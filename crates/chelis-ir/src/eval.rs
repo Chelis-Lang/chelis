@@ -3055,7 +3055,7 @@ pub fn eval_scalar(dag: &Dag, inputs: &UnordMap<String, f64>) -> UnordMap<NodeId
 mod tests {
     use super::*;
     use crate::dag::RiscOp;
-    use crate::lower::lower_program;
+    use crate::lower::{LoweredLibrary, lower_program_to_library};
     use chelis_deep::parser::parse_str;
     use chelis_types::types::Prim;
 
@@ -4045,6 +4045,10 @@ mod tests {
     }
 
     fn lower(src: &str) -> Dag {
+        lower_library(src).dag().clone()
+    }
+
+    fn lower_library(src: &str) -> LoweredLibrary {
         let exprs = parse_str(src).expect("parse failed");
         let checked = chelis_types::check_ir_program(&exprs)
             .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
@@ -4052,7 +4056,7 @@ mod tests {
             .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
         let checked = chelis_types::check_linearity(&checked)
             .unwrap_or_else(|errors| panic!("linearity check failed: {errors:?}"));
-        lower_program(&checked)
+        lower_program_to_library(&checked)
     }
 
     #[test]
@@ -4181,7 +4185,7 @@ mod tests {
             (def {} beta (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} beta))
             (def {} y
               (app {type: (t-tensor {} (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))}
-                   (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta)))
+                   (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta) (lit {type: (t-prim {} f32)} 0.00001)))
         "#;
         let dag = lower(src);
         let mut inputs = UnordMap::new();
@@ -4206,15 +4210,16 @@ mod tests {
     }
 
     #[test]
-    fn lowered_conv2d_1x1_has_correct_numeric_result() {
+    fn lowered_conv_1x1_has_correct_numeric_result() {
         let src = r#"
             (def {} x (var {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))} x))
             (def {} k (var {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 1) (d-lit {} 1) (t-prim {} f32))} k))
             (def {} y
               (app {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))}
-                   (var {} conv2d) (var {} x) (var {} k) (lit {} 1) (lit {} 0)))
+                   (var {} conv) (var {} x) (var {} k) (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 1) (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 1) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 0) (lit {type: (t-prim {} int64)} 0)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 0) (lit {type: (t-prim {} int64)} 0)) (var {} Nil)))))
         "#;
-        let dag = lower(src);
+        let library = lower_library(src);
+        let dag = library.dag();
         let mut inputs = UnordMap::new();
         inputs.insert(
             "x".into(),
@@ -4224,8 +4229,12 @@ mod tests {
             "k".into(),
             TensorValue::from_vec(vec![1, 1, 1, 1], vec![2.0]),
         );
-        let vals = eval_tensor(&dag, &inputs).unwrap();
-        let last = vals.get(dag.roots().last().expect("DAG root")).unwrap();
+        let vals = eval_tensor(dag, &inputs).unwrap();
+        let root = library
+            .symbol_table()
+            .get("y")
+            .expect("named convolution result is lowered");
+        let last = vals.get(root).unwrap();
         assert_eq!(
             *last,
             TensorValue::from_vec(vec![1, 1, 2, 2], vec![2.0, 4.0, 6.0, 8.0])
@@ -4233,15 +4242,16 @@ mod tests {
     }
 
     #[test]
-    fn lowered_conv2d_2x2_has_correct_numeric_result() {
+    fn lowered_conv_2x2_has_correct_numeric_result() {
         let src = r#"
             (def {} x (var {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 3) (d-lit {} 3) (t-prim {} f32))} x))
             (def {} k (var {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))} k))
             (def {} y
               (app {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))}
-                   (var {} conv2d) (var {} x) (var {} k) (lit {} 1) (lit {} 0)))
+                   (var {} conv) (var {} x) (var {} k) (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 1) (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 1) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 0) (lit {type: (t-prim {} int64)} 0)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 0) (lit {type: (t-prim {} int64)} 0)) (var {} Nil)))))
         "#;
-        let dag = lower(src);
+        let library = lower_library(src);
+        let dag = library.dag();
         let mut inputs = UnordMap::new();
         inputs.insert(
             "x".into(),
@@ -4254,8 +4264,12 @@ mod tests {
             "k".into(),
             TensorValue::from_vec(vec![1, 1, 2, 2], vec![1.0, 1.0, 1.0, 1.0]),
         );
-        let vals = eval_tensor(&dag, &inputs).unwrap();
-        let last = vals.get(dag.roots().last().expect("DAG root")).unwrap();
+        let vals = eval_tensor(dag, &inputs).unwrap();
+        let root = library
+            .symbol_table()
+            .get("y")
+            .expect("named convolution result is lowered");
+        let last = vals.get(root).unwrap();
         assert_eq!(
             *last,
             TensorValue::from_vec(vec![1, 1, 2, 2], vec![12.0, 16.0, 24.0, 28.0])

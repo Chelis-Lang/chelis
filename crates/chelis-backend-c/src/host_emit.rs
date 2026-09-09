@@ -5510,61 +5510,12 @@ impl<'a> HostEmitter<'a> {
                 let tensor_name = self.next_temp(&format!("tensor_arg{index}"));
                 self.lines
                     .push(format!("{}chelis_tensor* {};", self.indent, tensor_name));
-                // Scalar inputs to tensor helpers use true rank-0 tensors so
-                // the declared dtype keeps shape=[] across generated host/DAG
-                // calls. Every arm writes through its exact storage type;
-                // Bool is the canonical one-byte Bool8 carrier.
-                let (dtype, store) = match inferred_ty {
-                    HostType::Int8 => (
-                        "CHELIS_DTYPE_I8",
-                        format!("((int8_t*){tensor_name}_write.data)[0] = {value_name};"),
-                    ),
-                    HostType::Int16 => (
-                        "CHELIS_DTYPE_I16",
-                        format!("((int16_t*){tensor_name}_write.data)[0] = {value_name};"),
-                    ),
-                    HostType::Int64 => (
-                        "CHELIS_DTYPE_I64",
-                        format!("((int64_t*){tensor_name}_write.data)[0] = {value_name};"),
-                    ),
-                    HostType::Bool => (
-                        "CHELIS_DTYPE_BOOL",
-                        format!(
-                            "((uint8_t*){tensor_name}_write.data)[0] = {value_name} ? UINT8_C(1) : UINT8_C(0);"
-                        ),
-                    ),
-                    // #381: an f64 captured scalar (e.g. `cast(1.1, f64)`)
-                    // fed to a tensor helper via `scalar_to_tensor` must be
-                    // packed into a `CHELIS_DTYPE_F64` rank-0 tensor and written
-                    // through a `double*`. The pre-fix catch-all packed it
-                    // as `CHELIS_DTYPE_F32` and stored only the low 4 bytes; the
-                    // f64 kernel then read 8 bytes (the high 4 garbage),
-                    // collapsing the value to ~0 and silently disagreeing
-                    // with the evaluator. Float32 still uses the f32 arm.
-                    HostType::Float64 => (
-                        "CHELIS_DTYPE_F64",
-                        format!("((double*){tensor_name}_write.data)[0] = (double)({value_name});"),
-                    ),
-                    _ => (
-                        "CHELIS_DTYPE_F32",
-                        format!("((float*){tensor_name}_write.data)[0] = (float)({value_name});"),
-                    ),
-                };
+                // Preserve the declared dtype and stored bits through the
+                // existing tagged scalar carrier; no scalar class falls back
+                // to f32 or interprets f16/bf16 storage as an integer value.
+                let scalar = scalar_carrier_expr(&value_name, &inferred_ty)?;
                 self.lines.push(format!(
-                    "{}{tensor_name} = chelis_alloc(0, NULL, {dtype});",
-                    self.indent
-                ));
-                self.lines.push(format!(
-                    "{}chelis_tensor_write *{tensor_name}_guard = chelis_tensor_begin_write({tensor_name});",
-                    self.indent
-                ));
-                self.lines.push(format!(
-                    "{}chelis_write_view {tensor_name}_write = chelis_tensor_write_view({tensor_name}_guard);",
-                    self.indent
-                ));
-                self.lines.push(format!("{}{store}", self.indent));
-                self.lines.push(format!(
-                    "{}chelis_tensor_end_write({tensor_name}_guard);",
+                    "{}{tensor_name} = chelis_scalar_tensor({scalar});",
                     self.indent
                 ));
                 (tensor_name.clone(), Some(tensor_name))

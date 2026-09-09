@@ -866,7 +866,10 @@ class StageUnionTests(unittest.TestCase):
         self.assertEqual(slices[0], [gate.LOWERING_TRACE_TESTS,
                                     gate.EMISSION_OBSERVER_TESTS,
                                     gate.COMPILER_FRONT_END_PERFORMANCE_ORACLE])
-        self.assertEqual(slices[1], [gate.UNREPRESENTABLE_DOMAIN_ORACLE])
+        self.assertEqual(slices[1], [
+            gate.UNREPRESENTABLE_DOMAIN_ORACLE,
+            [gate.MANAGED_PYTHON, "scripts/dtype_builtin_atom_closure_oracle.py"],
+        ])
         self.assertEqual(slices[0] + slices[1], gate.STAGES["integration"][1:])
 
     def test_emission_observer_runs_with_its_feature_locally_and_in_ci_support(self):

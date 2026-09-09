@@ -40,7 +40,7 @@ class ManifestTests(unittest.TestCase):
         inputs = oracle.prerequisites(sys.executable)
         unresolved = {issue for child in inputs if isinstance(child, oracle.MissingOracle)
                       for issue in child.issues}
-        self.assertTrue({893, 1288, 1294}.issubset(unresolved))
+        self.assertTrue({893, 1288}.issubset(unresolved))
         with self.assertRaisesRegex(oracle.OracleFailure, "#1288"):
             oracle.require_available(inputs)
 
@@ -52,6 +52,14 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(available["count"].success_line, "DTYPE COUNT ORACLE: PASS")
         self.assertEqual(available["direct-arithmetic"].issues, (1306,))
         self.assertEqual(available["relu"].issues, (1313,))
+        self.assertEqual(available["builtin-closure"].issues, (1294,))
+        self.assertEqual(available["builtin-closure"].argv,
+                         (sys.executable, "scripts/dtype_builtin_atom_closure_oracle.py"))
+        self.assertEqual(available["builtin-closure"].success_line,
+                         "DTYPE BUILTIN ATOM CLOSURE ORACLE: PASS")
+        self.assertNotIn(1294, {issue for child in oracle.prerequisites(sys.executable)
+                               if isinstance(child, oracle.MissingOracle)
+                               for issue in child.issues})
 
 
 def packet(*, run_id="fresh", head="a" * 40, digest="b" * 64):

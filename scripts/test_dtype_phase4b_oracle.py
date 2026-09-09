@@ -517,7 +517,7 @@ class ContractValidationTests(unittest.TestCase):
     def test_host_numeric_builtin_manifest_has_no_specialized_compatibility_identities(self) -> None:
         block = self.repository_atom("05-OP-38")
         for identity in (
-            "`tensor_scan` | `(T,((T,int64)->T!E),int64)->tensor[n,T]!E`",
+            "`tensor_scan` | `(T,((T,int64)->T!E),int64)->tensor[n,..state_shape(T),element(T)]!E`",
             "`process_run` | `(string,List[string])->(int64,string,string)!{IO}`",
             "`test_assert_eq` | `(Q,Q,string)->unit!{Test}`",
         ):
@@ -2227,7 +2227,7 @@ class ContractValidationTests(unittest.TestCase):
             ),
             "05-OP-35": ("(p_float)->p_float", "(f32)->f32"),
             "05-OP-38": (
-                "(T,((T,int64)->T!E),int64)->tensor[n,T]!E",
+                "(T,((T,int64)->T!E),int64)->tensor[n,..state_shape(T),element(T)]!E",
                 "(f32,((f32,int64)->f32),int64)->tensor[n,f32]",
             ),
         }
@@ -2771,12 +2771,8 @@ class ContractValidationTests(unittest.TestCase):
     def test_plain_prose_after_extrema_atom_cannot_contradict_it(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),
-            "> adjoint reverses that composition. Integer operands are forward-only and\n"
-            "> `grad` rejects them.\n>\n"
             "> **[05-OP-13]**",
-            "> adjoint reverses that composition. Integer operands are forward-only and\n"
-            "> `grad` rejects them.\n\n"
-            "An implementation MAY instead route the full non-NaN `max_reduce` "
+            "\nAn implementation MAY instead route the full non-NaN `max_reduce` "
             "cotangent to only the last element equal to the selected maximum.\n\n"
             "> **[05-OP-13]**",
         )
@@ -4503,14 +4499,14 @@ class FrozenContractChangeTests(unittest.TestCase):
 
     def test_unchanged_tree_passes(self) -> None:
         report = self.check()
-        self.assertIn("0 of 30 contract files changed", report[0])
+        self.assertIn("0 of 31 contract files changed", report[0])
 
     def test_every_contract_file_is_watched(self) -> None:
         # The converted whole-file-digest test. Contradictory prose prepended
         # to any contract file must fail, and the failure must name the file.
         # The watched set is now all 30 CONTRACT_FILES, a superset of the 22
         # that carried a whole-file digest.
-        self.assertEqual(len(CONTRACT_FILES), 30)
+        self.assertEqual(len(CONTRACT_FILES), 31)
         for relative in oracle.CONTRACT_FILES:
             with self.subTest(relative=relative):
                 path = self.root / relative
@@ -4603,7 +4599,7 @@ class FrozenContractChangeTests(unittest.TestCase):
     def test_an_acknowledged_change_passes(self) -> None:
         self.append("spec/11-ffi.md", "\nA reviewed sentence.\n")
         report = self.check(acknowledgements=("spec/11-ffi.md",))
-        self.assertIn("1 of 30 contract files changed", report[0])
+        self.assertIn("1 of 31 contract files changed", report[0])
         self.assertIn("  ok  Frozen-contract-change: spec/11-ffi.md", report)
 
     def test_a_body_line_acknowledges_the_change(self) -> None:
@@ -4708,7 +4704,7 @@ class FrozenContractChangeTests(unittest.TestCase):
         report = self.check(
             acknowledgements=("spec/10-serialization.md",)
         )
-        self.assertIn("1 of 30 contract files changed", report[0])
+        self.assertIn("1 of 31 contract files changed", report[0])
 
     def test_an_unreadable_baseline_blob_is_an_error_not_an_absence(self) -> None:
         # Round 1 F3. Reading a failed `git show` as "absent at the merge base"

@@ -12,50 +12,17 @@
 //! kernels, number of BLAS specializations actually fired, and the verified
 //! Phase 3 buffer allocation/reuse footprint in bytes.
 //!
-//! Findings (locked here as assertions):
-//!   * Emitted `// span:` lines include Surf parser byte-range IDs of the
-//!     form `surf:<start>..<end>`. Synthesized markers may still appear for
-//!     nodes that genuinely have no source range, but the traceability
-//!     chain no longer bottoms out at `__synthesized_*__` for ordinary Surf
-//!     bodies.
-//!   * Symbolic-dim matmuls now specialize to runtime-sized BLAS calls. The
-//!     transformer block emits seven `cblas_sgemm` call sites and no dense
-//!     generic `expand + mul + sum` product buffers for the QKV/O/FFN and
-//!     value-weighted attention matmuls.
+//! The emitted spans retain Surf byte ranges through fusion. C contractions
+//! retain their primitive arithmetic, so this fixture has no vendor GEMM
+//! substitutions and keeps the dense product intermediates.
 //!
-//! ## Cost profile (computed from emitted C, parameterised by `seq`)
-//!
-//! Empirically the helper-side owned-allocation footprint is a polynomial in `seq` whose
-//! coefficients are read directly off `chelis_alloc(N, (int64_t[]){...})` calls:
-//!
-//! | term | bytes | dominant source |
-//! |---|---|---|
-//! | `c2` (× seq²) | 780 B | attention score/probs and unfused per-head intermediates |
-//! | `c1` (× seq) | 18,716 B | Q/K/V/O, residual/LN, and FFN physical slots after symbolic BLAS, dedicated ReLU, and verified Phase 3 reuse |
-//! | `c0` | 0 | none — every allocation has at least one `seq` factor |
-//!
-//! Projected peak working set:
-//!
-//! | seq | peak | dominant term |
-//! |---|---|---|
-//! | 128 | 14.47 MiB | physical Phase 3 slots |
-//! | 512 | 204.14 MiB | `c2 × seq²` |
-//! | 2048 | **3.08 GiB** | `c2 × seq²` |
-//! | 4096 | 12.26 GiB | `c2 × seq²` |
-//!
-//! **Why this is still high:** symbolic BLAS removes the cubic generic matmul
-//! product buffers, and [05-OP-43]'s dedicated ReLU identity removes the old
-//! `[seq, 1024]` f32 zero tensor (4096 × `seq` bytes). The 49 produced tensors
-//! use 29 physical owned allocations and 20 proof-authorized descriptor
-//! repurposes under the shared Phase 3 plan. Vanilla attention also
-//! materializes `seq × seq` score/probability tensors.
-//!
-//! A follow-on FlashAttention-style pass would shrink this further by avoiding
-//! materialized score/probability tensors.
-//!
-//! Even with both, vanilla attention is `seq`-quadratic in the score
-//! buffers — FlashAttention-style fusion (not on the roadmap today)
-//! would eliminate the score materialisation entirely.
+//! The inspected ownership plan produces 74 tensors with 32 physical owned
+//! allocations and 42 descriptor repurposes. Those physical tensor buffers
+//! occupy `1028 + 3357720 * seq + 780 * seq^2` bytes. This measures the retained
+//! tensor storage only: inputs, runtime metadata, and temporary reduction-tree
+//! scratch are outside the polynomial. It is not a whole-process peak estimate.
+//! Any future optimization must preserve the decided arithmetic and update
+//! these measurements from its emitted ownership plan.
 
 use std::fs;
 use std::process::Command;
@@ -85,7 +52,7 @@ fn is_owned_tensor_release(line: &str) -> bool {
 }
 
 /// Parse physical owned `tN = chelis_alloc(...)` calls and compute a polynomial
-/// in `seq` describing the Phase 3 peak. Returns
+/// in `seq` describing retained physical tensor storage. Returns
 /// (allocation_count, constant_bytes, seq1_bytes, seq2_bytes) such
 /// that total ≈ constant + seq * seq1 + seq * seq * seq2.
 ///
@@ -235,19 +202,19 @@ fn transformer_block_traceability_state_is_locked() {
          MHA+FFN block; got {fused_kernels}"
     );
     assert_eq!(
-        owned_allocations, 29,
-        "expected the verified Phase 3 plan to reduce 49 produced tensors to \
-         29 physical owned tN allocations; got \
+        owned_allocations, 32,
+        "expected the verified plan to map 74 produced tensors to \
+         32 physical owned tN allocations; got \
          {owned_allocations}"
     );
     assert_eq!(
-        storage_repurposes, 20,
-        "expected the verified Phase 3 plan to repurpose exactly 20 physical \
+        storage_repurposes, 42,
+        "expected the verified Phase 3 plan to repurpose exactly 42 physical \
          slots for the remaining produced tensors; got {storage_repurposes}"
     );
     assert_eq!(
         owned_allocations + storage_repurposes,
-        49,
+        74,
         "every transformer result must be accounted for by either a fresh \
          physical allocation or a proof-authorized descriptor repurpose"
     );
@@ -258,22 +225,17 @@ fn transformer_block_traceability_state_is_locked() {
          repurposes, not borrowed chelis_slot wrappers or chelis_alloc_view"
     );
     assert_eq!(
-        blas_calls, 7,
-        "expected seven symbolic-dim matmul→BLAS specializations in \
-         transformer_block.ch; got {blas_calls}. If this changes, update the \
-         cost profile and specialization notes in this test."
+        blas_calls, 0,
+        "primitive contractions must keep their canonical arithmetic"
     );
     for dense_product_shape in [
         "(int64_t[]){ seq, 256, 64 }",
-        "(int64_t[]){ seq, 64, 256 }",
+        "(int64_t[]){ seq, 64, seq }",
         "(int64_t[]){ seq, 256, 1024 }",
-        "(int64_t[]){ seq, 1024, 256 }",
-        "(int64_t[]){ seq, seq, 64 }",
     ] {
         assert!(
-            !source.contains(dense_product_shape),
-            "symbolic/batched BLAS should remove generic matmul product \
-             buffers; found dense allocation shape {dense_product_shape}"
+            source.contains(dense_product_shape),
+            "the retained primitive graph includes this product buffer: {dense_product_shape}"
         );
     }
 
@@ -288,7 +250,7 @@ fn transformer_block_traceability_state_is_locked() {
     for seq in projections {
         let total = c0 + c1 * seq + c2 * seq * seq;
         let mib = total as f64 / (1024.0 * 1024.0);
-        eprintln!("  peak at seq = {seq:>5}: {total:>12} bytes ({mib:>8.2} MiB)");
+        eprintln!("  tensor bytes at seq = {seq:>5}: {total:>12} bytes ({mib:>8.2} MiB)");
     }
 
     assert!(
@@ -306,7 +268,7 @@ fn transformer_block_traceability_state_is_locked() {
     );
     assert_eq!(
         (alloc_count, c0, c1, c2),
-        (29, 0, 18_716, 780),
+        (32, 1028, 3_357_720, 780),
         "unexpected transformer_block Phase 3 physical working-set polynomial; \
          update the locked cost profile only after inspecting the emitted C and \
          its proof-authorized descriptor repurposes"
@@ -324,7 +286,7 @@ fn transformer_block_traceability_state_is_locked() {
         .expect("owned tensor release");
     assert!(
         first_owned_release > final_owned_allocation,
-        "the summed owned-allocation polynomial is a peak only while every \
+        "the summed owned-allocation polynomial is simultaneously live only while every \
          temporary survives through the final allocation"
     );
 }

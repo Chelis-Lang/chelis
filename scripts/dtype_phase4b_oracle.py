@@ -96,6 +96,7 @@ CONTRACT_FILES = (
     "openspec/specs/serialization/spec.md",
     "openspec/specs/transformations/spec.md",
     "openspec/specs/type-system/spec.md",
+    "spec/registry/builtin_semantic_identities.md",
     "spec/registry/c_scalar_carrier.md",
     "spec/registry/c_container_boundary.md",
     "spec/registry/c_tensor_runtime.md",
@@ -401,7 +402,7 @@ EXPECTED_OP_MANIFESTS = {
     ),
     "05-OP-38": tuple(
         """\
-> | `tensor_scan` | `(T,((T,int64)->T!E),int64)->tensor[n,T]!E` |
+> | `tensor_scan` | `(T,((T,int64)->T!E),int64)->tensor[n,..state_shape(T),element(T)]!E` |
 > | `process_run` | `(string,List[string])->(int64,string,string)!{IO}` |
 > | `test_assert_eq` | `(Q,Q,string)->unit!{Test}` |
 > | `test_assert_close_tensor` | `(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}` |
@@ -429,18 +430,18 @@ FROZEN_ATOM_DIGESTS = {
     "05-OP-2": "86fe2002cebd6192d15078ed0e8144936e38ba14f925802d2d526b7bf880ecd3",
     "05-OP-3": "b5a3ee9ca9a4f3161e20e729467d044878080ac8fb302af14b512bea66a58d3b",
     "05-OP-4": "f45693d5e3ef37033aef4c9a3f03de1806ea034d8247390c3ff6113d1c2ffa13",
-    "05-OP-5": "00b9b1ecfdb42d0def6cc38296a518d9a25039cb2af3bdac53f1648225377d9a",
+    "05-OP-5": "011173c34344dc89d15eda5518a8ea833470fa953378bafba611391e8d083549",
     "05-OP-6": "95d842566c76f85e0e89844029d7387921f57f6997e68107be92fe9b9cc1061c",
     "05-OP-7": "d3c5120918a8de774833d776204d62c01b3eccd01ffc22e43ff5422d4e28e54b",
     "05-OP-8": "ea385826c01b7cb1d24e75e1dbb4889149f0a08441d798eafcee75fc7d9f7b4f",
     "05-OP-9": "8359a6d8688f86f3818477c4d3fd8df04018e593fab9ad7ffa6fd0ebf5c1acf1",
     "05-OP-10": "5d77be3eb92d9db44da15ea02a0706239f8f1c70b32ab0391d5dad6aff94cfa2",
-    "05-OP-11": "a9db7bb96766662e5c520e7714d0a6d266aebe9eb17603d4fd9750698c33133b",
-    "05-OP-12": "6e99f2ecbb3c7fbf3ae4f852104b03bdf65f5edf7ead1cae02c9e1d833708353",
-    "05-OP-13": "3fd84ffa594776abc51a8c277c5d9a0dbc2b7b8fc11ab1bf32209b30c7d97890",
-    "05-OP-14": "cba4686a8a31fb18cf9c5213af5ac4a545b03ce548b5c7bcd96e8f7f76648a40",
-    "05-OP-15": "a9ad8cf1423e99bf092e6dd52ce273555cda77b4beb52ff3a78564db1800933e",
-    "05-OP-16": "b5ee19533f9f7241117f5958e092978446b49faacba312eec5781be548b3303d",
+    "05-OP-11": "ecf20846cbb70956b075e5d7397ce068d59b51d51986bcd2f5e25236f88c3ff7",
+    "05-OP-12": "9a0acc6c7279de3d7c1696e9ce3c4f9a16667a9aca25c43857ac76b8e4d4a793",
+    "05-OP-13": "8cf9f59c3af760dec33de17c98940af57b3771c7c7842360baee7ba7fcd9d8c1",
+    "05-OP-14": "6de7de82e7c3daca3c1089c855b94584cf9bfee47f71fe7020e3a9d6621961eb",
+    "05-OP-15": "ce451642a40332fea15da796393f833880ba94948f663c60023e77043bedd0cd",
+    "05-OP-16": "ddced357a351860e42537449d526dfa3ba8cda0a2aa28073d3ea5b81eae2008f",
     "05-OP-17": "7c85fa51323c9993bb63f97ee4728c8fc5c13bd2c30315f6bcf7a69a77a39304",
     "05-OP-18": "6cf5eaa4e1ab068d667ea1d8cc26ba366694329669cba39443a4878a6d04714a",
     "05-OP-19": "d84cd2202079d852ba918b99e2bae1c964650362dee200942a9addba954bd5e5",
@@ -450,8 +451,8 @@ FROZEN_ATOM_DIGESTS = {
     "05-OP-23": "1e0adc2fc7abf416c131f9ad5b6b054581eabf0365a9707b985fbaaa06e5e5b7",
     "05-OP-24": "2f3009f8b80b944f11fa2cf378409d85eb7891a59cdc1024e58ce2b67af5b800",
     "05-OP-25": "29f27a57545efd179e0f6b2766f48d7fdafb7c2ac6c3bbaeeaf5b0c0646ed502",
-    "05-OP-26": "90050a454489c33ba0afb9caa41763591f22461eca947dd3525109c97976362f",
-    "05-OP-27": "03a81560ae84cb4dd151e57da34d117a9e616a33700957796edea98c2afaf82f",
+    "05-OP-26": "3371ca252044c6c2da596ce3df10ad6151221430d93a6bc3dbc98098e3e8d31d",
+    "05-OP-27": "9fb4c24b5756860675db850ab82192199afb562b157e2b5197b0e132704333ea",
     "05-OP-28": "9eb81ed515be3e016371f951a75a3b65c4bae2cd8bfbc8de22c510f8e71be56b",
     "05-OP-29": "3fc46cb450b49244dfea8859a662190128420ab2565f7d18f5f97d7ffb27fd0a",
     "05-OP-30": "30c8c04f547161b7c40cbe5659a0c5fee34102f34a6fc605bcde8740221b461b",
@@ -462,12 +463,12 @@ FROZEN_ATOM_DIGESTS = {
     "05-OP-35": "6eb9a0e1023aeed6dcf43abe8623a9b94dcb38db15224f38915320108c276ef7",
     "05-OP-36": "aeaaf9888f922b31159b8b7536444603897d649c8fb477e77bda659346177ab4",
     "05-OP-37": "2b27734c6956b706e031130b2c444cb69f0ff5a6a6886d1935611f61767f02b0",
-    "05-OP-38": "46685ae74bc05fac13ce0ff877e92978bea109b4660f7d7ca637222819cb368e",
+    "05-OP-38": "39e4e800864ca561f12d83cb0bb1b17489f46c59112bd1aacd3f00cf15e3e33d",
     "05-OP-39": "c23d7e9e0964df3655319ce26c486a8c006097cdb8ff714d8f7a1b8fcfecaa14",
-    "05-OP-40": "4d3da3d13beca3c53b18515dbd15178b214fa3baa015ab975257ef778899dc18",
+    "05-OP-40": "12c188d00bf6544645b1b4a7cb6b09af563b6dbbc98c2e931db9189d16e11376",
     "05-OP-41": "7bbbba7450bf89f9eac66a7f660f7352940a41e4baf6f7497873e46a29be41db",
     "05-OP-42": "d469e00652b7b9239f37532817b3c0f563bf22a66743c66dab66ce879be43ff4",
-    "05-OP-43": "51dd3a7b7df5ecc20c7796a49f7a0122daf0f3a4b6538993964fea7a9f284ee7",
+    "05-OP-43": "ec1ffe9abb148062ed80d696b0f9b5a60af477633b218dc2ca51675170e887b1",
     "05-OP-44": "5da56d56c928f228c0ed069c078696b648863e440c732ee41e8a23626757ea4e",
 }
 
@@ -492,7 +493,7 @@ FROZEN_REGION_DIGESTS = {
         "AGENTS.md",
         "### Numeric Surface Discipline",
         "### Public-Surface Change Rule",
-        "92b7a9076e1b671f4d7e7329337380939ab816a90f157533041d2b78a658b0b9",
+        "0be875e998a6052fae32a0fda037ae397ebf5710c5e5c2365541c4ed0b859b41",
     ),
     "numeric value semantics": (
         "spec/04-type-system.md",
@@ -504,13 +505,13 @@ FROZEN_REGION_DIGESTS = {
         "spec/05-risc-primitives.md",
         "### 2.1 Elementwise Binary",
         "### 2.4 Movement",
-        "a8fc522c8db143bce747512c7c64c52f62b2fb40c18e1e7906bf03ebcf027cf0",
+        "5cfbd4054d35b0c496c60ef70fb5d526431dbcbf391c229039e0d5fa656389ee",
     ),
     "logical builtin contract": (
         "spec/05-risc-primitives.md",
         "### 3.2 Comparison and Logical Operations",
         "### 3.3 Activation Functions",
-        "0f5112fa156d699d2bff79b65c0447d1075a381556b5f887f57d8dd0646dfd57",
+        "3c65a26f4a5f3bd8469bf6b78e32c79df3b8d61c119016bceb13cecb14097cb5",
     ),
     "name-preserving rank polymorphism": (
         "spec/04-type-system.md",
@@ -534,7 +535,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/05-risc-primitives.md",
         "### 3.8 Named Lossy Cast Forms",
         "## 4. Standard Lowerings",
-        "4c2e336e26005cfea1a4cd649236231db3f5a4add35305f385434bbd3c68f089",
+        "cd150af8941f2702efae3c86290ae7755b7011ff357dd4b841ab9d514c83232c",
     ),
     "capability schema": (
         "spec/design/capability_table.md",
@@ -552,7 +553,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/dtype_semantics.md",
         "## Phase 4 - the capability table becomes the permanent guard",
         "## I1. Interlock with loud unsupported ([#730])",
-        "ea61b94d134aa288bf5378b14490b97a2a9f4a2aa2566c9383164cf202cdb407",
+        "d21e93e6b327941813f93a47f2ecdf1cc5983a7eb6bf77528f25c25ed1cf3713",
     ),
     "compiled stdlib consumer": (
         "spec/design/loud_unsupported.md",
@@ -2562,14 +2563,15 @@ def validate_normative_contract(
         ),
         "05-OP-38": (
             "governs exactly these five numeric-capacity identities and signatures",
-            "`tensor_scan` | `(T,((T,int64)->T!E),int64)->tensor[n,T]!E`",
+            "`tensor_scan` | `(T,((T,int64)->T!E),int64)->tensor[n,..state_shape(T),element(T)]!E`",
             "`process_run` | `(string,List[string])->(int64,string,string)!{IO}`",
             "`test_assert_eq` | `(Q,Q,string)->unit!{Test}`",
             "`test_assert_close_tensor` | `(&tensor[..r,p_float],"
             "&tensor[..r,p_float],p_float,string)->unit!{Test}`",
             "`test_assert_eq_tensor` | `(&tensor[..r,p],&tensor[..r,p],string)"
             "->unit!{Test}`",
-            "`T` is one active numeric or bool scalar type",
+            "`T` is a scalar or tensor state",
+            "shape and dtype are invariant across every callback application",
             "`Q` is one static type in [05-OP-36]'s scalar or recursive equality "
             "domain",
             "Repeated variables denote the same type, dtype, rank, and dimensions",

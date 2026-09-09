@@ -4821,8 +4821,6 @@ impl CEmitter {
         ty: &TensorType,
         dag: VerifiedDagView<'_>,
     ) {
-        let input_node = dag.get(inputs[0]).unwrap();
-        let input_prec = input_node.output_type.precision;
         // C3a invariant from `chelis_ir::verify`: `Sum.output_type.precision == accumulator`.
         // Pin it locally so a future emit refactor that decouples the two
         // gets a loud assertion instead of silent miscompilation.
@@ -4832,46 +4830,6 @@ impl CEmitter {
              verifier-enforced spec/04-type-system.md §5.7.1 invariant violated"
         );
 
-        // WS-A4: i8/i16 source data + i32 accumulator + i32 output, per
-        // spec/04-type-system.md §5.7.1. The accumulator C type comes
-        // from the IR-supplied `accumulator` parameter; do NOT infer it
-        // from the operand precision (the destructure-`..` footgun the
-        // F1 finding caught for BlasMatmul). Routed through a dedicated
-        // helper that zero-fills i32 inline (no `chelis_fill_i32`
-        // runtime symbol today) and keeps the source/accumulator C type
-        // spellings explicit at the cast site.
-        if matches!(input_prec, Prim::Int8 | Prim::Int16) && accumulator == Prim::Int32 {
-            let src_c_ty = match input_prec {
-                Prim::Int8 => "int8_t",
-                Prim::Int16 => "int16_t",
-                _ => unreachable!(),
-            };
-            self.emit_reduce_sum_int_promoted(id, axis, src_c_ty, "int32_t", inputs, ty, dag);
-            return;
-        }
-
-        // WS-1: bf16 / f16 source + f32 accumulator + f32 output, per
-        // spec/04-type-system.md §5.7.1. The accumulator field is f32
-        // (the type system's `default_reduce_sum_accumulator` returns
-        // `Prim::F32` for bf16/f16 operands); the operand storage is
-        // `uint16_t`. Route through a dedicated helper that loads each
-        // element via `chelis_<x>_to_f32` before accumulating in `f32`
-        // so the loop never reads `uint16_t` bits as if they were
-        // float bytes. The §5.7.1 enforcement test
-        // `bf16_reduce_sum_uses_f32_accumulator_per_spec_5_7_1` locks
-        // this path.
-        if matches!(input_prec, Prim::Bf16 | Prim::F16) && accumulator == Prim::F32 {
-            self.emit_reduce_sum_reduced_f(id, axis, input_prec, inputs, ty, dag);
-            return;
-        }
-
-        // WS-A1 general path: f32 → f32 (with the SIMD fast path),
-        // f64 → f64, f32 → f64 widening, i32 → i32, i64 → i64, etc.
-        // The general scalar loop drives accumulator type and zero
-        // initializer from `elem_type` / `scalar_zero_literal` /
-        // `fill_zero_call` so every (operand, accumulator) combo the
-        // C backend's helpers know about lowers correctly without a
-        // dedicated specialization.
         self.emit_reduce_sum_general(id, axis, inputs, ty, dag);
     }
 
@@ -5004,15 +4962,83 @@ impl CEmitter {
         self.line("}");
     }
 
-    /// WS-A1 dtype-parameterized reduce_sum. Drives accumulator type
-    /// and zero initializer from `Self::elem_type` /
-    /// `Self::scalar_zero_literal` / `Self::fill_zero_call` so every
-    /// (operand, accumulator) combo the C backend's helpers know about
-    /// lowers correctly without a dedicated specialization. Includes
-    /// the f32+f32 SIMD fast path inline (`chelis_sum_f32`) so the
-    /// pre-WS-A4 emit for that combo stays byte-identical. Other
-    /// dispatched paths (i8/i16 → i32 via `emit_reduce_sum_int_promoted`)
-    /// short-circuit before this is called.
+    /// Allocate the leaves of [05-OP-30]'s adjacent-pair tree. An empty
+    /// slice has no leaves: its identity is introduced only at the final store.
+    fn emit_sum_level(&mut self, id: usize, axis_size: &str, precision: Prim) {
+        let et = Self::elem_type(&TensorType {
+            dims: vec![],
+            precision,
+        });
+        let index_et = Self::elem_type(&TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        });
+        self.line(&format!("{index_et} __sum_n_{id} = {axis_size};"));
+        // After the signed-domain check, the usual C integer conversions
+        // compare the full count with the target's allocation limit without
+        // narrowing it to size_t before the check.
+        self.line(&format!(
+            "if (__sum_n_{id} < 0 || __sum_n_{id} > SIZE_MAX / sizeof({et})) abort();"
+        ));
+        self.line(&format!("{et} *__sum_level_{id} = __sum_n_{id} ? ({et}*)malloc((size_t)__sum_n_{id} * sizeof({et})) : NULL;"));
+        self.line(&format!("if (__sum_n_{id} && !__sum_level_{id}) abort();"));
+    }
+
+    /// Pair in positional order, round/check each actual addition at the
+    /// accumulator width, and carry odd leaves without adding an identity.
+    /// Fused and materialized Sum use this same emitted tree.
+    fn emit_sum_fold(&mut self, id: usize, precision: Prim) {
+        let et = Self::elem_type(&TensorType {
+            dims: vec![],
+            precision,
+        });
+        let index_et = Self::elem_type(&TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        });
+        let zero = Self::scalar_zero_literal(precision);
+        self.line(&format!("while (__sum_n_{id} > 1) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "{index_et} __next_n_{id} = __sum_n_{id} / 2 + __sum_n_{id} % 2;"
+        ));
+        self.line(&format!(
+            "for ({index_et} __j_{id} = 0; __j_{id} < __next_n_{id}; __j_{id}++) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!("{index_et} __left_{id} = 2 * __j_{id};"));
+        self.line(&format!("{index_et} __right_{id} = __left_{id} + 1;"));
+        let left = format!("__sum_level_{id}[__left_{id}]");
+        let right = format!("__sum_level_{id}[__right_{id}]");
+        let sum = if precision.is_integer() {
+            let bits = Self::integer_width(precision);
+            let trap = NumericTrap::Overflow {
+                op: "sum",
+                prim: precision,
+            }
+            .to_string();
+            format!(
+                "({et})chelis_int_checked_add(({index_et}){left}, ({index_et}){right}, {bits}, {trap:?})"
+            )
+        } else {
+            format!("{left} + {right}")
+        };
+        self.line(&format!(
+            "__sum_level_{id}[__j_{id}] = (__right_{id} < __sum_n_{id}) ? {sum} : {left};"
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!("__sum_n_{id} = __next_n_{id};"));
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!(
+            "(({et}*)t{id}_data)[outer] = __sum_n_{id} ? __sum_level_{id}[0] : {zero};"
+        ));
+        self.line(&format!("free(__sum_level_{id});"));
+    }
+
+    /// Sum loads each source at its storage width, then finalizes every
+    /// adjacent pair at the explicitly selected accumulator width.
     fn emit_reduce_sum_general(
         &mut self,
         id: usize,
@@ -5022,46 +5048,17 @@ impl CEmitter {
         dag: VerifiedDagView<'_>,
     ) {
         let a = inputs[0].0;
-        let input_node = dag.get(inputs[0]).unwrap();
-        let axis_size = Self::emit_dim_info(&input_node.output_type.dims[axis]);
+        let input_ty = &dag.get(inputs[0]).unwrap().output_type;
+        let axis_size = Self::emit_dim_info(&input_ty.dims[axis]);
         let acc_et = Self::elem_type(ty);
-        let acc_zero = Self::scalar_zero_literal(ty.precision);
-        let operand_et = Self::elem_type(&input_node.output_type);
+        let operand_et = Self::elem_type(input_ty);
         self.emit_slot_wrapper(id, ty);
-        let output_is_scalar = ty.dims.is_empty();
-        // Fast path: contiguous f32 input AND f32 accumulator can use
-        // the SIMD `chelis_sum_f32` helper. Other dtype combinations
-        // fall through to the dtype-parameterized scalar loop below.
-        // No widening fast path for {f32 operand, f64 accumulator} or
-        // similar mixed-precision: those are admitted by the type
-        // system but routed through the scalar accumulator loop.
-        let can_simd_fast_path = output_is_scalar
-            && ty.precision == Prim::F32
-            && input_node.output_type.precision == Prim::F32;
-        if can_simd_fast_path {
-            self.line(&format!("if (chelis_is_contiguous(t{a})) {{"));
-            self.indent += 1;
-            self.line(&format!(
-                "((float*)t{id}_data)[0] = chelis_sum_f32((const float*)t{a}_data, t{a}_size);"
-            ));
-            self.indent -= 1;
-            self.line("} else {");
-            self.indent += 1;
-        }
-        self.line(&Self::fill_zero_call(ty, &format!("t{id}_write_guard")));
         self.line("#pragma omp parallel for");
         self.line(&format!(
             "for (int64_t outer = 0; outer < t{id}_size; outer++) {{"
         ));
         self.indent += 1;
-        // Stride-4 ILP cascade matching torch's CPU `row_sum`
-        // (`num_levels=4, ilp_factor=4` in
-        // pytorch/aten/src/ATen/native/cpu/SumKernel.cpp). Bit-exact
-        // with torch's `.sum()` for n <= 16 (issue
-        // Chelis-Lang/chelis#163).
-        self.line(&format!(
-            "{acc_et} acc0 = {acc_zero}, acc1 = {acc_zero}, acc2 = {acc_zero}, acc3 = {acc_zero};"
-        ));
+        self.emit_sum_level(id, &axis_size, ty.precision);
         self.line(&format!(
             "int64_t out_indices[t{id}_rank > 0 ? t{id}_rank : 1];"
         ));
@@ -5069,91 +5066,37 @@ impl CEmitter {
             "chelis_flat_to_indices(outer, t{id}_shape, t{id}_rank, out_indices);"
         ));
         self.line(&format!(
-            "for (int64_t __reduce_i = 0; __reduce_i < {axis_size}; __reduce_i++) {{"
+            "for (int64_t __reduce_i = 0; __reduce_i < __sum_n_{id}; __reduce_i++) {{"
         ));
         self.indent += 1;
         self.line(&format!(
             "int64_t full_indices[t{a}_rank > 0 ? t{a}_rank : 1];"
         ));
-        // Build full indices: insert k at the reduction axis
         self.line("int out_d = 0;");
         self.line(&format!("for (int d = 0; d < t{a}_rank; d++) {{"));
         self.indent += 1;
-        self.line(&format!("if (d == {axis}) {{"));
-        self.indent += 1;
-        self.line("full_indices[d] = __reduce_i;");
-        self.indent -= 1;
-        self.line("} else {");
-        self.indent += 1;
-        self.line("full_indices[d] = out_indices[out_d];");
-        self.line("out_d++;");
-        self.indent -= 1;
-        self.line("}");
+        self.line(&format!(
+            "full_indices[d] = (d == {axis}) ? __reduce_i : out_indices[out_d++];"
+        ));
         self.indent -= 1;
         self.line("}");
         self.line(&format!(
             "int64_t src_idx = chelis_indices_to_flat(full_indices, t{a}_strides, t{a}_rank);"
         ));
-        // Read the operand at its native element type and accumulate at
-        // the accumulator type; C handles the implicit widening for the
-        // f32→f64 case, and integer accumulators preserve exact values.
+        let native = format!("((const {operand_et}*)t{a}_data)[src_idx]");
+        let load = if matches!(input_ty.precision, Prim::Bf16 | Prim::F16) {
+            format!("{}({native})", Self::reduced_to_f32_fn(input_ty.precision))
+        } else {
+            native
+        };
         self.line(&format!(
-            "{acc_et} __v = ({acc_et})((const {operand_et}*)t{a}_data)[src_idx];"
+            "__sum_level_{id}[__reduce_i] = ({acc_et})({load});"
         ));
-        if ty.precision.is_integer() {
-            let bits = Self::integer_width(ty.precision);
-            let trap = NumericTrap::Overflow {
-                op: "sum",
-                prim: ty.precision,
-            }
-            .to_string();
-            self.line("switch (__reduce_i & 3) {");
-            for lane in 0..3 {
-                self.line(&format!(
-                    "  case {lane}: acc{lane} = ({acc_et})chelis_int_checked_add((int64_t)acc{lane}, (int64_t)__v, {bits}, {trap:?}); break;"
-                ));
-            }
-            self.line(&format!(
-                "  default: acc3 = ({acc_et})chelis_int_checked_add((int64_t)acc3, (int64_t)__v, {bits}, {trap:?}); break;"
-            ));
-            self.line("}");
-        } else {
-            self.line("switch (__reduce_i & 3) {");
-            self.line("  case 0: acc0 += __v; break;");
-            self.line("  case 1: acc1 += __v; break;");
-            self.line("  case 2: acc2 += __v; break;");
-            self.line("  default: acc3 += __v; break;");
-            self.line("}");
-        }
         self.indent -= 1;
         self.line("}");
-        if ty.precision.is_integer() {
-            let bits = Self::integer_width(ty.precision);
-            let trap = NumericTrap::Overflow {
-                op: "sum",
-                prim: ty.precision,
-            }
-            .to_string();
-            self.line(&format!(
-                "{acc_et} __sum01 = ({acc_et})chelis_int_checked_add((int64_t)acc0, (int64_t)acc1, {bits}, {trap:?});"
-            ));
-            self.line(&format!(
-                "{acc_et} __sum23 = ({acc_et})chelis_int_checked_add((int64_t)acc2, (int64_t)acc3, {bits}, {trap:?});"
-            ));
-            self.line(&format!(
-                "(({acc_et}*)t{id}_data)[outer] = ({acc_et})chelis_int_checked_add((int64_t)__sum01, (int64_t)__sum23, {bits}, {trap:?});"
-            ));
-        } else {
-            self.line(&format!(
-                "(({acc_et}*)t{id}_data)[outer] = (acc0 + acc1) + (acc2 + acc3);"
-            ));
-        }
+        self.emit_sum_fold(id, ty.precision);
         self.indent -= 1;
         self.line("}");
-        if can_simd_fast_path {
-            self.indent -= 1;
-            self.line("}");
-        }
     }
 
     /// C zero-literal for a Chelis precision used as an accumulator
@@ -5192,193 +5135,6 @@ impl CEmitter {
             .unwrap_or_else(|error| panic!("C backend cannot zero-fill this tensor: {error}"))
             .c_macro();
         format!("chelis_fill_scalar({tensor}, chelis_scalar_from_bits({dtype}, UINT64_C(0)));")
-    }
-
-    /// WS-A4: integer reduce_sum where the accumulator dtype is wider
-    /// than the source dtype (the i8/i16 → i32 promoted path per spec
-    /// §5.7.1). `src_c_ty` and `acc_c_ty` are the C type spellings used
-    /// for the reinterpret cast on `t->data` and for the accumulator
-    /// variable respectively. Output buffer is sized for `acc_c_ty` by
-    /// `chelis_alloc` honoring the `dtype_macro(ty)` value (CHELIS_DTYPE_I32
-    /// for the i8/i16 → i32 lowering).
-    // WS-A4: dtype-parameterized reduction needs both source and
-    // accumulator C-type spellings plus the standard set of
-    // emit-context arguments; the helper sits at the same arity as the
-    // existing `emit_reduce_simple` which is similarly broad.
-    #[allow(clippy::too_many_arguments)]
-    fn emit_reduce_sum_int_promoted(
-        &mut self,
-        id: usize,
-        axis: usize,
-        src_c_ty: &str,
-        acc_c_ty: &str,
-        inputs: &[NodeId],
-        ty: &TensorType,
-        dag: VerifiedDagView<'_>,
-    ) {
-        let a = inputs[0].0;
-        let input_node = dag.get(inputs[0]).unwrap();
-        let axis_size = Self::emit_dim_info(&input_node.output_type.dims[axis]);
-        self.emit_slot_wrapper(id, ty);
-        // Zero-fill the output buffer manually since there is no
-        // `chelis_fill_i32` helper today; an inline loop avoids touching
-        // the runtime ABI for the WS-A4 cycle.
-        self.line(&format!(
-            "for (int64_t __zi = 0; __zi < t{id}_size; __zi++) {{ (({acc_c_ty}*)t{id}_data)[__zi] = 0; }}"
-        ));
-        self.line("#pragma omp parallel for");
-        self.line(&format!(
-            "for (int64_t outer = 0; outer < t{id}_size; outer++) {{"
-        ));
-        self.indent += 1;
-        // Stride-4 ILP cascade (issue #163). [04-NUM-12] defines integer
-        // trap occurrence relative to this exact lane order, so every lane
-        // update and each final combine uses the checked accumulator width.
-        self.line(&format!(
-            "{acc_c_ty} acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0;"
-        ));
-        self.line(&format!(
-            "int64_t out_indices[t{id}_rank > 0 ? t{id}_rank : 1];"
-        ));
-        self.line(&format!(
-            "chelis_flat_to_indices(outer, t{id}_shape, t{id}_rank, out_indices);"
-        ));
-        self.line(&format!(
-            "for (int64_t __reduce_i = 0; __reduce_i < {axis_size}; __reduce_i++) {{"
-        ));
-        self.indent += 1;
-        self.line(&format!(
-            "int64_t full_indices[t{a}_rank > 0 ? t{a}_rank : 1];"
-        ));
-        self.line("int out_d = 0;");
-        self.line(&format!("for (int d = 0; d < t{a}_rank; d++) {{"));
-        self.indent += 1;
-        self.line(&format!("if (d == {axis}) {{"));
-        self.indent += 1;
-        self.line("full_indices[d] = __reduce_i;");
-        self.indent -= 1;
-        self.line("} else {");
-        self.indent += 1;
-        self.line("full_indices[d] = out_indices[out_d];");
-        self.line("out_d++;");
-        self.indent -= 1;
-        self.line("}");
-        self.indent -= 1;
-        self.line("}");
-        self.line(&format!(
-            "int64_t src_idx = chelis_indices_to_flat(full_indices, t{a}_strides, t{a}_rank);"
-        ));
-        // Promote each source element to the (wider) accumulator type
-        // before adding so partial sums of 200 i8 ones produce 200, not
-        // -56 (which would be the wrap-around if accumulation happened
-        // at the source width).
-        self.line(&format!(
-            "{acc_c_ty} __v = ({acc_c_ty})(({src_c_ty}*)t{a}_data)[src_idx];"
-        ));
-        let bits = Self::integer_width(ty.precision);
-        let trap = NumericTrap::Overflow {
-            op: "sum",
-            prim: ty.precision,
-        }
-        .to_string();
-        self.line("switch (__reduce_i & 3) {");
-        for lane in 0..3 {
-            self.line(&format!(
-                "  case {lane}: acc{lane} = ({acc_c_ty})chelis_int_checked_add((int64_t)acc{lane}, (int64_t)__v, {bits}, {trap:?}); break;"
-            ));
-        }
-        self.line(&format!(
-            "  default: acc3 = ({acc_c_ty})chelis_int_checked_add((int64_t)acc3, (int64_t)__v, {bits}, {trap:?}); break;"
-        ));
-        self.line("}");
-        self.indent -= 1;
-        self.line("}");
-        self.line(&format!(
-            "{acc_c_ty} __sum01 = ({acc_c_ty})chelis_int_checked_add((int64_t)acc0, (int64_t)acc1, {bits}, {trap:?});"
-        ));
-        self.line(&format!(
-            "{acc_c_ty} __sum23 = ({acc_c_ty})chelis_int_checked_add((int64_t)acc2, (int64_t)acc3, {bits}, {trap:?});"
-        ));
-        self.line(&format!(
-            "(({acc_c_ty}*)t{id}_data)[outer] = ({acc_c_ty})chelis_int_checked_add((int64_t)__sum01, (int64_t)__sum23, {bits}, {trap:?});"
-        ));
-        self.indent -= 1;
-        self.line("}");
-    }
-
-    /// WS-1: bf16 / f16 source -> f32 accumulator -> f32 output
-    /// reduce_sum, per spec/04-type-system.md §5.7.1. Loads each
-    /// reduced-float source element through `chelis_<x>_to_f32`,
-    /// accumulates in `f32`, and writes the result into an f32
-    /// destination tensor. The output tensor's dtype IS `CHELIS_DTYPE_F32`
-    /// (the IR `accumulator` field equals the output precision per
-    /// the C3a invariant), so `chelis_fill_f32` zeros the buffer and
-    /// the result store is a plain `((float*)t{id}_data)[outer]`
-    /// assignment.
-    fn emit_reduce_sum_reduced_f(
-        &mut self,
-        id: usize,
-        axis: usize,
-        input_prec: Prim,
-        inputs: &[NodeId],
-        ty: &TensorType,
-        dag: VerifiedDagView<'_>,
-    ) {
-        let a = inputs[0].0;
-        let input_node = dag.get(inputs[0]).unwrap();
-        let axis_size = Self::emit_dim_info(&input_node.output_type.dims[axis]);
-        let load = Self::reduced_to_f32_fn(input_prec);
-        self.emit_slot_wrapper(id, ty);
-        self.line(&Self::fill_zero_call(ty, &format!("t{id}_write_guard")));
-        self.line("#pragma omp parallel for");
-        self.line(&format!(
-            "for (int64_t outer = 0; outer < t{id}_size; outer++) {{"
-        ));
-        self.indent += 1;
-        self.line("float acc = 0.0f;");
-        self.line(&format!(
-            "int64_t out_indices[t{id}_rank > 0 ? t{id}_rank : 1];"
-        ));
-        self.line(&format!(
-            "chelis_flat_to_indices(outer, t{id}_shape, t{id}_rank, out_indices);"
-        ));
-        self.line(&format!(
-            "for (int64_t __reduce_i = 0; __reduce_i < {axis_size}; __reduce_i++) {{"
-        ));
-        self.indent += 1;
-        self.line(&format!(
-            "int64_t full_indices[t{a}_rank > 0 ? t{a}_rank : 1];"
-        ));
-        self.line("int out_d = 0;");
-        self.line(&format!("for (int d = 0; d < t{a}_rank; d++) {{"));
-        self.indent += 1;
-        self.line(&format!("if (d == {axis}) {{"));
-        self.indent += 1;
-        self.line("full_indices[d] = __reduce_i;");
-        self.indent -= 1;
-        self.line("} else {");
-        self.indent += 1;
-        self.line("full_indices[d] = out_indices[out_d];");
-        self.line("out_d++;");
-        self.indent -= 1;
-        self.line("}");
-        self.indent -= 1;
-        self.line("}");
-        self.line(&format!(
-            "int64_t src_idx = chelis_indices_to_flat(full_indices, t{a}_strides, t{a}_rank);"
-        ));
-        // Load via the conversion helper so the operand bits are
-        // interpreted as their declared bf16/f16 value and promoted
-        // to f32 for accumulation. The §5.7.1 enforcement test pins
-        // this: 1024 elements of bf16(0.01) sum to within tolerance
-        // of 10.24 in f32, but a naive bf16-direct accumulator
-        // diverges by far more.
-        self.line(&format!("acc += {load}(((uint16_t*)t{a}_data)[src_idx]);"));
-        self.indent -= 1;
-        self.line("}");
-        self.line(&format!("((float*)t{id}_data)[outer] = acc;"));
-        self.indent -= 1;
-        self.line("}");
     }
 
     // ---- Reduce max ----
@@ -6234,10 +5990,8 @@ impl CEmitter {
         } else {
             "-INFINITY"
         };
-        // Sum uses a stride-4 ILP cascade (issue #163, torch parity);
-        // max keeps a single accumulator since `fmaxf` is associative.
         if reduce_kind == "sum" {
-            self.line("float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;");
+            self.emit_sum_level(id, &axis_size, out_ty.precision);
         } else {
             self.line(&format!("float acc = {init};"));
         }
@@ -6396,12 +6150,7 @@ impl CEmitter {
         // Accumulate the last step's result
         let last = ops.len() - 1;
         if reduce_kind == "sum" {
-            self.line("switch (__reduce_i & 3) {");
-            self.line(&format!("  case 0: acc0 += v{last}; break;"));
-            self.line(&format!("  case 1: acc1 += v{last}; break;"));
-            self.line(&format!("  case 2: acc2 += v{last}; break;"));
-            self.line(&format!("  default: acc3 += v{last}; break;"));
-            self.line("}");
+            self.line(&format!("__sum_level_{id}[__reduce_i] = v{last};"));
         } else {
             // #172: fused max_reduce propagates NaN (torch parity),
             // matching the non-fused `chelis_max_f32` path.
@@ -6410,9 +6159,7 @@ impl CEmitter {
         self.indent -= 1;
         self.line("}");
         if reduce_kind == "sum" {
-            self.line(&format!(
-                "((float*)t{id}_data)[outer] = (acc0 + acc1) + (acc2 + acc3);"
-            ));
+            self.emit_sum_fold(id, out_ty.precision);
         } else {
             self.line(&format!("((float*)t{id}_data)[outer] = acc;"));
         }
@@ -7429,11 +7176,8 @@ mod tests {
             None,
         );
         let c = emit_test_dag(&dag, "test_fn").unwrap();
-        // Stride-4 ILP cascade (issue #163): four independent
-        // accumulators rather than a single `acc +=` chain.
-        assert!(c.contains("acc0 += __v"));
-        assert!(c.contains("acc3 += __v"));
-        assert!(c.contains("(acc0 + acc1) + (acc2 + acc3)"));
+        assert!(c.contains("__sum_level_"));
+        assert!(!c.contains("chelis_sum_f32("));
         assert!(c.contains("for (int64_t __reduce_i"));
     }
 
@@ -8158,9 +7902,8 @@ mod tests {
         );
         dag.add_node(RiscOp::Neg, vec![s], scalar_f32(), None);
         let c = emit_test_dag(&dag, "test_fn").unwrap();
-        // Stride-4 ILP cascade (issue #163).
-        assert!(c.contains("acc0 += __v"));
-        assert!(c.contains("(acc0 + acc1) + (acc2 + acc3)"));
+        assert!(c.contains("__sum_level_"));
+        assert!(!c.contains("chelis_sum_f32("));
         // The slow (non-contiguous) path emits a typed pointer cast then negates.
         assert!(c.contains("((float*)t1_data)[idx]"));
     }
@@ -8446,7 +8189,7 @@ mod tests {
     }
 
     #[test]
-    fn matmul_pattern_emits_cblas_call() {
+    fn matmul_pattern_retains_canonical_sum() {
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
@@ -8507,9 +8250,10 @@ mod tests {
             ..crate::CodegenOptions::default()
         };
         let verified = crate::testing::verified_dag(&dag, options)
-            .expect("BLAS codegen test DAG must verify ownership");
+            .expect("matmul codegen test DAG must verify ownership");
         let result = crate::codegen_with_options(verified, "test_fn", options).unwrap();
-        assert!(result.c_source.contains("cblas_sgemm("));
+        assert!(!result.c_source.contains("cblas_sgemm("));
+        assert!(result.c_source.contains("__sum_level_"));
     }
 
     #[test]
@@ -8571,7 +8315,11 @@ mod tests {
         );
         let c = emit_test_dag(&dag, "test_fn").unwrap();
         assert!(!c.contains("cblas_sgemm("));
-        assert!(c.contains("for (int64_t __reduce_i = 0; __reduce_i < 3; __reduce_i++) {"));
+        assert!(
+            c.lines()
+                .any(|line| line.contains("__sum_n_") && line.ends_with(" = 3;"))
+        );
+        assert!(c.contains("__sum_level_"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "freeze_sha256": "73a29872ed36bd3bf638c59b27ef8dadd34fc576f1314dcbba5a350d2125a719",
+  "freeze_sha256": "1060ce0d5942665350b47d60b0141a2abf00dfc9773bd6abe22946f59b8fdad0",
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -1553,19 +1553,7 @@
       "sample": "for (int64_t outer = 0; outer < t{id}_size; outer++) {{"
     },
     {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_sum",
-      "sample": "int8_t"
-    },
-    {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_sum_general",
-      "sample": "for (int64_t outer = 0; outer < t{id}_size; outer++) {{"
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_sum_int_promoted",
-      "sample": "for (int64_t outer = 0; outer < t{id}_size; outer++) {{"
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_sum_reduced_f",
       "sample": "for (int64_t outer = 0; outer < t{id}_size; outer++) {{"
     },
     {
@@ -2214,14 +2202,6 @@
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_sum_general",
-      "sample": "((float*)t{id}_data)[0] = chelis_sum_f32((const float*)t{a}_data, t{a}_size);"
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_sum_int_promoted",
-      "sample": "for (int64_t __zi = 0; __zi < t{id}_size; __zi++) {{ (({acc_c_ty}*)t{id}_data)[__zi] = 0; }}"
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_sum_reduced_f",
       "sample": "int64_t out_indices[t{id}_rank > 0 ? t{id}_rank : 1];"
     },
     {
@@ -2287,10 +2267,6 @@
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_sparse_summary",
       "sample": "{}int64_t {shape_name}[{}] = {{ {} }};"
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_tensor_call",
-      "sample": "((int8_t*){tensor_name}_write.data)[0] = {value_name};"
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::emit_sparse_gather_summary_body",
@@ -2463,10 +2439,6 @@
     {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/tier2.rs|owner=align_matmul_operand",
       "sample": "lead_dims . len () . saturating_sub (source_lead . len ())"
-    },
-    {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/tier2.rs|owner=lower_conv2d",
-      "sample": "h_out_size . saturating_sub (1)"
     },
     {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/tier2.rs|owner=lower_layer_norm",
@@ -2726,7 +2698,7 @@
       "artifact": "the frozen INVENTORY_SOURCES file list",
       "enumerator": "chelis-repr-inventory: syn for Rust; clang's front end under fixed target lanes, a committed stub SDK, and a scrubbed environment for C and Objective-C headers, classified with the capacity census's closed type-word lists",
       "universe": {
-        "registered_sources": 71,
+        "registered_sources": 72,
         "roots": [
           "crates/chelis-runtime/src/**/*.rs",
           "crates/chelis-runtime/include/**/*.h",

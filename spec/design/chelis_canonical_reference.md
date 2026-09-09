@@ -503,7 +503,7 @@ The ~12 Tier 1 RISC primitives (`add`, `mul`, `exp`, etc.) are language-native b
 the compiler decomposes them, the AD engine has adjoint rules for them, and the C/HIP
 backends emit specialized code for them.
 The Tier 2 derived built-ins (`relu`, `sigmoid`, `softmax`, `matmul`, `layer_norm`,
-`conv2d`) are in the core because the compiler recognizes them by name and decomposes
+`conv`) are in the core because the compiler recognizes them by name and decomposes
 them to RISC primitives during IR lowering.
 The type checker knows their signatures.
 The optimizer can fuse them.

@@ -3277,7 +3277,7 @@ informative rather than costly, and none is a reason to keep the asymmetry:
 | module-reopen and forged-linker-name guards, `collect_all_declarations`, opacity, `validate_binder_literal_adoption_in_program`, the PP6 schedule, the deferred borrow and opaque ledgers, `validate_tensor_precisions_in_program`, `validate_type_invariants_in_program_with_sink`, `validate_polymorphic_op_constraints` | all four | shared already; no action |
 | `report_initialization_errors` | IR, typed (wrapper), `infer_ir` | **[04-INF-4]/[04-INF-7]/[04-INF-8].** Move into the shared driver so the fourth entry gets it |
 | `validate_vmap_extent_dependencies` | IR, `infer_ir` | **spec/06 §3.7: "Such a program is a type error, `batch_varying_extent` (§8.6)".** The spec makes it a *type* error, so it runs at every checker entry. Add, and repair its stamped-carrier read |
-| conv2d stride > 0 and padding >= 0 | IR, `infer_ir` | **author the atom, with [05-RWIN-1]'s split.** spec/05 §4.5 gives conv2d a signature and an im2col lowering and no constraint, and no `[05-OP-N]`. The code's comment cites "spec/05-risc-primitives.md §471-483", which is the `sum` accumulator-parameter text and governs nothing here. The nearest governing category is [05-RWIN-1] (spec/05:526-533), which applies the static-versus-runtime split to the constraint itself. Draft below; keep the rule, give it authority, and give it that split |
+| `conv` per-axis stride > 0 and both padding bounds >= 0 | IR, `infer_ir` | **apply [05-OP-51] and spec/05 §4.5 at every entry.** The governing atom now exists; its exact per-axis shape and static-versus-runtime rules replace the former scalar-metadata proposal. PP9 owns consistent enforcement, not a second semantic definition |
 | conv2d "requires a literal integer stride / padding" (`extract_typed_scalar_literal`) | IR, `infer_ir` | **delete as a checker rejection; the lowering restriction relocates to [#730].** [05-RWIN-1] decides this by category: for the analogous windowed primitives the stride list "may be runtime values", and the violation "never becomes an empty-list default, truncated rank, **static-parameter signature**, or backend assertion". A demand that the operand be a compile-time literal is exactly a static-parameter signature. A non-literal stride is therefore legal, and the range rule reaches it through the runtime half of the split. That the Phase 0 im2col lowering cannot emit a runtime-strided conv2d today is a capability restriction, and it moves with the concreteness gate below rather than separately |
 | conv2d "concrete tensor argument metadata", `mean` concrete reduced axis, `layer_norm` concrete normalized axis | IR, `infer_ir` | **relocate to [#730].** No spec sentence; the rationale is that the IR lowering needs the extent statically. That is a backend capability, and the typed lane's own tests accept the symbolic forms. `loud_unsupported.md`'s class owns it; `chelis check` does not |
 | `detect_trivial_non_terminating_fns` | IR, `infer_ir` | **relocate to [#730].** No spec sentence. [04-INF-2]/[04-INF-3] admit recursion at the type level; nothing makes a base-case-less function a type error. Its own comment says the Phase 0 DAG lowering cannot represent recursion and would silently elide it to an identity, which is precisely the loud-unsupported class |
@@ -3302,19 +3302,13 @@ move, and one added sentence would close the recurring argument:
 > entry does and the rejection it performed moves to the stage whose
 > capability it describes.
 
-The conv2d constraint has no home atom. It needs one, allocated against the
-highest `[05-OP-N]` on current `main` at authoring time:
-
-> *Proposed, for spec/05 §4.5:* **[05-OP-N]** `conv2d(input, kernel, stride,
-> padding)` SHALL receive `stride >= 1` and `padding >= 0`. The output spatial
-> extent is `floor((in + 2 * padding - k) / stride) + 1`; a stride of zero or
-> less leaves it undefined and a negative padding shrinks the effective input
-> below zero. `stride` and `padding` MAY be runtime values. A statically
-> proved violation of either bound, or a statically proved non-positive output
-> extent, is a type error at every checker entry; otherwise the same violation
-> traps `Domain` before any tensor read or output allocation. It never becomes
-> a static-parameter signature, a silently clamped extent, or a backend
-> assertion.
+The convolution constraint is now owned by [05-OP-51] and spec/05 §4.5.
+The canonical `conv` takes explicit per-axis int64 strides and `(low,high)`
+padding pairs at every positive spatial rank. That numbered contract owns
+the shape relation, domain checks, and static-versus-runtime split; PP9
+must consume it rather than author another operation rule. The historical
+`conv2d` probes below retain their original evidence spelling. Their
+successors use `conv` with per-axis metadata.
 
 That is [05-RWIN-1]'s shape, deliberately. The reviewer's hypothesis was that
 the literal-operand requirement is not a checker rule at all, and the spec text

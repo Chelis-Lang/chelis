@@ -1996,7 +1996,7 @@ fn builtin_layer_norm() {
         "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} f32))} 0))
          (def {} gamma (lit {type: (t-tensor {} (d-name {} hidden) (t-prim {} f32))} 0))
          (def {} beta (lit {type: (t-tensor {} (d-name {} hidden) (t-prim {} f32))} 0))
-         (def {} y (app {} (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta)))",
+         (def {} y (app {} (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta) (lit {type: (t-prim {} f32)} 0.00001)))",
     );
 }
 
@@ -2006,7 +2006,7 @@ fn builtin_layer_norm_rejects_rank2_gamma() {
         "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} f32))} 0))
          (def {} gamma (lit {type: (t-tensor {} (d-name {} hidden) (d-name {} extra) (t-prim {} f32))} 0))
          (def {} beta (lit {type: (t-tensor {} (d-name {} hidden) (t-prim {} f32))} 0))
-         (def {} y (app {} (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta)))",
+         (def {} y (app {} (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta) (lit {type: (t-prim {} f32)} 0.00001)))",
         CheckErrorKind::DimensionMismatch,
     );
 }
@@ -2017,36 +2017,36 @@ fn builtin_layer_norm_rejects_precision_mismatch() {
         "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} f32))} 0))
          (def {} gamma (lit {type: (t-tensor {} (d-name {} hidden) (t-prim {} bf16))} 0))
          (def {} beta (lit {type: (t-tensor {} (d-name {} hidden) (t-prim {} f32))} 0))
-         (def {} y (app {} (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta)))",
+         (def {} y (app {} (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta) (lit {type: (t-prim {} f32)} 0.00001)))",
         CheckErrorKind::PrecisionMismatch,
     );
 }
 
 #[test]
-fn builtin_conv2d_accepts_int_stride_padding() {
+fn builtin_conv_accepts_int_stride_padding() {
     check_ok(
         "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (d-name {} in_c) (d-name {} h) (d-name {} w) (t-prim {} f32))} 0))
          (def {} k (lit {type: (t-tensor {} (d-name {} out_c) (d-name {} in_c) (d-lit {} 3) (d-lit {} 3) (t-prim {} f32))} 0))
-         (def {} y (app {} (var {} conv2d) (var {} x) (var {} k) (lit {type: (t-prim {} int32)} 1) (lit {type: (t-prim {} int32)} 1)))",
+         (def {} y (app {} (var {} conv) (var {} x) (var {} k) (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 1) (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 1) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 1) (lit {type: (t-prim {} int64)} 1)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 1) (lit {type: (t-prim {} int64)} 1)) (var {} Nil)))))",
     );
 }
 
 #[test]
-fn builtin_conv2d_rejects_channel_mismatch() {
+fn builtin_conv_rejects_channel_mismatch() {
     check_err(
         "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (d-name {} in_a) (d-name {} h) (d-name {} w) (t-prim {} f32))} 0))
          (def {} k (lit {type: (t-tensor {} (d-name {} out_c) (d-name {} in_b) (d-lit {} 3) (d-lit {} 3) (t-prim {} f32))} 0))
-         (def {} y (app {} (var {} conv2d) (var {} x) (var {} k) (lit {type: (t-prim {} int32)} 1) (lit {type: (t-prim {} int32)} 1)))",
+         (def {} y (app {} (var {} conv) (var {} x) (var {} k) (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 1) (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 1) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 1) (lit {type: (t-prim {} int64)} 1)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 1) (lit {type: (t-prim {} int64)} 1)) (var {} Nil)))))",
         CheckErrorKind::DimensionMismatch,
     );
 }
 
 #[test]
-fn builtin_conv2d_rejects_kernel_precision_mismatch() {
+fn builtin_conv_rejects_kernel_precision_mismatch() {
     check_err(
         "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (d-name {} in_c) (d-name {} h) (d-name {} w) (t-prim {} f32))} 0))
          (def {} k (lit {type: (t-tensor {} (d-name {} out_c) (d-name {} in_c) (d-lit {} 3) (d-lit {} 3) (t-prim {} bf16))} 0))
-         (def {} y (app {} (var {} conv2d) (var {} x) (var {} k) (lit {type: (t-prim {} int32)} 1) (lit {type: (t-prim {} int32)} 1)))",
+         (def {} y (app {} (var {} conv) (var {} x) (var {} k) (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 1) (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 1) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 1) (lit {type: (t-prim {} int64)} 1)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 1) (lit {type: (t-prim {} int64)} 1)) (var {} Nil)))))",
         CheckErrorKind::PrecisionMismatch,
     );
 }

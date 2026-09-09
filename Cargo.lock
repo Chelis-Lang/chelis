@@ -669,6 +669,7 @@ dependencies = [
  "serde",
  "serde_json",
  "stacker",
+ "syn 2.0.117",
  "thiserror 2.0.18",
 ]
 
@@ -774,10 +775,13 @@ dependencies = [
  "chelis-vocab",
  "libc",
  "libloading",
+ "proc-macro2",
  "pyo3",
+ "quote",
  "serde",
  "serde_json",
  "sha2",
+ "syn 2.0.117",
  "tempfile",
 ]
 

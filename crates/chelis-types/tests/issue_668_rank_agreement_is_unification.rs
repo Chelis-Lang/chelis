@@ -530,7 +530,7 @@ fn a_lexically_shadowed_builtin_name_keeps_its_parameter_type() {
 /// DISPOSITION LOCK. The stale-fact bug it was written for was reachable only
 /// through the rank comparison this pull request deletes, so the row can no
 /// longer go red the way it originally did. It stays because the environment
-/// it exercises still feeds the exact-shape `conv2d` validators, where a stale
+/// it exercises still feeds the exact-shape `conv` validators, where a stale
 /// entry would be the same defect with a different consumer.
 #[test]
 fn a_rebinding_does_not_inherit_the_previous_bindings_shape() {
@@ -538,7 +538,7 @@ fn a_rebinding_does_not_inherit_the_previous_bindings_shape() {
         "module Repro.Rebind\n\
          def f(x: tensor[n, f32]) = {\n\
            a = stride(x, 2i64)\n\
-           a = normalize(insert(x, 0i32, 2i64))\n\
+           a = relu(insert(x, 0i32, 2i64))\n\
            b = insert(x, 0i32, 2i64)\n\
            add(a, b)\n\
          }\n",
@@ -553,7 +553,7 @@ fn a_rebinding_does_not_inherit_the_previous_bindings_shape() {
 /// prove that a private `RankOnly` fact could not be forged from Deep syntax.
 /// With no private carrier left there is nothing to forge, and what it now
 /// locks is the weaker, still-worth-holding property that an unusual
-/// `d-name` does not perturb the exact-shape `conv2d` derivation.
+/// `d-name` does not perturb the exact-shape `conv` derivation.
 #[test]
 fn an_authored_rank_only_prefix_dimension_is_an_ordinary_name() {
     assert_accepts(
@@ -561,7 +561,7 @@ fn an_authored_rank_only_prefix_dimension_is_an_ordinary_name() {
          def convolve(\n\
            x: tensor[__chelis_rank_only_axis_0, 3, 8, 8, f32],\n\
            k: tensor[8, 3, 3, 3, f32],\n\
-         ) -> tensor[__chelis_rank_only_axis_0, 8, 6, 6, f32] = conv2d(&x, &k, 1i32, 0)\n",
+         ) -> tensor[__chelis_rank_only_axis_0, 8, 6, 6, f32] = conv(&x, &k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])\n",
         "an authored `__chelis_rank_only_axis_0` dimension",
     );
 }

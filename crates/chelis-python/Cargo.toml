@@ -28,6 +28,9 @@ tempfile = "3"
 
 [dev-dependencies]
 assert_cmd = "2"
+proc-macro2 = { version = "1", features = ["span-locations"] }
+quote.workspace = true
+syn.workspace = true
 
 [lints]
 workspace = true

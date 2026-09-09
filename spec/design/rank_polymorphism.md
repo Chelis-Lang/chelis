@@ -474,7 +474,7 @@ semantics (NOT on the HM scheme). Concretely:
   result (only valid in an erasure-position body).
 - *denylist (reject inside an `R`-body):* every shape-rewriting op —
   `permute`, `reshape`, `expand`, `shrink`, `stride`, `pad`, `concat`,
-  `gather`, `scatter`, `matmul`, axis-indexed reductions, `conv2d`, … — and
+  `gather`, `scatter`, `matmul`, axis-indexed reductions, `conv`, … — and
   any user `def` not itself proven rank-safe.
 
 The check runs during body validation (extends the §4.4 "body must type-check

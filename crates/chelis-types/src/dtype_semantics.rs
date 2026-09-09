@@ -2541,32 +2541,17 @@ fn reduce_sum_group(
     input: &TensorStorage,
     group: &[usize],
     accumulator: Prim,
-    stride4: bool,
 ) -> Result<ScalarValue, NumericKernelError> {
     let zero = reduction_seed(op, accumulator, 0, 0.0)?;
-    if !stride4 {
-        let mut acc = zero;
-        for &index in group {
-            acc = reduction_add(
-                op,
-                acc,
-                scalar_at_reduction_width(op, input, index, accumulator)?,
-            )?;
-        }
-        return Ok(acc);
-    }
-
-    let mut lanes = [zero; 4];
-    for (position, &index) in group.iter().enumerate() {
-        lanes[position & 3] = reduction_add(
+    let mut acc = zero;
+    for &index in group {
+        acc = reduction_add(
             op,
-            lanes[position & 3],
+            acc,
             scalar_at_reduction_width(op, input, index, accumulator)?,
         )?;
     }
-    let left = reduction_add(op, lanes[0], lanes[1])?;
-    let right = reduction_add(op, lanes[2], lanes[3])?;
-    reduction_add(op, left, right)
+    Ok(acc)
 }
 
 fn reduce_group(
@@ -2576,10 +2561,20 @@ fn reduce_group(
     accumulator: Prim,
 ) -> Result<ScalarValue, NumericKernelError> {
     match op {
-        TensorReduceOp::Sum { .. } => reduce_sum_group(op, input, group, accumulator, true),
-        TensorReduceOp::ReduceWindowSum => reduce_sum_group(op, input, group, accumulator, false),
+        TensorReduceOp::Sum { .. } => {
+            let leaves = group
+                .iter()
+                .map(|&index| scalar_at_reduction_width(op, input, index, accumulator))
+                .collect::<Result<Vec<_>, _>>()?;
+            match checked_adjacent_pair_fold(leaves, |left, right| reduction_add(op, left, right))?
+            {
+                Some(value) => Ok(value),
+                None => reduction_seed(op, accumulator, 0, 0.0),
+            }
+        }
+        TensorReduceOp::ReduceWindowSum => reduce_sum_group(op, input, group, accumulator),
         TensorReduceOp::ReduceWindowMean => {
-            let sum = reduce_sum_group(op, input, group, accumulator, false)?;
+            let sum = reduce_sum_group(op, input, group, accumulator)?;
             let divisor = reduction_seed(op, accumulator, group.len() as i64, group.len() as f64)?;
             reduction_div_float(op, sum, divisor)
         }
@@ -4931,7 +4926,7 @@ mod tests {
     }
 
     #[test]
-    fn global_sum_uses_explicit_accumulator_and_stride4_order() {
+    fn global_sum_uses_explicit_accumulator_and_canonical_order() {
         let int8 = finalize_tensor(
             "test",
             Prim::Int8,
@@ -4970,6 +4965,42 @@ mod tests {
                 prim: Prim::Int32,
             }))
         );
+    }
+
+    #[test]
+    fn global_sum_traps_only_at_canonical_adjacent_pairs() {
+        for prim in [Prim::Int32, Prim::Int64] {
+            let (_, max) = prim.integer_range().unwrap();
+            let op = TensorReduceOp::Sum {
+                accumulator: prim,
+                result: prim,
+            };
+            let trapping = finalize_tensor(
+                "test",
+                prim,
+                RawTensor::Int(vec![max, 1, 0, 0, -max, -1, 0, 0]),
+            )
+            .unwrap();
+            assert_eq!(
+                reduce_tensor_groups(op, &trapping, &one_group(8)),
+                Err(NumericKernelError::Trap(NumericTrap::Overflow {
+                    op: "sum",
+                    prim
+                }))
+            );
+            let valid = finalize_tensor(
+                "test",
+                prim,
+                RawTensor::Int(vec![max, -max, 0, 0, 1, -1, 0, 0]),
+            )
+            .unwrap();
+            assert_eq!(
+                reduce_tensor_groups(op, &valid, &one_group(8))
+                    .unwrap()
+                    .to_i64_exact_vec(),
+                Some(vec![0])
+            );
+        }
     }
 
     #[test]

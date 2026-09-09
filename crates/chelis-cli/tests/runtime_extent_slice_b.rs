@@ -572,25 +572,11 @@ fn an_op_declared_witness_reaches_the_hip_prologue_without_panicking() {
     );
 }
 
-/// The same example on the C lane, for the LOCAL half of section 4.7.
-///
-/// `seq` is one class with sixteen members: `x`'s own axis, seven extents
-/// operations compute, and eight folded reads of computed tensors. The last
-/// group is the guard set, and on `main` only FOUR of the eight are guarded,
-/// because chelis#616's `runtime_dim_sites` finds sites by walking
-/// occurrences for an op-declared name rather than by asking which members a
-/// class has. The derivation finds all eight, and each renders [04-NUM-9]
-/// instead of `chelis: runtime dim `seq` mismatch at node N axis A` followed
-/// by `abort()`.
-///
-/// The eight is this example's measured count, not a property of the rule; an
-/// edit to the example is expected to change it, and a reader updating it
-/// should re-derive rather than relax the assertion, because the count is the
-/// only thing here that distinguishes finding every member from finding the
-/// four the walk already found.
-///
-/// EVIDENTIARY STATUS: regression test on both halves - four guards and the
-/// legacy rendering on `main`, eight and [04-NUM-9] here.
+/// Every local folded read of `seq` is guarded at its operation. The
+/// current example's canonical contractions and explicit epsilon produce
+/// seventeen such reads: nine in projections/attention, three in each
+/// normalization block, and two in the feed-forward projections. The emitted nodes/axes below pin that independent
+/// derivation, so a missing or duplicated guard cannot preserve the count.
 #[test]
 fn every_local_member_of_one_class_is_guarded_at_its_operation_on_c() {
     if !gcc_available() {
@@ -615,17 +601,45 @@ fn every_local_member_of_one_class_is_guarded_at_its_operation_on_c() {
         !emitted.contains("chelis: runtime dim `seq` mismatch"),
         "no local guard keeps the legacy rendering"
     );
+    let guarded_sites = [
+        (12, 0),
+        (16, 0),
+        (20, 0),
+        (24, 2),
+        (25, 0),
+        (29, 1),
+        (32, 1),
+        (35, 0),
+        (39, 0),
+        (55, 0),
+        (56, 0),
+        (57, 0),
+        (60, 0),
+        (65, 0),
+        (81, 0),
+        (82, 0),
+        (83, 0),
+    ];
     assert_eq!(
         emitted.matches("extent `seq`: claimed = ").count(),
-        8,
-        "every folded read of a computed tensor under this claim is guarded"
+        guarded_sites.len()
     );
+    for (node, axis) in guarded_sites {
+        assert_eq!(
+            emitted
+                .matches(&format!(
+                    "extent `seq`: claimed = %lld, node {node} axis {axis} = %lld"
+                ))
+                .count(),
+            1
+        );
+    }
     assert_eq!(
         emitted
             .matches(&format!("{}\");", domain_trap_line("expand")))
             .count(),
-        8,
-        "and each renders [04-NUM-9] naming the operation"
+        guarded_sites.len(),
+        "each local guard renders [04-NUM-9] naming its operation"
     );
 }
 

@@ -68,6 +68,21 @@ const ALLOWED: &[(&str, usize, &str)] = &[
         1,
         "the wrong-line mutant in the mean-adjoint anchor test",
     ),
+    (
+        "scripts/builtin_atom_semantic_contracts.py",
+        1,
+        "the normative [05-OP-49] movement signature assertion, whose expand retains rank and broadcasts an existing unit extent",
+    ),
+    (
+        "scripts/test_builtin_atom_registry.py",
+        1,
+        "the missing-contract mutant removes that same-rank movement signature to prove cross-references alone cannot supply builtin authority",
+    ),
+    (
+        "crates/chelis-types/tests/issue_1294_standard_lowerings.rs",
+        2,
+        "negative controls reject the obsolete shape-taking expand recipe and an invalid broadcast extent",
+    ),
     // Genuine same-rank broadcasts: the declared result has the operand's rank.
     // These are what `expand` means after the split, so they are not renamed.
     (
@@ -207,7 +222,7 @@ const ALLOWED: &[(&str, usize, &str)] = &[
     (
         "crates/chelis-types/tests/issue_668_deleted_derivation_does_not_suppress_conv2d.rs",
         3,
-        "three `y = expand(x, 0i32, 2i64)` bindings over a unit axis 0, feeding a `conv2d` whose validator must keep running; the operand carries the unit extent, so each is a same-rank broadcast",
+        "three `y = expand(x, 0i32, 2i64)` bindings over a unit axis 0, feeding a `conv` whose validator must keep running; the operand carries the unit extent, so each is a same-rank broadcast",
     ),
     (
         "crates/chelis-types/tests/issue_668_rank_agreement_is_unification.rs",
