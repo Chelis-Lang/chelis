@@ -41,6 +41,11 @@ const ALLOWED: &[(&str, usize, &str)] = &[
         1,
         "the wrong-line mutant in the mean-adjoint anchor test",
     ),
+    (
+        "scripts/builtin_atom_semantic_contracts.py",
+        1,
+        "the normative [05-OP-49] movement signature assertion, whose expand retains rank and broadcasts an existing unit extent",
+    ),
     // Genuine same-rank broadcasts: the declared result has the operand's rank.
     // These are what `expand` means after the split, so they are not renamed.
     (
