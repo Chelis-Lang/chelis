@@ -6750,6 +6750,16 @@ impl CEmitter {
         pair.0.node_input().is_some() || pair.1.node_input().is_some()
     }
 
+    /// Declare an op-owned runtime extent under its existing representation
+    /// owner. Guard scheduling is separate from C variable declaration.
+    fn emit_runtime_dim_site(&mut self, id: usize, axis: usize, extent_expr: &str) {
+        if let Some((name, true)) = self.runtime_dim_sites.get(&(id, axis)) {
+            let name = name.clone();
+            self.declared_dim_names.insert(name.clone());
+            self.line(&format!("int64_t {name} = {extent_expr};"));
+        }
+    }
+
     /// Declare supported runtime extents, then consume this operation's
     /// claims in declaration order. Supplying all axes together preserves
     /// that order even when the output permutes the signature's dimensions.
@@ -6764,11 +6774,7 @@ impl CEmitter {
         // unreachable, which is how a compiled kernel came to broadcast
         // element 0 of a two-element axis in silence.
         for (axis, extent_expr) in extents {
-            if let Some((name, true)) = self.runtime_dim_sites.get(&(id, *axis)) {
-                let name = name.clone();
-                self.declared_dim_names.insert(name.clone());
-                self.line(&format!("int64_t {name} = {extent_expr};"));
-            }
+            self.emit_runtime_dim_site(id, *axis, extent_expr);
         }
         // The guard site and the claim it compares against are the
         // derivation's, and the rendering is [04-NUM-9]'s: the complete
