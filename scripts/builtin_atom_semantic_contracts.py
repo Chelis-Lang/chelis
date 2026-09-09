@@ -94,7 +94,7 @@ CALLABLE_CLAUSES = {
         (("dict_get", "dict_insert", "dict_merge", "dict_remove"),
          "`dict_of(entries)` takes List[(K,V)]"),
         (("einsum",), "`einsum(equation,a,b)` takes a string equation and two tensors"),
-        (("expand", "insert", "pad"),
+        (("expand", "insert", "pad", "shrink", "stride"),
          "`reshape(x,shape)`, `permute(x,axes)`, `expand(x,axis,size)`"),
         (("gather",), "`gather(values,indices,axis)`"),
         (("len",), "`len(xs)` accepts List[T] or Dict[K,V] and returns int64"),

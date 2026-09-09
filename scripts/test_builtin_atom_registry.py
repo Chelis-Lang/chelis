@@ -125,6 +125,39 @@ class SemanticAuthorityTests(unittest.TestCase):
         changed = re.sub(r"\b(?:Signature|Domain|Result|Failure|Adjoint|Accumulator):", "", self.spec)
         semantics.validate_semantics(self.rows, changed)
 
+    def test_movement_trap_references_keep_the_builtin_authority(self):
+        blocks = registry.atom_blocks(self.spec)
+        for reference_atom in ("[05-OP-9]", "[05-OP-33]"):
+            block = blocks[reference_atom]
+            changed = self.spec.replace(block, block +
+                "> Numeric failures use operation `shrink` or `stride`.\n")
+            with self.subTest(reference_atom=reference_atom):
+                semantics.validate_semantics(self.rows, changed)
+                for operation in ("shrink", "stride"):
+                    identity = next(name for name in self.rows
+                                    if name.split(":")[1] == operation)
+                    wrong = {identity: reference_atom,
+                             **{name: atom for name, atom in self.rows.items()
+                                if name != identity}}
+                    with self.assertRaisesRegex(registry.RegistryError, "govern"):
+                        semantics.validate_semantics(wrong, changed)
+
+    def test_movement_ambiguity_requires_the_real_contract(self):
+        blocks = registry.atom_blocks(self.spec)
+        for operation in ("shrink", "stride"):
+            identity = next(name for name in self.rows if name.split(":")[1] == operation)
+            atom = self.rows[identity]
+            clause = "`reshape(x,shape)`, `permute(x,axes)`, `expand(x,axis,size)`"
+            block = blocks[atom]
+            missing = "> " + semantics.normalized(block).replace(clause, "REMOVED") + "\n"
+            changed = self.spec.replace(block, missing)
+            changed += f"\n> **[05-OP-999]** Numeric failures use operation `{operation}`.\n"
+            rows = {identity: atom, **self.rows}
+            with self.subTest(operation=operation), self.assertRaisesRegex(
+                registry.RegistryError, f"contract of {identity}"
+            ):
+                semantics.validate_semantics(rows, changed)
+
 
 if __name__ == "__main__":
     unittest.main()
