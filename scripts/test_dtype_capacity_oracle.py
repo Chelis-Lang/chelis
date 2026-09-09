@@ -117,15 +117,25 @@ class ExecutionTests(unittest.TestCase):
                 "profile": {"test": True},
                 "executable": str(artifact),
             }) + "\n", stderr="")
+            evidence = root / "target/dtype-capacity/evidence/primary"
             with mock.patch("dtype_capacity_oracle.subprocess.run", return_value=completed) as run, \
                     mock.patch("dtype_capacity_oracle.run_libtest", return_value=tuple(group.selected)):
-                self.assertEqual(oracle.execute_group(root, root / "target/dtype-capacity", group), tuple(group.selected))
+                self.assertEqual(
+                    oracle.execute_group(root, root / "target/dtype-capacity", group, evidence),
+                    tuple(group.selected),
+                )
             command = run.call_args.args[0]
             self.assertIn("--locked", command)
             self.assertIn("--no-run", command)
             self.assertIn("--message-format=json", command)
             self.assertEqual(run.call_args.kwargs["env"]["RUSTC_BOOTSTRAP"], "1")
             self.assertEqual(run.call_args.kwargs["cwd"], root)
+            self.assertEqual((evidence / "cargo.stdout").read_text(), completed.stdout)
+            self.assertEqual((evidence / "cargo.artifacts.jsonl").read_text(), completed.stdout)
+            self.assertEqual((evidence / "cargo.stderr").read_text(), "")
+            cargo = json.loads((evidence / "cargo.process.json").read_text())
+            self.assertEqual(cargo["argv"], list(command))
+            self.assertEqual(cargo["returncode"], 0)
 
     def test_missing_final_binding_test_cannot_turn_a_zero_test_run_into_success(self):
         with self.assertRaises(oracle.CapacityOracleError):
@@ -220,8 +230,9 @@ class ExecutionTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
+            (root / "evidence").mkdir()
             self.assertEqual(
-                oracle.run_libtest(root, binary, ("selected", "second_selected")),
+                oracle.run_libtest(root, binary, ("selected", "second_selected"), root / "evidence"),
                 ("selected", "second_selected"),
             )
 
@@ -238,8 +249,9 @@ class ExecutionTests(unittest.TestCase):
                  "ignored": 0, "measured": 0, "filtered_out": 0},
             ])
             result = mock.Mock(returncode=0, stdout=events, stderr="")
+            (root / "evidence").mkdir()
             with mock.patch("dtype_capacity_oracle.subprocess.run", return_value=result) as run:
-                self.assertEqual(oracle.run_libtest(root, binary, ("selected",)), ("selected",))
+                self.assertEqual(oracle.run_libtest(root, binary, ("selected",), root / "evidence"), ("selected",))
             command = run.call_args.args[0]
             self.assertIn("-Zunstable-options", command)
             self.assertIn("--format=json", command)
@@ -264,9 +276,93 @@ class ExecutionTests(unittest.TestCase):
             def mutate(*args, **kwargs):
                 binary.write_bytes(b"after")
                 return mock.Mock(returncode=0, stdout=events, stderr="")
+            (root / "evidence").mkdir()
             with mock.patch("dtype_capacity_oracle.subprocess.run", side_effect=mutate):
                 with self.assertRaises(oracle.CapacityOracleError):
-                    oracle.run_libtest(root, binary, ("selected",))
+                    oracle.run_libtest(root, binary, ("selected",), root / "evidence")
+
+    def test_libtest_retains_lifecycle_output_and_exact_process_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            binary = root / "test"
+            binary.write_bytes(b"fixture")
+            evidence = root / "evidence"
+            events = "\n".join(json.dumps(event) for event in [
+                {"type": "suite", "event": "started", "test_count": 1},
+                {"type": "test", "event": "started", "name": "selected"},
+                {"type": "test", "event": "ok", "name": "selected"},
+                {"type": "suite", "event": "ok", "passed": 1, "failed": 0,
+                 "ignored": 0, "measured": 0, "filtered_out": 0},
+            ])
+            result = mock.Mock(returncode=0, stdout=events, stderr="libtest diagnostic\n")
+            evidence.mkdir()
+            with mock.patch("dtype_capacity_oracle.subprocess.run", return_value=result) as run:
+                self.assertEqual(oracle.run_libtest(root, binary, ("selected",), evidence), ("selected",))
+            self.assertEqual((evidence / "libtest.stdout").read_text(), events)
+            self.assertEqual((evidence / "libtest.stderr").read_text(), "libtest diagnostic\n")
+            process = json.loads((evidence / "libtest.process.json").read_text())
+            self.assertEqual(process["argv"], list(run.call_args.args[0]))
+            self.assertEqual(process["returncode"], 0)
+
+    def test_failed_process_retains_output_and_existing_evidence_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            binary = root / "test"
+            binary.write_bytes(b"fixture")
+            evidence = root / "evidence"
+            events = "\n".join(json.dumps(event) for event in [
+                {"type": "suite", "event": "started", "test_count": 1},
+                {"type": "test", "event": "started", "name": "selected"},
+                {"type": "test", "event": "ok", "name": "selected"},
+                {"type": "suite", "event": "ok", "passed": 1, "failed": 0,
+                 "ignored": 0, "measured": 0, "filtered_out": 0},
+            ])
+            result = mock.Mock(returncode=9, stdout=events, stderr="failed after output\n")
+            evidence.mkdir()
+            with mock.patch("dtype_capacity_oracle.subprocess.run", return_value=result):
+                with self.assertRaises(oracle.CapacityOracleError):
+                    oracle.run_libtest(root, binary, ("selected",), evidence)
+            self.assertEqual((evidence / "libtest.stdout").read_text(), events)
+            self.assertEqual((evidence / "libtest.stderr").read_text(), "failed after output\n")
+            with mock.patch("dtype_capacity_oracle.subprocess.run", return_value=result):
+                with self.assertRaises(oracle.CapacityOracleError):
+                    oracle.run_libtest(root, binary, ("selected",), evidence)
+
+    def test_existing_group_evidence_directory_is_rejected_before_cargo_runs(self):
+        group = oracle.GROUPS[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            source = root / "crates/chelis-cli/tests/capacity_census_tripwire.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text("// fixture\n")
+            target = root / "target/dtype-capacity"
+            evidence = target / "evidence/primary"
+            evidence.mkdir(parents=True)
+            with mock.patch("dtype_capacity_oracle.subprocess.run") as run:
+                with self.assertRaises(oracle.CapacityOracleError):
+                    oracle.execute_group(root, target, group, evidence)
+            run.assert_not_called()
+
+    def test_failed_cargo_process_retains_outputs_without_running_libtest(self):
+        group = oracle.GROUPS[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            source = root / "crates/chelis-cli/tests/capacity_census_tripwire.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text("// fixture\n")
+            target = root / "target/dtype-capacity"
+            evidence = target / "evidence/primary"
+            result = mock.Mock(returncode=101, stdout='{"reason":"build-finished"}\n',
+                               stderr="locked build failed\n")
+            with mock.patch("dtype_capacity_oracle.subprocess.run", return_value=result), \
+                    mock.patch("dtype_capacity_oracle.run_libtest") as run_libtest:
+                with self.assertRaises(oracle.CapacityOracleError):
+                    oracle.execute_group(root, target, group, evidence)
+            self.assertEqual((evidence / "cargo.stdout").read_text(), result.stdout)
+            self.assertEqual((evidence / "cargo.artifacts.jsonl").read_text(), result.stdout)
+            self.assertEqual((evidence / "cargo.stderr").read_text(), result.stderr)
+            self.assertEqual(json.loads((evidence / "cargo.process.json").read_text())["returncode"], 101)
+            run_libtest.assert_not_called()
 
 
 if __name__ == "__main__":

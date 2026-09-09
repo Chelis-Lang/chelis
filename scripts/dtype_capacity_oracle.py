@@ -201,6 +201,42 @@ def _unique_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
+def _prepare_evidence_dir(target: Path, evidence: Path) -> Path:
+    target = target.resolve()
+    evidence = evidence.resolve()
+    if not evidence.is_relative_to(target):
+        raise CapacityOracleError("group evidence must be under the framework target directory")
+    if evidence.exists():
+        raise CapacityOracleError("group evidence directory already exists")
+    evidence.mkdir(parents=True)
+    return evidence
+
+
+def _record_process(evidence: Path, name: str, command: Sequence[str], cwd: Path,
+                    result: subprocess.CompletedProcess[str]) -> None:
+    if not evidence.is_dir():
+        raise CapacityOracleError("framework-owned group evidence directory is absent")
+    files = {
+        f"{name}.stdout": result.stdout,
+        f"{name}.stderr": result.stderr,
+        f"{name}.process.json": json.dumps({
+            "argv": list(command),
+            "cwd": str(cwd.resolve()),
+            "returncode": result.returncode,
+        }, sort_keys=True) + "\n",
+    }
+    if name == "cargo":
+        files["cargo.artifacts.jsonl"] = result.stdout
+    elif name == "libtest":
+        files["libtest.lifecycle.jsonl"] = result.stdout
+    try:
+        for filename, contents in files.items():
+            with (evidence / filename).open("x") as output:
+                output.write(contents)
+    except OSError as error:
+        raise CapacityOracleError(f"could not retain {name} framework output") from error
+
+
 def validate_libtest_events(expected: Sequence[str], events: Iterable[object]) -> tuple[str, ...]:
     expected = _selection(expected)
     expected_set = set(expected)
@@ -243,15 +279,16 @@ def validate_libtest_events(expected: Sequence[str], events: Iterable[object]) -
     return tuple(name for name in expected if name in completed)
 
 
-def run_libtest(root: Path, binary: Path, selected: Sequence[str]) -> tuple[str, ...]:
+def run_libtest(root: Path, binary: Path, selected: Sequence[str], evidence: Path) -> tuple[str, ...]:
     selected = _selection(selected)
     binary = binary.resolve()
     before = hashlib.sha256(binary.read_bytes()).hexdigest()
+    command = (
+        str(binary), "-Zunstable-options", "--format=json", "--exact",
+        "--test-threads=1", *selected,
+    )
     result = subprocess.run(
-        (
-            str(binary), "-Zunstable-options", "--format=json", "--exact",
-            "--test-threads=1", *selected,
-        ),
+        command,
         cwd=root.resolve(),
         env={
             **os.environ,
@@ -263,6 +300,7 @@ def run_libtest(root: Path, binary: Path, selected: Sequence[str]) -> tuple[str,
         text=True,
         check=False,
     )
+    _record_process(evidence, "libtest", command, root, result)
     try:
         events = [json.loads(line, object_pairs_hook=_unique_fields) for line in result.stdout.splitlines()]
     except (CapacityOracleError, json.JSONDecodeError) as error:
@@ -273,7 +311,8 @@ def run_libtest(root: Path, binary: Path, selected: Sequence[str]) -> tuple[str,
     return executed
 
 
-def execute_group(root: Path, target: Path, group: Group) -> tuple[str, ...]:
+def execute_group(root: Path, target: Path, group: Group, evidence: Path) -> tuple[str, ...]:
+    evidence = _prepare_evidence_dir(target, evidence)
     source = _source_path(root, group)
     if not source.is_file():
         raise CapacityOracleError(f"{group.name}: required current test source is absent")
@@ -291,9 +330,10 @@ def execute_group(root: Path, target: Path, group: Group) -> tuple[str, ...]:
         "VIRTUAL_ENV": sys.prefix,
     }
     result = subprocess.run(command, cwd=root, env=env, capture_output=True, text=True, check=False)
+    _record_process(evidence, "cargo", command, root, result)
     if result.returncode:
         raise CapacityOracleError(f"{group.name}: test artifact build failed: {result.stderr[-4000:]}")
-    return run_libtest(root, _test_artifact(root, target, group, result.stdout), group.selected)
+    return run_libtest(root, _test_artifact(root, target, group, result.stdout), group.selected, evidence)
 
 
 def _id(group: Group, test: str) -> str:
@@ -348,6 +388,11 @@ def _required_environment(root: Path) -> SourceIdentity:
     return actual
 
 
+def _evidence_root(target: Path, run_id: str) -> Path:
+    digest = hashlib.sha256(run_id.encode("utf-8")).hexdigest()
+    return target / "evidence" / digest
+
+
 def main() -> int:
     try:
         validate_groups()
@@ -355,8 +400,12 @@ def main() -> int:
         # Bindings run first: the absent final-zero-legacy test is an explicit
         # integration blocker and must not be bypassed with other green legs.
         order = (GROUPS[-1], *GROUPS[:-1])
+        target = REPO_ROOT / "target/dtype-capacity"
+        evidence = _evidence_root(target, os.environ["CHELIS_ORACLE_RUN_ID"])
+        if evidence.exists():
+            raise CapacityOracleError("framework evidence directory already exists for this run")
         executions = {
-            group.name: execute_group(REPO_ROOT, REPO_ROOT / "target/dtype-capacity", group)
+            group.name: execute_group(REPO_ROOT, target, group, evidence / group.name)
             for group in order
         }
         if source_identity(REPO_ROOT) != identity:
