@@ -43,9 +43,16 @@ use tempfile::{TempDir, tempdir};
 
 /// `chelis check` on a file, with the style gate LIVE.
 ///
-/// Deliberately does not set `CHELIS_STYLE_GATE_DISABLE`: one of the paths
-/// under test is the style gate itself, and the sibling suite's helper
-/// disables it, which is why that suite cannot see any of this.
+/// Deliberately does not set `CHELIS_STYLE_GATE_DISABLE`, because one of the
+/// paths under test IS the style gate.
+///
+/// Measured rather than assumed: running this suite with that variable set
+/// changes the outcome of exactly one of its six tests, the style-gate one.
+/// The read and non-UTF-8 fixtures fail in `fs::read_to_string` before the
+/// gate is consulted, so the variable is irrelevant to them. An earlier
+/// draft of this comment claimed the sibling suite "cannot see any of this"
+/// because it disables the gate; that overstated the case for five of the
+/// six.
 fn check(path: &std::path::Path) -> (Option<i32>, String, String) {
     let output = Command::cargo_bin("chelis")
         .expect("binary")
@@ -195,4 +202,12 @@ fn a_style_violation_is_still_bypassable_by_the_documented_flag() {
         "the flag bypasses the gate, so this checks clean: {stdout}"
     );
     assert_eq!(output.status.code(), Some(0));
+    // Distinguishes the FLAG from `CHELIS_STYLE_GATE_DISABLE`, which reaches
+    // the same stdout by a different route. Without this the test passes
+    // vacuously under the env var and stops testing the flag at all.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--allow-style-violations"),
+        "the documented bypass warns on stderr; got {stderr:?}"
+    );
 }

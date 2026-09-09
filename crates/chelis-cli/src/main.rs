@@ -2223,11 +2223,28 @@ fn synthetic_check_report_with_error(message: &str) -> Result<String, Box<dyn st
 /// machine-facing JSON shape is unchanged; only the process exit
 /// status now reflects the errors array.
 ///
-/// Non-zero exit is ALSO produced when the check could not be RUN
-/// to completion (style-gate violation, parser/reef failure, IO
-/// error). Those propagate through `Result::Err` and pick up the
-/// default exit `1` in `main`'s error arm; only the
-/// errors-array-non-empty path uses [`CHECK_ERRORS_EXIT_CODE`].
+/// A failure that stops the check from RUNNING -- an unreadable or
+/// non-UTF-8 file, a style-gate violation, a parse failure, a
+/// preparation failure -- is not an exception to that rule
+/// (chelis#886 [04-FIT-12]). It is reported as a diagnostic in the
+/// same `errors` array and therefore also exits
+/// [`CHECK_ERRORS_EXIT_CODE`]. The exit status is a function of the
+/// errors array and nothing else.
+///
+/// This paragraph used to say the opposite -- that those paths
+/// propagated through `Result::Err` and picked up exit `1`. That was
+/// true until the report started transporting them. `spec/04` §
+/// Gating pins only "`0` iff empty, non-zero otherwise", so both
+/// values conformed; `2` was chosen because the Deep arm already
+/// behaved that way for an unreadable file while the Surf arm did
+/// not.
+///
+/// Exit `1` survives only where no per-file report exists to carry
+/// the failure: `chelis check <dir>` on a directory it cannot
+/// enumerate fails in [`discover_check_files`] before any file is
+/// reached. That is the directory envelope's surface, which
+/// `spec/04` does not specify; chelis#1678 owns it, and §6.4 keeps
+/// its "not fully implemented" caveat until it is resolved.
 fn cmd_check(
     target: &Path,
     show_inferred: bool,
