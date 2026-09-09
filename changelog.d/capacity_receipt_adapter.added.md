@@ -1,0 +1,1 @@
+Added a fail-closed internal adapter for the future #1288 zero-exception capacity receipt. It cannot issue a receipt until the primary, stdlib, wire, and final PyO3 binding gates run on one committed source tree.
