@@ -192,6 +192,15 @@ def closure_cases(identities: list[str], table: str, spec: str, generated: set[s
             changed = "> " + semantics.normalized(block).replace(clause, "REMOVED") + "\n"
             add(f"semantic-clause:{atom}:{index}", "mutation", lambda block=block, changed=changed:
                 rejects(spec=spec.replace(block, changed)))
+    for number, contradictions in semantics.FORBIDDEN_DOMAIN_CLAUSES.items():
+        atom = f"[05-OP-{number}]"
+        block = blocks[atom]
+        for index, contradiction in enumerate(contradictions):
+            # Keep all affirmative clauses: deleting good text is not the only
+            # way a newly authored atom can contradict its controlling domain.
+            changed = block + f"> Domain restriction: {contradiction}.\n"
+            add(f"contradictory-domain:{atom}:{index}", "mutation", lambda block=block, changed=changed:
+                rejects(spec=spec.replace(block, changed)))
     for identity in semantics.CASE_CLAUSES:
         atom = rows[identity]
         sibling = next(other for name, other in rows.items()

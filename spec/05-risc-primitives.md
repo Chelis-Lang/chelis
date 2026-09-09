@@ -3397,25 +3397,38 @@ path even though bare `round` under `grad` remains a structural
 > registry](registry/builtin_semantic_identities.md) is incorporated by
 > reference for this atom's exact domain/case identities.
 >
-> Signature: `to_tensor(xs)` takes List[T] of one active scalar
-> tensor-element dtype and returns tensor[len(xs),T]; `to_list(x)` borrows a
-> rank-one tensor and returns List[T].
+> Signature: `to_tensor(xs)` takes a rectangular, recursively nested List
+> with one active scalar tensor-element leaf dtype T. A nesting depth r
+> yields a rank-r tensor. `to_list(x)` separately borrows a rank-one tensor
+> and returns List[T].
 >
 > Domain: All active tensor element dtypes, including bool, are admitted
-> without conversion. A List's element type determines an empty result's
-> dtype; no nonempty witness or default f32 is inferred. Strings, mixed
-> element types, and nested Lists are outside this signature.
+> without conversion. The recursive shape relation is `shape(scalar) = []`
+> and `shape([v0, ..., vn-1]) = [n] ++ s` when every child has the same
+> shape s and leaf dtype T. This admits arbitrary List nesting, including
+> spec/04 section 4.5.1's rectangular nested construction; it has no
+> rank-two exception or maximum nesting depth. A List's element type
+> determines an empty result's dtype. Inner extents that an empty outer
+> List cannot establish remain explicit shape obligations; no default f32
+> or invented trailing extent is permitted. Strings and mixed leaf dtypes
+> are type errors.
 >
-> Result: Conversions preserve source order, length, dtype, and each
-> element's stored bits. They only change the container representation.
+> Result: `to_tensor` concatenates leaves in recursive source order into
+> the tensor's row-major storage and preserves the full recursive shape,
+> dtype, and each element's stored bits. `to_list` preserves the rank-one
+> tensor's element order, length, dtype, and stored bits. The rank-one
+> `to_tensor(to_list(x))` identity and its identity adjoint follow spec/06
+> section 2.10; this does not restrict the separate nested-List ingress.
 >
-> Failure: A non-rank-one tensor, invalid element type, or inconsistent List
-> element type is a type error; unrepresentable length/size arithmetic fails
-> loudly.
+> Failure: Inconsistent child shapes reject, statically when known and at
+> runtime otherwise. Unresolved required extents and unrepresentable size
+> arithmetic fail loudly. Invalid leaf types, mixed leaf dtypes, and
+> non-rank-one `to_list` operands are type errors.
 >
-> Adjoint: For float T the inverse conversion routes the corresponding
-> element cotangents. Integer/bool differentiated data structurally rejects
-> under spec/06.
+> Adjoint: For float T, `to_tensor` reconstructs the saved source List
+> nesting and routes each corresponding element cotangent. `to_list` builds
+> the original rank-one tensor from its element cotangents. Integer/bool
+> differentiated data structurally rejects under spec/06.
 >
 > Accumulator: None.
 >

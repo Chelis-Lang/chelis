@@ -2337,6 +2337,13 @@ adjoints, and accumulator/order rules. The oracle checks exact membership,
 real numbered definitions, signature governance, generated membership, and
 adversarial deletion/duplication/authority mutations. Semantic review remains
 necessary: membership does not prove numerical implementation conformance.
+The semantic mutations cover both deleting required clauses and inserting known
+contradictory domain restrictions while all affirmative clauses remain. The
+executable domain controls generate rectangular Lists at depths one through four
+for every active tensor-element dtype, reject recursively ragged/non-element
+inputs, and exercise shift counts at and above every signed width plus negative
+counts. These are named domain obligations, not a claim of full numerical or AD
+conformance for every builtin.
 
 Run the oracle from a clean committed checkout with the managed Python and
 Rust environments. It runs in the integration support stage; changes to the
