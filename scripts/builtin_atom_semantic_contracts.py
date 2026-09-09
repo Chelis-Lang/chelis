@@ -4,10 +4,11 @@ These are test obligations, not semantic registrations. The numbered atoms
 remain authoritative. Changes to a decided rule update its assertion and
 negative control together, under the same semantic review.
 """
-from scripts.builtin_atom_registry import RegistryError, atom_blocks
+from scripts.builtin_atom_registry import RegistryError, atom_blocks, named_callables
 
 # Each governed atom has substantive assertions: deleting its actual contract
-# while retaining a heading, signature, or six field labels must fail.
+# while retaining its heading and callable names must fail. Formatting labels
+# carry no semantic authority.
 CLAUSES = {
     1: ("operand's own storage width", "ties resolved to the even final digit"),
     3: ("csv_int", "int64", "no cotangent"),
@@ -72,6 +73,43 @@ CASE_CLAUSES = {
     "Container:concat:ConcatTensors": "axis:int32",
 }
 
+# A callable mentioned by more than one atom needs a discriminating contract
+# clause, not merely its name. These are semantic assertions, without atom IDs
+# or a second identity-to-atom registry. A new ambiguity without such an
+# assertion fails closed; the overload-specific assertions above do the same
+# job for concat's two legitimate contracts.
+CALLABLE_CLAUSES = {
+    operation: clause
+    for operations, clause in (
+        (("abs", "cos", "exp", "log", "neg", "round", "sqrt"),
+         "`neg(x)`, `recip(x)`, `exp(x)`, `log(x)`"),
+        (("add", "div", "mul"), "`add(x,y)`, `mul(x,y)`, `div(x,y)`"),
+        (("cast",), "`cast(value,target_dtype)` returns the same scalar or tensor"),
+        (("clamp", "cumsum", "diagonal", "sort", "split", "trace", "where"),
+         "`where(condition,a,b)` uses a bool condition and same-shaped same-dtype branches"),
+        (("cmplt",), "`comparison(left, right) -> result` governs exactly the seven language identities"),
+        (("count",), "`count(x, axes...) -> result` admits exactly a `bool` tensor operand"),
+        (("dict_get", "dict_insert", "dict_merge", "dict_remove"),
+         "`dict_of(entries)` takes List[(K,V)]"),
+        (("einsum",), "`einsum(equation,a,b)` takes a string equation and two tensors"),
+        (("expand", "insert", "pad"),
+         "`reshape(x,shape)`, `permute(x,axes)`, `expand(x,axis,size)`"),
+        (("gather",), "`gather(values,indices,axis)`"),
+        (("len",), "`len(xs)` accepts List[T] or Dict[K,V] and returns int64"),
+        (("max_elem",),
+         "`max_elem(left, right) -> result` and `min_elem(left, right) -> result` each admit two values"),
+        (("mean",), "`mean(x, axes...) -> result` admits a tensor operand of"),
+        (("mmap_read", "read_bytes"), "`print(value)->unit!{IO}`, `debug(value)->value!{IO}`"),
+        (("rank",), "`rank(x)` and `numel(x)` borrow a tensor and return int32 and int64 respectively"),
+        (("relu",), "`relu(x) -> result` admits every active float dtype"),
+        (("shape",), "The runtime extent read (`shape(x, axis)`; C ABI"),
+        (("sub",), "`sub(left, right) -> result` admits two values"),
+        (("sum",), "`sum(x, axes..., accumulator = default(p)) -> result` admits"),
+        (("to_string",), "`to_string(value) -> result` borrows exactly one value"),
+    )
+    for operation in operations
+}
+
 
 def normalized(block: str) -> str:
     return " ".join(" ".join(line.removeprefix(">").strip() for line in block.splitlines()).split())
@@ -82,6 +120,15 @@ def validate_semantics(rows: dict[str, str], spec: str) -> None:
     if set(rows.values()) != set(assertions):
         raise RegistryError("governed atoms and semantic mutation obligations differ")
     blocks = {atom: normalized(block) for atom, block in atom_blocks(spec).items()}
+    callables = {atom: named_callables(block) for atom, block in blocks.items()}
+    for identity, atom in rows.items():
+        operation = identity.split(":")[1]
+        clause = CASE_CLAUSES.get(identity, CALLABLE_CLAUSES.get(operation))
+        mentions = sum(operation in names for names in callables.values())
+        if mentions > 1 and clause is None:
+            raise RegistryError(f"ambiguous callable {operation} lacks a discriminating contract clause")
+        if clause is not None and clause not in blocks[atom]:
+            raise RegistryError(f"{atom} does not govern the contract of {identity}: {clause}")
     for atom, clauses in assertions.items():
         for clause in clauses:
             if clause not in blocks[atom]:

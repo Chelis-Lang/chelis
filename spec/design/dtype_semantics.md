@@ -1554,8 +1554,9 @@ protocol, not a failure.
 
 [#1294] adds exact builtin identity incorporation to the existing governing
 operation atoms and authors [05-OP-45..63] for the remaining builtin families.
-The normative identity registry and the six contract fields make their
-signatures, domains, results, failures, adjoints, and accumulators explicit.
+Chapter §1.5 incorporates the normative identity registry once; each atom
+states its own signatures, domains, results, failures, adjoints, and
+accumulators. Generic field-label paragraphs confer no semantic evidence.
 Existing decided behavior remains controlling, including integer rounding
 identities, saved-mask List differentiation, and exact arithmetic widths.
 `to_csv`'s atom explicitly carries its existing text-serialization signature
@@ -2341,8 +2342,13 @@ support disposition. This metadata carries no target support decision.
 `spec/registry/builtin_semantic_identities.md` is the normative identity map.
 Its atoms decide signatures, dtype/parameter domains, results, failures,
 adjoints, and accumulator/order rules. The oracle checks exact membership,
-real numbered definitions, signature governance, generated membership, and
-adversarial deletion/duplication/authority mutations. Semantic review remains
+the shared incorporation rule, real numbered definitions, callable governance,
+generated membership, and adversarial deletion/duplication/authority mutations.
+It removes actual contract clauses rather than formatting labels. When more
+than one atom mentions a callable, an explicit semantic-clause assertion must
+distinguish its governing contract; the oracle rejects every alternative
+atom that merely mentions it. A new ambiguity without a discriminating
+assertion fails closed. Semantic review remains
 necessary: membership does not prove numerical implementation conformance.
 The semantic mutations cover both deleting required clauses and inserting known
 contradictory domain restrictions while all affirmative clauses remain. The

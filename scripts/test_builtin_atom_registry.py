@@ -2,18 +2,22 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 from scripts import builtin_atom_registry as registry
+from scripts import builtin_atom_semantic_contracts as semantics
 
 
 SPEC = """# Operations
 
+The [builtin identity registry](registry/builtin_semantic_identities.md)
+is incorporated by reference into each numbered operation atom named in its
+Atom column.
+
 > **[05-OP-45]** `add` uses the exact operand dtype.
-> The [builtin identity registry](registry/builtin_semantic_identities.md)
-> is incorporated by reference for this atom's exact identities.
-> Signature: `add(left, right)` takes two same-shaped operands. Domain: active arithmetic dtypes.
-> Result: operand dtype. Failure: checked integer overflow.
-> Adjoint: `(g, g)` on floats. Accumulator: none.
+> `add(left, right)` takes two same-shaped operands of an active arithmetic dtype.
+> The result has the operand dtype; integer overflow traps.
+> Its float adjoint is `(g, g)` and it has no accumulator.
 """
 TABLE = """# Builtin semantic identities
 
@@ -47,7 +51,9 @@ class RegistryTests(unittest.TestCase):
             self.validate(table=TABLE.replace(":add:", ":stdlib::add:"))
 
     def test_wrong_existing_atom_fails_governance(self):
-        other = SPEC.replace("[05-OP-45]", "[05-OP-46]").replace("`add", "`mul")
+        other = registry.atom_blocks(SPEC)["[05-OP-45]"].replace(
+            "[05-OP-45]", "[05-OP-46]"
+        ).replace("`add", "`mul")
         with self.assertRaisesRegex(registry.RegistryError, "govern"):
             registry.validate(("Numeric:add:TableA",), TABLE.replace("45", "46"),
                               SPEC + "\n" + other, {"[05-OP-45]", "[05-OP-46]"})
@@ -77,10 +83,47 @@ class RegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(registry.RegistryError, "incorporat"):
             self.validate(spec=SPEC.replace("incorporated by reference", "mentioned"))
 
-    def test_semantic_fields_cannot_disappear(self):
-        for field in ("Signature", "Domain", "Result", "Failure", "Adjoint", "Accumulator"):
-            with self.subTest(field=field), self.assertRaises(registry.RegistryError):
-                self.validate(spec=SPEC.replace(field + ":", "omitted:"))
+    def test_shared_incorporation_cannot_be_duplicated(self):
+        with self.assertRaisesRegex(registry.RegistryError, "incorporat"):
+            self.validate(spec=SPEC.split("> **")[0] + SPEC)
+
+    def test_callable_cannot_be_replaced_by_an_ordinary_prose_mention(self):
+        with self.assertRaisesRegex(registry.RegistryError, "govern"):
+            self.validate(spec=SPEC.replace("`add`", "add").replace(
+                "`add(left, right)`", "add(left, right)"
+            ))
+
+    def test_namespaced_callable_cannot_authorize_a_builtin(self):
+        with self.assertRaisesRegex(registry.RegistryError, "govern"):
+            self.validate(spec=SPEC.replace("`add", "`stdlib::add"))
+
+
+class SemanticAuthorityTests(unittest.TestCase):
+    def setUp(self):
+        root = Path(__file__).resolve().parents[1]
+        self.spec = (root / "spec/05-risc-primitives.md").read_text()
+        self.rows = registry.parse_registry(
+            (root / "spec/registry/builtin_semantic_identities.md").read_text()
+        )
+
+    def test_reference_to_callable_does_not_confer_its_authority(self):
+        for identity, wrong_atom in (
+            ("Numeric:div:TableA", "[05-OP-11]"),
+            ("Boundary:to_string:ToStringScalar", "[05-OP-5]"),
+            ("Numeric:relu:TableA", "[05-OP-40]"),
+        ):
+            with self.subTest(identity=identity), self.assertRaises(registry.RegistryError):
+                semantics.validate_semantics({**self.rows, identity: wrong_atom}, self.spec)
+
+    def test_new_ambiguous_reference_requires_a_discriminating_contract(self):
+        changed = self.spec + "\n> **[05-OP-999]** This atom mentions `argmin_reduce`.\n"
+        with self.assertRaisesRegex(registry.RegistryError, "ambiguous"):
+            semantics.validate_semantics(self.rows, changed)
+
+    def test_actual_contract_does_not_require_field_labels(self):
+        import re
+        changed = re.sub(r"\b(?:Signature|Domain|Result|Failure|Adjoint|Accumulator):", "", self.spec)
+        semantics.validate_semantics(self.rows, changed)
 
 
 if __name__ == "__main__":

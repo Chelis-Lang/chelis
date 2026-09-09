@@ -1,11 +1,8 @@
 # Builtin semantic identities
 
-This registry is normative content incorporated by the numbered operation
-atoms that own its rows. An identity is exactly domain, canonical operation,
-and builtin-owned case. Rows are identity-keyed and have no semantic ordinals.
-Each atom incorporates exactly its own rows, including the rejected type
-shapes its contract names. A row supplies identity membership, not backend
-support or permission to weaken the owning semantic contract.
+The incorporation and identity rules are defined in
+[spec/05 §1.5](../05-risc-primitives.md#15-builtin-semantic-identities).
+Each row names its governing atom.
 
 | Identity | Atom |
 |---|---|

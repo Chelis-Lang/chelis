@@ -66,6 +66,21 @@ values instead, the evaluator and generated C runtime reject them during executi
 compiled C exits non-zero rather than aborting. Duplicate replace-scatter indices are
 not errors: they follow §3.5's deterministic last-write-wins rule.
 
+### 1.5 Builtin semantic identities
+
+The [builtin identity registry](registry/builtin_semantic_identities.md)
+is incorporated by reference into each numbered operation atom named in its
+Atom column. Each atom incorporates exactly the rows that name it, including
+its rejected domain/case identities. An identity is the exact triple of
+domain, canonical operation, and builtin-owned case; the rows have no
+semantic ordinals.
+
+Each atom supplies its signatures, admitted and rejected domains, results,
+failures, differentiation rules, and any accumulator or traversal order.
+The registry supplies identity membership only: it adds no behavior,
+default, alias, or backend-support disposition. Arithmetic and storage
+widths remain governed by [04-NUM-8].
+
 ---
 
 ## 2. RISC Primitives (Tier 1)
@@ -196,7 +211,8 @@ and float precisions as their tensor forms and use the same adjoint rule.
 > including signed-zero equality. Signed integers are compared exactly at their declared
 > width and likewise preserve the first operand on equality. For floats, the
 > adjoint routes the whole cotangent to the selected operand and exact zero to
-> the other operand. `relu` is a distinct Tier-2 identity whose adjoint is
+> the other operand; this is the internal `ExtremaAdjoint` contract.
+> `relu` is a distinct Tier-2 identity whose adjoint is
 > [05-OP-43]'s zero-at-zero rule, not this selection rule's tie behavior.
 > Signed-integer forms are forward-only and `grad`
 > rejects them. Both operations have no accumulator. `min_elem` is a direct
@@ -204,16 +220,6 @@ and float precisions as their tensor forms and use the same adjoint rule.
 > `string`, reserved dtype spellings, mixed dtypes or surfaces, and mismatched
 > tensor dimensions are type errors.
 >
-> The [builtin identity registry](registry/builtin_semantic_identities.md)
-> is incorporated by reference for this atom's exact domain/case identities.
-> Signature: `max_elem`, `min_elem`, `ExtremaAdjoint` have exactly the
-> argument and result signatures stated in this atom.
-> Domain: the admitted and rejected dtype, shape, and value cases stated in
-> this atom, at [04-NUM-8]'s declared widths.
-> Result: the exact value, type, and effect contract stated above.
-> Failure: the type errors, domain/overflow traps, and structural rejections stated above; no default result.
-> Adjoint: the differentiability, discrete-argument, and cotangent rules stated above.
-> Accumulator: only the explicitly specified accumulator and traversal order; otherwise none.
 
 
 ### 2.2 Elementwise Unary
@@ -321,16 +327,6 @@ denotes the input dimensions with the complete selected axis set `K` removed.
 > ambiguous, or out-of-range axes are type errors. `mean` has no accumulator
 > parameter of its own.
 >
->
-> The [builtin identity registry](registry/builtin_semantic_identities.md)
-> is incorporated by reference for this atom's exact domain/case identities.
-> Signature: `mean` have exactly the argument and result signatures stated in this atom.
-> Domain: the admitted and rejected dtype, shape, and value cases stated in
-> this atom, at [04-NUM-8]'s declared widths.
-> Result: the exact value, type, and effect contract stated above.
-> Failure: the type errors, domain/overflow traps, and structural rejections stated above; no default result.
-> Adjoint: the differentiability, discrete-argument, and cotangent rules stated above.
-> Accumulator: only the explicitly specified accumulator and traversal order; otherwise none.
 
 > **[05-OP-12]** `max_reduce(x, axes...) -> result` admits every active signed
 > integer and float tensor dtype and returns that same dtype with the selected
@@ -353,16 +349,6 @@ denotes the input dimensions with the complete selected axis set `K` removed.
 > adjoint reverses that composition. Integer operands are forward-only and
 > `grad` rejects them.
 >
->
-> The [builtin identity registry](registry/builtin_semantic_identities.md)
-> is incorporated by reference for this atom's exact domain/case identities.
-> Signature: `max_reduce` have exactly the argument and result signatures stated in this atom.
-> Domain: the admitted and rejected dtype, shape, and value cases stated in
-> this atom, at [04-NUM-8]'s declared widths.
-> Result: the exact value, type, and effect contract stated above.
-> Failure: the type errors, domain/overflow traps, and structural rejections stated above; no default result.
-> Adjoint: the differentiability, discrete-argument, and cotangent rules stated above.
-> Accumulator: only the explicitly specified accumulator and traversal order; otherwise none.
 
 > **[05-OP-13]** `min_reduce(x, axes...) -> result` has the same dtype,
 > finalization, empty-axis, accumulator, and differentiation contract as
@@ -374,16 +360,6 @@ denotes the input dimensions with the complete selected axis set `K` removed.
 > infinities, receives the upstream cotangent divided by the number of equal
 > minima.
 >
->
-> The [builtin identity registry](registry/builtin_semantic_identities.md)
-> is incorporated by reference for this atom's exact domain/case identities.
-> Signature: `min_reduce` have exactly the argument and result signatures stated in this atom.
-> Domain: the admitted and rejected dtype, shape, and value cases stated in
-> this atom, at [04-NUM-8]'s declared widths.
-> Result: the exact value, type, and effect contract stated above.
-> Failure: the type errors, domain/overflow traps, and structural rejections stated above; no default result.
-> Adjoint: the differentiability, discrete-argument, and cotangent rules stated above.
-> Accumulator: only the explicitly specified accumulator and traversal order; otherwise none.
 
 > **[05-OP-14]** `prod_reduce(x, axes...) -> result` admits every active signed
 > integer and float tensor dtype and returns that same dtype with the selected
@@ -410,16 +386,6 @@ denotes the input dimensions with the complete selected axis set `K` removed.
 > highest-original-position-first composition of this exact balanced graph;
 > reverse mode differentiates the composed graph in reverse order.
 >
->
-> The [builtin identity registry](registry/builtin_semantic_identities.md)
-> is incorporated by reference for this atom's exact domain/case identities.
-> Signature: `prod_reduce` have exactly the argument and result signatures stated in this atom.
-> Domain: the admitted and rejected dtype, shape, and value cases stated in
-> this atom, at [04-NUM-8]'s declared widths.
-> Result: the exact value, type, and effect contract stated above.
-> Failure: the type errors, domain/overflow traps, and structural rejections stated above; no default result.
-> Adjoint: the differentiability, discrete-argument, and cotangent rules stated above.
-> Accumulator: only the explicitly specified accumulator and traversal order; otherwise none.
 
 > **[05-OP-15]** `argmax_reduce(x, axis) -> result` admits every active
 > signed integer and float tensor dtype and returns `int64` indices with the
@@ -431,32 +397,12 @@ denotes the input dimensions with the complete selected axis set `K` removed.
 > `argmax_reduce` at result dtype `int64`. It has no accumulator and is
 > non-differentiable: `grad` rejects it.
 >
->
-> The [builtin identity registry](registry/builtin_semantic_identities.md)
-> is incorporated by reference for this atom's exact domain/case identities.
-> Signature: `argmax_reduce` have exactly the argument and result signatures stated in this atom.
-> Domain: the admitted and rejected dtype, shape, and value cases stated in
-> this atom, at [04-NUM-8]'s declared widths.
-> Result: the exact value, type, and effect contract stated above.
-> Failure: the type errors, domain/overflow traps, and structural rejections stated above; no default result.
-> Adjoint: the differentiability, discrete-argument, and cotangent rules stated above.
-> Accumulator: only the explicitly specified accumulator and traversal order; otherwise none.
 
 > **[05-OP-16]** `argmin_reduce(x, axis) -> result` has the signature, dtype,
 > exact-comparison, empty-axis, accumulator, and non-differentiability
 > contract of [05-OP-15], returning the lowest NaN index when present and
 > otherwise the lowest axis index whose stored value is minimal.
 >
->
-> The [builtin identity registry](registry/builtin_semantic_identities.md)
-> is incorporated by reference for this atom's exact domain/case identities.
-> Signature: `argmin_reduce` have exactly the argument and result signatures stated in this atom.
-> Domain: the admitted and rejected dtype, shape, and value cases stated in
-> this atom, at [04-NUM-8]'s declared widths.
-> Result: the exact value, type, and effect contract stated above.
-> Failure: the type errors, domain/overflow traps, and structural rejections stated above; no default result.
-> Adjoint: the differentiability, discrete-argument, and cotangent rules stated above.
-> Accumulator: only the explicitly specified accumulator and traversal order; otherwise none.
 
 > **[05-OP-29]** `count(x, axes...) -> result` admits exactly a `bool` tensor operand
 > and returns an `int64` tensor whose dimensions are the operand dimensions
@@ -480,16 +426,6 @@ denotes the input dimensions with the complete selected axis set `K` removed.
 > graph reaching `count` is structurally rejected with
 > `AdRejectionReason::IntegerReductionOutput`; it never receives a silent zero
 > cotangent.
->
-> The [builtin identity registry](registry/builtin_semantic_identities.md)
-> is incorporated by reference for this atom's exact domain/case identities.
-> Signature: `count` have exactly the argument and result signatures stated in this atom.
-> Domain: the admitted and rejected dtype, shape, and value cases stated in
-> this atom, at [04-NUM-8]'s declared widths.
-> Result: the exact value, type, and effect contract stated above.
-> Failure: the type errors, domain/overflow traps, and structural rejections stated above; no default result.
-> Adjoint: the differentiability, discrete-argument, and cotangent rules stated above.
-> Accumulator: only the explicitly specified accumulator and traversal order; otherwise none.
 
 
 *(Not fully implemented; chelis#1287 owns the evaluator and C delivery,
@@ -513,16 +449,6 @@ chelis#1291 the HIP and Metal kernels.)*
 > removed axis and finalizes it at the operand dtype. Signed-integer forms are
 > forward-only and `grad` rejects them. No backend may substitute a left fold,
 > stride-4 cascade, library-selected tree, or bool-to-integer promotion.
->
-> The [builtin identity registry](registry/builtin_semantic_identities.md)
-> is incorporated by reference for this atom's exact domain/case identities.
-> Signature: `sum` have exactly the argument and result signatures stated in this atom.
-> Domain: the admitted and rejected dtype, shape, and value cases stated in
-> this atom, at [04-NUM-8]'s declared widths.
-> Result: the exact value, type, and effect contract stated above.
-> Failure: the type errors, domain/overflow traps, and structural rejections stated above; no default result.
-> Adjoint: the differentiability, discrete-argument, and cotangent rules stated above.
-> Accumulator: only the explicitly specified accumulator and traversal order; otherwise none.
 
 
 **Axis:** Integer index into the input rank. Non-negative axes are
@@ -728,18 +654,6 @@ substitute zero merely because a backend lacks a second-order kernel.
 > float forms use the exact `ReduceWindowGrad` graph. No target-specific rank,
 > reducer, dtype, first-order-only, host-fallback, alias, or compatibility
 > identity belongs to this atom.
->
-> The [builtin identity registry](registry/builtin_semantic_identities.md)
-> is incorporated by reference for this atom's exact domain/case identities.
-> Signature: `reduce_window_max`, `reduce_window_min`, `reduce_window_sum`,
-> `reduce_window_mean`, `ReduceWindowGrad` have exactly the argument and
-> result signatures stated in this atom.
-> Domain: the admitted and rejected dtype, shape, and value cases stated in
-> this atom, at [04-NUM-8]'s declared widths.
-> Result: the exact value, type, and effect contract stated above.
-> Failure: the type errors, domain/overflow traps, and structural rejections stated above; no default result.
-> Adjoint: the differentiability, discrete-argument, and cotangent rules stated above.
-> Accumulator: only the explicitly specified accumulator and traversal order; otherwise none.
 
 
 **Reduction order.** `sum`, `prod_reduce`, and `count` use one canonical
@@ -994,16 +908,6 @@ per [05-DIM-2] — extent-domain out, axis-domain in.
 > contributes exact zero to the tensor input and to the discrete axis, does
 > not block differentiation of a surrounding graph, and never silently
 > becomes a structural `grad` rejection. No accumulator rule applies.
->
-> The [builtin identity registry](registry/builtin_semantic_identities.md)
-> is incorporated by reference for this atom's exact domain/case identities.
-> Signature: `shape` have exactly the argument and result signatures stated in this atom.
-> Domain: the admitted and rejected dtype, shape, and value cases stated in
-> this atom, at [04-NUM-8]'s declared widths.
-> Result: the exact value, type, and effect contract stated above.
-> Failure: the type errors, domain/overflow traps, and structural rejections stated above; no default result.
-> Adjoint: the differentiability, discrete-argument, and cotangent rules stated above.
-> Accumulator: only the explicitly specified accumulator and traversal order; otherwise none.
 
 
 Two semantic use shapes exist, and they are distinct:
@@ -1076,16 +980,6 @@ compile-time-only alias.
 > width and each scalar contribution combined by the canonical adjacent-pair
 > balanced tree. The sampled `u_i` values are the exact forward values at that
 > arithmetic width. It has no accumulator parameter.
->
-> The [builtin identity registry](registry/builtin_semantic_identities.md)
-> is incorporated by reference for this atom's exact domain/case identities.
-> Signature: `uniform_like` have exactly the argument and result signatures stated in this atom.
-> Domain: the admitted and rejected dtype, shape, and value cases stated in
-> this atom, at [04-NUM-8]'s declared widths.
-> Result: the exact value, type, and effect contract stated above.
-> Failure: the type errors, domain/overflow traps, and structural rejections stated above; no default result.
-> Adjoint: the differentiability, discrete-argument, and cotangent rules stated above.
-> Accumulator: only the explicitly specified accumulator and traversal order; otherwise none.
 
 
 > **[05-OP-37]** `dropout(input, rate) -> result` admits every active float
@@ -1118,16 +1012,6 @@ compile-time-only alias.
 > Dropped elements contribute positive zero and the contributions combine by
 > the canonical adjacent-pair balanced tree. The mask comparison itself has
 > zero cotangent. The operation has no accumulator parameter.
->
-> The [builtin identity registry](registry/builtin_semantic_identities.md)
-> is incorporated by reference for this atom's exact domain/case identities.
-> Signature: `dropout` have exactly the argument and result signatures stated in this atom.
-> Domain: the admitted and rejected dtype, shape, and value cases stated in
-> this atom, at [04-NUM-8]'s declared widths.
-> Result: the exact value, type, and effect contract stated above.
-> Failure: the type errors, domain/overflow traps, and structural rejections stated above; no default result.
-> Adjoint: the differentiability, discrete-argument, and cotangent rules stated above.
-> Accumulator: only the explicitly specified accumulator and traversal order; otherwise none.
 
 
 > **[05-RNG-1]** Every conforming evaluation of a `with seed(N)` program
@@ -1182,16 +1066,6 @@ program did not request.
 > Signed-integer forms are forward-only and `grad` rejects them. The operation
 > has no accumulator. `bool`, `string`, reserved dtype spellings, mixed dtypes
 > or surfaces, and mismatched tensor dimensions are type errors.
->
-> The [builtin identity registry](registry/builtin_semantic_identities.md)
-> is incorporated by reference for this atom's exact domain/case identities.
-> Signature: `sub` have exactly the argument and result signatures stated in this atom.
-> Domain: the admitted and rejected dtype, shape, and value cases stated in
-> this atom, at [04-NUM-8]'s declared widths.
-> Result: the exact value, type, and effect contract stated above.
-> Failure: the type errors, domain/overflow traps, and structural rejections stated above; no default result.
-> Adjoint: the differentiability, discrete-argument, and cotangent rules stated above.
-> Accumulator: only the explicitly specified accumulator and traversal order; otherwise none.
 
 
 ### 3.2 Comparison and Logical Operations
@@ -1223,32 +1097,12 @@ order.
 > operation is pure, performs no arithmetic or dtype conversion, has no
 > accumulator, and is non-differentiable: `grad` rejects it.
 >
->
-> The [builtin identity registry](registry/builtin_semantic_identities.md)
-> is incorporated by reference for this atom's exact domain/case identities.
-> Signature: `and` have exactly the argument and result signatures stated in this atom.
-> Domain: the admitted and rejected dtype, shape, and value cases stated in
-> this atom, at [04-NUM-8]'s declared widths.
-> Result: the exact value, type, and effect contract stated above.
-> Failure: the type errors, domain/overflow traps, and structural rejections stated above; no default result.
-> Adjoint: the differentiability, discrete-argument, and cotangent rules stated above.
-> Accumulator: only the explicitly specified accumulator and traversal order; otherwise none.
 
 > **[05-OP-27]** `or(left, right) -> result` has the signature, surface,
 > shape, evaluation-order, rejection, purity, accumulator, and differentiation
 > contract of [05-OP-26]. Its result is true exactly when either operand is
 > true and is false otherwise, applied element-wise for tensors.
 >
->
-> The [builtin identity registry](registry/builtin_semantic_identities.md)
-> is incorporated by reference for this atom's exact domain/case identities.
-> Signature: `or` have exactly the argument and result signatures stated in this atom.
-> Domain: the admitted and rejected dtype, shape, and value cases stated in
-> this atom, at [04-NUM-8]'s declared widths.
-> Result: the exact value, type, and effect contract stated above.
-> Failure: the type errors, domain/overflow traps, and structural rejections stated above; no default result.
-> Adjoint: the differentiability, discrete-argument, and cotangent rules stated above.
-> Accumulator: only the explicitly specified accumulator and traversal order; otherwise none.
 
 > **[05-OP-28]** `not(value) -> result` admits exactly one `bool` scalar or
 > `bool` tensor and returns `bool` on the same surface and, for a tensor, with
@@ -1257,16 +1111,6 @@ order.
 > non-`bool` operand is a type error. The operation is pure, performs no
 > arithmetic or dtype conversion, has no accumulator, and is
 > non-differentiable: `grad` rejects it.
->
-> The [builtin identity registry](registry/builtin_semantic_identities.md)
-> is incorporated by reference for this atom's exact domain/case identities.
-> Signature: `not` have exactly the argument and result signatures stated in this atom.
-> Domain: the admitted and rejected dtype, shape, and value cases stated in
-> this atom, at [04-NUM-8]'s declared widths.
-> Result: the exact value, type, and effect contract stated above.
-> Failure: the type errors, domain/overflow traps, and structural rejections stated above; no default result.
-> Adjoint: the differentiability, discrete-argument, and cotangent rules stated above.
-> Accumulator: only the explicitly specified accumulator and traversal order; otherwise none.
 
 
 > **[05-OP-36]** `comparison(left, right) -> result` governs exactly the seven
@@ -1308,17 +1152,6 @@ order.
 > accumulator, and contributes zero cotangent to every differentiable leaf.
 > No identity has an alias, grandfathered path, deprecated spelling, or
 > compatibility wrapper.
->
-> The [builtin identity registry](registry/builtin_semantic_identities.md)
-> is incorporated by reference for this atom's exact domain/case identities.
-> Signature: `cmplt`, `eq`, `neq`, `lt`, `gt`, `lte`, `gte` have exactly the
-> argument and result signatures stated in this atom.
-> Domain: the admitted and rejected dtype, shape, and value cases stated in
-> this atom, at [04-NUM-8]'s declared widths.
-> Result: the exact value, type, and effect contract stated above.
-> Failure: the type errors, domain/overflow traps, and structural rejections stated above; no default result.
-> Adjoint: the differentiability, discrete-argument, and cotangent rules stated above.
-> Accumulator: only the explicitly specified accumulator and traversal order; otherwise none.
 
 
 Logical operations do not alias arithmetic primitives. An implementation may
@@ -1357,17 +1190,9 @@ intact Tier-2 identity.
 > semantic transform; only after its adjoint or zero rule has been applied
 > may it decompose to the lowering, so the adjoint attaches to the identity
 > rather than to `max_elem`'s tie rule. Non-float operands are type errors.
-> The operation has no accumulator.
+> The operation has no accumulator. The internal `ReluAdjoint` identity has
+> this cotangent contract.
 >
-> The [builtin identity registry](registry/builtin_semantic_identities.md)
-> is incorporated by reference for this atom's exact domain/case identities.
-> Signature: `relu`, `ReluAdjoint` have exactly the argument and result signatures stated in this atom.
-> Domain: the admitted and rejected dtype, shape, and value cases stated in
-> this atom, at [04-NUM-8]'s declared widths.
-> Result: the exact value, type, and effect contract stated above.
-> Failure: the type errors, domain/overflow traps, and structural rejections stated above; no default result.
-> Adjoint: the differentiability, discrete-argument, and cotangent rules stated above.
-> Accumulator: only the explicitly specified accumulator and traversal order; otherwise none.
 
 
 ### 3.4 Higher-Level Operations
@@ -1643,18 +1468,6 @@ traps `Test` with its supplied label and the operation name.
 > numeric accumulator other than `tensor_scan`'s explicitly typed recurrence
 > state. No dtype-named, rank-named, evaluator-only, legacy, or compatibility
 > identity is part of this atom.
->
-> The [builtin identity registry](registry/builtin_semantic_identities.md)
-> is incorporated by reference for this atom's exact domain/case identities.
-> Signature: `tensor_scan`, `process_run`, `test_assert_eq`,
-> `test_assert_eq_tensor`, `test_assert_close_tensor` have exactly the
-> argument and result signatures stated in this atom.
-> Domain: the admitted and rejected dtype, shape, and value cases stated in
-> this atom, at [04-NUM-8]'s declared widths.
-> Result: the exact value, type, and effect contract stated above.
-> Failure: the type errors, domain/overflow traps, and structural rejections stated above; no default result.
-> Adjoint: the differentiability, discrete-argument, and cotangent rules stated above.
-> Accumulator: only the explicitly specified accumulator and traversal order; otherwise none.
 
 
 ### 3.6.2 Sequence-padding builders
@@ -1677,16 +1490,6 @@ traps `Test` with its supplied label and the operation name.
 > cotangent is positive zero. For integer or bool `T`, the operation is
 > forward-only and its source and `pad` components are non-differentiable
 > under spec/06 §2.1. The operation has no public accumulator parameter.
->
-> The [builtin identity registry](registry/builtin_semantic_identities.md)
-> is incorporated by reference for this atom's exact domain/case identities.
-> Signature: `pad_sequences` have exactly the argument and result signatures stated in this atom.
-> Domain: the admitted and rejected dtype, shape, and value cases stated in
-> this atom, at [04-NUM-8]'s declared widths.
-> Result: the exact value, type, and effect contract stated above.
-> Failure: the type errors, domain/overflow traps, and structural rejections stated above; no default result.
-> Adjoint: the differentiability, discrete-argument, and cotangent rules stated above.
-> Accumulator: only the explicitly specified accumulator and traversal order; otherwise none.
 
 
 > **[05-OP-10]** `pad_sequences_to(sequences: List[List[T]], width: int64,
@@ -1701,16 +1504,6 @@ traps `Test` with its supplied label and the operation name.
 > cotangent. The `pad` cotangent uses [05-OP-9]'s exact traversal, arithmetic,
 > tree, and positive-zero rule over the padded result cells. `width` is
 > non-differentiable.
->
-> The [builtin identity registry](registry/builtin_semantic_identities.md)
-> is incorporated by reference for this atom's exact domain/case identities.
-> Signature: `pad_sequences_to` have exactly the argument and result signatures stated in this atom.
-> Domain: the admitted and rejected dtype, shape, and value cases stated in
-> this atom, at [04-NUM-8]'s declared widths.
-> Result: the exact value, type, and effect contract stated above.
-> Failure: the type errors, domain/overflow traps, and structural rejections stated above; no default result.
-> Adjoint: the differentiability, discrete-argument, and cotangent rules stated above.
-> Accumulator: only the explicitly specified accumulator and traversal order; otherwise none.
 
 
 ### 3.6.3 Canonical value-to-string conversion
@@ -1738,16 +1531,6 @@ traps `Test` with its supplied label and the operation name.
 > lane produces byte-identical text for the same admitted stored value. The
 > operation is pure, performs no arithmetic or dtype conversion, is
 > non-differentiable (`grad` rejects it), and has no accumulator.
->
-> The [builtin identity registry](registry/builtin_semantic_identities.md)
-> is incorporated by reference for this atom's exact domain/case identities.
-> Signature: `to_string` have exactly the argument and result signatures stated in this atom.
-> Domain: the admitted and rejected dtype, shape, and value cases stated in
-> this atom, at [04-NUM-8]'s declared widths.
-> Result: the exact value, type, and effect contract stated above.
-> Failure: the type errors, domain/overflow traps, and structural rejections stated above; no default result.
-> Adjoint: the differentiability, discrete-argument, and cotangent rules stated above.
-> Accumulator: only the explicitly specified accumulator and traversal order; otherwise none.
 
 
 ### 3.7 Host-Lane Data I/O Numeric Operations
@@ -1818,16 +1601,6 @@ exact ADT identity by [05-OP-34].
 > constant: a differentiated graph containing it is structurally rejected
 > with `AdRejectionReason::PiecewiseConstant`, rather than receiving a silent
 > zero cotangent. It has no accumulator.
->
-> The [builtin identity registry](registry/builtin_semantic_identities.md)
-> is incorporated by reference for this atom's exact domain/case identities.
-> Signature: `round_to` have exactly the argument and result signatures stated in this atom.
-> Domain: the admitted and rejected dtype, shape, and value cases stated in
-> this atom, at [04-NUM-8]'s declared widths.
-> Result: the exact value, type, and effect contract stated above.
-> Failure: the type errors, domain/overflow traps, and structural rejections stated above; no default result.
-> Adjoint: the differentiability, discrete-argument, and cotangent rules stated above.
-> Accumulator: only the explicitly specified accumulator and traversal order; otherwise none.
 
 
 #### Numeric ingestion atom
@@ -1884,17 +1657,6 @@ exact ADT identity by [05-OP-34].
 > exact accessor; no JSON variant or default cell is fabricated. These text
 > parsers are structurally rejected inside `grad`; they have no cotangent and
 > may not be replaced by a silent zero. They have no accumulator.
->
-> The [builtin identity registry](registry/builtin_semantic_identities.md)
-> is incorporated by reference for this atom's exact domain/case identities.
-> Signature: `csv_int`, `csv_ints`, `csv_f64`, `csv_f64s`, `csv_nrows` have
-> exactly the argument and result signatures stated in this atom.
-> Domain: the admitted and rejected dtype, shape, and value cases stated in
-> this atom, at [04-NUM-8]'s declared widths.
-> Result: the exact value, type, and effect contract stated above.
-> Failure: the type errors, domain/overflow traps, and structural rejections stated above; no default result.
-> Adjoint: the differentiability, discrete-argument, and cotangent rules stated above.
-> Accumulator: only the explicitly specified accumulator and traversal order; otherwise none.
 
 
 #### Exact construction atom
@@ -1927,15 +1689,9 @@ exact ADT identity by [05-OP-34].
 > row-order rules without inferring, preserving, or serializing a numeric cell
 > type. Numeric source values enter CSV only through explicit `to_string`.
 >
-> The [builtin identity registry](registry/builtin_semantic_identities.md)
-> is incorporated by reference for this atom's exact domain/case identities.
-> Signature: `to_csv(table: List[Dict[string,string]]) -> string` returns the serialized text table.
-> Domain: the admitted and rejected dtype, shape, and value cases stated in
-> this atom, at [04-NUM-8]'s declared widths.
-> Result: the exact value, type, and effect contract stated above.
-> Failure: the type errors, domain/overflow traps, and structural rejections stated above; no default result.
-> Adjoint: text serialization is non-differentiable and outside AD.
-> Accumulator: only the explicitly specified accumulator and traversal order; otherwise none.
+> `to_csv(table: List[Dict[string,string]]) -> string` returns the serialized
+> text table. Text serialization is non-differentiable and outside AD; it
+> has no accumulator.
 
 
 #### Exact public scalar and container boundaries
@@ -2854,16 +2610,6 @@ not a mode parameter to `cast`.
 > **non-differentiable**: its adjoint is zero almost everywhere (the map is piecewise
 > constant), so it carries the `no_grad` rule — a gradient goal through it is a clean
 > error, never a silent zero that masks a modeling bug (same discipline as `argmax`).
->
-> The [builtin identity registry](registry/builtin_semantic_identities.md)
-> is incorporated by reference for this atom's exact domain/case identities.
-> Signature: `cast_trunc` have exactly the argument and result signatures stated in this atom.
-> Domain: the admitted and rejected dtype, shape, and value cases stated in
-> this atom, at [04-NUM-8]'s declared widths.
-> Result: the exact value, type, and effect contract stated above.
-> Failure: the type errors, domain/overflow traps, and structural rejections stated above; no default result.
-> Adjoint: the differentiability, discrete-argument, and cotangent rules stated above.
-> Accumulator: only the explicitly specified accumulator and traversal order; otherwise none.
 
 
 `cast_trunc(x, T)` agrees with `cast(x, T)` exactly when `x` is already
@@ -2935,11 +2681,7 @@ path even though bare `round` under `grad` remains a structural
 
 #### Exact arithmetic
 
-> **[05-OP-45]** The [builtin identity
-> registry](registry/builtin_semantic_identities.md) is incorporated by
-> reference for this atom's exact domain/case identities.
->
-> Signature: `add(x,y)`, `mul(x,y)`, `div(x,y)`, `floor_div(x,y)`,
+> **[05-OP-45]** Signature: `add(x,y)`, `mul(x,y)`, `div(x,y)`, `floor_div(x,y)`,
 > `trunc_div(x,y)`, and `mod(x,y)` take two same-dtype numeric scalars or
 > two same-shaped, same-dtype tensors and return that surface and dtype.
 >
@@ -2974,11 +2716,7 @@ path even though bare `round` under `grad` remains a structural
 
 #### Unary arithmetic
 
-> **[05-OP-46]** The [builtin identity
-> registry](registry/builtin_semantic_identities.md) is incorporated by
-> reference for this atom's exact domain/case identities.
->
-> Signature: `neg(x)`, `recip(x)`, `exp(x)`, `log(x)`, `sin(x)`, `sqrt(x)`,
+> **[05-OP-46]** Signature: `neg(x)`, `recip(x)`, `exp(x)`, `log(x)`, `sin(x)`, `sqrt(x)`,
 > `cos(x)`, `tan(x)`, `atan(x)`, `abs(x)`, `floor(x)`, `ceil(x)`, and
 > `round(x)` preserve the scalar or tensor shape and dtype of one operand.
 >
@@ -3014,11 +2752,7 @@ path even though bare `round` under `grad` remains a structural
 
 #### Bitwise arithmetic
 
-> **[05-OP-47]** The [builtin identity
-> registry](registry/builtin_semantic_identities.md) is incorporated by
-> reference for this atom's exact domain/case identities.
->
-> Signature: `bitand(x,y)`, `bitor(x,y)`, `bitxor(x,y)`, `shl(x,y)`, and
+> **[05-OP-47]** Signature: `bitand(x,y)`, `bitor(x,y)`, `bitxor(x,y)`, `shl(x,y)`, and
 > `shr(x,y)` take two same-dtype signed-integer scalars or same-shaped
 > tensors.
 >
@@ -3045,11 +2779,7 @@ path even though bare `round` under `grad` remains a structural
 
 #### Activation compositions
 
-> **[05-OP-48]** The [builtin identity
-> registry](registry/builtin_semantic_identities.md) is incorporated by
-> reference for this atom's exact domain/case identities.
->
-> Signature: `sigmoid(x)`, `tanh(x)`, `silu(x)`, and `gelu(x)` preserve one
+> **[05-OP-48]** Signature: `sigmoid(x)`, `tanh(x)`, `silu(x)`, and `gelu(x)` preserve one
 > float scalar or tensor's shape and dtype; `softmax(x,axis)` takes a float
 > tensor and an axis-domain int32 and returns the same tensor type.
 >
@@ -3079,11 +2809,7 @@ path even though bare `round` under `grad` remains a structural
 
 #### Movement identities
 
-> **[05-OP-49]** The [builtin identity
-> registry](registry/builtin_semantic_identities.md) is incorporated by
-> reference for this atom's exact domain/case identities.
->
-> Signature: `reshape(x,shape)`, `permute(x,axes)`, `expand(x,axis,size)`,
+> **[05-OP-49]** Signature: `reshape(x,shape)`, `permute(x,axes)`, `expand(x,axis,size)`,
 > `insert(x,axis,size)`, `pad(x,padding)`, `shrink(x,bounds)`, and
 > `stride(x,steps)` have section 2.4's tensor movement signatures, including
 > its named-axis and anchored insert forms.
@@ -3119,11 +2845,7 @@ path even though bare `round` under `grad` remains a structural
 
 #### Shape and scalar boundaries
 
-> **[05-OP-50]** The [builtin identity
-> registry](registry/builtin_semantic_identities.md) is incorporated by
-> reference for this atom's exact domain/case identities.
->
-> Signature: `rank(x)` and `numel(x)` borrow a tensor and return int32 and
+> **[05-OP-50]** Signature: `rank(x)` and `numel(x)` borrow a tensor and return int32 and
 > int64 respectively; `scalar_to_tensor(x)` maps one active tensor-element
 > scalar to a rank-zero tensor; `tensor_to_scalar(x)` borrows a rank-zero
 > tensor and returns its element scalar.
@@ -3151,11 +2873,7 @@ path even though bare `round` under `grad` remains a structural
 
 #### Contractions and normalization graphs
 
-> **[05-OP-51]** The [builtin identity
-> registry](registry/builtin_semantic_identities.md) is incorporated by
-> reference for this atom's exact domain/case identities.
->
-> Signature: `matmul(a,b)` uses section 4.1's batched matrix signature;
+> **[05-OP-51]** Signature: `matmul(a,b)` uses section 4.1's batched matrix signature;
 > `einsum(equation,a,b)` takes a string equation and two tensors;
 > `conv2d(input,kernel,stride:int64,padding:int64)` uses section 4.5's
 > layout; `layer_norm(x,gamma,beta)` uses section 4.4's trailing-axis
@@ -3206,11 +2924,7 @@ path even though bare `round` under `grad` remains a structural
 
 #### Sparse tensor identities
 
-> **[05-OP-52]** The [builtin identity
-> registry](registry/builtin_semantic_identities.md) is incorporated by
-> reference for this atom's exact domain/case identities.
->
-> Signature: `gather(values,indices,axis)`,
+> **[05-OP-52]** Signature: `gather(values,indices,axis)`,
 > `scatter(base,indices,updates,axis,mode)`,
 > `scatter_replace(base,indices,updates,axis)`, and
 > `scatter_elements(base,indices,updates,axis)` use section 3.5's exact
@@ -3245,11 +2959,7 @@ path even though bare `round` under `grad` remains a structural
 
 #### Tensor ordering and selection
 
-> **[05-OP-53]** The [builtin identity
-> registry](registry/builtin_semantic_identities.md) is incorporated by
-> reference for this atom's exact domain/case identities.
->
-> Signature: `where(condition,a,b)` uses a bool condition and same-shaped
+> **[05-OP-53]** Signature: `where(condition,a,b)` uses a bool condition and same-shaped
 > same-dtype branches; `cumsum(x,axis)` preserves x's shape with the default
 > sum result dtype, while `sort(x,axis)` returns (values, int64 indices) at
 > that shape; `diagonal(x,axis1,axis2)` and `trace(x,axis1,axis2)` select
@@ -3290,11 +3000,7 @@ path even though bare `round` under `grad` remains a structural
 
 #### List structure and counts
 
-> **[05-OP-54]** The [builtin identity
-> registry](registry/builtin_semantic_identities.md) is incorporated by
-> reference for this atom's exact domain/case identities.
->
-> Signature: `len(xs)` accepts List[T] or Dict[K,V] and returns int64;
+> **[05-OP-54]** Signature: `len(xs)` accepts List[T] or Dict[K,V] and returns int64;
 > `index(xs,i)` takes List[T] and int64 and returns T; `append(xs,x)` and
 > `concat(xs,ys)` return List[T]; `take(xs,n)` and `drop(xs,n)` take int64
 > counts; `chunk(xs,n)` returns List[List[T]]; `range(start,end)` takes
@@ -3332,11 +3038,7 @@ path even though bare `round` under `grad` remains a structural
 
 #### Higher-order List identities
 
-> **[05-OP-55]** The [builtin identity
-> registry](registry/builtin_semantic_identities.md) is incorporated by
-> reference for this atom's exact domain/case identities.
->
-> Signature: `map(f,xs)` maps T->U over List[T]; `filter(f,xs)` and
+> **[05-OP-55]** Signature: `map(f,xs)` maps T->U over List[T]; `filter(f,xs)` and
 > `partition(f,xs)` use T->bool; `fold(f,init,xs)` and `scan(f,init,xs)` use
 > (A,T)->A; `flat_map(f,xs)` uses T->List[U]; `flatten(xss)` takes
 > List[List[T]]; `zip(xs,ys)` returns List[(T,U)]; `enumerate(xs)` returns
@@ -3376,11 +3078,7 @@ path even though bare `round` under `grad` remains a structural
 
 #### Dictionary identities
 
-> **[05-OP-56]** The [builtin identity
-> registry](registry/builtin_semantic_identities.md) is incorporated by
-> reference for this atom's exact domain/case identities.
->
-> Signature: `dict_of(entries)` takes List[(K,V)]; `dict_get(dict,key)`
+> **[05-OP-56]** Signature: `dict_of(entries)` takes List[(K,V)]; `dict_get(dict,key)`
 > returns Option[V]; `dict_contains(dict,key)` returns bool;
 > `dict_remove(dict,key)`, `dict_insert(dict,key,value)`, and
 > `dict_merge(left,right)` return Dict[K,V]; `dict_keys`, `dict_values`, and
@@ -3418,11 +3116,7 @@ path even though bare `round` under `grad` remains a structural
 
 #### List/tensor conversion
 
-> **[05-OP-57]** The [builtin identity
-> registry](registry/builtin_semantic_identities.md) is incorporated by
-> reference for this atom's exact domain/case identities.
->
-> Signature: `to_tensor(xs)` takes a rectangular, recursively nested List
+> **[05-OP-57]** Signature: `to_tensor(xs)` takes a rectangular, recursively nested List
 > with one active scalar tensor-element leaf dtype T. A nesting depth r
 > yields a rank-r tensor. `to_list(x)` separately borrows a rank-one tensor
 > and returns List[T].
@@ -3460,11 +3154,7 @@ path even though bare `round` under `grad` remains a structural
 
 #### String identities
 
-> **[05-OP-58]** The [builtin identity
-> registry](registry/builtin_semantic_identities.md) is incorporated by
-> reference for this atom's exact domain/case identities.
->
-> Signature: `string_len(s)` returns int64; `string_concat(a,b)` returns
+> **[05-OP-58]** Signature: `string_len(s)` returns int64; `string_concat(a,b)` returns
 > string; `string_slice(s,start,length)` takes int64 offsets and returns
 > string; `string_contains`, `string_starts_with`, and `string_ends_with`
 > take two strings and return bool; `string_trim(s)` returns string.
@@ -3490,11 +3180,7 @@ path even though bare `round` under `grad` remains a structural
 
 #### Explicit text parsers
 
-> **[05-OP-59]** The [builtin identity
-> registry](registry/builtin_semantic_identities.md) is incorporated by
-> reference for this atom's exact domain/case identities.
->
-> Signature: `to_int(text: string)->Option[int64]` and `to_float(text:
+> **[05-OP-59]** Signature: `to_int(text: string)->Option[int64]` and `to_float(text:
 > string)->Option[f64]` explicitly select their result dtype.
 >
 > Domain: Both parsers consume the whole string after trimming surrounding
@@ -3520,11 +3206,7 @@ path even though bare `round` under `grad` remains a structural
 
 #### Host observation and file boundaries
 
-> **[05-OP-60]** The [builtin identity
-> registry](registry/builtin_semantic_identities.md) is incorporated by
-> reference for this atom's exact domain/case identities.
->
-> Signature: `print(value)->unit!{IO}`, `debug(value)->value!{IO}`,
+> **[05-OP-60]** Signature: `print(value)->unit!{IO}`, `debug(value)->value!{IO}`,
 > `fail(message:string)->T`, and
 > `test_assert(condition:bool,label:string)->unit!{Test}` are the
 > observation/control identities. `read_file(path)->string`,
@@ -3564,11 +3246,7 @@ path even though bare `round` under `grad` remains a structural
 
 #### CSV text structure
 
-> **[05-OP-61]** The [builtin identity
-> registry](registry/builtin_semantic_identities.md) is incorporated by
-> reference for this atom's exact domain/case identities.
->
-> Signature: `parse_csv(text:string)->List[Dict[string,string]]`;
+> **[05-OP-61]** Signature: `parse_csv(text:string)->List[Dict[string,string]]`;
 > `csv_str(table,row:int64,column:string)->string`;
 > `csv_strs(table,column:string)->List[string]`; and
 > `csv_cols(table)->List[string]` operate on the text-table representation.
@@ -3595,11 +3273,7 @@ path even though bare `round` under `grad` remains a structural
 
 #### Tensor concatenation
 
-> **[05-OP-62]** The [builtin identity
-> registry](registry/builtin_semantic_identities.md) is incorporated by
-> reference for this atom's exact domain/case identities.
->
-> Signature: `concat(parts:List[tensor[..r,p]],axis:int32)->tensor[..r,p]`
+> **[05-OP-62]** Signature: `concat(parts:List[tensor[..r,p]],axis:int32)->tensor[..r,p]`
 > concatenates a nonempty List of equal-rank tensors along one existing
 > axis; the List/List overload is [05-OP-54].
 >
@@ -3626,11 +3300,7 @@ path even though bare `round` under `grad` remains a structural
 
 #### Checked cast identity
 
-> **[05-OP-63]** The [builtin identity
-> registry](registry/builtin_semantic_identities.md) is incorporated by
-> reference for this atom's exact domain/case identities.
->
-> Signature: `cast(value,target_dtype)` returns the same scalar or tensor
+> **[05-OP-63]** Signature: `cast(value,target_dtype)` returns the same scalar or tensor
 > shape with the explicitly named target dtype.
 >
 > Domain: The source/target product is exactly [04-NUM-14]'s checked cast

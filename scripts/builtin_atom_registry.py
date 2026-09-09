@@ -13,11 +13,19 @@ REGISTRY = "builtin_semantic_identities.md"
 ATOM = re.compile(r"^> \*\*(\[05-OP-[1-9][0-9]*\])\*\*", re.MULTILINE)
 IDENTITY = re.compile(r"(?:Numeric|Container|Boundary):[A-Za-z][A-Za-z0-9_]*:[A-Za-z][A-Za-z0-9_]*\Z")
 ROW = re.compile(r"\| `([^`]+)` \| (\[05-OP-[1-9][0-9]*\]) \|\Z")
-FIELDS = ("Signature", "Domain", "Result", "Failure", "Adjoint", "Accumulator")
+INCORPORATION = (
+    "The [builtin identity registry](registry/builtin_semantic_identities.md) "
+    "is incorporated by reference into each numbered operation atom named in its "
+    "Atom column."
+)
 
 
 class RegistryError(ValueError):
     pass
+
+
+def named_callables(block: str) -> set[str]:
+    return set(re.findall(r"`([A-Za-z][A-Za-z0-9_]*)(?:`|\()", block))
 
 
 def atom_blocks(spec: str) -> dict[str, str]:
@@ -67,24 +75,20 @@ def validate(discovered: Iterable[str], table: str, spec: str,
     if missing or stale:
         raise RegistryError(f"missing registrations={sorted(missing)}; stale registrations={sorted(stale)}")
     blocks = atom_blocks(spec)
+    preamble = " ".join(spec.split("> **[05-OP-", 1)[0].split())
+    if preamble.count(INCORPORATION) != 1:
+        raise RegistryError("the chapter must incorporate the builtin identity registry once")
     for identity, atom in rows.items():
         if atom not in blocks:
             raise RegistryError(f"missing normative definition {atom} for {identity}")
         if atom not in generated:
             raise RegistryError(f"missing generated membership {atom}")
         block = blocks[atom]
-        normalized = " ".join(line.removeprefix(">").strip() for line in block.splitlines())
-        if REGISTRY not in block or "incorporated by reference" not in normalized:
-            raise RegistryError(f"{atom} must incorporate the builtin identity registry by reference")
-        for field in FIELDS:
-            if field + ":" not in normalized:
-                raise RegistryError(f"{atom} lacks semantic field {field}")
-        # A typed identity is explicitly authored in the table. The atom must
-        # additionally spell its operation in its semantic signature, not an
-        # arbitrary mention or a namespaced stdlib/C export with a similar name.
-        signature = normalized.split("Signature:", 1)[1].split("Domain:", 1)[0]
+        # The table authors the identity-to-atom relation. Its normative atom
+        # must also name the exact callable; unquoted prose and namespaced
+        # lookalikes cannot satisfy this structural check. Substantive contract
+        # clauses are checked separately by builtin_atom_semantic_contracts.
         operation = identity.split(":")[1]
-        names = re.findall(r"`([A-Za-z][A-Za-z0-9_]*)(?:`|\()", signature)
-        if operation not in names:
-            raise RegistryError(f"{atom} does not govern the signature of {identity}")
+        if operation not in named_callables(block):
+            raise RegistryError(f"{atom} does not govern the callable {identity}")
     return rows

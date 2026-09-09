@@ -163,6 +163,19 @@ def closure_cases(identities: list[str], table: str, spec: str, generated: set[s
         raise AssertionError("mutation was accepted")
 
     add("exact-bijection", "positive", lambda: registry.validate(identities, table, spec, generated))
+    incorporation = re.search(
+        r"\s+".join(re.escape(word) for word in registry.INCORPORATION.split()), spec
+    )
+    assert incorporation is not None
+    add("missing-incorporation", "mutation", lambda:
+        rejects(spec=spec[:incorporation.start()] + spec[incorporation.end():]))
+    add("duplicate-incorporation", "mutation", lambda:
+        rejects(spec=registry.INCORPORATION + "\n" + spec))
+    unlabelled = re.sub(r"\b(?:Signature|Domain|Result|Failure|Adjoint|Accumulator):", "", spec)
+    def accepts_unlabelled_contracts():
+        changed_rows = registry.validate(identities, table, unlabelled, generated)
+        semantics.validate_semantics(changed_rows, unlabelled)
+    add("contracts-without-field-labels", "positive", accepts_unlabelled_contracts)
     for identity, atom in rows.items():
         line = f"| `{identity}` | {atom} |"
         add(f"missing:{identity}", "mutation", lambda line=line: rejects(table=table.replace(line, "")))
@@ -175,14 +188,27 @@ def closure_cases(identities: list[str], table: str, spec: str, generated: set[s
                      identity.split(":")[1] not in re.findall(r"`([A-Za-z][A-Za-z0-9_]*)(?:`|\()", b))
         add(f"wrong-authority:{identity}", "mutation", lambda line=line, atom=atom, other=other:
             rejects(table=table.replace(line, line.replace(atom, other))))
+        for other, other_block in blocks.items():
+            if other == atom or identity.split(":")[1] not in registry.named_callables(other_block):
+                continue
+            add(f"incidental-authority:{identity}:{other}", "mutation",
+                lambda line=line, atom=atom, other=other:
+                rejects(table=table.replace(line, line.replace(atom, other))))
     for atom in sorted(set(rows.values())):
         block = blocks[atom]
         add(f"deleted-atom:{atom}", "mutation", lambda block=block: rejects(spec=spec.replace(block, "")))
         add(f"stale-generated:{atom}", "mutation", lambda atom=atom: rejects(generated=generated - {atom}))
-        for field in registry.FIELDS:
-            changed = block.replace(field + ":", "Removed:")
-            add(f"deleted-{field}:{atom}", "mutation", lambda block=block, changed=changed:
-                rejects(spec=spec.replace(block, changed)))
+        names = sorted(identity.split(":")[1] for identity, owner in rows.items() if owner == atom)
+        changed = f"> **{atom}** " + ", ".join(f"`{name}`" for name in names) + ".\n"
+        add(f"deleted-contract:{atom}", "mutation", lambda block=block, changed=changed:
+            rejects(spec=spec.replace(block, changed)))
+        clauses = {semantics.CASE_CLAUSES.get(identity,
+                   semantics.CALLABLE_CLAUSES.get(identity.split(":")[1]))
+                   for identity, owner in rows.items() if owner == atom}
+        for index, clause in enumerate(sorted(clauses - {None})):
+            changed = "> " + semantics.normalized(block).replace(clause, "REMOVED") + "\n"
+            add(f"callable-contract:{atom}:{index}", "mutation",
+                lambda block=block, changed=changed: rejects(spec=spec.replace(block, changed)))
     for number, clauses in semantics.CLAUSES.items():
         atom = f"[05-OP-{number}]"
         block = blocks[atom]
