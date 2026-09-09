@@ -113,7 +113,7 @@ fn file_entry<'a>(json: &'a Value, suffix: &str) -> &'a Value {
 fn assert_file_clean(json: &Value, suffix: &str) {
     let entry = file_entry(json, suffix);
     assert_eq!(
-        entry["report"]["score"], 1,
+        entry["report"]["score"], 1.0,
         "{suffix} must check clean (score 1): {entry}"
     );
     let errors = entry["report"]["errors"]

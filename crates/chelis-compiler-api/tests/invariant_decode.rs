@@ -10,6 +10,9 @@
 //!
 //! Run: `cargo nextest run -p chelis-compiler-api --test invariant_decode`.
 
+#[path = "../../../tests/support/wire_values.rs"]
+mod wire_values;
+
 use chelis_compiler_api::compiler::eval;
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind};
 use chelis_compiler_api::{DecodeError, RuntimeValue, decode_adt_value, try_decode_adt_value};
@@ -71,33 +74,20 @@ fn eval_result_value(source: &str) -> ExecutionValue {
 
 /// Structural equality over `ExecutionValue` with EXACT scalar comparison
 /// (bit-identical floats; no tolerance). `ExecutionValue` does not derive
-/// `PartialEq` because it carries `f64`, so the comparison is explicit and
-/// the float equality is deliberately strict (this is a round-trip check,
-/// not a numeric-agreement check).
+/// `PartialEq`; its canonical stored-bit codec makes the comparison exact
+/// even for signed zero, NaN payloads and int64 values above 2^53.
 fn execution_values_identical(a: &ExecutionValue, b: &ExecutionValue) -> bool {
     use ExecutionValue::*;
     match (a, b) {
-        (Int8 { value: x }, Int8 { value: y }) => x == y,
-        (Int16 { value: x }, Int16 { value: y }) => x == y,
-        (Int32 { value: x }, Int32 { value: y }) => x == y,
-        (Int64 { value: x }, Int64 { value: y }) => x == y,
-        (Float16 { value: x }, Float16 { value: y })
-        | (Bfloat16 { value: x }, Bfloat16 { value: y }) => x.to_bits() == y.to_bits(),
-        (Float32 { value: x }, Float32 { value: y }) => x.to_bits() == y.to_bits(),
-        // Bit-identical float compare: `to_bits` so a NaN payload would
-        // compare equal to itself, and -0.0 is distinguished from 0.0.
-        (Float64 { value: x }, Float64 { value: y }) => x.to_bits() == y.to_bits(),
+        (Scalar { value: x }, Scalar { value: y }) => {
+            serde_json::to_value(x).unwrap() == serde_json::to_value(y).unwrap()
+        }
         (Bool { value: x }, Bool { value: y }) => x == y,
         (String { value: x }, String { value: y }) => x == y,
         (Unit, Unit) => true,
         (Tensor { value: x }, Tensor { value: y }) => {
             x.shape == y.shape
-                && x.data.len() == y.data.len()
-                && x.data
-                    .to_f64_lossy_vec()
-                    .iter()
-                    .zip(y.data.to_f64_lossy_vec())
-                    .all(|(l, r)| l.to_bits() == r.to_bits())
+                && serde_json::to_value(&x.data).unwrap() == serde_json::to_value(&y.data).unwrap()
         }
         (List { value: x }, List { value: y }) | (Tuple { value: x }, Tuple { value: y }) => {
             x.len() == y.len()
@@ -275,7 +265,7 @@ fn wrong_constructor_is_structural_not_invariant() {
     let exprs = program_exprs(PROBABILITY_SRC);
     let payload = ExecutionValue::Adt {
         ctor: "NotAProbability".to_string(),
-        fields: vec![ExecutionValue::Float32 { value: 0.3 }],
+        fields: vec![wire_values::scalar_f32(0.3)],
     };
     let err = try_decode_adt_value(&exprs, &payload).expect_err("unknown ctor rejected");
     assert!(
@@ -300,10 +290,7 @@ fn extra_field_is_structural_not_invariant() {
     let exprs = program_exprs(PROBABILITY_SRC);
     let payload = ExecutionValue::Adt {
         ctor: "Probability".to_string(),
-        fields: vec![
-            ExecutionValue::Float32 { value: 0.3 },
-            ExecutionValue::Float32 { value: 0.4 },
-        ],
+        fields: vec![wire_values::scalar_f32(0.3), wire_values::scalar_f32(0.4)],
     };
     let err = try_decode_adt_value(&exprs, &payload).expect_err("extra field rejected");
     assert!(matches!(err, DecodeError::Structural(_)), "got {err:?}");
@@ -316,7 +303,10 @@ fn wrong_scalar_type_is_structural_not_invariant() {
     let exprs = program_exprs(PROBABILITY_SRC);
     let payload = ExecutionValue::Adt {
         ctor: "Probability".to_string(),
-        fields: vec![ExecutionValue::Int64 { value: 0 }],
+        fields: vec![wire_values::scalar_integer(
+            chelis_types::types::Prim::Int64,
+            0,
+        )],
     };
     let err = try_decode_adt_value(&exprs, &payload).expect_err("int into float field rejected");
     assert!(matches!(err, DecodeError::Structural(_)), "got {err:?}");
@@ -332,7 +322,10 @@ fn structural_and_invariant_message_prefixes_distinguish() {
         &exprs,
         &ExecutionValue::Adt {
             ctor: "Probability".to_string(),
-            fields: vec![ExecutionValue::Int64 { value: 0 }],
+            fields: vec![wire_values::scalar_integer(
+                chelis_types::types::Prim::Int64,
+                0,
+            )],
         },
     )
     .expect_err("structural");
@@ -382,9 +375,9 @@ fn nested_inner_violating_rejected_naming_inner_type() {
         fields: vec![
             ExecutionValue::Adt {
                 ctor: "Probability".to_string(),
-                fields: vec![ExecutionValue::Float32 { value: 1.5 }],
+                fields: vec![wire_values::scalar_f32(1.5)],
             },
-            ExecutionValue::Float32 { value: 2.0 },
+            wire_values::scalar_f32(2.0),
         ],
     };
     let err = try_decode_adt_value(&exprs, &payload)
@@ -410,9 +403,9 @@ fn nested_inner_nan_rejected_fail_closed() {
         fields: vec![
             ExecutionValue::Adt {
                 ctor: "Probability".to_string(),
-                fields: vec![ExecutionValue::Float32 { value: f32::NAN }],
+                fields: vec![wire_values::scalar_f32(f32::NAN)],
             },
-            ExecutionValue::Float32 { value: 2.0 },
+            wire_values::scalar_f32(2.0),
         ],
     };
     let err = try_decode_adt_value(&exprs, &payload).expect_err("inner NaN rejected");
@@ -444,7 +437,7 @@ fn rejected_decode_yields_no_value() {
         },
         ExecutionValue::Adt {
             ctor: "Nope".to_string(),
-            fields: vec![ExecutionValue::Float32 { value: 0.3 }],
+            fields: vec![wire_values::scalar_f32(0.3)],
         },
     ];
     for payload in &rejecting {
@@ -459,9 +452,7 @@ fn rejected_decode_yields_no_value() {
 fn prob_payload(value: f64) -> ExecutionValue {
     ExecutionValue::Adt {
         ctor: "Probability".to_string(),
-        fields: vec![ExecutionValue::Float32 {
-            value: value as f32,
-        }],
+        fields: vec![wire_values::scalar_f32(value as f32)],
     }
 }
 
@@ -490,9 +481,7 @@ def make(x: f32) -> Tol = Tol { value: x }
 fn tol_payload(value: f64) -> ExecutionValue {
     ExecutionValue::Adt {
         ctor: "Tol".to_string(),
-        fields: vec![ExecutionValue::Float32 {
-            value: value as f32,
-        }],
+        fields: vec![wire_values::scalar_f32(value as f32)],
     }
 }
 

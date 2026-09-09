@@ -15,3 +15,15 @@ pub struct Root {
     tree: Tree<i64>,
     label: String,
 }
+
+pub struct Hex<const DIGITS: usize>(String);
+pub struct SizedPayload<T, const WIDTH: usize> {
+    values: [T; WIDTH],
+    marker: Hex<WIDTH>,
+}
+pub struct ConstRoot {
+    small: Hex<4>,
+    medium: Hex<8>,
+    wide: Hex<16>,
+    numeric: SizedPayload<i32, 4>,
+}

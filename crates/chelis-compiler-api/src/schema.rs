@@ -1,3 +1,13 @@
+mod artifact;
+mod dag_domains;
+mod envelopes;
+mod execution;
+pub mod numbers;
+mod reports;
+pub use artifact::{ArtifactAbiVersion, CompiledArtifactManifest};
+pub use execution::NumericScalar;
+use numbers::{NonnegativeCount, NonnegativeExtent, SourceFloat, SourceInteger, UnitInterval};
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use chelis_types::unsupported::Unsupported;
@@ -62,7 +72,7 @@ impl<T> ApiEnvelope<T> {
     ///
     /// ```compile_fail
     /// use chelis_compiler_api::schema::ApiEnvelope;
-    /// let _: ApiEnvelope<()> = ApiEnvelope::failure("compile", vec!["compile_error"]);
+    /// let _: ApiEnvelope<()> = ApiEnvelope::failure("compile".into(), vec!["compile_error"]);
     /// ```
     ///
     /// Nor may the public unsupported variant be handed directly to this
@@ -72,14 +82,14 @@ impl<T> ApiEnvelope<T> {
     /// use chelis_compiler_api::schema::ApiEnvelope;
     /// use chelis_vocab::DiagnosticKind;
     /// let _: ApiEnvelope<()> = ApiEnvelope::failure(
-    ///     "compile",
+    ///     "compile".into(),
     ///     vec![DiagnosticKind::UnsupportedFeature],
     /// );
     /// ```
-    pub fn failure(stage: impl Into<String>, errors: Vec<Diagnostic>) -> Self {
+    pub fn failure(stage: String, errors: Vec<Diagnostic>) -> Self {
         Self::Failure(ApiFailure {
             ok: false,
-            stage: stage.into(),
+            stage,
             errors,
         })
     }
@@ -88,11 +98,11 @@ impl<T> ApiEnvelope<T> {
     /// construction to the transport crate.
     pub fn invalid_request(message: impl Into<String>) -> Self {
         Self::failure(
-            "http",
+            "http".into(),
             vec![Diagnostic::general(
                 GeneralKind::InvalidRequest,
                 message,
-                1.0,
+                crate::schema::numbers::UnitInterval::new(1.0).expect("constant severity"),
             )],
         )
     }
@@ -127,8 +137,7 @@ pub struct WireApiFailure {
 /// ).unwrap();
 /// let _: ApiEnvelope<()> = wire.into();
 /// ```
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug, Clone)]
 pub enum WireApiEnvelope<T> {
     Success(WireApiSuccess<T>),
     Failure(WireApiFailure),
@@ -171,13 +180,13 @@ pub enum WireApiEnvelope<T> {
 ///     r#"{"kind":"unsupported_feature","message":"forged","severity":1.0}"#,
 /// ).unwrap();
 /// let producer: Diagnostic = wire.into();
-/// let _: ApiEnvelope<()> = ApiEnvelope::failure("compile", vec![producer]);
+/// let _: ApiEnvelope<()> = ApiEnvelope::failure("compile".into(), vec![producer]);
 /// ```
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct Diagnostic {
     kind: String,
     pub message: String,
-    pub severity: f64,
+    pub severity: UnitInterval,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -213,17 +222,25 @@ impl Diagnostic {
             .expect("producer diagnostics are constructed from DiagnosticKind")
     }
 
-    pub(crate) fn general(kind: GeneralKind, message: impl Into<String>, severity: f64) -> Self {
+    pub(crate) fn general(
+        kind: GeneralKind,
+        message: impl Into<String>,
+        severity: UnitInterval,
+    ) -> Self {
         let diagnostic_kind = kind.diagnostic_kind();
         debug_assert_eq!(GeneralKind::project(diagnostic_kind), Some(kind));
         Self::new(diagnostic_kind, message, severity)
     }
 
     fn unsupported(error: Unsupported) -> Self {
-        Self::new(DiagnosticKind::UnsupportedFeature, error.to_string(), 1.0)
+        Self::new(
+            DiagnosticKind::UnsupportedFeature,
+            error.to_string(),
+            UnitInterval::new(1.0).expect("constant severity"),
+        )
     }
 
-    fn new(kind: DiagnosticKind, message: impl Into<String>, severity: f64) -> Self {
+    fn new(kind: DiagnosticKind, message: impl Into<String>, severity: UnitInterval) -> Self {
         Self {
             kind: kind.as_str().to_owned(),
             message: message.into(),
@@ -253,11 +270,11 @@ impl Diagnostic {
 /// cannot move the wire.
 impl Diagnostic {
     /// Project a check diagnostic onto the wire carrier.
-    pub fn from_check_error(error: &chelis_types::errors::CheckError) -> Self {
-        Self {
+    pub fn try_from_check_error(error: &chelis_types::errors::CheckError) -> Result<Self, String> {
+        Ok(Self {
             kind: check_error_kind(&error.kind).as_str().to_owned(),
             message: error.message.clone(),
-            severity: error.severity,
+            severity: UnitInterval::new(error.severity)?,
             expected: error.expected.clone(),
             got: error.got.clone(),
             // [04-FIT-15]: the field set does not vary by producing stage.
@@ -267,7 +284,7 @@ impl Diagnostic {
             span: check_error_span(error),
             deep_path: None,
             span_id: error.span_id.clone(),
-        }
+        })
     }
 
     /// Project an effect diagnostic onto the wire carrier.
@@ -280,7 +297,7 @@ impl Diagnostic {
     /// repair hints at six sites, and the template this replaces had no slot
     /// for them, so dropping them here would keep the very stage-dependence
     /// the atom forbids.
-    pub fn from_effect_error(error: &chelis_effects::EffectError, severity: f64) -> Self {
+    pub fn from_effect_error(error: &chelis_effects::EffectError, severity: UnitInterval) -> Self {
         Self {
             kind: effect_error_kind(&error.kind).as_str().to_owned(),
             message: error.message.clone(),
@@ -325,7 +342,7 @@ fn check_error_span(error: &chelis_types::errors::CheckError) -> Option<Diagnost
     // carries an extent Chelis itself measured. The stamp ingress path in
     // `compiler.rs` already has one and still reports `Range`.
     Some(DiagnosticSpan::Point {
-        offset: error.span_offset?,
+        offset: host_index(error.span_offset?),
     })
 }
 
@@ -383,7 +400,7 @@ fn effect_error_kind(kind: &chelis_effects::EffectErrorKind) -> DiagnosticKind {
 pub struct WireDiagnostic {
     pub kind: String,
     pub message: String,
-    pub severity: f64,
+    pub severity: UnitInterval,
     pub expected: Option<String>,
     pub got: Option<String>,
     #[serde(default)]
@@ -578,7 +595,11 @@ pub(crate) fn stage_error_with_span(
     kind: GeneralKind,
     span: Option<DiagnosticSpan>,
 ) -> crate::compiler::CompilerError {
-    let mut diagnostic = Diagnostic::general(kind, message, 1.0);
+    let mut diagnostic = Diagnostic::general(
+        kind,
+        message,
+        crate::schema::numbers::UnitInterval::new(1.0).expect("constant severity"),
+    );
     diagnostic.span = span;
     crate::compiler::CompilerError {
         stage: stage.to_owned(),
@@ -609,9 +630,43 @@ pub struct WireDeepErrorPath {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Span {
-    pub offset: usize,
-    pub len: usize,
+    pub offset: u64,
+    pub len: u64,
+}
+
+impl Span {
+    /// Admit a foreign byte range for access to this local UTF-8 source.
+    pub fn slice<'a>(&self, source: &'a str) -> Result<&'a str, String> {
+        let end = self
+            .offset
+            .checked_add(self.len)
+            .ok_or("source range endpoint exceeds u64")?;
+        let start = usize::try_from(self.offset)
+            .map_err(|_| "source offset exceeds host index capacity")?;
+        let end =
+            usize::try_from(end).map_err(|_| "source endpoint exceeds host index capacity")?;
+        source.get(start..end).ok_or_else(|| {
+            "source range is outside the buffer or splits a UTF-8 character".to_string()
+        })
+    }
+}
+
+/// Pure widening of an existing local index. A wider host must implement a
+/// fallible producer path before it can build this wire implementation.
+pub(crate) fn host_index(value: usize) -> u64 {
+    const { assert!(usize::BITS <= u64::BITS) };
+    value as u64
+}
+
+impl From<chelis_deep::Span> for Span {
+    fn from(span: chelis_deep::Span) -> Self {
+        Self {
+            offset: host_index(span.offset),
+            len: host_index(span.len),
+        }
+    }
 }
 
 /// A diagnostic's reported source location (chelis#1395).
@@ -629,17 +684,17 @@ pub struct Span {
 /// whose `InputAxis.tensor` slot index is the wire census's registered
 /// tagged transport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "span", rename_all = "snake_case")]
+#[serde(tag = "span", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DiagnosticSpan {
     /// The producer measured a range.
-    Range { offset: usize, len: usize },
+    Range { offset: u64, len: u64 },
     /// The producer held a coordinate and no extent.
-    Point { offset: usize },
+    Point { offset: u64 },
 }
 
 impl DiagnosticSpan {
     /// The byte offset, which both variants carry.
-    pub fn offset(self) -> usize {
+    pub fn offset(self) -> u64 {
         match self {
             Self::Range { offset, .. } | Self::Point { offset } => offset,
         }
@@ -650,7 +705,7 @@ impl DiagnosticSpan {
     /// Named for [04-FIT-17]'s word rather than `len`: this is not a
     /// collection length, and calling it one invites `is_empty`, which would
     /// be meaningless for a source coordinate.
-    pub fn extent(self) -> Option<usize> {
+    pub fn extent(self) -> Option<u64> {
         match self {
             Self::Range { len, .. } => Some(len),
             Self::Point { .. } => None,
@@ -658,142 +713,18 @@ impl DiagnosticSpan {
     }
 }
 
-/// Execution-payload wire version (chelis#729 Phase 1, the section C3
-/// storage decision's wire layer). Version history:
-///
-/// * v1 (implicit; no version field on the wire): `TensorValue.data` was
-///   an untagged `Vec<f64>`, which cannot carry exact int64 above 2^53
-///   (chelis#686) and erased every element dtype (chelis#685).
-/// * v2: `TensorValue.data` is the tagged per-dtype [`TensorElements`]
-///   payload below; numeric scalar leaves use exact-width
-///   [`ExecutionValue`] variants instead of substituting `Int64`/`Float64`;
-///   and [`EvalResult`] stamps `schema_version: 2`.
-///
-/// Mechanics (v1 compat DELETED at the chelis#729 rework): producers
-/// always stamp the current version, and `schema_version` is REQUIRED on
-/// decode and must equal this constant - a missing field is a loud serde
-/// "missing field `schema_version`" error, and a `1` (or any other
-/// value) is a loud error naming the field and both versions. Every
-/// reader and writer of this payload is in-repo, so there is no
-/// deployment that can legitimately present a version-less or v1
-/// payload; per the chelis#730 closed-vocabulary doctrine (closed types
-/// have no `Default` and no `Unknown`), the compat default was a spare
-/// key to a door that should have exactly one. Tensor BINDINGS in
-/// requests changed shape with v2, so a v1 client posting the old
-/// bare-array `data` also fails loudly at serde (a type error at the
-/// payload position), never a silent reinterpretation. This constant
-/// governs the execution payload only; `WIRE_DAG_SCHEMA_VERSION` below
-/// governs the `WireDag` surface and is independent (and, unlike this
-/// one, has a genuinely external consumer - see its note).
-pub const EXECUTION_VALUE_SCHEMA_VERSION: u32 = 2;
+/// Execution-value schema version: exact stored-bit carriers, numeric scalar
+/// tags, and checked int64 tensor shapes. Readers validate this stamp before
+/// decoding values; older, missing and future versions have no fallback.
+pub const EXECUTION_VALUE_SCHEMA_VERSION: u32 = 3;
 
-/// Field validator for [`EvalResult::schema_version`]: the field is
-/// required and must equal [`EXECUTION_VALUE_SCHEMA_VERSION`]. The
-/// error names the field so a stale producer is diagnosable from the
-/// message alone.
-fn require_execution_value_schema_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::Deserialize;
-    use serde::de::Error;
-    let version = u32::deserialize(deserializer)?;
-    if version != EXECUTION_VALUE_SCHEMA_VERSION {
-        return Err(D::Error::custom(format!(
-            "unsupported `schema_version` {version} on the execution-value              payload: this reader supports exactly              {EXECUTION_VALUE_SCHEMA_VERSION} (the v1 compat path was              deleted at the chelis#729 rework; regenerate the payload              with a current producer)"
-        )));
-    }
-    Ok(version)
-}
+/// The canonical sealed storage carrier, with the exact spec/10 bit codec.
+pub type TensorElements = chelis_types::TensorStorage;
 
-/// Per-dtype tensor element payload (execution wire v2; the chelis#729
-/// section C3 storage decision expressed at the wire layer). Integer
-/// families carry exact integers at width; `f16`/`bf16` carry the EXACT
-/// f64 images of the stored half-precision values (every half value is
-/// exactly representable in f64, and JSON numbers carry f64 exactly);
-/// bool carries true/false.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "dtype", content = "values", rename_all = "snake_case")]
-pub enum TensorElements {
-    F64(Vec<f64>),
-    F32(Vec<f32>),
-    F16(Vec<f64>),
-    Bf16(Vec<f64>),
-    Int64(Vec<i64>),
-    Int32(Vec<i32>),
-    Int16(Vec<i16>),
-    Int8(Vec<i8>),
-    Bool(Vec<bool>),
-}
-
-impl TensorElements {
-    pub fn len(&self) -> usize {
-        match self {
-            TensorElements::F64(v) => v.len(),
-            TensorElements::F32(v) => v.len(),
-            TensorElements::F16(v) => v.len(),
-            TensorElements::Bf16(v) => v.len(),
-            TensorElements::Int64(v) => v.len(),
-            TensorElements::Int32(v) => v.len(),
-            TensorElements::Int16(v) => v.len(),
-            TensorElements::Int8(v) => v.len(),
-            TensorElements::Bool(v) => v.len(),
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// Widen every element to f64. Exact except for int64 magnitudes
-    /// above 2^53, hence the lossy name (the section C3 read-side
-    /// contract; consumers that need exact int64 match the variant).
-    pub fn to_f64_lossy_vec(&self) -> Vec<f64> {
-        match self {
-            TensorElements::F64(v) => v.clone(),
-            TensorElements::F32(v) => v.iter().map(|&x| x as f64).collect(),
-            TensorElements::F16(v) => v.clone(),
-            TensorElements::Bf16(v) => v.clone(),
-            TensorElements::Int64(v) => v.iter().map(|&x| x as f64).collect(),
-            TensorElements::Int32(v) => v.iter().map(|&x| x as f64).collect(),
-            TensorElements::Int16(v) => v.iter().map(|&x| x as f64).collect(),
-            TensorElements::Int8(v) => v.iter().map(|&x| x as f64).collect(),
-            TensorElements::Bool(v) => v.iter().map(|&x| if x { 1.0 } else { 0.0 }).collect(),
-        }
-    }
-
-    /// One element widened to f64 (same loss profile as
-    /// [`Self::to_f64_lossy_vec`]).
-    pub fn element_as_f64_lossy(&self, index: usize) -> f64 {
-        match self {
-            TensorElements::F64(v) => v[index],
-            TensorElements::F32(v) => v[index] as f64,
-            TensorElements::F16(v) => v[index],
-            TensorElements::Bf16(v) => v[index],
-            TensorElements::Int64(v) => v[index] as f64,
-            TensorElements::Int32(v) => v[index] as f64,
-            TensorElements::Int16(v) => v[index] as f64,
-            TensorElements::Int8(v) => v[index] as f64,
-            TensorElements::Bool(v) => {
-                if v[index] {
-                    1.0
-                } else {
-                    0.0
-                }
-            }
-        }
-    }
-
-    /// Convenience f64 constructor for request builders and tests that
-    /// carry plain float payloads.
-    pub fn from_f64_vec(data: Vec<f64>) -> Self {
-        TensorElements::F64(data)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, JsonSchema)]
 pub struct TensorValue {
-    pub shape: Vec<usize>,
+    #[schemars(schema_with = "execution::shape_schema")]
+    pub shape: Vec<i64>,
     pub data: TensorElements,
 }
 
@@ -803,40 +734,16 @@ pub struct DictEntryValue {
     pub value: ExecutionValue,
 }
 
-/// Machine-facing execution value. Every numeric scalar variant names its
-/// own dtype; the field width is either that dtype's exact Rust carrier or,
-/// for f16/bf16, the exact f64 image of the stored reduced-width value.
+/// Machine-facing execution value. Numeric descendants retain their sealed
+/// dtype and stored bits; booleans have one separate execution spelling.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExecutionValue {
     Tensor {
         value: TensorValue,
     },
-    Int8 {
-        value: i8,
-    },
-    Int16 {
-        value: i16,
-    },
-    Int32 {
-        value: i32,
-    },
-    Int64 {
-        value: i64,
-    },
-    Float16 {
-        /// Exact f64 image of the stored IEEE binary16 value.
-        value: f64,
-    },
-    Bfloat16 {
-        /// Exact f64 image of the stored bfloat16 value.
-        value: f64,
-    },
-    Float32 {
-        value: f32,
-    },
-    Float64 {
-        value: f64,
+    Scalar {
+        value: NumericScalar,
     },
     Bool {
         value: bool,
@@ -1041,7 +948,7 @@ pub struct RenameResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub renamed_defsig_deep: Option<String>,
     pub module_deep: String,
-    pub renamed_references: usize,
+    pub renamed_references: NonnegativeCount,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1066,7 +973,7 @@ pub struct ChangeSignatureResult {
     pub changed_def_deep: String,
     pub changed_defsig_deep: String,
     pub module_deep: String,
-    pub rewritten_calls: usize,
+    pub rewritten_calls: NonnegativeCount,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1093,70 +1000,99 @@ pub struct CheckRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FitnessComponents {
-    pub parse: f64,
-    pub structure: f64,
-    pub names: f64,
-    pub types: f64,
+    pub parse: UnitInterval,
+    pub structure: UnitInterval,
+    pub names: UnitInterval,
+    pub types: UnitInterval,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct CheckResult {
-    pub score: f64,
+    pub score: UnitInterval,
     pub components: FitnessComponents,
-    pub typed_nodes: usize,
-    pub untyped_nodes: usize,
-    pub total_nodes: usize,
+    pub typed_nodes: NonnegativeCount,
+    pub untyped_nodes: NonnegativeCount,
+    pub total_nodes: NonnegativeCount,
     pub unresolved_names: Vec<String>,
-    /// The inferred-signature tree, present only when the caller asked for
-    /// it (chelis#886, [04-FIT-13]).
-    ///
-    /// A member of the report's type rather than a JSON fragment spliced
-    /// into a `format!` template.
-    ///
-    /// The ROW is `serde_json::Value` and not a struct-per-field: the CLI
-    /// already builds these rows with `serde_json::json!`, so there is no
-    /// parallel Rust type here for the document to drift against. Typing
-    /// the row shape is real work, and a different defect from the one this
-    /// field closes.
-    ///
-    /// The SEQUENCE is a `Vec`, not a bare `Value`. §6.4 calls this a
-    /// structured signature tree and the document has always carried an
-    /// array, so a `Value` here would let a caller set an object and get a
-    /// document the report's own formatter renders across several lines
-    /// where every shipped one is a single line. `Vec` makes that
-    /// unrepresentable instead of merely unreached.
-    ///
-    /// A note on the wire census, since the absence of a row here is easy to
-    /// misread: `numeric_primitives` recurses for primitive float and
-    /// integer spellings and finds none inside a `Value`, so this field
-    /// classifies as non-numeric. That is the census being unable to see
-    /// through the type, not proof that no number crosses here. Numbers do:
-    /// `WireInferredDim::Lit`'s `size`, a param's `index`, and
-    /// `WireInferredType::Var`'s `id` all reach the wire through these rows.
-    ///
-    /// What makes that acceptable is narrower than "no numbers" and
-    /// narrower than "no `f64`": none of them is a bare `f64`/`double` or a
-    /// raw dtype id, which is what Numeric Surface Discipline forbids, and
-    /// every one of them already shipped through the `format!` template
-    /// this field replaces. The census gains no row because it never had
-    /// one for this channel, not because the channel is empty.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inferred_signatures: Option<Vec<serde_json::Value>>,
+    /// Typed inferred-signature rows, omitted when the caller did not request them
+    /// ([04-FIT-13]). Parameter references retain their owning list and exact indices.
+    pub inferred_signatures: Option<Vec<WireInferredSignature>>,
     pub errors: Vec<Diagnostic>,
 }
 
 /// Consumer-side shape for `chelis check --json` output.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct WireCheckResult {
-    pub score: f64,
+    pub score: UnitInterval,
     pub components: FitnessComponents,
-    pub typed_nodes: usize,
-    pub untyped_nodes: usize,
-    pub total_nodes: usize,
+    pub typed_nodes: NonnegativeCount,
+    pub untyped_nodes: NonnegativeCount,
+    pub total_nodes: NonnegativeCount,
     pub unresolved_names: Vec<String>,
-    #[serde(default)]
-    pub inferred_signatures: Option<Vec<serde_json::Value>>,
+    pub inferred_signatures: Option<Vec<WireInferredSignature>>,
     pub errors: Vec<WireDiagnostic>,
+}
+
+/// One function's inferred report, including its ordered parameter references.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireInferredSignature {
+    pub function: String,
+    pub recursive_cycle: bool,
+    pub checked_signature: String,
+    pub display_signature: String,
+    pub checked_signature_structured: WireInferredType,
+    pub display_signature_structured: WireInferredType,
+    pub effect_row: Vec<WireInferredEffect>,
+    pub effect_row_display: Vec<String>,
+    pub params: OrderedInferredParameters,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireInferredParameter {
+    pub index: u64,
+    pub name: String,
+    pub written: bool,
+    pub inferred_read_only: bool,
+    pub checked_type: String,
+    pub display_type: String,
+    pub checked_type_structured: WireInferredType,
+    pub display_type_structured: WireInferredType,
+}
+
+/// Parameter references validated against their owning ordered list.
+#[derive(Debug, Clone, Serialize)]
+#[serde(transparent)]
+pub struct OrderedInferredParameters(Vec<WireInferredParameter>);
+
+impl OrderedInferredParameters {
+    pub fn as_slice(&self) -> &[WireInferredParameter] {
+        &self.0
+    }
+}
+
+impl TryFrom<Vec<WireInferredParameter>> for OrderedInferredParameters {
+    type Error = String;
+    fn try_from(parameters: Vec<WireInferredParameter>) -> Result<Self, Self::Error> {
+        for (position, parameter) in parameters.iter().enumerate() {
+            let expected =
+                u64::try_from(position).map_err(|_| "parameter position exceeds uint64")?;
+            if parameter.index != expected {
+                return Err(format!(
+                    "inferred parameter index {} does not equal its owning list position {expected}",
+                    parameter.index
+                ));
+            }
+        }
+        Ok(Self(parameters))
+    }
+}
+
+impl<'de> Deserialize<'de> for OrderedInferredParameters {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Vec::<WireInferredParameter>::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 /// Structured, machine-readable inferred-type tree for one inferred
@@ -1240,7 +1176,7 @@ pub enum WireInferredDim {
     /// `DimVar` index, matching the `dN` display rendering.
     Var { id: u32 },
     /// `Dim::Lit` — a fixed numeric size.
-    Lit { size: i64 },
+    Lit { size: NonnegativeExtent },
     /// `Dim::Wildcard` — an unknown / dynamic dimension (the `*`
     /// display rendering).
     Wildcard,
@@ -1305,10 +1241,10 @@ pub struct LowerRequest {
     pub entry: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct LowerResult {
     pub dag: WireDag,
-    pub named_roots: BTreeMap<String, usize>,
+    pub named_roots: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1362,7 +1298,7 @@ pub struct CompileResult {
     pub compile_flags: Vec<String>,
     pub link_flags: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub peak_device_bytes_estimate: Option<usize>,
+    pub peak_device_bytes_estimate: Option<NonnegativeCount>,
     pub manifest: RootManifestResult,
 }
 
@@ -1376,7 +1312,7 @@ pub struct EvalRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvaluatedRoot {
-    pub node_id: usize,
+    pub node_id: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub value: ExecutionValue,
@@ -1392,18 +1328,15 @@ pub struct EvaluatedRoot {
     pub display: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct EvalResult {
     /// Execution-payload wire version (see
     /// [`EXECUTION_VALUE_SCHEMA_VERSION`]): producers stamp the current
     /// version; decode REQUIRES the field and rejects any other version
     /// loudly (the v1 compat default is gone, chelis#729 rework).
-    #[serde(deserialize_with = "require_execution_value_schema_version")]
     pub schema_version: u32,
     pub roots: Vec<EvaluatedRoot>,
-    #[serde(default)]
     pub manifest: RootManifestResult,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transcript: Vec<String>,
 }
 
@@ -1417,12 +1350,12 @@ pub struct GradRequest {
     pub fuse: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct GradResult {
     pub dag: WireDag,
-    pub output_node: usize,
-    pub grad_nodes_by_name: BTreeMap<String, usize>,
-    pub forward_nodes_by_name: BTreeMap<String, usize>,
+    pub output_node: u64,
+    pub grad_nodes_by_name: BTreeMap<String, u64>,
+    pub forward_nodes_by_name: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1487,8 +1420,7 @@ pub struct BatchResultEnvelope {
 
 /// Consumer-only counterpart to [`BatchResult`]. The `Check` arm uses the
 /// read-only diagnostic graph all the way through the enclosing envelope.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Debug, Clone)]
 pub enum WireBatchResult {
     Parse(WireApiEnvelope<ParseResult>),
     Desugar(WireApiEnvelope<DesugarResult>),
@@ -1541,8 +1473,8 @@ pub enum WireDeepExprKind {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WireDeepAtom {
     Symbol { value: String },
-    Int { value: i64 },
-    Float { value: f64 },
+    Int { value: SourceInteger },
+    Float { value: SourceFloat },
     Str { value: String },
     Bool { value: bool },
 }
@@ -1723,7 +1655,7 @@ pub enum WireSurfExpr {
     },
     TupleGet {
         expr: Box<WireSurfExpr>,
-        index: i64,
+        index: SourceInteger,
         span: Span,
     },
     Binary {
@@ -1779,7 +1711,7 @@ pub enum WireSurfExpr {
     },
     Vmap {
         expr: Box<WireSurfExpr>,
-        axis: Option<i64>,
+        axis: Option<SourceInteger>,
         span: Span,
     },
     Jit {
@@ -1844,19 +1776,19 @@ pub enum WireSurfExpr {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WireLiteral {
     Int {
-        value: i64,
+        value: SourceInteger,
     },
     Float {
-        value: f64,
+        value: SourceFloat,
     },
     /// Integer literal carrying an explicit precision suffix per spec
     /// §5.5. Suffix is one of `i8`/`i16`/`i32`/`i64`/`f32`/`f64`/`bf16`/`f16`.
     TypedInt {
-        value: i64,
+        value: SourceInteger,
         suffix: String,
     },
     TypedFloat {
-        value: f64,
+        value: SourceFloat,
         suffix: String,
     },
     Str {
@@ -2060,8 +1992,12 @@ pub struct WireRecordPatternField {
 ///   `InputAxis` metadata read. Chelis#1313 added the dedicated `Relu` and
 ///   `ReluAdjoint` identities to this unreleased exact schema.
 /// - `8`: literal call witnesses and explicit invocation dependencies and
-///   provenance. Requirement and dependency payloads use sealed int64 values.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 8;
+///   provenance. Requirement and dependency payloads used sealed int64 values.
+/// - `9`: exact stored IEEE bits, active-dtype random parameters, fixed-width
+///   numeric domains, and references validated in their declared owners.
+///   Shape dependencies are exact u64 node identities and literal-witness
+///   requirements use the fixed int64 extent carrier.
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 9;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
@@ -2132,21 +2068,21 @@ pub struct WireDag {
     /// Exact schema version of this serialized DAG surface.
     pub schema_version: u32,
     pub nodes: Vec<WireDagNode>,
-    pub roots: Vec<usize>,
+    pub roots: Vec<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
 struct WireDagFields {
     schema_version: u32,
     nodes: Vec<WireDagNode>,
-    roots: Vec<usize>,
+    roots: Vec<u64>,
 }
 
 #[derive(Serialize)]
 struct WireDagFieldsRef<'a> {
     schema_version: u32,
     nodes: &'a [WireDagNode],
-    roots: &'a [usize],
+    roots: &'a [u64],
 }
 
 impl Serialize for WireDag {
@@ -2172,22 +2108,13 @@ impl<'de> Deserialize<'de> for WireDag {
     where
         D: serde::Deserializer<'de>,
     {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        if !value.is_object() {
-            return Err(<D::Error as serde::de::Error>::custom(
-                "WireDag root must be a JSON object",
-            ));
-        }
-        let found = explicit_wire_dag_schema_version(&value)
-            .map_err(<D::Error as serde::de::Error>::custom)?;
+        let raw = Box::<serde_json::value::RawValue>::deserialize(deserializer)?;
+        let found =
+            envelopes::version(raw.get()).map_err(<D::Error as serde::de::Error>::custom)?;
         validate_explicit_wire_dag_schema_version(found)
             .map_err(<D::Error as serde::de::Error>::custom)?;
-
-        // The version gate above intentionally runs while nodes are still
-        // untyped JSON. Only an exact current-version payload may construct
-        // WireRiscOp.
         let fields: WireDagFields =
-            serde_json::from_value(value).map_err(<D::Error as serde::de::Error>::custom)?;
+            serde_json::from_str(raw.get()).map_err(<D::Error as serde::de::Error>::custom)?;
         let dag = Self {
             schema_version: fields.schema_version,
             nodes: fields.nodes,
@@ -2197,16 +2124,6 @@ impl<'de> Deserialize<'de> for WireDag {
             .map_err(<D::Error as serde::de::Error>::custom)?;
         Ok(dag)
     }
-}
-
-fn explicit_wire_dag_schema_version(
-    value: &serde_json::Value,
-) -> Result<Option<u32>, serde_json::Error> {
-    value
-        .get("schema_version")
-        .cloned()
-        .map(serde_json::from_value::<u32>)
-        .transpose()
 }
 
 fn validate_explicit_wire_dag_schema_version(found: Option<u32>) -> Result<(), WireDagSchemaError> {
@@ -2236,54 +2153,8 @@ impl WireDag {
 
     /// Validate fields whose exact encoding depends on surrounding DAG shape.
     pub fn validate_wire_contract(&self) -> Result<(), WireDagContractError> {
+        dag_domains::validate(self)?;
         for (index, node) in self.nodes.iter().enumerate() {
-            for dep in &node.shape_deps {
-                if dep.prim() != Prim::Int64
-                    || dep
-                        .as_i64_exact()
-                        .and_then(|value| usize::try_from(value).ok())
-                        .is_none_or(|value| value >= index || self.nodes[value].id != value)
-                {
-                    return Err(WireDagContractError::new(format!(
-                        "WireDag node {} shape dependency must be an int64 reference to an earlier node",
-                        node.id
-                    )));
-                }
-            }
-            if let WireRiscOp::ExtentWitness {
-                axis: WireRtAxis::Lit { value: axis },
-                requirements,
-                ..
-            } = &node.op
-            {
-                let input = (node.inputs.len() == 1)
-                    .then(|| node.inputs[0])
-                    .and_then(|id| {
-                        self.nodes
-                            .get(id)
-                            .filter(|input| input.id == id && id < index)
-                    });
-                if input.is_none_or(|input| {
-                    usize::try_from(*axis).map_or(true, |axis| axis >= input.output_type.dims.len())
-                }) {
-                    return Err(WireDagContractError::new(format!(
-                        "WireDag ExtentWitness node {} requires one earlier tensor and an in-range axis",
-                        node.id
-                    )));
-                }
-                if !node.output_type.dims.is_empty()
-                    || node.output_type.precision != "int64"
-                    || requirements.iter().any(|value| {
-                        value.prim() != Prim::Int64
-                            || value.as_i64_exact().is_none_or(|value| value < 0)
-                    })
-                {
-                    return Err(WireDagContractError::new(format!(
-                        "WireDag ExtentWitness node {} requires a scalar int64 output and nonnegative int64 requirements",
-                        node.id
-                    )));
-                }
-            }
             match &node.op {
                 WireRiscOp::Expand { size, .. } => {
                     validate_wire_rt_dim(&self.nodes, index, node, size, false, true, "Expand")?;
@@ -2367,7 +2238,7 @@ impl WireDag {
                         // time and cannot see the pairing, so the decoder
                         // checks it here, where both halves are in hand.
                         if matches!(end, WireRtDim::ToEnd)
-                            && !matches!(start, WireRtDim::Lit { value: 0 })
+                            && !matches!(start, WireRtDim::Lit { value } if value.get() == 0)
                         {
                             return Err(WireDagContractError::new(format!(
                                 "WireDag Shrink node {} pairs the to_end carrier with a start \
@@ -2507,7 +2378,11 @@ impl WireDag {
                 )));
             }
             let input_rank = input.output_type.dims.len();
-            if let Some(axis) = axes.iter().copied().find(|axis| *axis >= input_rank) {
+            if let Some(axis) = axes
+                .iter()
+                .copied()
+                .find(|axis| usize::try_from(*axis).map_or(true, |axis| axis >= input_rank))
+            {
                 return Err(WireDagContractError::new(format!(
                     "WireDag Count node {} axis {axis} is out of range for input rank {input_rank}",
                     node.id
@@ -2530,7 +2405,7 @@ impl WireDag {
                 .dims
                 .iter()
                 .enumerate()
-                .filter(|(axis, _)| !axes.contains(axis))
+                .filter(|(axis, _)| i32::try_from(*axis).map_or(true, |axis| !axes.contains(&axis)))
                 .map(|(_, dim)| dim)
                 .collect::<Vec<_>>();
             if expected_output_dims.len() != node.output_type.dims.len()
@@ -2559,23 +2434,10 @@ impl WireDag {
     /// [`WireDagSchemaError`], and an invalid exact-version cross-node shape
     /// surfaces as [`WireDagContractError`].
     pub fn from_validated_json(json: &str) -> Result<Self, WireDagDecodeError> {
-        let value: serde_json::Value =
-            serde_json::from_str(json).map_err(WireDagDecodeError::Parse)?;
-        if !value.is_object() {
-            return serde_json::from_value::<WireDagFields>(value)
-                .map(|fields| Self {
-                    schema_version: fields.schema_version,
-                    nodes: fields.nodes,
-                    roots: fields.roots,
-                })
-                .map_err(WireDagDecodeError::Parse);
-        }
-        let found = explicit_wire_dag_schema_version(&value).map_err(WireDagDecodeError::Parse)?;
+        let found = envelopes::version(json).map_err(WireDagDecodeError::Parse)?;
         validate_explicit_wire_dag_schema_version(found).map_err(WireDagDecodeError::Schema)?;
-
-        // Keep node JSON untyped until the exact schema stamp above succeeds.
         let fields: WireDagFields =
-            serde_json::from_value(value).map_err(WireDagDecodeError::Parse)?;
+            serde_json::from_str(json).map_err(WireDagDecodeError::Parse)?;
         let dag = Self {
             schema_version: fields.schema_version,
             nodes: fields.nodes,
@@ -2596,7 +2458,10 @@ fn validate_wire_rt_dim(
     allow_input_axis: bool,
     label: &str,
 ) -> Result<(), WireDagContractError> {
-    let resolve_slot = |slot: usize| -> Result<&WireDagNode, WireDagContractError> {
+    let resolve_slot = |wire_slot: u64| -> Result<&WireDagNode, WireDagContractError> {
+        let slot = usize::try_from(wire_slot).map_err(|_| {
+            WireDagContractError::new("runtime input reference exceeds host capacity")
+        })?;
         if slot == 0 || slot >= owner.inputs.len() {
             return Err(WireDagContractError::new(format!(
                 "WireDag {label} node {} references invalid input slot {slot} (inputs len {})",
@@ -2680,7 +2545,7 @@ fn validate_exact_wire_rt_dim_inputs<'a>(
         })
         .collect::<BTreeSet<_>>();
     for input in 1..owner.inputs.len() {
-        if !owned.contains(&input) {
+        if !owned.contains(&host_index(input)) {
             return Err(WireDagContractError::new(format!(
                 "WireDag {label} node {} has unowned runtime extent input slot {input}",
                 owner.id
@@ -2741,14 +2606,14 @@ impl std::error::Error for WireDagDecodeError {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireDagNode {
-    /// Tagged int64 references to earlier shape-only dependencies.
-    pub shape_deps: Vec<chelis_types::ScalarValue>,
+    /// Exact u64 references to earlier shape-only dependencies.
+    pub shape_deps: Vec<u64>,
     #[serde(deserialize_with = "require_explicit_span")]
     pub span_id: Option<String>,
     pub merged_spans: Vec<String>,
-    pub id: usize,
+    pub id: u64,
     pub op: WireRiscOp,
-    pub inputs: Vec<usize>,
+    pub inputs: Vec<u64>,
     pub output_type: WireTensorType,
 }
 
@@ -2767,15 +2632,20 @@ pub struct WireTensorType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WireDimInfo {
-    Named { name: String, size: Option<usize> },
-    Lit { size: usize },
+    Named {
+        name: String,
+        size: Option<NonnegativeExtent>,
+    },
+    Lit {
+        size: NonnegativeExtent,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WireDimExpr {
     Concrete {
-        value: usize,
+        value: NonnegativeExtent,
     },
     Sym {
         name: String,
@@ -2826,8 +2696,8 @@ pub enum WireFusedStepOp {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WireFusedInput {
-    External { index: usize },
-    PreviousStep { index: usize },
+    External { index: u64 },
+    PreviousStep { index: u64 },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -2851,11 +2721,11 @@ pub enum WireExtremaOperand {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "bound", rename_all = "snake_case")]
 pub enum WireRtDim {
-    Lit { value: usize },
+    Lit { value: NonnegativeExtent },
     ToEnd,
-    Node { input: usize },
+    Node { input: u64 },
     Sym { name: String },
-    InputAxis { tensor: usize, axis: WireRtAxis },
+    InputAxis { tensor: u64, axis: WireRtAxis },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2896,16 +2766,16 @@ pub enum WireRiscOp {
     Ceil,
     Round,
     UniformLike {
-        low: f64,
-        high: f64,
+        low: ScalarValue,
+        high: ScalarValue,
         seed: u64,
     },
     Dropout {
-        rate: f64,
+        rate: ScalarValue,
         seed: u64,
     },
     Sum {
-        axis: usize,
+        axis: i32,
         /// Accumulator precision, populated per spec/04-type-system.md
         /// §5.7.1. Defaults are resolved before lowering, so this is
         /// always concrete in the wire schema.
@@ -2918,23 +2788,23 @@ pub enum WireRiscOp {
     /// order and range against the referenced input before encoding or after
     /// exact-version decoding.
     Count {
-        axes: Vec<usize>,
+        axes: Vec<i32>,
     },
     MaxReduce {
-        axis: usize,
+        axis: i32,
     },
     MinReduce {
-        axis: usize,
+        axis: i32,
     },
     ProdReduce {
-        axis: usize,
+        axis: i32,
     },
     ReduceWindow {
         /// One of "max" / "min" / "sum" / "mean", matching the Surf
         /// builtin name suffix and `chelis_ir::dag::ReduceWindowKind`.
         reducer: String,
-        window_shape: Vec<usize>,
-        strides: Vec<usize>,
+        window_shape: Vec<NonnegativeExtent>,
+        strides: Vec<NonnegativeExtent>,
     },
     /// Reverse-mode adjoint of `ReduceWindow` (`RiscOp::ReduceWindowGrad`).
     /// Carries the same `reducer` / window / stride contract; appears only
@@ -2942,27 +2812,27 @@ pub enum WireRiscOp {
     ReduceWindowGrad {
         /// One of "max" / "min" / "sum" / "mean", as for `ReduceWindow`.
         reducer: String,
-        window_shape: Vec<usize>,
-        strides: Vec<usize>,
+        window_shape: Vec<NonnegativeExtent>,
+        strides: Vec<NonnegativeExtent>,
     },
     Argmax {
-        axis: usize,
+        axis: i32,
     },
     Argmin {
-        axis: usize,
+        axis: i32,
     },
     Reshape {
         new_shape: Vec<WireRtDim>,
     },
     Permute {
-        axes: Vec<usize>,
+        axes: Vec<i32>,
     },
     Expand {
-        axis: usize,
+        axis: i32,
         size: WireRtDim,
     },
     OneHot {
-        vocab: usize,
+        vocab: NonnegativeExtent,
     },
     Pad {
         padding: Vec<(WireRtDim, WireRtDim)>,
@@ -2975,20 +2845,20 @@ pub enum WireRiscOp {
         strides: Vec<WireRtDim>,
     },
     Const {
-        /// Sealed dtype-tagged scalar (wire v4; finalize-on-decode).
+        /// Sealed dtype-tagged scalar (wire v9; exact stored-bit transport).
         value: chelis_types::ScalarValue,
     },
     ConstTensor {
-        /// Sealed per-dtype storage (wire v4; finalize-on-decode).
+        /// Sealed per-dtype storage (wire v9; exact stored-bit transport).
         data: chelis_types::TensorStorage,
     },
     Shape {
-        axis: usize,
+        axis: i32,
     },
     ExtentWitness {
         parameter: String,
         axis: WireRtAxis,
-        requirements: Vec<chelis_types::ScalarValue>,
+        requirements: Vec<NonnegativeExtent>,
     },
     Load {
         name: String,
@@ -3019,16 +2889,16 @@ pub enum WireRiscOp {
         accumulator: String,
     },
     Gather {
-        axis: usize,
+        axis: i32,
     },
     ScatterAdd {
-        axis: usize,
+        axis: i32,
     },
     Scatter {
-        axis: usize,
+        axis: i32,
     },
     ScatterElements {
-        axis: usize,
+        axis: i32,
     },
 }
 
@@ -3109,9 +2979,7 @@ mod tests {
         let witness = WireRiscOp::ExtentWitness {
             parameter: "x".into(),
             axis: WireRtAxis::Lit { value: 0 },
-            requirements: vec![
-                chelis_types::scalar_from_i64("load", chelis_types::types::Prim::Int64, 4).unwrap(),
-            ],
+            requirements: vec![NonnegativeExtent::new(4).unwrap()],
         };
         let json = serde_json::to_value(&witness).unwrap();
         let back: WireRiscOp = serde_json::from_value(json.clone()).unwrap();
@@ -3201,6 +3069,9 @@ mod tests {
         let current_with_legacy_fill = serde_json::json!({
             "schema_version": WIRE_DAG_SCHEMA_VERSION,
             "nodes": [{
+                "shape_deps": [],
+                "span_id": null,
+                "merged_spans": [],
                 "id": 0,
                 "op": {"kind": "pad", "padding": [], "fill": 1.5},
                 "inputs": [],
@@ -3362,10 +3233,13 @@ mod tests {
             other => panic!("expected scatter wire op, got {other:?}"),
         }
 
-        let one_hot = serde_json::to_string(&WireRiscOp::OneHot { vocab: 7 }).unwrap();
+        let one_hot = serde_json::to_string(&WireRiscOp::OneHot {
+            vocab: NonnegativeExtent::new(7).unwrap(),
+        })
+        .unwrap();
         assert_eq!(one_hot, r#"{"kind":"one_hot","vocab":7}"#);
         match serde_json::from_str::<WireRiscOp>(&one_hot).unwrap() {
-            WireRiscOp::OneHot { vocab } => assert_eq!(vocab, 7),
+            WireRiscOp::OneHot { vocab } => assert_eq!(vocab.get(), 7),
             other => panic!("expected one_hot wire op, got {other:?}"),
         }
     }
@@ -3435,8 +3309,10 @@ mod tests {
 
     #[test]
     fn relu_wire_contract_rejects_wrong_arity_dtype_and_shape() {
-        let ty = |precision: &str, size: usize| WireTensorType {
-            dims: vec![WireDimInfo::Lit { size }],
+        let ty = |precision: &str, size: i64| WireTensorType {
+            dims: vec![WireDimInfo::Lit {
+                size: NonnegativeExtent::new(size).unwrap(),
+            }],
             precision: precision.to_string(),
         };
         let load = |id, precision: &str, size| WireDagNode {
@@ -3523,7 +3399,9 @@ mod tests {
         // reads back.
         let ty = WireInferredType::Ref {
             inner: Box::new(WireInferredType::Tensor {
-                dims: vec![WireInferredDim::Lit { size: 4 }],
+                dims: vec![WireInferredDim::Lit {
+                    size: NonnegativeExtent::new(4).unwrap(),
+                }],
                 precision: WireInferredPrecision::Concrete {
                     name: "f32".to_string(),
                 },
@@ -3585,8 +3463,14 @@ mod tests {
         ] {
             let op = WireRiscOp::ReduceWindow {
                 reducer: reducer.to_string(),
-                window_shape: vec![2, 3],
-                strides: vec![1, 2],
+                window_shape: [2, 3]
+                    .into_iter()
+                    .map(|value| NonnegativeExtent::new(value).unwrap())
+                    .collect(),
+                strides: [1, 2]
+                    .into_iter()
+                    .map(|value| NonnegativeExtent::new(value).unwrap())
+                    .collect(),
             };
             let json = serde_json::to_string(&op).unwrap();
             assert_eq!(
@@ -3602,8 +3486,20 @@ mod tests {
                     strides,
                 } => {
                     assert_eq!(reducer, kind);
-                    assert_eq!(window_shape, vec![2, 3]);
-                    assert_eq!(strides, vec![1, 2]);
+                    assert_eq!(
+                        window_shape
+                            .into_iter()
+                            .map(NonnegativeExtent::get)
+                            .collect::<Vec<_>>(),
+                        vec![2, 3]
+                    );
+                    assert_eq!(
+                        strides
+                            .into_iter()
+                            .map(NonnegativeExtent::get)
+                            .collect::<Vec<_>>(),
+                        vec![1, 2]
+                    );
                 }
                 other => panic!("expected reduce_window wire op, got {other:?}"),
             }
@@ -3619,8 +3515,14 @@ mod tests {
         for kind in ["max", "min", "sum", "mean"] {
             let op = WireRiscOp::ReduceWindowGrad {
                 reducer: kind.to_string(),
-                window_shape: vec![2, 3],
-                strides: vec![1, 2],
+                window_shape: [2, 3]
+                    .into_iter()
+                    .map(|value| NonnegativeExtent::new(value).unwrap())
+                    .collect(),
+                strides: [1, 2]
+                    .into_iter()
+                    .map(|value| NonnegativeExtent::new(value).unwrap())
+                    .collect(),
             };
             let json = serde_json::to_string(&op).unwrap();
             assert_eq!(
@@ -3636,8 +3538,20 @@ mod tests {
                     strides,
                 } => {
                     assert_eq!(reducer, kind);
-                    assert_eq!(window_shape, vec![2, 3]);
-                    assert_eq!(strides, vec![1, 2]);
+                    assert_eq!(
+                        window_shape
+                            .into_iter()
+                            .map(NonnegativeExtent::get)
+                            .collect::<Vec<_>>(),
+                        vec![2, 3]
+                    );
+                    assert_eq!(
+                        strides
+                            .into_iter()
+                            .map(NonnegativeExtent::get)
+                            .collect::<Vec<_>>(),
+                        vec![1, 2]
+                    );
                 }
                 other => panic!("expected reduce_window_grad wire op, got {other:?}"),
             }
@@ -3800,7 +3714,8 @@ mod diagnostic_projection_contract {
     /// chelis#1395 — cited rather than restated so a reader can check it.
     #[test]
     fn a_coordinate_without_an_identity_travels_as_a_point() {
-        let derived = Diagnostic::from_check_error(&check_error(K::Other, Some(30), None));
+        let derived =
+            Diagnostic::try_from_check_error(&check_error(K::Other, Some(30), None)).unwrap();
         assert_eq!(derived.span, Some(DiagnosticSpan::Point { offset: 30 }));
         assert_eq!(derived.span.map(|span| span.extent()), Some(None));
     }
@@ -3812,7 +3727,8 @@ mod diagnostic_projection_contract {
     #[test]
     fn a_degenerate_identity_is_a_point_not_a_zero_width_range() {
         let derived =
-            Diagnostic::from_check_error(&check_error(K::Other, Some(77), Some("surf:77..77")));
+            Diagnostic::try_from_check_error(&check_error(K::Other, Some(77), Some("surf:77..77")))
+                .unwrap();
         assert_eq!(derived.span, Some(DiagnosticSpan::Point { offset: 77 }));
     }
 
@@ -3857,7 +3773,8 @@ mod diagnostic_projection_contract {
         // A producer with no location at all still reports nothing. `Point`
         // exists for a coordinate the producer HELD, never for one it lacked.
         assert!(
-            Diagnostic::from_check_error(&check_error(K::Other, None, None))
+            Diagnostic::try_from_check_error(&check_error(K::Other, None, None))
+                .unwrap()
                 .span
                 .is_none(),
             "no location at all must stay absent"
@@ -3906,7 +3823,7 @@ mod diagnostic_projection_contract {
                 check_error(K::Other, Some(30), Some("surf:99..104")),
             ),
         ] {
-            let span = Diagnostic::from_check_error(&error).span;
+            let span = Diagnostic::try_from_check_error(&error).unwrap().span;
             assert_eq!(
                 span,
                 Some(DiagnosticSpan::Point { offset: 30 }),
@@ -3924,11 +3841,12 @@ mod diagnostic_projection_contract {
     /// range loses nothing a consumer previously had.
     #[test]
     fn an_opaque_identity_travels_without_a_range() {
-        let projected = Diagnostic::from_check_error(&check_error(
+        let projected = Diagnostic::try_from_check_error(&check_error(
             K::Other,
             Some(30),
             Some("octant:theorem-7"),
-        ));
+        ))
+        .unwrap();
         assert_eq!(projected.span_id.as_deref(), Some("octant:theorem-7"));
         // Both travel: [04-FIT-16] requires the coordinate and the identity
         // to be independently carryable, so an opaque identity that yields no

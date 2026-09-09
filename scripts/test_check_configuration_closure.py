@@ -362,6 +362,113 @@ class MatrixCoverageTests(unittest.TestCase):
 
 
 class SourceReconciliationTests(unittest.TestCase):
+    def test_wire_driver_has_one_exact_executable_owner(self) -> None:
+        from capacity_census_wire_calls import DRIVER
+
+        selected = tuple(
+            entry for entry in CLOSURE.UNCOMPILED_EXCEPTIONS
+            if entry.directory == Path(DRIVER).parent.as_posix()
+        )
+        self.assertEqual(len(selected), 1, "the standalone Clippy driver needs its owner")
+        self.assertEqual(selected[0].sources, (DRIVER,))
+        self.assertEqual(selected[0].owning_gate, "scripts/capacity_census_wire_calls.py")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(("git", "init", "--quiet"), cwd=root, check=True)
+            for name in (DRIVER, selected[0].owning_gate, "src/compiled.rs"):
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("", encoding="utf-8")
+            deps = root / "target/debug/deps"
+            deps.mkdir(parents=True)
+            (deps / "unit.d").write_text(
+                "target/debug/deps/x.rmeta: src/compiled.rs\n", encoding="utf-8"
+            )
+
+            def reconcile(owners=selected):
+                CLOSURE.check_every_source_is_compiled(
+                    (root / "target/debug",), root,
+                    exceptions=owners, nightly_only=(), require_complete=True,
+                )
+
+            reconcile()
+            with self.assertRaisesRegex(CLOSURE.ConfigurationClosureFailure, "wire_calls/driver.rs"):
+                reconcile(())
+            owner = root / selected[0].owning_gate
+            owner.unlink()
+            with self.assertRaisesRegex(CLOSURE.ConfigurationClosureFailure, "missing owning gate"):
+                reconcile()
+            owner.write_text("", encoding="utf-8")
+            for relative in ("extra.rs", "nested/extra.rs"):
+                extra = root / selected[0].directory / relative
+                extra.parent.mkdir(parents=True, exist_ok=True)
+                extra.write_text("", encoding="utf-8")
+                with self.assertRaisesRegex(CLOSURE.ConfigurationClosureFailure, "exact fixture inventory"):
+                    reconcile()
+                extra.unlink()
+            driver = root / DRIVER
+            driver.unlink()
+            with self.assertRaisesRegex(CLOSURE.ConfigurationClosureFailure, "exact fixture inventory"):
+                reconcile()
+
+    def test_cache_compile_fixtures_are_exact_owned_sources_not_a_directory_pass(self):
+        from dataclasses import replace
+        from capacity_census_cache_publication import COMPILE_CASES
+
+        name = "crates/chelis-compiler-api/tests/fixtures/cache_publication"
+        selected = tuple(x for x in CLOSURE.UNCOMPILED_EXCEPTIONS if x.directory == name)
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0].sources, tuple(c.fixture for c in COMPILE_CASES))
+        self.assertEqual(selected[0].owning_gate, "scripts/capacity_census_cache_publication.py")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(("git", "init", "--quiet"), cwd=root, check=True)
+            for source in (*selected[0].sources, selected[0].owning_gate, "src/compiled.rs"):
+                path = root / source
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("")
+            deps = root / "target/debug/deps"
+            deps.mkdir(parents=True)
+            (deps / "unit.d").write_text("target/debug/deps/x.rmeta: src/compiled.rs\n")
+            args = ((root / "target/debug",), root)
+            CLOSURE.check_every_source_is_compiled(*args, exceptions=selected, nightly_only=())
+            with self.assertRaisesRegex(CLOSURE.ConfigurationClosureFailure, "fixture inventory"):
+                CLOSURE.check_every_source_is_compiled(
+                    *args,
+                    exceptions=(replace(selected[0], sources=()),),
+                    nightly_only=(),
+                )
+            extra = root / name / "nested/undriven.rs"
+            extra.parent.mkdir()
+            extra.write_text("")
+            with self.assertRaisesRegex(CLOSURE.ConfigurationClosureFailure, "fixture inventory"):
+                CLOSURE.check_every_source_is_compiled(*args, exceptions=selected, nightly_only=())
+            extra.unlink()
+            (root / selected[0].sources[0]).unlink()
+            with self.assertRaisesRegex(CLOSURE.ConfigurationClosureFailure, "fixture inventory"):
+                CLOSURE.check_every_source_is_compiled(*args, exceptions=selected, nightly_only=())
+
+    def test_historical_producer_requires_real_dep_info_without_an_exception(self):
+        source = "crates/chelis-compiler-api/tests/fixtures/cache_wire_v3/producer.rs"
+        self.assertFalse(any(source.startswith(x.directory + "/") for x in CLOSURE.UNCOMPILED_EXCEPTIONS))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(("git", "init", "--quiet"), cwd=root, check=True)
+            path = root / source
+            path.parent.mkdir(parents=True)
+            path.write_text("")
+            (root / "src").mkdir()
+            (root / "src/compiled.rs").write_text("")
+            deps = root / "target/debug/deps"
+            deps.mkdir(parents=True)
+            info = deps / "unit.d"
+            info.write_text("target/debug/deps/x.rmeta: src/compiled.rs\n")
+            args = ((root / "target/debug",), root)
+            with self.assertRaisesRegex(CLOSURE.ConfigurationClosureFailure, "cache_wire_v3/producer.rs"):
+                CLOSURE.check_every_source_is_compiled(*args, exceptions=(), nightly_only=())
+            info.write_text("target/debug/deps/x.rmeta: src/compiled.rs " + source + "\n")
+            CLOSURE.check_every_source_is_compiled(*args, exceptions=(), nightly_only=())
+
     def test_names_a_source_no_configuration_compiled(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -604,6 +711,12 @@ class SourceReconciliationTests(unittest.TestCase):
         for exception in CLOSURE.UNCOMPILED_EXCEPTIONS:
             directory = REPO_ROOT / exception.directory
             self.assertTrue(directory.is_dir(), exception.directory)
+            if exception.sources:
+                self.assertEqual(
+                    {path.relative_to(REPO_ROOT).as_posix() for path in directory.rglob("*.rs")},
+                    set(exception.sources),
+                )
+                continue
             self.assertTrue(
                 any(directory.rglob("Cargo.toml")),
                 f"{exception.directory} must hold standalone Cargo projects",

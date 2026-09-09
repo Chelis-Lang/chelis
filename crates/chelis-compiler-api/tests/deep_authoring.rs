@@ -274,7 +274,7 @@ fn rename_fails_closed_on_stale_preimage_and_cascades_calls() {
         ok.module_deep
             .contains("(app {} (var {} renamed) (var {} x))")
     );
-    assert_eq!(ok.renamed_references, 1);
+    assert_eq!(ok.renamed_references.get(), 1);
     assert_full_check_has_no_fitness_errors(&ok.module_deep);
 }
 
@@ -354,7 +354,7 @@ fn replace_function_and_change_signature_validate_whole_module() {
             .module_deep
             .contains("(app {} (var {} pair) (var {} b) (var {} a))")
     );
-    assert_eq!(changed.rewritten_calls, 1);
+    assert_eq!(changed.rewritten_calls.get(), 1);
     assert_full_check_has_no_fitness_errors(&changed.module_deep);
 }
 
@@ -392,7 +392,7 @@ fn change_signature_rewrites_property_precondition_metadata_calls() {
         "property precondition call arguments must be reordered: {}",
         changed.module_deep
     );
-    assert_eq!(changed.rewritten_calls, 1);
+    assert_eq!(changed.rewritten_calls.get(), 1);
     assert_full_check_has_no_fitness_errors(&changed.module_deep);
 }
 

@@ -770,7 +770,7 @@ fn each_tool_dispatches_successfully() {
             json!({
                 "source_kind":"surf",
                 "source":LOSS_PROGRAM,
-                "bindings":{"x":{"shape":[4],"data":{"dtype":"f32","values":[1.0,2.0,3.0,4.0]}}}
+                "bindings":{"x":{"shape":[4],"data":{"dtype":"f32","bits":["3f800000","40000000","40400000","40800000"]}}}
             }),
         ),
         (

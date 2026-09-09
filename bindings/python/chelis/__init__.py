@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import math
 from pathlib import Path
+import re
+import sys
 from typing import Any, Mapping
 
 import numpy as np
+from ml_dtypes import bfloat16
 from safetensors.numpy import load_file as _load_safetensors_file
 from safetensors.numpy import save_file as _save_safetensors_file
 
@@ -83,13 +87,14 @@ class CompileResult:
 
 @dataclass(frozen=True)
 class TensorValue:
-    """A decoded wire tensor (execution wire v2, chelis#729).
+    """A decoded wire tensor (execution wire v3, spec/10 §3.2).
 
     ``dtype`` is the element dtype tag (``f64``/``f32``/``f16``/``bf16``/
     ``int64``/``int32``/``int16``/``int8``/``bool``); ``data`` carries the
     elements exactly at that dtype (Python ints for the integer families,
-    floats for the float families, bools for ``bool``), so exact int64
-    payloads survive the boundary (the old np.float64 collapse is gone).
+    NumPy own-width scalars for the float families, ``ml_dtypes.bfloat16``
+    for bf16, bools for ``bool``). Float transport preserves every stored
+    bit, including signaling NaNs; ``float(value)`` is an explicit conversion.
     """
 
     shape: tuple[int, ...]
@@ -319,9 +324,9 @@ def eval(
 ) -> EvalResult:
     """Evaluate Chelis source.
 
-    Tensor inputs cross the boundary as per-dtype payloads (execution wire
-    v2, chelis#729): the numpy array's dtype selects the wire tag, so
-    integer tensors stay exact end-to-end. uint8/uint16/uint32 widen
+    Tensor inputs cross the boundary as per-dtype stored-bit payloads (execution
+    wire v3): the numpy array's dtype selects the wire tag. Integers and float
+    bits stay exact end-to-end. uint8/uint16/uint32 widen
     losslessly to int16/int32/int64; u64 and unmapped float widths raise
     `ChelisError` until the caller chooses an explicit numpy cast. Zero-copy
     execution of compiled artifacts belongs to `chelis.load()` in Phase
@@ -355,6 +360,21 @@ def eval(
             project_root=native_project_root,
         )
     )
+    return _eval_result(payload)
+
+
+def _eval_result(payload: dict[str, Any]) -> EvalResult:
+    if not isinstance(payload, dict) or type(payload.get("schema_version")) is not int or payload["schema_version"] != 3:
+        raise ValueError("execution schema_version must be exactly 3 before decoding values")
+    # The compiler's root manifest is routing metadata; this facade projects
+    # evaluated values. The codec omits an empty transcript.
+    _object(payload, {"schema_version", "roots"}, {"manifest", "transcript"})
+    roots = _array(payload["roots"])
+    for root in roots:
+        _object(root, {"node_id", "value"}, {"name"})
+        _integer(root["node_id"], 0, 2**64 - 1)
+        if root.get("name") is not None:
+            _string(root["name"])
     return EvalResult(
         roots=tuple(
             EvaluatedRoot(
@@ -362,9 +382,9 @@ def eval(
                 name=root.get("name"),
                 value=_execution_value(root["value"]),
             )
-            for root in payload["roots"]
+            for root in roots
         ),
-        transcript=tuple(str(item) for item in payload.get("transcript", [])),
+        transcript=tuple(_string(item) for item in _array(payload.get("transcript", []))),
     )
 
 
@@ -387,7 +407,18 @@ def load_safetensors(path: str | Path) -> dict[str, ChelisTensor]:
 
 
 def _decode_json(payload: str) -> dict[str, Any]:
-    return json.loads(payload)
+    def object_pairs(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON member: {key}")
+            result[key] = value
+        return result
+
+    def invalid_constant(value):
+        raise ValueError(f"invalid JSON constant: {value}")
+
+    return json.loads(payload, object_pairs_hook=object_pairs, parse_constant=invalid_constant)
 
 
 def _wrap_compiled_output(value: Any) -> Any:
@@ -447,60 +478,145 @@ def _diagnostic(payload: dict[str, Any]) -> Diagnostic:
 
 
 _INT_DTYPES = ("int64", "int32", "int16", "int8")
-_FLOAT_DTYPES = ("f64", "f32", "f16", "bf16")
+_FLOAT_DTYPES = {
+    "f64": np.dtype(np.float64),
+    "f32": np.dtype(np.float32),
+    "f16": np.dtype(np.float16),
+    "bf16": np.dtype(bfloat16),
+}
+
+
+def _object(value: Any, required: set[str], optional: set[str] = frozenset()) -> dict[str, Any]:
+    if type(value) is not dict or not required <= value.keys() or not value.keys() <= required | optional:
+        raise ValueError(f"wire object requires {sorted(required)} and only optional {sorted(optional)}")
+    return value
+
+
+def _array(value: Any) -> list[Any]:
+    if type(value) is not list:
+        raise ValueError("wire array must be a JSON array")
+    return value
+
+
+def _string(value: Any) -> str:
+    if type(value) is not str:
+        raise ValueError("wire string must be a JSON string")
+    return value
+
+
+def _integer(value: Any, minimum: int, maximum: int) -> int:
+    if type(value) is not int or not minimum <= value <= maximum:
+        raise ValueError(f"wire integer must be in [{minimum}, {maximum}]")
+    return value
+
+
+def _boolean(value: Any) -> bool:
+    if type(value) is not bool:
+        raise ValueError("wire boolean must be a JSON boolean")
+    return value
+
+
+def _signed_integer(value: Any, dtype: str) -> int:
+    width = np.dtype(dtype).itemsize * 8
+    return _integer(value, -(1 << (width - 1)), (1 << (width - 1)) - 1)
+
+
+def _float_bits(value: Any, dtype: str) -> int:
+    digits = _FLOAT_DTYPES[dtype].itemsize * 2
+    if type(value) is not str or re.fullmatch(f"[0-9a-f]{{{digits}}}", value) is None:
+        raise ValueError(f"{dtype} bits require exactly {digits} lowercase hexadecimal digits")
+    return int(value, 16)
+
+
+def _float_values(bits: list[int], dtype: str) -> np.ndarray[Any, Any]:
+    element_type = _FLOAT_DTYPES[dtype]
+    # Construct integers and reinterpret storage; a float conversion can quiet a
+    # signaling NaN or replace its payload. Scalar extraction retains NumPy types.
+    return np.array(bits, dtype=f"u{element_type.itemsize}").view(element_type)
+
+
+def _numeric_scalar(payload: Any) -> Any:
+    if type(payload) is not dict:
+        raise ValueError("numeric carrier must be an object")
+    dtype = _string(payload.get("dtype"))
+    if dtype in _FLOAT_DTYPES:
+        _object(payload, {"dtype", "bits"})
+        return _float_values([_float_bits(payload["bits"], dtype)], dtype)[0]
+    if dtype in _INT_DTYPES:
+        _object(payload, {"dtype", "value"})
+        return np.dtype(dtype).type(_signed_integer(payload["value"], dtype))
+    raise ValueError(f"unknown numeric scalar dtype: {dtype}")
 
 
 def _tensor_value(payload: dict[str, Any]) -> TensorValue:
+    _object(payload, {"shape", "data"})
+    shape = tuple(_integer(dim, 0, 2**63 - 1) for dim in _array(payload["shape"]))
+    if len(shape) > 2**31 - 1:
+        raise ValueError("tensor rank exceeds int32")
     data = payload["data"]
-    dtype = data["dtype"]
-    values = data["values"]
+    if type(data) is not dict:
+        raise ValueError("tensor storage must be an object")
+    dtype = _string(data.get("dtype"))
+    if dtype not in _INT_DTYPES and dtype not in _FLOAT_DTYPES and dtype != "bool":
+        raise ValueError(f"unknown tensor element dtype: {dtype}")
+    field = "bits" if dtype in _FLOAT_DTYPES else "values"
+    _object(data, {"dtype", field})
+    values = _array(data[field])
+    width = _FLOAT_DTYPES[dtype].itemsize if dtype in _FLOAT_DTYPES else np.dtype(dtype).itemsize
+    count = 0 if 0 in shape else math.prod(shape)
+    if count > sys.maxsize // width:
+        raise ValueError("tensor storage exceeds host byte capacity")
+    if len(values) != count:
+        raise ValueError("tensor shape product does not equal its element count")
     if dtype in _INT_DTYPES:
-        decoded = tuple(int(value) for value in values)
+        decoded = tuple(_signed_integer(value, dtype) for value in values)
     elif dtype in _FLOAT_DTYPES:
-        decoded = tuple(float(value) for value in values)
-    elif dtype == "bool":
-        decoded = tuple(bool(value) for value in values)
+        bits = [_float_bits(value, dtype) for value in values]
+        decoded = tuple(_float_values(bits, dtype))
     else:
-        raise ChelisError(f"unknown tensor element dtype: {dtype}")
-    return TensorValue(
-        shape=tuple(int(dim) for dim in payload["shape"]),
-        data=decoded,
-        dtype=dtype,
-    )
+        decoded = tuple(_boolean(value) for value in values)
+    return TensorValue(shape=shape, data=decoded, dtype=dtype)
 
 
 def _execution_value(payload: dict[str, Any]) -> Any:
-    kind = payload["type"]
+    if type(payload) is not dict:
+        raise ValueError("execution value must be an object")
+    kind = _string(payload.get("type"))
+    members = {
+        "tensor": {"value"}, "scalar": {"value"}, "bool": {"value"},
+        "string": {"value"}, "list": {"value"}, "tuple": {"value"},
+        "dict": {"entries"}, "adt": {"ctor", "fields"}, "unit": set(),
+    }
+    if kind not in members:
+        raise ValueError(f"unknown execution value type: {kind}")
+    _object(payload, {"type"} | members[kind])
     if kind == "tensor":
         return _tensor_value(payload["value"])
-    if kind in ("int8", "int16", "int32", "int64"):
-        return int(payload["value"])
-    if kind in ("float16", "bfloat16", "float32", "float64"):
-        return float(payload["value"])
+    if kind == "scalar":
+        return _numeric_scalar(payload["value"])
     if kind == "bool":
-        return bool(payload["value"])
+        return _boolean(payload["value"])
     if kind == "string":
-        return str(payload["value"])
-    if kind == "list":
-        return tuple(_execution_value(item) for item in payload["value"])
+        return _string(payload["value"])
+    if kind in ("list", "tuple"):
+        return tuple(_execution_value(item) for item in _array(payload["value"]))
     if kind == "dict":
+        entries = _array(payload["entries"])
+        for entry in entries:
+            _object(entry, {"key", "value"})
         return {
             _execution_value(entry["key"]): _execution_value(entry["value"])
-            for entry in payload["entries"]
+            for entry in entries
         }
-    if kind == "tuple":
-        return tuple(_execution_value(item) for item in payload["value"])
     if kind == "adt":
         return AdtValue(
-            ctor=payload["ctor"],
-            fields=tuple(_execution_value(item) for item in payload["fields"]),
+            ctor=_string(payload["ctor"]),
+            fields=tuple(_execution_value(item) for item in _array(payload["fields"])),
         )
-    if kind == "unit":
-        return ()
-    raise ChelisError(f"unknown execution value type: {kind}")
+    return ()
 
 
-# numpy kind/itemsize -> execution wire v2 dtype tag. Unsigned widths that
+# numpy kind/itemsize -> execution wire v3 dtype tag. Unsigned widths that
 # fit exactly in the next signed family widen losslessly; u64 and every
 # other unmapped dtype are rejected rather than falling through an f64
 # funnel.
@@ -521,13 +637,18 @@ _NUMPY_WIRE_DTYPES: dict[tuple[str, int], str] = {
 
 def _tensor_value_payload(value: Any) -> dict[str, Any]:
     array = _tensor_to_numpy(value)
-    dtype = _NUMPY_WIRE_DTYPES.get((array.dtype.kind, array.dtype.itemsize))
+    dtype = ("bf16" if array.dtype.newbyteorder("=") == np.dtype(bfloat16)
+             else _NUMPY_WIRE_DTYPES.get((array.dtype.kind, array.dtype.itemsize)))
+    field = "values"
     if dtype in _INT_DTYPES:
         flat = [int(v) for v in array.reshape(-1)]
     elif dtype == "bool":
         flat = [bool(v) for v in array.reshape(-1)]
     elif dtype in _FLOAT_DTYPES:
-        flat = [float(v) for v in array.reshape(-1)]
+        width = array.dtype.itemsize
+        unsigned = np.dtype(f"u{width}").newbyteorder(array.dtype.byteorder)
+        flat = [f"{int(v):0{width * 2}x}" for v in array.view(unsigned).reshape(-1)]
+        field = "bits"
     else:
         raise ChelisError(
             f"unsupported tensor ingress dtype `{array.dtype}`: the execution wire has no "
@@ -537,7 +658,7 @@ def _tensor_value_payload(value: Any) -> dict[str, Any]:
         )
     return {
         "shape": [int(dim) for dim in array.shape],
-        "data": {"dtype": dtype, "values": flat},
+        "data": {"dtype": dtype, field: flat},
     }
 
 

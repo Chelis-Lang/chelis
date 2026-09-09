@@ -1,9 +1,12 @@
-//! Execution-wire v2 mechanics (chelis#729 Phase 1, section C3's wire
+//! Execution-wire version migration mechanics (chelis#729 Phase 1, section C3's wire
 //! layer; the rt857 F5 negative-parity suite). Locks the versioning
 //! mechanics recorded at `schema::EXECUTION_VALUE_SCHEMA_VERSION` and
 //! the tagged per-dtype payload's exactness both directions.
 
-use chelis_compiler_api::schema::{EvalResult, ExecutionValue, TensorElements, TensorValue};
+#[path = "../../../tests/support/wire_values.rs"]
+mod wire_values;
+
+use chelis_compiler_api::schema::{EvalResult, ExecutionValue, TensorValue};
 
 /// A version-less result payload is REJECTED naming the field (the v1
 /// compat default was deleted at the chelis#729 rework: every
@@ -23,7 +26,7 @@ fn versionless_result_is_rejected_naming_the_field() {
 /// rejected with a message naming the field and both versions.
 #[test]
 fn stale_or_unknown_schema_version_is_rejected_naming_the_field() {
-    for version in [1u32, 3, 999] {
+    for version in [1u32, 2, 999] {
         let payload = format!(r#"{{"schema_version":{version},"roots":[]}}"#);
         let err = serde_json::from_str::<EvalResult>(&payload)
             .expect_err("a non-current schema_version must not parse");
@@ -31,7 +34,7 @@ fn stale_or_unknown_schema_version_is_rejected_naming_the_field() {
         assert!(
             msg.contains("schema_version")
                 && msg.contains(&version.to_string())
-                && msg.contains('2'),
+                && msg.contains('3'),
             "the rejection must name the field, the stale version, and the \
              supported version; got: {msg}"
         );
@@ -41,7 +44,7 @@ fn stale_or_unknown_schema_version_is_rejected_naming_the_field() {
 /// A freshly produced result stamps the current version (negative parity
 /// for the default above: the field is present on the wire, not elided).
 #[test]
-fn produced_result_stamps_v2() {
+fn produced_result_stamps_v3() {
     let result = EvalResult {
         schema_version: chelis_compiler_api::schema::EXECUTION_VALUE_SCHEMA_VERSION,
         roots: vec![],
@@ -50,19 +53,19 @@ fn produced_result_stamps_v2() {
     };
     let json = serde_json::to_string(&result).expect("serialize");
     assert!(
-        json.contains(r#""schema_version":2"#),
+        json.contains(r#""schema_version":3"#),
         "the version stamp must be on the wire; got: {json}"
     );
 }
 
-/// Exact int64 above 2^53 survives the v2 payload in BOTH directions
+/// Exact int64 above 2^53 survives the v3 payload in BOTH directions
 /// (the chelis#686 capacity fix this wire break exists for).
 #[test]
-fn v2_int64_payload_is_exact_above_2p53_both_directions() {
+fn v3_int64_payload_is_exact_above_2p53_both_directions() {
     let tensor = ExecutionValue::Tensor {
         value: TensorValue {
             shape: vec![2],
-            data: TensorElements::Int64(vec![9007199254740993, -9007199254740993]),
+            data: wire_values::storage_i64(vec![9007199254740993, -9007199254740993]),
         },
     };
     let json = serde_json::to_string(&tensor).expect("serialize");
@@ -75,7 +78,7 @@ fn v2_int64_payload_is_exact_above_2p53_both_directions() {
         ExecutionValue::Tensor { value } => {
             assert_eq!(
                 value.data,
-                TensorElements::Int64(vec![9007199254740993, -9007199254740993])
+                wire_values::storage_i64(vec![9007199254740993, -9007199254740993])
             );
         }
         other => panic!("round-trip changed the variant: {other:?}"),
@@ -102,7 +105,7 @@ fn unknown_dtype_tag_is_rejected() {
 #[test]
 fn v1_bare_array_data_fails_loudly() {
     let err = serde_json::from_str::<TensorValue>(r#"{"shape":[4],"data":[1.0,2.0,3.0,4.0]}"#)
-        .expect_err("the v1 bare-array payload must not parse as v2");
+        .expect_err("the v1 bare-array payload must not parse as v3");
     let msg = err.to_string();
     assert!(
         msg.contains("invalid type") || msg.contains("expected"),
@@ -111,14 +114,16 @@ fn v1_bare_array_data_fails_loudly() {
 }
 
 /// bool and half payloads keep their tags and values through the wire
-/// (f16/bf16 carry exact f64 images; every half value is exactly
-/// representable in f64).
+/// (f16/bf16 use their exact stored 16-bit payloads).
 #[test]
-fn v2_bool_and_half_payloads_round_trip() {
+fn v3_bool_and_half_payloads_round_trip() {
     for data in [
-        TensorElements::Bool(vec![true, false]),
-        TensorElements::F16(vec![2048.0, 0.0999755859375]),
-        TensorElements::Bf16(vec![256.0, 0.75]),
+        serde_json::from_value::<chelis_types::TensorStorage>(
+            serde_json::json!({"dtype":"bool","values":[true,false]}),
+        )
+        .unwrap(),
+        serde_json::from_value(serde_json::json!({"dtype":"f16","bits":["6800","2e66"]})).unwrap(),
+        serde_json::from_value(serde_json::json!({"dtype":"bf16","bits":["4380","3f40"]})).unwrap(),
     ] {
         let tensor = ExecutionValue::Tensor {
             value: TensorValue {
@@ -139,19 +144,23 @@ fn v2_bool_and_half_payloads_round_trip() {
 /// elements. This locks the serde surface independently of evaluator
 /// construction, including the full int64 digits above 2^53.
 #[test]
-fn v2_numeric_scalar_variants_round_trip_at_every_dtype() {
+fn v3_numeric_scalar_variants_round_trip_at_every_dtype() {
     let payload = ExecutionValue::List {
         value: vec![
-            ExecutionValue::Int8 { value: -8 },
-            ExecutionValue::Int16 { value: -16 },
-            ExecutionValue::Int32 { value: -32 },
-            ExecutionValue::Int64 {
-                value: 9_007_199_254_740_993,
-            },
-            ExecutionValue::Float16 { value: 1.5 },
-            ExecutionValue::Bfloat16 { value: 1.5 },
-            ExecutionValue::Float32 { value: 0.25 },
-            ExecutionValue::Float64 { value: 1e100 },
+            wire_values::scalar_integer(chelis_types::types::Prim::Int8, -8),
+            wire_values::scalar_integer(chelis_types::types::Prim::Int16, -16),
+            wire_values::scalar_integer(chelis_types::types::Prim::Int32, -32),
+            wire_values::scalar_integer(chelis_types::types::Prim::Int64, 9_007_199_254_740_993),
+            serde_json::from_value(
+                serde_json::json!({"type":"scalar","value":{"dtype":"f16","bits":"3e00"}}),
+            )
+            .unwrap(),
+            serde_json::from_value(
+                serde_json::json!({"type":"scalar","value":{"dtype":"bf16","bits":"3fc0"}}),
+            )
+            .unwrap(),
+            wire_values::scalar_f32(0.25),
+            wire_values::scalar_f64(1e100),
         ],
     };
     let json = serde_json::to_string(&payload).expect("serialize scalar carriers");
@@ -169,7 +178,7 @@ fn v2_numeric_scalar_variants_round_trip_at_every_dtype() {
 /// Negative parity: the type vocabulary is closed. A generic `float` tag is
 /// not guessed as f32 or f64.
 #[test]
-fn v2_unknown_numeric_scalar_tag_is_rejected() {
+fn v3_unknown_numeric_scalar_tag_is_rejected() {
     let err = serde_json::from_str::<ExecutionValue>(r#"{"type":"float","value":0.5}"#)
         .expect_err("unknown scalar dtype tag must be rejected");
     assert!(

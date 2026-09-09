@@ -146,7 +146,7 @@ fn assert_eval_and_build_reject_unbound(root: &Path, entry: &Path, identifier: &
 fn assert_all_value_lanes_pass(root: &Path, entry: &Path) {
     let (check, report) = run_check(root, entry);
     assert!(check.status.success(), "check failed: {check:?}");
-    assert_eq!(report["score"], 1, "check must be perfect: {report}");
+    assert_eq!(report["score"], 1.0, "check must be perfect: {report}");
     assert!(errors(&report).is_empty(), "check errors: {report}");
     assert_eq!(report["unresolved_names"], serde_json::json!([]));
 
@@ -270,7 +270,7 @@ fn unknown_constructor_is_counted_as_an_unresolved_name() {
         check.status.success(),
         "imported constructor failed: {check:?}"
     );
-    assert_eq!(report["components"]["names"], 1);
+    assert_eq!(report["components"]["names"], 1.0);
     assert_eq!(report["unresolved_names"], serde_json::json!([]));
     assert!(errors(&report).is_empty(), "imported constructor: {report}");
 }
@@ -324,7 +324,7 @@ fn unrelated_exporters_cannot_change_a_positional_constructor_kind() {
         check.status.success(),
         "imported positional constructor failed: {check:?}"
     );
-    assert_eq!(report["components"]["names"], 1);
+    assert_eq!(report["components"]["names"], 1.0);
     assert_eq!(report["unresolved_names"], serde_json::json!([]));
     assert!(
         errors(&report).is_empty(),

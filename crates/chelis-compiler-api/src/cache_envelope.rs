@@ -1,12 +1,14 @@
 //! Shared on-disk cache envelope: atomic write, version + integrity
 //! envelope, torn-write rejection.
 //!
-//! Both the Phase K whole-package `CompiledContext` cache (`context.rs`)
-//! and the cross-process chelis-std typecheck sub-context cache
-//! (`stdlib_cache.rs`) persist a bincode-serialized payload through this
-//! one code path. The two caches differ only in *what they key on* — a
-//! whole-graph source hash vs. a content-addressed chelis-std bundle hash
-//! — not in *how the bytes hit disk*.
+//! The dependency `LibraryContext` cache (`library_cache.rs`) and the
+//! chelis-std `StdLibContext` cache (`stdlib_cache.rs`) persist their payloads
+//! through this code path. `CachePayload` seals publication to those two
+//! concrete owners and supplies each owner's format/key domain. Comparison
+//! and key-material bincode helpers are not durable payload publication.
+//!
+//! `CompiledContext` instead owns `context::CacheEnvelope`, shared by its
+//! disk cache and worker encode/decode routes; it does not use this envelope.
 //!
 //! ## On-disk layout
 //!
@@ -50,6 +52,36 @@ use std::path::{Path, PathBuf};
 /// Magic header bytes. The trailing newline guards against accidental
 /// concatenation with another file.
 const CACHE_MAGIC: &[u8] = b"CHELIS_CACHE_ENV_V1\n";
+
+// The seal is local to this module. A sibling cannot make arbitrary serde
+// data durable by implementing CachePayload; adding an owner changes this
+// exact, enumerable publication boundary.
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for crate::LibraryContext {}
+    impl Sealed for crate::StdLibContext {}
+}
+
+/// Closed durable payload owners under spec/10 §3's compatibility admission.
+///
+/// The format version and domain prefix participate in the owning cache key
+/// before payload decoding. They do not change the common envelope layout.
+pub(crate) trait CachePayload:
+    sealed::Sealed + Serialize + serde::de::DeserializeOwned
+{
+    const FORMAT_VERSION: u32;
+    const KEY_DOMAIN: &'static [u8];
+}
+
+impl CachePayload for crate::LibraryContext {
+    const FORMAT_VERSION: u32 = 12;
+    const KEY_DOMAIN: &'static [u8] = b"chelis_library_typecheck_v";
+}
+
+impl CachePayload for crate::StdLibContext {
+    const FORMAT_VERSION: u32 = 16;
+    const KEY_DOMAIN: &'static [u8] = b"chelis_std_typecheck_v";
+}
 
 /// Errors from the shared cache envelope layer.
 #[derive(Debug)]
@@ -178,7 +210,11 @@ pub(crate) fn lowered_library_payload_matches(
 /// Parent directories are created lazily (private `0o700` on Unix when
 /// this call has to create them; an existing directory's mode is left
 /// untouched). The write is temp-file + `fs::rename`.
-pub fn save<T: Serialize>(path: &Path, key: [u8; 32], payload: &T) -> Result<(), CacheError> {
+pub(crate) fn save<T: CachePayload>(
+    path: &Path,
+    key: [u8; 32],
+    payload: &T,
+) -> Result<(), CacheError> {
     let payload_bytes =
         bincode::serialize(payload).map_err(|e| CacheError::Encode(format!("payload: {e}")))?;
     let payload_sha256: [u8; 32] = Sha256::digest(&payload_bytes).into();
@@ -288,7 +324,7 @@ pub fn save<T: Serialize>(path: &Path, key: [u8; 32], payload: &T) -> Result<(),
 /// - `Ok(None)` — clean miss: file absent, or stored key != expected key.
 /// - `Err(_)` — the bytes are present but unusable (corrupt, version
 ///   skew, decode failure). Never a silent fall-through.
-pub fn load<T: for<'de> Deserialize<'de>>(
+pub(crate) fn load<T: CachePayload>(
     path: &Path,
     expected_key: [u8; 32],
 ) -> Result<Option<T>, CacheError> {
@@ -357,56 +393,103 @@ pub fn load<T: for<'de> Deserialize<'de>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{StdLibContext, build_stdlib_context};
     use tempfile::tempdir;
 
-    #[derive(Serialize, Deserialize, PartialEq, Debug)]
-    struct Sample {
-        a: u32,
-        b: String,
+    fn sample(marker: u32) -> StdLibContext {
+        let source = format!("module CacheProof\ndef value_{marker}() -> int32 = {marker}\n");
+        let decls = chelis_surf::parser::parse_str(&source).unwrap();
+        build_stdlib_context(&decls).unwrap()
     }
 
     fn key(byte: u8) -> [u8; 32] {
         [byte; 32]
     }
 
+    // Deliberate invalid bytes are test fixtures, never a generic publication
+    // function available to production callers.
+    fn rewrite(path: &Path, change: impl FnOnce(&mut Envelope)) {
+        let bytes = fs::read(path).unwrap();
+        let mut envelope: Envelope = bincode::deserialize(&bytes[CACHE_MAGIC.len()..]).unwrap();
+        change(&mut envelope);
+        let mut changed = CACHE_MAGIC.to_vec();
+        changed.extend(bincode::serialize(&envelope).unwrap());
+        fs::write(path, changed).unwrap();
+    }
+
     #[test]
-    fn round_trips_on_matching_key() {
+    fn round_trips_on_matching_key_without_changing_envelope_bytes() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("entry.cache");
-        let payload = Sample {
-            a: 7,
-            b: "hello".to_string(),
-        };
+        let payload = sample(7);
         save(&path, key(1), &payload).unwrap();
-        let loaded: Option<Sample> = load(&path, key(1)).unwrap();
-        assert_eq!(loaded, Some(payload));
+        let loaded = load::<StdLibContext>(&path, key(1)).unwrap().unwrap();
+        let payload_bytes = bincode::serialize(&payload).unwrap();
+        assert_eq!(bincode::serialize(&loaded).unwrap(), payload_bytes);
+        let old_layout = Envelope {
+            version: 1,
+            key: key(1),
+            payload_sha256: Sha256::digest(&payload_bytes).into(),
+            payload: payload_bytes,
+        };
+        let mut expected = b"CHELIS_CACHE_ENV_V1\n".to_vec();
+        expected.extend(bincode::serialize(&old_layout).unwrap());
+        assert_eq!(fs::read(path).unwrap(), expected);
     }
 
     #[test]
     fn absent_file_is_clean_miss() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("nope.cache");
-        let loaded: Option<Sample> = load(&path, key(1)).unwrap();
-        assert_eq!(loaded, None);
+        assert!(
+            load::<StdLibContext>(&dir.path().join("nope.cache"), key(1))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
-    fn key_mismatch_is_clean_miss_not_error() {
+    fn key_mismatch_is_clean_miss_before_invalid_payload_decode() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("entry.cache");
-        save(
-            &path,
-            key(1),
-            &Sample {
-                a: 1,
-                b: "x".to_string(),
-            },
-        )
-        .unwrap();
-        // Same file, different expected key: a valid entry for another
-        // key, so a clean miss — not a corruption error.
-        let loaded: Option<Sample> = load(&path, key(2)).unwrap();
-        assert_eq!(loaded, None);
+        save(&path, key(1), &sample(1)).unwrap();
+        rewrite(&path, |envelope| {
+            envelope.payload = vec![0xff];
+            envelope.payload_sha256 = Sha256::digest(&envelope.payload).into();
+        });
+        assert!(load::<StdLibContext>(&path, key(2)).unwrap().is_none());
+        // This exact malformed body would fail if the key gate decoded it.
+        assert!(matches!(
+            load::<StdLibContext>(&path, key(1)),
+            Err(CacheError::Decode(_))
+        ));
+    }
+
+    #[test]
+    fn version_mismatch_precedes_key_and_payload_admission() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("entry.cache");
+        save(&path, key(1), &sample(1)).unwrap();
+        rewrite(&path, |envelope| {
+            envelope.version = 2;
+            envelope.payload = vec![0xff];
+        });
+        assert!(matches!(
+            load::<StdLibContext>(&path, key(2)),
+            Err(CacheError::UnsupportedVersion {
+                stored: 2,
+                expected: 1
+            })
+        ));
+    }
+
+    #[test]
+    fn payload_hash_mismatch_is_corrupt_before_decode() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("entry.cache");
+        save(&path, key(1), &sample(1)).unwrap();
+        rewrite(&path, |envelope| envelope.payload = vec![0xff]);
+        let error = load::<StdLibContext>(&path, key(1)).unwrap_err();
+        assert!(matches!(error, CacheError::Corrupt(ref message) if message.contains("sha256")));
     }
 
     #[test]
@@ -414,7 +497,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("entry.cache");
         fs::write(&path, b"").unwrap();
-        let err = load::<Sample>(&path, key(1)).unwrap_err();
+        let err = load::<StdLibContext>(&path, key(1)).unwrap_err();
         assert!(matches!(err, CacheError::Corrupt(_)), "got {err:?}");
     }
 
@@ -423,7 +506,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("entry.cache");
         fs::write(&path, b"not a chelis cache file at all").unwrap();
-        let err = load::<Sample>(&path, key(1)).unwrap_err();
+        let err = load::<StdLibContext>(&path, key(1)).unwrap_err();
         assert!(matches!(err, CacheError::Corrupt(_)), "got {err:?}");
     }
 
@@ -431,53 +514,38 @@ mod tests {
     fn truncated_payload_is_corrupt_not_miss() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("entry.cache");
-        save(
-            &path,
-            key(1),
-            &Sample {
-                a: 42,
-                b: "payload bytes here".to_string(),
-            },
-        )
-        .unwrap();
-        // Truncate to a third of the file: past the magic, into the
-        // envelope/payload region — the classic torn-write shape.
+        save(&path, key(1), &sample(42)).unwrap();
         let full = fs::read(&path).unwrap();
         fs::write(&path, &full[..full.len() / 3]).unwrap();
-        let err = load::<Sample>(&path, key(1)).unwrap_err();
-        assert!(
-            matches!(err, CacheError::Corrupt(_)),
-            "truncated payload must be Corrupt, got {err:?}"
-        );
+        let err = load::<StdLibContext>(&path, key(1)).unwrap_err();
+        assert!(matches!(err, CacheError::Corrupt(_)), "got {err:?}");
     }
 
     #[test]
     fn save_is_atomic_under_concurrent_writers() {
-        // N threads racing to write the same path must each either
-        // complete a full write or fail cleanly; the final file must be
-        // a valid, fully-decodable envelope, never a torn one.
         let dir = tempdir().unwrap();
         let path = dir.path().join("raced.cache");
-        let handles: Vec<_> = (0..16)
-            .map(|i| {
+        let payloads = (0..16).map(sample).collect::<Vec<_>>();
+        let handles = payloads
+            .iter()
+            .cloned()
+            .map(|payload| {
                 let path = path.clone();
-                std::thread::spawn(move || {
-                    save(
-                        &path,
-                        key(9),
-                        &Sample {
-                            a: i,
-                            b: format!("writer-{i}"),
-                        },
-                    )
-                })
+                std::thread::spawn(move || save(&path, key(9), &payload))
             })
-            .collect();
-        for h in handles {
-            h.join().unwrap().expect("each racing save must succeed");
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle
+                .join()
+                .unwrap()
+                .expect("each racing save must succeed");
         }
-        // The surviving file must be a valid envelope.
-        let loaded: Option<Sample> = load(&path, key(9)).expect("final file must not be torn");
-        assert!(loaded.is_some(), "a valid payload must survive the race");
+        let loaded = load::<StdLibContext>(&path, key(9)).unwrap().unwrap();
+        let bytes = bincode::serialize(&loaded).unwrap();
+        assert!(
+            payloads
+                .iter()
+                .any(|payload| bincode::serialize(payload).unwrap() == bytes)
+        );
     }
 }

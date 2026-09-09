@@ -255,7 +255,7 @@ out = max_reduce(&stacked, 4)
     );
     for (i, &want) in expected.iter().enumerate() {
         assert_close(
-            out.data.element_as_f64_lossy(i),
+            out.data.element_f64_lossy(i),
             want as f64,
             1e-5,
             &format!("maxpool[{i}]"),
@@ -305,7 +305,7 @@ out = layer_norm(&x, &g, &b, 0.00001f32)
     }
     for (i, &want) in expected.iter().enumerate() {
         assert_close(
-            out.data.element_as_f64_lossy(i),
+            out.data.element_f64_lossy(i),
             want,
             1e-5,
             &format!("layer_norm[{i}]"),
@@ -364,7 +364,7 @@ out = run_conv(make_x(), make_k())
     // tolerance comfortably covers the worst-case rounding noise.
     for (i, &want) in expected.iter().enumerate() {
         assert_close(
-            out.data.element_as_f64_lossy(i),
+            out.data.element_f64_lossy(i),
             want as f64,
             1e-4,
             &format!("conv[{i}]"),
@@ -390,7 +390,7 @@ out = run_conv(make_x(), make_k())
         }
     }
     assert_close(
-        out.data.element_as_f64_lossy(0),
+        out.data.element_f64_lossy(0),
         hand,
         1e-4,
         "conv hand-computed out[0, 0, 0, 0]",

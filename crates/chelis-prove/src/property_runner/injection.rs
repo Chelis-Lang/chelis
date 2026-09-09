@@ -434,7 +434,7 @@ fn eval_bool_in_module(
         [root] => match &root.value {
             ExecutionValue::Bool { value } => Ok(*value),
             ExecutionValue::Tensor { value } if value.shape.is_empty() && value.data.len() == 1 => {
-                Ok(value.data.element_as_f64_lossy(0) != 0.0)
+                Ok(value.data.element_f64_lossy(0) != 0.0)
             }
             other => Err(format!("property evaluated to non-bool: {other:?}")),
         },
@@ -478,7 +478,7 @@ fn resolve_constants(
                 && value.shape.is_empty()
                 && value.data.len() == 1
             {
-                env.insert(name.clone(), value.data.element_as_f64_lossy(0));
+                env.insert(name.clone(), value.data.element_f64_lossy(0));
                 break;
             }
         }

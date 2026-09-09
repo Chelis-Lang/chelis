@@ -14,6 +14,7 @@ pub mod pipeline;
 pub mod prune;
 pub(crate) mod runtime;
 pub mod schema;
+mod source_wire;
 pub mod stdlib_cache;
 pub mod target_capability;
 

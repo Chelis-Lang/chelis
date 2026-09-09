@@ -1602,7 +1602,7 @@ fn eval_scalar_const(source: &str, name: &str) -> Option<f64> {
             && value.shape.is_empty()
             && value.data.len() == 1
         {
-            return Some(value.data.element_as_f64_lossy(0));
+            return Some(value.data.element_f64_lossy(0));
         }
     }
     None
@@ -1951,38 +1951,7 @@ fn flatten_field_value(
             let prim = Prim::parse_name(prim_name)
                 .ok_or_else(|| format!("unknown scalar field precision `{prim_name}`"))?;
             let scalar = match value {
-                ExecutionValue::Float16 { value } if prim == Prim::F16 => {
-                    scalar_from_f64("prove-produced-field", prim, *value)
-                        .map_err(|trap| trap.to_string())?
-                }
-                ExecutionValue::Bfloat16 { value } if prim == Prim::Bf16 => {
-                    scalar_from_f64("prove-produced-field", prim, *value)
-                        .map_err(|trap| trap.to_string())?
-                }
-                ExecutionValue::Float32 { value } if prim == Prim::F32 => {
-                    scalar_from_f64("prove-produced-field", prim, f64::from(*value))
-                        .map_err(|trap| trap.to_string())?
-                }
-                ExecutionValue::Float64 { value } if prim == Prim::F64 => {
-                    scalar_from_f64("prove-produced-field", prim, *value)
-                        .map_err(|trap| trap.to_string())?
-                }
-                ExecutionValue::Int8 { value } if prim == Prim::Int8 => {
-                    scalar_from_i64("prove-produced-field", prim, i64::from(*value))
-                        .map_err(|trap| trap.to_string())?
-                }
-                ExecutionValue::Int16 { value } if prim == Prim::Int16 => {
-                    scalar_from_i64("prove-produced-field", prim, i64::from(*value))
-                        .map_err(|trap| trap.to_string())?
-                }
-                ExecutionValue::Int32 { value } if prim == Prim::Int32 => {
-                    scalar_from_i64("prove-produced-field", prim, i64::from(*value))
-                        .map_err(|trap| trap.to_string())?
-                }
-                ExecutionValue::Int64 { value } if prim == Prim::Int64 => {
-                    scalar_from_i64("prove-produced-field", prim, *value)
-                        .map_err(|trap| trap.to_string())?
-                }
+                ExecutionValue::Scalar { value } if value.get().prim() == prim => value.get(),
                 ExecutionValue::Bool { value } if prim == Prim::Bool => {
                     scalar_from_i64("prove-produced-field", Prim::Bool, i64::from(*value))
                         .map_err(|trap| trap.to_string())?
@@ -2298,6 +2267,9 @@ impl Lcg {
 mod tests;
 
 #[cfg(test)]
+use crate::wire_values;
+
+#[cfg(test)]
 mod finding_tests {
     //! Unit tests for the PR #386 fresh-context review findings #7, #8, #11.
     //! These drive the private flatten/validate helpers directly with
@@ -2306,9 +2278,47 @@ mod finding_tests {
     // `super::*` already brings `ExecutionValue`, `OpaqueInvariant`, `Prim`,
     // `BTreeMap`, and the private flatten/validate helpers into scope.
     use super::*;
+
     use crate::opaque::FieldType;
-    use chelis_compiler_api::schema::{TensorElements, TensorValue};
+    use chelis_compiler_api::schema::TensorValue;
     use chelis_pred::PredAmenability;
+
+    #[test]
+    fn scalar_flattening_moves_exact_bits_and_rejects_dtype_substitution() {
+        for wire in [
+            serde_json::json!({"dtype":"f16","bits":"7c01"}),
+            serde_json::json!({"dtype":"bf16","bits":"ff81"}),
+            serde_json::json!({"dtype":"f32","bits":"80000000"}),
+            serde_json::json!({"dtype":"f64","bits":"fff0000000000001"}),
+            serde_json::json!({"dtype":"int64","value":9007199254740993_i64}),
+            serde_json::json!({"dtype":"int32","value":i32::MIN}),
+            serde_json::json!({"dtype":"int16","value":i16::MIN}),
+            serde_json::json!({"dtype":"int8","value":i8::MIN}),
+        ] {
+            let input: ExecutionValue =
+                serde_json::from_value(serde_json::json!({"type":"scalar","value":wire})).unwrap();
+            let dtype = wire["dtype"].as_str().unwrap();
+            let mut env = BTreeMap::new();
+            flatten_field_value(
+                &input,
+                &FieldType::Scalar(dtype.into()),
+                "p.value",
+                &mut env,
+            )
+            .unwrap();
+            assert_eq!(serde_json::to_value(env["p.value"]).unwrap(), wire);
+            let other = if dtype == "f32" { "f64" } else { "f32" };
+            assert!(
+                flatten_field_value(
+                    &input,
+                    &FieldType::Scalar(other.into()),
+                    "p.value",
+                    &mut env
+                )
+                .is_err()
+            );
+        }
+    }
 
     /// A minimal single-scalar-field opaque invariant. `opaque_record_env`
     /// and `flatten_field_value` read only `ctor_name`, `binder`, and
@@ -2338,7 +2348,7 @@ mod finding_tests {
         let inv = scalar_inv("Probability", "Probability", "value");
         let wrong = ExecutionValue::Adt {
             ctor: "Velocity".to_string(),
-            fields: vec![ExecutionValue::Float32 { value: 0.5 }],
+            fields: vec![wire_values::scalar_f32(0.5)],
         };
         let err = opaque_record_env(&wrong, &inv)
             .expect_err("a wrong-ctor same-arity ADT must be rejected, not flattened");
@@ -2357,7 +2367,7 @@ mod finding_tests {
         let inv = scalar_inv("Probability", "Probability", "value");
         let right = ExecutionValue::Adt {
             ctor: "Probability".to_string(),
-            fields: vec![ExecutionValue::Float32 { value: 0.5 }],
+            fields: vec![wire_values::scalar_f32(0.5)],
         };
         let env =
             opaque_record_env(&right, &inv).expect("the matching-ctor case must flatten cleanly");
@@ -2381,7 +2391,7 @@ mod finding_tests {
         let multi = ExecutionValue::Tensor {
             value: TensorValue {
                 shape: vec![3],
-                data: TensorElements::F32(vec![0.5, f32::NAN, 0.5]),
+                data: wire_values::storage_f32(vec![0.5, f32::NAN, 0.5]),
             },
         };
         let err = flatten_field_value(&multi, &fty, "p.value", &mut env)
@@ -2405,7 +2415,7 @@ mod finding_tests {
         let single = ExecutionValue::Tensor {
             value: TensorValue {
                 shape: vec![1],
-                data: TensorElements::F32(vec![0.5]),
+                data: wire_values::storage_f32(vec![0.5]),
             },
         };
         flatten_field_value(&single, &fty, "p.value", &mut env)
@@ -2418,13 +2428,8 @@ mod finding_tests {
         // A plain exact-tagged f32 scalar is unaffected by the fix.
         let fty = FieldType::Scalar("f32".to_string());
         let mut env = BTreeMap::new();
-        flatten_field_value(
-            &ExecutionValue::Float32 { value: 0.25 },
-            &fty,
-            "p.value",
-            &mut env,
-        )
-        .expect("a true scalar still flattens");
+        flatten_field_value(&wire_values::scalar_f32(0.25), &fty, "p.value", &mut env)
+            .expect("a true scalar still flattens");
         assert_eq!(
             env.get("p.value").map(ScalarValue::as_f64_lossy),
             Some(0.25)
@@ -2436,9 +2441,7 @@ mod finding_tests {
         let fty = FieldType::Scalar("int64".to_string());
         let mut env = BTreeMap::new();
         flatten_field_value(
-            &ExecutionValue::Int64 {
-                value: 9_007_199_254_740_993,
-            },
+            &wire_values::scalar_integer(Prim::Int64, 9_007_199_254_740_993),
             &fty,
             "p.value",
             &mut env,
@@ -2452,7 +2455,7 @@ mod finding_tests {
         let fty = FieldType::Scalar("int64".to_string());
         let mut env = BTreeMap::new();
         let error = flatten_field_value(
-            &ExecutionValue::Int32 { value: 7 },
+            &wire_values::scalar_integer(Prim::Int32, 7),
             &fty,
             "p.value",
             &mut env,
@@ -2474,7 +2477,7 @@ mod finding_tests {
         let value = ExecutionValue::Tensor {
             value: TensorValue {
                 shape: vec![1],
-                data: TensorElements::Int64(vec![9_007_199_254_740_993]),
+                data: wire_values::storage_i64(vec![9_007_199_254_740_993]),
             },
         };
         let mut env = BTreeMap::new();
@@ -2492,7 +2495,7 @@ mod finding_tests {
         let value = ExecutionValue::Tensor {
             value: TensorValue {
                 shape: vec![1],
-                data: TensorElements::F64(vec![1.0]),
+                data: wire_values::storage_f64(vec![1.0]),
             },
         };
         let mut env = BTreeMap::new();

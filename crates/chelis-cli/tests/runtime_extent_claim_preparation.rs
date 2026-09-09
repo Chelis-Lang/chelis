@@ -407,7 +407,7 @@ fn observe(case: &Case) -> Value {
     let report: Value = serde_json::from_slice(&check.stdout)
         .expect("checker JSON, not a style/parse transport failure");
     assert_eq!(
-        report["components"]["parse"], 1,
+        report["components"]["parse"], 1.0,
         "fixture must parse: {}: {report}",
         case.id
     );
@@ -585,7 +585,7 @@ fn contract_failures(case: &Case, observation: &Value) -> Vec<String> {
         }
         return failures;
     }
-    if check["success"] != true || check["score"] != 1 || check["errors"] != json!([]) {
+    if check["success"] != true || check["score"] != 1.0 || check["errors"] != json!([]) {
         failures.push(format!("{}.check: expected score 1 and no errors", case.id));
     }
     if let Some(signature) = case.signature
@@ -907,7 +907,7 @@ fn acceptance_cannot_be_satisfied_by_equal_wrong_answers_or_missing_roots() {
         exported: None,
     };
     let run = json!({"stage":"execute", "success":true, "stdout":"out = tensor(shape=[5], data=[7, 7, 7, 7, 7])", "stderr":""});
-    let mut observed = json!({"check":{"success":true,"score":1,"errors":[]},"eval":run,"c":run});
+    let mut observed = json!({"check":{"success":true,"score":1.0,"errors":[]},"eval":run,"c":run});
     assert_eq!(contract_failures(&case, &observed).len(), 2);
     for lane in ["eval", "c"] {
         observed[lane]["stdout"] = "out = tensor(shape=[4], data=[7, 7, 7, 7])".into();
@@ -930,7 +930,7 @@ fn claims_and_traps_require_their_own_evidence() {
         exported: None,
     };
     let ok = json!({"stage":"execute", "success":true, "stdout":"out = tensor(shape=[4], data=[7, 7, 7, 7])", "stderr":""});
-    let mut observed = json!({"check":{"success":true,"score":1,"errors":[],"signatures":{"f":"() -> tensor[*, f32]"}},"eval":ok,"c":ok});
+    let mut observed = json!({"check":{"success":true,"score":1.0,"errors":[],"signatures":{"f":"() -> tensor[*, f32]"}},"eval":ok,"c":ok});
     assert_eq!(
         contract_failures(&case, &observed).len(),
         1,

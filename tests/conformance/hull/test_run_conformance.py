@@ -15,7 +15,9 @@ Run with the uv-managed interpreter:
 from __future__ import annotations
 
 import json
+import math
 import os
+import struct
 import sys
 import unittest
 
@@ -50,7 +52,16 @@ def reject_check_json() -> str:
 
 
 def eval_json(value_obj: dict) -> str:
-    return json.dumps({"roots": [{"name": "answer", "value": value_obj}]})
+    return json.dumps({"schema_version": 3, "roots": [{"name": "answer", "value": value_obj}]})
+
+
+def scalar_wire(dtype, value):
+    if dtype in ("f32", "f64"):
+        bits = struct.pack("!f" if dtype == "f32" else "!d", value).hex()
+        payload = {"dtype": dtype, "bits": bits}
+    else:
+        payload = {"dtype": dtype, "value": value}
+    return {"type": "scalar", "value": payload}
 
 
 FN_F32_F32 = {
@@ -205,7 +216,7 @@ class EvalClassificationTests(unittest.TestCase):
         r = rc.classify_program(
             rec,
             0,
-            eval_json({"type": "float32", "value": 1318815700.0}),
+            eval_json(scalar_wire("f32", 1318815700.0)),
         )
         self.assertEqual(r.bucket, "agree")
 
@@ -219,7 +230,7 @@ class EvalClassificationTests(unittest.TestCase):
                     "type": "tensor",
                     "value": {
                         "shape": [],
-                        "data": {"dtype": "f32", "values": [3269017.2]},
+                        "data": {"dtype": "f32", "bits": [struct.pack("!f", 3269017.2).hex()]},
                     },
                 }
             ),
@@ -228,18 +239,18 @@ class EvalClassificationTests(unittest.TestCase):
 
     def test_eval_float64_decimal_is_not_rounded_to_float32(self):
         self.assertEqual(
-            rc._read_root_scalar({"type": "float64", "value": 1318815700.0}),
+            rc._read_root_scalar(scalar_wire("f64", 1318815700.0)),
             1318815700.0,
         )
 
-    def test_eval_v2_integer_scalar_tags_are_read_without_dtype_substitution(self):
+    def test_eval_v3_integer_scalar_tags_are_read_without_dtype_substitution(self):
         for tag in ("int8", "int16", "int32", "int64"):
             with self.subTest(tag=tag):
-                self.assertEqual(rc._read_root_scalar({"type": tag, "value": -24}), -24)
+                self.assertEqual(rc._read_root_scalar(scalar_wire(tag, -24)), -24)
 
     def test_eval_int64_above_binary64_exact_range_stays_an_integer(self):
         value = 9_007_199_254_740_993
-        decoded = rc._read_root_scalar({"type": "int64", "value": value})
+        decoded = rc._read_root_scalar(scalar_wire("int64", value))
         self.assertIsInstance(decoded, int)
         self.assertEqual(decoded, value)
 
@@ -248,33 +259,33 @@ class EvalClassificationTests(unittest.TestCase):
         exact = rc.classify_program(
             eval_record(reference),
             0,
-            eval_json({"type": "int64", "value": 9_007_199_254_740_993}),
+            eval_json(scalar_wire("int64", 9_007_199_254_740_993)),
         )
         adjacent = rc.classify_program(
             eval_record(reference),
             0,
-            eval_json({"type": "int64", "value": 9_007_199_254_740_992}),
+            eval_json(scalar_wire("int64", 9_007_199_254_740_992)),
         )
         self.assertEqual(exact.bucket, "agree")
         self.assertEqual(adjacent.bucket, "disagree")
 
     def test_eval_agree_within_tol(self):
         rec = eval_record("2.0")
-        r = rc.classify_program(rec, 0, eval_json({"type": "float64", "value": 2.001}))
+        r = rc.classify_program(rec, 0, eval_json(scalar_wire("f64", 2.001)))
         self.assertEqual(r.bucket, "agree")
 
     def test_eval_disagree_outside_tol(self):
         rec = eval_record("2.0")
-        r = rc.classify_program(rec, 0, eval_json({"type": "float64", "value": 5.0}))
+        r = rc.classify_program(rec, 0, eval_json(scalar_wire("f64", 5.0)))
         self.assertEqual(r.bucket, "disagree")
 
     def test_eval_int_exact(self):
         rec = eval_record("-24")
-        r = rc.classify_program(rec, 0, eval_json({"type": "int64", "value": -24}))
+        r = rc.classify_program(rec, 0, eval_json(scalar_wire("int64", -24)))
         self.assertEqual(r.bucket, "agree")
 
     def test_eval_tensor_scalar(self):
-        # Execution wire v2 (chelis#729): tagged per-dtype payload.
+        # Execution wire v3: exact stored f32 bits.
         rec = eval_record("3.0")
         r = rc.classify_program(
             rec,
@@ -282,7 +293,7 @@ class EvalClassificationTests(unittest.TestCase):
             eval_json(
                 {
                     "type": "tensor",
-                    "value": {"shape": [], "data": {"dtype": "f32", "values": [3.0]}},
+                    "value": {"shape": [], "data": {"dtype": "f32", "bits": ["40400000"]}},
                 }
             ),
         )
@@ -298,15 +309,15 @@ class EvalClassificationTests(unittest.TestCase):
         self.assertIn("legacy v1", str(ctx.exception))
 
     def test_eval_nan_reconciliation_both_nonfinite(self):
-        # Compiler renders non-finite as JSON null; Hull reference is NaN.
+        # Both decoded stored value and Hull reference are NaN.
         rec = eval_record("nan")
-        r = rc.classify_program(rec, 0, eval_json({"type": "float64", "value": None}))
+        r = rc.classify_program(rec, 0, eval_json(scalar_wire("f64", math.nan)))
         self.assertEqual(r.bucket, "agree")
 
     def test_eval_nan_one_sided_disagrees(self):
-        # Hull finite, compiler non-finite (null) -> disagree.
+        # Hull finite, compiler NaN -> disagree.
         rec = eval_record("2.0")
-        r = rc.classify_program(rec, 0, eval_json({"type": "float64", "value": None}))
+        r = rc.classify_program(rec, 0, eval_json(scalar_wire("f64", math.nan)))
         self.assertEqual(r.bucket, "disagree")
 
     def test_eval_compiler_crash_no_roots(self):
@@ -317,13 +328,110 @@ class EvalClassificationTests(unittest.TestCase):
     def test_eval_ref_not_value(self):
         # Hull did not reach a scalar (hull_eval_value null) -> ref_not_value.
         rec = eval_record(None)
-        r = rc.classify_program(rec, 0, eval_json({"type": "float64", "value": 2.0}))
+        r = rc.classify_program(rec, 0, eval_json(scalar_wire("f64", 2.0)))
         self.assertEqual(r.bucket, "ref_not_value")
 
     def test_eval_nonzero_exit_is_crash(self):
         rec = eval_record("2.0")
         r = rc.classify_program(rec, 1, "")
         self.assertEqual(r.bucket, "compiler_crash")
+
+
+class ExecutionV3ConsumerTests(unittest.TestCase):
+    def test_floats_decode_at_their_declared_storage_width(self):
+        for dtype, bits, expected in [
+            ("f16", "3c01", 1.0009765625),
+            ("bf16", "3f81", 1.0078125),
+            ("f32", "3f800001", 1.0000001192092896),
+            ("f64", "3ff0000000000001", 1.0000000000000002),
+        ]:
+            with self.subTest(dtype=dtype):
+                value = {"type":"scalar", "value":{"dtype":dtype,"bits":bits}}
+                self.assertEqual(rc.compiler_eval_scalar(0, eval_json(value)), expected)
+                tensor = {"type": "tensor", "value": {
+                    "shape": [], "data": {"dtype": dtype, "bits": [bits]}}}
+                self.assertEqual(rc.compiler_eval_scalar(0, eval_json(tensor)), expected)
+                zero = "8" + "0" * (len(bits) - 1)
+                decoded = rc._read_root_scalar({"type":"scalar","value":{"dtype":dtype,"bits":zero}})
+                self.assertEqual(math.copysign(1.0, decoded), -1.0)
+
+    def test_integer_width_limits_are_exact_and_out_of_range_is_rejected(self):
+        for dtype, width in [("int8",8),("int16",16),("int32",32),("int64",64)]:
+            lo, hi = -(1 << (width-1)), (1 << (width-1))-1
+            for value in [lo, hi]:
+                self.assertEqual(rc.compiler_eval_scalar(0, eval_json(scalar_wire(dtype,value))), value)
+            for value in [lo-1, hi+1, 1.0, True]:
+                self.assertIsNone(rc.compiler_eval_scalar(0, eval_json(scalar_wire(dtype,value))))
+
+    def test_legacy_and_malformed_scalar_codecs_never_produce_agreement(self):
+        malformed = [
+            {"type":"float32","value":1.0},
+            {"type":"int64","value":1},
+            {"type":"scalar","value":{"dtype":"bool","value":True}},
+            {"type":"scalar","value":{"dtype":"float32","bits":"3f800000"}},
+            {"type":"scalar","value":{"dtype":"f32","value":1.0}},
+            {"type":"scalar","value":{"dtype":"f32","bits":"3F800000"}},
+            {"type":"scalar","value":{"dtype":"f32","bits":"3f80000"}},
+            {"type":"scalar","value":{"dtype":"f32","bits":"3f800000","value":1.0}},
+            {"type":"scalar","value":{"dtype":"f32","bits":None}},
+            {"type":"scalar","value":{"dtype":"int64","value":"1"}},
+            {"type":"scalar","value":{"dtype":[],"value":1}},
+        ]
+        for value in malformed:
+            with self.subTest(value=value):
+                result = rc.classify_program(eval_record("1"), 0, eval_json(value))
+                self.assertEqual(result.bucket, "compiler_crash")
+
+    def test_tensor_shape_and_every_payload_element_are_validated(self):
+        good = {"type":"tensor","value":{"shape":[2],"data":{"dtype":"f32","bits":["3f800000","40000000"]}}}
+        self.assertEqual(rc.compiler_eval_scalar(0, eval_json(good)), 1.0)
+        for shape, data in [
+            ([], {"dtype":"f32","bits":["3f800000","40000000"]}),
+            ([-1], {"dtype":"f32","bits":["3f800000"]}),
+            ([True], {"dtype":"f32","bits":["3f800000"]}),
+            ([1.0], {"dtype":"f32","bits":["3f800000"]}),
+            ([1 << 63], {"dtype":"f32","bits":["3f800000"]}),
+            ([2], {"dtype":"f32","bits":["3f800000","bad"]}),
+            ([1], {"dtype":"f32","values":[1.0]}),
+            ([1], [1.0]),
+        ]:
+            self.assertIsNone(rc.compiler_eval_scalar(0, eval_json({"type":"tensor","value":{"shape":shape,"data":data}})))
+
+    def test_execution_version_and_json_grammar_are_required(self):
+        current = json.loads(eval_json(scalar_wire("int64", 1)))
+        self.assertEqual(rc.compiler_eval_scalar(0, json.dumps(current)), 1)
+        for version in [None, 1, 2, 4, True, 3.0]:
+            candidate = dict(current)
+            if version is None:
+                del candidate["schema_version"]
+            else:
+                candidate["schema_version"] = version
+            self.assertIsNone(rc.compiler_eval_scalar(0, json.dumps(candidate)))
+        duplicate = eval_json(scalar_wire("int64", 1)).replace('"value": 1', '"value": 2, "value": 1')
+        self.assertIsNone(rc.compiler_eval_scalar(0, duplicate))
+        for constant in ["NaN", "Infinity", "-Infinity"]:
+            malformed = eval_json(scalar_wire("int64", 1)).replace('"value": 1', f'"value": {constant}')
+            self.assertIsNone(rc.compiler_eval_scalar(0, malformed))
+
+    def test_boolean_value_and_storage_require_json_booleans(self):
+        for value in [False, True]:
+            self.assertEqual(rc._read_root_scalar({"type": "bool", "value": value}), int(value))
+            tensor = {"type": "tensor", "value": {
+                "shape": [], "data": {"dtype": "bool", "values": [value]}}}
+            self.assertEqual(rc._read_root_scalar(tensor), int(value))
+        for value in [0, 1, "true", None]:
+            self.assertIsNone(rc._read_root_scalar({"type": "bool", "value": value}))
+            tensor = {"type": "tensor", "value": {
+                "shape": [], "data": {"dtype": "bool", "values": [value]}}}
+            self.assertIsNone(rc._read_root_scalar(tensor))
+
+    def test_nonfinite_agreement_requires_matching_class_and_infinity_sign(self):
+        for reference, actual in [("nan",math.nan),("inf",math.inf),("-inf",-math.inf)]:
+            result = rc.classify_program(eval_record(reference), 0, eval_json(scalar_wire("f64",actual)))
+            self.assertEqual(result.bucket, "agree")
+        for reference, actual in [("nan",math.inf),("inf",math.nan),("-inf",math.inf),("inf",-math.inf)]:
+            result = rc.classify_program(eval_record(reference), 0, eval_json(scalar_wire("f64",actual)))
+            self.assertEqual(result.bucket, "disagree")
 
 
 # ============================================================================

@@ -110,8 +110,12 @@ use crate::stdlib_cache::{StdLibContext, cache_disabled, typecheck_cache_dir};
 ///
 /// V8: the serialized positional-expand ledger grew the
 /// `DeferredShapeObligation` enum for comparison shape mirrors.
-// Opaque producer annotations use an explicit data wire variant.
-const LIBRARY_CACHE_FORMAT_VERSION: u32 = 11;
+// V10: opaque producer annotations use an explicit data wire variant.
+// V11: declared literal results and call-witness payloads are retained.
+// V12: scalar/storage payloads use the exact dtype-tagged bit codecs;
+// the changed key rejects previous positional payloads before decode.
+const LIBRARY_CACHE_FORMAT_VERSION: u32 =
+    <LibraryContext as cache_envelope::CachePayload>::FORMAT_VERSION;
 
 /// The typechecked composed `chelis-std ++ dependency-packages`
 /// sub-context.
@@ -281,7 +285,7 @@ fn visit_library_cache_key_inputs(
     format_version: u32,
     mut append: impl FnMut(&[u8]),
 ) {
-    append(b"chelis_library_typecheck_v");
+    append(<LibraryContext as cache_envelope::CachePayload>::KEY_DOMAIN);
     append(&format_version.to_le_bytes());
     let compiler_version = crate::build_fingerprint();
     append(b"compiler_version");
@@ -609,16 +613,16 @@ mod tests {
 
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes_and_nominal_kinds() {
-        assert_eq!(LIBRARY_CACHE_FORMAT_VERSION, 11);
+        assert_eq!(LIBRARY_CACHE_FORMAT_VERSION, 12);
     }
 
     #[test]
-    fn preceding_payload_version_is_a_clean_cache_miss() {
+    fn different_format_key_is_a_clean_cache_miss() {
         let stdlib_context = build_stdlib_context(&[]).expect("empty stdlib context");
-        let decls = sample_decls("preceding_version");
+        let decls = sample_decls("different_key");
         let stdlib_key = key(5);
         let current_key = library_cache_key(&decls, stdlib_key);
-        let preceding_key = library_cache_key_at_version(&decls, stdlib_key, 10);
+        let preceding_key = library_cache_key_at_version(&decls, stdlib_key, 11);
         assert_ne!(current_key, preceding_key);
 
         let context = build_library_context(&stdlib_context, &decls)
@@ -627,11 +631,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let preceding_path = library_cache_path(dir.path(), preceding_key);
         cache_envelope::save(&preceding_path, preceding_key, &context)
-            .expect("preceding-version fixture must save");
+            .expect("different-key fixture must save");
 
         let current_path = library_cache_path(dir.path(), current_key);
         let loaded: Option<LibraryContext> = cache_envelope::load(&current_path, current_key)
-            .expect("a preceding-version fixture must be a clean miss");
+            .expect("a different-key fixture must be a clean miss");
         assert!(loaded.is_none());
         assert!(
             preceding_path.exists(),

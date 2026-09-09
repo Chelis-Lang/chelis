@@ -65,17 +65,20 @@ class ContractValidationTests(unittest.TestCase):
 
     def test_wire_binding_decisions_have_positive_and_negative_freeze_controls(self) -> None:
         cases = (
-            ("spec/10-serialization.md", "Schema version 8 is explicitly\npresent", "wire v8 presence"),
+            ("spec/10-serialization.md", "Schema version 9 is explicitly\npresent", "wire v9 presence"),
             ("spec/10-serialization.md", "`schema_version: 3`", "execution v3 exactness"),
             ("spec/10-serialization.md", "f64: 16; f32: 8; f16: 4; bf16: 4", "wire IEEE bit widths"),
             ("spec/10-serialization.md", "No codec normalizes a NaN payload or a signed zero.", "wire bit preservation"),
             ("spec/10-serialization.md", "A raw source DTO is not an admitted executable AST.", "wire raw-source admission"),
             ("spec/10-serialization.md", "A reference is resolved only in its declared owner and namespace.", "wire reference scope"),
+            ("spec/10-serialization.md", "Every requirement uses the exact\n`NonnegativeExtent` adapter over a nonnegative `int64`", "wire literal-witness requirement carrier"),
+            ("spec/10-serialization.md", "`WireDagNode.shape_deps` contains exact u64 node\nreferences to strictly earlier nodes", "wire shape-dependency references"),
+            ("spec/10-serialization.md", "`shape_deps`, `span_id` (explicitly null when absent), and `merged_spans` are\nmandatory fields", "wire mandatory invocation fields"),
             ("spec/10-serialization.md", "Bounds alone never establish transport authority.", "wire report numeric authority"),
             ("spec/04-type-system.md", "untyped_nodes = total_nodes - typed_nodes", "fitness counter consistency"),
             ("spec/11-ffi.md", "Dynamic Python object types do not establish nonnumeric capacity.", "binding dynamic capacity"),
             ("spec/11-ffi.md", "DLPack keywords are validated, never ignored.", "binding DLPack keyword admission"),
-            ("spec/design/dtype_semantics.md", "No partial WireDag v8 is published.", "wire atomic cutover"),
+            ("spec/design/dtype_semantics.md", "No partial WireDag v9 is published.", "wire atomic cutover"),
         )
         for relative, required, label in cases:
             with self.subTest(label=label):

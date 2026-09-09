@@ -261,7 +261,7 @@ fn analyze_surf_document(text: &str) -> DocumentAnalysis {
         chelis_tide::schema::ApiEnvelope::Success(success) => {
             let result = success.result;
             (
-                Some(result.score),
+                Some(result.score.get()),
                 false,
                 diagnostics_from_api(text, &result.errors, first_decl_range(text, &decls)),
             )
@@ -1178,15 +1178,19 @@ fn diagnostics_from_api(
                 // what "the producer knew where, not how wide" means to an
                 // editor. The document stays honest and the editor still
                 // points at the right character.
-                .map(|span| {
-                    range_for_span(
-                        text,
-                        DeepSpan::new(span.offset(), span.extent().unwrap_or(0)),
-                    )
+                .and_then(|span| {
+                    let measured = chelis_tide::schema::Span {
+                        offset: span.offset(),
+                        len: span.extent().unwrap_or(0),
+                    };
+                    measured.slice(text).ok()?;
+                    let offset = usize::try_from(measured.offset).ok()?;
+                    let len = usize::try_from(measured.len).ok()?;
+                    Some(range_for_span(text, DeepSpan::new(offset, len)))
                 })
                 .or(fallback)
                 .unwrap_or_else(|| full_document_range(text)),
-            severity: Some(severity(diagnostic.severity)),
+            severity: Some(severity(diagnostic.severity.get())),
             message: diagnostic.message.clone(),
             source: Some("chelis".to_string()),
             ..Diagnostic::default()
@@ -1618,6 +1622,55 @@ mod tests {
 
     fn deep_uri() -> Url {
         Url::parse("file:///tmp/test.dp").expect("uri")
+    }
+
+    #[test]
+    fn foreign_diagnostic_locations_require_local_bounds_and_utf8_admission() {
+        use chelis_tide::schema::{DiagnosticSpan, ParseRequest, SourceKind};
+        let text = "aλz";
+        let mut errors = compiler::parse(ParseRequest {
+            source_kind: SourceKind::Surf,
+            source: "def (".into(),
+        })
+        .expect_err("fixture parse error")
+        .errors;
+        let fallback = full_document_range(text);
+        for (span, expected) in [
+            (
+                DiagnosticSpan::Point { offset: 1 },
+                Range::new(Position::new(0, 1), Position::new(0, 1)),
+            ),
+            (
+                DiagnosticSpan::Range { offset: 1, len: 2 },
+                Range::new(Position::new(0, 1), Position::new(0, 2)),
+            ),
+            (
+                DiagnosticSpan::Range { offset: 4, len: 0 },
+                Range::new(Position::new(0, 3), Position::new(0, 3)),
+            ),
+        ] {
+            errors[0].span = Some(span);
+            assert_eq!(
+                diagnostics_from_api(text, &errors, Some(fallback))[0].range,
+                expected
+            );
+        }
+        for span in [
+            DiagnosticSpan::Point { offset: u64::MAX },
+            DiagnosticSpan::Range {
+                offset: 1,
+                len: u64::MAX,
+            },
+            DiagnosticSpan::Range { offset: 1, len: 1 },
+            DiagnosticSpan::Point { offset: 2 },
+            DiagnosticSpan::Point { offset: 5 },
+        ] {
+            errors[0].span = Some(span);
+            assert_eq!(
+                diagnostics_from_api(text, &errors, Some(fallback))[0].range,
+                fallback
+            );
+        }
     }
 
     /// chelis#1395: a CHECK diagnostic carrying a point renders as a

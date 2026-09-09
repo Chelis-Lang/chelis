@@ -1,0 +1,187 @@
+{
+  "compiler_build": "0.18.6+bid.ce511015024a3f5bb8883872f510cc31.41fbe50",
+  "context_numeric_payloads": [
+    {
+      "bincode": "000000000000000000000000",
+      "bits": "0000000000000000",
+      "dtype": "f64",
+      "kind": "scalar"
+    },
+    {
+      "bincode": "0000000002000000000000000000000000000080010000000000f03f",
+      "bits": [
+        "8000000000000000",
+        "3ff0000000000001"
+      ],
+      "dtype": "f64",
+      "kind": "storage"
+    },
+    {
+      "bincode": "040000000100000000002000",
+      "dtype": "int64",
+      "kind": "scalar",
+      "value": 9007199254740993
+    },
+    {
+      "bincode": "0400000002000000000000000100000000002000ffffffffffffdfff",
+      "dtype": "int64",
+      "kind": "storage",
+      "values": [
+        9007199254740993,
+        -9007199254740993
+      ]
+    }
+  ],
+  "context_version": 17,
+  "dependency_source": "def fixture_transform(x: f32) -> f32 = fixture_base(x) + 0.25f32\n",
+  "library_key": [
+    61,
+    227,
+    213,
+    138,
+    234,
+    137,
+    223,
+    6,
+    109,
+    212,
+    146,
+    18,
+    210,
+    99,
+    26,
+    233,
+    67,
+    179,
+    212,
+    174,
+    76,
+    118,
+    134,
+    114,
+    250,
+    14,
+    68,
+    248,
+    19,
+    123,
+    217,
+    96
+  ],
+  "library_version": 11,
+  "old_literal_result_declaration": "tensor[4, f32]",
+  "old_producer_old_consumer": "pass",
+  "old_worker_producer_old_worker_consumer": "pass",
+  "producer_commit": "010354f91d1efd210037f4090f6e862aa7a68773",
+  "sha256": {
+    "context-v17.ctx": "67c9bc3bb55051be8a5a7f62d14d8dc9d4d551314d569180d9e3f6bf03244136",
+    "library-v11-key-input.bin": "3de3d58aea89df066dd49212d2631ae943b3d4ae4c768672fa0e44f8137bd960",
+    "library-v11.tc": "1baf74fa2fcf5059f102dac3bf25e133bbee4e6bf6dee96e5c4c56eab16089e3",
+    "producer.rs": "d45020270d46133f58a3ac8054982a7b97e576ce03831a4439cf0ca4da587cc4",
+    "stdlib-v15-key-input.bin": "87d4c0e2913392d125ab453791aa2d03d2e90c9708bb89de26ae7657a51ff50e",
+    "stdlib-v15.tc": "c9ec448434d6a19722bd2d33256da5f4e5666cb22aa4cdaedc36456af952ed29",
+    "worker-unversioned.bin": "0253f30ae2d502509f2561b1c97a9d5e91e2c0b2dc56d6da2ae8ba7c8062c0fa"
+  },
+  "source_digest": [
+    90,
+    90,
+    90,
+    90,
+    90,
+    90,
+    90,
+    90,
+    90,
+    90,
+    90,
+    90,
+    90,
+    90,
+    90,
+    90,
+    90,
+    90,
+    90,
+    90,
+    90,
+    90,
+    90,
+    90,
+    90,
+    90,
+    90,
+    90,
+    90,
+    90,
+    90,
+    90
+  ],
+  "stdlib_key": [
+    135,
+    212,
+    192,
+    226,
+    145,
+    51,
+    146,
+    209,
+    37,
+    171,
+    69,
+    55,
+    145,
+    170,
+    45,
+    3,
+    210,
+    233,
+    12,
+    151,
+    8,
+    187,
+    137,
+    222,
+    38,
+    174,
+    118,
+    87,
+    165,
+    31,
+    245,
+    14
+  ],
+  "stdlib_numeric_payloads": [
+    {
+      "bincode": "000000000000000000000000",
+      "bits": "0000000000000000",
+      "dtype": "f64",
+      "kind": "scalar"
+    },
+    {
+      "bincode": "0000000002000000000000000000000000000080010000000000f03f",
+      "bits": [
+        "8000000000000000",
+        "3ff0000000000001"
+      ],
+      "dtype": "f64",
+      "kind": "storage"
+    },
+    {
+      "bincode": "040000000100000000002000",
+      "dtype": "int64",
+      "kind": "scalar",
+      "value": 9007199254740993
+    },
+    {
+      "bincode": "0400000002000000000000000100000000002000ffffffffffffdfff",
+      "dtype": "int64",
+      "kind": "storage",
+      "values": [
+        9007199254740993,
+        -9007199254740993
+      ]
+    }
+  ],
+  "stdlib_source": "def fixture_base(x: f32) -> f32 = x + 0.5f32\ndef fixture_wide() -> int64 = 9007199254740993i64\ndef fixture_zero() -> f64 = 0.0f64\ndef fixture_tensor() -> tensor[2, f64] = to_tensor([-0.0f64, 1.0000000000000002f64])\ndef fixture_tensor_int() -> tensor[2, int64] = to_tensor([9007199254740993i64, -9007199254740993i64])\ndef fixture_literal(b: tensor[f32], x: tensor[rows, f32]) -> tensor[4, f32] = insert(b, 0i32, shape(x, 0i32))\nfixture_claim = fixture_literal(scalar_to_tensor(7.0f32), to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32]))\n",
+  "stdlib_version": 15
+}

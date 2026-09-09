@@ -159,7 +159,7 @@ out = eq(preds, refs)
 // ---------------------------------------------------------------------
 
 /// EXPECT: `to_list` of an `argmax_reduce` result yields int64 scalars
-/// (ExecutionValue::Int64), not Float64. The Phase 3j-pre caveat said
+/// (ExecutionValue::Scalar with int64 dtype). The Phase 3j-pre caveat said
 /// "we store integer-valued floats"; with the storage widening, the
 /// per-element schema dtype now matches the type-system label.
 #[test]
@@ -176,15 +176,20 @@ out = to_list(preds)
     assert_eq!(items.len(), 2, "to_list length");
     for (i, item) in items.iter().enumerate() {
         match item {
-            ExecutionValue::Int64 { value: _ } => {}
-            other => panic!("to_list element {i}: expected ExecutionValue::Int64, got {other:?}"),
+            ExecutionValue::Scalar { value }
+                if value.get().prim() == chelis_types::types::Prim::Int64 => {}
+            other => panic!("to_list element {i}: expected scalar int64, got {other:?}"),
         }
     }
     // Pin the concrete values too.
     let values: Vec<i64> = items
         .iter()
         .map(|item| match item {
-            ExecutionValue::Int64 { value } => *value,
+            ExecutionValue::Scalar { value }
+                if value.get().prim() == chelis_types::types::Prim::Int64 =>
+            {
+                value.get().as_i64_exact().unwrap()
+            }
             other => panic!("unexpected element kind: {other:?}"),
         })
         .collect();
@@ -206,7 +211,11 @@ out = to_list(preds)
     let values: Vec<i64> = items
         .iter()
         .map(|item| match item {
-            ExecutionValue::Int64 { value } => *value,
+            ExecutionValue::Scalar { value }
+                if value.get().prim() == chelis_types::types::Prim::Int64 =>
+            {
+                value.get().as_i64_exact().unwrap()
+            }
             other => panic!("unexpected element kind: {other:?}"),
         })
         .collect();

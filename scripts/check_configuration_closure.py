@@ -42,6 +42,8 @@ import sys
 import tomllib
 from typing import Iterable, Sequence
 
+from capacity_census_cache_publication import COMPILE_CASES as CACHE_COMPILE_CASES
+from capacity_census_wire_calls import DRIVER as WIRE_CALL_DRIVER
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -97,6 +99,9 @@ class UncompiledException:
     directory: str
     reason: str
     owning_gate: str
+    #: Exact repository paths when the owner drives individual Rust fixtures.
+    #: None retains the older standalone-Cargo-directory exceptions.
+    sources: tuple[str, ...] | None = None
 
 
 PER_PULL_REQUEST = "per-pull-request"
@@ -239,6 +244,18 @@ NIGHTLY_ONLY_SOURCES: tuple[NightlyOnlySource, ...] = (
 # not compile. Each holds standalone compiler fixtures driven by its own named
 # gate, which checks their expected rejection or generated typed artifacts.
 UNCOMPILED_EXCEPTIONS: tuple[UncompiledException, ...] = (
+    UncompiledException(
+        directory=Path(WIRE_CALL_DRIVER).parent.as_posix(),
+        reason="standalone compiler driver built under the pinned Clippy policy by the wire verifier",
+        owning_gate="scripts/capacity_census_wire_calls.py",
+        sources=(WIRE_CALL_DRIVER,),
+    ),
+    UncompiledException(
+        directory="crates/chelis-compiler-api/tests/fixtures/cache_publication",
+        reason="exact positive and rejection fixtures compiled by the cache publication verifier",
+        owning_gate="scripts/capacity_census_cache_publication.py",
+        sources=tuple(case.fixture for case in CACHE_COMPILE_CASES),
+    ),
     UncompiledException(
         directory="scripts/fixtures/capacity_graph",
         reason="standalone rustdoc fixtures; the owning suite compiles their typed artifacts",
@@ -575,6 +592,25 @@ def check_every_source_is_compiled(
                 f"uncompiled-source exception {exception.directory} names a missing "
                 f"owning gate: {exception.owning_gate}"
             )
+        if exception.sources is not None:
+            expected = set(exception.sources)
+            actual = {
+                path.relative_to(repo_root).as_posix()
+                for path in (repo_root / exception.directory).rglob("*.rs")
+            }
+            if (
+                len(expected) != len(exception.sources)
+                or expected != actual
+                or any(
+                    not source.startswith(exception.directory + "/")
+                    or not (repo_root / source).is_file()
+                    or (repo_root / source).is_symlink()
+                    for source in expected
+                )
+            ):
+                raise ConfigurationClosureFailure(
+                    f"exact fixture inventory differs from its owning gate: {exception.directory}"
+                )
 
     compiled = compiled_rust_sources(target_directories, repo_root)
     if not compiled:
@@ -597,10 +633,15 @@ def check_every_source_is_compiled(
                 + ". Delete their NIGHTLY_ONLY_SOURCES entries; the residual has shrunk."
             )
 
-    excepted = tuple(f"{exception.directory}/" for exception in exceptions)
+    excepted = tuple(
+        f"{exception.directory}/" for exception in exceptions if exception.sources is None
+    )
+    owned_fixtures = {
+        source for exception in exceptions for source in (exception.sources or ())
+    }
     uncompiled = sorted(
         source
-        for source in repository_rust_sources(repo_root) - compiled - allowed_nightly
+        for source in repository_rust_sources(repo_root) - compiled - allowed_nightly - owned_fixtures
         if not source.startswith(excepted)
     )
     if uncompiled:
