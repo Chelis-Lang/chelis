@@ -280,7 +280,7 @@ unreachable call SHALL neither emit a stub nor cause whole-module rejection.
 
 ### Requirement: Standard lowerings
 
-`matmul`, `softmax`, `cross_entropy`, `layer_norm`, `conv2d`, `embedding`, and
+`matmul`, `softmax`, `cross_entropy`, `layer_norm`, `conv`, `embedding`, and
 `multi_head_attention` SHALL lower to defined Tier-1 compositions; `matmul` SHALL carry an
 accumulator parameter with the documented defaults and SHALL NOT admit integer operand
 precisions. `matmul`'s inner sum SHALL follow the canonical balanced tree, so its result
