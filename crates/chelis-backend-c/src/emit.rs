@@ -7920,7 +7920,9 @@ mod tests {
             None,
         );
         let c = emit_test_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("in_indices[d] = d == 0 ? 0 : out_indices[d]"));
+        assert!(c.contains(
+            "in_indices[d] = d == 0 ? chelis_scalar_from_bits(CHELIS_DTYPE_I64, 0) : out_indices[d]"
+        ));
         assert!(!c.contains("t1->strides[0] ="));
     }
 
