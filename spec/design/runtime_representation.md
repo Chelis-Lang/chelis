@@ -560,9 +560,38 @@ steps, and weakened identity conditions. This final classification is limited to
 these two methods and `backend-element-spelling`; another numeric or width owner
 still fails the inventory. It adds no foundation or active debt.
 
-Generated C adoption still requires movement and reduction indexing, sparse/BLAS loop
-domains, Count/window scratch allocation, and the complete Phase 1 execution
-receipt/mutation oracle remain outstanding. Host-only results do not establish
+#### Generated C permutation and expansion delivery (#889)
+
+The DAG `emit_permute` and `emit_expand` paths validate the exact target metadata
+and movement relationship before their existing storage-plan allocation or
+repurpose. The runtime requires a complete normalized axis bijection for
+permutation, and a unit replacement axis or one inserted axis for expansion;
+every unchanged axis must agree, including on empty tensors. Existing extent
+claim guards and source selection retain their runtime-extents authority.
+
+Their loops transport coordinates as canonical int64 `chelis_scalar` values.
+The runtime's private checked metadata owns unraveling and flattening; the C
+consumer only reorders coordinates or supplies the explicit zero coordinate on
+a replaced unit axis. No per-element heap allocation is needed. These are
+metadata-only operations, so generated producer write guards remain live.
+Element payload access and storage ownership keep their existing mechanisms.
+The four exact [05-OP-33] operations and their census registrations ship with
+these two consumers as one checked coordinate-mapping slice.
+
+Supporting Phase 0 acceptance includes `checked_c_movement` runtime contracts in
+debug and release, the two-method emitter adoption control, and generated C
+execution under optimized ASan/UBSan. Positive and negative cases cover all nine
+representations, scalar/empty/dynamic ranks, exact large metadata, permutation
+bijections, expansion axis relationships, canonical scalar coordinates, and
+linear/coordinate range rejection. Executable mutations must detect unchecked
+coordinates and erased target validation. The immutable 358-row foundation is
+preserved; the two retired movement-template rows reduce active debt from 326
+to 324 without adding an owner exception. This extends supporting evidence and
+does not implement the complete Phase 1 receipt oracle.
+
+Generated C adoption still requires padding, shrinking, striding, reduction
+indexing, sparse/BLAS loop domains, and Count/window scratch allocation. The
+complete Phase 1 execution receipt/mutation oracle remains outstanding. Host-only results do not establish
 device execution or close #889/#893. Generated host/device descriptors and
 validated Python/DLPack wrappers remain under #893/#1345; #1288 consumes those
 interfaces and owns their exact discovery and authority registrations.

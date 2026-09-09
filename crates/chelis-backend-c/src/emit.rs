@@ -6621,23 +6621,35 @@ impl CEmitter {
     ) {
         let a = inputs[0].0;
         let elem_type = Self::elem_type(ty);
+        let axis_values = if axes.is_empty() {
+            "0".to_string()
+        } else {
+            axes.iter()
+                .map(|axis| format!("chelis_scalar_from_bits(CHELIS_DTYPE_I64, {axis})"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        self.line(&format!(
+            "chelis_tensor_check_permute(t{a}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {}), {}, (chelis_scalar[]){{{axis_values}}});",
+            Self::ndim(ty), Self::tagged_shape_literal(ty)
+        ));
         self.emit_slot_wrapper(id, ty);
         self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
         self.indent += 1;
         self.line(&format!(
-            "int64_t out_indices[t{id}_rank > 0 ? t{id}_rank : 1];"
+            "chelis_scalar out_indices[t{id}_rank > 0 ? t{id}_rank : 1];"
         ));
         self.line(&format!(
-            "int64_t in_indices[t{a}_rank > 0 ? t{a}_rank : 1];"
+            "chelis_scalar in_indices[t{a}_rank > 0 ? t{a}_rank : 1];"
         ));
         self.line(&format!(
-            "chelis_flat_to_indices(i, t{id}_shape, t{id}_rank, out_indices);"
+            "chelis_tensor_unravel_index(t{id}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)i), out_indices);"
         ));
         for (new_d, &old_d) in axes.iter().enumerate() {
             self.line(&format!("in_indices[{old_d}] = out_indices[{new_d}];"));
         }
         self.line(&format!(
-            "int64_t src = chelis_indices_to_flat(in_indices, t{a}_strides, t{a}_rank);"
+            "int64_t src = chelis_tensor_flat_index(t{a}, in_indices);"
         ));
         self.line(&format!(
             "(({elem_type}*)t{id}_data)[i] = ((const {elem_type}*)t{a}_data)[src];"
@@ -6671,22 +6683,26 @@ impl CEmitter {
             self.emit_runtime_dim_sites(id, &[(axis, extent)]);
         }
         let elem_type = Self::elem_type(ty);
+        self.line(&format!(
+            "chelis_tensor_check_expand(t{a}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {}), {}, {axis});",
+            Self::ndim(ty), Self::tagged_shape_literal(ty)
+        ));
         self.emit_slot_wrapper(id, ty);
         self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
         self.indent += 1;
         self.line(&format!(
-            "int64_t out_indices[t{id}_rank > 0 ? t{id}_rank : 1];"
+            "chelis_scalar out_indices[t{id}_rank > 0 ? t{id}_rank : 1];"
         ));
         self.line(&format!(
-            "int64_t in_indices[t{a}_rank > 0 ? t{a}_rank : 1];"
+            "chelis_scalar in_indices[t{a}_rank > 0 ? t{a}_rank : 1];"
         ));
         self.line(&format!(
-            "chelis_flat_to_indices(i, t{id}_shape, t{id}_rank, out_indices);"
+            "chelis_tensor_unravel_index(t{id}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)i), out_indices);"
         ));
         self.line(&format!("if (t{id}_rank == t{a}_rank) {{"));
         self.indent += 1;
         self.line(&format!(
-            "for (int d = 0; d < t{a}_rank; d++) in_indices[d] = d == {axis} ? 0 : out_indices[d];"
+            "for (int d = 0; d < t{a}_rank; d++) in_indices[d] = d == {axis} ? chelis_scalar_from_bits(CHELIS_DTYPE_I64, 0) : out_indices[d];"
         ));
         self.indent -= 1;
         self.line("} else {");
@@ -6697,7 +6713,7 @@ impl CEmitter {
         self.indent -= 1;
         self.line("}");
         self.line(&format!(
-            "int64_t src = chelis_indices_to_flat(in_indices, t{a}_strides, t{a}_rank);"
+            "int64_t src = chelis_tensor_flat_index(t{a}, in_indices);"
         ));
         self.line(&format!(
             "(({elem_type}*)t{id}_data)[i] = ((const {elem_type}*)t{a}_data)[src];"
@@ -7915,7 +7931,9 @@ mod tests {
             None,
         );
         let c = emit_test_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("in_indices[d] = d == 0 ? 0 : out_indices[d]"));
+        assert!(c.contains(
+            "in_indices[d] = d == 0 ? chelis_scalar_from_bits(CHELIS_DTYPE_I64, 0) : out_indices[d]"
+        ));
         assert!(!c.contains("t1->strides[0] ="));
     }
 

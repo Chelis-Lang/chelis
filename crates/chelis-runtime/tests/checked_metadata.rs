@@ -262,3 +262,46 @@ fn scratch_lengths_and_rank_projections_are_checked_before_allocation() {
         Err(MetadataError::Overflow(_))
     ));
 }
+
+#[test]
+fn checked_movement_relations_reject_invalid_bijections_and_bystanders() {
+    let shape = |dims: &[i64]| ShapeMetadata::contiguous(dims, RuntimeDType::I8).unwrap();
+    let input = shape(&[2, 3]);
+    assert!(input
+        .require_permutation(&shape(&[3, 2]), &[-1, -2])
+        .is_ok());
+    assert!(input.require_permutation(&shape(&[2, 2]), &[0, 0]).is_err());
+    assert!(input.require_permutation(&shape(&[2, 3]), &[1, 0]).is_err());
+    assert!(input.require_permutation(&shape(&[3, 2]), &[1]).is_err());
+    assert!(input.require_permutation(&shape(&[3, 2]), &[1, 2]).is_err());
+    let unit = shape(&[2, 1]);
+    assert!(unit.require_expansion(&shape(&[2, 3]), -1).is_ok());
+    assert!(unit.require_expansion(&shape(&[4, 2, 1]), 0).is_ok());
+    assert!(input.require_expansion(&shape(&[2, 4]), 1).is_err());
+    assert!(unit.require_expansion(&shape(&[3, 4]), 1).is_err());
+    assert!(unit.require_expansion(&shape(&[4, 3, 1]), 0).is_err());
+    assert!(unit.require_expansion(&shape(&[2]), 0).is_err());
+    let other = ShapeMetadata::contiguous(&[2, 3], RuntimeDType::I16).unwrap();
+    assert!(input.require_permutation(&other, &[0, 1]).is_err());
+    assert!(unit.require_expansion(&other, 1).is_err());
+}
+
+#[test]
+fn checked_movement_coordinates_preserve_exact_large_indices_without_storage() {
+    let extent = 9_007_199_254_740_995;
+    let metadata = ShapeMetadata::contiguous(&[2, extent], RuntimeDType::I8).unwrap();
+    let mut coordinates = [0, 0];
+    let linear = extent * 2 - 1;
+    metadata
+        .unravel_into(linear, |axis, value| coordinates[axis] = value)
+        .unwrap();
+    assert_eq!(coordinates, [1, extent - 1]);
+    assert_eq!(
+        metadata.flat_index_by(|axis| coordinates[axis]).unwrap(),
+        linear as usize
+    );
+    assert!(metadata
+        .unravel_into(extent * 2, |_, _| panic!("invalid index must not write"))
+        .is_err());
+    assert!(metadata.flat_index_by(|_| -1).is_err());
+}
