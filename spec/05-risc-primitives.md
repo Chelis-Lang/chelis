@@ -1849,7 +1849,7 @@ exact ADT identity by [05-OP-34].
 > accumulator.
 >
 > **[05-OP-33]** `runtime_tensor(value, parameters...) -> result` governs
-> exactly the twenty-six final public C callable identities enumerated in
+> exactly the twenty-eight final public C callable identities enumerated in
 > the normative registry `spec/registry/c_tensor_runtime.md`, which this atom
 > incorporates by reference. These
 > signatures are canonical: axes and unboxed rank are `int32_t`; extents, sizes,
@@ -1918,6 +1918,24 @@ exact ADT identity by [05-OP-34].
 > zero elements but still requires representable suffix strides; rank zero has
 > one element. Malformed metadata or unequal counts trap `Domain`; unrepresentable
 > products, strides, byte counts, or allocation projections trap `Overflow`.
+>
+> `chelis_tensor_elementwise_index_step` validates input and domain tensor metadata
+> and returns exact int64 zero for a rank-zero input, or one when the input shape
+> is identical to the domain shape. Any other shape pairing traps `Domain`, even
+> when the element counts agree or are zero. Input and domain dtypes may differ.
+> `chelis_tensor_elementwise_index_step_for_shape` applies the same rule to an
+> iteration domain supplied as exact tagged int64 rank and extents. The decoded
+> rank must fit nonnegative int32; positive rank requires a non-null shape pointer.
+> It validates every extent and the exact zero-aware element product before
+> selecting the scalar or identity step. An iteration domain requires neither
+> storage byte counts nor contiguous suffix strides. Negative rank or extents,
+> malformed tagged scalars, and invalid handles trap `Domain`; unrepresentable
+> rank, element count, or scratch allocation projections trap `Overflow`.
+> Both step operations observe only checked metadata, remain valid during active
+> write guards, and change no metadata, ownership, or payload. A caller validates
+> the original input before repurposing its storage, uses the checked domain count
+> as its loop bound, and maps a domain index `i` to the input index `i * step`.
+> These internal scalar projections do not introduce language-level broadcasting.
 >
 > `chelis_tensor_reshape` accepts a live, flat `List<int64>` of target extents
 > and an idle tensor of any active element dtype. It applies the same checked

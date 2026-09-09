@@ -751,6 +751,20 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_tensor_elementwise_index_step ( const chelis_tensor * input , const chelis_tensor * domain ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_tensor_elementwise_index_step_for_shape ( const chelis_tensor * input , chelis_scalar rank , const chelis_scalar * shape ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: int64_t chelis_tensor_numel ( const chelis_tensor * tensor ) ;",
       "flags": [
         "numeric-op"

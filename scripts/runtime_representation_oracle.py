@@ -62,7 +62,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "bd80b87111722a2f7ca4d6e396d20e961a54687efd745a2fbcf2871c84ea1579"
+FREEZE_SHA256 = "978f9fcdec0efb941fa778e66893c32a530f01765594d04dcf01c13c1ee78498"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -183,6 +183,10 @@ VOCAB_OWNER = "crates/chelis-vocab/src/lib.rs"
 ELEMENT_OWNER = "crates/chelis-runtime/src/element.rs"
 METADATA_OWNER = "crates/chelis-runtime/src/metadata.rs"
 METADATA_FINAL_WIDTH_OWNERS = ("ElementCount::bytes", "ElementCount::scratch_len")
+C_INDEX_PROJECTION_OWNERS = (
+    ("crates/chelis-backend-c/src/emit.rs", "CEmitter::emit_elementwise_index_steps"),
+    ("crates/chelis-backend-c/src/host_emit.rs", "HostEmitter < 'a >::emit_elementwise_index_step"),
+)
 ELEMENT_FINAL_CONTRACT_OWNERS = (
     "ElementStorage for f64", "ElementStorage for f32",
     "ElementStorage for F16Bits", "ElementStorage for Bf16Bits",
@@ -232,6 +236,9 @@ def owner_module_final_form(kind: str, path: str, owner: str) -> bool:
         path == METADATA_OWNER
         and kind == "width-arithmetic"
         and owner in METADATA_FINAL_WIDTH_OWNERS
+    ) or (
+        kind == "backend-element-spelling"
+        and (path, owner) in C_INDEX_PROJECTION_OWNERS
     )
 
 
@@ -600,6 +607,10 @@ def coverage_manifest(probes: Sequence[MutationProbe] | None = None) -> dict[str
             "identity": "kind|path|owner, where owner is the seam's enclosing declaration",
             "expected_success": "every hit is exact active debt from the frozen foundation",
             "owner_module_final_forms": {
+                **{
+                    path: [{"kind": "backend-element-spelling", "owner": owner}]
+                    for path, owner in C_INDEX_PROJECTION_OWNERS
+                },
                 METADATA_OWNER: [
                     {"kind": "width-arithmetic", "owner": owner}
                     for owner in METADATA_FINAL_WIDTH_OWNERS
@@ -1657,6 +1668,7 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
                 "--features", "ownership-ledger",
                 "--test", "checked_metadata", "--test", "metadata_compile",
                 "--test", "checked_metadata_padding", "--test", "checked_c_metadata",
+                "--test", "checked_c_indexing",
                 "--test", "exact_tagged_c_abi",
                 "--test", "op33_empty_tensor_axis_decomposition",
                 "--test", "op33_tensor_validation",
@@ -1667,6 +1679,32 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
         OracleLeg(
             "checked C snapshot delegation and restoration mutations",
             ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_metadata"),
+        ),
+        OracleLeg(
+            "checked C shared indexing cohort and restoration mutations",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_indexing"),
+        ),
+        OracleLeg(
+            "checked C shared indexing optimized sanitizer execution",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "exec_compile",
+             "-E", "test(checked_c_indexing_)"),
+        ),
+        OracleLeg(
+            "checked C shared indexing dtype dispatch and storage reuse",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--lib",
+             "--test", "host_emit_dtype_dispatch", "--test", "dtype_matrix_bf16_f16",
+             "--test", "fused_in_place_exec", "--test", "fused_in_place_forall_alias"),
+        ),
+        OracleLeg(
+            "checked C shared indexing cast behavior and first failure",
+            ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "issue_759_checked_cast_default",
+             "--test", "cast_trunc", "--test", "cbackend_cast_memcpy",
+             "--test", "cbackend_cast_arithmetic_composition"),
+        ),
+        OracleLeg(
+            "checked C reshape and shared indexing example parity",
+            ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "parity",
+             "-E", "test(parity_checked_reshape)"),
         ),
         OracleLeg(
             "checked C DAG reshape optimized UBSan execution",

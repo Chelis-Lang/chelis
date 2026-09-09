@@ -2599,6 +2599,26 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         surface: StaticSurfaceDescriptor::new(
             PRIMARY_CENSUS_FAMILY,
             "header-export",
+            "chelis_runtime.h: int64_t chelis_tensor_elementwise_index_step ( const chelis_tensor * input , const chelis_tensor * domain ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_elementwise_index_step` validates input and domain tensor metadata",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_tensor_elementwise_index_step_for_shape ( const chelis_tensor * input , chelis_scalar rank , const chelis_scalar * shape ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_elementwise_index_step_for_shape` applies the same rule",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
             "chelis_runtime.h: void chelis_tensor_check_reshape ( const chelis_tensor * tensor , chelis_scalar rank , const chelis_scalar * shape ) ;",
             &[],
         ),

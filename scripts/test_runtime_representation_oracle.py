@@ -391,7 +391,8 @@ class ManifestTests(unittest.TestCase):
             {"kind": "width-arithmetic", "owner": owner} for owner in sorted(owners)
         ])
         commands = [leg.argv for leg in oracle.phase0_legs()]
-        for test in ("checked_metadata", "metadata_compile", "checked_metadata_padding", "exact_tagged_c_abi",
+        for test in ("checked_metadata", "metadata_compile", "checked_metadata_padding", "checked_c_metadata",
+                     "checked_c_indexing", "exact_tagged_c_abi",
                      "op33_empty_tensor_axis_decomposition", "op33_tensor_validation",
                      "op33_legal_domain_matrix", "dim_carrier_int64",
                      "tensor_repurpose", "tensor_write_guard"):
@@ -408,6 +409,18 @@ class ManifestTests(unittest.TestCase):
             "dim_expr_evaluation" in command and "--release" in command
             for command in commands
         ), commands)
+
+    def test_checked_c_index_projection_owners_require_their_executable_control(self) -> None:
+        manifest = oracle.coverage_manifest()
+        forms = manifest["source_inventory"]["owner_module_final_forms"]
+        for path, owner in oracle.C_INDEX_PROJECTION_OWNERS:
+            self.assertTrue(oracle.owner_module_final_form("backend-element-spelling", path, owner))
+            self.assertFalse(oracle.owner_module_final_form("width-arithmetic", path, owner))
+            self.assertFalse(oracle.owner_module_final_form("backend-element-spelling", path, owner + "_unchecked"))
+            self.assertEqual(forms[path], [{"kind": "backend-element-spelling", "owner": owner}])
+        commands = [leg.argv for leg in oracle.phase0_legs()]
+        self.assertTrue(any("chelis-backend-c" in command and "checked_c_indexing" in command for command in commands))
+        self.assertTrue(any("exec_compile" in command and "test(checked_c_indexing_)" in command for command in commands))
 
     def test_release_reproducers_and_landed_receipts_are_named(self) -> None:
         commands = [

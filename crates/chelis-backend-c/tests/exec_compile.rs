@@ -27,6 +27,268 @@ use support::{codegen, codegen_with_options, emit_host_program};
 
 mod common;
 
+fn checked_indexing_run(source: &str, harness: &str) -> std::process::Output {
+    let probe = common::probe_dir("checked_c_indexing");
+    let dir = probe.path();
+    fs::write(dir.join("kernel.c"), source).unwrap();
+    fs::write(dir.join("main.c"), harness).unwrap();
+    let toolchain = chelis_backend_c::toolchain::test_toolchain(Default::default());
+    let binary = dir.join("probe");
+    let compiled = Command::new(toolchain.compiler)
+        .args([
+            "-O2",
+            "-fsanitize=address,undefined",
+            "-fno-sanitize-recover=all",
+        ])
+        .args(toolchain.compile_flags)
+        .arg("-I")
+        .arg(runtime_include_dir())
+        .arg(dir.join("kernel.c"))
+        .arg(dir.join("main.c"))
+        .arg(runtime_lib_path())
+        .args(toolchain.link_flags)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "{}\n{source}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    Command::new(binary)
+        .env("ASAN_OPTIONS", "detect_leaks=0")
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn checked_c_indexing_dag_scalar_fused_reuse_and_empty_execute_under_sanitizers() {
+    use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
+    for prim in [Prim::F32, Prim::F64] {
+        for shape in [vec![], vec![4], vec![0], vec![1; 9]] {
+            for fused in [false, true] {
+                let ty = TensorType {
+                    dims: shape.iter().copied().map(DimInfo::Lit).collect(),
+                    precision: prim,
+                };
+                let scalar_ty = if fused {
+                    TensorType {
+                        dims: vec![],
+                        precision: prim,
+                    }
+                } else {
+                    ty.clone()
+                };
+                let mut dag = Dag::new();
+                let input =
+                    dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+                let scalar =
+                    dag.add_node(RiscOp::Load { name: "s".into() }, vec![], scalar_ty, None);
+                let negated = dag.add_node(RiscOp::Neg, vec![input], ty.clone(), None);
+                let op = if fused {
+                    RiscOp::FusedElem {
+                        ops: vec![FusedStep {
+                            op: FusedStepOp::Add,
+                            input_indices: vec![FusedInput::External(0), FusedInput::External(1)],
+                        }],
+                    }
+                } else {
+                    RiscOp::Add
+                };
+                let result = dag.add_node(op, vec![negated, scalar], ty, None);
+                if fused {
+                    dag.set_reusable_input(result, negated);
+                }
+                dag.add_root(result);
+                let generated = codegen(&dag, "checked_indexing").unwrap();
+                assert!(
+                    generated
+                        .c_source
+                        .contains("chelis_tensor_elementwise_index_step_for_shape(")
+                );
+                if fused && !shape.contains(&0) {
+                    assert!(
+                        generated.c_source.contains("chelis_tensor_repurpose("),
+                        "fixture must exercise storage reuse"
+                    );
+                }
+                let inputs = generated
+                    .input_labels
+                    .iter()
+                    .map(|name| name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let elem = if prim == Prim::F32 { "float" } else { "double" };
+                let dtype = if prim == Prim::F32 {
+                    "CHELIS_DTYPE_F32"
+                } else {
+                    "CHELIS_DTYPE_F64"
+                };
+                let dims = if shape.is_empty() {
+                    "1".into()
+                } else {
+                    shape
+                        .iter()
+                        .map(usize::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                let rank = shape.len();
+                let count = shape.iter().product::<usize>();
+                let scalar_rank = if fused { 0 } else { rank };
+                let scalar_count = if fused { 1 } else { count };
+                let harness = format!(
+                    r#"
+#include "chelis_runtime.h"
+void checked_indexing(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    int64_t dims[] = {{ {dims} }};
+    chelis_tensor *x = chelis_alloc({rank}, dims, {dtype});
+    chelis_tensor_write *guard = chelis_tensor_begin_write(x);
+    {elem} *data = ({elem} *)chelis_tensor_write_view(guard).data;
+    for (int64_t i = 0; i < {count}; ++i) data[i] = ({elem})(i + 1);
+    chelis_tensor_end_write(guard);
+    chelis_tensor *s = chelis_alloc({scalar_rank}, dims, {dtype});
+    guard = chelis_tensor_begin_write(s);
+    for (int64_t i = 0; i < {scalar_count}; ++i) (({elem} *)chelis_tensor_write_view(guard).data)[i] = 10;
+    chelis_tensor_end_write(guard);
+    chelis_tensor *inputs[] = {{ {inputs} }}, *outputs[1] = {{NULL}};
+    checked_indexing(inputs, 2, outputs, 1);
+    chelis_read_view view = chelis_tensor_read_view(outputs[0]);
+    if (view.count != {count} || chelis_tensor_rank(outputs[0]) != {rank}) return 2;
+    for (int64_t i = 0; i < view.count; ++i)
+        if (((const {elem} *)view.data)[i] != 9 - i) return 3;
+    chelis_tensor_release(outputs[0]); chelis_tensor_release(x); chelis_tensor_release(s);
+    puts("CHECKED INDEX PASS");
+    return 0;
+}}
+"#
+                );
+                let run = checked_indexing_run(&generated.c_source, &harness);
+                assert!(
+                    run.status.success(),
+                    "{prim:?} {shape:?} fused={fused}: {}\n{}",
+                    String::from_utf8_lossy(&run.stderr),
+                    generated.c_source
+                );
+                assert_eq!(String::from_utf8_lossy(&run.stdout), "CHECKED INDEX PASS\n");
+                if fused && prim == Prim::F32 && shape == vec![4] {
+                    // Execute the actual emitted fast-path condition with its
+                    // scalar protection removed. ASan must observe the scalar
+                    // read beyond its allocation; a source-only check is insufficient.
+                    let anchor = "t3_input1_step == 1";
+                    assert!(generated.c_source.contains(anchor));
+                    let bad_fast =
+                        checked_indexing_run(&generated.c_source.replace(anchor, "1"), &harness);
+                    assert!(!bad_fast.status.success());
+                    assert!(String::from_utf8_lossy(&bad_fast.stderr).contains("AddressSanitizer"));
+
+                    // A same-capacity header change must be rejected while the
+                    // original shape remains observable. Moving validation past
+                    // fused repurpose erases it and makes this witness return success.
+                    let lines: Vec<_> = generated
+                        .c_source
+                        .lines()
+                        .filter(|line| {
+                            line.contains("const int64_t t3_input") && line.contains("_step =")
+                        })
+                        .collect();
+                    assert_eq!(lines.len(), 2);
+                    let steps = format!("{}\n{}\n", lines[0], lines[1]);
+                    assert!(generated.c_source.contains(&steps));
+                    let change = r#"
+    chelis_tensor_end_write(t2_write_guard);
+    chelis_tensor_repurpose(t2, chelis_scalar_from_bits(CHELIS_DTYPE_I64, 2),
+        (chelis_scalar[]){chelis_scalar_from_bits(CHELIS_DTYPE_I64, 2), chelis_scalar_from_bits(CHELIS_DTYPE_I64, 2)});
+    t2_write_guard = chelis_tensor_begin_write(t2);
+    t2_data = chelis_tensor_write_view(t2_write_guard).data;
+"#;
+                    let changed = generated
+                        .c_source
+                        .replace(&steps, &format!("{change}{steps}"));
+                    let run = checked_indexing_run(&changed, &harness);
+                    assert!(!run.status.success());
+                    assert!(
+                        String::from_utf8_lossy(&run.stderr)
+                            .contains("Domain: chelis_tensor_elementwise_index_step_for_shape")
+                    );
+                    let rebound = "t2_data = t3_data;";
+                    assert_eq!(changed.matches(rebound).count(), 1);
+                    let late = changed
+                        .replace(&steps, "")
+                        .replace(rebound, &format!("{rebound}\n{steps}"));
+                    let run = checked_indexing_run(&late, &harness);
+                    assert!(
+                        run.status.success(),
+                        "late-validation mutation did not erase the witness: {}",
+                        String::from_utf8_lossy(&run.stderr)
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn checked_c_indexing_host_scalar_projection_and_reversed_domain_execute_under_sanitizers() {
+    for builtin in ["add", "max_elem"] {
+        for reversed in [false, true] {
+            let (lhs, rhs) = if reversed {
+                (vec![], vec![4])
+            } else {
+                (vec![4], vec![])
+            };
+            let source = emit_host_program(
+                &host_binary_program(builtin, lhs, rhs),
+                "checked_host_indexing",
+            )
+            .unwrap();
+            assert!(source.contains("chelis_tensor_elementwise_index_step("));
+            assert!(!source.contains("chelis_host_indices_to_flat"));
+            let args = if reversed { "s, x" } else { "x, s" };
+            let expected = if builtin == "add" { "i + 11" } else { "10" };
+            let harness = format!(
+                r#"
+#include "chelis_runtime.h"
+chelis_tensor *the_fn(chelis_tensor *, chelis_tensor *);
+int main(void) {{
+    int64_t dim = 4;
+    chelis_tensor *x = chelis_alloc(1, &dim, CHELIS_DTYPE_F32);
+    chelis_tensor *s = chelis_alloc(0, NULL, CHELIS_DTYPE_F32);
+    chelis_tensor_write *guard = chelis_tensor_begin_write(x);
+    float *data = (float *)chelis_tensor_write_view(guard).data;
+    for (int i = 0; i < 4; ++i) data[i] = i + 1;
+    chelis_tensor_end_write(guard);
+    guard = chelis_tensor_begin_write(s);
+    *(float *)chelis_tensor_write_view(guard).data = 10;
+    chelis_tensor_end_write(guard);
+    chelis_tensor *out = the_fn({args});
+    chelis_read_view view = chelis_tensor_read_view(out);
+    if (view.count != 4) return 2;
+    for (int i = 0; i < 4; ++i) if (((const float *)view.data)[i] != {expected}) return 3;
+    chelis_tensor_release(out); chelis_tensor_release(x); chelis_tensor_release(s);
+    puts("CHECKED HOST PASS");
+    return 0;
+}}
+"#
+            );
+            let run = checked_indexing_run(&source, &harness);
+            let stderr = String::from_utf8_lossy(&run.stderr);
+            if reversed {
+                assert!(!run.status.success());
+                assert!(
+                    stderr.contains("Domain: chelis_tensor_elementwise_index_step"),
+                    "{stderr}"
+                );
+            } else {
+                assert!(run.status.success(), "{stderr}\n{source}");
+                assert_eq!(String::from_utf8_lossy(&run.stdout), "CHECKED HOST PASS\n");
+            }
+        }
+    }
+}
+
 fn vec_f32(n: usize) -> TensorType {
     TensorType {
         dims: vec![DimInfo::Lit(n)],

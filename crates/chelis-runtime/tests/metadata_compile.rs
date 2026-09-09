@@ -95,6 +95,21 @@ fn weakened_metadata_construction_fails_the_executable_contract() {
     ));
     for (from, to, witness) in [
         (
+            "self.shape.as_ref() == domain",
+            "true",
+            "checked_iteration_steps_preserve_exact_large_domains_without_storage",
+        ),
+        (
+            "if self.rank == 0 {\n            Ok(0)",
+            "if self.rank == 0 {\n            Ok(1)",
+            "checked_iteration_steps_preserve_exact_large_domains_without_storage",
+        ),
+        (
+            "self.shape.as_ref() == domain {\n            Ok(1)",
+            "self.shape.as_ref() == domain {\n            Ok(0)",
+            "checked_iteration_steps_preserve_exact_large_domains_without_storage",
+        ),
+        (
             "**extent < 0",
             "false",
             "zeros_do_not_hide_negative_extents_or_canonical_stride_overflow",
@@ -253,6 +268,12 @@ fn internal_callers_cannot_forge_counts_or_restore_independent_tensor_fields() {
             "fn bad(c: ByteCount) { let _: AllocationBytes = c; }".to_owned(),
             "E0308",
             "AllocationBytes",
+        ),
+        (
+            "fn bad(m: &ShapeMetadata) { let _ = m.index_step_for_checked_shape(&[-1]); }"
+                .to_owned(),
+            "E0624",
+            "index_step_for_checked_shape",
         ),
     ];
     for field in ["shape", "strides", "rank", "elements", "bytes", "dtype"] {
