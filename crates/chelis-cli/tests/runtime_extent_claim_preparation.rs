@@ -749,8 +749,17 @@ fn literal_claim_transport_survives_nested_and_unused_calls() {
             expected: if good { Expected::Tensor(vec![1], vec![9.0]) }
             else { Expected::Domain("load", &["claimed = 4", "x axis 0 = 5"]) },
         });
+        fixtures.push(Case {
+            id: format!("literal.unused_existing.{}", if good { "satisfied" } else { "mismatch" }),
+            issue: 1377,
+            source: format!("{definitions}\ndef main() -> tensor[f32] = {{\n  b = {}\n  _ = f(b, {})\n  b\n}}\n", literal(&seed), literal(&x)),
+            signature: Some("(tensor[f32], tensor[rows, f32]) -> tensor[4, f32]"),
+            exported: None,
+            expected: if good { Expected::Tensor(vec![], vec![7.0]) }
+            else { Expected::Domain("load", &["claimed = 4", "x axis 0 = 5"]) },
+        });
     }
-    assert_eq!(fixtures.len(), 8);
+    assert_eq!(fixtures.len(), 10);
     let failures: Vec<_> = fixtures
         .iter()
         .flat_map(|case| contract_failures(case, &observe(case)))

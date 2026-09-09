@@ -292,7 +292,9 @@ the result annotation alone never licenses the substitution.
 
 The enclosing invocation result retains its call witnesses through explicit
 `shape_deps`, including witnesses of nested calls whose tensor results are
-discarded. These dependencies participate in root-scoped evaluation and DCE:
+discarded. A fresh `Copy` return carrier follows the result value and every
+required witness; an existing returned value is never mutated to depend on
+a later call. These dependencies participate in root-scoped evaluation and DCE:
 an unrelated export does not activate another invocation's checks. A witness
 without a requirement adds no trap dependency. CSE, specialization and folding preserve the check or discharge
 it from independent evidence; they cannot infer success from its requirement.
@@ -479,7 +481,7 @@ Phase B records `guard.local.declaration_order.eval_c`. This closes the P2
 multi-axis reshape ordering witness recorded during #1662; it does not claim
 the remaining op-computed guard coverage or call/witness transport.
 
-The #1377 exit runs six direct-call cases and eight nested/discarded-call
+The #1377 exit runs six direct-call cases and ten nested/discarded-call
 cases, with declared types and exact outputs or required traps:
 
 ```sh
@@ -488,7 +490,8 @@ cargo test -p chelis-cli --test runtime_extent_claim_preparation \
 ```
 
 It asserts the declared result and exact execution or required failure on
-exported calls, top-level bindings and inlined main. All 14 cases pass.
+exported calls, top-level bindings and inlined main, including returning an
+existing value after a discarded call. All 16 cases pass.
 Phase B attaches the direct public runner to its two inlined-root rows and
 adds `claim.literal.nested_and_unused.eval_c`. The 55-case preparation
 baseline now has 51 unmet cells: 24 declared signatures are preserved and

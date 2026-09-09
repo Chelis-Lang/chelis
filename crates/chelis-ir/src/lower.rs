@@ -6138,8 +6138,7 @@ impl LowerCtx {
         for elem in &elems[2..] {
             last = self.lower_expr(elem);
         }
-        self.retain_invocation_witnesses(&last, witness_start);
-        last
+        self.retain_invocation_witnesses(last, witness_start)
     }
 
     /// The census-row-16 fallthrough (chelis#730 section C1.4), shared by
@@ -6290,7 +6289,7 @@ impl LowerCtx {
         }
 
         let result = self.lower_expr(&elems[3]);
-        self.retain_invocation_witnesses(&result, witness_start);
+        let result = self.retain_invocation_witnesses(result, witness_start);
         self.bindings = saved; // Restore scope
         self.list_bindings = saved_list_bindings;
         self.shape_bindings = saved_shape_bindings;
@@ -7725,7 +7724,7 @@ impl LowerCtx {
             self.repair_output_type_if_default(&result, expected_return_ty);
         }
         self.preserve_literal_result(&result, &declared_result);
-        self.retain_invocation_witnesses(&result, witness_start);
+        let result = self.retain_invocation_witnesses(result, witness_start);
         self.parameter_witnesses = saved_witnesses;
         self.inlining_active -= 1;
         if let Some(name) = &inlining_name
@@ -11900,9 +11899,9 @@ impl LowerCtx {
         }
     }
 
-    fn retain_invocation_witnesses(&mut self, result: &LoweredValue, start: usize) {
+    fn retain_invocation_witnesses(&mut self, result: LoweredValue, start: usize) -> LoweredValue {
         let Some(id) = result.as_single_node() else {
-            return;
+            return result;
         };
         let required = self.invocation_witnesses[start..]
             .iter()
@@ -11912,12 +11911,23 @@ impl LowerCtx {
                 RiscOp::ExtentWitness { requirements, .. } if !requirements.is_empty())
             })
             .collect::<Vec<_>>();
-        let node = self.dag.node_mut(id).expect("result");
-        for witness in required {
-            if witness != id && !node.shape_deps.contains(&witness) {
-                node.shape_deps.push(witness);
-            }
+        if required.is_empty() {
+            return result;
         }
+        // A block can return a value bound before the invocation. Attaching
+        // the later checks to that existing node creates forward dependencies
+        // (or cycles when it is also the witnessed input). Give this return
+        // its own carrier after every dependency, without mutating a value
+        // that another invocation or root can still reference.
+        let ty = self.dag.get(id).expect("result").output_type.clone();
+        let carrier = self
+            .dag
+            .add_node(RiscOp::Copy, vec![id], ty, self.current_span_id.clone());
+        self.dag
+            .node_mut(carrier)
+            .expect("return carrier")
+            .shape_deps = required;
+        LoweredValue::Node(carrier)
     }
 
     fn input_axis_source_from_shape_arg(
@@ -12761,7 +12771,7 @@ impl LowerCtx {
         if let Some(ty) = &declared_result {
             self.preserve_literal_result(&result, ty);
         }
-        self.retain_invocation_witnesses(&result, witness_start);
+        let result = self.retain_invocation_witnesses(result, witness_start);
         self.parameter_witnesses = saved_witnesses;
         self.bindings = saved; // Restore scope
         self.list_bindings = saved_list_bindings;
