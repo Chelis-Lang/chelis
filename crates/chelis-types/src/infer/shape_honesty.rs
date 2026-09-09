@@ -189,9 +189,9 @@ pub(super) fn record_let_binding_shape_fact(
             // unary/binary passthrough wrapper
             // around one, recursively) but its
             // output type could not be derived.
-            // This catches `y = conv2d(bad)`
+            // This catches `y = conv(bad)`
             // and the R3 F-A passthrough cases
-            // like `y = relu(conv2d(bad))`.
+            // like `y = relu(conv(bad))`.
             //
             // RT-205 round-4 / issue #212: the
             // previous guard checked

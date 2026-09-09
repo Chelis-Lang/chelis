@@ -268,55 +268,5 @@ pub(super) fn reject_inadmissible_operand_dtypes(
         }
     }
 
-    if let Some(fname) = func_name
-        && fname == "conv2d"
-    {
-        *checked_route_observed = true;
-        for (index, arg_ty) in arg_tys.iter().enumerate() {
-            let resolved = type_for_readonly_check(arg_ty, subst);
-            if index < 2 {
-                match &resolved {
-                    Type::Tensor(_, _) | Type::Var(_) | Type::Error(_) => {}
-                    _ => {
-                        return reject(
-                            errors,
-                            CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!(
-                                        "conv2d expects tensor inputs for args 1-2, got {}",
-                                        resolved
-                                    ),
-                                ),
-                                vec![],
-                            ),
-                        );
-                    }
-                }
-            } else {
-                match &resolved {
-                    Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_) => {}
-                    _ => {
-                        return reject(
-                            errors,
-                            CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!(
-                                        "conv2d expects int32 stride/padding, got {}",
-                                        resolved
-                                    ),
-                                ),
-                                vec![],
-                            ),
-                        );
-                    }
-                }
-            }
-        }
-    }
-
     None
 }

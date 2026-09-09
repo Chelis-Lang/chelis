@@ -2727,6 +2727,33 @@ fn top_level_expr_name(expr: &Expr) -> Option<&str> {
     kids.first().and_then(symbol_name)
 }
 
+/// [05-OP-51] literal metadata belongs to the convolution shape, not a host
+/// List computation. Keep classification and lowering on the same extractor.
+type ConvLiteralParameters = (Vec<usize>, Vec<(usize, usize)>);
+
+fn conv_literal_parameters(strides: &Expr, padding: &Expr) -> Option<ConvLiteralParameters> {
+    let strides = collect_cons_chain(strides)?
+        .into_iter()
+        .map(|x| usize::try_from(extract_int_for_dim(x)?).ok())
+        .collect::<Option<Vec<_>>>()?;
+    let padding = collect_cons_chain(padding)?
+        .into_iter()
+        .map(|x| {
+            let (DeepTag::Tuple, _, kids) = stamped_parts(x)? else {
+                return None;
+            };
+            let [low, high] = kids else {
+                return None;
+            };
+            Some((
+                usize::try_from(extract_int_for_dim(low)?).ok()?,
+                usize::try_from(extract_int_for_dim(high)?).ok()?,
+            ))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some((strides, padding))
+}
+
 fn expr_requires_host_runtime(expr: &Expr) -> bool {
     expr_requires_host_runtime_with_ctx(expr, false)
 }
@@ -2794,6 +2821,16 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
                 // The type checker has already proved that every selector is
                 // either a static int32 axis or a named operand dimension, so
                 // only the tensor operand contributes runtime requirements.
+                if name == "conv" {
+                    let kids = children(list);
+                    if let [_, input, kernel, strides, padding] = kids
+                        && conv_literal_parameters(strides, padding).is_some()
+                    {
+                        return [input, kernel].into_iter().any(|operand| {
+                            expr_requires_host_runtime_with_ctx(operand, exempt_to_tensor_literal)
+                        });
+                    }
+                }
                 if name == "count" {
                     let app_children = children(list);
                     if let (Some(input), Some(axes)) = (app_children.get(1), app_children.get(2..))
@@ -3694,7 +3731,7 @@ fn is_shape_sensitive_builtin_app(expr: &Expr) -> bool {
                 | "softmax"
                 | "mean"
                 | "layer_norm"
-                | "conv2d"
+                | "conv"
                 | "sum"
                 | "count"
                 | "max_reduce"
@@ -8832,37 +8869,33 @@ impl LowerCtx {
                 );
                 self.attach_reuse_hint(node, app_span, &[x, gamma, beta])
             }
-            "conv2d" if args.len() >= 2 => {
-                let input = self.lower_expr_node(&args[0], "conv2d input");
-                let kernel = self.lower_expr_node(&args[1], "conv2d kernel");
-                let stride = args
-                    .get(2)
-                    .and_then(|expr| self.extract_usize_value(expr))
-                    .unwrap_or(1);
-                let padding = args
-                    .get(3)
-                    .and_then(|expr| self.extract_usize_value(expr))
-                    .unwrap_or(0);
+            "conv" if args.len() == 4 => {
+                let input = self.lower_expr_node(&args[0], "conv input");
+                let kernel = self.lower_expr_node(&args[1], "conv kernel");
+                let (strides, padding) = conv_literal_parameters(&args[2], &args[3])
+                    .expect("checked conv requires literal per-axis metadata");
                 let input_ty = self
                     .dag
                     .get(input)
-                    .map(|n| n.output_type.clone())
-                    .unwrap_or_else(|| ty.clone());
+                    .expect("conv input node")
+                    .output_type
+                    .clone();
                 let kernel_ty = self
                     .dag
                     .get(kernel)
-                    .map(|n| n.output_type.clone())
-                    .unwrap_or_else(|| ty.clone());
+                    .expect("conv kernel node")
+                    .output_type
+                    .clone();
                 let parent_span = self.current_span_id.clone();
-                tier2::lower_conv2d(
+                tier2::lower_conv(
                     &mut self.dag,
                     input,
                     kernel,
                     &input_ty,
                     &kernel_ty,
                     ty,
-                    stride,
-                    padding,
+                    &strides,
+                    &padding,
                     parent_span.as_deref(),
                 )
             }

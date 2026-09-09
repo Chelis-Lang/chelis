@@ -126,7 +126,14 @@ fn replace_matmul_patterns(dag: &Dag) -> Dag {
     let mut id_map: UnordMap<NodeId, NodeId> = UnordMap::new();
 
     for node in dag.nodes() {
-        if let Some(info) = detect_matmul_pattern(dag, node.id) {
+        if let Some(info) = detect_matmul_pattern(dag, node.id)
+            // Empty contractions (including [05-OP-51]'s zero-channel
+            // convolution) retain their RISC zero/empty result. BlasMatmul's
+            // verified domain requires positive matrix dimensions.
+            && [&info.m, &info.n, &info.k]
+                .into_iter()
+                .all(|dimension| dimension.as_concrete() != Some(0))
+        {
             let a = id_map[&info.a];
             let b = id_map[&info.b];
             // The matmul-pattern detector recognizes the

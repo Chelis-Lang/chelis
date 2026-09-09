@@ -387,7 +387,7 @@ EXPECTED_OP_MANIFESTS = {
     ),
     "05-OP-38": tuple(
         """\
-> | `tensor_scan` | `(T,((T,int64)->T!E),int64)->tensor[n,T]!E` |
+> | `tensor_scan` | `(T,((T,int64)->T!E),int64)->tensor[n,..state_shape(T),element(T)]!E` |
 > | `process_run` | `(string,List[string])->(int64,string,string)!{IO}` |
 > | `test_assert_eq` | `(Q,Q,string)->unit!{Test}` |
 > | `test_assert_close_tensor` | `(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}` |
@@ -446,7 +446,7 @@ FROZEN_ATOM_DIGESTS = {
     "05-OP-35": "6eb9a0e1023aeed6dcf43abe8623a9b94dcb38db15224f38915320108c276ef7",
     "05-OP-36": "aeaaf9888f922b31159b8b7536444603897d649c8fb477e77bda659346177ab4",
     "05-OP-37": "2b27734c6956b706e031130b2c444cb69f0ff5a6a6886d1935611f61767f02b0",
-    "05-OP-38": "46685ae74bc05fac13ce0ff877e92978bea109b4660f7d7ca637222819cb368e",
+    "05-OP-38": "39e4e800864ca561f12d83cb0bb1b17489f46c59112bd1aacd3f00cf15e3e33d",
     "05-OP-39": "c23d7e9e0964df3655319ce26c486a8c006097cdb8ff714d8f7a1b8fcfecaa14",
     "05-OP-40": "6ec67e1092a1dd46c8ceb005d95415bb7a4448889350f70079e7680085d8d034",
     "05-OP-41": "7bbbba7450bf89f9eac66a7f660f7352940a41e4baf6f7497873e46a29be41db",
@@ -506,7 +506,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/05-risc-primitives.md",
         "### 3.8 Named Lossy Cast Forms",
         "## 4. Standard Lowerings",
-        "0e1edb86742324a7d04cbccd406a6d19378ed02a84f049f52d56e3d639fa2aed",
+        "1867155f6dfa7ae8689a0c276dbe33742638f3355c8a2d2ea2cb3d8ba0b4235b",
     ),
     "capability schema": (
         "spec/design/capability_table.md",
@@ -524,7 +524,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/dtype_semantics.md",
         "## Phase 4 - the capability table becomes the permanent guard",
         "## I1. Interlock with loud unsupported ([#730])",
-        "678e4636d5b864f39ee7d7ae887719ae0a2e09bd4b0725f896df6c5f109a1e18",
+        "3cb11424f8e1f5fb5c8b4fdade54e10d6cdfd20375e7c143e85e139ddb137563",
     ),
     "compiled stdlib consumer": (
         "spec/design/loud_unsupported.md",
@@ -2498,14 +2498,15 @@ def validate_normative_contract(
         ),
         "05-OP-38": (
             "governs exactly these five numeric-capacity identities and signatures",
-            "`tensor_scan` | `(T,((T,int64)->T!E),int64)->tensor[n,T]!E`",
+            "`tensor_scan` | `(T,((T,int64)->T!E),int64)->tensor[n,..state_shape(T),element(T)]!E`",
             "`process_run` | `(string,List[string])->(int64,string,string)!{IO}`",
             "`test_assert_eq` | `(Q,Q,string)->unit!{Test}`",
             "`test_assert_close_tensor` | `(&tensor[..r,p_float],"
             "&tensor[..r,p_float],p_float,string)->unit!{Test}`",
             "`test_assert_eq_tensor` | `(&tensor[..r,p],&tensor[..r,p],string)"
             "->unit!{Test}`",
-            "`T` is one active numeric or bool scalar type",
+            "`T` is a scalar or tensor state",
+            "shape and dtype are invariant across every callback application",
             "`Q` is one static type in [05-OP-36]'s scalar or recursive equality "
             "domain",
             "Repeated variables denote the same type, dtype, rank, and dimensions",

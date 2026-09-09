@@ -313,7 +313,7 @@ fn an_authored_rank_only_prefix_dimension_is_an_ordinary_name() {
 def convolve(\n\
   x: tensor[__chelis_rank_only_axis_0, 3, 8, 8, f32],\n\
   k: tensor[8, 3, 3, 3, f32],\n\
-) -> tensor[__chelis_rank_only_axis_0, 8, 6, 6, f32] = conv2d(&x, &k, 1i32, 0)\n";
+) -> tensor[__chelis_rank_only_axis_0, 8, 6, 6, f32] = conv(&x, &k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])\n";
     let (status, report) = check(source);
     assert!(
         status.success(),
@@ -387,7 +387,7 @@ fn authored_deep_type_metadata_cannot_override_the_inferred_rank() {
 /// rebinding read the earlier binding's rank, and the identity-rank validator
 /// then rejected a valid program (chelis#668 round-6 F1). That consumer is
 /// gone, so this row can no longer go red the way it originally did; the
-/// environment it exercises still feeds the exact-shape `conv2d` validators,
+/// environment it exercises still feeds the exact-shape `conv` validators,
 /// where a stale entry would be the same defect with a different consumer.
 #[test]
 fn rebinding_to_a_nonderivable_value_does_not_inherit_the_previous_shape() {

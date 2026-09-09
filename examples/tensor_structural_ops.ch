@@ -27,3 +27,7 @@ sorted_indices = sort(diag, 0).1
 pool_grid = to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)], [cast(7.0, f32), cast(8.0, f32), cast(9.0, f32)]])
 windowed_max = reduce_window_max(pool_grid, [2i64, 2i64], [1i64, 1i64])
 windowed_mean = reduce_window_mean(pool_grid, [2i64, 2i64], [2i64, 2i64])
+def convolve_line(data: tensor[1,1,4,f32], weights: tensor[1,1,2,f32]) -> tensor[1,1,3,f32] = conv(data, weights, [1i64], [(0i64,0i64)])
+conv_input: tensor[1,1,4,f32] = reshape(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]), [1i64, 1i64, 4i64])
+conv_kernel: tensor[1,1,2,f32] = reshape(to_tensor([10.0f32, 1.0f32]), [1i64, 1i64, 2i64])
+convolved = convolve_line(conv_input, conv_kernel)

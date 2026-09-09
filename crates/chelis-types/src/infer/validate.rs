@@ -1385,10 +1385,10 @@ pub(super) fn validate_ir_expr(
                 let kids = children(list);
                 let mut scoped_static_env = static_env.clone();
                 // Clone the type env on let-scope entry so each binding's
-                // derivable IR-shape-sensitive type (e.g. conv2d's output
+                // derivable IR-shape-sensitive type (e.g. conv's output
                 // dims) can extend the env visible to the let body. Without
                 // this the validator cannot resolve `(var y)` for a let-
-                // bound `y = conv2d(...)` and silently rejects the next
+                // bound `y = conv(...)` and silently rejects the next
                 // shape-sensitive call that consumes `y` (RT-205 F5).
                 let mut scoped_type_env = type_env.clone();
                 if let Some(deep::Expr::List(bind_list, _)) = kids.first()
@@ -1798,7 +1798,7 @@ pub(super) fn is_ir_shape_sensitive_builtin(name: &str) -> bool {
             | "softmax"
             | "mean"
             | "layer_norm"
-            | "conv2d"
+            | "conv"
             | "sum"
             | "count"
             | "max_reduce"
@@ -1908,7 +1908,7 @@ pub(super) fn let_rhs_is_recognized_shape_sensitive(
     // Both halves are required. `is_ir_shape_sensitive_builtin` alone would
     // mark `y = expand(...)`, `insert`, and `stride` as failed derivations
     // although this validator no longer derives anything for them, and a
-    // marked name silences the whole `conv2d` validator downstream
+    // marked name silences the whole `conv` validator downstream
     // (chelis#668 round-1 P0). `ir_builtin_has_output_type_derivation` alone
     // would mark every `y = relu(x)`, because the Identity fallthrough has an
     // arm for `relu` while the recursion below is what is meant to reach it.
@@ -2030,18 +2030,10 @@ pub(super) fn expr_tensor_type_is_concrete(expr: &deep::Expr, type_env: &ShapeTy
         .unwrap_or(false)
 }
 
-/// Check whether a conv2d input tensor argument is concrete in every
-/// dimension EXCEPT axis 0 (batch). Per spec/05-risc-primitives.md
-/// §4.5 the canonical signature is `tensor[batch, in_c, h, w, p]`
-/// and `batch` is named, so symbolic-batch programs are first-class
-/// (RT-205 round-3 F-C). The spatial dims and `in_c` must remain
-/// concrete because they appear in the im2col/matmul lowering.
-///
-/// Returns true when the type resolves to a rank-4 tensor whose
-/// axes 1, 2, 3 are all `Dim::Lit`. Axis 0 may be `Dim::Lit` or
-/// `Dim::NonConcrete`. Returns false on unresolvable type or any
-/// non-concrete axis other than 0.
-pub(super) fn conv2d_input_dims_concrete_modulo_batch(
+/// Static-lowering metadata for convolution: every non-batch extent must
+/// be concrete. The batch dimension retains its symbolic identity during
+/// checking; support for its execution is a separate target obligation.
+pub(super) fn conv_input_dims_concrete_modulo_batch(
     expr: Option<&deep::Expr>,
     type_env: &ShapeTypeEnv,
 ) -> bool {
@@ -2055,13 +2047,13 @@ pub(super) fn conv2d_input_dims_concrete_modulo_batch(
         // Not a tensor; fall back to scalar-prim check.
         return type_expr_is_ir_concrete(&ty);
     };
-    if dims.len() != 4 {
+    if dims.len() < 3 {
         // Rank mismatch is reported separately; return true so the
-        // rank-4 guard later in the validator can fire instead of
+        // signature rank guard can fire instead of
         // suppressing it with a metadata error.
         return true;
     }
-    // axes 1, 2, 3 must be concrete; axis 0 (batch) may be symbolic.
+    // Every channel/spatial axis must be concrete; batch may be symbolic.
     dims[1..].iter().all(|d| matches!(d, DeepDimKind::Lit(_)))
 }
 
@@ -2073,7 +2065,7 @@ pub(super) fn validate_ir_builtin_symbolic_requirements(
     errors: &mut DiagnosticSink<'_>,
 ) {
     match func_name {
-        "conv2d" => validate_conv2d_symbolic_requirements(list, type_env, failed_let_names, errors),
+        "conv" => validate_conv_symbolic_requirements(list, type_env, failed_let_names, errors),
         "mean" if ir_builtin_axis_dim(list, type_env, 0, 1) == Some(DeepDimKind::NonConcrete) => {
             errors.push(validator_error(
                 CheckErrorKind::DimensionMismatch,
@@ -2107,10 +2099,10 @@ pub(super) fn validate_ir_builtin_symbolic_requirements(
 
 /// Return `true` if any of `list`'s tensor arguments (positional 3, 4)
 /// is a `(var <name>)` whose `name` is in `failed_let_names`. Used by
-/// `validate_conv2d_symbolic_requirements` to suppress the cascade
+/// `validate_conv_symbolic_requirements` to suppress the cascade
 /// diagnostic when a let-bound name's own derivation already emitted
 /// the owning diagnostic (RT-205 round-2 F3).
-pub(super) fn conv2d_input_is_failed_let_name(
+pub(super) fn conv_input_is_failed_let_name(
     list: &deep::List,
     failed_let_names: &UnordSet<String>,
 ) -> bool {
@@ -2182,252 +2174,116 @@ pub(super) fn parse_span_offset(span_id: &str) -> Option<usize> {
         .and_then(|(start, _)| start.parse::<usize>().ok())
 }
 
-/// Validate the symbolic requirements of an IR-level `conv2d` call.
-///
-/// The previous implementation read `:type` from the app node's
-/// metadata via `app_result_type_is_concrete` to decide whether the
-/// output dims were concrete. Surf-desugared apps only carry `:span`
-/// metadata; the annotation pass that would stamp inferred app types
-/// back into Deep runs after `validate_ir_program`, so that check was
-/// structurally always-false for any Surf source (see issue #186).
-///
-/// The replacement derives output concreteness from the arguments
-/// (input tensor dims, kernel tensor dims, stride/padding literal
-/// values), all of which are knowable at validation time. After
-/// extracting the args this function evaluates the output spatial-
-/// dim formula `floor((in + 2 * padding - kernel) / stride) + 1`
-/// per axis (spec/05-risc-primitives.md §471-483) and rejects calls
-/// whose evaluated output dim is non-positive. Also enforces rank-4
-/// input/kernel and positive-stride / non-negative-padding.
-pub(super) fn validate_conv2d_symbolic_requirements(
+/// Backend shape requirements of the canonical convolution call. The checker
+/// diagnoses invalid ranks/types; this pass owns static lowering obligations.
+pub(super) fn validate_conv_symbolic_requirements(
     list: &deep::List,
     type_env: &ShapeTypeEnv,
     failed_let_names: &UnordSet<String>,
     errors: &mut DiagnosticSink<'_>,
 ) {
-    // The inference pass owns builtin arity diagnostics. This validator only
-    // owns the symbolic requirements of the canonical 4-argument call:
-    // (app {} (var conv2d) input kernel stride padding). Returning here keeps
-    // malformed calls total and prevents a secondary validator diagnostic.
-    let [_, _, _, input, kernel, _, _] = list.elements.as_slice() else {
+    let [_, _, _, input, kernel, strides, padding] = list.elements.as_slice() else {
         return;
     };
-
-    // RT-205 round-2 F3: if either tensor arg is a `(var <name>)`
-    // whose `name` is in the failed-derivation set, the owning
-    // diagnostic was already emitted for the let-binding's own RHS.
-    // Suppress the cascade so the user sees one error per root cause,
-    // not one per consumer.
-    if conv2d_input_is_failed_let_name(list, failed_let_names) {
+    if conv_input_is_failed_let_name(list, failed_let_names) {
         return;
     }
-    // Args at elements[3]..[6] for the canonical 4-arg call shape:
-    // (app {} (var conv2d) input kernel stride padding).
-    //
-    // RT-205 round-3 F-C: input axis 0 (batch) is allowed to be
-    // NonConcrete per spec/05 §4.5, since it does not enter the
-    // spatial-dim formula and conv2d's IR lowering can carry a
-    // symbolic batch through. All OTHER input axes (in_c, h, w) and
-    // all kernel axes must remain concrete -- they appear in the
-    // im2col/matmul lowering and must be statically knowable.
-    if !conv2d_input_dims_concrete_modulo_batch(Some(peel_borrow(input)), type_env)
+    if !conv_input_dims_concrete_modulo_batch(Some(peel_borrow(input)), type_env)
         || !expr_tensor_type_is_concrete(kernel, type_env)
     {
         errors.push(validator_error(
             CheckErrorKind::DimensionMismatch,
             list,
-            "IR builtin `conv2d` requires concrete tensor argument metadata".to_string(),
-            vec![
-                "Use concrete d-lit dimensions for IR lowering (axis 0 / batch may be symbolic)"
+            "IR builtin `conv` requires concrete tensor argument metadata".to_string(),
+            vec![],
+        ));
+        return;
+    }
+    let Some(input_dims) =
+        arg_tensor_type_expr(input, type_env).and_then(|t| tensor_dims_from_type_expr(&t))
+    else {
+        return;
+    };
+    let Some(kernel_dims) =
+        arg_tensor_type_expr(kernel, type_env).and_then(|t| tensor_dims_from_type_expr(&t))
+    else {
+        return;
+    };
+    if input_dims.len() < 3 || input_dims.len() != kernel_dims.len() {
+        return;
+    }
+    let params = match conv_parameters(strides, padding, input_dims.len() - 2) {
+        Ok(Some(params)) => params,
+        Ok(None) => {
+            errors.push(validator_error(
+                CheckErrorKind::DimensionMismatch,
+                list,
+                "IR builtin `conv` requires literal per-axis stride and padding metadata"
                     .to_string(),
-            ],
-        ));
-        return;
-    }
-    // Extract and range-check stride/padding. The IR lowering relies
-    // on these being statically-knowable positive (stride) or
-    // non-negative (padding) integers; the output spatial dim formula
-    // `floor((in + 2p - k) / s) + 1` (spec/05-risc-primitives.md
-    // §471-483) divides by stride, so `stride <= 0` is undefined and
-    // a negative padding shrinks the effective input below zero.
-    // Without these guards the validator silently accepts the
-    // ill-formed call and the back-end ICEs at codegen time
-    // (issue #186 RT findings F1, F2, F3).
-    let stride = match extract_typed_scalar_literal(list, 5, "stride", errors) {
-        Some(v) => v,
-        None => return,
-    };
-    if stride <= 0 {
-        errors.push(validator_error(
-            CheckErrorKind::DimensionMismatch,
-            list,
-            format!("IR builtin `conv2d` requires a positive stride, got {stride}"),
-            vec!["Stride must be >= 1; the output dim formula divides by stride".to_string()],
-        ));
-        return;
-    }
-    let padding = match extract_typed_scalar_literal(list, 6, "padding", errors) {
-        Some(v) => v,
-        None => return,
-    };
-    if padding < 0 {
-        errors.push(validator_error(
-            CheckErrorKind::DimensionMismatch,
-            list,
-            format!("IR builtin `conv2d` requires non-negative padding, got {padding}"),
-            vec!["Padding must be >= 0".to_string()],
-        ));
-        return;
-    }
-    // Resolve input + kernel tensor dims so we can evaluate the
-    // output spatial-dim formula. expr_tensor_type_is_concrete above
-    // already established concreteness; the lookups below should both
-    // succeed, but bail gracefully on the unexpected case rather than
-    // unwrap-panicking.
-    let Some(input_dims) = list
-        .elements
-        .get(3)
-        .and_then(|expr| arg_tensor_type_expr(expr, type_env))
-        .and_then(|ty| tensor_dims_from_type_expr(&ty))
-    else {
-        return;
-    };
-    let Some(kernel_dims) = list
-        .elements
-        .get(4)
-        .and_then(|expr| arg_tensor_type_expr(expr, type_env))
-        .and_then(|ty| tensor_dims_from_type_expr(&ty))
-    else {
-        return;
-    };
-    // Rank guard: the canonical conv2d shape is [N, C, H, W] x [F, C, kH, kW].
-    // The HM signature check (check_conv2d_signature, infer.rs:9999+) also
-    // catches rank errors and may have already emitted its diagnostic via
-    // `check_conv2d_signature`. Dedupe so the user sees ONE rank error per
-    // role (input/kernel), not two (RT-205 round-2 F4).
-    if input_dims.len() != 4 {
-        let rank = input_dims.len();
-        let hm_emitted = errors.iter().any(|e| {
-            e.message.contains(&format!(
-                "conv2d expects rank-4 input tensor, got rank {rank}"
-            ))
-        });
-        if !hm_emitted {
-            errors.push(validator_error(
-                CheckErrorKind::DimensionMismatch,
-                list,
-                format!("IR builtin `conv2d` requires a rank-4 input tensor, got rank {rank}"),
-                vec!["Pass a [N, C, H, W] tensor as the first argument".to_string()],
-            ));
-        }
-        return;
-    }
-    if kernel_dims.len() != 4 {
-        let rank = kernel_dims.len();
-        let hm_emitted = errors.iter().any(|e| {
-            e.message.contains(&format!(
-                "conv2d expects rank-4 kernel tensor, got rank {rank}"
-            ))
-        });
-        if !hm_emitted {
-            errors.push(validator_error(
-                CheckErrorKind::DimensionMismatch,
-                list,
-                format!("IR builtin `conv2d` requires a rank-4 kernel tensor, got rank {rank}"),
-                vec!["Pass a [F, C, kH, kW] tensor as the second argument".to_string()],
-            ));
-        }
-        return;
-    }
-    // Output spatial-dim formula per spec/05-risc-primitives.md §471-483:
-    //   out = floor((in + 2 * padding - kernel) / stride) + 1
-    // for both H (axis 2) and W (axis 3). If either evaluates to <= 0
-    // the call is ill-formed; without this guard the back-end emits a
-    // less-actionable error after codegen begins.
-    let in_h = match input_dims[2] {
-        DeepDimKind::Lit(v) => v,
-        DeepDimKind::NonConcrete => return,
-    };
-    let in_w = match input_dims[3] {
-        DeepDimKind::Lit(v) => v,
-        DeepDimKind::NonConcrete => return,
-    };
-    let k_h = match kernel_dims[2] {
-        DeepDimKind::Lit(v) => v,
-        DeepDimKind::NonConcrete => return,
-    };
-    let k_w = match kernel_dims[3] {
-        DeepDimKind::Lit(v) => v,
-        DeepDimKind::NonConcrete => return,
-    };
-    for (axis, name, in_extent, k_extent) in [("H", "height", in_h, k_h), ("W", "width", in_w, k_w)]
-        .iter()
-        .map(|(short, long, inp, kr)| (*short, *long, *inp, *kr))
-    {
-        let Some(val) = conv2d_output_extent(in_extent, k_extent, stride, padding) else {
-            errors.push(validator_error(
-                CheckErrorKind::DimensionMismatch,
-                list,
-                format!(
-                    "IR builtin `conv2d` output {name} (axis {axis}) cannot be computed: input={in_extent}, kernel={k_extent}, stride={stride}, padding={padding} overflows i64 in the canonical formula"
-                ),
-                vec![
-                    "Use input/kernel/stride/padding values whose intermediate `input + 2 * padding - kernel` and final `+ 1` fit in a signed 64-bit integer".to_string(),
-                ],
+                vec![],
             ));
             return;
-        };
-        if val <= 0 {
-            // Reaching this branch implies `conv2d_output_extent`
-            // returned `Some(val)`, which in turn means
-            // `padding.checked_mul(2)` and
-            // `in_extent.checked_add(2 * padding)` both succeeded
-            // upstream. Plain arithmetic is safe here; the
-            // saturating-mul + checked-add fallback that earlier
-            // code carried is unreachable. (RT-205 round-3 F-D.)
-            let padded_hint = in_extent + 2 * padding;
+        }
+        Err(message) => {
             errors.push(validator_error(
                 CheckErrorKind::DimensionMismatch,
                 list,
-                format!(
-                    "IR builtin `conv2d` output {name} (axis {axis}) evaluates to {val} for input={in_extent}, kernel={k_extent}, stride={stride}, padding={padding}; output dims must be positive"
-                ),
-                vec![format!(
-                    "Increase padding, decrease stride, or shrink the kernel so the padded input ({padded_hint}) is at least the kernel size ({k_extent})"
-                )],
+                message,
+                vec![],
             ));
+            return;
+        }
+    };
+    for (axis, ((input, kernel), (stride, low, high))) in input_dims[2..]
+        .iter()
+        .zip(&kernel_dims[2..])
+        .zip(params)
+        .enumerate()
+    {
+        let (DeepDimKind::Lit(input), DeepDimKind::Lit(kernel)) = (input, kernel) else {
+            return;
+        };
+        if *kernel <= 0 {
+            errors.push(validator_error(
+                CheckErrorKind::DimensionMismatch,
+                list,
+                format!("conv requires positive kernel extents at spatial axis {axis}"),
+                vec![],
+            ));
+            return;
+        }
+        if conv_output_extent(*input, *kernel, stride, low, high).is_none() {
+            errors.push(validator_error(CheckErrorKind::DimensionMismatch, list,
+                match input.checked_add(low).and_then(|n| n.checked_add(high)) {
+                    Some(padded) if *kernel > padded => format!("IR builtin `conv` output spatial axis {axis}: kernel must fit the padded input"),
+                    _ => format!("IR builtin `conv` output spatial axis {axis} arithmetic overflows i64"),
+                }, vec![]));
             return;
         }
     }
 }
 
-/// Compute the output spatial extent of a conv2d axis using the
-/// canonical formula `floor((in + 2 * padding - kernel) / stride) + 1`
-/// (spec/05-risc-primitives.md §471-483). Returns a signed value so
-/// the validator can detect ill-formed configurations (output <= 0)
-/// before they reach the back-end.
-///
-/// Uses `div_euclid` for floor division so a negative numerator (the
-/// kernel does not fit the padded input) produces an informative
-/// negative output value rather than truncating toward zero.
-/// `stride` is required to be positive by the caller, which is what
-/// makes `div_euclid` equivalent to mathematical floor here.
-///
-/// Returns `None` on integer overflow in any intermediate (RT-205
-/// round-2 F1). Callers must treat `None` as "input parameters
-/// outside the representable range" and emit a diagnostic; previously
-/// a huge `padding` like `i64::MAX/2` triggered `attempt to multiply
-/// with overflow` and panicked `chelis check`.
-pub(super) fn conv2d_output_extent(
+/// [05-OP-51]: positive kernel, nonnegative padding, positive stride, and
+/// checked int64 arithmetic. A kernel that does not fit is never an empty
+/// result or a truncating-division special case.
+pub(super) fn conv_output_extent(
     input: i64,
     kernel: i64,
     stride: i64,
-    padding: i64,
+    low: i64,
+    high: i64,
 ) -> Option<i64> {
-    let two_p = padding.checked_mul(2)?;
-    let padded = input.checked_add(two_p)?;
-    let numerator = padded.checked_sub(kernel)?;
-    numerator.checked_div_euclid(stride)?.checked_add(1)
+    if input < 0 || kernel <= 0 || stride <= 0 || low < 0 || high < 0 {
+        return None;
+    }
+    let padded = input.checked_add(low)?.checked_add(high)?;
+    if kernel > padded {
+        return None;
+    }
+    padded
+        .checked_sub(kernel)?
+        .checked_div(stride)?
+        .checked_add(1)
 }
 
 /// If `expr` is a recognizable shape-sensitive IR builtin call whose
@@ -2437,11 +2293,11 @@ pub(super) fn conv2d_output_extent(
 /// so downstream uses of a let-bound name resolve to a concrete
 /// tensor type (RT-205 F5).
 ///
-/// In addition to `conv2d` direct calls, this also handles
+/// In addition to `conv` direct calls, this also handles
 /// shape-PRESERVING unary and binary point-wise ops (relu, tanh,
 /// add, mul, etc.) so the canonical CNN layer pattern
-/// `y = relu(conv2d(...))` chains correctly into a downstream
-/// `conv2d(&y, ...)` (RT-205 round-2 F2). Reductions and most movement
+/// `y = relu(conv(...))` chains correctly into a downstream
+/// `conv(&y, ...)` (RT-205 round-2 F2). Reductions and most movement
 /// ops are intentionally NOT handled here; they need separate per-op
 /// derivation because they change rank or shape. `stride`, `expand`, and
 /// `insert` are deliberately absent: the rank-only facts they used to derive
@@ -2466,7 +2322,7 @@ pub(super) fn derive_ir_builtin_output_type(
     }
     let func_name = active_ir_builtin_name(list, static_env)?;
     match func_name {
-        "conv2d" => derive_conv2d_output_type(list, type_env),
+        "conv" => derive_conv_output_type(list, type_env),
         // softmax takes a (tensor, axis) tuple but its output shape
         // equals the input tensor's shape, but it is intentionally not in the
         // rank-polymorphism Identity class because its axis is positional.
@@ -2493,18 +2349,18 @@ pub(super) fn derive_ir_builtin_output_type(
 /// having the same answer when chelis#668 deleted the
 /// `stride`/`expand`/`insert` arms. Keying
 /// `let_rhs_is_recognized_shape_sensitive` on the first question marked those
-/// bindings as FAILED derivations, which suppressed every downstream `conv2d`
+/// bindings as FAILED derivations, which suppressed every downstream `conv`
 /// check (round-1 P0). The failed-derivation marker means "this validator owed
 /// a type here and could not produce one", so it must be keyed on the table
 /// that owes it.
 pub(super) fn ir_builtin_has_output_type_derivation(name: &str) -> bool {
-    matches!(name, "conv2d" | "softmax") || crate::shape_class(name) == crate::ShapeClass::Identity
+    matches!(name, "conv" | "softmax") || crate::shape_class(name) == crate::ShapeClass::Identity
 }
 
 /// Derive the output tensor type of a shape-preserving unary
 /// point-wise call: it equals the type of the single argument.
-/// Recurses through nested apps so e.g. `relu(conv2d(...))`
-/// resolves to conv2d's derived output type, peeking through any
+/// Recurses through nested apps so e.g. `relu(conv(...))`
+/// resolves to conv's derived output type, peeking through any
 /// borrow wrapper as usual (RT-205 round-2 F2).
 pub(super) fn derive_unary_shape_passthrough(
     list: &deep::List,
@@ -2521,7 +2377,7 @@ pub(super) fn derive_unary_shape_passthrough(
 /// `uniform_like`), so arity-specific allowlists are both unnecessary and a
 /// source of registry drift. Rank agreement, broadcasting, and dtype
 /// promotion are ordinary inference's; this helper carries an exact shape to
-/// the exact-shape validators (`conv2d` chaining, RT-205) and nothing else.
+/// the exact-shape validators (`conv` chaining, RT-205) and nothing else.
 pub(super) fn derive_identity_shape_passthrough(
     list: &deep::List,
     type_env: &ShapeTypeEnv,
@@ -2546,88 +2402,41 @@ fn resolve_let_value_tensor_type(
         .or_else(|| expr_shape_type_fact(inner, type_env))
 }
 
-/// Derive a conv2d call's output tensor type (rank-4 `[N, F, outH, outW]`
-/// with the input's precision) from its argument types and literal
-/// stride/padding values. Returns `None` if any non-batch input dim
-/// or any kernel dim is non-concrete, stride/padding are not int
-/// literals, ranks are wrong, or the output dims would be non-positive.
-///
-/// RT-205 round-3 F-C: input axis 0 (batch) is allowed to be
-/// `Dim::NonConcrete` per spec/05 §4.5. When the input batch is
-/// symbolic, the synthesized output type preserves the input
-/// tensor's raw batch-dim expression (e.g. `(d-name {} batch)`)
-/// rather than forcing a `d-lit`. This lets downstream chained
-/// conv2d calls resolve `&y` to the symbolic-batch type.
-pub(super) fn derive_conv2d_output_type(
+/// Derive all convolution spatial extents, preserving the batch dimension's
+/// original symbolic identity when it is not a literal.
+pub(super) fn derive_conv_output_type(
     list: &deep::List,
     type_env: &ShapeTypeEnv,
 ) -> Option<deep::Expr> {
-    let input_ty = list
-        .elements
-        .get(3)
-        .and_then(|e| arg_tensor_type_expr(e, type_env))?;
-    let kernel_ty = list
-        .elements
-        .get(4)
-        .and_then(|e| arg_tensor_type_expr(e, type_env))?;
+    let input_ty = arg_tensor_type_expr(list.elements.get(3)?, type_env)?;
+    let kernel_ty = arg_tensor_type_expr(list.elements.get(4)?, type_env)?;
     let input_dims = tensor_dims_from_type_expr(&input_ty)?;
     let kernel_dims = tensor_dims_from_type_expr(&kernel_ty)?;
-    if input_dims.len() != 4 || kernel_dims.len() != 4 {
+    if input_dims.len() < 3 || input_dims.len() != kernel_dims.len() {
         return None;
     }
-    // Issue #216: cast-aware so `conv2d(x, k, cast(1, int32), cast(0, int32))`
-    // surfaces the same derived output type as the bare-literal form.
-    let stride = extract_int_for_dim(list.elements.get(5)?)?;
-    let padding = extract_int_for_dim(list.elements.get(6)?)?;
-    if stride <= 0 || padding < 0 {
-        return None;
+    let params = conv_parameters(
+        list.elements.get(5)?,
+        list.elements.get(6)?,
+        input_dims.len() - 2,
+    )
+    .ok()??;
+    let mut trailing = vec![match kernel_dims[0] {
+        DeepDimKind::Lit(n) => n,
+        _ => return None,
+    }];
+    for ((input, kernel), (stride, low, high)) in
+        input_dims[2..].iter().zip(&kernel_dims[2..]).zip(params)
+    {
+        let (DeepDimKind::Lit(input), DeepDimKind::Lit(kernel)) = (input, kernel) else {
+            return None;
+        };
+        trailing.push(conv_output_extent(*input, *kernel, stride, low, high)?);
     }
-    // Capture the input tensor's raw batch-dim Expr (axis 0) so a
-    // symbolic batch can pass through verbatim into the synthesized
-    // output type. axes 1-3 must be concrete literals (RT-205 r3 F-C).
-    let input_dim_exprs = tensor_dim_exprs_from_type_expr(&input_ty)?;
-    if input_dim_exprs.len() != 4 {
-        return None;
-    }
-    let batch_dim_expr = input_dim_exprs[0].clone();
-    let f = match kernel_dims[0] {
-        DeepDimKind::Lit(v) => v,
-        DeepDimKind::NonConcrete => return None,
-    };
-    let in_h = match input_dims[2] {
-        DeepDimKind::Lit(v) => v,
-        DeepDimKind::NonConcrete => return None,
-    };
-    let in_w = match input_dims[3] {
-        DeepDimKind::Lit(v) => v,
-        DeepDimKind::NonConcrete => return None,
-    };
-    let k_h = match kernel_dims[2] {
-        DeepDimKind::Lit(v) => v,
-        DeepDimKind::NonConcrete => return None,
-    };
-    let k_w = match kernel_dims[3] {
-        DeepDimKind::Lit(v) => v,
-        DeepDimKind::NonConcrete => return None,
-    };
-    // `conv2d_output_extent` returns None on integer overflow (RT-205
-    // round-2 F1); in that case there's no valid output tensor type
-    // to register, so the caller falls back to no extension and the
-    // validator's own arm will emit the overflow diagnostic.
-    let out_h = conv2d_output_extent(in_h, k_h, stride, padding)?;
-    let out_w = conv2d_output_extent(in_w, k_w, stride, padding)?;
-    if out_h <= 0 || out_w <= 0 {
-        return None;
-    }
-    // Build `(t-tensor {} <batch-expr> (d-lit {} f) (d-lit {} out_h)
-    // (d-lit {} out_w) <precision-expr>)` from the input's precision
-    // and the captured batch-dim expression (which may be a symbolic
-    // `(d-name {} ...)` per RT-205 r3 F-C).
-    let prec_expr = tensor_precision_expr(&input_ty)?;
     Some(build_tensor_type_expr_with_batch(
-        batch_dim_expr,
-        &[f, out_h, out_w],
-        prec_expr,
+        tensor_dim_exprs_from_type_expr(&input_ty)?.first()?.clone(),
+        &trailing,
+        tensor_precision_expr(&input_ty)?,
     ))
 }
 
@@ -2677,7 +2486,7 @@ pub(super) fn tensor_precision_expr(ty: &deep::Expr) -> Option<deep::Expr> {
 /// (d-lit {} d2) ... prec)`, placing a verbatim Deep expression at
 /// axis 0 (the batch dim) and integer literals for the remaining
 /// axes. Used to preserve symbolic batch (`(d-name {} batch)`) when
-/// deriving a chained conv2d's output type (RT-205 round-3 F-C).
+/// deriving a chained conv's output type (RT-205 round-3 F-C).
 /// Spans are zeroed because the derived type is synthetic; downstream
 /// lookups care only about the structural shape.
 pub(super) fn build_tensor_type_expr_with_batch(
@@ -2709,45 +2518,6 @@ pub(super) fn build_tensor_type_expr_with_batch(
     }
     elements.push(prec);
     deep::Expr::List(deep::List { elements }, zero)
-}
-
-/// Look up positional arg `idx` of a `conv2d` call, attempt to
-/// extract it as an integer literal, and emit a clear diagnostic if
-/// the arg is missing or non-literal.
-///
-/// `label` names the role (`"stride"` / `"padding"`) for the error
-/// message. Returns `Some(value)` on success and `None` when an error
-/// was pushed (the caller should bail to avoid piling on cascading
-/// diagnostics).
-pub(super) fn extract_typed_scalar_literal(
-    list: &deep::List,
-    idx: usize,
-    label: &str,
-    errors: &mut DiagnosticSink<'_>,
-) -> Option<i64> {
-    let Some(arg) = list.elements.get(idx) else {
-        // Arity mismatch is caught elsewhere; bail without piling on.
-        return None;
-    };
-    // Issue #216: cast-aware so a cast-wrapped literal (e.g.
-    // `conv2d(x, k, cast(0, int32), 0)`) lands the precise
-    // positive-stride / non-negative-padding diagnostic instead of the
-    // misleading "requires a literal integer stride" message that
-    // pre-fix appeared whenever the literal was wrapped.
-    match extract_int_for_dim(arg) {
-        Some(v) => Some(v),
-        None => {
-            errors.push(validator_error(
-                CheckErrorKind::DimensionMismatch,
-                list,
-                format!("IR builtin `conv2d` requires a literal integer {label}"),
-                vec![format!(
-                    "Pass `{label}` as a constant int literal, not a variable or expression"
-                )],
-            ));
-            None
-        }
-    }
 }
 
 pub(super) fn ir_builtin_axis_dim(

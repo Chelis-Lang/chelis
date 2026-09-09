@@ -219,7 +219,7 @@ and AD so its zero-boundary rule cannot be confused with `max_elem`'s tie rule.
 | `mean` | `div(sum(x,axis), axis extent)` | differentiable |
 | `softmax` | max-shift + `exp` + `sum` + `div` (`spec/05` §4.2) | differentiable |
 | `layer_norm` | mean/var normalize + affine (`spec/05` §4.4) | differentiable |
-| `conv2d` | `im2col` → `matmul` → `reshape` (`spec/05` §4.5) | differentiable |
+| `conv` | N-dimensional padded window gather → one matrix contraction → reshape/permute; explicit per-axis int64 strides and `(low,high)` padding pairs (`spec/05` §4.5) | differentiable |
 
 The derived activations and arithmetic also have a host-lane C-emit path
 (`host_emit.rs`) used when they appear inside the host lane — i.e. they are
@@ -264,10 +264,11 @@ capability.
 
 | Name | Signature | Notes |
 |---|---|---|
-| `tensor_scan` | `(initial: T, fn: (T,int64)->T, n: int64) -> tensor[n, T]` | **host-only**, no AD; **`chelis build` (C/HIP) rejects it whole-program**; `grad`/`vmap` over a body reaching it are rejected (reachability-scoped). The sanctioned init-time per-index tensor constructor (`T` scalar; accumulator is f64-backed, exact to 2^53). |
+| `tensor_scan` | `(initial: T, fn: (T,int64)->T ! E, n: int64) -> tensor[n,..state_shape(T),element(T)] ! E` | [05-OP-38] admits scalar or fixed-shape tensor state. The runtime currently implements scalar state with exact tagged values; tensor state, compiled execution, and transforms remain implementation gaps recorded in `spec/design/dtype_semantics.md`. |
 
-**`tensor_scan` (tensor lane, init-only) ≠ `scan` (list combinator, §3.3).** Don't
-put `tensor_scan` in a loss, forward, or anything `grad`/`build` must reach.
+`tensor_scan` stacks successive states into a tensor; `scan` (§3.3) returns
+a List. The normative scan contract includes float-state AD and callback
+effects even where an execution lane has not implemented them.
 
 ### 3.3 Higher-order list / sequence combinators
 
@@ -374,7 +375,7 @@ Tier-1 DAG:   add sub mul div floor_div trunc_div max_elem min_elem cmplt neg re
               reduce_window_mean reshape permute expand insert pad shrink stride
               uniform_like gather scatter_replace scatter_elements
 Tier-2 DAG:   eq neq lt gt lte gte and or not relu sigmoid tanh silu gelu
-              softmax mean matmul layer_norm conv2d
+              softmax mean matmul layer_norm conv
 Host lane:    cumsum sort einsum diagonal trace where clamp concat split scatter
               pad_sequences pad_sequences_to tensor_scan
               map filter fold scan partition flat_map flatten zip enumerate chunk

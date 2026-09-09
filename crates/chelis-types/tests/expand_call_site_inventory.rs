@@ -185,7 +185,7 @@ const ALLOWED: &[(&str, usize, &str)] = &[
     (
         "crates/chelis-types/tests/issue_668_deleted_derivation_does_not_suppress_conv2d.rs",
         3,
-        "three `y = expand(x, 0i32, 2i64)` bindings over a unit axis 0, feeding a `conv2d` whose validator must keep running; the operand carries the unit extent, so each is a same-rank broadcast",
+        "three `y = expand(x, 0i32, 2i64)` bindings over a unit axis 0, feeding a `conv` whose validator must keep running; the operand carries the unit extent, so each is a same-rank broadcast",
     ),
     (
         "crates/chelis-types/tests/issue_668_rank_agreement_is_unification.rs",

@@ -59,7 +59,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "matmul",
     "min_elem",
     "layer_norm",
-    "conv2d",
+    "conv",
     "sum",
     "count",
     "max_reduce",
@@ -449,7 +449,7 @@ const SHAPE_COMPUTED_INFERENCE_BUILTINS: &[&str] = &[
     "expand",
     "insert",
     "layer_norm",
-    "conv2d",
+    "conv",
     "scatter_elements",
 ];
 
@@ -1167,7 +1167,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
-        name: "conv2d",
+        name: "conv",
         capability: NUMERIC_CAPABILITY,
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
         realizability: Realizability::Universal,
@@ -2300,7 +2300,7 @@ pub fn builtin_env() -> (Env, VarGen) {
         env.bind(name.to_string(), scheme);
     }
 
-    fn tensor_conv2d(name: &str, env: &mut Env, vg: &mut VarGen) {
+    fn tensor_conv(name: &str, env: &mut Env, vg: &mut VarGen) {
         let input = vg.fresh_tvar();
         let kernel = vg.fresh_tvar();
         let output = vg.fresh_tvar();
@@ -2313,8 +2313,14 @@ pub fn builtin_env() -> (Env, VarGen) {
                 vec![
                     borrowed(Type::Var(input)),
                     borrowed(Type::Var(kernel)),
-                    Type::Prim(Prim::Int32),
-                    Type::Prim(Prim::Int32),
+                    Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]),
+                    Type::Adt(
+                        "List".to_string(),
+                        vec![Type::Tuple(vec![
+                            Type::Prim(Prim::Int64),
+                            Type::Prim(Prim::Int64),
+                        ])],
+                    ),
                 ],
                 Box::new(Type::Var(output)),
             ),
@@ -2621,7 +2627,7 @@ pub fn builtin_env() -> (Env, VarGen) {
 
     tensor_binop_to_out("matmul", &mut env, &mut vg);
     tensor_triop_return_first("layer_norm", &mut env, &mut vg);
-    tensor_conv2d("conv2d", &mut env, &mut vg);
+    tensor_conv("conv", &mut env, &mut vg);
     tensor_reduce_to_out("sum", &mut env, &mut vg);
     tensor_reduce_to_out("count", &mut env, &mut vg);
     tensor_reduce_to_out("max_reduce", &mut env, &mut vg);
@@ -3185,7 +3191,7 @@ mod tests {
         }
         // Spot-check the positional shape-rewriters stay Rewriting (the §4.2
         // traps): a positional index is meaningless at symbolic rank.
-        for op in ["permute", "reshape", "matmul", "gather", "conv2d"] {
+        for op in ["permute", "reshape", "matmul", "gather", "conv"] {
             assert_eq!(
                 shape_class(op),
                 ShapeClass::Rewriting,
@@ -3281,10 +3287,10 @@ mod tests {
     }
 
     #[test]
-    fn builtin_env_has_layer_norm_and_conv2d() {
+    fn builtin_env_has_layer_norm_and_conv() {
         let (env, _) = builtin_env();
         assert!(env.lookup("layer_norm").is_some());
-        assert!(env.lookup("conv2d").is_some());
+        assert!(env.lookup("conv").is_some());
     }
 
     #[test]

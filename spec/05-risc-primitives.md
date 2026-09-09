@@ -1383,14 +1383,24 @@ host execution is not a lesser language lane and does not change legality.
 
 | Name | Signature | Semantics |
 |---|---|---|
-| `tensor_scan` | `(initial: T, fn: (T, int64) -> T ! E, n: int64) -> tensor[n, T] ! E` | Iteratively apply `fn(prev, i)` for `i in 0..n` and collect the `n` resulting values into a rank-1 tensor whose precision matches `T`. |
+| `tensor_scan` | `(initial: T, fn: (T, int64) -> T ! E, n: int64) -> tensor[n, ..state_shape(T), element(T)] ! E` | Iteratively apply `fn(prev, i)` for `i in 0..n` and stack the `n` resulting states along a new leading axis. |
 
-`T` must be a scalar primitive (`int8`..`int64`, `f16`..`f64`,
-`bool`). The output is owned, contiguous, rank-1, and its
-precision equals the dtype of `initial`. The iteration order is the
+`T` is either an active tensor-element scalar primitive or a tensor of any
+rank at one active element dtype, including bool. `state_shape(T)` is empty
+for a scalar and is the full tensor shape otherwise; `element(T)` is that
+scalar dtype or tensor precision. These are signature relations, not new
+builtins. The callback preserves the exact state type, dtype, rank, and
+dimensions. The output is owned and contiguous, with shape
+`[n] ++ state_shape(T)` and precision `element(T)`. Scalar and rank-zero
+tensor states both yield rank-one output but remain distinct callback types.
+The iteration order is the
 positional integer sequence `0, 1, ..., n - 1`. Callback effects `E` occur
 exactly once per iteration in that order; when `n = 0`, the result is empty
-and the callback is not invoked, so no callback effect occurs.
+and the callback is not invoked, so no callback effect occurs. The empty
+result retains every initial-state extent, including zero trailing extents;
+no callback invocation is needed to discover its shape. Size and extent
+arithmetic is checked int64 arithmetic. A zero-sized tensor state still
+invokes the callback exactly n times.
 
 The `tensor_scan` accumulator and emitted elements remain at `T` for every
 step. Each callback result is finalized once at `T` before it becomes the
@@ -1400,7 +1410,7 @@ use [04-NUM-8]'s arithmetic width and storage finalization. No scalar travels
 through f64 merely because the helper executes in the host runtime. This is
 the same exact tagged-carrier rule as [04-NUM-11] and [05-OP-31].
 
-`tensor_scan` runs in constant stack space with respect to `n`. On float `T`,
+`tensor_scan` runs in constant stack space with respect to `n`. On float state elements,
 reverse-mode differentiation is the reverse traversal of the exact executed
 recurrence: cotangents from the returned elements and later recurrence states
 combine at each callback invocation in reverse iteration order, using that
@@ -1411,7 +1421,7 @@ same positional iteration sequence.
 
 **Negative parity for `tensor_scan`**: a non-callable second argument,
 a wrong-arity call, a negative `n`, or a callback that returns a
-different dtype than the initial value's dtype are rejected with
+different state type, dtype, rank, or shape are rejected with
 `tensor_scan`-tagged diagnostics. A callback with an effect unavailable under
 the enclosing handler is rejected by the ordinary effect rules; neither an
 unreachable definition nor another definition's effects change this call's
@@ -1451,13 +1461,15 @@ traps `Test` with its supplied label and the operation name.
 >
 > | identity | exact signature |
 > |---|---|
-> | `tensor_scan` | `(T,((T,int64)->T!E),int64)->tensor[n,T]!E` |
+> | `tensor_scan` | `(T,((T,int64)->T!E),int64)->tensor[n,..state_shape(T),element(T)]!E` |
 > | `process_run` | `(string,List[string])->(int64,string,string)!{IO}` |
 > | `test_assert_eq` | `(Q,Q,string)->unit!{Test}` |
 > | `test_assert_close_tensor` | `(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}` |
 > | `test_assert_eq_tensor` | `(&tensor[..r,p],&tensor[..r,p],string)->unit!{Test}` |
 >
-> Here `T` is one active numeric or bool scalar type, `Q` is one static type in
+> Here `T` is a scalar or tensor state with the exact `state_shape(T)` and
+> `element(T)` relations in section 3.6; its shape and dtype are invariant
+> across every callback application. `Q` is one static type in
 > [05-OP-36]'s scalar or recursive equality domain, `p_float` is one active
 > float dtype, and `p` is one active tensor element dtype. Repeated variables
 > denote the same type, dtype, rank, and dimensions. `tensor_scan` has
@@ -2681,7 +2693,7 @@ path even though bare `round` under `grad` remains a structural
 
 #### Exact arithmetic
 
-> **[05-OP-45]** Signature: `add(x,y)`, `mul(x,y)`, `div(x,y)`, `floor_div(x,y)`,
+> **[05-OP-64]** Signature: `add(x,y)`, `mul(x,y)`, `div(x,y)`, `floor_div(x,y)`,
 > `trunc_div(x,y)`, and `mod(x,y)` take two same-dtype numeric scalars or
 > two same-shaped, same-dtype tensors and return that surface and dtype.
 >
@@ -2875,11 +2887,11 @@ path even though bare `round` under `grad` remains a structural
 
 > **[05-OP-51]** Signature: `matmul(a,b)` uses section 4.1's batched matrix signature;
 > `einsum(equation,a,b)` takes a string equation and two tensors;
-> `conv2d(input,kernel,stride:int64,padding:int64)` uses section 4.5's
+> `conv(input,kernel,strides:List[int64],padding:List[(int64,int64)])` uses section 4.5's
 > layout; `layer_norm(x,gamma,beta)` uses section 4.4's trailing-axis
 > normalization and affine parameters.
 >
-> Domain: Matmul, conv2d, and layer_norm operands share one active float
+> Domain: Matmul, conv, and layer_norm operands share one active float
 > dtype; einsum admits one active signed-integer or float dtype, with its
 > exact equation grammar, result dtype, accumulator, and contraction graph
 > from [05-OP-33]. All contracted extents, batch dimensions, layouts, and
@@ -2890,14 +2902,23 @@ path even though bare `round` under `grad` remains a structural
 > Result: The output shape and primitive graph are the section 4
 > definitions. Layer normalization's epsilon is the decimal constant 0.00001
 > rounded once to the operand storage dtype before entering that graph; the
-> trailing hidden extent is positive. Conv2d computes cross-correlation
-> without flipping the kernel. Stride is positive and padding nonnegative,
-> applied symmetrically on both spatial axes with exact dtype-zero cells.
-> Kernel height and width are positive and fit the padded input. The output
-> extents are floor((h+2*padding-kh)/stride)+1 and
-> floor((w+2*padding-kw)/stride)+1, computed in checked int64 arithmetic.
-> Products visit (input-channel, kernel-row, kernel-column) in row-major
-> order for each output before the contraction tree. Einsum's equation
+> trailing hidden extent is positive. Conv computes cross-correlation
+> without flipping the kernel, for every positive spatial rank r. Input and
+> kernel have rank r+2; the first two axes are batch/input-channel and
+> output-channel/input-channel respectively. Spatial axis j in the input
+> corresponds explicitly to spatial axis j in the kernel and result.
+> Strides and padding each contain exactly r entries: each stride is positive,
+> and each padding pair gives nonnegative (low,high) extents. Padding inserts
+> exact dtype-zero cells. Each kernel extent is positive and fits its padded
+> input extent. Output extent j is
+> floor((input[j]+low[j]+high[j]-kernel[j])/strides[j])+1,
+> computed in checked int64 arithmetic. Products visit
+> (input-channel,kernel-axis-0,...,kernel-axis-r-1) in row-major order for each
+> output before the contraction tree. A zero input-channel extent is an empty
+> contraction with dtype-zero result; zero batch or output-channel extents
+> produce empty tensors without changing the spatial shape obligations.
+> No scalar metadata broadcast or rank-named convolution alias is admitted.
+> Einsum's equation
 > explicitly chooses labels, contractions, diagonals, and output order; it
 > cannot invent a missing extent. Multiplication, sums, constants,
 > normalization epsilon, and affine results use [04-NUM-8]'s operand and
@@ -2916,7 +2937,7 @@ path even though bare `round` under `grad` remains a structural
 > applies spec/06's accumulation order; no identity receives an invented
 > zero adjoint.
 >
-> Accumulator: Matmul and conv2d use spec/04 section 5.7.2's contraction
+> Accumulator: Matmul and conv use spec/04 section 5.7.1's contraction
 > accumulator; einsum uses [05-OP-33]'s multiply-and-balanced-add graph.
 > Layer normalization reductions use [05-OP-30]. Every default, explicit
 > accumulator, finalization, and operation order is preserved by the section
@@ -3118,8 +3139,8 @@ path even though bare `round` under `grad` remains a structural
 
 > **[05-OP-57]** Signature: `to_tensor(xs)` takes a rectangular, recursively nested List
 > with one active scalar tensor-element leaf dtype T. A nesting depth r
-> yields a rank-r tensor. `to_list(x)` separately borrows a rank-one tensor
-> and returns List[T].
+> yields a rank-r tensor. `to_list(x)` borrows a tensor of any positive rank r
+> and returns r nested Lists with scalar leaf dtype T.
 >
 > Domain: All active tensor element dtypes, including bool, are admitted
 > without conversion. The recursive shape relation is `shape(scalar) = []`
@@ -3134,19 +3155,26 @@ path even though bare `round` under `grad` remains a structural
 >
 > Result: `to_tensor` concatenates leaves in recursive source order into
 > the tensor's row-major storage and preserves the full recursive shape,
-> dtype, and each element's stored bits. `to_list` preserves the rank-one
-> tensor's element order, length, dtype, and stored bits. The rank-one
-> `to_tensor(to_list(x))` identity and its identity adjoint follow spec/06
-> section 2.10; this does not restrict the separate nested-List ingress.
+> dtype, and each element's stored bits. `to_list` recursively partitions
+> the row-major elements by every successive axis, preserving axis order,
+> all observable lengths, dtype, and stored bits. A zero extent gives an
+> empty List at that level; trailing extents below an empty List are not
+> encoded as invented values. `to_tensor(to_list(x))` has x's exact value
+> and shape when those unobservable extents are supplied by the expected
+> tensor type; otherwise they remain explicit shape obligations. Its
+> identity adjoint follows spec/06 section 2.10 and retains the saved shape.
 >
 > Failure: Inconsistent child shapes reject, statically when known and at
 > runtime otherwise. Unresolved required extents and unrepresentable size
 > arithmetic fail loudly. Invalid leaf types, mixed leaf dtypes, and
-> non-rank-one `to_list` operands are type errors.
+> scalar or rank-zero `to_list` operands are type errors; use [05-OP-50]'s
+> explicit scalar conversion for rank zero.
 >
 > Adjoint: For float T, `to_tensor` reconstructs the saved source List
 > nesting and routes each corresponding element cotangent. `to_list` builds
-> the original rank-one tensor from its element cotangents. Integer/bool
+> the original full tensor shape from the nested element cotangents,
+> using the saved forward shape even when empty Lists hide trailing extents.
+> Integer/bool
 > differentiated data structurally rejects under spec/06.
 >
 > Accumulator: None.
@@ -3434,22 +3462,40 @@ Lowering:
 9. result = add(mul(normed, gamma_exp), beta_exp)  ;; scale and shift
 ```
 
-### 4.5 Convolution 2D
+### 4.5 Convolution
 
 ```
-conv2d(input: tensor[batch, in_c, h, w, p],
-       kernel: tensor[out_c, in_c, kh, kw, p],
-       stride, padding) → tensor[batch, out_c, h', w', p]
+conv(input: tensor[batch, in_c, s0, ..., s(r-1), p],
+     kernel: tensor[out_c, in_c, k0, ..., k(r-1), p],
+     strides: List[int64], padding: List[(int64, int64)])
+  → tensor[batch, out_c, o0, ..., o(r-1), p]
 ```
 
-Lowering via im2col:
-```
-1. cols = im2col(input, kh, kw, stride, padding)  ;; reshape input to columns
-2. result = matmul(kernel_reshaped, cols)           ;; matrix multiply
-3. output = reshape(result, [batch, out_c, h', w']) ;; reshape to output
-```
+Here r is any positive integer and p is any active float dtype. The ellipses
+denote r explicit corresponding spatial axes, not an inferred permutation.
+For a different authored layout, use an explicit `permute` into this layout
+and an explicit `permute` of the result. Equal input-channel extents are
+contracted; neither channels nor spatial metadata broadcast implicitly.
 
-`im2col` itself decomposes into `stride`, `pad`, `reshape`, and `permute`. The compiler can recognize this pattern and emit optimized library calls (cuDNN, MKL) instead.
+[05-OP-51] gives the per-axis extent formula and failure rules. For example,
+input spatial extents `[5,7]`, kernel extents `[3,2]`, strides `[2,1]`, and
+padding `[(0,1),(2,0)]` yield output spatial extents `[2,8]`. The same rule
+applies to one, three, and higher spatial ranks. A statically known rank
+determines both metadata lengths and the number of result extents. A generic
+instantiation must discharge that relation; spec/04 section 4.5.3's rank
+spreads do not authorize positional rewriting of unknown axis identities.
+
+The defining graph pads the input, gathers each output window, and flattens
+each window in `(input-channel,kernel-axis-0,...,kernel-axis-r-1)` order.
+Flatten the kernel in that same order, apply section 4.1's matrix contraction
+with its resolved default accumulator, then reshape and permute into the
+declared output layout. There is no separately selected convolution
+accumulator. Strides, padding, and axis correspondence are discrete metadata
+with zero cotangents; the input and kernel adjoints reverse this exact graph.
+
+An implementation may specialize this graph for a spatial rank or target
+library only while preserving its full shape, dtype, accumulation, and
+adjoint contract. Specialization does not create a public rank-named builtin.
 
 ### 4.6 Embedding
 

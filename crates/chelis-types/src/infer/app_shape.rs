@@ -1819,15 +1819,15 @@ pub(super) fn app_children_of(expr: &deep::Expr) -> Option<&[deep::Expr]> {
 /// |----------------------|--------------------------------------|----------------------|---------------------------|----------------------|
 /// | trace/diagonal axis  | `resolve_axis_pair_member` (~4110)   | yes                  | rank bounds + diagnostic  | yes (eval)           |
 /// | builtin axis         | `resolve_builtin_axis` (~4154)       | yes                  | rank bounds + diagnostic  | yes (eval)           |
-/// | conv2d output type   | `derive_conv2d_output_type` (~5720)  | yes (`stride=cast`)  | positivity + spatial dim  | yes (validator arm)  |
-/// | conv2d output type   | `derive_conv2d_output_type` (~5721)  | yes (`padding=cast`) | non-neg + spatial dim     | yes (validator arm)  |
-/// | conv2d validator     | `extract_typed_scalar_literal`(~5874)| yes                  | literal-int + then >0/>=0 | yes (codegen panic)  |
-/// | conv2d axis-dim      | `ir_builtin_axis_dim` (~5907)        | yes                  | rank bounds via normalize | yes (eval)           |
+/// | conv output type   | `derive_conv_output_type` (~5720)  | yes (`stride=cast`)  | positivity + spatial dim  | yes (validator arm)  |
+/// | conv output type   | `derive_conv_output_type` (~5721)  | yes (`padding=cast`) | non-neg + spatial dim     | yes (validator arm)  |
+/// | conv validator     | `conv_parameters`| yes                  | literal-int + then >0/>=0 | yes (codegen panic)  |
+/// | conv axis-dim      | `ir_builtin_axis_dim` (~5907)        | yes                  | rank bounds via normalize | yes (eval)           |
 /// | softmax axis         | softmax arm (~7630)                  | yes (`axis=cast`)    | rank bounds + diagnostic  | yes (eval)           |
 /// | shape axis           | shape arm (~8238)                    | yes (issue #206)     | non-neg + rank bounds     | yes (eval)           |
 /// | split axis           | split arm (~8959)                    | yes                  | rank bounds + diagnostic  | yes (eval)           |
-/// | conv2d spatial out   | `compute_concrete_conv2d_spatial`(11722)| yes                | positivity + spatial dim  | yes (validator arm)  |
-/// | conv2d spatial out   | `compute_concrete_conv2d_spatial`(11723)| yes                | non-neg + spatial dim     | yes (validator arm)  |
+/// | conv spatial out   | `compute_concrete_conv_spatial`(11722)| yes                | positivity + spatial dim  | yes (validator arm)  |
+/// | conv spatial out   | `compute_concrete_conv_spatial`(11723)| yes                | non-neg + spatial dim     | yes (validator arm)  |
 /// | reduction axis       | `check_reduce_signature` (~12076)    | yes (`axis=cast`)    | rank bounds + diagnostic  | yes (eval)           |
 /// | grad wrt tuple       | `grad_wrt_indices` (~13793)          | NO (surf desugar)    | int-type + non-neg        | yes (AD pass)        |
 /// | grad wrt single      | `grad_wrt_indices` (~13814)          | NO (surf desugar)    | int-type + non-neg        | yes (AD pass)        |

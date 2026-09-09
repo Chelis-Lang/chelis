@@ -1950,7 +1950,7 @@ pub(super) fn tensor_softmax_host(
 // ---------------------------------------------------------------------------
 // Composed Tier-2 host-runtime delegation
 //
-// `mean` / `layer_norm` / `conv2d` are not single RISC ops; they
+// `mean` / `layer_norm` / `conv` are not single RISC ops; they
 // decompose into combinations of `RiscOp::Sum`, `RiscOp::Div`,
 // `RiscOp::Sqrt`, `RiscOp::Mul`, `RiscOp::Pad`, etc. The canonical
 // decomposition lives in `crates/chelis-ir/src/tier2.rs::lower_*`. To
@@ -2061,63 +2061,52 @@ where
     extract_root(&dag, &inputs, root, "composed triop tier2")
 }
 
-/// conv2d forward in the host runtime. `tier2::lower_conv2d` is shape-
-/// polymorphic via its `output_ty` parameter and panics if the spatial
-/// dims of `output_ty` disagree with the arithmetic derived from
-/// `(input_dims, kernel_dims, stride, padding)`. The host runtime does
-/// not have a downstream type-annotation source for the output type,
-/// so we compute it inline from the four spatial parameters: that's
-/// the same formula `lower_conv2d` reaches for via the
-/// `raw_h_out`/`raw_w_out` fallback at
-/// `crates/chelis-ir/src/tier2.rs:973-984`.
-pub(super) fn conv2d_host(
+/// Execute the same N-dimensional contraction graph as the compiled lane.
+pub(super) fn conv_host(
     input: &RuntimeTensorValue,
     kernel: &RuntimeTensorValue,
-    stride: usize,
-    padding: usize,
+    strides: &[usize],
+    padding: &[(usize, usize)],
 ) -> Result<RuntimeTensorValue, String> {
-    if input.value.shape.len() != 4 {
+    let shape = &input.value.shape;
+    let kernel_shape = &kernel.value.shape;
+    if shape.len() < 3 || kernel_shape.len() != shape.len() {
+        return Err("conv requires equal input/kernel ranks of at least 3".to_string());
+    }
+    let rank = shape.len() - 2;
+    if strides.len() != rank || padding.len() != rank {
         return Err(format!(
-            "conv2d input must be rank-4 (batch, channels, h, w), got shape {:?}",
-            input.value.shape
+            "conv requires exactly {rank} stride and padding entries"
         ));
     }
-    if kernel.value.shape.len() != 4 {
-        return Err(format!(
-            "conv2d kernel must be rank-4 (out_c, in_c, kh, kw), got shape {:?}",
-            kernel.value.shape
-        ));
+    if shape[1] != kernel_shape[1]
+        || input.precision != kernel.precision
+        || !input.precision.is_float()
+    {
+        return Err("conv requires matching channels and one active float dtype".to_string());
     }
-    let stride = stride.max(1);
-    let batch = input.value.shape[0];
-    let in_c = input.value.shape[1];
-    let h_in = input.value.shape[2];
-    let w_in = input.value.shape[3];
-    let out_c = kernel.value.shape[0];
-    let kernel_in_c = kernel.value.shape[1];
-    let kh = kernel.value.shape[2];
-    let kw = kernel.value.shape[3];
-    if kernel_in_c != in_c {
-        return Err(format!(
-            "conv2d kernel input channels ({kernel_in_c}) must match input channels ({in_c})"
-        ));
+    let mut output_shape = vec![shape[0], kernel_shape[0]];
+    for axis in 0..rank {
+        let padded = shape[axis + 2]
+            .checked_add(padding[axis].0)
+            .and_then(|n| n.checked_add(padding[axis].1))
+            .filter(|&n| i64::try_from(n).is_ok())
+            .ok_or("conv padded extent overflows int64")?;
+        let k = kernel_shape[axis + 2];
+        if strides[axis] == 0 || k == 0 || k > padded {
+            return Err(format!(
+                "conv invalid kernel/stride/padding at spatial axis {axis}"
+            ));
+        }
+        output_shape.push(
+            ((padded - k) / strides[axis])
+                .checked_add(1)
+                .filter(|&n| i64::try_from(n).is_ok())
+                .ok_or("conv output extent overflows int64")?,
+        );
     }
-    let padded_h = h_in + (2 * padding);
-    let padded_w = w_in + (2 * padding);
-    if padded_h < kh || padded_w < kw {
-        return Err(format!(
-            "conv2d kernel dims ({kh}, {kw}) exceed padded input dims ({padded_h}, {padded_w})"
-        ));
-    }
-    let h_out = ((padded_h - kh) / stride) + 1;
-    let w_out = ((padded_w - kw) / stride) + 1;
     let output_ty = TensorType {
-        dims: vec![
-            DimInfo::Lit(batch),
-            DimInfo::Lit(out_c),
-            DimInfo::Lit(h_out),
-            DimInfo::Lit(w_out),
-        ],
+        dims: output_shape.into_iter().map(DimInfo::Lit).collect(),
         precision: input.precision,
     };
     let input_ty = tensor_type_for(input);
@@ -2127,13 +2116,13 @@ pub(super) fn conv2d_host(
     let k_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}1");
     let x_id = add_load(&mut dag, x_name.clone(), input_ty.clone());
     let k_id = add_load(&mut dag, k_name.clone(), kernel_ty.clone());
-    let root = tier2::lower_conv2d(
-        &mut dag, x_id, k_id, &input_ty, &kernel_ty, &output_ty, stride, padding, None,
+    let root = tier2::lower_conv(
+        &mut dag, x_id, k_id, &input_ty, &kernel_ty, &output_ty, strides, padding, None,
     );
     let mut inputs = UnordMap::new();
     inputs.insert(x_name, input.value.clone());
     inputs.insert(k_name, kernel.value.clone());
-    extract_root(&dag, &inputs, root, "conv2d")
+    extract_root(&dag, &inputs, root, "conv")
 }
 
 pub(super) fn tensor_concat_value(

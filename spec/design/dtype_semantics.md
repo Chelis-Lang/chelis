@@ -1553,7 +1553,7 @@ this document and [#729] first, and say so in the PR - that is the
 protocol, not a failure.
 
 [#1294] adds exact builtin identity incorporation to the existing governing
-operation atoms and authors [05-OP-45..63] for the remaining builtin families.
+operation atoms and authors [05-OP-46..64] for the remaining builtin families.
 Chapter §1.5 incorporates the normative identity registry once; each atom
 states its own signatures, domains, results, failures, adjoints, and
 accumulators. Generic field-label paragraphs confer no semantic evidence.
@@ -1566,6 +1566,16 @@ the affected atom/region digests and the Phase 4 handoff digest. The #1294
 oracle supplies per-identity mutations, substantive semantic-clause mutations,
 and checked application/CLI regressions; it does not replace the behavior
 oracles or introduce Phase 4C support cells.
+
+The generalized-contract amendment replaces the two-spatial-axis convolution
+signature with [05-OP-51]'s single `conv` contract, extends [05-OP-57]'s List
+egress to positive tensor ranks, and extends [05-OP-38]'s scan state to
+fixed-shape tensors. The named scalar/rank restrictions are superseded by
+those normative amendments; numerical-kind restrictions remain controlling.
+The accompanying contract mutations guard the expanded domains and exact
+metadata signatures. The changed [05-OP-38] and region digests identify the
+amended contract, and the oracle now executes the generalized convolution
+checker and evaluation/C tests as supporting behavior evidence.
 
 The same change extends the frozen Phase 3 example corpus with
 `explicit_normalization.ch` and its executable eval/C parity row. The
@@ -2373,6 +2383,39 @@ A zero-match, skipped, duplicate, stale, or failed execution cannot pass.
 This prerequisite's release exit is semantic membership closure. It does not
 certify Table A/B target cells, all builtin behavior across lanes, or the
 composite #1296 release exit; those remain their owning oracles' work.
+
+The generalized contracts retain that boundary. [05-OP-51] now owns one
+`conv` identity with a positive number of spatial axes and explicit per-axis
+int64 strides and padding pairs. The declaration and callable spelling are
+migrated together; there is no public `conv2d` compatibility identity. The
+static lowering builds a window matrix in the contract's channel/kernel
+order and performs one contraction across its full reduction axis. Numerical
+checks cover evaluation and compiled C at spatial ranks one through three
+and all four float dtypes, plus the input adjoint of overlapping windows.
+They do not establish dynamic-shape, accelerator, or full higher-order AD
+conformance. Runtime metadata and symbolic extents still require the checker
+and target capability work owned by #731 and #730; literal-only lowering is
+an implementation gap, not a restriction on the normative signature.
+
+The same authority audit generalizes [05-OP-57]'s `to_list` to recursively
+nested Lists for every positive tensor rank and [05-OP-38]'s `tensor_scan`
+to fixed-shape tensor states. These two amendments establish the contracts;
+their runtime paths still restrict `to_list` to rank one and `tensor_scan`
+to scalar state. The remaining implementation must preserve recursive
+result types, empty-state shapes, exact element bits, callback effects, and
+the saved full shape used by AD. Phase 4C's capability declarations must
+record those gaps honestly, and the composite release exit cannot treat
+this membership oracle as execution evidence for either generalization.
+The contract mutations delete these rank-general rules and insert the
+former rank/scalar restrictions to ensure that the closure guard rejects
+both kinds of regression.
+
+Other rank restrictions were checked against their controlling rules:
+matmul already admits batched operands; reductions, movement, sparse, and
+ordering operations already use explicit axes. Integer matmul remains a
+type error under spec/04 section 5.7.2, and scalar/tensor extraction remains
+restricted to rank zero under [05-OP-50]. Neither is an accidental
+specialization to remove.
 
 ### Pre-4C - composite executable gate ([#1296])
 

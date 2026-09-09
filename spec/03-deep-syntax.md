@@ -652,7 +652,7 @@ Not built-in — require `(import {} std.x ...)`:
 
 - `std.io`: `println`, `read_tensor`, `write_tensor`
 - `std.init`: `randn`, `uniform`, `zeros`, `ones`, `arange`
-- `std.nn`: `layer_norm`, `conv2d`, `embedding`, `multi_head_attention`, `cross_entropy`
+- `std.nn`: `layer_norm`, `conv`, `embedding`, `multi_head_attention`, `cross_entropy`
 
 ---
 

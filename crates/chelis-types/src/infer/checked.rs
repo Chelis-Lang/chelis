@@ -315,7 +315,7 @@ pub(super) enum DeferredShapeRule {
         env: Box<Env>,
     },
     LayerNorm,
-    Conv2d,
+    Conv,
     ScatterElements {
         list: deep::List,
     },
@@ -573,7 +573,7 @@ impl InferenceProduct {
                 DeferredShapeRule::LayerNorm => {
                     check_layer_norm_signature(&check.arg_tys, &check.result_ty, vg, subst, errors)
                 }
-                DeferredShapeRule::Conv2d => check_conv2d_signature(
+                DeferredShapeRule::Conv => check_conv_signature(
                     &check.arg_exprs,
                     &check.arg_tys,
                     &check.result_ty,
@@ -613,7 +613,7 @@ impl InferenceProduct {
                 DeferredShapeRule::Reduction { name } => name,
                 DeferredShapeRule::Expand { builtin, .. } => (*builtin).to_string(),
                 DeferredShapeRule::LayerNorm => "layer_norm".to_string(),
-                DeferredShapeRule::Conv2d => "conv2d".to_string(),
+                DeferredShapeRule::Conv => "conv".to_string(),
                 DeferredShapeRule::ScatterElements { .. } => "scatter_elements".to_string(),
             };
             errors.push(CheckError::new(

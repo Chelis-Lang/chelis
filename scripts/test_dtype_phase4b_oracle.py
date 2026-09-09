@@ -480,7 +480,7 @@ class ContractValidationTests(unittest.TestCase):
     def test_host_numeric_builtin_manifest_has_no_specialized_compatibility_identities(self) -> None:
         block = self.repository_atom("05-OP-38")
         for identity in (
-            "`tensor_scan` | `(T,((T,int64)->T!E),int64)->tensor[n,T]!E`",
+            "`tensor_scan` | `(T,((T,int64)->T!E),int64)->tensor[n,..state_shape(T),element(T)]!E`",
             "`process_run` | `(string,List[string])->(int64,string,string)!{IO}`",
             "`test_assert_eq` | `(Q,Q,string)->unit!{Test}`",
         ):
@@ -2190,7 +2190,7 @@ class ContractValidationTests(unittest.TestCase):
             ),
             "05-OP-35": ("(p_float)->p_float", "(f32)->f32"),
             "05-OP-38": (
-                "(T,((T,int64)->T!E),int64)->tensor[n,T]!E",
+                "(T,((T,int64)->T!E),int64)->tensor[n,..state_shape(T),element(T)]!E",
                 "(f32,((f32,int64)->f32),int64)->tensor[n,f32]",
             ),
         }

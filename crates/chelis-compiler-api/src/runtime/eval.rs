@@ -2948,20 +2948,32 @@ impl<'a> EvalContext<'a> {
                 })
                 .map(RuntimeValue::Tensor)
             }
-            "conv2d" => {
+            "conv" => {
                 let input = expect_tensor_arg(args, 0)?;
                 let kernel = expect_tensor_arg(args, 1)?;
-                let stride = expect_int_arg(args, 2)?;
-                let padding = expect_int_arg(args, 3)?;
-                if stride < 1 {
-                    return Err(format!("conv2d stride must be >= 1, got {stride}"));
-                }
-                if padding < 0 {
-                    return Err(format!("conv2d padding must be >= 0, got {padding}"));
-                }
-                let stride = stride as usize;
-                let padding = padding as usize;
-                conv2d_host(&input, &kernel, stride, padding).map(RuntimeValue::Tensor)
+                let raw_strides = expect_list_arg(args, 2)?;
+                let raw_padding = expect_list_arg(args, 3)?;
+                let strides = expect_int_list(&raw_strides, "conv")?;
+                let padding = raw_padding
+                    .iter()
+                    .map(|value| {
+                        let RuntimeValue::Tuple(pair) = value else {
+                            return Err("conv padding requires (low,high) tuples".to_string());
+                        };
+                        if pair.len() != 2 {
+                            return Err("conv padding requires two entries per pair".to_string());
+                        }
+                        let low = expect_int_arg(pair, 0)?;
+                        let high = expect_int_arg(pair, 1)?;
+                        Ok((
+                            usize::try_from(low)
+                                .map_err(|_| "conv padding must be non-negative")?,
+                            usize::try_from(high)
+                                .map_err(|_| "conv padding must be non-negative")?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                conv_host(&input, &kernel, &strides, &padding).map(RuntimeValue::Tensor)
             }
             // Movement primitives that take parameterized window args. Both
             // delegate to the same arithmetic the IR evaluator at

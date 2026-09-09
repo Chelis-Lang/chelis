@@ -25,8 +25,8 @@ use std::io::Write;
 const CHECK_ERRORS_EXIT_CODE: i32 = 2;
 
 #[test]
-fn issue_207_check_exits_nonzero_when_validator_rejects_conv2d() {
-    // Concrete-shape conv2d with stride 0; the RT-205 F1 fix rejects
+fn issue_207_check_exits_nonzero_when_validator_rejects_conv() {
+    // Concrete-shape conv with stride 0; the RT-205 F1 fix rejects
     // this at validator time. Pre-#207 this exited 0 with a non-empty
     // errors array. Post-#207 the exit code matches the errors array
     // so downstream CI shell scripts can detect the rejection without
@@ -37,7 +37,7 @@ fn issue_207_check_exits_nonzero_when_validator_rejects_conv2d() {
         .tempfile()
         .expect("create tempfile");
     let src = "module Probe\n\
-               def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] = conv2d(&x, &k, 0, 0)\n";
+               def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] = conv(&x, &k, [0i64, 0i64], [(0i64, 0i64), (0i64, 0i64)])\n";
     tmp.write_all(src.as_bytes()).expect("write tempfile");
     tmp.flush().expect("flush tempfile");
 

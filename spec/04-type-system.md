@@ -750,7 +750,7 @@ Standard Algorithm W with extensions for tensor types. The flow:
 The replay requirement applies to every operation whose result or admission
 depends on the resolved operand shape, not to a hand-maintained exception for
 one builtin. In particular, a `matmul`, reduction, `expand`, `insert`,
-`layer_norm`, `conv2d`, or `scatter_elements` reached through a bare lambda
+`layer_norm`, `conv`, or `scatter_elements` reached through a bare lambda
 parameter is
 checked again after the parameter binds. The check used on replay is the
 operation's ordinary typing rule, so immediate and deferred applications

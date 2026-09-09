@@ -32,24 +32,24 @@ CLAUSES = {
     30: ("same numeric kind", "integer overflow is checked at every addition", "canonical balanced tree"),
     36: ("seven language identities", "recursively admitted by this equality rule", "NaN", "zero cotangent"),
     37: ("every active float", "scalar `rate: p`", "0 <= rate < 1", "saved forward mask"),
-    38: ("`(Q,Q,string)->unit!{Test}`", "one static type", "equality, own-width closeness"),
+    38: ("`(Q,Q,string)->unit!{Test}`", "one static type", "equality, own-width closeness", "scalar or tensor state", "shape and dtype are invariant across every callback application"),
     39: ("reduce_window_sum", "ReduceWindowGrad", "window/stride validation", "higher-order"),
     40: ("selection, not arithmetic", "first NaN in operand order", "first operand on every equality"),
     41: ("exact mathematical difference", "It never lowers through `neg`", "`(g, neg(g))`"),
     43: ("positive zero otherwise", "including at `x = 0`", "Non-float operands are type errors"),
-    45: ("Integer zero divisors trap Domain", "without introducing intermediate overflow", "-g*(x/y)/y"),
+    64: ("Integer zero divisors trap Domain", "without introducing intermediate overflow", "-g*(x/y)/y"),
     46: ("Floor, ceil, and round are exact identities on integers", "-g*y*y using the forward y=1/x", "including zero for x=0 and NaN"),
     47: ("nonnegative counts at or above w yield zero", "zero for nonnegative x and -1 for negative x", "Counts are never implicitly masked", "shift amount must be non-negative, got N", "right shift is arithmetic", "structurally reject differentiation"),
     48: ("All active float dtypes", "no clipping, default distribution, or hidden epsilon", "canonical balanced tree"),
     49: ("Every active tensor element dtype", "exact stored bits", "stride scatters to its original sampling positions"),
     50: ("int32 and int64 respectively", "rank-zero product one", "No conversion crosses either scalar/tensor boundary"),
-    51: ("einsum admits one active signed-integer or float dtype", "section 5.7.2's contraction accumulator", "no identity receives an invented zero adjoint", "epsilon is the decimal constant 0.00001", "Stride is positive and padding nonnegative"),
+    51: ("einsum admits one active signed-integer or float dtype", "section 5.7.1's contraction accumulator", "no identity receives an invented zero adjoint", "epsilon is the decimal constant 0.00001", "every positive spatial rank r", "each stride is positive", "nonnegative (low,high) extents", "exactly r entries", "floor((input[j]+low[j]+high[j]-kernel[j])/strides[j])+1", "(input-channel,kernel-axis-0,...,kernel-axis-r-1)", "empty contraction with dtype-zero result", "No scalar metadata broadcast or rank-named convolution alias"),
     52: ("any active signed-integer dtype", "last update in row-major update order", "structurally reject differentiation"),
     53: ("sort(x,axis)` returns (values, int64 indices)", "without converting bool to numeric", "saved permutation"),
     54: ("List concatenation takes a List second argument", "one-argument drop is explicit lifetime consumption", "Element/count/index quantities are int64"),
     55: ("exactly once per visited element in source order", "hold the exact forward predicate mask constant", "Cotangent combination follows spec/06's order"),
     56: ("Float and aggregate keys are type errors", "canonical observation order", "Missing lookup is the explicit Option result"),
-    57: ("All active tensor element dtypes, including bool", "shape(scalar) = []", "shape([v0, ..., vn-1]) = [n] ++ s", "arbitrary List nesting", "A List's element type determines an empty result's dtype", "each element's stored bits", "reconstructs the saved source List nesting"),
+    57: ("All active tensor element dtypes, including bool", "shape(scalar) = []", "shape([v0, ..., vn-1]) = [n] ++ s", "arbitrary List nesting", "A List's element type determines an empty result's dtype", "each element's stored bits", "reconstructs the saved source List nesting", "any positive rank r", "returns r nested Lists", "unobservable extents are supplied by the expected tensor type", "saved forward shape even when empty Lists hide trailing extents"),
     58: ("Unicode scalar values", "Negative slice start/length", "structurally reject differentiation"),
     59: ("Option[int64]", "Option[f64]", "out-of-range int64 yield None"),
     60: ("byte reads preserve every byte", "an offset-plus-length beyond the mapping fail", "outside AD"),
@@ -62,8 +62,10 @@ CLAUSES = {
 # a positive sentence is insufficient when an added sentence narrows it again.
 # The oracle inserts these restrictions while retaining every required clause.
 FORBIDDEN_DOMAIN_CLAUSES = {
+    38: ("tensor_scan admits only scalar state",),
     47: ("0 <= y < w", "counts at or above the width trap"),
-    57: ("nested Lists are outside this signature", "to_tensor admits only flat Lists"),
+    51: ("conv requires exactly two spatial axes", "conv admits only rank-four tensors", "conv2d is a public alias"),
+    57: ("nested Lists are outside this signature", "to_tensor admits only flat Lists", "to_list admits only rank-one tensors"),
 }
 
 # Overloaded spellings do not confer authority for the other overload. These
