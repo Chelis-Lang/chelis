@@ -485,10 +485,28 @@ Pragmatic surface. IO effect on everything.
 | `read_lines` | `String -> List[String]` | IO | Read file, split by newline |
 | `read_bytes` | `String -> List[Int]` | IO | Read raw bytes as integer list |
 | `file_exists` | `String -> Bool` | IO | Check file existence |
-| `list_dir` | `String -> List[String]` | IO | List directory entry names, in [05-HOST-4] byte order |
+| `list_dir` | `String -> List[String]` | IO | List directory entry names in [05-HOST-4] byte order, with strict UTF-8 conversion and whole-call failure on an invalid name |
 | `mmap_file` | `String -> MappedFile` | IO | Memory-map a file for zero-copy random access |
 | `mmap_read` | `(MappedFile, Int, Int) -> List[Int]` | Pure | Read bytes from offset+length after open |
 | `mmap_len` | `MappedFile -> Int` | Pure | File size in bytes |
+
+The #1479 row-7 directory conversion acceptance command is:
+
+```sh
+cargo nextest run -p chelis-runtime -p chelis-compiler-api -p chelis-cli --lib --test issue_1479_list_dir_order --test issue_1479_list_dir_lane_parity -E 'test(list_dir_conversion) | binary(~issue_1479_list_dir)' --no-fail-fast --retries 0
+```
+
+Acceptance requires every selected case to execute and pass, including the
+Linux filesystem cases and the compiled C executions (a C compiler is required).
+The suites also run in the hosted workspace jobs. macOS executes the in-memory
+invalid-name conversion controls and valid-name filesystem/parity controls; Linux
+additionally creates invalid filenames and verifies whole-call failure through
+the evaluator, runtime FFI, and generated C. macOS alone does not prove those
+filesystem failure paths. The executable example is
+`examples/io/list_directory.ch`, with an absolute fixture path substituted by
+the parity suite before formatting, checking, evaluating, and compiling it.
+This is the conversion row's acceptance surface, not completion of #1479's
+other carriers or this phase's broader I/O work.
 
 **Memory-mapped I/O:** For datasets that don't fit in memory (billions of trade events,
 large token corpora), `mmap_file` provides zero-copy random access to file contents. The

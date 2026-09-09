@@ -19,6 +19,27 @@ use super::named_axis::*;
 use super::transforms::*;
 use super::*;
 
+/// [05-HOST-4]: choose the first invalid host name in the declared order.
+/// Complete validation precedes construction of language/runtime list values.
+fn list_dir_names_to_strings(
+    mut names: Vec<std::ffi::OsString>,
+    path: &str,
+) -> Result<Vec<String>, String> {
+    names.sort_by(|a, b| a.as_encoded_bytes().cmp(b.as_encoded_bytes()));
+    names
+        .into_iter()
+        .map(|name| {
+            name.into_string().map_err(|name| {
+                format!(
+                    "IO trap in list_dir: directory b\"{}\", entry b\"{}\": name is not valid UTF-8",
+                    path.as_bytes().escape_ascii(),
+                    name.as_encoded_bytes().escape_ascii()
+                )
+            })
+        })
+        .collect()
+}
+
 fn close_at_f32_width(actual: f32, expected: f32, tolerance: f32) -> bool {
     if actual.is_nan() || expected.is_nan() {
         return false;
@@ -2427,16 +2448,10 @@ impl<'a> EvalContext<'a> {
                         entry.map_err(|err| format!("list_dir failed for `{path}`: {err}"))?;
                     names.push(entry.file_name());
                 }
-                // [05-HOST-4]: order by the host's own name bytes, before the
-                // lossy conversion below. `to_string_lossy` maps every invalid
-                // UTF-8 sequence to U+FFFD, so two distinct names can collapse
-                // to one string; sorting after it would leave those tie-broken
-                // by directory order, which is the order the atom forbids.
-                names.sort_by(|a, b| a.as_encoded_bytes().cmp(b.as_encoded_bytes()));
                 Ok(RuntimeValue::List(
-                    names
+                    list_dir_names_to_strings(names, &path)?
                         .into_iter()
-                        .map(|name| RuntimeValue::String(name.to_string_lossy().into_owned()))
+                        .map(RuntimeValue::String)
                         .collect(),
                 ))
             }
@@ -3207,5 +3222,62 @@ fn stage_kernel_argument(
             "kernel `{def}` parameter `{param}` expects a tensor or scalar argument, got {}",
             describe_value(other)
         )),
+    }
+}
+
+#[cfg(test)]
+mod list_dir_conversion_tests {
+    use super::list_dir_names_to_strings;
+    use std::ffi::OsString;
+
+    #[test]
+    fn list_dir_conversion_preserves_unicode_and_empty_lists() {
+        let names = ["替", "\u{fffd}", "é", "e\u{301}", "a\n\"\\z"];
+        let mut expected = names.to_vec();
+        expected.sort();
+        assert_eq!(
+            list_dir_names_to_strings(names.into_iter().map(OsString::from).collect(), "/dir"),
+            Ok(expected.into_iter().map(str::to_owned).collect())
+        );
+        assert_eq!(list_dir_names_to_strings(vec![], "/dir"), Ok(vec![]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_dir_conversion_rejects_collisions_and_selects_first_raw_name() {
+        use std::os::unix::ffi::OsStringExt;
+        // In-memory host names exercise the production conversion on macOS,
+        // including filesystems that cannot create an invalid-name fixture.
+        for names in [
+            vec![b"a\xff".to_vec(), b"a\xfe".to_vec()],
+            vec![b"a\xfe".to_vec(), b"a\xff".to_vec()],
+        ] {
+            let mut names: Vec<_> = names.into_iter().map(OsString::from_vec).collect();
+            names.push(OsString::from("0-valid"));
+            assert_eq!(
+                list_dir_names_to_strings(names, "/dir"),
+                Err("IO trap in list_dir: directory b\"/dir\", entry b\"a\\xfe\": name is not valid UTF-8".to_owned())
+            );
+        }
+        // Raw order and replacement-string order disagree for these names.
+        let names = vec![
+            OsString::from_vec(b"\x81a".to_vec()),
+            OsString::from_vec(b"\x80z".to_vec()),
+        ];
+        assert_eq!(
+            list_dir_names_to_strings(names, "/dir"),
+            Err("IO trap in list_dir: directory b\"/dir\", entry b\"\\x80z\": name is not valid UTF-8".to_owned())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_dir_conversion_escapes_directory_and_offending_entry_reversibly() {
+        use std::os::unix::ffi::OsStringExt;
+        let names = vec![OsString::from_vec(b"bad\n\r\t\\\"'\xff".to_vec())];
+        assert_eq!(
+            list_dir_names_to_strings(names, "/d\n\r\t\\\"'é"),
+            Err("IO trap in list_dir: directory b\"/d\\n\\r\\t\\\\\\\"\\'\\xc3\\xa9\", entry b\"bad\\n\\r\\t\\\\\\\"\\'\\xff\": name is not valid UTF-8".to_owned())
+        );
     }
 }

@@ -296,8 +296,18 @@ The host lane is eager (no lazy list fusion).
 
 | Name | Signature | Notes |
 |---|---|---|
-| `list_dir` | `string -> List[string]` | Entry names, not paths. Ordered by the entry name's byte sequence, per [05-HOST-4]. |
+| `list_dir` | `string -> List[string]` | Entry names, not paths. Ordered by host-name bytes; strict UTF-8 conversion under [05-HOST-4]. An invalid name traps `IO` for the complete call. |
 | `process_run` | `(cmd: string, args: List[string]) -> (int64, string, string)` | argv, no shell. **Eval/test-only** — C/HIP/Metal build reject it (chelis#267). |
+
+String-valued path APIs cannot directly name non-UTF-8 files. `list_dir`
+preserves valid names exactly, without normalization; on conversion failure its
+diagnostic identifies the directory and first invalid entry in host-name order
+using reversible byte escapes. A byte-preserving path API is not provided by
+this contract.
+
+The executable [directory listing example](../examples/io/list_directory.ch)
+prints names in that order. Its fixture-based eval/C coverage is
+`crates/chelis-cli/tests/issue_1479_list_dir_lane_parity.rs`.
 
 ### 3.6 Diagnostics & test — `Test` effect on asserts
 

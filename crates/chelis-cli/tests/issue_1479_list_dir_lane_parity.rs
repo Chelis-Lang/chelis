@@ -33,16 +33,26 @@ use tempfile::tempdir;
 
 /// Escape an absolute host path into a Surf string literal.
 fn surf_string_literal(value: &str) -> String {
-    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+    format!(
+        "\"{}\"",
+        value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+            .replace('\t', "\\t")
+    )
 }
 
 /// A program that prints `list_dir`'s result for one absolute fixture path,
 /// separator-joined so the printed line encodes the order rather than the set.
 fn source_for(fixture: &Path) -> String {
-    format!(
-        "listing = print(string_concat(\"names:\", fold(fn (acc: string, name: string) -> \
-         string_concat(acc, string_concat(\"/\", name)), \"\", list_dir({}))))\n",
-        surf_string_literal(fixture.to_str().expect("UTF-8 fixture path"))
+    include_str!("../../../examples/io/list_directory.ch").replace(
+        "list_dir(\".\")",
+        &format!(
+            "list_dir({})",
+            surf_string_literal(fixture.to_str().expect("UTF-8 fixture path"))
+        ),
     )
 }
 
@@ -51,6 +61,19 @@ fn eval_stdout(source: &str, name: &str) -> String {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join(format!("{name}.ch"));
     write_file(&path, source);
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .arg("fmt")
+        .arg("--inplace")
+        .arg(&path)
+        .assert()
+        .success();
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .arg("check")
+        .arg(&path)
+        .assert()
+        .success();
     let out = Command::cargo_bin("chelis")
         .expect("binary")
         .args(["eval", "--file", path.to_str().unwrap()])
@@ -86,10 +109,10 @@ fn assert_lane_parity(name: &str, entries: &[&str], expected_rendering: &str) {
          {expected_rendering}\nfull stdout:\n{eval}"
     );
 
-    if !gcc_available() {
-        eprintln!("skipping build lane for `{name}`: c compiler not available");
-        return;
-    }
+    assert!(
+        gcc_available(),
+        "this cross-lane oracle requires a C compiler"
+    );
     let built = build_and_run(&source, name);
     assert_eq!(
         built, eval,
@@ -127,4 +150,94 @@ fn both_lanes_order_list_dir_dotfiles_and_digits_by_byte_sequence() {
 #[test]
 fn both_lanes_render_an_empty_directory_as_the_empty_list() {
     assert_lane_parity("issue1479_empty", &[], "names:");
+}
+
+#[test]
+fn both_lanes_preserve_unicode_list_dir_names() {
+    assert_lane_parity(
+        "issue1479_unicode",
+        &["\u{fffd}", "替", "λ", "ASCII"],
+        "names:/ASCII/λ/替/\u{fffd}",
+    );
+}
+
+/// Invalid host names require a supporting filesystem, not a weaker contract.
+/// Linux CI executes these complete eval/build/link/run failure cases.
+#[cfg(target_os = "linux")]
+#[test]
+fn both_lanes_reject_invalid_list_dir_names_without_a_partial_list() {
+    use common::link_generated;
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    assert!(
+        gcc_available(),
+        "this cross-lane oracle requires a C compiler"
+    );
+    let cases: &[(&[&[u8]], &str)] = &[
+        (&[b"a\xff", b"a\xfe"], r#"a\xfe"#),
+        (&[b"a\xfe", b"a\xff"], r#"a\xfe"#),
+        (&[b"\x81a", b"\x80z"], r#"\x80z"#),
+        (&[b"bad\n\r\t\\\"'\xff"], r#"bad\n\r\t\\\"\'\xff"#),
+    ];
+    for (invalid_names, escaped_entry) in cases {
+        let dir = tempdir().expect("tempdir");
+        let fixture = dir.path().join("directory\n\"\\λ");
+        fs::create_dir(&fixture).unwrap();
+        fs::write(fixture.join("0-valid"), b"x").unwrap();
+        for name in *invalid_names {
+            fs::write(fixture.join(OsStr::from_bytes(name)), b"x").unwrap();
+        }
+        let source = source_for(&fixture);
+        let path = dir.path().join("invalid.ch");
+        write_file(&path, &source);
+        let expected = format!(
+            "IO trap in list_dir: directory b\"{}\", entry b\"{escaped_entry}\": name is not valid UTF-8",
+            fixture.as_os_str().as_bytes().escape_ascii(),
+        );
+        let eval = Command::cargo_bin("chelis")
+            .unwrap()
+            .arg("eval")
+            .arg("--file")
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(
+            !eval.status.success(),
+            "invalid names returned successfully: {eval:?}"
+        );
+        assert!(
+            eval.stdout.is_empty(),
+            "a failed listing must not publish a result: {eval:?}"
+        );
+        let eval_stderr = String::from_utf8(eval.stderr).unwrap();
+        assert!(
+            eval_stderr.lines().any(|line| line.ends_with(&expected)),
+            "wrong evaluator diagnostic: {eval_stderr}"
+        );
+
+        let out = dir.path().join("out");
+        Command::cargo_bin("chelis")
+            .unwrap()
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .arg("build")
+            .arg(&path)
+            .args(["--target", "c", "--output"])
+            .arg(&out)
+            .assert()
+            .success();
+        assert!(link_generated(&out, "invalid.c", "invalid").success());
+        let compiled = std::process::Command::new(out.join("invalid"))
+            .output()
+            .unwrap();
+        assert_eq!(compiled.status.code(), Some(1), "{compiled:?}");
+        assert!(
+            compiled.stdout.is_empty(),
+            "compiled listing published a partial result"
+        );
+        assert_eq!(
+            String::from_utf8(compiled.stderr).unwrap(),
+            format!("{expected}\n")
+        );
+    }
 }
