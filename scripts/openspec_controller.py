@@ -471,6 +471,15 @@ def run(
 ) -> int:
     """Classify one push and open or reuse its pull request."""
     print("openspec-autoland controller")
+    # Absolute from here down, and this is load-bearing rather than tidy.
+    # The workflow passes `base`, the directory it checked the default
+    # branch out to. Every command below runs with `cwd` set to this path,
+    # and the classifier is additionally TOLD the path with `--repo`. While
+    # it stayed relative, the child resolved it a second time against the
+    # working directory it had already been given and looked for
+    # `base/base`, which is how the first hosted run failed:
+    # `cannot run Git: [Errno 2] No such file or directory: 'base'`.
+    repository_path = Path(repository_path).resolve()
     try:
         signal = read_signal(
             repository, run_id, default_branch, repository_path, runner
