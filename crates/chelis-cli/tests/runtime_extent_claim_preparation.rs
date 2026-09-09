@@ -715,6 +715,51 @@ fn literal_result_claim_contract() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// [04] §4.7 and [06] §5.2: a call's runtime obligation survives another
+/// inlining boundary and remains observable when its result is discarded.
+#[test]
+#[ignore = "pending #1377 literal claim transport"]
+fn literal_claim_transport_survives_nested_and_unused_calls() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut fixtures = Vec::new();
+    for good in [true, false] {
+        let x = vector(if good { 4 } else { 5 });
+        let seed = Input {
+            dims: vec![],
+            values: vec![7.0],
+        };
+        let definitions = "def g(b: tensor[f32], x: tensor[rows, f32]) -> tensor[4, f32] = insert(b, 0i32, shape(x, 0i32))\ndef f(b: tensor[f32], x: tensor[rows, f32]) -> tensor[4, f32] = g(b, x)";
+        call_matrix(
+            &mut fixtures,
+            "literal.nested",
+            1377,
+            definitions,
+            "(tensor[f32], tensor[rows, f32]) -> tensor[4, f32]",
+            vec![seed.clone(), x.clone()],
+            if good {
+                Expected::Tensor(vec![4], vec![7.0; 4])
+            } else {
+                Expected::Domain("load", &["claimed = 4", "x axis 0 = 5"])
+            },
+        );
+        fixtures.push(Case {
+            id: format!("literal.unused.{}", if good { "satisfied" } else { "mismatch" }),
+            issue: 1377,
+            source: format!("{definitions}\ndef main() -> tensor[1, f32] = {{\n  _ = f({}, {})\n  to_tensor([9.0f32])\n}}\n", literal(&seed), literal(&x)),
+            signature: Some("(tensor[f32], tensor[rows, f32]) -> tensor[4, f32]"),
+            exported: None,
+            expected: if good { Expected::Tensor(vec![1], vec![9.0]) }
+            else { Expected::Domain("load", &["claimed = 4", "x axis 0 = 5"]) },
+        });
+    }
+    assert_eq!(fixtures.len(), 8);
+    let failures: Vec<_> = fixtures
+        .iter()
+        .flat_map(|case| contract_failures(case, &observe(case)))
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// #1619's executable exit: original comparison witnesses, exported calls,
 /// top-level bindings, an inlined main, and a refuted runtime unit operand.
 #[test]

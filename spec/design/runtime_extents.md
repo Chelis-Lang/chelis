@@ -266,6 +266,57 @@ representation of the same obligation, not distinct trapping operations.
 
 #### C2.6 Atomic integration and wire ordering
 
+B2b-1 first implements literal call claims through an explicit IR witness.
+This bounded change owns #1377. A literal identifies its own required value;
+it does not need to identify a named binder by spelling. The remaining named
+claim migration still owns scoped binding identities, unread named witnesses,
+and #1374/#1376/#1566. Both changes retain the C2.3 distinction between a
+requirement and an independently observed extent.
+
+The literal transport uses `RiscOp::ExtentWitness { parameter, axis,
+requirements }`. Its one tensor input is the actual argument; its result is
+the observed axis extent as a rank-zero `int64`. `parameter` is diagnostic
+text, `axis: RtAxis` selects the observed axis, and
+`requirements: Vec<ScalarValue>` retains ordered, tagged `int64` literal
+claims. Requirements are explicit fields, with no missing-field default.
+The operation reads shape metadata without copying the argument's elements.
+Its existing `span_id` records the introducing call.
+
+Lowering creates these witnesses in parameter/axis order before lowering the
+callee body. A parameter shape read uses its witness through an ordinary
+`RtDim::Node` input slot. The checked declared result supplies the literal
+obligation, while the witness input supplies the observed value. A fresh call
+creates fresh witness nodes; copying or importing a graph remaps their ordinary
+inputs and retains their claims. No name-keyed extent grouping is involved.
+Once a guard establishes equality, a consumer may use that checked literal;
+the result annotation alone never licenses the substitution.
+
+A potentially failing witness is an observable DCE root even when the call's
+tensor result is discarded. An independently proven satisfied witness adds
+no trap root. CSE, specialization and folding preserve the check or discharge
+it from independent evidence; they cannot infer success from its requirement.
+Grad retains primal checks and assigns zero cotangent to shape values. Vmap
+keeps the result scalar and shifts its observed input axis past the batch axis.
+
+The construction/consumer inventory for this change is:
+
+| boundary | concrete owners |
+|---|---|
+| checked declaration | `infer/common.rs` declaration owner and `infer/annotate.rs` function stamp; `CheckedProgram::signature_inference` retains the declared result |
+| construction and calls | `lower.rs`: `lower_fn`, `lower_plain_callable_app`, parameter shape-read lowering and declared-result preservation |
+| graph transport | `Dag::add_node`/`replace_node`, `lower.rs::splice_dag`, `optimize.rs` DCE/CSE/folding, `specialize.rs`, `fuse.rs`, `grad.rs`, `vmap.rs`, `tier2.rs` and contextual library import |
+| validation and sources | `verify.rs`, `axis_sources.rs`, `dag.rs` operation properties and runtime-dimension consumers |
+| execution and ownership | `eval.rs`, `ownership/mod.rs`, `ownership/storage.rs`, C/HIP/Metal emitters and compiler target classification |
+| public transport and caches | compiler-api `schema.rs` wire op and `compiler.rs` conversions, stdlib/library cache versions and build identity; capacity/rejection registries and structural inventory |
+
+The existing six-case `literal_result_claim_contract` is extended by nested
+calls and discarded results in
+`literal_claim_transport_survives_nested_and_unused_calls`. These public
+fixtures precede implementation. The change also owes transforming rebuild,
+serialization rejection/roundtrip, and exact positive/negative witness tests
+before it can claim that this carrier is integrated. The wider named-claim
+and op-computed-source exits remain separate.
+
 B2b-1 changes the checked-to-lowered claim carrier and every consumer together.
 Its PR must name the concrete type fields and all construction/rebuild/decode
 sites before implementation; compilation and negative tests reject omitted
