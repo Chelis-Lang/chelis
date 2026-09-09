@@ -11892,10 +11892,9 @@ impl LowerCtx {
             .expect("int64 extent literal");
             if let RiscOp::ExtentWitness { requirements, .. } =
                 &mut self.dag.node_mut(witness).expect("witness").op
+                && !requirements.contains(&required_value)
             {
-                if !requirements.contains(&required_value) {
-                    requirements.push(required_value);
-                }
+                requirements.push(required_value);
             }
             self.dag.node_mut(id).expect("result").output_type.dims[axis] = dim.clone();
         }
