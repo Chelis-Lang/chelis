@@ -61,16 +61,12 @@ pub struct CEmitter {
     /// the already-declared value when false (the symbol is Load-declared in
     /// the prologue, or an earlier op already declared it).
     runtime_dim_sites: chelis_unord::UnordMap<(usize, usize), (String, bool)>,
-    /// chelis#1277 C1.3: `(node, axis)` -> the claim a local guard compares
-    /// against, and the operation [04-NUM-9]'s `<op>` slot names.
-    local_dim_guard_sites: chelis_unord::UnordMap<
-        chelis_ir::ownership::LocalGuardSite,
-        Vec<chelis_ir::ownership::LocalGuardClaim>,
-    >,
-    /// Claim names this function actually declares as C variables. A local
-    /// guard compares against the claim BY NAME, so a claim that resolved to
-    /// a literal and was never declared has nothing to compare against and
-    /// gets no guard rather than an undeclared identifier.
+    /// Local claims in derivation/declaration order at each operation. Grouping
+    /// by axis would reorder simultaneous failures when axes are permuted.
+    local_dim_guard_sites:
+        chelis_unord::UnordMap<usize, Vec<(usize, chelis_ir::ownership::LocalGuardClaim)>>,
+    /// Claim names this function actually declares as C variables. Resolved
+    /// claims compare against their numeric canonical value instead.
     declared_dim_names: chelis_unord::UnordSet<String>,
     /// Node descriptors whose exclusive runtime write lease remains live
     /// while the generated kernel fills and consumes its private storage.
@@ -280,13 +276,14 @@ impl CEmitter {
         // means agreeing in claim, canonical, operation AND read instruction,
         // which is exactly the set one comparison discharges.
         let mut local_dim_guard_sites: chelis_unord::UnordMap<
-            chelis_ir::ownership::LocalGuardSite,
-            Vec<chelis_ir::ownership::LocalGuardClaim>,
+            usize,
+            Vec<(usize, chelis_ir::ownership::LocalGuardClaim)>,
         > = chelis_unord::UnordMap::new();
-        for (site, claim) in dag.local_dim_guard_sites() {
-            let claims = local_dim_guard_sites.entry(site).or_default();
-            if !claims.contains(&claim) {
-                claims.push(claim);
+        for ((node, axis), claim) in dag.local_dim_guard_sites() {
+            let claims = local_dim_guard_sites.entry(node).or_default();
+            let entry = (axis, claim);
+            if !claims.contains(&entry) {
+                claims.push(entry);
             }
         }
 
@@ -6583,20 +6580,22 @@ impl CEmitter {
     ) {
         let a = inputs[0].0;
         // chelis#616: a node-valued (runtime) target extent is read from its
-        // rank-0 bound scalar behind a negativity guard, then declared (or
-        // equality-guarded) under the axis's symbolic dim name so the
-        // `shape_literal` allocation below references a real C variable.
-        for (axis, dim) in new_shape.iter().enumerate() {
-            if !matches!(dim, RtDim::Node(_) | RtDim::InputAxis { .. }) {
-                continue;
-            }
-            let extent = Self::bound_c_expr(dim, inputs, a, axis, dag);
+        // rank-0 bound scalar. Check claims in declaration order before the
+        // legacy target validation and before allocation. Symbolic targets
+        // also declare the variables used by `shape_literal` below.
+        let extents: Vec<_> = new_shape
+            .iter()
+            .enumerate()
+            .filter(|(_, dim)| matches!(dim, RtDim::Node(_) | RtDim::InputAxis { .. }))
+            .map(|(axis, dim)| (axis, Self::bound_c_expr(dim, inputs, a, axis, dag)))
+            .collect();
+        self.emit_runtime_dim_sites(id, &extents);
+        for (axis, extent) in &extents {
             self.line(&format!(
                 "if (({extent}) < 0) {{ fprintf(stderr, \"chelis: runtime reshape target \
                  must be non-negative at node {id} axis {axis}\\n\"); abort(); }}"
             ));
-            self.emit_runtime_dim_site(id, axis, &extent);
-            self.emit_static_dim_guard(id, axis, &extent, ty.dims.get(axis));
+            self.emit_static_dim_guard(id, *axis, extent, ty.dims.get(*axis));
         }
         // The runtime's checked metadata owner validates this exact target
         // before either allocation or capacity-proven repurpose can occur.
@@ -6666,10 +6665,10 @@ impl CEmitter {
         // walk alone would let the derivation find a guard site the walk
         // cannot see and emit nothing.
         if self.runtime_dim_sites.contains_key(&(id, axis))
-            || self.local_dim_guard_sites.contains_key(&(id, axis))
+            || self.local_dim_guard_sites.contains_key(&id)
         {
             let extent = Self::bound_c_expr(size, inputs, a, axis, dag);
-            self.emit_runtime_dim_site(id, axis, &extent);
+            self.emit_runtime_dim_sites(id, &[(axis, extent)]);
         }
         let elem_type = Self::elem_type(ty);
         self.emit_slot_wrapper(id, ty);
@@ -6751,15 +6750,10 @@ impl CEmitter {
         pair.0.node_input().is_some() || pair.1.node_input().is_some()
     }
 
-    /// chelis#616: emit the declaration or equality guard for an op-declared
-    /// runtime dim at `(node id, axis)`, with `extent_expr` the C integer
-    /// expression computing this op's extent for the axis. A declare site
-    /// emits `int <sym> = <extent>;` (which `shape_literal` references for
-    /// the output allocation); a guard site aborts at run time if the op's
-    /// extent disagrees with the already-declared value (the symbol is
-    /// Load-declared in the prologue or declared by an earlier op — the
-    /// checker unified them, so a disagreement is a real shape error).
-    fn emit_runtime_dim_site(&mut self, id: usize, axis: usize, extent_expr: &str) {
+    /// Declare supported runtime extents, then consume this operation's
+    /// claims in declaration order. Supplying all axes together preserves
+    /// that order even when the output permutes the signature's dimensions.
+    fn emit_runtime_dim_sites(&mut self, id: usize, extents: &[(usize, String)]) {
         // Declaring and guarding are not exclusive. The legacy walk owns
         // declarations and the derivation owns guards, so an axis that
         // declares its own extent may ALSO be the axis another operation
@@ -6769,12 +6763,11 @@ impl CEmitter {
         // declared. Returning after the declaration made every such guard
         // unreachable, which is how a compiled kernel came to broadcast
         // element 0 of a two-element axis in silence.
-        if let Some((name, true)) = self.runtime_dim_sites.get(&(id, axis)) {
-            let name = name.clone();
-            self.declared_dim_names.insert(name.clone());
-            self.line(&format!("int64_t {name} = {extent_expr};"));
-            if !self.local_dim_guard_sites.contains_key(&(id, axis)) {
-                return;
+        for (axis, extent_expr) in extents {
+            if let Some((name, true)) = self.runtime_dim_sites.get(&(id, *axis)) {
+                let name = name.clone();
+                self.declared_dim_names.insert(name.clone());
+                self.line(&format!("int64_t {name} = {extent_expr};"));
             }
         }
         // The guard site and the claim it compares against are the
@@ -6794,12 +6787,18 @@ impl CEmitter {
         // entry path emits for a `Literal` claim (chelis#1377). Keying it on
         // whether a C variable happened to be allocated narrowed a required
         // check to an implementation convenience.
-        let Some(sites) = self.local_dim_guard_sites.get(&(id, axis)).cloned() else {
+        let Some(sites) = self.local_dim_guard_sites.get(&id).cloned() else {
             return;
         };
-        // One comparison per DISTINCT claim on this axis. Two claims here are
-        // two obligations, and the derivation already coalesced the equal ones.
-        for site in sites {
+        // Consume claims, not axes: multiple claims on one axis can be
+        // interleaved with claims on another axis in declaration order.
+        for (axis, site) in sites {
+            // Only the extent forms supported by this movement consumer are
+            // supplied here. Other local source kinds retain their existing
+            // ownership in runtime_extents.md B2b-0b.
+            let Some((_, extent_expr)) = extents.iter().find(|(a, _)| *a == axis) else {
+                continue;
+            };
             // The class's canonical value, rendered as a C expression: the
             // variable this function's prologue declared for the claim's
             // binder, or the size the checker resolved.
@@ -6865,6 +6864,7 @@ impl CEmitter {
                 )
             })
             .collect();
+        let mut extents = Vec::new();
         for (d, pair) in padding.iter().enumerate() {
             let (before_e, after_e) = &pad_exprs[d];
             let extent = format!("t{a}_shape[{d}] + ({before_e}) + ({after_e})");
@@ -6875,8 +6875,9 @@ impl CEmitter {
                 ));
                 self.emit_static_dim_guard(id, d, &extent, ty.dims.get(d));
             }
-            self.emit_runtime_dim_site(id, d, &extent);
+            extents.push((d, extent));
         }
+        self.emit_runtime_dim_sites(id, &extents);
         self.emit_slot_wrapper(id, ty);
         // WS-A1: pad fill must honor the output dtype. Pre-WS-A1 the
         // default arm fell through to chelis_fill_f32 even for f64
@@ -7019,6 +7020,7 @@ impl CEmitter {
                 )
             })
             .collect();
+        let mut extents = Vec::new();
         for (d, pair) in bounds.iter().enumerate() {
             let (start_e, end_e) = &shrink_exprs[d];
             let extent = format!("({end_e}) - ({start_e})");
@@ -7036,8 +7038,9 @@ impl CEmitter {
             // extent under its actual symbolic dim name (a fresh
             // `_anon_dim_*` or a sig-named `k`), which `shape_literal`
             // references for the output allocation.
-            self.emit_runtime_dim_site(id, d, &extent);
+            extents.push((d, extent));
         }
+        self.emit_runtime_dim_sites(id, &extents);
         self.emit_slot_wrapper(id, ty);
         self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
         self.indent += 1;
@@ -7082,6 +7085,7 @@ impl CEmitter {
             .enumerate()
             .map(|(d, s)| Self::bound_c_expr(s, inputs, a, d, dag))
             .collect();
+        let mut extents = Vec::new();
         for (d, step_e) in step_exprs.iter().enumerate() {
             // Declare (or guard) a runtime output extent where the
             // occurrence pass marked this op as the axis's runtime-dim site
@@ -7102,8 +7106,9 @@ impl CEmitter {
             if node_step {
                 self.emit_static_dim_guard(id, d, &extent, ty.dims.get(d));
             }
-            self.emit_runtime_dim_site(id, d, &extent);
+            extents.push((d, extent));
         }
+        self.emit_runtime_dim_sites(id, &extents);
         let elem_type = Self::elem_type(ty);
         self.emit_slot_wrapper(id, ty);
         self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));

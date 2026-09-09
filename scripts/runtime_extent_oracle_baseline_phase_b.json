@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "17acf77559b420c3b6400f506c87067000cb0f79b41f6e118e834b812235beda",
+  "corpus_sha256": "ae567a22209c51775b9b8de447f2d9155549095a87e2872fbbaa17b2255b420b",
   "rows": [
     {
       "baseline": "silent_unguarded",
@@ -241,6 +241,12 @@
       "id": "expand.shape_derived.declared_result_survives.eval",
       "phase_b": "silent_unguarded",
       "receipt": "cli_slice_b.a_shape_derived_bound_keeps_its_declared_result_dimension_on_eval"
+    },
+    {
+      "baseline": "lane_divergent",
+      "id": "guard.local.declaration_order.eval_c",
+      "phase_b": "executes_exactly",
+      "receipt": "exec_c.local_reshape_guards_follow_declaration_order"
     },
     {
       "baseline": "silent_unguarded",

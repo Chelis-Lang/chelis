@@ -680,6 +680,12 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "exec_c.numeric_local_extent_claims_execute_exactly",
         ),
         _row(
+            "guard.local.declaration_order.eval_c",
+            "lane_divergent",
+            EXECUTES,
+            "exec_c.local_reshape_guards_follow_declaration_order",
+        ),
+        _row(
             "shrink.to_end.nonzero_start",
             "silent_unguarded",
             "rejects_exactly",
@@ -1016,6 +1022,7 @@ def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
                 "an_all_interface_class_runs_when_its_witnesses_agree",
                 "an_all_interface_class_traps_at_entry_when_its_witnesses_disagree",
                 "entry_guards_run_in_assigned_slot_order_not_claim_name_order",
+                "local_reshape_guards_follow_declaration_order",
                 "numeric_local_extent_claims_execute_exactly",
             ),
             (
@@ -1025,6 +1032,7 @@ def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
                 "an_all_interface_class_runs_when_its_witnesses_agree",
                 "an_all_interface_class_traps_at_entry_when_its_witnesses_disagree",
                 "entry_guards_run_in_assigned_slot_order_not_claim_name_order",
+                "local_reshape_guards_follow_declaration_order",
                 "numeric_local_extent_claims_execute_exactly",
             ),
         ),
