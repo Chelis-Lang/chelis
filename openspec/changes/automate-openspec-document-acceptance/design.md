@@ -172,7 +172,9 @@ The job:
 
 Step 4's failure modes are the ones that bite: no checks reported yet, a context that exists but is `neutral`/`skipped`, a required context whose app id does not match, and a re-run that supersedes an earlier conclusion. Each must be an explicit refusal.
 
-**What is not proven locally.** The worker's read and decision paths were exercised against the live API read-only: required-context discovery returned all nine contexts, evaluation of a real head sha returned zero failures, and a commit missing one context failed closed naming it. The merge call itself has never run, and `pull_request_target` only takes effect once this file is on `main`.
+**What is not proven locally.** The worker's read and decision paths were exercised against the live API read-only: required-context discovery returned all nine contexts, evaluation of a real head sha returned zero failures, and a commit missing one context failed closed naming it. The merge call itself has never run under the Actions token.
+
+These files are now on `main` (see Migration Plan), so `pull_request_target` and `workflow_run` are live. Being live is not the same as being proven: until a hosted document push is observed end to end, the merge call, the token mint, and the check discovery under the Actions token all remain unverified.
 
 **No new credential or setting is needed.**
 
@@ -325,10 +327,14 @@ The change is additive. `openspec-validate` keeps running in advisory mode and i
 
 Ordering:
 
-1. Land the classifier, the submission command, their tests, and the workflow. Autoland does nothing until the repository settings below allow it, so this step is inert.
-2. Nothing else happens automatically. Automatic merging is a separate reviewed change with the prerequisites in D13, and it does not proceed by relaxing a review requirement that also covers code.
+1. Land the classifier, the controller, the merge worker, the submission command, their tests, and the four workflows.
+2. Observe one hosted document push end to end. Until that runs, the mechanism is deployed but unproven.
 
-Rollback is deleting the workflow file. It touches neither the submission command nor the document tree.
+**Step 1 is done.** Pull request #1653 merged to `main` as `40266a0a` on 2026-09-09 after every required check passed on its exact head `581955a1`, by an ordinary merge bound to that sha with no administrative option and no auto-merge grant. The same pull request carried `a658d655`, which repaired a pre-existing tree-wide validation failure in `harden-lint-traversal-edges` whose MODIFIED block had renamed two scenarios; `openspec validate --all --strict` had failed on pristine `origin/main` before it and passes after, which removes the blocker that would have refused every document submission.
+
+**Step 2 has not been observed.** No hosted push has yet produced a controller decision, so the token mint, the pull-request creation under the App installation, the check discovery under the Actions token, and the merge call are all still unverified. Whether the App installation grants `Pull requests: write` on this repository is a prerequisite that cannot be read without a JWT or `admin:org`; the first hosted run is its oracle. A missing grant fails the mint step or the create call and is reported blocked, never worked around.
+
+Rollback is deleting the workflow files. It touches neither the submission command nor the document tree.
 
 ## Open Questions
 
