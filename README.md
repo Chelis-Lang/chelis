@@ -645,12 +645,14 @@ The token is requested as narrowly as the action allows:
 |---|---|
 | `owner` | `${{ github.repository_owner }}` |
 | `repositories` | `${{ github.event.repository.name }}` (this repository only) |
-| Permission | `permission-pull-requests: write`, and nothing else |
+| Permission | `permission-pull-requests: write` and `permission-contents: read`, and nothing else |
 | Revocation | automatic at job end (`skip-token-revoke` deliberately unset) |
 
-`Pull requests: write` is the exact and only permission
-`POST /repos/{owner}/{repo}/pulls` requires, which is why the controller
-calls that endpoint directly instead of `gh pr create` -- the CLI would
+`POST /repos/{owner}/{repo}/pulls` needs `Pull requests: write` to perform
+the write and `Contents: read` to resolve the head and base refs. A token
+without the second cannot see the branch and the call answers
+`422 Validation Failed` on `head` -- measured, on the third hosted run. The
+endpoint is called directly rather than through `gh pr create`, which would
 additionally read repository and branch metadata. The **Workflows**
 permission is *not* needed: it governs writing repository content, and this
 credential never pushes.

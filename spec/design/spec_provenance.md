@@ -114,21 +114,30 @@ addressable requirement is not a valid implementation claim.
 The maintainer authorized automated acceptance for OpenSpec document paths,
 including normative capability specifications under `openspec/specs/`.
 
-The mechanism is implemented and **not yet activated**. What exists is the
-whole path: an ordinary push to a branch starts `openspec-autoland`, which
-classifies the pushed commit with default-branch code, opens an internal
-pull request, waits for the required checks on that exact commit, and merges
-it. Nothing is approved and no protection is bypassed.
+The mechanism is implemented and **deployed, but not yet proven**. What
+exists is the whole path: an ordinary push to a branch starts
+`openspec-autoland`, which classifies the pushed commit with default-branch
+code, opens an internal pull request, waits for the required checks on that
+exact commit, and merges it. Nothing is approved and no protection is
+bypassed.
 
-Two conditions activate it, and the automation performs neither: the
-workflow files must be on the default branch, and the GitHub App this
-repository already configures must grant `Pull requests: write` on this
-repository through its installation. No new secret is introduced; the
-controller mints a short-lived, repository-scoped token per run from that
-App and lets it be revoked at job end. Without it the controller reports
-the push blocked and writes nothing, because a pull request opened with the
-built-in token starts none of the required checks and could never merge.
-`README.md` carries the details.
+The workflow files are on the default branch, which is what makes
+`workflow_run` and `pull_request_target` take effect. The credential is a
+short-lived, repository-scoped token minted per run from `chelis-openspec`,
+a GitHub App dedicated to this mechanism (`vars.OPENSPEC_APP_ID`,
+`secrets.OPENSPEC_APP_PRIVATE_KEY`), revoked at job end and never stored.
+Its installation must grant `Pull requests: write` and `Contents: read` on
+this repository: the first performs the write, the second lets
+`POST /pulls` resolve the head and base refs. It is deliberately not the
+shared `CI_APP_*` App, whose installation grants no pull-request write and
+whose key several workflows already hold. Without a working credential the
+controller reports the push blocked and writes nothing, because a pull
+request opened with the built-in token starts none of the required checks
+and could never merge. `README.md` carries the details.
+
+Deployed is not proven. Until a hosted document push is observed opening a
+pull request and merging it, the create call and the merge call remain
+unverified, and the change's own acceptance oracle stays open.
 
 The authorization narrows the earlier rule that implementation waits on a
 *human* review queue, because that rule bought nothing here: an OpenSpec
