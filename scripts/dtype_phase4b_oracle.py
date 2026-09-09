@@ -248,7 +248,15 @@ EXPECTED_OP_MANIFESTS = {
 | padding shape construction | `void chelis_tensor_pad_shape(const chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *before, const chelis_scalar *after, chelis_scalar *shape)` |
 | shrinking shape construction | `void chelis_tensor_shrink_shape(const chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *start, const chelis_scalar *end, chelis_scalar *shape)` |
 | striding shape construction | `void chelis_tensor_stride_shape(const chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *steps, chelis_scalar *shape)` |
-| affine coordinate projection | `int64_t chelis_tensor_affine_index(const chelis_tensor *tensor, const chelis_scalar *coordinates, const chelis_scalar *offsets, const chelis_scalar *steps)` |""".splitlines()
+| affine coordinate projection | `int64_t chelis_tensor_affine_index(const chelis_tensor *tensor, const chelis_scalar *coordinates, const chelis_scalar *offsets, const chelis_scalar *steps)` |
+| checked reduction tensor_reduction_plan | `chelis_reduction_plan *chelis_tensor_reduction_plan(const chelis_tensor *tensor, chelis_scalar axis_count, const chelis_scalar *axes, chelis_scalar exemplar, chelis_reduction_op operation)` |
+| checked reduction shape_reduction_plan | `chelis_reduction_plan *chelis_shape_reduction_plan(chelis_scalar rank, const chelis_scalar *shape, chelis_scalar axis_count, const chelis_scalar *axes, chelis_scalar exemplar, chelis_reduction_op operation)` |
+| checked reduction reduction_count | `int64_t chelis_reduction_count(const chelis_reduction_plan *plan)` |
+| checked reduction reduction_extent | `int64_t chelis_reduction_extent(const chelis_reduction_plan *plan, chelis_scalar axis)` |
+| checked reduction reduction_index | `int64_t chelis_reduction_index(const chelis_reduction_plan *plan, chelis_scalar outer, chelis_scalar leaf)` |
+| checked reduction reduction_check_target | `void chelis_reduction_check_target(const chelis_reduction_plan *plan, chelis_scalar rank, const chelis_scalar *shape)` |
+| checked reduction reduction_check_scratch | `void chelis_reduction_check_scratch(const chelis_reduction_plan *plan, chelis_scalar exemplar)` |
+| checked reduction reduction_plan_release | `void chelis_reduction_plan_release(chelis_reduction_plan *plan)` |""".splitlines()
     ),
     "05-OP-34": tuple(
         """\
@@ -458,7 +466,7 @@ FROZEN_ATOM_DIGESTS = {
     "05-OP-30": "30c8c04f547161b7c40cbe5659a0c5fee34102f34a6fc605bcde8740221b461b",
     "05-OP-31": "20100b3524f8381469ea2a24d035da89be346f7809b70bfd6698aa94b6df9031",
     "05-OP-32": "fc45b2ef829aeebdb0d524059c63452cd2d9c733a5c2cdf85b5bfdd845bda8a1",
-    "05-OP-33": "c1514e35aa271d5d2aa27325eecfa9790de04fd9f75567c6535108cd87f191bc",
+    "05-OP-33": "7a644c2d9acae4b1a2d6f1c1fd909efd924406b735c612622a9f396b12039fd1",
     "05-OP-34": "0d2c7d4a051a43dc6b0c93b241434ff1d66bbd7a3e6d47e5c74b669d2fd687bf",
     "05-OP-35": "6eb9a0e1023aeed6dcf43abe8623a9b94dcb38db15224f38915320108c276ef7",
     "05-OP-36": "aeaaf9888f922b31159b8b7536444603897d649c8fb477e77bda659346177ab4",

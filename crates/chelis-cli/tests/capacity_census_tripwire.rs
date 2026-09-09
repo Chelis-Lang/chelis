@@ -132,6 +132,13 @@ const PRIMARY_CENSUS_FAMILY: &str = "covered-family";
 /// derived flags are necessary but never sufficient: the complete family,
 /// kind, canonical identity, and flag vector must match one of these rows.
 const FINAL_NONNUMERIC_ROWS: &[StaticSurfaceDescriptor] = &[
+    // A closed diagnostic identity; no extent, width, dtype, or payload is encoded.
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-struct",
+        "chelis_runtime.h: typedef enum { CHELIS_REDUCE_SUM = 0 , CHELIS_REDUCE_COUNT = 1 , CHELIS_REDUCE_MAX = 2 , CHELIS_REDUCE_MIN = 3 , CHELIS_REDUCE_PROD = 4 , CHELIS_REDUCE_ARGMAX = 5 , CHELIS_REDUCE_ARGMIN = 6 } chelis_reduction_op",
+        &[],
+    ),
     // Final nonnumeric lifetime operations from the retired primary cohort.
     StaticSurfaceDescriptor::new(
         PRIMARY_CENSUS_FAMILY,
@@ -1972,6 +1979,86 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         ),
         atom: "[05-OP-33]",
         authority_anchor: "`chelis_tensor_affine_index` takes rank-many exact tagged int64 coordinates,",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_reduction_plan * chelis_tensor_reduction_plan ( const chelis_tensor * tensor , chelis_scalar axis_count , const chelis_scalar * axes , chelis_scalar exemplar , chelis_reduction_op operation ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_reduction_plan` snapshots checked tensor metadata;",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_reduction_plan * chelis_shape_reduction_plan ( chelis_scalar rank , const chelis_scalar * shape , chelis_scalar axis_count , const chelis_scalar * axes , chelis_scalar exemplar , chelis_reduction_op operation ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_reduction_plan` snapshots checked tensor metadata;",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_reduction_count ( const chelis_reduction_plan * plan ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_reduction_plan` snapshots checked tensor metadata;",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_reduction_extent ( const chelis_reduction_plan * plan , chelis_scalar axis ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_reduction_plan` snapshots checked tensor metadata;",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_reduction_index ( const chelis_reduction_plan * plan , chelis_scalar outer , chelis_scalar leaf ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_reduction_plan` snapshots checked tensor metadata;",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_reduction_check_target ( const chelis_reduction_plan * plan , chelis_scalar rank , const chelis_scalar * shape ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_reduction_plan` snapshots checked tensor metadata;",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_reduction_check_scratch ( const chelis_reduction_plan * plan , chelis_scalar exemplar ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_reduction_plan` snapshots checked tensor metadata;",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_reduction_plan_release ( chelis_reduction_plan * plan ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_reduction_plan` snapshots checked tensor metadata;",
     },
     FinalNumericOperationRegistration {
         surface: StaticSurfaceDescriptor::new(

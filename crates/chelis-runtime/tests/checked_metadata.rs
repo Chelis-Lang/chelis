@@ -5,7 +5,71 @@
 mod metadata;
 
 use chelis_vocab::RuntimeDType;
-use metadata::{ByteCount, ElementCount, IterationSpace, MetadataError, ShapeMetadata};
+use metadata::{
+    ByteCount, ElementCount, IterationSpace, MetadataError, ReductionMetadata, ShapeMetadata,
+};
+
+#[test]
+fn reduction_metadata_binds_grouping_to_checked_input_and_result_domains() {
+    for dtype in RuntimeDType::ALL {
+        let plan = ReductionMetadata::new(&[2, 3], &[1], dtype).unwrap();
+        assert_eq!(plan.result().dtype(), dtype);
+        assert_eq!(plan.result().bytes().get(), 2 * dtype.byte_width() as i64);
+        assert_eq!(
+            plan.leaves().bytes(dtype).unwrap().get(),
+            3 * dtype.byte_width() as i64
+        );
+        let large = ReductionMetadata::new(&[i64::MAX, 0], &[1], dtype);
+        assert_eq!(large.is_err(), dtype.byte_width() > 1);
+    }
+    let plan = ReductionMetadata::new(&[2, 3, 2], &[-1, -3], RuntimeDType::I64).unwrap();
+    assert_eq!(plan.result().shape(), &[3]);
+    assert_eq!(plan.extent(-1).unwrap(), 3);
+    assert!(plan.extent(-2).is_err());
+    assert_eq!(plan.leaves().get(), 4);
+    for (outer, indices) in [[0, 1, 6, 7], [2, 3, 8, 9], [4, 5, 10, 11]]
+        .iter()
+        .enumerate()
+    {
+        for (leaf, expected) in indices.iter().enumerate() {
+            assert_eq!(plan.index(outer as i64, leaf as i64).unwrap(), *expected);
+        }
+    }
+    for (outer, leaf) in [(-1, 0), (3, 0), (0, -1), (0, 4)] {
+        assert!(matches!(
+            plan.index(outer, leaf),
+            Err(MetadataError::Domain(_))
+        ));
+    }
+    for axes in [
+        vec![],
+        vec![1, 1],
+        vec![0, 1],
+        vec![-4],
+        vec![3],
+        vec![2, -1],
+    ] {
+        assert!(matches!(
+            ReductionMetadata::new(&[2, 3, 2], &axes, RuntimeDType::I64),
+            Err(MetadataError::Domain(_))
+        ));
+    }
+    assert!(matches!(
+        ReductionMetadata::new(&[i64::MAX, 0], &[1], RuntimeDType::I64),
+        Err(MetadataError::Overflow(_))
+    ));
+    assert!(matches!(
+        ReductionMetadata::new(&[0, i64::MAX, i64::MAX, 0], &[3], RuntimeDType::I8),
+        Err(MetadataError::Overflow(_))
+    ));
+    let empty =
+        ReductionMetadata::new(&[0, i64::MAX, i64::MAX], &[2, 1], RuntimeDType::I64).unwrap();
+    assert_eq!(empty.leaves().get(), 0);
+    assert!(empty.index(0, 0).is_err());
+    let huge = ReductionMetadata::new(&[i64::MAX], &[0], RuntimeDType::I64).unwrap();
+    assert!(huge.leaves().bytes(RuntimeDType::I64).is_err());
+    assert_eq!(huge.index(0, i64::MAX - 1).unwrap(), i64::MAX - 1);
+}
 
 #[test]
 fn checked_iteration_steps_preserve_exact_large_domains_without_storage() {

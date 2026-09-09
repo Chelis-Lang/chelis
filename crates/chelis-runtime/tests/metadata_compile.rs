@@ -95,6 +95,16 @@ fn weakened_metadata_construction_fails_the_executable_contract() {
     ));
     for (from, to, witness) in [
         (
+            "*slot = true;",
+            "*slot = false;",
+            "reduction_metadata_binds_grouping_to_checked_input_and_result_domains",
+        ),
+        (
+            "            index = coordinate\n",
+            "            index = 0_i64\n",
+            "reduction_metadata_binds_grouping_to_checked_input_and_result_domains",
+        ),
+        (
             ".checked_add(before[axis])",
             ".wrapping_add(before[axis]).checked_add(0)",
             "affine_metadata_checks_exact_extents_and_offsets_without_storage",
@@ -261,7 +271,7 @@ fn internal_callers_cannot_forge_counts_or_restore_independent_tensor_fields() {
     );
     let context = format!(
         "#![allow(dead_code, non_camel_case_types)]\nmod metadata;\n\
-         use metadata::{{ShapeMetadata, ElementCount, ByteCount, AllocationBytes}};\n\
+         use metadata::{{ShapeMetadata, ElementCount, ByteCount, AllocationBytes, ReductionMetadata}};\n\
          use chelis_vocab::RuntimeDType;\nuse std::sync::atomic::AtomicU8;\n\
          struct HeapHeader;\nstruct TensorStorageProvenance;\nstruct chelis_tensor_write;\n\
          {declarations}\n"
@@ -276,9 +286,21 @@ fn internal_callers_cannot_forge_counts_or_restore_independent_tensor_fields() {
             metadata.require_capacity(bytes).unwrap();
             let _: i64 = t.metadata.elements().get();
             let _: i64 = storage.byte_capacity.get();
+            let plan = ReductionMetadata::new(&[2, 3], &[1], RuntimeDType::I64).unwrap();
+            let _: i64 = plan.index(1, 2).unwrap();
         }
     "#;
     let mut negatives = vec![
+        (
+            "fn bad(m: &mut ReductionMetadata) { m.leaves = ElementCount::from_extents(&[99]).unwrap(); }".to_owned(),
+            "E0616",
+            "leaves",
+        ),
+        (
+            "fn bad(m: &mut ReductionMetadata) { m.result = ShapeMetadata::contiguous(&[99], RuntimeDType::I64).unwrap(); }".to_owned(),
+            "E0616",
+            "result",
+        ),
         (
             "fn bad() { let _ = ElementCount(1); }".to_owned(),
             "E0423",

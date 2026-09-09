@@ -336,6 +336,16 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_reduction_plan * chelis_shape_reduction_plan ( chelis_scalar rank , const chelis_scalar * shape , chelis_scalar axis_count , const chelis_scalar * axes , chelis_scalar exemplar , chelis_reduction_op operation ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_reduction_plan * chelis_tensor_reduction_plan ( const chelis_tensor * tensor , chelis_scalar axis_count , const chelis_scalar * axes , chelis_scalar exemplar , chelis_reduction_op operation ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: chelis_scalar chelis_scalar_from_bits ( chelis_dtype dtype , uint64_t bits ) ;",
       "flags": [
         "numeric-op"
@@ -711,6 +721,27 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_reduction_count ( const chelis_reduction_plan * plan ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_reduction_extent ( const chelis_reduction_plan * plan , chelis_scalar axis ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_reduction_index ( const chelis_reduction_plan * plan , chelis_scalar outer , chelis_scalar leaf ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: int64_t chelis_string_len ( chelis_string value ) ;",
       "flags": [
         "numeric-op"
@@ -856,6 +887,21 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_reduction_check_scratch ( const chelis_reduction_plan * plan , chelis_scalar exemplar ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_reduction_check_target ( const chelis_reduction_plan * plan , chelis_scalar rank , const chelis_scalar * shape ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_reduction_plan_release ( chelis_reduction_plan * plan ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_string_release ( chelis_string value ) ;",
       "flags": []
     },
@@ -944,6 +990,11 @@
     {
       "kind": "header-struct",
       "id": "chelis_runtime.h: enum { CHELIS_VALUE_UNIT = 0 , CHELIS_VALUE_SCALAR = 1 , CHELIS_VALUE_STRING = 2 , CHELIS_VALUE_TENSOR = 3 , CHELIS_VALUE_LIST = 4 , CHELIS_VALUE_TUPLE = 5 , CHELIS_VALUE_DICT = 6 , CHELIS_VALUE_ADT = 7 , CHELIS_VALUE_OPTION = 8 , CHELIS_VALUE_MAPPED_FILE = 9 }",
+      "flags": []
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime.h: typedef enum { CHELIS_REDUCE_SUM = 0 , CHELIS_REDUCE_COUNT = 1 , CHELIS_REDUCE_MAX = 2 , CHELIS_REDUCE_MIN = 3 , CHELIS_REDUCE_PROD = 4 , CHELIS_REDUCE_ARGMAX = 5 , CHELIS_REDUCE_ARGMIN = 6 } chelis_reduction_op",
       "flags": []
     },
     {

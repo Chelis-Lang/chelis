@@ -2186,6 +2186,20 @@ class ContractValidationTests(unittest.TestCase):
                 finally:
                     path.write_text(original, encoding="utf-8")
 
+    def test_reduction_metadata_declarations_cannot_disappear(self) -> None:
+        path = self.root / "spec/registry/c_tensor_runtime.md"
+        original = path.read_text(encoding="utf-8")
+        rows = [row for row in oracle.EXPECTED_OP_MANIFESTS["05-OP-33"] if "checked reduction" in row]
+        self.assertEqual(len(rows), 8)
+        for row in rows:
+            with self.subTest(row=row):
+                self.assertIn(row, original)
+                path.write_text(original.replace(row + "\n", "", 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails("05-OP-33.*exact manifest")
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
     def test_exact_op_manifest_row_deletion_fails(self) -> None:
         for atom, rows in oracle.EXPECTED_OP_MANIFESTS.items():
             relative = oracle.OP_MANIFEST_REGISTRY_FILES.get(

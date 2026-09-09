@@ -154,13 +154,20 @@ fn c_fused_reduce_sum_no_intermediate() {
     assert!(!src.contains("acc0 +="));
 
     // There should be NO separate allocation for the FusedElem output.
-    // With fusion: 1 const alloc + 1 reduction alloc = 2 chelis_alloc calls.
-    // Without fusion: 1 const alloc + 1 FusedElem alloc + 1 reduction alloc = 3.
+    // The tree scratch is now a checked runtime tensor. It is distinct from
+    // materializing the fused elementwise result across every output group.
     let alloc_count = src.matches("chelis_alloc(").count();
     assert_eq!(
-        alloc_count, 2,
-        "Fused add→neg→sum should have 2 allocs (1 const + 1 reduction output), got {alloc_count}"
+        alloc_count, 3,
+        "Fused add→neg→sum requires one constant, one result, and checked tree scratch"
     );
+    let fused_node = fused
+        .nodes()
+        .iter()
+        .find(|node| matches!(node.op, RiscOp::FusedElem { .. }))
+        .unwrap();
+    assert!(!src.contains(&format!("chelis_tensor *t{} =", fused_node.id.0)));
+    assert!(src.contains("chelis_reduction_check_scratch("));
 }
 
 #[test]
