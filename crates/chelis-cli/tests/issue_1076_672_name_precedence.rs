@@ -407,7 +407,21 @@ fn ordinary_def_cannot_collide_with_standard_prelude_macro() {
         .args(["check", source.to_str().unwrap()])
         .output()
         .expect("run check");
-    assert_eq!(output.status.code(), Some(1));
+    // chelis#886 [04-FIT-12]: this failure is now transported by the check
+    // report rather than only by a display string, so it exits 2 like every
+    // other non-empty errors array instead of 1. `spec/04` § Gating pins
+    // only "`0` iff empty, non-zero otherwise", so both values conform; 2
+    // converges this path on the rest of `chelis check`. The stderr message
+    // below is deliberately unchanged -- the report is additional to the
+    // terminal line, not a replacement for it.
+    assert_eq!(output.status.code(), Some(2));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|e| panic!("the collision must reach the report: {e}"));
+    assert_eq!(
+        report["errors"].as_array().map(Vec::len),
+        Some(1),
+        "the collision is transported as one diagnostic: {report}"
+    );
     let message = String::from_utf8_lossy(&output.stderr);
     assert!(
         message.contains("`def cross_entropy`")

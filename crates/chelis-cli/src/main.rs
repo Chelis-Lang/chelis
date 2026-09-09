@@ -2474,7 +2474,13 @@ fn cmd_check_one_on_grown_stack(
             ) {
                 Ok(layered) => layered,
                 Err(error) => {
-                    let json = synthetic_check_report_with_error(&compiler_error_messages(&error))?;
+                    // stderr is kept alongside the report. The atom asks for
+                    // the failure to REACH the report, not for the terminal
+                    // line to be taken away, and this message is the only
+                    // human-facing account of a layered-check failure.
+                    let message = compiler_error_messages(&error);
+                    eprintln!("error: {message}");
+                    let json = synthetic_check_report_with_error(&message)?;
                     return Ok((json, true));
                 }
             }
@@ -2551,7 +2557,12 @@ fn cmd_check_one_on_grown_stack(
             let prepared = match chelis_compiler_api::pipeline::prepare_surf_decls(&decls, None) {
                 Ok(prepared) => prepared,
                 Err(error) => {
-                    let json = synthetic_check_report_with_error(&error.to_string())?;
+                    // stderr kept, as above. A prelude-name collision is
+                    // reported here, and it is the kind of message a person
+                    // reads in a terminal rather than parses out of JSON.
+                    let message = error.to_string();
+                    eprintln!("error: {message}");
+                    let json = synthetic_check_report_with_error(&message)?;
                     return Ok((json, true));
                 }
             };
