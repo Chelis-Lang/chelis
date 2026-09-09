@@ -779,20 +779,32 @@ fn retired_binding_rows_cannot_regain_legacy_admission() {
         row.flags = vec!["float-carrier".into()];
         assert!(current_authority_problem(&[row], None).is_some());
     }
-    let mut baseline: serde_json::Value = serde_json::from_slice(&baseline_bytes()).unwrap();
-    let transport_rows = baseline["rows"]
-        .as_array_mut()
+    let baseline: serde_json::Value = serde_json::from_slice(&baseline_bytes()).unwrap();
+    let final_ids = baseline["rows"]
+        .as_array()
         .unwrap()
-        .iter_mut()
-        .filter(|row| {
-            row.get("authority").and_then(|value| value.as_str()) == Some("TaggedTransport")
+        .iter()
+        .filter_map(|row| {
+            row.get("authority")
+                .is_some()
+                .then(|| row["id"].as_str().unwrap().to_string())
         })
         .collect::<Vec<_>>();
-    assert_eq!(transport_rows.len(), 4);
-    for row in transport_rows {
+    assert_eq!(final_ids.len(), 13);
+    for id in final_ids {
+        let mut mutation = baseline.clone();
+        let row = mutation["rows"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|row| row["id"].as_str() == Some(id.as_str()))
+            .unwrap();
         row["citation"] = serde_json::json!(PERMANENT_BINDING_DISPOSITION);
+        assert!(
+            baseline_problem(&serde_json::to_vec(&mutation).unwrap()).is_some(),
+            "final binding regained legacy citation admission: {id}"
+        );
     }
-    assert!(baseline_problem(&serde_json::to_vec(&baseline).unwrap()).is_some());
 }
 
 #[test]
