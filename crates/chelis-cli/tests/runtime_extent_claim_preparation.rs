@@ -1120,6 +1120,62 @@ fn helper_signature_guard_order_contract() {
             expected,
         );
     }
+    let start = fixtures.len();
+    for (q, r, expected) in [
+        (3, 2, Expected::Tensor(vec![], vec![18.0])),
+        (
+            4,
+            5,
+            Expected::Domain("load", &["a axis 0 = 3", "q axis 0 = 4"]),
+        ),
+        (
+            3,
+            5,
+            Expected::Domain("load", &["z axis 0 = 2", "r axis 0 = 5"]),
+        ),
+    ] {
+        call_matrix(
+            &mut fixtures,
+            &format!("helper_order.named.{q}.{r}"),
+            1277,
+            "def f(z: tensor[rows, f32], a: tensor[cols, f32], q: tensor[cols, f32], r: tensor[rows, f32]) -> tensor[f32] = add(sum(add(z, r), 0i32), sum(add(a, q), 0i32))",
+            "(tensor[rows, f32], tensor[cols, f32], tensor[cols, f32], tensor[rows, f32]) -> tensor[f32]",
+            vec![vector(2), vector(3), vector(q), vector(r)],
+            expected,
+        );
+    }
+    for (a, q, expected) in [
+        (
+            3,
+            2,
+            Expected::Tensor(vec![2, 3], vec![2.0, 2.0, 2.0, 4.0, 4.0, 4.0]),
+        ),
+        (
+            6,
+            5,
+            Expected::Domain("load", &["claimed = 3", "a axis 0 = 6"]),
+        ),
+        (
+            3,
+            5,
+            Expected::Domain("load", &["z axis 0 = 2", "q axis 0 = 5"]),
+        ),
+    ] {
+        call_matrix(
+            &mut fixtures,
+            &format!("helper_order.mixed.{a}.{q}"),
+            1277,
+            "def f(z: tensor[rows, f32], a: tensor[cols, f32], q: tensor[rows, f32]) -> tensor[rows, 3, f32] = insert(add(z, q), 1i32, shape(a, 0i32))",
+            "(tensor[rows, f32], tensor[cols, f32], tensor[rows, f32]) -> tensor[rows, 3, f32]",
+            vec![vector(2), vector(a), vector(q)],
+            expected,
+        );
+    }
+    let bindings = fixtures
+        .drain(start..)
+        .filter(|case| case.exported.is_none() && !case.source.contains("def main()"))
+        .collect::<Vec<_>>();
+    fixtures.extend(bindings);
     let example = include_str!("../../../examples/ordered_extent_claims.ch");
     for (id, source, expected) in [
         (
@@ -1153,6 +1209,6 @@ fn helper_signature_guard_order_contract() {
         println!("{}: {}", case.id, observed);
         failures.extend(contract_failures(case, &observed));
     }
-    assert_eq!(fixtures.len(), 44);
+    assert_eq!(fixtures.len(), 50);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
