@@ -26,6 +26,7 @@ use walkdir::WalkDir;
 /// machinery driving `~/.local/share/chelis-src/`; wired into the CLI by
 /// `chelis reef src`.
 pub mod chelis_src;
+pub mod declared_surface;
 
 const CURRENT_COMPILER_VERSION: &str = concat!("=", env!("CARGO_PKG_VERSION"));
 

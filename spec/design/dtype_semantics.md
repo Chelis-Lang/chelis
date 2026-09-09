@@ -1057,6 +1057,24 @@ Deliverables, with phase homes:
      `an_exported_stdlib_def_without_a_signature_fails_loudly`, with
      `a_declared_stdlib_signature_enumerates_and_a_type_export_does_not`
      keeping a dtype-free type export from reading as one).
+     Discovery links the complete stdlib source package through Reef's
+     declaration linker, then resolves signatures, nominal fields and alias
+     bodies through the compiler's Deep type resolver. Source paths and
+     authored signatures remain the census identities; qualified compiler
+     names govern the graph. Same-package imports include private helpers,
+     local declarations shadow imports, and unresolved imports, type names,
+     arities or argument kinds fail discovery.
+     Finite summaries track concrete numeric domains and formal payload
+     positions to a worklist fixed point. They follow the compiler's
+     containers, function inputs/results, tuples, references and tensor
+     precisions, including recursive aliases and changing recursive generic
+     arguments. Aliases are transparent; a nominal boundary stops bare-carrier
+     flags while its payloads still contribute numeric reachability. Declared
+     dtype bounds and the existing precision-name backstop remain capacity;
+     an ordinary unbounded `p -> p` stays nonnumeric. The stdlib closure cases
+     in `capacity_census_tripwire` exercise these boundaries and preserve the
+     existing 84 definition and five ADT identities. This is declared-surface
+     evidence, not body inference, backend acceptance or completion of [#1288].
    - **Matched rows freeze enforcement metadata.** Equality is not
      merely `(kind, id)`: the tripwire compares the complete
      enforcement-relevant derived classification for every matched
