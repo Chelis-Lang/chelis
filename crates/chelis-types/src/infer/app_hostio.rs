@@ -44,6 +44,56 @@ fn unify_host_slot(
     slot_description: &str,
     subst: &mut Subst,
 ) -> Option<Type> {
+    // chelis#1489: decide this BEFORE unifying. `unify` binds an unbound
+    // variable to `expected` and returns Ok, so a variable check placed after
+    // the unification can never see one -- it would be dead code, and an
+    // earlier revision of this change shipped it that way.
+    //
+    // A concrete type still fails immediately: this defers the decision on an
+    // unknown, it does not soften a known-bad operand.
+    if let Type::Var(tv) = subst.apply(slot) {
+        subst.record_deferred_tensor_operand(
+            tv,
+            DeferredOperandGate::HostSlot {
+                fname: fname.to_string(),
+                description: slot_description.to_string(),
+                expected: Box::new(expected.clone()),
+            },
+        );
+        return None;
+    }
+    unify_host_slot_eager(errors, list, fname, slot, expected, slot_description, subst)
+}
+
+/// Unify a host-lane slot and reject an unresolved operand immediately: the
+/// behaviour every slot had before chelis#1489.
+///
+/// `round_to` still uses this. The deferring form carries ONE expected type
+/// and discharge unifies the operand against it, but `round_to` accepts more
+/// than one: the arm above admits `f64` and `f32` and returns the operand's own
+/// precision. Deferring it against `f64` alone made an operand that later bound
+/// to `f32` emit a rejection naming `f32` as acceptable -- false on its face,
+/// and a disagreement with the eager arm. The ten csv slots each accept exactly
+/// one type, so they defer correctly.
+///
+/// `{f64, f32}` is this CHECKER's set, not the normative one. [05-OP-1] declares
+/// four operand dtypes -- f64, f32, f16 and bf16 -- and the narrowing to two is
+/// a known divergence tracked as chelis#1295, not authority for the pair. Do not
+/// cite the atom for it.
+///
+/// Converting this slot therefore needs the gate to carry an accepted SET, sized
+/// by the atom rather than by today's checker, and a deferred result. That is
+/// more than the relabelling the rest of the conversion is, so it stays on
+/// chelis#1489 rather than being bolted on here.
+fn unify_host_slot_eager(
+    errors: &mut DiagnosticSink<'_>,
+    list: &deep::List,
+    fname: &str,
+    slot: &Type,
+    expected: &Type,
+    slot_description: &str,
+    subst: &mut Subst,
+) -> Option<Type> {
     if unify(slot, expected, subst).is_err() {
         return Some(reject_host_builtin_slot(
             errors,
@@ -91,8 +141,9 @@ pub(super) fn check_round_to_builtin_signature(
     let result = match &operand {
         Type::Prim(p @ (Prim::F64 | Prim::F32)) => Type::Prim(*p),
         Type::Error(_) => Type::Prim(Prim::F64),
+        // chelis#1489: deliberately NOT deferred -- see `unify_host_slot_eager`.
         Type::Var(_) => {
-            if let Some(error) = unify_host_slot(
+            if let Some(error) = unify_host_slot_eager(
                 errors,
                 list,
                 FNAME,

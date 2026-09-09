@@ -993,6 +993,29 @@ The gradient payload shape is:
 
 The forward value is not bundled into the `grad(...)` result.
 
+#### Operand decisions on an unresolved operand
+
+An operation's operand type is not always known where the operation is
+checked. When the operand is still an unresolved type variable — a lambda
+parameter awaiting its argument, a signature hole, or a binding that takes its
+type from one of those — the operation has not been shown to be ill-typed,
+only to be undecided. In that case the decision is **deferred**: it is settled
+when the variable is bound, and reaches the verdict the operation would have
+reached had the operand carried that type when the operation was first
+checked. An operand whose outer type constructor is already known is not such
+a case, and is decided immediately whatever remains unresolved inside it; a
+tensor with unresolved dimension variables is decided at once.
+
+The deferral is sound only because a variable that is never bound is still
+rejected. After a function body's inference completes, every deferred operand
+decision that has not settled is rejected with the same diagnostic as an
+operand of a concretely inadmissible type. Deferral never admits an operand
+the operation would otherwise reject, and the verdict never depends on the
+order in which inference reaches the operand.
+
+(Not every operation implements this yet; the remaining ones are tracked on
+[#1489](https://github.com/Chelis-Lang/chelis/issues/1489).)
+
 ---
 
 ## 4. Tensor Type Algebra

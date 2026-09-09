@@ -991,12 +991,37 @@ pub(super) fn infer_cast(
         }
     };
 
+    cast_result_from_source(resolved, new_prec, mode, subst, vg, errors)
+}
+
+/// The [05-OP-6] source-side decision for a source whose type is already
+/// settled (chelis#1489).
+///
+/// The tensor/scalar split, the per-shape precision validity check and the
+/// `cast_trunc` pair rule. NOT the whole of what `cast` decides: `infer_cast`
+/// also runs the `CastOut` opacity check on the peeled source before reaching
+/// here, and discharge does not re-run it.
+///
+/// It takes no substitution, no `VarGen` and no `DiagnosticSink`, which is the
+/// point: a suspended `Cast` constraint discharges from inside unification,
+/// where none of those are in hand, and it must reach the same verdict as the
+/// eager call that has all three.
+///
+/// A `Type::Var` source is not settled and does not reach here from discharge,
+/// which only runs once the variable is bound. `infer_cast` has its own
+/// earlier arm for a quantified target that tolerates a variable source
+/// without suspending it -- see the gap recorded on chelis#1489.
+pub(crate) fn cast_result_from_settled_source(
+    resolved: Type,
+    new_prec: Prim,
+    mode: CastMode,
+) -> Result<Type, Box<CheckError>> {
     match resolved {
         Type::Tensor(dims, src_prec) => {
             if !new_prec.is_valid_tensor_precision() {
-                return push_unsupported_precision_error(
-                    errors, new_prec, /* tensor = */ true,
-                );
+                return Err(Box::new(unsupported_precision_error(
+                    new_prec, /* tensor = */ true,
+                )));
             }
             if mode == CastMode::Trunc {
                 let source = match src_prec {
@@ -1004,39 +1029,73 @@ pub(super) fn infer_cast(
                     TensorPrec::Var(_) => None,
                 };
                 if let Some(error) = trunc_pair_error(source, new_prec) {
-                    return report(errors, error);
+                    return Err(Box::new(error));
                 }
             }
-            Type::Tensor(dims, TensorPrec::Concrete(new_prec))
+            Ok(Type::Tensor(dims, TensorPrec::Concrete(new_prec)))
         }
         Type::Prim(src_prec) => {
             if !new_prec.is_valid_scalar_cast_target() {
-                return push_unsupported_precision_error(
-                    errors, new_prec, /* tensor = */ false,
-                );
+                return Err(Box::new(unsupported_precision_error(
+                    new_prec, /* tensor = */ false,
+                )));
             }
             if mode == CastMode::Trunc
                 && let Some(error) = trunc_pair_error(Some(src_prec), new_prec)
             {
-                return report(errors, error);
+                return Err(Box::new(error));
             }
-            Type::Prim(new_prec)
+            Ok(Type::Prim(new_prec))
         }
-        Type::Error(w) => propagate(&w),
-        other @ (Type::Fn(_, _)
-        | Type::Ref(_)
-        | Type::Adt(_, _)
-        | Type::KindedAdt(_, _)
-        | Type::Var(_)
-        | Type::Tuple(_)
-        | Type::Unit) => report(
-            errors,
-            CheckError::new(
-                CheckErrorKind::CastNonTensor,
-                format!("cast requires tensor or prim type, got {other}"),
-                vec![],
-            ),
-        ),
+        Type::Error(w) => Ok(propagate(&w)),
+        other => Err(Box::new(CheckError::new(
+            CheckErrorKind::CastNonTensor,
+            format!("cast requires tensor or prim type, got {other}"),
+            vec![],
+        ))),
+    }
+}
+
+pub(super) fn cast_result_from_source(
+    resolved: Type,
+    new_prec: Prim,
+    mode: CastMode,
+    subst: &mut Subst,
+    vg: &mut VarGen,
+    errors: &mut DiagnosticSink<'_>,
+) -> Type {
+    match resolved {
+        // chelis#1489: the source may simply not be resolved YET. Deciding
+        // here bound the verdict to inference order rather than to the
+        // program, and this gate alone was the largest single contributor to
+        // the spurious rejections measured on 0.18.6.
+        //
+        // Suspend the decision on the source variable instead. Unification
+        // discharges it at the instant that variable is bound, so the verdict
+        // depends on what the program says and not on when inference got
+        // there. The result is a fresh variable, and discharge unifies the
+        // settled answer into it: returning an unconstrained variable with
+        // nothing to settle it is how an earlier revision let an ill-typed
+        // program reach codegen.
+        Type::Var(source_var) => {
+            let result = vg.fresh_type();
+            subst.record_deferred_tensor_operand(
+                source_var,
+                DeferredOperandGate::Cast {
+                    target: new_prec,
+                    mode,
+                    result: Box::new(result.clone()),
+                },
+            );
+            result
+        }
+        // Every settled source, accepted or rejected, is decided by the one
+        // function discharge also calls. There is no second copy of this
+        // decision to disagree with.
+        settled => match cast_result_from_settled_source(settled, new_prec, mode) {
+            Ok(result) => result,
+            Err(error) => report(errors, *error),
+        },
     }
 }
 
@@ -1105,23 +1164,22 @@ pub(super) fn report_unknown_cast_target(
     report(errors, error)
 }
 
-/// Emit the canonical "unsupported precision" diagnostic for either a
+/// Build the canonical "unsupported precision" rejection for either a
 /// tensor element or a scalar cast target. The deferred `f8e4m3` dtype
 /// (`spec/04-type-system.md` §1.1.1) gets a specific diagnostic citing the
 /// owning spec section so producers can resolve the deferral state without
 /// guessing.
-/// chelis#731 Phase 2 (§C3): report an unsupported cast precision and return
-/// the witness-carrying `Type::Error`. Every caller does `return
-/// push_unsupported_precision_error(...)`, so the push and the error return
-/// are one expression.
-pub(super) fn push_unsupported_precision_error(
-    errors: &mut DiagnosticSink<'_>,
-    new_prec: Prim,
-    tensor: bool,
-) -> Type {
+///
+/// This returns the rejection rather than pushing it, because `cast` is
+/// decided in two places -- when its source is already known, and when a
+/// suspended constraint discharges because the source just became known --
+/// and only the first of those has a `DiagnosticSink`. Building the error
+/// separately from reporting it is what lets both run the same decision
+/// (chelis#1489). chelis#731 Phase 2 (§C3) owns the witness-carrying return.
+pub(super) fn unsupported_precision_error(new_prec: Prim, tensor: bool) -> CheckError {
     let surface = if tensor { "tensor element" } else { "scalar" };
     let active_set = "f32, f64, bf16, f16, bool, int8, int16, int32, int64";
-    let err = if matches!(new_prec, Prim::F8e4m3) {
+    if matches!(new_prec, Prim::F8e4m3) {
         CheckError::new(
             CheckErrorKind::UnsupportedTensorPrecision,
             format!(
@@ -1145,6 +1203,5 @@ pub(super) fn push_unsupported_precision_error(
             ),
             vec![format!("Use a supported {surface} precision")],
         )
-    };
-    report(errors, err)
+    }
 }

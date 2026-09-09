@@ -14,6 +14,91 @@ pub(super) enum OwnedTypeMetadataResolution {
     Failed(ErrorWitness),
 }
 
+/// The whole of `copy`'s inference, in one place.
+///
+/// Both `DeepTag::Copy` arms were byte-identical apart from how they spelled
+/// the list, so they were two chances to fix a bug once (chelis#1489).
+fn infer_copy(
+    list: &deep::List,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
+) -> Type {
+    let kids = children(list);
+    if let Some(inner) = kids.first() {
+        let inner_ty = infer_expr(inner, env, vg, subst, adt_reg, errors, product);
+        let resolved = subst.apply(&inner_ty);
+        match copy_result_from_source(&resolved) {
+            Some(settled) => settled,
+            None => match resolved {
+                // chelis#1489: the operand may simply not be
+                // resolved YET. Suspend the decision on it, and
+                // unification calls `copy_result_from_source`
+                // with the settled type at the instant that
+                // variable is bound. A variable that is never
+                // bound is still rejected by the per-def pass,
+                // so this defers the decision rather than
+                // dropping it.
+                //
+                // The result is a FRESH variable, not the
+                // operand's, and discharge unifies the shared
+                // decision's answer into it. Returning the
+                // operand's variable made a deferred `copy(&t)`
+                // type as `&t` where an eager one is `t` -- the
+                // inference-order sensitivity this issue exists to
+                // delete, reintroduced by its own fix.
+                Type::Var(tv) => {
+                    let result = vg.fresh_type();
+                    subst.record_deferred_tensor_operand(
+                        tv,
+                        DeferredOperandGate::Copy {
+                            result: Box::new(result.clone()),
+                        },
+                    );
+                    result
+                }
+                _ => report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::TypeMismatch,
+                        format!("copy requires tensor input, got {resolved}"),
+                        vec!["Wrap only tensor values in copy".to_string()],
+                    ),
+                ),
+            },
+        }
+    } else {
+        malformed_form(list, "copy", "one wrapped expression", errors)
+    }
+}
+
+/// The source-side decision `copy` makes, factored out so the eager arm and
+/// the suspended constraint's discharge run *the same code* (chelis#1489).
+///
+/// Returns `None` when the operand is not something `copy` accepts, leaving
+/// the caller to report — the eager arm and discharge word that rejection
+/// differently, and only the decision is shared.
+///
+/// This exists because the decision previously lived in three places: two
+/// identical eager arms and a re-derivation in the pass that decided the
+/// deferrals. They agreed, but nothing made them agree, and every defect on
+/// chelis#1489 has been some path disagreeing with another. A comment even
+/// claimed this function existed before it did, which is worse than the
+/// duplication: a reviewer reading it would stop looking.
+pub(crate) fn copy_result_from_source(resolved: &Type) -> Option<Type> {
+    match resolved {
+        Type::Tensor(_, _) | Type::Error(_) => Some(resolved.clone()),
+        // `copy(&t)` yields `t`, not `&t`.
+        Type::Ref(inner) if matches!(inner.as_ref(), Type::Tensor(_, _)) => {
+            Some(inner.as_ref().clone())
+        }
+        _ => None,
+    }
+}
+
 /// Named type/dimension/rank variables in source annotations are closed by
 /// default. Only the lexical environment cloned for a matching `defsig` body
 /// exposes an explicit binder set.
@@ -207,29 +292,7 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                         malformed_form(list, "realize", "one wrapped expression", errors)
                     }
                 }
-                Some(DeepTag::Copy) => {
-                    let kids = children(list);
-                    if let Some(inner) = kids.first() {
-                        let inner_ty = infer_expr(inner, env, vg, subst, adt_reg, errors, product);
-                        let resolved = subst.apply(&inner_ty);
-                        match resolved {
-                            Type::Tensor(_, _) | Type::Error(_) => resolved,
-                            Type::Ref(inner) if matches!(inner.as_ref(), Type::Tensor(_, _)) => {
-                                *inner
-                            }
-                            _ => report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    format!("copy requires tensor input, got {resolved}"),
-                                    vec!["Wrap only tensor values in copy".to_string()],
-                                ),
-                            ),
-                        }
-                    } else {
-                        malformed_form(list, "copy", "one wrapped expression", errors)
-                    }
-                }
+                Some(DeepTag::Copy) => infer_copy(list, env, vg, subst, adt_reg, errors, product),
                 Some(DeepTag::Borrow) => {
                     let kids = children(list);
                     if let Some(inner) = kids.first() {
@@ -468,29 +531,7 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                         malformed_form(&list, "realize", "one wrapped expression", errors)
                     }
                 }
-                DeepTag::Copy => {
-                    let kids = children(&list);
-                    if let Some(inner) = kids.first() {
-                        let inner_ty = infer_expr(inner, env, vg, subst, adt_reg, errors, product);
-                        let resolved = subst.apply(&inner_ty);
-                        match resolved {
-                            Type::Tensor(_, _) | Type::Error(_) => resolved,
-                            Type::Ref(inner) if matches!(inner.as_ref(), Type::Tensor(_, _)) => {
-                                *inner
-                            }
-                            _ => report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    format!("copy requires tensor input, got {resolved}"),
-                                    vec!["Wrap only tensor values in copy".to_string()],
-                                ),
-                            ),
-                        }
-                    } else {
-                        malformed_form(&list, "copy", "one wrapped expression", errors)
-                    }
-                }
+                DeepTag::Copy => infer_copy(&list, env, vg, subst, adt_reg, errors, product),
                 DeepTag::Borrow => {
                     let kids = children(&list);
                     if let Some(inner) = kids.first() {
