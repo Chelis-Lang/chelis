@@ -5040,9 +5040,10 @@ struct LowerCtx {
     /// non-static value drops its stale entry (shadowing symmetry, mirroring
     /// `shape_bindings`). Saved/restored across binding scopes.
     static_size_bindings: UnordMap<String, i64>,
-    /// Lexical parameter binding plus its fresh shape witnesses. The bound
-    /// node comparison prevents a shadowed variable reusing an outer witness.
-    parameter_witnesses: UnordMap<String, (NodeId, Vec<NodeId>)>,
+    /// Lexical binding plus its declaring shape witnesses. Alias bindings
+    /// forward this metadata; rebinding replaces it and scope exit restores it.
+    /// The node comparison prevents a shadowed value reusing an outer witness.
+    binding_witnesses: UnordMap<String, (NodeId, Vec<NodeId>)>,
     invocation_witnesses: Vec<NodeId>,
     local_callables: UnordMap<String, Expr>,
     program_types: Arc<BTreeMap<String, TensorType>>,
@@ -5168,7 +5169,7 @@ impl LowerCtx {
             list_bindings: UnordMap::new(),
             shape_bindings: UnordMap::new(),
             static_size_bindings: UnordMap::new(),
-            parameter_witnesses: UnordMap::new(),
+            binding_witnesses: UnordMap::new(),
             invocation_witnesses: Vec::new(),
             local_callables: UnordMap::new(),
             program_types: program_types.into(),
@@ -6214,6 +6215,7 @@ impl LowerCtx {
             );
         }
         let saved = self.bindings.clone();
+        let saved_witnesses = self.binding_witnesses.clone();
         let saved_list_bindings = self.list_bindings.clone();
         let saved_shape_bindings = self.shape_bindings.clone();
         let saved_static_size_bindings = self.static_size_bindings.clone();
@@ -6278,9 +6280,19 @@ impl LowerCtx {
                         self.static_size_bindings.remove(name);
                     }
                     if let Some(callable) = self.callable_binding_expr(&bind_kids[i + 1]) {
+                        self.binding_witnesses.remove(name);
                         self.local_callables.insert(name.clone(), callable);
                     } else {
+                        let witnesses = self.binding_witnesses_for_expr(&bind_kids[i + 1]).cloned();
                         let val_id = self.lower_expr(&bind_kids[i + 1]);
+                        if let Some((input, witnesses)) = witnesses
+                            && val_id.as_single_node() == Some(input)
+                        {
+                            self.binding_witnesses
+                                .insert(name.clone(), (input, witnesses));
+                        } else {
+                            self.binding_witnesses.remove(name);
+                        }
                         self.bindings.insert(name.clone(), val_id);
                     }
                 }
@@ -6291,6 +6303,7 @@ impl LowerCtx {
         let result = self.lower_expr(&elems[3]);
         let result = self.retain_invocation_witnesses(result, witness_start);
         self.bindings = saved; // Restore scope
+        self.binding_witnesses = saved_witnesses;
         self.list_bindings = saved_list_bindings;
         self.shape_bindings = saved_shape_bindings;
         self.static_size_bindings = saved_static_size_bindings;
@@ -7485,7 +7498,7 @@ impl LowerCtx {
         };
         let saved = self.bindings.clone();
         let witness_start = self.invocation_witnesses.len();
-        let saved_witnesses = self.parameter_witnesses.clone();
+        let saved_witnesses = self.binding_witnesses.clone();
         let call_span = self.current_span_id.clone();
         let saved_list_bindings = self.list_bindings.clone();
         let saved_shape_bindings = self.shape_bindings.clone();
@@ -7725,7 +7738,7 @@ impl LowerCtx {
         }
         self.preserve_literal_result(&result, &declared_result);
         let result = self.retain_invocation_witnesses(result, witness_start);
-        self.parameter_witnesses = saved_witnesses;
+        self.binding_witnesses = saved_witnesses;
         self.inlining_active -= 1;
         if let Some(name) = &inlining_name
             && let Some(depth) = self.inlining_depths.get_mut(name)
@@ -9545,7 +9558,7 @@ impl LowerCtx {
                     //     followed by `cast(len, int32)` — no longer falls
                     //     through to the size-1 default (a silent
                     //     eval-`[3, 3]`-vs-C-`[1, 3]` miscompile pre-fix).
-                    if let Some(witness) = self.parameter_witness_from_shape_arg(size_arg) {
+                    if let Some(witness) = self.binding_witness_from_shape_arg(size_arg) {
                         let slot = inputs.len();
                         inputs.push(witness);
                         RtDim::Node(slot)
@@ -11805,7 +11818,7 @@ impl LowerCtx {
         result: &TensorType,
         span: Option<String>,
     ) {
-        self.parameter_witnesses.clear();
+        self.binding_witnesses.clear();
         if !result.dims.iter().any(|dim| matches!(dim, DimInfo::Lit(_))) {
             return;
         }
@@ -11842,18 +11855,27 @@ impl LowerCtx {
                 witnesses.push(witness);
                 self.invocation_witnesses.push(witness);
             }
-            self.parameter_witnesses
+            self.binding_witnesses
                 .insert(name.clone(), (input, witnesses));
         }
     }
 
-    fn parameter_witness_from_shape_arg(&self, expr: &Expr) -> Option<NodeId> {
+    fn binding_witnesses_for_expr(&self, expr: &Expr) -> Option<&(NodeId, Vec<NodeId>)> {
+        let mut expr = expr;
+        while let Some((DeepTag::Borrow, _, children)) = stamped_parts(expr) {
+            expr = children.first()?;
+        }
+        let name = bare_var_name(expr)?;
+        let binding @ (input, _) = self.binding_witnesses.get(&name)?;
+        (self.bindings.get(&name)?.as_single_node()? == *input).then_some(binding)
+    }
+
+    fn binding_witness_from_shape_arg(&self, expr: &Expr) -> Option<NodeId> {
         let (operand, axis) = self.shape_app_operand_axis_resolved(expr)?;
-        let name = bare_var_name(&operand)?;
-        let (input, witnesses) = self.parameter_witnesses.get(&name)?;
-        (self.bindings.get(&name)?.as_single_node()? == *input)
-            .then(|| witnesses.get(axis).copied())
-            .flatten()
+        self.binding_witnesses_for_expr(&operand)?
+            .1
+            .get(axis)
+            .copied()
     }
 
     fn axis_literal_witness(&self, id: NodeId, axis: usize) -> Option<NodeId> {
@@ -12687,7 +12709,7 @@ impl LowerCtx {
         }
         let saved = self.bindings.clone();
         let witness_start = self.invocation_witnesses.len();
-        let saved_witnesses = self.parameter_witnesses.clone();
+        let saved_witnesses = self.binding_witnesses.clone();
         let call_span = self.current_span_id.clone();
         let saved_list_bindings = self.list_bindings.clone();
         let saved_shape_bindings = self.shape_bindings.clone();
@@ -12772,7 +12794,7 @@ impl LowerCtx {
             self.preserve_literal_result(&result, ty);
         }
         let result = self.retain_invocation_witnesses(result, witness_start);
-        self.parameter_witnesses = saved_witnesses;
+        self.binding_witnesses = saved_witnesses;
         self.bindings = saved; // Restore scope
         self.list_bindings = saved_list_bindings;
         self.shape_bindings = saved_shape_bindings;

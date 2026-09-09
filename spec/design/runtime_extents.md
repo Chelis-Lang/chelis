@@ -287,6 +287,13 @@ callee body. A parameter shape read uses its witness through an ordinary
 obligation, while the witness input supplies the observed value. A fresh call
 creates fresh witness nodes; copying or importing a graph remaps their ordinary
 inputs and retains their claims. No name-keyed extent grouping is involved.
+Within each lexical environment, a value binding carries its original tensor
+node and witnesses together. Binding an alias forwards that metadata; rebinding
+replaces it and leaving the scope restores it. Borrowing an alias for a shape
+read consumes the same binding metadata. Thus alias
+chains retain the declaring witness without conflating different parameters
+that happen to receive the same actual tensor. Shape reads consume this binding
+metadata rather than requiring the parameter's original spelling.
 Once a guard establishes equality, a consumer may use that checked literal;
 the result annotation alone never licenses the substitution.
 
@@ -481,7 +488,7 @@ Phase B records `guard.local.declaration_order.eval_c`. This closes the P2
 multi-axis reshape ordering witness recorded during #1662; it does not claim
 the remaining op-computed guard coverage or call/witness transport.
 
-The #1377 exit runs six direct-call cases and ten nested/discarded-call
+The #1377 exit runs six direct-call cases and 34 nested/discarded/alias
 cases, with declared types and exact outputs or required traps:
 
 ```sh
@@ -491,7 +498,8 @@ cargo test -p chelis-cli --test runtime_extent_claim_preparation \
 
 It asserts the declared result and exact execution or required failure on
 exported calls, top-level bindings and inlined main, including returning an
-existing value after a discarded call. All 16 cases pass.
+existing value after a discarded call, alias chains, borrows and shadowing.
+All 40 cases pass.
 Phase B attaches the direct public runner to its two inlined-root rows and
 adds `claim.literal.nested_and_unused.eval_c`. The 55-case preparation
 baseline now has 51 unmet cells: 24 declared signatures are preserved and

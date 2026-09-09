@@ -758,8 +758,42 @@ fn literal_claim_transport_survives_nested_and_unused_calls() {
             expected: if good { Expected::Tensor(vec![], vec![7.0]) }
             else { Expected::Domain("load", &["claimed = 4", "x axis 0 = 5"]) },
         });
+        for (id, bindings, source) in [
+            ("literal.tensor_alias", "y = x", "y"),
+            ("literal.tensor_alias_chain", "y = x\n  z = y", "z"),
+            ("literal.tensor_alias_borrow", "y = x", "&y"),
+        ] {
+            call_matrix(
+                &mut fixtures,
+                id,
+                1377,
+                &format!(
+                    "def f(b: tensor[f32], x: tensor[rows, f32]) -> tensor[4, f32] = {{\n  {bindings}\n  insert(b, 0i32, shape({source}, 0i32))\n}}"
+                ),
+                "(tensor[f32], tensor[rows, f32]) -> tensor[4, f32]",
+                vec![seed.clone(), x.clone()],
+                if good {
+                    Expected::Tensor(vec![4], vec![7.0; 4])
+                } else {
+                    Expected::Domain("load", &["claimed = 4", "x axis 0 = 5"])
+                },
+            );
+        }
+        call_matrix(
+            &mut fixtures,
+            "literal.tensor_alias_shadow",
+            1377,
+            "def f(b: tensor[f32], x: tensor[rows, f32], z: tensor[cols, f32]) -> tensor[4, f32] = {\n  y = x\n  y = z\n  insert(b, 0i32, shape(y, 0i32))\n}",
+            "(tensor[f32], tensor[rows, f32], tensor[cols, f32]) -> tensor[4, f32]",
+            vec![seed, vector(if good { 5 } else { 4 }), x],
+            if good {
+                Expected::Tensor(vec![4], vec![7.0; 4])
+            } else {
+                Expected::Domain("load", &["claimed = 4", "z axis 0 = 5"])
+            },
+        );
     }
-    assert_eq!(fixtures.len(), 10);
+    assert_eq!(fixtures.len(), 34);
     let failures: Vec<_> = fixtures
         .iter()
         .flat_map(|case| contract_failures(case, &observe(case)))
