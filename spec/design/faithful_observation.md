@@ -914,6 +914,15 @@ it does not establish empty-list dtype preservation in eval, whose pre-existing
 fallback is tracked in #1650. The definition guard retains executable admission
 and the corpus entry.
 
+PR #1299 adds `explicit_normalization.ch` and `parity_explicit_normalization`
+to the frozen inventory. The independently reviewed `issue_1294_normalize`
+suite requires the authored example to check and evaluate to exactly
+`result = 2.0`, and rejects undeclared `normalize` with `UnboundVariable`.
+The parity row additionally compiles and executes generated C and compares
+its output with eval. Corpus membership retains every existing example;
+mutation controls reject deleting or emptying the new row, changing it to
+library-only parity, or removing its corpus entry.
+
 Three digest-locked behavioral canaries perturb the compiled observation before
 the shared comparator, drive the shared `assert_expected` helper with a
 known-wrong expected value, and present an adjacent f32 result while the

@@ -60,6 +60,7 @@ REQUIRED_TESTS = {
         "parity_checked_reshape",
         "parity_dict_foundation",
         "parity_count_bool_axes",
+        "parity_explicit_normalization",
         "parity_generic_explicit_shape",
         "parity_hash_order_determinism",
         "parity_constraint_directed_risk_guards_library_only",
@@ -155,6 +156,9 @@ REQUIRED_EVAL_RECEIPTS = {
 # chelis#889/#893 add checked_reshape.ch and its executable parity row.
 # Independent runtime and generated host/DAG UBSan controls cover exact stored
 # bits, empty domains, metadata rejection, and owned reshape independence.
+# chelis#1294 adds explicit_normalization.ch and its executable parity row.
+# The independently reviewed issue_1294_normalize suite pins its exact eval
+# result and the undeclared-name rejection; the parity row also runs generated C.
 REQUIRED_TEST_DEFINITION_SHA256: dict[Path, dict[str, str]] = {
     PARITY_SOURCE: {
         "parity_checked_reshape": "3f2defb3802726dac732a24ee5a9815433c8a16679f60a8ae337268305119424",
@@ -165,7 +169,8 @@ REQUIRED_TEST_DEFINITION_SHA256: dict[Path, dict[str, str]] = {
         "parity_comparator_reports_sub_tolerance_float_drift": "40d029638fe1b70c1611adab72eeb31c1befed97d74c5400f5aae82f8c86aafe",
         "parity_constraint_directed_risk_guards_library_only": "ac6933d790a89ff00d7658e1260d61614ccc2547d9a91a67a0aa98918e33ca32",
         "parity_count_bool_axes": "66e82bb4aeedafabc5d77eefeec25cb2728085becf2fdf44c335631fde750ba9",
-        "parity_corpus_is_complete": "61685ac93d7419e13a781bfbdf764cbdfac0181b149ca83f59e552756fbc98b5",
+        "parity_corpus_is_complete": "724ed8110f109be54f7a2cd94558841a36800b0ac1de915050e2b5e0d8778c0a",
+        "parity_explicit_normalization": "d09c17ffa744ee21214877d59476ce58441480e4f6f8a29d6eb5edf3ad1417cb",
         "parity_dict_foundation": "1bfd21bf0d78c9f36869908852a963037e0f13e36d5f9bc73b77131ff9d2970f",
         "parity_generic_explicit_shape": "72ebff1fb9ca21ef52e6622c724f90e7f24f9054c8bff0b5c582be8582007f73",
         "parity_hash_order_determinism": "148c637280b238c9a119e22196960703873e291f1f0df59323c33ddb96b47170",

@@ -1566,6 +1566,13 @@ oracle supplies per-identity mutations, substantive semantic-clause mutations,
 and checked application/CLI regressions; it does not replace the behavior
 oracles or introduce Phase 4C support cells.
 
+The same change extends the frozen Phase 3 example corpus with
+`explicit_normalization.ch` and its executable eval/C parity row. The
+independently reviewed `issue_1294_normalize` success/error controls and
+the parity execution justify the new row and corpus-definition digests;
+deletion, empty-body, and library-only mutations remain rejection cases.
+`faithful_observation.md` records this additive corpus amendment.
+
 [#1310] adds the root-manifest atoms [05-OBS-7..11], so it deliberately moves
 the tamper-evident complete-file digest for `spec/05-risc-primitives.md`. It
 does not amend a frozen [05-OP] atom, the §C1 semantics table, the capability
