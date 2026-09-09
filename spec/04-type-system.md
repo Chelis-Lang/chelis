@@ -2254,6 +2254,8 @@ shape is a change to a published interface.
 > conforming: a consumer cannot distinguish "no diagnostics" from
 > "the diagnostics were not transported".
 
+(Not fully implemented; tracked by chelis#886.)
+
 #### Document fields
 
 | field | type | presence |

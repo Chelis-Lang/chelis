@@ -476,12 +476,9 @@ fn inferred_signatures_is_a_member_of_the_report_not_a_spliced_fragment() {
     let stdout = String::from_utf8(with.stdout).expect("UTF-8");
     let parsed: chelis_compiler_api::schema::WireCheckResult =
         serde_json::from_str(&stdout).expect("JSON");
-    let rows = parsed
-        .inferred_signatures
-        .expect("present when requested")
-        .as_array()
-        .expect("the rows are an array")
-        .clone();
+    // `Vec`, not a `Value` that has to be re-checked for arrayness: the
+    // carrier makes the sequence a sequence.
+    let rows = parsed.inferred_signatures.expect("present when requested");
     assert_eq!(rows.len(), 1, "one def, one row: {stdout}");
     assert_eq!(rows[0]["function"], "add_one");
 
@@ -512,7 +509,7 @@ fn a_rejected_program_still_reports_the_requested_member() {
         serde_json::from_slice(&output.stdout).expect("JSON");
     assert_eq!(
         parsed.inferred_signatures,
-        Some(serde_json::Value::Array(Vec::new())),
+        Some(Vec::new()),
         "the member is present and empty, not absent"
     );
     assert!(!parsed.errors.is_empty(), "the fixture must be rejected");
@@ -534,6 +531,12 @@ fn the_cli_holds_no_second_producer_of_the_document() {
     // If you are here because you added a report field: add it to
     // `CheckResult`. If you are here because you need a document the type
     // cannot express, that is a change to the type, not a second template.
+    //
+    // Scope, stated so it is a known limit rather than an assumed one: this
+    // reads `chelis-cli`'s `main.rs` only, because that is where both
+    // removed templates lived and where a regression would most plausibly
+    // reappear. A producer written into another crate would not be caught
+    // here; the byte pins above are what would catch it, by disagreeing.
     let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs"))
         .expect("read the CLI source");
     for key in [
@@ -544,13 +547,26 @@ fn the_cli_holds_no_second_producer_of_the_document() {
         "total_nodes",
         "unresolved_names",
         "inferred_signatures",
+        // `errors` is deliberately NOT in this list, and the reason is not
+        // an oversight: `cmd_check`'s DIRECTORY mode emits a different
+        // document, the envelope `{"files":[...],"errors":[]}`, whose own
+        // `errors` key collides with the report's. Adding it here fails on
+        // that envelope, which is not a second producer of the report. The
+        // six keys above are unique to the report, which is what makes them
+        // usable as a signature.
     ] {
-        let literal = format!("\\\"{key}\\\"");
-        assert!(
-            !source.contains(&literal),
-            "`{literal}` is spelled as a string literal in the CLI source. \
-             The check report has one producer (`CheckResult::to_report_json`); \
-             a template that spells its keys is the defect chelis#886 removed."
-        );
+        // BOTH quote forms. A red-team pass evaded the first version of this
+        // check by writing the replacement template as a raw string literal
+        // (`r#"..."#`), where the document's keys need no backslash and the
+        // escaped spelling never appears. Checking only the form the removed
+        // code happened to use is checking for a typo, not for a producer.
+        for literal in [format!("\\\"{key}\\\""), format!("\"{key}\":")] {
+            assert!(
+                !source.contains(&literal),
+                "`{literal}` is spelled as a string literal in the CLI source. \
+                 The check report has one producer (`CheckResult::to_report_json`); \
+                 a template that spells its keys is the defect chelis#886 removed."
+            );
+        }
     }
 }

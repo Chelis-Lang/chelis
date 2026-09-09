@@ -23,8 +23,20 @@
 //!    `inferred_signatures` on a single line each.
 //! 2. **`f64` is written with `Display`, not `ryu`.** `Display` prints an
 //!    integral double as `1`; `serde_json` prints `1.0`. The templates used
-//!    `format!`, so `"score": 1` is the shipped spelling and is asserted by
-//!    substring across the CLI test corpus.
+//!    `format!` for `score` and `components`, so `"score": 1` is the shipped
+//!    spelling and is asserted by substring across the CLI test corpus.
+//!
+//!    This applies to EVERY `f64` in the document, which is a wider rule
+//!    than the templates had. A diagnostic's `severity` reached the wire
+//!    through `serde_json::to_string`, so an integral severity would have
+//!    been `1.0` there and is `1` here. No shipped byte moves -- every
+//!    producer emits 0.5 through 0.9 (`CheckErrorKind::default_severity`,
+//!    and the 0.8 constant `from_effect_error` takes) -- but `severity` is a
+//!    public `f64` and [04-FIT-18] admits the whole of `[0, 1]`, so the
+//!    endpoints are in-domain and reachable by a future producer. One
+//!    spelling for every number in one document is the deliberate choice;
+//!    `an_integral_severity_uses_the_document_spelling` pins it so it stays
+//!    a decision rather than becoming an accident.
 //! 3. **Compact separators carry no space** (`":"`, `","`), matching the
 //!    `serde_json::to_string` that produced the per-error objects.
 
@@ -182,7 +194,7 @@ impl Formatter for ReportFormatter {
 
 #[cfg(test)]
 mod tests {
-    use crate::schema::{CheckResult, FitnessComponents, WireCheckResult};
+    use crate::schema::{CheckResult, Diagnostic, FitnessComponents, WireCheckResult};
 
     fn clean_report() -> CheckResult {
         CheckResult {
@@ -237,6 +249,34 @@ mod tests {
         );
     }
 
+    /// `severity` takes the document's spelling too, not `serde_json`'s.
+    ///
+    /// This is the one place the formatter is WIDER than the templates it
+    /// replaces: `score` came from `format!`, but `severity` came from
+    /// `serde_json::to_string`, which would have written `1.0`. Latent --
+    /// no producer emits an integral severity -- but [04-FIT-18] admits
+    /// `[0, 1]` inclusive, so both endpoints are in-domain, and a test is
+    /// cheaper than rediscovering this from a wire diff.
+    #[test]
+    fn an_integral_severity_uses_the_document_spelling() {
+        let mut report = clean_report();
+        report.errors = vec![Diagnostic::from_check_error(
+            &chelis_types::errors::CheckError {
+                kind: chelis_types::errors::CheckErrorKind::Other,
+                message: "probe".to_string(),
+                severity: 1.0,
+                expected: None,
+                got: None,
+                span_offset: None,
+                span_id: None,
+                suggestions: Vec::new(),
+            },
+        )];
+        let rendered = report.to_report_json().expect("render");
+        assert!(rendered.contains("\"severity\":1}"), "{rendered}");
+        assert!(!rendered.contains("\"severity\":1.0"), "{rendered}");
+    }
+
     /// A fractional double is unchanged, so the deviation above is confined
     /// to the integral case rather than being a lossy re-spelling.
     #[test]
@@ -278,9 +318,9 @@ mod tests {
     fn an_array_and_its_contents_stay_on_one_line() {
         let mut report = clean_report();
         report.unresolved_names = vec!["nope".to_string(), "also_nope".to_string()];
-        report.inferred_signatures = Some(serde_json::json!([
-            {"function": "f", "params": [{"index": 0, "name": "x"}]}
-        ]));
+        report.inferred_signatures = Some(vec![
+            serde_json::json!({"function": "f", "params": [{"index": 0, "name": "x"}]}),
+        ]);
         let rendered = report.to_report_json().expect("render");
         assert!(
             rendered.contains("\n  \"unresolved_names\": [\"nope\",\"also_nope\"],\n"),
@@ -304,7 +344,7 @@ mod tests {
         assert!(!rendered.contains("inferred_signatures"), "{rendered}");
 
         let mut requested = clean_report();
-        requested.inferred_signatures = Some(serde_json::Value::Array(Vec::new()));
+        requested.inferred_signatures = Some(Vec::new());
         let rendered = requested.to_report_json().expect("render");
         assert!(
             rendered.contains("\n  \"inferred_signatures\": [],\n  \"errors\""),
@@ -317,10 +357,10 @@ mod tests {
     #[test]
     fn an_empty_object_closes_compactly() {
         let mut report = clean_report();
-        report.inferred_signatures = Some(serde_json::json!({}));
+        report.inferred_signatures = Some(vec![serde_json::json!({})]);
         let rendered = report.to_report_json().expect("render");
         assert!(
-            rendered.contains("\"inferred_signatures\": {},"),
+            rendered.contains("\"inferred_signatures\": [{}],"),
             "{rendered}"
         );
     }
@@ -332,7 +372,7 @@ mod tests {
     fn the_rendered_document_reads_back_through_the_consumer_type() {
         let mut report = clean_report();
         report.unresolved_names = vec!["nope".to_string()];
-        report.inferred_signatures = Some(serde_json::json!([{"function": "f"}]));
+        report.inferred_signatures = Some(vec![serde_json::json!({"function": "f"})]);
         let rendered = report.to_report_json().expect("render");
         let parsed: WireCheckResult = serde_json::from_str(&rendered).expect("round-trip");
         assert_eq!(parsed.typed_nodes, 4);
@@ -340,7 +380,7 @@ mod tests {
         assert_eq!(parsed.unresolved_names, vec!["nope".to_string()]);
         assert_eq!(
             parsed.inferred_signatures,
-            Some(serde_json::json!([{"function": "f"}])),
+            Some(vec![serde_json::json!({"function": "f"})]),
             "the member survives the crossing rather than being dropped"
         );
         assert!(parsed.errors.is_empty());

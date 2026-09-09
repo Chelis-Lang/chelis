@@ -1111,15 +1111,30 @@ pub struct CheckResult {
     /// it (chelis#886, [04-FIT-13]).
     ///
     /// A member of the report's type rather than a JSON fragment spliced
-    /// into a `format!` template. It is deliberately `serde_json::Value`
-    /// and not a struct-per-row: the CLI already builds these rows with
-    /// `serde_json::json!`, so there is no parallel Rust type here for the
-    /// document to drift against, and an opaque value adds no numeric field
-    /// to the wire census that [`Diagnostic`] roots. Typing the row shape
-    /// itself is real work, but it is a different defect from the one this
+    /// into a `format!` template.
+    ///
+    /// The ROW is `serde_json::Value` and not a struct-per-field: the CLI
+    /// already builds these rows with `serde_json::json!`, so there is no
+    /// parallel Rust type here for the document to drift against. Typing
+    /// the row shape is real work, and a different defect from the one this
     /// field closes.
+    ///
+    /// The SEQUENCE is a `Vec`, not a bare `Value`. §6.4 calls this a
+    /// structured signature tree and the document has always carried an
+    /// array, so a `Value` here would let a caller set an object and get a
+    /// document the report's own formatter renders across several lines
+    /// where every shipped one is a single line. `Vec` makes that
+    /// unrepresentable instead of merely unreached.
+    ///
+    /// A note on the wire census, since the absence of a row here is easy to
+    /// misread: `numeric_primitives` recurses for primitive float and
+    /// integer spellings and finds none inside a `Value`, so this field
+    /// classifies as non-numeric. That is the census being unable to see
+    /// through the type, not proof that no number crosses here -- a row can
+    /// hold `Number`. It is benign today because no `WireInferred*` type
+    /// carries an `f64`, and that is the fact the classification rests on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inferred_signatures: Option<serde_json::Value>,
+    pub inferred_signatures: Option<Vec<serde_json::Value>>,
     pub errors: Vec<Diagnostic>,
 }
 
@@ -1133,7 +1148,7 @@ pub struct WireCheckResult {
     pub total_nodes: usize,
     pub unresolved_names: Vec<String>,
     #[serde(default)]
-    pub inferred_signatures: Option<serde_json::Value>,
+    pub inferred_signatures: Option<Vec<serde_json::Value>>,
     pub errors: Vec<WireDiagnostic>,
 }
 

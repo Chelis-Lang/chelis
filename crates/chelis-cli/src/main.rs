@@ -2533,7 +2533,7 @@ fn check_prepared_for_cli(
     chelis_types::FitnessReport,
     Vec<chelis_effects::EffectError>,
     Vec<chelis_types::errors::CheckError>,
-    Option<serde_json::Value>,
+    Option<Vec<serde_json::Value>>,
 ) {
     let analysis = match chelis_compiler_api::pipeline::analyze_prepared(prepared) {
         chelis_compiler_api::pipeline::PreparedTypeAnalysisOutcome::Rejected { fitness } => {
@@ -2544,7 +2544,7 @@ fn check_prepared_for_cli(
                 fitness,
                 Vec::new(),
                 Vec::new(),
-                show_inferred.then(|| serde_json::Value::Array(Vec::new())),
+                show_inferred.then(Vec::new),
             );
         }
         chelis_compiler_api::pipeline::PreparedTypeAnalysisOutcome::Accepted(analysis) => *analysis,
@@ -2583,7 +2583,7 @@ fn assemble_check_json(
     mut report: chelis_types::FitnessReport,
     effect_errors: &[chelis_effects::EffectError],
     linearity_errors: &[chelis_types::errors::CheckError],
-    inferred_signatures: Option<serde_json::Value>,
+    inferred_signatures: Option<Vec<serde_json::Value>>,
 ) -> Result<(String, bool), Box<dyn std::error::Error>> {
     if !effect_errors.is_empty() {
         report.score = (report.score - 0.2 * effect_errors.len() as f64).max(0.0);
@@ -2767,7 +2767,7 @@ mod advisory_lint_scope_tests {
 /// chelis#886 [04-FIT-13]: these used to be rendered to a string here and
 /// spliced into the document template. They are now a value carried in
 /// `CheckResult`, so the report's type covers them like every other member.
-fn inferred_signatures_value(checked: &chelis_types::CheckedProgram) -> serde_json::Value {
+fn inferred_signatures_value(checked: &chelis_types::CheckedProgram) -> Vec<serde_json::Value> {
     // Per-def inferred effect rows, keyed by def name. Computed from the
     // same `CheckedProgram` so the structured effect-row a consumer
     // (Hull) reads is the exact row `chelis check` infers. Functions
@@ -2817,7 +2817,7 @@ fn inferred_signatures_value(checked: &chelis_types::CheckedProgram) -> serde_js
             })
         })
         .collect();
-    serde_json::Value::Array(entries)
+    entries
 }
 
 /// Convert a checker [`Type`] into the lossless, serde-friendly
