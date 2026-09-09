@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "f582b85bd73c591ffb63efbb7cc8f987cff52e67b95a9dbc94ecd7edfaf5bd7d",
+  "corpus_sha256": "17acf77559b420c3b6400f506c87067000cb0f79b41f6e118e834b812235beda",
   "rows": [
     {
       "baseline": "silent_unguarded",
@@ -241,6 +241,12 @@
       "id": "expand.shape_derived.declared_result_survives.eval",
       "phase_b": "silent_unguarded",
       "receipt": "cli_slice_b.a_shape_derived_bound_keeps_its_declared_result_dimension_on_eval"
+    },
+    {
+      "baseline": "silent_unguarded",
+      "id": "guard.local.numeric_carriers.eval_c",
+      "phase_b": "executes_exactly",
+      "receipt": "exec_c.numeric_local_extent_claims_execute_exactly"
     },
     {
       "baseline": "silent_unguarded",

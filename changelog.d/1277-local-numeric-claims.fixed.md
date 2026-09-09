@@ -1,0 +1,1 @@
+Check literal and resolved named extent claims against computed size carriers in Eval and generated C for live expand and reshape operations. Mismatches now report the extent Domain trap before reshape's downstream size error.

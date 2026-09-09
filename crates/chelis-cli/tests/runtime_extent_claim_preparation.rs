@@ -698,6 +698,23 @@ fn claimed_extent_contract() {
     );
 }
 
+/// #1377: a literal result claim retains its required failure after inlining.
+#[test]
+#[ignore = "manual pending acceptance: B2b-1 declaration and call-claim transport"]
+fn literal_result_claim_contract() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let fixtures: Vec<_> = cases()
+        .into_iter()
+        .filter(|case| case.issue == 1377)
+        .collect();
+    assert_eq!(fixtures.len(), 6, "export/binding/root, satisfied/mismatch");
+    let failures: Vec<_> = fixtures
+        .iter()
+        .flat_map(|case| contract_failures(case, &observe(case)))
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// #1619's executable exit: original comparison witnesses, exported calls,
 /// top-level bindings, an inlined main, and a refuted runtime unit operand.
 #[test]
