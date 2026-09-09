@@ -1002,14 +1002,29 @@ skip the preflight.
 `--local` and the bare full gate then take an advisory workstation-wide lease,
 `fcntl.flock` on `gate.lock` under `$CHELIS_GATE_LEASE_DIR`, else `$XDG_CACHE_HOME/chelis`,
 else `~/.cache/chelis`, held for the whole run so two cold gates in different worktrees do
-not starve each
-other. The default is to wait indefinitely, polling every 10 seconds with a heartbeat
-every 60 seconds that names the holder's pid, worktree, head, and start time.
-`--no-wait` exits 4 at once when the lease is held, `--lease-timeout SECONDS` caps the
-wait and exits 4 on expiry, and `--no-lease` bypasses it. `--fast` never takes the
+not starve each other. Waiters register numbered tickets in `gate.lock.queue/` under
+a short `gate.lock.queue.lock` mutex; only the oldest registered live ticket may take
+the main lock. Order is ticket-registration order. Simultaneous registrations are
+serialized, and a new caller cannot overtake an existing ticket during a polling gap.
+Each waiter holds a kernel lock on its ticket, so abandoned tickets are reaped without
+PID checks. Cancellation and timeout remove the ticket; SIGKILL leaves an unlocked
+ticket that the next queue scan removes. Queue bookkeeping errors stop with exit 2;
+they do not implicitly bypass queued gates.
+
+The default is to wait indefinitely, polling every 10 seconds with a heartbeat
+every 60 seconds that names the holder's pid, worktree, head, and start time and the
+waiter's queue position (1 is next). Queue registration retries use a short 0.1-second
+interval. `--no-wait` exits 4 when the lease is held, an earlier ticket exists, or the
+queue mutex is busy. `--lease-timeout SECONDS` caps the whole queue wait and exits 4
+on expiry, and `--no-lease` bypasses it. `--fast` never takes the
 lease; it prints a note when a full gate holds it. The kernel releases the lock when
 the holder exits, SIGKILL included, so the sidecar naming the holder is descriptive,
 never authoritative.
+The queue coordinates updated runners; gates from older worktrees still contend on
+the same main lock but can bypass ticket order. Update active worktrees to get FIFO
+admission across them. `.venv/bin/python -m unittest scripts.test_gate_queue` is the
+focused acceptance command for ordering, simultaneous registration, cancellation,
+holder/waiter death, deadlines, queue errors, and heartbeat positions.
 
 Every command's combined stdout and stderr streams live. On failure the gate
 retains the complete transcript under `target/gate-failures/`, replays the

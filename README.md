@@ -521,8 +521,12 @@ only when a check fails. `--local` runs two workspace clippy configurations,
 guards, both oracles, and per-crate nextest for the crates changed vs
 `origin/main`; it takes an advisory workstation-wide lease on `gate.lock` under
 `$CHELIS_GATE_LEASE_DIR`, else `$XDG_CACHE_HOME/chelis`, else `~/.cache/chelis`,
-so two full gates in different worktrees do not run at once (`--no-wait`,
-`--lease-timeout SECONDS`, and `--no-lease` change that). Every run other than
+so two full gates in different worktrees do not run at once. Updated runners queue
+in ticket-registration order, report their position, and reap abandoned tickets.
+`--no-wait` exits 4 if the lease or queue cannot admit the caller immediately;
+`--lease-timeout SECONDS` bounds the wait, and `--no-lease` bypasses it. Queue errors
+stop with exit 2. Older worktrees must pick up the queue implementation to participate
+in FIFO ordering. Every run other than
 `--list` writes a JSON summary under `target/gate-reports/` and prints one
 summary line. Push before the review round; the round reviews the pushed
 head while CI runs, and CI is watched by one background waiter, never a
