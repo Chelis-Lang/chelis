@@ -41,10 +41,8 @@ fn find_tagged<'a>(expr: &'a Expr, tag: &str) -> Option<&'a Expr> {
             }
         }
         Expr::Node(node, _) => {
-            for (_, value) in &node.meta().entries {
-                if let Some(found) = find_tagged(value, tag) {
-                    return Some(found);
-                }
+            if let Some(found) = node.meta().find_expression(|value| find_tagged(value, tag)) {
+                return Some(found);
             }
             for child in node.children_slice() {
                 if let Some(found) = find_tagged(child, tag) {
@@ -60,10 +58,8 @@ fn find_tagged<'a>(expr: &'a Expr, tag: &str) -> Option<&'a Expr> {
             }
         }
         Expr::UnknownForm(data) => {
-            for (_, value) in &data.meta.entries {
-                if let Some(found) = find_tagged(value, tag) {
-                    return Some(found);
-                }
+            if let Some(found) = data.meta.find_expression(|value| find_tagged(value, tag)) {
+                return Some(found);
             }
             for child in &data.children {
                 if let Some(found) = find_tagged(child, tag) {
@@ -72,20 +68,19 @@ fn find_tagged<'a>(expr: &'a Expr, tag: &str) -> Option<&'a Expr> {
             }
         }
         Expr::Map(map, _) => {
-            for (_, value) in &map.entries {
-                if let Some(found) = find_tagged(value, tag) {
-                    return Some(found);
-                }
+            if let Some(found) = map.find_expression(|value| find_tagged(value, tag)) {
+                return Some(found);
             }
         }
         Expr::MetaExpr(meta, _) => {
             if let Some(found) = find_tagged(&meta.expr, tag) {
                 return Some(found);
             }
-            for (_, value) in &meta.entries {
-                if let Some(found) = find_tagged(value, tag) {
-                    return Some(found);
-                }
+            if let Some(found) = meta
+                .metadata
+                .find_expression(|value| find_tagged(value, tag))
+            {
+                return Some(found);
             }
         }
         Expr::Atom(_, _) => {}
@@ -105,9 +100,7 @@ fn type_metadata(expr: &Expr) -> Option<&Expr> {
         }
         _ => return None,
     };
-    meta.entries
-        .iter()
-        .find_map(|(key, value)| (key == "type").then_some(value))
+    meta.ty().map(|ty| ty.expression())
 }
 
 /// Render an Expr to canonical Deep text for substring matching.

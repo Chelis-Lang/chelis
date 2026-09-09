@@ -463,57 +463,54 @@ pub(super) fn infer_app(
 
     let ret_tv = vg.fresh_type();
 
-    // Comparison-op tensor/scalar broadcast: when a comparison op
-    // (`cmplt`, `eq`, `neq`, `lt`, `gt`, `lte`, `gte`) is called with one
-    // tensor argument and one scalar argument of matching precision, the
-    // scalar is broadcast across the tensor at eval time. The polymorphic
-    // scheme `(α, α) → α` would otherwise reject the call because
-    // `tensor[D, p]` does not unify with `Prim(p)`. Rewrite the scalar's
-    // type to the tensor type for unification purposes only; the
-    // semantic post-check below still validates each original arg type.
-    //
-    // Ordered comparisons (`lt`, `gt`, `lte`, `gte`, `cmplt`) require
-    // matching numeric precision. `eq`/`neq` allow any matching precision
-    // (including `bool` and `string`).
-    let unify_arg_tys: Vec<Type> = if let Some(ref fname) = func_name
-        && builtins::COMPARISON_OPS.contains(&fname.as_str())
+    // [04-DTYPE-2] restricts a bounded type variable to primitive dtypes.
+    // It therefore has a scalar surface even before specialization. Reject
+    // mixed surfaces before unification can emit an unrelated occurs-check
+    // error for p beside tensor[D, p]. Unrestricted variables remain unknown.
+    if let Some(ref fname) = func_name
+        && (builtins::COMPARISON_OPS.contains(&fname.as_str())
+            || matches!(
+                fname.as_str(),
+                "add" | "sub" | "mul" | "div" | "floor_div" | "trunc_div" | "max_elem" | "min_elem"
+            ))
         && arg_tys.len() == 2
     {
-        let lhs_resolved = type_for_readonly_check(&arg_tys[0], subst);
-        let rhs_resolved = type_for_readonly_check(&arg_tys[1], subst);
-        let is_eq_family = matches!(fname.as_str(), "eq" | "neq");
-        let precisions_compatible = |tensor_prec: &TensorPrec, scalar_prec: &Prim| -> bool {
-            // Polymorphic-precision tensors (TensorPrec::Var) are not
-            // eligible for the scalar-broadcast rewrite: the rewrite
-            // requires a known precision so the rewritten arg type can
-            // unify against the actual scalar argument. Leave them to
-            // the standard unification path (which will surface a
-            // precise PrecisionMismatch if needed).
-            match tensor_prec {
-                TensorPrec::Concrete(p) => p == scalar_prec && (is_eq_family || p.is_numeric()),
-                TensorPrec::Var(_) => false,
-            }
+        let lhs = type_for_readonly_check(&arg_tys[0], subst);
+        let rhs = type_for_readonly_check(&arg_tys[1], subst);
+        let scalar = |ty: &Type| {
+            matches!(ty, Type::Prim(_))
+                || matches!(ty, Type::Var(p) if subst.tvar_restriction(*p).is_some())
         };
-        match (&lhs_resolved, &rhs_resolved) {
-            (Type::Tensor(dims, tensor_prec), Type::Prim(scalar_prec))
-                if precisions_compatible(tensor_prec, scalar_prec) =>
-            {
-                let tensor_ty = Type::Tensor(dims.clone(), tensor_prec.clone());
-                vec![arg_tys[0].clone(), tensor_ty]
+        if (matches!(lhs, Type::Tensor(..)) && scalar(&rhs))
+            || (scalar(&lhs) && matches!(rhs, Type::Tensor(..)))
+        {
+            let authority = if builtins::COMPARISON_OPS.contains(&fname.as_str()) {
+                "spec/05-risc-primitives.md [05-OP-36] makes a mixed surface a type error, and section 1.2 admits no broadcasting exception"
+            } else {
+                "spec/05-risc-primitives.md section 1.2 and spec/04-type-system.md section 4.3 require explicit shape construction"
+            };
+            let mut error = CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!("`{fname}` does not admit a scalar beside a tensor, got {lhs} and {rhs}: {authority}"),
+                vec![
+                    "Give the scalar the tensor's shape explicitly. For a rank-one tensor xs and a scalar c of the same dtype, use `insert(scalar_to_tensor(c), 0i32, shape(xs, 0i32))`; insert each axis for higher ranks.".to_string(),
+                    "For concrete f32 values, another explicit spelling is `gt(xs, expand(to_tensor([1.5f32]), 0i32, shape(xs, 0i32)))`.".to_string(),
+                ],
+            );
+            if let Some(id) = list_span_id(list) {
+                error.span_offset = parse_span_offset(id);
+                error.span_id = Some(id.to_string());
+            } else {
+                let off = span_of_list(list).offset;
+                if off > 0 {
+                    error.span_offset = Some(off);
+                }
             }
-            (Type::Prim(scalar_prec), Type::Tensor(dims, tensor_prec))
-                if precisions_compatible(tensor_prec, scalar_prec) =>
-            {
-                let tensor_ty = Type::Tensor(dims.clone(), tensor_prec.clone());
-                vec![tensor_ty, arg_tys[1].clone()]
-            }
-            _ => arg_tys.clone(),
+            return report(errors, error);
         }
-    } else {
-        arg_tys.clone()
-    };
+    }
 
-    let unify_arg_tys = auto_borrow_call_arg_types(&func_ty, unify_arg_tys, subst);
+    let unify_arg_tys = auto_borrow_call_arg_types(&func_ty, arg_tys.clone(), subst);
     let expected_fn = Type::Fn(unify_arg_tys, Box::new(ret_tv.clone()));
 
     match unify(&func_ty, &expected_fn, subst) {

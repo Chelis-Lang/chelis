@@ -949,7 +949,8 @@ fn f6_deep_bridge_source_kind_is_skipped_not_error() {
   m
   (def {chelis_role: "property",
          property_source_kind: "bridge:c-earchin",
-         property_quantifiers: (params {} (x {type: (t-prim {} f32)}))}
+         property_quantifiers: (params {} (x {type: (t-prim {} f32)})),
+         property_preconditions: (tuple {})}
     bridged
     (fn {}
       (params {} (x {type: (t-prim {} f32)}))
@@ -1080,4 +1081,12 @@ fn wi8_smt_precondition_discharge_site_stamps_discharge_tier() {
         none.is_empty(),
         "no preconditions => no assumption record to tier"
     );
+}
+
+#[test]
+fn producer_property_marker_has_no_discovery_authority() {
+    let source = r#"(def {c_earchin_role: "property_witness", property_source_kind: "user"} ordinary (fn {} (params {}) (lit {type: (t-prim {} bool)} false)))"#;
+    let PropertyRunResult::Ran(outcomes) =
+        run_deep_source_properties(source, &PropertyRunOptions::default()).unwrap();
+    assert!(outcomes.is_empty(), "{outcomes:?}");
 }

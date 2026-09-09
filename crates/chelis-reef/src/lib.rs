@@ -7825,11 +7825,7 @@ impl ShellTypeVariableRenamer {
             DeepExpr::Map(meta, span) => DeepExpr::Map(self.rewrite_meta(meta), *span),
             DeepExpr::MetaExpr(meta, span) => DeepExpr::MetaExpr(
                 MetaExpr {
-                    entries: meta
-                        .entries
-                        .iter()
-                        .map(|(key, value)| (key.clone(), self.rewrite(value)))
-                        .collect(),
+                    metadata: self.rewrite_meta(&meta.metadata),
                     expr: Box::new(self.rewrite(&meta.expr)),
                 },
                 *span,
@@ -7874,14 +7870,9 @@ impl ShellTypeVariableRenamer {
         }
     }
 
-    fn rewrite_meta(&mut self, meta: &chelis_deep::MetaMap) -> chelis_deep::MetaMap {
-        chelis_deep::MetaMap {
-            entries: meta
-                .entries
-                .iter()
-                .map(|(key, value)| (key.clone(), self.rewrite(value)))
-                .collect(),
-        }
+    fn rewrite_meta(&mut self, meta: &chelis_deep::Metadata) -> chelis_deep::Metadata {
+        meta.map_expressions(&mut |value, _| self.rewrite(value))
+            .expect("type variable renaming preserves annotation shapes")
     }
 
     fn rewrite_child(

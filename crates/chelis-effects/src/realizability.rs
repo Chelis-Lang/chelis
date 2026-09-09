@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use chelis_deep::{
     DeepTag,
-    ast::{Atom, Expr, List, MetaMap},
+    ast::{Atom, Expr, List, Metadata},
 };
 use chelis_types::known_tags::{LaneContribution, deep_tag_lane_contribution};
 use chelis_types::manifest::{HostReason, RootPathStep};
@@ -416,7 +416,7 @@ struct LaneWalkContext<'a> {
 
 fn tagged_needs_host(
     tag: DeepTag,
-    meta: Option<&MetaMap>,
+    meta: Option<&Metadata>,
     children: &[Expr],
     context: &LaneWalkContext<'_>,
     reasons: &mut Vec<HostReason>,
@@ -542,7 +542,7 @@ fn get_children(list: &List) -> &[Expr] {
     }
 }
 
-fn list_meta(list: &List) -> Option<&MetaMap> {
+fn list_meta(list: &List) -> Option<&Metadata> {
     match list.elements.get(1) {
         Some(Expr::Map(meta, _)) => Some(meta),
         _ => None,
@@ -557,7 +557,7 @@ fn tagged_children(expr: &Expr) -> Option<(DeepTag, &[Expr])> {
     }
 }
 
-fn tagged_meta(expr: &Expr) -> Option<&MetaMap> {
+fn tagged_meta(expr: &Expr) -> Option<&Metadata> {
     match expr {
         Expr::Node(node, _) => Some(node.meta()),
         Expr::List(list, _) => list_meta(list),
@@ -860,15 +860,9 @@ fn app_callee_name(children: &[Expr]) -> Option<String> {
 }
 
 /// Check if an app expression's type metadata indicates a scalar (t-prim) type.
-fn app_type_is_scalar(meta: Option<&MetaMap>) -> bool {
-    if let Some(meta) = meta {
-        for (key, value) in &meta.entries {
-            if key == "type" {
-                return value.tag() == Some(DeepTag::TPrim);
-            }
-        }
-    }
-    false
+fn app_type_is_scalar(meta: Option<&Metadata>) -> bool {
+    meta.and_then(Metadata::ty)
+        .is_some_and(|ty| ty.expression().tag() == Some(DeepTag::TPrim))
 }
 
 /// Extract a def's name and body from a top-level expression.
@@ -1267,20 +1261,13 @@ fn static_adt_components<'a>(
 
 /// Extract type metadata from an expression's metadata map.
 fn expr_type_metadata(expr: &Expr) -> Option<&Expr> {
-    if let Some(meta) = tagged_meta(expr) {
-        for (key, value) in &meta.entries {
-            if key == "type" {
-                return Some(value);
-            }
-        }
-    }
-    None
+    tagged_meta(expr)?.ty().map(|ty| ty.expression())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chelis_deep::ast::MetaMap;
+    use chelis_deep::ast::Metadata;
     use chelis_types::types::Prim;
 
     fn check_program_from_source(source: &str) -> CheckedProgram {
@@ -1535,29 +1522,29 @@ mod tests {
         let span = chelis_deep::Span::new(0, 0);
         let callee = Expr::node(
             DeepTag::Var,
-            MetaMap::default(),
+            Metadata::default(),
             vec![Expr::Atom(Atom::Name("library_add".to_string()), span)],
             span,
         );
         let expression = Expr::node(
             DeepTag::App,
-            MetaMap::default(),
+            Metadata::default(),
             vec![callee, Expr::Atom(Atom::Int(1), span)],
             span,
         );
         let external_type = Expr::node(
             DeepTag::TFn,
-            MetaMap::default(),
+            Metadata::default(),
             vec![
                 Expr::node(
                     DeepTag::TPrim,
-                    MetaMap::default(),
+                    Metadata::default(),
                     vec![Expr::Atom(Atom::Name("int64".to_string()), span)],
                     span,
                 ),
                 Expr::node(
                     DeepTag::TPrim,
-                    MetaMap::default(),
+                    Metadata::default(),
                     vec![Expr::Atom(Atom::Name("int64".to_string()), span)],
                     span,
                 ),
@@ -1642,19 +1629,19 @@ mod tests {
         let span = chelis_deep::Span::new(0, 0);
         let body = Expr::node(
             DeepTag::Lit,
-            MetaMap::default(),
+            Metadata::default(),
             vec![Expr::Atom(Atom::Int(42), span)],
             span,
         );
         let def = Expr::node(
             DeepTag::Def,
-            MetaMap::default(),
+            Metadata::default(),
             vec![Expr::Atom(Atom::Name("answer".to_string()), span), body],
             span,
         );
         let ty = Expr::node(
             DeepTag::TPrim,
-            MetaMap::default(),
+            Metadata::default(),
             vec![Expr::Atom(Atom::Name("int32".to_string()), span)],
             span,
         );
@@ -1883,10 +1870,10 @@ mod tests {
     // #1086: an unrecognized form must fail closed to Host with a reason.
     #[test]
     fn unknown_form_routes_host_fail_closed() {
-        use chelis_deep::ast::{MetaMap, UnknownFormData};
+        use chelis_deep::ast::{Metadata, UnknownFormData};
         let expr = Expr::UnknownForm(Box::new(UnknownFormData {
             head: "mystery".to_string(),
-            meta: MetaMap::default(),
+            meta: Metadata::default(),
             children: vec![],
             span: chelis_deep::Span::new(0, 0),
         }));
@@ -2004,11 +1991,11 @@ mod tests {
         let span = chelis_deep::Span::new(0, 0);
         let record = Expr::node(
             DeepTag::Record,
-            MetaMap::default(),
+            Metadata::default(),
             vec![Expr::Atom(Atom::Name("R".to_string()), span)],
             span,
         );
-        let expr = Expr::node(DeepTag::Block, MetaMap::default(), vec![record], span);
+        let expr = Expr::node(DeepTag::Block, Metadata::default(), vec![record], span);
         let lane_by_def: BTreeMap<String, Lane> = BTreeMap::new();
         let target: UnordSet<Prim> = C_PRIMS.iter().copied().collect();
         let type_env: BTreeMap<String, Expr> = BTreeMap::new();
@@ -2039,11 +2026,11 @@ mod tests {
         let span = chelis_deep::Span::new(0, 0);
         let literal = Expr::node(
             DeepTag::Lit,
-            MetaMap::default(),
+            Metadata::default(),
             vec![Expr::Atom(Atom::Int(1), span)],
             span,
         );
-        let expr = Expr::node(DeepTag::Block, MetaMap::default(), vec![literal], span);
+        let expr = Expr::node(DeepTag::Block, Metadata::default(), vec![literal], span);
         let lane_by_def: BTreeMap<String, Lane> = BTreeMap::new();
         let target: UnordSet<Prim> = C_PRIMS.iter().copied().collect();
         let type_env: BTreeMap<String, Expr> = BTreeMap::new();

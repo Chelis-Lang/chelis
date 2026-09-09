@@ -129,13 +129,18 @@ fn simplex_tolerance_band_is_well_formed() {
 
 #[test]
 fn invariant_without_opaque_is_rejected() {
-    let deep = deep_of_dp(
+    let error = chelis_deep::parser::parse_str(
         "(deftype {invariant: (fn {} (params {} p) \
             (app {} (var {} gte) (access {} (var {} p) value) (lit {type: (t-prim {} f32)} 0.0))), \
             invariant_amenability: \"linear\"} \
             Probability () (variant {} Probability (field {} value (t-prim {} f32))))",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("invariant") && error.contains("opaque"),
+        "{error}"
     );
-    assert_has_violation(&errors(&deep), "requires `@opaque`");
 }
 
 #[test]

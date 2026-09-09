@@ -212,7 +212,7 @@ pub(crate) fn collect_type_invariants(exprs: &[Expr]) -> UnordMap<String, Invari
         let Some((DeepTag::Deftype, meta, kids)) = expr_parts(expr) else {
             continue;
         };
-        let Some((_, inv_value)) = meta.entries.iter().find(|(key, _)| key == "invariant") else {
+        let Some(inv_value) = meta.invariant() else {
             // No declared invariant: this type contributes no table entry.
             continue;
         };
@@ -230,7 +230,7 @@ pub(crate) fn collect_type_invariants(exprs: &[Expr]) -> UnordMap<String, Invari
         // entry. Parse the metadata once; a malformed metadata becomes a
         // `Malformed` entry rather than being skipped (fail-closed).
         let parsed = match readable_type_name {
-            Some(_) => parse_invariant_fn(inv_value),
+            Some(_) => parse_invariant_fn(&inv_value.to_expression()),
             None => None,
         };
         let type_name = readable_type_name.unwrap_or(UNREADABLE_DEFTYPE_NAME);
@@ -545,7 +545,7 @@ fn parse_invariant_fn(expr: &Expr) -> Option<(String, Expr)> {
 }
 
 /// Borrow the common stamped shape without reconstructing a legacy `List`.
-fn expr_parts(expr: &Expr) -> Option<(DeepTag, &MetaMap, &[Expr])> {
+fn expr_parts(expr: &Expr) -> Option<(DeepTag, &Metadata, &[Expr])> {
     match expr {
         Expr::List(list, _) => Some((tag(list)?, get_meta(list)?, children(list))),
         Expr::Node(node, _) => Some((node.tag(), node.meta(), node.children_slice())),
@@ -567,6 +567,23 @@ fn render_invariant_body(pred: &InvariantPredicate) -> String {
 /// Recursively drop `span` entries from a Deep expression's metadata maps.
 /// Diagnostics-only helper: never mutates a value that round-trips, only a
 /// throwaway clone used to render the invariant text.
+fn strip_annotation_spans(metadata: &mut chelis_deep::Metadata) {
+    metadata.remove(chelis_deep::annotations::MetadataKey::Span);
+    *metadata = metadata
+        .try_map_expressions_with_annotations::<chelis_deep::metadata::MetadataError>(
+            &mut |value, _| {
+                let mut value = value.clone();
+                strip_span_meta(&mut value);
+                Ok(value)
+            },
+            &mut |mut metadata, _| {
+                metadata.remove(chelis_deep::annotations::MetadataKey::Span);
+                Ok(metadata)
+            },
+        )
+        .expect("span removal preserves annotation payloads");
+}
+
 fn strip_span_meta(expr: &mut Expr) {
     match expr {
         Expr::List(list, _) => {
@@ -575,16 +592,10 @@ fn strip_span_meta(expr: &mut Expr) {
             }
         }
         Expr::Map(map, _) => {
-            map.entries.retain(|(key, _)| key != "span");
-            for (_, value) in &mut map.entries {
-                strip_span_meta(value);
-            }
+            strip_annotation_spans(map);
         }
         Expr::MetaExpr(meta, _) => {
-            meta.entries.retain(|(key, _)| key != "span");
-            for (_, value) in &mut meta.entries {
-                strip_span_meta(value);
-            }
+            strip_annotation_spans(&mut meta.metadata);
             strip_span_meta(&mut meta.expr);
         }
         Expr::Atom(_, _) => {}
@@ -607,10 +618,7 @@ fn strip_span_meta(expr: &mut Expr) {
             }
         }
         Expr::UnknownForm(data) => {
-            data.meta.entries.retain(|(key, _)| key != "span");
-            for (_, value) in &mut data.meta.entries {
-                strip_span_meta(value);
-            }
+            strip_annotation_spans(&mut data.meta);
             for child in &mut data.children {
                 strip_span_meta(child);
             }
@@ -856,58 +864,38 @@ pub(crate) fn revalidate_adt_value(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chelis_deep::ast::{MetaMap, UnknownFormData};
+    use chelis_deep::ast::{Metadata, UnknownFormData};
 
     fn sp() -> Span {
         Span::new(0, 0)
     }
 
-    fn span_entry() -> (String, Expr) {
-        (
-            "span".to_string(),
-            Expr::Atom(Atom::Str("surf:0..1".to_string()), sp()),
-        )
+    fn span_metadata() -> Metadata {
+        Metadata::from(chelis_deep::annotations::MetadataValue::Span(
+            chelis_deep::annotations::SpanId::try_new("surf:0..1".into(), sp()).unwrap(),
+        ))
     }
 
-    /// True when any metadata map anywhere in `expr` still carries a `span`
-    /// entry.
     fn mentions_span_key(expr: &Expr) -> bool {
+        fn metadata_has_span(metadata: &Metadata) -> bool {
+            let mut found = metadata.span_id().is_some();
+            metadata.visit_syntax(&mut |_, value| found |= mentions_span_key(value));
+            found
+        }
         match expr {
             Expr::Atom(_, _) => false,
-            Expr::Map(map, _) => {
-                map.entries.iter().any(|(key, _)| key == "span")
-                    || map
-                        .entries
-                        .iter()
-                        .any(|(_, value)| mentions_span_key(value))
-            }
+            Expr::Map(map, _) => metadata_has_span(map),
             Expr::MetaExpr(meta, _) => {
-                meta.entries.iter().any(|(key, _)| key == "span")
-                    || meta
-                        .entries
-                        .iter()
-                        .any(|(_, value)| mentions_span_key(value))
-                    || mentions_span_key(&meta.expr)
+                metadata_has_span(&meta.metadata) || mentions_span_key(&meta.expr)
             }
             Expr::List(list, _) => list.elements.iter().any(mentions_span_key),
             Expr::Node(node, _) => {
-                node.meta().entries.iter().any(|(key, _)| key == "span")
-                    || node
-                        .meta()
-                        .entries
-                        .iter()
-                        .any(|(_, value)| mentions_span_key(value))
+                metadata_has_span(node.meta())
                     || node.children_slice().iter().any(mentions_span_key)
             }
             Expr::BareList(elements, _) => elements.iter().any(mentions_span_key),
             Expr::UnknownForm(data) => {
-                data.meta.entries.iter().any(|(key, _)| key == "span")
-                    || data
-                        .meta
-                        .entries
-                        .iter()
-                        .any(|(_, value)| mentions_span_key(value))
-                    || data.children.iter().any(mentions_span_key)
+                metadata_has_span(&data.meta) || data.children.iter().any(mentions_span_key)
             }
         }
     }
@@ -919,26 +907,11 @@ mod tests {
     fn strip_span_meta_reaches_bare_list_and_unknown_form() {
         let mut expr = Expr::BareList(
             vec![
-                Expr::Map(
-                    MetaMap {
-                        entries: vec![span_entry()],
-                    },
-                    sp(),
-                ),
+                Expr::Map(span_metadata(), sp()),
                 Expr::UnknownForm(Box::new(UnknownFormData {
                     head: "mystery".to_string(),
-                    meta: MetaMap {
-                        entries: vec![span_entry()],
-                    },
-                    children: vec![Expr::BareList(
-                        vec![Expr::Map(
-                            MetaMap {
-                                entries: vec![span_entry()],
-                            },
-                            sp(),
-                        )],
-                        sp(),
-                    )],
+                    meta: span_metadata(),
+                    children: vec![Expr::BareList(vec![Expr::Map(span_metadata(), sp())], sp())],
                     span: sp(),
                 })),
             ],

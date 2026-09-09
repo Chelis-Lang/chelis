@@ -316,7 +316,7 @@ fn synth_unary_app(fname: &str, acc_name: &str, app_span: Span) -> Expr {
         List {
             elements: vec![
                 Expr::Atom(Atom::Tag(DeepTag::Var), zero_span),
-                Expr::Map(MetaMap::default(), zero_span),
+                Expr::Map(Metadata::default(), zero_span),
                 Expr::Atom(Atom::Name(fname.to_string()), zero_span),
             ],
         },
@@ -326,7 +326,7 @@ fn synth_unary_app(fname: &str, acc_name: &str, app_span: Span) -> Expr {
         List {
             elements: vec![
                 Expr::Atom(Atom::Tag(DeepTag::Var), zero_span),
-                Expr::Map(MetaMap::default(), zero_span),
+                Expr::Map(Metadata::default(), zero_span),
                 Expr::Atom(Atom::Name(acc_name.to_string()), zero_span),
             ],
         },
@@ -336,7 +336,7 @@ fn synth_unary_app(fname: &str, acc_name: &str, app_span: Span) -> Expr {
         List {
             elements: vec![
                 Expr::Atom(Atom::Tag(DeepTag::App), zero_span),
-                Expr::Map(MetaMap::default(), zero_span),
+                Expr::Map(Metadata::default(), zero_span),
                 callee,
                 arg,
             ],
@@ -356,7 +356,7 @@ fn synth_reduction_app(fname: &str, operand: Expr, axis: Expr, app_span: Span) -
         List {
             elements: vec![
                 Expr::Atom(Atom::Tag(DeepTag::Var), zero_span),
-                Expr::Map(MetaMap::default(), zero_span),
+                Expr::Map(Metadata::default(), zero_span),
                 Expr::Atom(Atom::Name(fname.to_string()), zero_span),
             ],
         },
@@ -366,7 +366,7 @@ fn synth_reduction_app(fname: &str, operand: Expr, axis: Expr, app_span: Span) -
         List {
             elements: vec![
                 Expr::Atom(Atom::Tag(DeepTag::App), zero_span),
-                Expr::Map(MetaMap::default(), zero_span),
+                Expr::Map(Metadata::default(), zero_span),
                 callee,
                 operand,
                 axis,
@@ -548,7 +548,7 @@ pub fn install_chelis_panic_hook() {
     });
 }
 
-use chelis_deep::ast::{Atom, Expr, List, MetaMap};
+use chelis_deep::ast::{Atom, Expr, List, Metadata};
 use chelis_deep::{
     DeepTag, Span, decode_dtype_bounds, decode_effect_kind, exact_type_variable_name,
 };
@@ -2004,7 +2004,7 @@ fn fn_type_arg_exprs(fn_expr: &Expr) -> Option<Vec<&Expr>> {
     let (DeepTag::Fn, meta, _) = stamped_parts(fn_expr)? else {
         return None;
     };
-    let (_, ty_expr) = meta.entries.iter().find(|(key, _)| key == "type")?;
+    let ty_expr = meta.ty()?.expression();
     let (DeepTag::TFn, _, args) = stamped_parts(ty_expr)? else {
         return None;
     };
@@ -2150,14 +2150,11 @@ fn collect_body_precision_var_names(expr: &Expr, out: &mut UnordSet<String>) {
             }
         }
         Expr::Map(map, _) => {
-            for (_, value) in &map.entries {
-                collect_body_precision_var_names(value, out);
-            }
+            map.visit_expressions(&mut |value, _| collect_body_precision_var_names(value, out));
         }
         Expr::MetaExpr(meta, _) => {
-            for (_, value) in &meta.entries {
-                collect_body_precision_var_names(value, out);
-            }
+            meta.metadata
+                .visit_expressions(&mut |value, _| collect_body_precision_var_names(value, out));
             collect_body_precision_var_names(&meta.expr, out);
         }
         Expr::Atom(_, _) => {}
@@ -2510,7 +2507,7 @@ pub fn top_level_lowering_map_with_context(
 /// `type_is_never_lowerable`, which inspects the t-fn return type.
 fn ty_expr_to_deep(ty: &TensorType) -> Expr {
     use chelis_deep::Span;
-    use chelis_deep::ast::{Atom, MetaMap};
+    use chelis_deep::ast::{Atom, Metadata};
     let span = Span::new(0, 0);
     let prim = match ty.precision {
         chelis_types::types::Prim::F32 => "f32",
@@ -2551,7 +2548,7 @@ fn ty_expr_to_deep(ty: &TensorType) -> Expr {
         List {
             elements: vec![
                 Expr::Atom(Atom::Tag(DeepTag::TPrim), span),
-                Expr::Map(MetaMap::default(), span),
+                Expr::Map(Metadata::default(), span),
                 Expr::Atom(Atom::Name(prim.into()), span),
             ],
         },
@@ -2564,7 +2561,7 @@ fn ty_expr_to_deep(ty: &TensorType) -> Expr {
             List {
                 elements: vec![
                     Expr::Atom(Atom::Tag(DeepTag::TTensor), span),
-                    Expr::Map(MetaMap::default(), span),
+                    Expr::Map(Metadata::default(), span),
                     prim_node,
                 ],
             },
@@ -2751,13 +2748,12 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
     match expr {
         Expr::Atom(Atom::Str(_), _) => true,
         Expr::Atom(_, _) => false,
-        Expr::Map(map, _) => map
-            .entries
-            .iter()
-            .any(|(_, value)| expr_requires_host_runtime_with_ctx(value, exempt_to_tensor_literal)),
+        Expr::Map(map, _) => map.any_expression(|value| {
+            expr_requires_host_runtime_with_ctx(value, exempt_to_tensor_literal)
+        }),
         Expr::MetaExpr(meta, _) => {
             expr_requires_host_runtime_with_ctx(&meta.expr, exempt_to_tensor_literal)
-                || meta.entries.iter().any(|(_, value)| {
+                || meta.metadata.any_expression(|value| {
                     expr_requires_host_runtime_with_ctx(value, exempt_to_tensor_literal)
                 })
         }
@@ -3070,13 +3066,6 @@ fn collect_top_level_dtype_bound_names(exprs: &[Expr]) -> BTreeMap<String, Unord
             && let Some(name) = kids.first().and_then(symbol_name)
         {
             let names = decode_dtype_bounds(meta)
-                .unwrap_or_else(|error| {
-                    raise_lowering_error(
-                        format!("malformed dtype_bounds reached IR lowering: {error}"),
-                        Some(expr.span()),
-                        expr.span_id().map(ToOwned::to_owned),
-                    )
-                })
                 .into_iter()
                 .map(|(binder, _)| binder)
                 .collect();
@@ -3353,7 +3342,7 @@ fn expr_depends_on_nonlowerable_name(
             }
             return false;
         }
-        return meta.entries.iter().any(|(_, value)| {
+        return meta.any_expression(|value| {
             expr_depends_on_nonlowerable_name(
                 value,
                 top_level_defs,
@@ -3378,7 +3367,7 @@ fn expr_depends_on_nonlowerable_name(
 
     match expr {
         Expr::Atom(_, _) => false,
-        Expr::Map(map, _) => map.entries.iter().any(|(_, value)| {
+        Expr::Map(map, _) => map.any_expression(|value| {
             expr_depends_on_nonlowerable_name(
                 value,
                 top_level_defs,
@@ -3398,7 +3387,7 @@ fn expr_depends_on_nonlowerable_name(
                 cache,
                 visiting,
                 bound_names,
-            ) || meta.entries.iter().any(|(_, value)| {
+            ) || meta.metadata.any_expression(|value| {
                 expr_depends_on_nonlowerable_name(
                     value,
                     top_level_defs,
@@ -3426,7 +3415,7 @@ fn expr_depends_on_nonlowerable_name(
             )
         }),
         Expr::Node(node, _) => {
-            node.meta().entries.iter().any(|(_, value)| {
+            node.meta().any_expression(|value| {
                 expr_depends_on_nonlowerable_name(
                     value,
                     top_level_defs,
@@ -3558,10 +3547,7 @@ fn builtin_name(list: &List) -> Option<&str> {
 
 fn expr_type_metadata(expr: &Expr) -> Option<&Expr> {
     let (_, meta, _) = stamped_parts(expr)?;
-    meta.entries
-        .iter()
-        .find(|(key, _)| key == "type")
-        .map(|(_, value)| value)
+    meta.ty().map(|value| value.expression())
 }
 
 fn if_expr_is_dag_lowerable(expr: &Expr) -> bool {
@@ -3569,7 +3555,7 @@ fn if_expr_is_dag_lowerable(expr: &Expr) -> bool {
         return false;
     };
 
-    let result_ty = LowerCtx::type_from_meta_static(&meta.entries);
+    let result_ty = LowerCtx::type_from_meta_static(meta);
     if !result_ty.precision.is_float() {
         return false;
     }
@@ -3596,9 +3582,7 @@ fn assert_ir_lowerable(expr: &Expr) {
                 expr,
             ));
         }
-        for (_, value) in &meta.entries {
-            assert_ir_lowerable(value);
-        }
+        meta.visit_expressions(&mut |value, _| assert_ir_lowerable(value));
         for child in kids {
             assert_ir_lowerable(child);
         }
@@ -3612,14 +3596,12 @@ fn assert_ir_lowerable(expr: &Expr) {
         }
         Expr::Node(_, _) => unreachable!("typed nodes are handled by stamped_parts"),
         Expr::Map(map, _) => {
-            for (_, value) in &map.entries {
-                assert_ir_lowerable(value);
-            }
+            map.visit_expressions(&mut |value, _| assert_ir_lowerable(value));
         }
         Expr::MetaExpr(inner, _) => {
-            for (_, value) in &inner.entries {
-                assert_ir_lowerable(value);
-            }
+            inner
+                .metadata
+                .visit_expressions(&mut |value, _| assert_ir_lowerable(value));
             assert_ir_lowerable(&inner.expr);
         }
         Expr::Atom(_, _) => {}
@@ -3652,9 +3634,7 @@ fn assert_ir_typed(expr: &Expr) {
                 expr,
             ));
         }
-        for (_, value) in &meta.entries {
-            assert_ir_typed(value);
-        }
+        meta.visit_expressions(&mut |value, _| assert_ir_typed(value));
         for child in kids {
             assert_ir_typed(child);
         }
@@ -3668,14 +3648,12 @@ fn assert_ir_typed(expr: &Expr) {
         }
         Expr::Node(_, _) => unreachable!("typed nodes are handled by stamped_parts"),
         Expr::Map(map, _) => {
-            for (_, value) in &map.entries {
-                assert_ir_typed(value);
-            }
+            map.visit_expressions(&mut |value, _| assert_ir_typed(value));
         }
         Expr::MetaExpr(inner, _) => {
-            for (_, value) in &inner.entries {
-                assert_ir_typed(value);
-            }
+            inner
+                .metadata
+                .visit_expressions(&mut |value, _| assert_ir_typed(value));
             assert_ir_typed(&inner.expr);
         }
         Expr::Atom(_, _) => {}
@@ -3693,8 +3671,7 @@ fn assert_ir_typed(expr: &Expr) {
 }
 
 fn has_type_metadata(expr: &Expr) -> bool {
-    stamped_parts(expr)
-        .is_some_and(|(_, meta, _)| meta.entries.iter().any(|(key, _)| key == "type"))
+    stamped_parts(expr).is_some_and(|(_, meta, _)| meta.ty().is_some())
 }
 
 fn is_shape_sensitive_builtin_app(expr: &Expr) -> bool {
@@ -3753,7 +3730,7 @@ fn children(list: &List) -> &[Expr] {
 }
 
 /// Borrow the canonical stamped shape without reconstructing a legacy `List`.
-fn stamped_parts(expr: &Expr) -> Option<(DeepTag, &MetaMap, &[Expr])> {
+fn stamped_parts(expr: &Expr) -> Option<(DeepTag, &Metadata, &[Expr])> {
     match expr {
         Expr::List(list, _) => {
             let Some(Expr::Map(meta, _)) = list.elements.get(1) else {
@@ -4485,71 +4462,27 @@ fn extract_numeric_leaf(expr: &Expr) -> Option<StagedScalar> {
 /// metadata as absence. The outer `Option` is recognition success; the inner
 /// one distinguishes an unstamped expression from a stamped scalar.
 fn optional_scalar_prim(expr: &Expr) -> Option<Option<Prim>> {
-    match unique_metadata_value(expr, "type")? {
-        Some(ty) => Some(Some(LowerCtx::try_extract_prim(ty)?)),
+    let metadata = match expr {
+        Expr::Node(_, _) | Expr::List(_, _) => Some(stamped_parts(expr)?.1),
+        _ => None,
+    };
+    match metadata.and_then(|meta| meta.ty()) {
+        Some(ty) => Some(Some(LowerCtx::try_extract_prim(ty.expression())?)),
         None => Some(None),
     }
-}
-
-/// Read a metadata key only when it occurs at most once.
-///
-/// `None` rejects an untagged carrier or duplicate key; `Some(None)` is a
-/// canonical absence. Static folding must not reproduce the parser's
-/// first-entry behavior because duplicate contract metadata is malformed,
-/// not an alternate spelling.
-fn unique_metadata_value<'a>(expr: &'a Expr, key: &str) -> Option<Option<&'a Expr>> {
-    let meta = match expr {
-        Expr::Node(_, _) | Expr::List(_, _) => {
-            let (_, meta, _) = stamped_parts(expr)?;
-            meta
-        }
-        Expr::Atom(_, _)
-        | Expr::Map(_, _)
-        | Expr::MetaExpr(_, _)
-        | Expr::BareList(_, _)
-        | Expr::UnknownForm(_) => return Some(None),
-    };
-    let mut values = meta
-        .entries
-        .iter()
-        .filter_map(|(candidate, value)| (candidate == key).then_some(value));
-    let first = values.next();
-    if values.next().is_some() {
-        return None;
-    }
-    Some(first)
 }
 
 /// A binder-adopted decimal specialized to an integer keeps its f32 source
 /// default; all other polarities finalize at the substituted target.
 fn binder_float_literal_source_default(
-    meta: &[(String, Expr)],
+    meta: &Metadata,
     raw: chelis_types::RawScalar,
     substitutions: &UnordMap<String, Prim>,
 ) -> Option<Prim> {
-    let single = |key: &str| {
-        let mut values = meta
-            .iter()
-            .filter_map(|(candidate, value)| (candidate == key).then_some(value));
-        let value = values.next()?;
-        values.next().is_none().then_some(value)
-    };
-    // Round 5 P1: the DAG lane's twin of the host predicate reads the FIRST
-    // `type` entry for the same reason its sibling does. See the note on
-    // `binder_float_literal_keeps_f32_source` in `host.rs`: the checker and the
-    // interpreter both take the first entry, so a lowering reader that demands
-    // exactly one is stricter than the readers that decide acceptance and
-    // silently changes the answer when they disagree. `surf_literal_style`
-    // keeps `single`, because the checker rejects a duplicate of that key.
-    let binder = meta
-        .iter()
-        .find_map(|(candidate, value)| (candidate == "type").then_some(value))
-        .and_then(extract_scalar_precision_var_name)?;
-    let exact_unsuffixed = matches!(
-        single("surf_literal_style"),
-        Some(Expr::Atom(Atom::Str(style), _)) if style == "unsuffixed"
-    );
-    if !exact_unsuffixed {
+    let binder = extract_scalar_precision_var_name(meta.ty()?.expression())?;
+    if meta.surf_literal_style().map(|style| *style.value())
+        != Some(chelis_deep::annotations::LiteralStyle::Unsuffixed)
+    {
         return None;
     }
     matches!(raw, chelis_types::RawScalar::Float(_))
@@ -4569,18 +4502,15 @@ fn binder_float_literal_source_default(
 fn extract_type_checked_literal(expr: &Expr) -> Option<chelis_types::ScalarValue> {
     use chelis_types::{scalar_from_f64, scalar_from_i64};
 
-    let (DeepTag::Lit, _, kids) = stamped_parts(expr)? else {
+    let (DeepTag::Lit, metadata, kids) = stamped_parts(expr)? else {
         return None;
     };
     let [Expr::Atom(atom, _)] = kids else {
         return None;
     };
     let declared = optional_scalar_prim(expr)??;
-    let literal_source = unique_metadata_value(expr, "literal_source")?;
-    let integer_source = matches!(
-        literal_source,
-        Some(Expr::Atom(Atom::Name(source), _)) if source == "integer"
-    );
+    let literal_source = metadata.literal_source();
+    let integer_source = literal_source.is_some();
 
     match (atom, declared, literal_source) {
         (Atom::Int(value), prim, None) if prim.is_integer() => {
@@ -4993,35 +4923,22 @@ fn extract_param_type(expr: &Expr, index: usize) -> Option<&Expr> {
     };
     let param = params_kids.get(index)?;
     let authored = match param {
-        Expr::MetaExpr(meta, _) => meta
-            .entries
-            .iter()
-            .find(|(key, _)| key == "type")
-            .map(|(_, value)| value),
+        Expr::MetaExpr(meta, _) => meta.metadata.ty().map(|value| value.expression()),
         Expr::List(param_list, _) => {
             if let Some(Expr::Map(meta, _)) = param_list.elements.get(1) {
-                meta.entries
-                    .iter()
-                    .find(|(key, _)| key == "type")
-                    .map(|(_, value)| value)
+                meta.ty().map(|value| value.expression())
             } else {
                 None
             }
         }
-        Expr::Node(_, _) => stamped_parts(param).and_then(|(_, meta, _)| {
-            meta.entries
-                .iter()
-                .find(|(key, _)| key == "type")
-                .map(|(_, value)| value)
-        }),
+        Expr::Node(_, _) => {
+            stamped_parts(param).and_then(|(_, meta, _)| meta.ty().map(|value| value.expression()))
+        }
         Expr::BareList(elements, _) => {
             let Expr::Map(meta, _) = elements.get(1)? else {
                 return None;
             };
-            meta.entries
-                .iter()
-                .find(|(key, _)| key == "type")
-                .map(|(_, value)| value)
+            meta.ty().map(|value| value.expression())
         }
         _ => None,
     };
@@ -5035,11 +4952,7 @@ fn param_name_and_type_expr(param: &Expr) -> Option<(String, Option<&Expr>)> {
             let Expr::Atom(Atom::Name(name), _) = meta.expr.as_ref() else {
                 return None;
             };
-            let ty_expr = meta
-                .entries
-                .iter()
-                .find(|(key, _)| key == "type")
-                .map(|(_, value)| value);
+            let ty_expr = meta.metadata.ty().map(|value| value.expression());
             Some((name.clone(), ty_expr))
         }
         Expr::List(param_list, _) => {
@@ -5047,10 +4960,7 @@ fn param_name_and_type_expr(param: &Expr) -> Option<(String, Option<&Expr>)> {
                 return None;
             };
             let ty_expr = if let Some(Expr::Map(meta, _)) = param_list.elements.get(1) {
-                meta.entries
-                    .iter()
-                    .find(|(key, _)| key == "type")
-                    .map(|(_, value)| value)
+                meta.ty().map(|value| value.expression())
             } else {
                 None
             };
@@ -5061,10 +4971,7 @@ fn param_name_and_type_expr(param: &Expr) -> Option<(String, Option<&Expr>)> {
                 return None;
             };
             let ty_expr = if let Some(Expr::Map(meta, _)) = elements.get(1) {
-                meta.entries
-                    .iter()
-                    .find(|(key, _)| key == "type")
-                    .map(|(_, value)| value)
+                meta.ty().map(|value| value.expression())
             } else {
                 None
             };
@@ -5078,7 +4985,7 @@ fn extract_fn_return_type(expr: &Expr) -> Option<&Expr> {
     let (DeepTag::Fn, meta, _) = stamped_parts(expr)? else {
         return None;
     };
-    let (_, ty_expr) = meta.entries.iter().find(|(key, _)| key == "type")?;
+    let ty_expr = meta.ty()?.expression();
     let (DeepTag::TFn, _, fn_kids) = stamped_parts(ty_expr)? else {
         return None;
     };
@@ -5397,17 +5304,16 @@ impl LowerCtx {
     /// `self.rank_substitutions` when extracting a tensor type out of a Deep
     /// meta map. Ensures inlined polymorphic-def bodies see substituted
     /// precisions and concrete ranks on their `type:` annotations.
-    fn type_from_meta(&self, meta: &[(String, Expr)]) -> TensorType {
-        for (key, val) in meta {
-            if key == "type" {
-                return Self::type_from_type_expr_with_subst(
-                    val,
+    fn type_from_meta(&self, meta: &Metadata) -> TensorType {
+        meta.ty()
+            .map(|ty| {
+                Self::type_from_type_expr_with_subst(
+                    ty.expression(),
                     &self.prec_substitutions,
                     &self.rank_substitutions,
-                );
-            }
-        }
-        Self::default_type()
+                )
+            })
+            .unwrap_or_else(Self::default_type)
     }
 
     /// Static (no-substitution) variant of [`Self::type_from_meta`].
@@ -5415,13 +5321,10 @@ impl LowerCtx {
     /// the if-lowerable shape pre-check at top-level analysis time).
     /// A `(t-var)` precision slot reaching this entry will trip the
     /// F2 backend tripwire panic per spec/04-type-system.md §5.8.1.
-    fn type_from_meta_static(meta: &[(String, Expr)]) -> TensorType {
-        for (key, val) in meta {
-            if key == "type" {
-                return Self::type_from_type_expr(val);
-            }
-        }
-        Self::default_type()
+    fn type_from_meta_static(meta: &Metadata) -> TensorType {
+        meta.ty()
+            .map(|ty| Self::type_from_type_expr(ty.expression()))
+            .unwrap_or_else(Self::default_type)
     }
 
     fn remap_callable_dim_symbols(
@@ -6390,7 +6293,7 @@ impl LowerCtx {
     /// `(lit {type: T} value)`
     fn lower_lit(&mut self, elems: &[Expr]) -> LoweredValue {
         let ty = if let Some(Expr::Map(meta, _)) = elems.get(1) {
-            self.type_from_meta(&meta.entries)
+            self.type_from_meta(meta)
         } else {
             Self::default_type()
         };
@@ -6419,11 +6322,9 @@ impl LowerCtx {
         let prim = elems
             .get(1)
             .and_then(|meta| match meta {
-                Expr::Map(meta, _) => binder_float_literal_source_default(
-                    &meta.entries,
-                    raw,
-                    &self.prec_substitutions,
-                ),
+                Expr::Map(meta, _) => {
+                    binder_float_literal_source_default(meta, raw, &self.prec_substitutions)
+                }
                 _ => None,
             })
             .unwrap_or(ty.precision);
@@ -6472,7 +6373,7 @@ impl LowerCtx {
     fn lower_var(&mut self, elems: &[Expr]) -> LoweredValue {
         // C6: Extract type from metadata if available, otherwise use checked top-level type info.
         let explicit_ty = if let Some(Expr::Map(meta, _)) = elems.get(1) {
-            self.type_from_meta(&meta.entries)
+            self.type_from_meta(meta)
         } else {
             Self::default_type()
         };
@@ -6575,7 +6476,7 @@ impl LowerCtx {
         }
 
         let ty = if let Some(Expr::Map(meta, _)) = elems.get(1) {
-            self.type_from_meta(&meta.entries)
+            self.type_from_meta(meta)
         } else {
             Self::default_type()
         };
@@ -12639,11 +12540,7 @@ impl LowerCtx {
         let checked_param_types = elems
             .get(1)
             .and_then(|expr| match expr {
-                Expr::Map(meta, _) => meta
-                    .entries
-                    .iter()
-                    .find(|(key, _)| key == "type")
-                    .map(|(_, value)| value),
+                Expr::Map(meta, _) => meta.ty().map(|value| value.expression()),
                 _ => None,
             })
             .and_then(stamped_parts)
@@ -13220,7 +13117,7 @@ impl LowerCtx {
         let else_node = self.expect_runtime_if_branch(else_value, "else", elems);
         self.random_path_condition = saved_random_path;
         let out_ty = if let Some(Expr::Map(meta, _)) = elems.get(1) {
-            self.type_from_meta(&meta.entries)
+            self.type_from_meta(meta)
         } else {
             self.dag
                 .get(then_node)
@@ -13865,7 +13762,7 @@ mod tests {
         let mut out = chelis_unord::UnordSet::new();
         let unknown = Expr::UnknownForm(Box::new(chelis_deep::ast::UnknownFormData {
             head: "mystery".to_string(),
-            meta: chelis_deep::ast::MetaMap::default(),
+            meta: chelis_deep::ast::Metadata::default(),
             children: vec![],
             span: chelis_deep::Span::new(0, 0),
         }));
@@ -13895,7 +13792,7 @@ mod tests {
             chelis_deep::ast::List {
                 elements: vec![
                     Expr::Atom(Atom::Name("t-prim".into()), Span::new(0, 0)),
-                    Expr::Map(chelis_deep::ast::MetaMap::default(), Span::new(0, 0)),
+                    Expr::Map(chelis_deep::ast::Metadata::default(), Span::new(0, 0)),
                 ],
             },
             Span::new(0, 0),
@@ -13909,7 +13806,7 @@ mod tests {
     fn boundary_guard_accepts_a_stamped_head() {
         let stamped = Expr::node(
             DeepTag::TPrim,
-            chelis_deep::ast::MetaMap::default(),
+            chelis_deep::ast::Metadata::default(),
             vec![Expr::Atom(Atom::Name("f32".into()), Span::new(0, 0))],
             Span::new(0, 0),
         );
@@ -13919,7 +13816,7 @@ mod tests {
     #[test]
     fn stamped_numeric_leaf_preserves_exact_checked_cast_semantics() {
         let span = Span::new(0, 0);
-        let meta = chelis_deep::ast::MetaMap::default();
+        let meta = chelis_deep::ast::Metadata::default();
         let literal = Expr::node(
             DeepTag::Lit,
             meta.clone(),
@@ -13947,7 +13844,7 @@ mod tests {
     #[test]
     fn stamped_numeric_leaf_declines_trapping_cast_and_integer_negation() {
         let span = Span::new(0, 0);
-        let meta = chelis_deep::ast::MetaMap::default();
+        let meta = chelis_deep::ast::Metadata::default();
         let int_lit = |value| {
             Expr::node(
                 DeepTag::Lit,
@@ -14037,7 +13934,7 @@ mod tests {
             chelis_deep::ast::List {
                 elements: vec![
                     Expr::Atom(Atom::Name("effects".into()), Span::new(0, 0)),
-                    Expr::Map(chelis_deep::ast::MetaMap::default(), Span::new(0, 0)),
+                    Expr::Map(chelis_deep::ast::Metadata::default(), Span::new(0, 0)),
                 ],
             },
             Span::new(0, 0),
@@ -16231,10 +16128,6 @@ mod tests {
             "(app {type: (t-prim {} int64)} (var {} neg) \
                  (lit {type: (t-prim {} string)} 1))",
             "(cast {} (lit {type: (t-prim {} bool)} 1) (t-prim {} int64))",
-            "(cast {} (lit {type: (t-prim {} f64), literal_source: floating} 7.0) \
-                 (t-prim {} int64))",
-            "(cast {} (lit {type: (t-prim {} f64), literal_source: integer, \
-                 literal_source: integer} 7) (t-prim {} int64))",
             "(cast {} (lit {type: (t-prim {} int32)} 7) (t-prim {} int64) trunc)",
             "(cast {} (cast {} (lit {type: (t-prim {} int32)} 7) \
                  (t-prim {} string)) (t-prim {} int64))",
@@ -16289,12 +16182,36 @@ mod tests {
     }
 
     #[test]
-    fn issue_794_malformed_literal_and_cast_modes_use_typed_unsupported_channel() {
-        let seeds = [
-            "(cast {} (lit {type: (t-prim {} f64), literal_source: floating} 7.0) \
-                 (t-prim {} int64))",
-            "(cast {} (lit {type: (t-prim {} int32)} 7) (t-prim {} int64) trunc)",
-        ];
+    fn issue_794_seed_annotations_reject_before_lowering() {
+        for (seed, reason) in [
+            (
+                "(cast {} (lit {type: (t-prim {} f64), literal_source: floating} 7.0) (t-prim {} int64))",
+                "integer on lit",
+            ),
+            (
+                "(cast {} (lit {type: (t-prim {} f64), literal_source: integer, literal_source: integer} 7) (t-prim {} int64))",
+                "exactly one occurrence",
+            ),
+        ] {
+            for source in [
+                seed.to_string(),
+                format!("(handle-effect {{effect: random}} {seed} (lit {{}} 1))"),
+            ] {
+                let error = chelis_deep::parser::parse_str(&source)
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    error.contains("metadata `literal_source`"),
+                    "{source}: {error}"
+                );
+                assert!(error.contains(reason), "{source}: {error}");
+            }
+        }
+    }
+
+    #[test]
+    fn issue_794_malformed_cast_modes_use_typed_unsupported_channel() {
+        let seeds = ["(cast {} (lit {type: (t-prim {} int32)} 7) (t-prim {} int64) trunc)"];
         for seed in seeds {
             let source = format!(
                 "(handle-effect {{effect: random}} \
@@ -18019,7 +17936,7 @@ mod regression_tests {
     #[test]
     fn deftype_tensor_invariant_metadata_does_not_trip_runtime_audit() {
         let src = r#"
-            (deftype {invariant: (fn {}
+            (deftype {opaque: true, invariant: (fn {}
                                    (params {} p)
                                    (app {}
                                      (var {} gte)
@@ -18049,7 +17966,7 @@ mod regression_tests {
     #[test]
     fn deftype_scalar_invariant_metadata_does_not_trip_runtime_audit() {
         let src = r#"
-            (deftype {invariant: (fn {}
+            (deftype {opaque: true, invariant: (fn {}
                                    (params {} p)
                                    (app {}
                                      (var {} and)

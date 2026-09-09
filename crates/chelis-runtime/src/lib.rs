@@ -19,6 +19,11 @@ mod decimal_parse;
 pub mod dtype_header;
 mod element;
 mod ieee_narrow;
+mod metadata;
+use metadata::{
+    AllocationBytes, AxisDecomposition, ByteCount, ElementCount, IterationSpace, MetadataError,
+    ShapeMetadata,
+};
 mod ownership_ledger;
 
 #[cfg(test)]
@@ -52,7 +57,7 @@ pub const CHELIS_DTYPE_I16: chelis_dtype = RuntimeDType::I16.id() as chelis_dtyp
 // `CRuntime-F32Coupling` §5 entry by giving each Rust primitive a
 // typed accessor on `chelis_tensor` and a `Result`-returning dtype
 // check.  Migrated call sites read or write the data buffer through
-// `<T>::data_ptr_unchecked` after an outer match on `(*t).dtype`,
+// `<T>::data_ptr_unchecked` after an outer match on `(*t).dtype()`,
 // or through `<T>::data_ptr` when the dtype is not yet verified.
 //
 // See `docs/design/compiler_cleanup_0_7_8_spec_lock.md` Contract 2
@@ -124,10 +129,10 @@ pub trait TensorElement: element::ElementStorage + Sized + Copy {
     #[inline]
     unsafe fn fill(tensor: *mut chelis_tensor, value: Self) {
         let ptr = unsafe { Self::data_ptr_unchecked(tensor) };
-        let size = unsafe { (*tensor).size } as isize;
+        let size = unsafe { (*tensor).count() };
         for i in 0..size {
             unsafe {
-                *ptr.offset(i) = value;
+                *ptr.add(i) = value;
             }
         }
     }
@@ -686,60 +691,6 @@ fn parse_einsum_equation(equation: &str, lhs_rank: usize, rhs_rank: usize) -> Ei
     }
 }
 
-/// The element count of a shape, in the canonical int64 extent domain
-/// ([05-DIM-2]), independent of the order the extents appear in.
-///
-/// Two rules meet here.
-///
-/// The domain is int64. [05-OP-33] requires an unrepresentable count to trap
-/// `Overflow`, and "representable" means representable as an int64 extent, not
-/// "happens to fit whatever width this host spells `usize`". A `usize` fold
-/// accepts the whole `[i64::MAX + 1, u64::MAX]` band on a 64-bit host and
-/// rejects legal extents on a 32-bit one, making the language's extent domain
-/// a property of the compiling machine.
-///
-/// The count is a product, not a running prefix. A zero extent means zero
-/// elements ([05-OP-33]), so the count of any shape containing a zero is zero
-/// no matter what the other extents are or where they sit. Folding
-/// left-to-right and trapping on the first intermediate that leaves int64 made
-/// acceptance depend on axis order: `[i64::MAX, 0, i64::MAX]` was accepted with
-/// size zero while its permutation `[i64::MAX, i64::MAX, 0]` was rejected,
-/// though both describe the same empty tensor. Extents are already validated
-/// nonnegative, so once no extent is zero the product is monotonic and a
-/// checked fold over the rest is exact.
-fn checked_extent_product(extents: impl IntoIterator<Item = i64> + Clone, context: &str) -> i64 {
-    if extents.clone().into_iter().any(|extent| extent == 0) {
-        return 0;
-    }
-    extents.into_iter().fold(1_i64, |product, extent| {
-        product
-            .checked_mul(extent)
-            .unwrap_or_else(|| runtime_fail!("Overflow: {context} extent product exceeds int64"))
-    })
-}
-
-/// Host length for a buffer of `count` elements at `element`'s width, with the
-/// byte size checked before anything can request it.
-///
-/// [05-OP-33] requires an unrepresentable allocation size to trap `Overflow`
-/// *before* allocation. A count that survives the int64 fold above can still
-/// name a byte size that is not an int64 quantity, and `Vec::with_capacity`
-/// reports that as a bare `capacity overflow` panic across the C boundary
-/// rather than a branded diagnostic.
-fn checked_einsum_buffer_len(count: i64, element: RuntimeDType, context: &str) -> usize {
-    if count
-        .checked_mul(tensor_elem_size(element) as i64)
-        .is_none()
-    {
-        runtime_fail!("Overflow: einsum {context} buffer byte size exceeds int64");
-    }
-    usize::try_from(count).unwrap_or_else(|_| {
-        runtime_fail!(
-            "Overflow: einsum {context} extent product {count} is not representable on this host"
-        )
-    })
-}
-
 #[inline]
 fn einsum_label_index(label: u8) -> usize {
     usize::from(label - b'a')
@@ -756,25 +707,19 @@ fn tensor_elem_size(dtype: RuntimeDType) -> usize {
 
 fn validate_data_contract(
     data: *mut u8,
-    byte_capacity: i64,
-    required_bytes: i64,
-    dtype: RuntimeDType,
+    byte_capacity: ByteCount,
+    metadata: &ShapeMetadata,
     context: &str,
 ) {
-    if byte_capacity < 0 {
-        runtime_fail!("Domain: {context} has negative byte capacity {byte_capacity}");
-    }
-    if required_bytes == 0 {
+    metadata_or_fail(metadata.require_capacity(byte_capacity), context);
+    metadata_or_fail(metadata.bytes().allocation(), context);
+    if metadata.elements().get() == 0 {
         return;
     }
     if data.is_null() {
         runtime_fail!("Domain: {context} nonempty tensor has null data");
     }
-    if byte_capacity < required_bytes {
-        runtime_fail!(
-            "Domain: {context} byte capacity {byte_capacity} is smaller than required {required_bytes}"
-        );
-    }
+    let dtype = metadata.dtype();
     let alignment = tensor_elem_size(dtype);
     if !(data as usize).is_multiple_of(alignment) {
         runtime_fail!(
@@ -784,13 +729,11 @@ fn validate_data_contract(
     }
 }
 
-struct TensorMetadata {
-    shape: Box<[i64]>,
-    strides: Box<[i64]>,
-    size: i64,
-    rank: c_int,
-    dtype: RuntimeDType,
-    required_bytes: i64,
+fn metadata_or_fail<T>(result: Result<T, MetadataError>, context: &str) -> T {
+    result.unwrap_or_else(|error| match error {
+        MetadataError::Domain(message) => runtime_fail!("Domain: {context} {message}"),
+        MetadataError::Overflow(message) => runtime_fail!("Overflow: {context} {message}"),
+    })
 }
 
 unsafe fn checked_tensor_metadata(
@@ -798,61 +741,30 @@ unsafe fn checked_tensor_metadata(
     shape: *const i64,
     dtype: RuntimeDType,
     context: &str,
-) -> TensorMetadata {
+) -> ShapeMetadata {
     if rank < 0 {
         runtime_fail!("Domain: {context} has negative rank {rank}");
     }
-    if rank == 0 {
-        let bytes = i64::try_from(tensor_elem_size(dtype)).expect("dtype widths fit i64");
-        return TensorMetadata {
-            shape: Box::new([]),
-            strides: Box::new([]),
-            size: 1,
-            rank,
-            dtype,
-            required_bytes: bytes,
-        };
-    }
-    if shape.is_null() {
-        runtime_fail!("Domain: {context} positive rank has null shape");
-    }
-    let rank_usize = rank as usize;
-    let mut owned_shape = Vec::with_capacity(rank_usize);
-    for axis in 0..rank_usize {
-        let extent = *shape.add(axis);
-        if extent < 0 {
-            runtime_fail!("Domain: {context} has negative extent {extent} at axis {axis}");
+    let extents = if rank == 0 {
+        Vec::new()
+    } else {
+        if shape.is_null() {
+            runtime_fail!("Domain: {context} positive rank has null shape");
         }
-        owned_shape.push(extent);
-    }
-    // The element count is the product of every extent, so it does not depend
-    // on axis order. The canonical strides below stay a checked suffix walk on
-    // purpose: [05-OP-31] defines each stride as the exact product of the
-    // following extents, and that product really can leave int64 for an empty
-    // tensor (`[0, i64::MAX, i64::MAX]` has an unrepresentable axis-0 stride),
-    // which is an `Overflow` the shape product must not mask.
-    let size = checked_extent_product(owned_shape.iter().copied(), context);
-    let mut owned_strides = vec![0_i64; rank_usize];
-    let mut stride = 1_i64;
-    for axis in (0..rank_usize).rev() {
-        owned_strides[axis] = stride;
-        stride = stride
-            .checked_mul(owned_shape[axis])
-            .unwrap_or_else(|| runtime_fail!("Overflow: {context} stride product exceeds int64"));
-    }
-    let byte_capacity = size
-        .checked_mul(tensor_elem_size(dtype) as i64)
-        .unwrap_or_else(|| runtime_fail!("Overflow: {context} byte size exceeds int64"));
-    usize::try_from(byte_capacity)
-        .unwrap_or_else(|_| runtime_fail!("Overflow: {context} byte size exceeds usize"));
-    TensorMetadata {
-        shape: owned_shape.into_boxed_slice(),
-        strides: owned_strides.into_boxed_slice(),
-        size,
-        rank,
-        dtype,
-        required_bytes: byte_capacity,
-    }
+        let axis_count = metadata_or_fail(ElementCount::from_extents(&[i64::from(rank)]), context);
+        metadata_or_fail(
+            axis_count
+                .bytes(RuntimeDType::I64)
+                .and_then(ByteCount::allocation),
+            context,
+        );
+        let mut extents = Vec::with_capacity(rank as usize);
+        for axis in 0..rank as usize {
+            extents.push(shape.add(axis).read());
+        }
+        extents
+    };
+    metadata_or_fail(ShapeMetadata::contiguous(&extents, dtype), context)
 }
 
 unsafe fn validate_tensor(tensor: *const chelis_tensor, context: &str) -> RuntimeDType {
@@ -868,7 +780,7 @@ unsafe fn validate_tensor_contents(tensor: &chelis_tensor, context: &str) -> Run
     let dtype = validate_tensor_metadata(tensor, context);
     if dtype == RuntimeDType::Bool {
         let data = tensor_storage_data(tensor.storage);
-        for index in 0..tensor.size as usize {
+        for index in 0..tensor.count() {
             let byte = *data.add(index);
             if Bool8::from_u8(byte).is_none() {
                 runtime_fail!(
@@ -881,55 +793,22 @@ unsafe fn validate_tensor_contents(tensor: &chelis_tensor, context: &str) -> Run
 }
 
 unsafe fn validate_tensor_metadata(tensor: &chelis_tensor, context: &str) -> RuntimeDType {
-    let dtype = require_runtime_dtype(tensor.dtype, context);
-    if tensor.rank < 0 {
-        runtime_fail!("Domain: {context}: tensor rank is negative");
-    }
-    if tensor.rank == 0 {
-        if !tensor.shape.is_empty() || !tensor.strides.is_empty() {
-            runtime_fail!("Domain: {context}: rank-zero tensor metadata must be empty");
-        }
-        if tensor.size != 1 {
-            runtime_fail!("Domain: {context}: rank-zero tensor must contain one element");
-        }
-    } else {
-        if tensor.shape.len() != tensor.rank as usize
-            || tensor.strides.len() != tensor.rank as usize
-        {
-            runtime_fail!("Domain: {context}: tensor metadata length does not match rank");
-        }
-        let mut size = 1_i64;
-        let mut stride = 1_i64;
-        for axis in (0..tensor.rank as usize).rev() {
-            let extent = tensor.shape[axis];
-            if extent < 0 {
-                runtime_fail!("Domain: {context}: negative tensor extent");
-            }
-            if tensor.strides[axis] != stride {
-                runtime_fail!("Domain: {context}: noncanonical tensor strides");
-            }
-            stride = stride
-                .checked_mul(extent)
-                .unwrap_or_else(|| runtime_fail!("Overflow: {context}: tensor shape overflow"));
-            size = stride;
-        }
-        if tensor.size != size {
-            runtime_fail!("Domain: {context}: tensor size does not match shape");
-        }
-    }
-    let required_bytes = tensor
-        .size
-        .checked_mul(tensor_elem_size(dtype) as i64)
-        .unwrap_or_else(|| runtime_fail!("Overflow: {context}: tensor byte size overflow"));
+    // Shape, count, canonical strides and representation cannot be assigned
+    // independently: only the private checked metadata owner constructs them.
+    let metadata = &tensor.metadata;
     require_live_kind(
         tensor.storage.cast(),
         ownership_ledger::Kind::TensorStorage,
         context,
     );
     let storage = &*tensor.storage;
-    let data = tensor_storage_data(tensor.storage);
-    validate_data_contract(data, storage.byte_capacity, required_bytes, dtype, context);
-    dtype
+    validate_data_contract(
+        tensor_storage_data(tensor.storage),
+        storage.byte_capacity,
+        metadata,
+        context,
+    );
+    metadata.dtype()
 }
 
 #[repr(C)]
@@ -951,16 +830,30 @@ impl HeapHeader {
 pub struct chelis_tensor {
     header: HeapHeader,
     storage: *mut TensorStorage,
-    shape: Box<[i64]>,
-    strides: Box<[i64]>,
-    size: i64,
-    rank: c_int,
-    dtype: chelis_dtype,
+    metadata: ShapeMetadata,
     /// Serializes descriptor lifetime operations with the embedded write
     /// lease. IDLE -> LOCKED is a transient runtime transition; WRITING is
     /// the public guard lifetime.
     access: AtomicU8,
     write_guard: chelis_tensor_write,
+}
+
+impl chelis_tensor {
+    fn shape(&self) -> &[i64] {
+        self.metadata.shape()
+    }
+    fn size(&self) -> i64 {
+        self.metadata.elements().get()
+    }
+    fn count(&self) -> usize {
+        metadata_or_fail(self.metadata.elements().as_usize(), "tensor element count")
+    }
+    fn rank(&self) -> c_int {
+        self.metadata.rank()
+    }
+    fn dtype(&self) -> chelis_dtype {
+        self.metadata.dtype().id() as chelis_dtype
+    }
 }
 
 const TENSOR_ACCESS_IDLE: u8 = 0;
@@ -978,7 +871,7 @@ enum TensorStorageProvenance {
 struct TensorStorage {
     header: HeapHeader,
     data: *mut u8,
-    byte_capacity: i64,
+    byte_capacity: ByteCount,
     provenance: TensorStorageProvenance,
 }
 
@@ -1064,22 +957,6 @@ pub union chelis_value_payload {
     pub mapped_file: *mut chelis_mapped_file,
 }
 
-unsafe fn chelis_flat_to_indices(flat: i64, shape: *const i64, rank: c_int, out: *mut i64) {
-    let mut flat = flat;
-    for d in (0..rank as isize).rev() {
-        *out.offset(d) = flat % *shape.offset(d);
-        flat /= *shape.offset(d);
-    }
-}
-
-unsafe fn chelis_indices_to_flat(indices: *const i64, strides: *const i64, rank: c_int) -> i64 {
-    let mut flat = 0;
-    for d in 0..rank as isize {
-        flat += *indices.offset(d) * *strides.offset(d);
-    }
-    flat
-}
-
 /// Read a signed-integer-valued slot from a tensor at logical offset
 /// `linear`, dispatching on the tensor's declared dtype. RT-4 F1
 /// sibling: gather/scatter previously read indices via `*data.add(i)`
@@ -1100,17 +977,6 @@ unsafe fn read_index_slot(t: *const chelis_tensor, linear: usize, dtype: Runtime
             dtype.name()
         ),
     }
-}
-
-unsafe fn chelis_is_contiguous(t: *const chelis_tensor) -> c_int {
-    let mut expected = 1;
-    for d in (0..(*t).rank as isize).rev() {
-        if (*t).strides[d as usize] != expected {
-            return 0;
-        }
-        expected *= (*t).shape[d as usize];
-    }
-    1
 }
 
 #[repr(C)]
@@ -1153,9 +1019,10 @@ fn validate_scalar(value: chelis_scalar, context: &str) -> RuntimeDType {
 }
 
 fn exact_i64_scalar(value: chelis_scalar, context: &str) -> i64 {
-    if validate_scalar(value, context) != RuntimeDType::I64 {
+    if value.dtype != CHELIS_DTYPE_I64 {
         runtime_fail!("Domain: {context} requires int64 tagged metadata");
     }
+    validate_scalar(value, context);
     i64::from_ne_bytes(value.bits.to_ne_bytes())
 }
 
@@ -1769,26 +1636,59 @@ unsafe fn tensor_normalize_axis(tensor: *const chelis_tensor, axis: i32, op: &st
     let axis64 = i64::from(axis);
     let normalized = if axis64 < 0 {
         axis64
-            .checked_add(i64::from((*tensor).rank))
+            .checked_add(i64::from((*tensor).rank()))
             .unwrap_or_else(|| runtime_fail!("Overflow: {op} axis normalization overflow"))
     } else {
         axis64
     };
-    if normalized < 0 || normalized >= i64::from((*tensor).rank) {
+    if normalized < 0 || normalized >= i64::from((*tensor).rank()) {
         runtime_fail!("Domain: {op} axis {axis} out of bounds");
     }
     normalized as usize
 }
 
-unsafe fn tensor_clone(tensor: *const chelis_tensor) -> *mut chelis_tensor {
-    let dtype = tensor_dtype(tensor, "tensor clone");
-    let out = chelis_alloc(
-        (*tensor).rank,
-        (*tensor).shape.as_ptr(),
-        dtype.id() as chelis_dtype,
+unsafe fn copy_bytes(source: *const u8, destination: *mut u8, bytes: AllocationBytes) {
+    // Rust's copy preconditions apply even at length zero; empty public
+    // tensors deliberately carry null pointers, so do not submit that copy.
+    if bytes.get() != 0 {
+        ptr::copy_nonoverlapping(source, destination, bytes.get());
+    }
+}
+
+unsafe fn copy_tensor_element(
+    source: *const chelis_tensor,
+    source_index: i64,
+    destination: *mut chelis_tensor,
+    destination_index: i64,
+    context: &str,
+) {
+    let source_metadata = &(*source).metadata;
+    let destination_metadata = &(*destination).metadata;
+    if source_metadata.dtype() != destination_metadata.dtype() {
+        runtime_fail!("Domain: {context} copy representation mismatch");
+    }
+    let source_offset = metadata_or_fail(source_metadata.byte_offset(source_index), context);
+    let destination_offset =
+        metadata_or_fail(destination_metadata.byte_offset(destination_index), context);
+    let bytes = metadata_or_fail(
+        ElementCount::from_extents(&[])
+            .and_then(|count| count.bytes(source_metadata.dtype()))
+            .and_then(ByteCount::allocation),
+        context,
     );
-    let bytes = (*tensor).size as usize * tensor_elem_size(dtype);
-    ptr::copy_nonoverlapping(tensor_data(tensor) as *const u8, tensor_data(out), bytes);
+    copy_bytes(
+        tensor_data(source).add(source_offset.get()),
+        tensor_data(destination).add(destination_offset.get()),
+        bytes,
+    );
+}
+
+unsafe fn tensor_clone(tensor: *const chelis_tensor) -> *mut chelis_tensor {
+    tensor_dtype(tensor, "tensor clone");
+    let metadata = (*tensor).metadata.clone();
+    let bytes = metadata_or_fail(metadata.bytes().allocation(), "tensor clone");
+    let out = allocate_tensor(metadata, "tensor clone");
+    copy_bytes(tensor_data(tensor), tensor_data(out), bytes);
     out
 }
 
@@ -1797,11 +1697,11 @@ unsafe fn require_same_tensor_shape_validated(
     rhs: *const chelis_tensor,
     op: &str,
 ) {
-    if (*lhs).rank != (*rhs).rank {
+    if (*lhs).rank() != (*rhs).rank() {
         runtime_fail!("{op} expects matching tensor rank");
     }
-    for axis in 0..(*lhs).rank as usize {
-        if (*lhs).shape[axis] != (*rhs).shape[axis] {
+    for axis in 0..(*lhs).rank() as usize {
+        if (*lhs).shape()[axis] != (*rhs).shape()[axis] {
             runtime_fail!("{op} expects matching tensor shape");
         }
     }
@@ -1811,14 +1711,14 @@ unsafe fn tensor_scalar_or_same_shape_validated(
     bound: *const chelis_tensor,
     tensor: *const chelis_tensor,
 ) -> bool {
-    if (*bound).rank == 0 {
+    if (*bound).rank() == 0 {
         return true;
     }
-    if (*bound).rank != (*tensor).rank {
+    if (*bound).rank() != (*tensor).rank() {
         return false;
     }
-    for axis in 0..(*tensor).rank as usize {
-        if (*bound).shape[axis] != (*tensor).shape[axis] {
+    for axis in 0..(*tensor).rank() as usize {
+        if (*bound).shape()[axis] != (*tensor).shape()[axis] {
             return false;
         }
     }
@@ -1840,16 +1740,21 @@ pub unsafe extern "C" fn chelis_alloc(
 ) -> *mut chelis_tensor {
     let dtype = require_runtime_dtype(dtype, "chelis_alloc");
     let metadata = unsafe { checked_tensor_metadata(rank, shape, dtype, "chelis_alloc") };
-    let byte_capacity = metadata.required_bytes;
-    let data = if byte_capacity == 0 {
+    allocate_tensor(metadata, "chelis_alloc")
+}
+
+unsafe fn allocate_tensor(metadata: ShapeMetadata, context: &str) -> *mut chelis_tensor {
+    let byte_capacity = metadata.bytes();
+    let allocation_bytes = metadata_or_fail(byte_capacity.allocation(), context);
+    let data = if allocation_bytes.get() == 0 {
         ptr::null_mut()
     } else {
         let mut allocation: *mut libc::c_void = ptr::null_mut();
-        let ret = libc::posix_memalign(&mut allocation, 32, byte_capacity as usize);
+        let ret = libc::posix_memalign(&mut allocation, 32, allocation_bytes.get());
         if ret != 0 || allocation.is_null() {
-            runtime_fail!("Domain: chelis_alloc tensor allocation failed");
+            runtime_fail!("Domain: {context} tensor allocation failed");
         }
-        libc::memset(allocation, 0, byte_capacity as usize);
+        libc::memset(allocation, 0, allocation_bytes.get());
         allocation.cast::<u8>()
     };
     new_tensor(
@@ -1857,17 +1762,18 @@ pub unsafe extern "C" fn chelis_alloc(
         data,
         byte_capacity,
         TensorStorageProvenance::RuntimeOwned,
-        "chelis_alloc",
+        context,
     )
 }
 
 unsafe fn new_tensor(
-    metadata: TensorMetadata,
+    metadata: ShapeMetadata,
     data: *mut u8,
-    byte_capacity: i64,
+    byte_capacity: ByteCount,
     provenance: TensorStorageProvenance,
     site: &str,
 ) -> *mut chelis_tensor {
+    validate_data_contract(data, byte_capacity, &metadata, site);
     let storage = Box::into_raw(Box::new(TensorStorage {
         header: HeapHeader::new(ownership_ledger::Kind::TensorStorage),
         data,
@@ -1878,7 +1784,7 @@ unsafe fn new_tensor(
         storage.cast(),
         ownership_ledger::Kind::TensorStorage,
         if provenance == TensorStorageProvenance::RuntimeOwned {
-            byte_capacity as u64
+            byte_capacity.get() as u64
         } else {
             0
         },
@@ -1891,11 +1797,7 @@ unsafe fn new_tensor(
     let mut tensor = Box::new(chelis_tensor {
         header: HeapHeader::new(ownership_ledger::Kind::Tensor),
         storage,
-        shape: metadata.shape,
-        strides: metadata.strides,
-        size: metadata.size,
-        rank: metadata.rank,
-        dtype: metadata.dtype.id() as chelis_dtype,
+        metadata,
         access: AtomicU8::new(TENSOR_ACCESS_IDLE),
         write_guard: chelis_tensor_write {
             tensor: ptr::null_mut(),
@@ -1936,11 +1838,14 @@ pub unsafe extern "C" fn chelis_tensor_entry_borrow(
     let dtype = require_runtime_dtype(dtype, "chelis_tensor_entry_borrow");
     let metadata =
         unsafe { checked_tensor_metadata(rank, shape, dtype, "chelis_tensor_entry_borrow") };
+    let byte_capacity = metadata_or_fail(
+        ByteCount::from_declared(byte_capacity),
+        "chelis_tensor_entry_borrow",
+    );
     validate_data_contract(
         data.cast_mut().cast::<u8>(),
         byte_capacity,
-        metadata.required_bytes,
-        dtype,
+        &metadata,
         "chelis_tensor_entry_borrow",
     );
     let tensor = new_tensor(
@@ -2022,13 +1927,13 @@ pub unsafe extern "C" fn chelis_tensor_read_view(tensor: *const chelis_tensor) -
     let tensor_ref = lock_tensor_idle(tensor, "chelis_tensor_read_view");
     validate_tensor_contents(tensor_ref, "chelis_tensor_read_view");
     let view = chelis_read_view {
-        data: if tensor_ref.size == 0 {
+        data: if tensor_ref.size() == 0 {
             ptr::null()
         } else {
             tensor_data(tensor).cast()
         },
-        count: tensor_ref.size,
-        dtype: tensor_ref.dtype,
+        count: tensor_ref.size(),
+        dtype: tensor_ref.dtype(),
         reserved: [0; 7],
     };
     unlock_tensor(tensor_ref, TENSOR_ACCESS_IDLE);
@@ -2057,8 +1962,20 @@ pub unsafe extern "C" fn chelis_tensor_repurpose(
     if rank > 0 && shape.is_null() {
         runtime_fail!("Domain: chelis_tensor_repurpose has null shape for rank {rank}");
     }
-    let mut decoded_shape = Vec::with_capacity(rank.max(0) as usize);
-    for axis in 0..rank.max(0) as usize {
+    let rank_count = metadata_or_fail(
+        ElementCount::from_extents(&[i64::from(rank)]),
+        "chelis_tensor_repurpose rank",
+    );
+    metadata_or_fail(
+        rank_count.scratch_len::<chelis_scalar>(),
+        "chelis_tensor_repurpose source shape",
+    );
+    let rank_len = metadata_or_fail(
+        rank_count.scratch_len::<i64>(),
+        "chelis_tensor_repurpose shape",
+    );
+    let mut decoded_shape = Vec::with_capacity(rank_len);
+    for axis in 0..rank_len {
         decoded_shape.push(exact_i64_scalar(
             *shape.add(axis),
             "chelis_tensor_repurpose shape extent",
@@ -2082,19 +1999,16 @@ pub unsafe extern "C" fn chelis_tensor_repurpose(
         dtype,
         "chelis_tensor_repurpose",
     );
-    if metadata.required_bytes != storage.byte_capacity {
+    if metadata.bytes() != storage.byte_capacity {
         runtime_fail!(
             "Domain: chelis_tensor_repurpose byte size {} does not equal storage capacity {}",
-            metadata.required_bytes,
-            storage.byte_capacity
+            metadata.bytes().get(),
+            storage.byte_capacity.get()
         );
     }
 
-    (*tensor).shape = metadata.shape;
-    (*tensor).strides = metadata.strides;
-    (*tensor).size = metadata.size;
-    (*tensor).rank = metadata.rank;
-    debug_assert_eq!((*tensor).dtype, metadata.dtype.id() as chelis_dtype);
+    debug_assert_eq!((*tensor).metadata.dtype(), metadata.dtype());
+    (*tensor).metadata = metadata;
     unlock_tensor(&*tensor, TENSOR_ACCESS_IDLE);
 }
 
@@ -2155,13 +2069,13 @@ pub unsafe extern "C" fn chelis_tensor_write_view(
 ) -> chelis_write_view {
     let tensor = lock_live_write_guard(guard, "chelis_tensor_write_view");
     let view = chelis_write_view {
-        data: if tensor.size == 0 {
+        data: if tensor.size() == 0 {
             ptr::null_mut()
         } else {
             tensor_data(tensor).cast()
         },
-        count: tensor.size,
-        dtype: tensor.dtype,
+        count: tensor.size(),
+        dtype: tensor.dtype(),
         reserved: [0; 7],
     };
     unlock_tensor(tensor, TENSOR_ACCESS_WRITING);
@@ -2231,8 +2145,11 @@ pub extern "C" fn chelis_scalar_from_bits(dtype: chelis_dtype, bits: u64) -> che
 pub unsafe extern "C" fn chelis_scalar_tensor(value: chelis_scalar) -> *mut chelis_tensor {
     let dtype = validate_scalar(value, "chelis_scalar_tensor");
     let tensor = chelis_alloc(0, ptr::null(), dtype.id() as chelis_dtype);
-    let width = tensor_elem_size(dtype);
-    ptr::copy_nonoverlapping(
+    let width = metadata_or_fail(
+        (*tensor).metadata.bytes().allocation(),
+        "chelis_scalar_tensor",
+    );
+    copy_bytes(
         value.bits.to_ne_bytes().as_ptr(),
         tensor_data(tensor),
         width,
@@ -2243,31 +2160,36 @@ pub unsafe extern "C" fn chelis_scalar_tensor(value: chelis_scalar) -> *mut chel
 #[no_mangle]
 pub unsafe extern "C" fn chelis_tensor_to_scalar(t: *const chelis_tensor) -> chelis_scalar {
     let dtype = tensor_dtype(t, "chelis_tensor_to_scalar");
-    if (*t).rank != 0 || (*t).size != 1 {
+    if (*t).rank() != 0 || (*t).size() != 1 {
         runtime_fail!("Domain: chelis_tensor_to_scalar expects a rank-zero tensor");
     }
-    let width = tensor_elem_size(dtype);
+    let width = metadata_or_fail(
+        (*t).metadata.bytes().allocation(),
+        "chelis_tensor_to_scalar",
+    );
     let mut bytes = [0_u8; 8];
-    ptr::copy_nonoverlapping(tensor_data(t), bytes.as_mut_ptr(), width);
+    copy_bytes(tensor_data(t), bytes.as_mut_ptr(), width);
     chelis_scalar_from_bits(dtype.id() as chelis_dtype, u64::from_ne_bytes(bytes))
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn chelis_fill_scalar(guard: *mut chelis_tensor_write, value: chelis_scalar) {
     let tensor = lock_live_write_guard(guard, "chelis_fill_scalar");
-    let tensor_dtype = require_runtime_dtype(tensor.dtype, "chelis_fill_scalar tensor");
+    let tensor_dtype = require_runtime_dtype(tensor.dtype(), "chelis_fill_scalar tensor");
     let scalar_dtype = validate_scalar(value, "chelis_fill_scalar value");
     if tensor_dtype != scalar_dtype {
         runtime_fail!("Domain: chelis_fill_scalar dtype mismatch");
     }
-    let width = tensor_elem_size(tensor_dtype);
+    let width = metadata_or_fail(
+        ElementCount::from_extents(&[])
+            .and_then(|count| count.bytes(tensor_dtype))
+            .and_then(ByteCount::allocation),
+        "chelis_fill_scalar",
+    );
     let bytes = value.bits.to_ne_bytes();
-    for index in 0..tensor.size as usize {
-        ptr::copy_nonoverlapping(
-            bytes.as_ptr(),
-            tensor_data(tensor).add(index * width),
-            width,
-        );
+    for index in 0..tensor.size() {
+        let offset = metadata_or_fail(tensor.metadata.byte_offset(index), "chelis_fill_scalar");
+        copy_bytes(bytes.as_ptr(), tensor_data(tensor).add(offset.get()), width);
     }
     unlock_tensor(tensor, TENSOR_ACCESS_WRITING);
 }
@@ -2275,7 +2197,7 @@ pub unsafe extern "C" fn chelis_fill_scalar(guard: *mut chelis_tensor_write, val
 #[no_mangle]
 pub unsafe extern "C" fn chelis_tensor_rank(t: *const chelis_tensor) -> i32 {
     tensor_metadata_dtype(t, "chelis_tensor_rank");
-    (*t).rank
+    (*t).rank()
 }
 
 /// chelis#1112: `axis` is axis-domain and carries `i32` ([05-DIM-1]); the
@@ -2285,13 +2207,130 @@ pub unsafe extern "C" fn chelis_tensor_rank(t: *const chelis_tensor) -> i32 {
 #[no_mangle]
 pub unsafe extern "C" fn chelis_tensor_shape(t: *const chelis_tensor, axis: i32) -> i64 {
     let axis = tensor_normalize_axis(t, axis, "chelis_tensor_shape");
-    (*t).shape[axis]
+    (*t).shape()[axis]
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn chelis_tensor_numel(t: *const chelis_tensor) -> i64 {
     tensor_metadata_dtype(t, "chelis_tensor_numel");
-    (*t).size
+    (*t).size()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_stride(t: *const chelis_tensor, axis: i32) -> i64 {
+    let axis = tensor_normalize_axis(t, axis, "chelis_tensor_stride");
+    (*t).metadata.strides()[axis]
+}
+
+/// Logical bytes, independent of spare backing-storage capacity. Like rank and
+/// shape, this immutable observation is legal while a write guard is live.
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_byte_count(t: *const chelis_tensor) -> i64 {
+    tensor_metadata_dtype(t, "chelis_tensor_byte_count");
+    (*t).metadata.bytes().get()
+}
+
+fn validate_reshape_metadata(input: &ShapeMetadata, target: &ShapeMetadata, context: &str) {
+    metadata_or_fail(target.bytes().allocation(), context);
+    if target.elements() != input.elements() {
+        runtime_fail!(
+            "Domain: {context} reshape numel mismatch: target {} but tensor has {} elements",
+            target.elements().get(),
+            input.elements().get()
+        );
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_elementwise_index_step(
+    input: *const chelis_tensor,
+    domain: *const chelis_tensor,
+) -> i64 {
+    let context = "chelis_tensor_elementwise_index_step";
+    tensor_metadata_dtype(input, context);
+    tensor_metadata_dtype(domain, context);
+    metadata_or_fail(
+        (*input)
+            .metadata
+            .elementwise_index_step(&(*domain).metadata),
+        context,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_elementwise_index_step_for_shape(
+    input: *const chelis_tensor,
+    rank: chelis_scalar,
+    shape: *const chelis_scalar,
+) -> i64 {
+    let context = "chelis_tensor_elementwise_index_step_for_shape";
+    tensor_metadata_dtype(input, context);
+    let rank_i64 = exact_i64_scalar(rank, context);
+    if rank_i64 < 0 {
+        runtime_fail!("Domain: {context} negative rank {rank_i64}");
+    }
+    let rank = i32::try_from(rank_i64)
+        .unwrap_or_else(|_| runtime_fail!("Overflow: {context} rank {rank_i64} exceeds int32"));
+    let axes = metadata_or_fail(ElementCount::from_extents(&[i64::from(rank)]), context);
+    if rank > 0 && shape.is_null() {
+        runtime_fail!("Domain: {context} positive rank has null shape");
+    }
+    metadata_or_fail(axes.scratch_len::<chelis_scalar>(), context);
+    let length = metadata_or_fail(axes.scratch_len::<i64>(), context);
+    let mut extents = Vec::with_capacity(length);
+    for axis in 0..length {
+        extents.push(exact_i64_scalar(shape.add(axis).read(), context));
+    }
+    let domain = metadata_or_fail(IterationSpace::new(&extents), context);
+    metadata_or_fail(domain.elementwise_index_step(&(*input).metadata), context)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_check_reshape(
+    tensor: *const chelis_tensor,
+    rank: chelis_scalar,
+    shape: *const chelis_scalar,
+) {
+    let context = "chelis_tensor_check_reshape";
+    let dtype = tensor_metadata_dtype(tensor, context);
+    let rank_i64 = exact_i64_scalar(rank, context);
+    let rank = i32::try_from(rank_i64)
+        .unwrap_or_else(|_| runtime_fail!("Overflow: {context} rank {rank_i64} exceeds int32"));
+    let axes = metadata_or_fail(ElementCount::from_extents(&[i64::from(rank)]), context);
+    if rank > 0 && shape.is_null() {
+        runtime_fail!("Domain: {context} positive rank has null shape");
+    }
+    metadata_or_fail(axes.scratch_len::<chelis_scalar>(), context);
+    let length = metadata_or_fail(axes.scratch_len::<i64>(), context);
+    let mut extents = Vec::with_capacity(length);
+    for axis in 0..length {
+        extents.push(exact_i64_scalar(shape.add(axis).read(), context));
+    }
+    let target = metadata_or_fail(ShapeMetadata::contiguous(&extents, dtype), context);
+    validate_reshape_metadata(&(*tensor).metadata, &target, context);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_reshape(
+    tensor: *const chelis_tensor,
+    shape: *const chelis_list,
+) -> *mut chelis_tensor {
+    let context = "chelis_tensor_reshape";
+    let dtype = tensor_dtype(tensor, context);
+    require_live_kind(shape.cast(), ownership_ledger::Kind::List, context);
+    let items = &(*shape).items;
+    metadata_or_fail(ShapeMetadata::checked_rank(items.len()), context);
+    let axes = metadata_or_fail(ElementCount::scratch_entries(items.len(), 0), context);
+    let mut extents = Vec::with_capacity(metadata_or_fail(axes.scratch_len::<i64>(), context));
+    for &value in items {
+        extents.push(exact_i64_scalar(chelis_value_unbox_scalar(value), context));
+    }
+    let target = metadata_or_fail(ShapeMetadata::contiguous(&extents, dtype), context);
+    validate_reshape_metadata(&(*tensor).metadata, &target, context);
+    let bytes = metadata_or_fail(target.bytes().allocation(), context);
+    let output = allocate_tensor(target, context);
+    copy_bytes(tensor_data(tensor), tensor_data(output), bytes);
+    output
 }
 
 #[no_mangle]
@@ -3501,29 +3540,38 @@ unsafe fn nested_list_shape(list: *const chelis_list) -> Vec<i64> {
     shape
 }
 
-unsafe fn write_scalar_bits(data: *mut u8, index: usize, value: chelis_scalar) {
-    match validate_scalar(value, "scalar storage write") {
-        RuntimeDType::F64 | RuntimeDType::I64 => *(data.cast::<u64>().add(index)) = value.bits,
-        RuntimeDType::F32 | RuntimeDType::I32 => {
-            *(data.cast::<u32>().add(index)) = value.bits as u32
-        }
+unsafe fn write_scalar_bits(tensor: *mut chelis_tensor, index: usize, value: chelis_scalar) {
+    let dtype = validate_scalar(value, "scalar storage write");
+    let metadata = &(*tensor).metadata;
+    if dtype != metadata.dtype() {
+        runtime_fail!("Domain: scalar storage write dtype mismatch");
+    }
+    let index = metadata_or_fail(
+        ElementCount::scratch_entries(index, 0),
+        "scalar storage index",
+    );
+    let offset = metadata_or_fail(metadata.byte_offset(index.get()), "scalar storage write");
+    let data = tensor_data(tensor).add(offset.get());
+    match dtype {
+        RuntimeDType::F64 | RuntimeDType::I64 => *data.cast::<u64>() = value.bits,
+        RuntimeDType::F32 | RuntimeDType::I32 => *data.cast::<u32>() = value.bits as u32,
         RuntimeDType::Bf16 | RuntimeDType::F16 | RuntimeDType::I16 => {
-            *(data.cast::<u16>().add(index)) = value.bits as u16
+            *data.cast::<u16>() = value.bits as u16
         }
-        RuntimeDType::Bool | RuntimeDType::I8 => *(data.add(index)) = value.bits as u8,
+        RuntimeDType::Bool | RuntimeDType::I8 => *data = value.bits as u8,
     }
 }
 
 unsafe fn flatten_exact_scalars(
     list: *const chelis_list,
     dtype: RuntimeDType,
-    data: *mut u8,
+    tensor: *mut chelis_tensor,
     index: &mut usize,
 ) {
     for item in &(*list).items {
         validate_value(*item, "chelis_tensor_from_values element");
         if item.tag == CHELIS_VALUE_LIST {
-            flatten_exact_scalars(item.payload.list, dtype, data, index);
+            flatten_exact_scalars(item.payload.list, dtype, tensor, index);
             continue;
         }
         if item.tag != CHELIS_VALUE_SCALAR {
@@ -3533,8 +3581,10 @@ unsafe fn flatten_exact_scalars(
         if validate_scalar(scalar, "chelis_tensor_from_values scalar") != dtype {
             runtime_fail!("Domain: chelis_tensor_from_values scalar dtype mismatch");
         }
-        write_scalar_bits(data, *index, scalar);
-        *index += 1;
+        write_scalar_bits(tensor, *index, scalar);
+        *index = index
+            .checked_add(1)
+            .unwrap_or_else(|| runtime_fail!("Overflow: tensor ingress index exceeds usize"));
     }
 }
 
@@ -3549,10 +3599,10 @@ pub unsafe extern "C" fn chelis_tensor_from_values(
         runtime_fail!("Overflow: chelis_tensor_from_values rank exceeds int32")
     });
     let out = chelis_alloc(rank, shape.as_ptr(), dtype.id() as chelis_dtype);
-    if (*out).size != 0 {
+    if (*out).size() != 0 {
         let mut index = 0;
-        flatten_exact_scalars(list, dtype, tensor_data(out), &mut index);
-        if index != (*out).size as usize {
+        flatten_exact_scalars(list, dtype, out, &mut index);
+        if index != (*out).count() {
             runtime_fail!("Domain: chelis_tensor_from_values leaf count does not match shape");
         }
     }
@@ -3562,8 +3612,12 @@ pub unsafe extern "C" fn chelis_tensor_from_values(
 #[no_mangle]
 pub unsafe extern "C" fn chelis_tensor_elements(tensor: *const chelis_tensor) -> *mut chelis_list {
     let dtype = tensor_dtype(tensor, "chelis_tensor_elements input");
-    let mut items = Vec::with_capacity((*tensor).size as usize);
-    for i in 0..(*tensor).size as usize {
+    let count = metadata_or_fail(
+        (*tensor).metadata.elements().scratch_len::<chelis_value>(),
+        "tensor elements output",
+    );
+    let mut items = Vec::with_capacity(count);
+    for i in 0..(*tensor).count() {
         let value = match dtype {
             RuntimeDType::Bool => {
                 let raw = *Bool8::data_ptr_unchecked(tensor as *mut chelis_tensor).add(i);
@@ -3622,7 +3676,7 @@ pub unsafe extern "C" fn chelis_pad_sequences(
     pad_value: chelis_scalar,
 ) -> *mut chelis_tensor {
     let dtype = validate_scalar(pad_value, "chelis_pad_sequences pad value");
-    let batch = chelis_list_len(sequences) as usize;
+    let batch = chelis_list_len(sequences);
     let mut width = 0usize;
     if !sequences.is_null() {
         for item in &(*sequences).items {
@@ -3632,7 +3686,8 @@ pub unsafe extern "C" fn chelis_pad_sequences(
             width = width.max((*item.payload.list).items.len());
         }
     }
-    let shape = [batch as i64, width as i64];
+    let width_count = metadata_or_fail(ElementCount::scratch_entries(width, 0), "padding width");
+    let shape = [batch, width_count.get()];
     let out = chelis_alloc(2, shape.as_ptr(), dtype.id() as chelis_dtype);
     if !sequences.is_null() {
         for (row, item) in (*sequences).items.iter().enumerate() {
@@ -3642,7 +3697,10 @@ pub unsafe extern "C" fn chelis_pad_sequences(
             }
             let seq = item.payload.list;
             for col in 0..width {
-                let flat = row * width + col;
+                let flat = metadata_or_fail(
+                    (*out).metadata.flat_index(&[row as i64, col as i64]),
+                    "padding coordinate",
+                );
                 let scalar = if col < (*seq).items.len() {
                     let value = (*seq).items[col];
                     if value.tag != CHELIS_VALUE_SCALAR {
@@ -3656,7 +3714,7 @@ pub unsafe extern "C" fn chelis_pad_sequences(
                 } else {
                     pad_value
                 };
-                write_scalar_bits(tensor_data(out), flat, scalar);
+                write_scalar_bits(out, flat, scalar);
             }
         }
     }
@@ -3670,11 +3728,10 @@ pub unsafe extern "C" fn chelis_pad_sequences_to(
     pad_value: chelis_scalar,
 ) -> *mut chelis_tensor {
     if width < 0 {
-        runtime_fail!("pad_sequences_to requires non-negative width");
+        runtime_fail!("Domain: pad_sequences_to requires non-negative width");
     }
-    let batch = chelis_list_len(sequences) as usize;
-    let width = width as usize;
-    let shape = [batch as i64, width as i64];
+    let batch = chelis_list_len(sequences);
+    let shape = [batch, width];
     let dtype = validate_scalar(pad_value, "chelis_pad_sequences_to pad value");
     let out = chelis_alloc(2, shape.as_ptr(), dtype.id() as chelis_dtype);
     if !sequences.is_null() {
@@ -3685,7 +3742,12 @@ pub unsafe extern "C" fn chelis_pad_sequences_to(
             }
             let seq = item.payload.list;
             for col in 0..width {
-                let flat = row * width + col;
+                let flat = metadata_or_fail(
+                    (*out).metadata.flat_index(&[row as i64, col]),
+                    "padding coordinate",
+                );
+                let col = usize::try_from(col)
+                    .unwrap_or_else(|_| runtime_fail!("Overflow: padding column exceeds usize"));
                 let scalar = if col < (*seq).items.len() {
                     let value = (*seq).items[col];
                     if value.tag != CHELIS_VALUE_SCALAR {
@@ -3699,7 +3761,7 @@ pub unsafe extern "C" fn chelis_pad_sequences_to(
                 } else {
                     pad_value
                 };
-                write_scalar_bits(tensor_data(out), flat, scalar);
+                write_scalar_bits(out, flat, scalar);
             }
         }
     }
@@ -3727,14 +3789,14 @@ pub unsafe extern "C" fn chelis_tensor_concat(
     let dtype = dtypes[0];
     let axis_i = tensor_normalize_axis(first, axis, "concat");
     let mut out_shape =
-        std::slice::from_raw_parts((*first).shape.as_ptr(), (*first).rank as usize).to_vec();
+        std::slice::from_raw_parts((*first).shape().as_ptr(), (*first).rank() as usize).to_vec();
     out_shape[axis_i] = 0;
     for (&tensor, &part_dtype) in tensors.iter().zip(&dtypes) {
-        if (*tensor).rank != (*first).rank || part_dtype != dtype {
+        if (*tensor).rank() != (*first).rank() || part_dtype != dtype {
             runtime_fail!("Domain: concat expects matching tensor rank and dtype");
         }
-        for axis2 in 0..(*tensor).rank as usize {
-            if axis2 != axis_i && (*tensor).shape[axis2] != (*first).shape[axis2] {
+        for axis2 in 0..(*tensor).rank() as usize {
+            if axis2 != axis_i && (*tensor).shape()[axis2] != (*first).shape()[axis2] {
                 runtime_fail!("Domain: concat expects matching non-concatenated axes");
             }
         }
@@ -3742,39 +3804,34 @@ pub unsafe extern "C" fn chelis_tensor_concat(
         // wrapped negative and surfaced as a `Domain` negative-extent report
         // from the allocator, where the atom mandates `Overflow`.
         out_shape[axis_i] = out_shape[axis_i]
-            .checked_add((*tensor).shape[axis_i])
+            .checked_add((*tensor).shape()[axis_i])
             .unwrap_or_else(|| runtime_fail!("Overflow: concat output extent exceeds int64"));
     }
     let out = chelis_alloc(
-        (*first).rank,
+        (*first).rank(),
         out_shape.as_ptr(),
         dtype.id() as chelis_dtype,
     );
-    let elem_size = tensor_elem_size(dtype);
     let mut axis_offset = 0;
-    let mut indices = vec![0; (*out).rank as usize];
+    let mut indices = vec![0; (*out).rank() as usize];
     for &tensor in &tensors {
-        for linear in 0..(*tensor).size {
-            chelis_flat_to_indices(
-                linear,
-                (*tensor).shape.as_ptr(),
-                (*tensor).rank,
-                indices.as_mut_ptr(),
+        for linear in 0..(*tensor).size() {
+            metadata_or_fail(
+                (*tensor).metadata.unravel(linear, &mut indices),
+                "tensor index",
             );
-            indices[axis_i] += axis_offset;
-            let out_linear =
-                chelis_indices_to_flat(indices.as_ptr(), (*out).strides.as_ptr(), (*out).rank);
+            indices[axis_i] = indices[axis_i]
+                .checked_add(axis_offset)
+                .unwrap_or_else(|| runtime_fail!("Overflow: concat coordinate exceeds int64"));
+            let out_linear = metadata_or_fail((*out).metadata.flat_index(&indices), "tensor index");
             // Byte-stride copy of a single element; preserves the
             // full bit pattern for every supported dtype (f32, f64,
             // i32, i64, bool) without depending on per-element typed
             // dispatch.
-            let dst = tensor_data(out).add(out_linear as usize * elem_size);
-            let src = tensor_data(tensor).add(linear as usize * elem_size) as *const u8;
-            ptr::copy_nonoverlapping(src, dst, elem_size);
-            indices[axis_i] -= axis_offset;
+            copy_tensor_element(tensor, linear, out, out_linear as i64, "concat");
         }
         axis_offset = axis_offset
-            .checked_add((*tensor).shape[axis_i])
+            .checked_add((*tensor).shape()[axis_i])
             .unwrap_or_else(|| runtime_fail!("Overflow: concat axis offset exceeds int64"));
     }
     out
@@ -3804,39 +3861,32 @@ pub unsafe extern "C" fn chelis_tensor_split(
             .checked_add(size)
             .unwrap_or_else(|| runtime_fail!("Overflow: split size sum exceeds int64"));
     }
-    if total != (*tensor).shape[axis_i] {
+    if total != (*tensor).shape()[axis_i] {
         runtime_fail!("split sizes must sum to the selected axis extent");
     }
     let mut items = Vec::new();
     let mut axis_offset = 0;
-    let mut indices = vec![0; (*tensor).rank as usize];
-    let elem_size = tensor_elem_size(dtype);
+    let mut indices = vec![0; (*tensor).rank() as usize];
     for part_idx in 0..chelis_list_len(sizes) {
         let part_size = int_list_value(sizes, part_idx, "split");
         let mut shape =
-            std::slice::from_raw_parts((*tensor).shape.as_ptr(), (*tensor).rank as usize).to_vec();
+            std::slice::from_raw_parts((*tensor).shape().as_ptr(), (*tensor).rank() as usize)
+                .to_vec();
         shape[axis_i] = part_size;
-        let part = chelis_alloc((*tensor).rank, shape.as_ptr(), dtype.id() as chelis_dtype);
-        for linear in 0..(*part).size {
-            chelis_flat_to_indices(
-                linear,
-                (*part).shape.as_ptr(),
-                (*part).rank,
-                indices.as_mut_ptr(),
+        let part = chelis_alloc((*tensor).rank(), shape.as_ptr(), dtype.id() as chelis_dtype);
+        for linear in 0..(*part).size() {
+            metadata_or_fail(
+                (*part).metadata.unravel(linear, &mut indices),
+                "tensor index",
             );
-            indices[axis_i] += axis_offset;
-            let src = chelis_indices_to_flat(
-                indices.as_ptr(),
-                (*tensor).strides.as_ptr(),
-                (*tensor).rank,
-            );
+            indices[axis_i] = indices[axis_i]
+                .checked_add(axis_offset)
+                .unwrap_or_else(|| runtime_fail!("Overflow: split coordinate exceeds int64"));
+            let src = metadata_or_fail((*tensor).metadata.flat_index(&indices), "tensor index");
             // Byte-stride copy of a single element; correct for every
             // supported dtype (4-byte f32/i32/bool and 8-byte
             // f64/i64).
-            let dst = tensor_data(part).add(linear as usize * elem_size);
-            let src_ptr = (tensor_data(tensor) as *const u8).add(src as usize * elem_size);
-            ptr::copy_nonoverlapping(src_ptr, dst, elem_size);
-            indices[axis_i] -= axis_offset;
+            copy_tensor_element(tensor, src as i64, part, linear, "split");
         }
         axis_offset = axis_offset
             .checked_add(part_size)
@@ -3856,71 +3906,59 @@ pub unsafe extern "C" fn chelis_tensor_gather(
         validate_tensor_inputs([(tensor, "gather input"), (indices, "gather indices")]);
     let indices_dtype = require_signed_integer_dtype(indices_dtype, "gather indices");
     let axis_i = tensor_normalize_axis(tensor, axis, "gather");
-    let out_ndim = (*tensor).rank as usize - 1 + (*indices).rank as usize;
+    let out_ndim = (*tensor).rank() as usize - 1 + (*indices).rank() as usize;
+    let out_rank = metadata_or_fail(ShapeMetadata::checked_rank(out_ndim), "gather output rank");
     let mut out_shape = vec![0; out_ndim];
     let mut pos = 0usize;
     for i in 0..axis_i {
-        out_shape[pos] = (*tensor).shape[i];
+        out_shape[pos] = (*tensor).shape()[i];
         pos += 1;
     }
-    for i in 0..(*indices).rank as usize {
-        out_shape[pos] = (*indices).shape[i];
+    for i in 0..(*indices).rank() as usize {
+        out_shape[pos] = (*indices).shape()[i];
         pos += 1;
     }
-    for i in axis_i + 1..(*tensor).rank as usize {
-        out_shape[pos] = (*tensor).shape[i];
+    for i in axis_i + 1..(*tensor).rank() as usize {
+        out_shape[pos] = (*tensor).shape()[i];
         pos += 1;
     }
-    let out = chelis_alloc(
-        out_ndim as c_int,
-        out_shape.as_ptr(),
-        dtype.id() as chelis_dtype,
-    );
-    let elem_size = tensor_elem_size(dtype);
+    let out = chelis_alloc(out_rank, out_shape.as_ptr(), dtype.id() as chelis_dtype);
     // Indices read at the correct dtype width via `read_index_slot`
     // (RT-4 F1 sibling). Eliminates the previous f32-only assumption.
     let mut out_index = vec![0; out_ndim];
-    let mut src_index = vec![0; (*tensor).rank as usize];
-    let mut gather_index = vec![0; (*indices).rank as usize];
-    for linear in 0..(*out).size {
-        chelis_flat_to_indices(
-            linear,
-            (*out).shape.as_ptr(),
-            (*out).rank,
-            out_index.as_mut_ptr(),
+    let mut src_index = vec![0; (*tensor).rank() as usize];
+    let mut gather_index = vec![0; (*indices).rank() as usize];
+    for linear in 0..(*out).size() {
+        metadata_or_fail(
+            (*out).metadata.unravel(linear, &mut out_index),
+            "tensor index",
         );
         let mut src_pos = 0usize;
         for &val in &out_index[..axis_i] {
             src_index[src_pos] = val;
             src_pos += 1;
         }
-        gather_index[..(*indices).rank as usize]
-            .copy_from_slice(&out_index[axis_i..((*indices).rank as usize + axis_i)]);
-        let index_linear = chelis_indices_to_flat(
-            gather_index.as_ptr(),
-            (*indices).strides.as_ptr(),
-            (*indices).rank,
+        gather_index[..(*indices).rank() as usize]
+            .copy_from_slice(&out_index[axis_i..((*indices).rank() as usize + axis_i)]);
+        let index_linear = metadata_or_fail(
+            (*indices).metadata.flat_index(&gather_index),
+            "tensor index",
         );
         let gathered = read_index_slot(indices, index_linear as usize, indices_dtype);
-        if gathered < 0 || gathered >= (*tensor).shape[axis_i] {
+        if gathered < 0 || gathered >= (*tensor).shape()[axis_i] {
             runtime_fail!("gather index {gathered} out of bounds");
         }
         src_index[src_pos] = gathered;
         src_pos += 1;
-        for i in axis_i + 1..(*tensor).rank as usize {
-            src_index[src_pos] = out_index[axis_i + (*indices).rank as usize + (i - axis_i - 1)];
+        for i in axis_i + 1..(*tensor).rank() as usize {
+            src_index[src_pos] = out_index[axis_i + (*indices).rank() as usize + (i - axis_i - 1)];
             src_pos += 1;
         }
-        let src_linear = chelis_indices_to_flat(
-            src_index.as_ptr(),
-            (*tensor).strides.as_ptr(),
-            (*tensor).rank,
-        );
+        let src_linear =
+            metadata_or_fail((*tensor).metadata.flat_index(&src_index), "tensor index");
         // Byte-stride copy of a single element preserves the bit
         // pattern for every supported dtype.
-        let dst = tensor_data(out).add(linear as usize * elem_size);
-        let src = (tensor_data(tensor) as *const u8).add(src_linear as usize * elem_size);
-        ptr::copy_nonoverlapping(src, dst, elem_size);
+        copy_tensor_element(tensor, src_linear as i64, out, linear, "gather");
     }
     out
 }
@@ -3940,8 +3978,8 @@ pub unsafe extern "C" fn chelis_tensor_cmplt(
         );
     }
     let dtype = require_signed_integer_or_float_dtype(dtype, "cmplt operands");
-    let out = chelis_alloc((*lhs).rank, (*lhs).shape.as_ptr(), CHELIS_DTYPE_BOOL);
-    let size = (*out).size as usize;
+    let out = chelis_alloc((*lhs).rank(), (*lhs).shape().as_ptr(), CHELIS_DTYPE_BOOL);
+    let size = (*out).count();
     let out_buf = Bool8::data_ptr_unchecked(out);
     let lm = lhs as *mut chelis_tensor;
     let rm = rhs as *mut chelis_tensor;
@@ -3997,13 +4035,18 @@ unsafe fn tensor_scatter(
     if dtype != updates_dtype {
         runtime_fail!("Domain: scatter expects matching base and update dtypes");
     }
-    let elem_size = tensor_elem_size(dtype);
     // Indices read via `read_index_slot` (RT-4 F1 sibling); dispatch on
     // the actual dtype rather than assuming f32 storage.
-    let mut update_index = vec![0; (*updates).rank as usize];
-    let mut out_index = vec![0; (*base).rank as usize];
-    let mut gather_index = vec![0; (*indices).rank as usize];
-    let mut additive_leaves = add_mode.then(|| vec![Vec::<usize>::new(); (*out).size as usize]);
+    let mut update_index = vec![0; (*updates).rank() as usize];
+    let mut out_index = vec![0; (*base).rank() as usize];
+    let mut gather_index = vec![0; (*indices).rank() as usize];
+    let mut additive_leaves = add_mode.then(|| {
+        let count = metadata_or_fail(
+            (*out).metadata.elements().scratch_len::<Vec<usize>>(),
+            "scatter scratch",
+        );
+        vec![Vec::<usize>::new(); count]
+    });
     unsafe fn scatter_add_all<T: RuntimeArithmetic>(
         out: *mut chelis_tensor,
         updates: *const chelis_tensor,
@@ -4015,7 +4058,12 @@ unsafe fn tensor_scatter(
             if update_indices.is_empty() {
                 continue;
             }
-            let mut leaves = Vec::with_capacity(update_indices.len() + 1);
+            let count = metadata_or_fail(
+                ElementCount::scratch_entries(update_indices.len(), 1)
+                    .and_then(|count| count.scratch_len::<T>()),
+                "scatter scratch",
+            );
+            let mut leaves = Vec::with_capacity(count);
             leaves.push(*output.add(out_linear));
             leaves.extend(update_indices.iter().map(|index| *update.add(*index)));
             *output.add(out_linear) = runtime_balanced_sum(leaves, "scatter");
@@ -4024,43 +4072,37 @@ unsafe fn tensor_scatter(
     // Walk the update positions, then dispatch on output dtype only
     // for `add` mode (replace mode is a pure overwrite, expressible
     // as a byte-stride copy regardless of dtype).
-    for linear in 0..(*updates).size {
-        chelis_flat_to_indices(
-            linear,
-            (*updates).shape.as_ptr(),
-            (*updates).rank,
-            update_index.as_mut_ptr(),
+    for linear in 0..(*updates).size() {
+        metadata_or_fail(
+            (*updates).metadata.unravel(linear, &mut update_index),
+            "tensor index",
         );
         let mut out_pos = 0usize;
         for &val in &update_index[..axis_i] {
             out_index[out_pos] = val;
             out_pos += 1;
         }
-        gather_index[..(*indices).rank as usize]
-            .copy_from_slice(&update_index[axis_i..((*indices).rank as usize + axis_i)]);
-        let index_linear = chelis_indices_to_flat(
-            gather_index.as_ptr(),
-            (*indices).strides.as_ptr(),
-            (*indices).rank,
+        gather_index[..(*indices).rank() as usize]
+            .copy_from_slice(&update_index[axis_i..((*indices).rank() as usize + axis_i)]);
+        let index_linear = metadata_or_fail(
+            (*indices).metadata.flat_index(&gather_index),
+            "tensor index",
         );
         let gathered = read_index_slot(indices, index_linear as usize, indices_dtype);
-        if gathered < 0 || gathered >= (*base).shape[axis_i] {
+        if gathered < 0 || gathered >= (*base).shape()[axis_i] {
             runtime_fail!("scatter index {gathered} out of bounds");
         }
         out_index[out_pos] = gathered;
         out_pos += 1;
-        for i in axis_i + 1..(*base).rank as usize {
-            out_index[out_pos] = update_index[axis_i + (*indices).rank as usize + (i - axis_i - 1)];
+        for i in axis_i + 1..(*base).rank() as usize {
+            out_index[out_pos] =
+                update_index[axis_i + (*indices).rank() as usize + (i - axis_i - 1)];
             out_pos += 1;
         }
-        let out_linear =
-            chelis_indices_to_flat(out_index.as_ptr(), (*out).strides.as_ptr(), (*out).rank)
-                as usize;
+        let out_linear = metadata_or_fail((*out).metadata.flat_index(&out_index), "tensor index");
         if !add_mode {
             // Replace = byte-copy of one element from updates to out.
-            let dst = tensor_data(out).add(out_linear * elem_size);
-            let src = (tensor_data(updates) as *const u8).add(linear as usize * elem_size);
-            ptr::copy_nonoverlapping(src, dst, elem_size);
+            copy_tensor_element(updates, linear, out, out_linear as i64, "scatter");
         } else {
             additive_leaves.as_mut().unwrap()[out_linear].push(linear as usize);
         }
@@ -4128,19 +4170,17 @@ pub unsafe extern "C" fn chelis_tensor_where(
         );
     }
     let out = chelis_alloc(
-        (*then_tensor).rank,
-        (*then_tensor).shape.as_ptr(),
+        (*then_tensor).rank(),
+        (*then_tensor).shape().as_ptr(),
         dtype.id() as chelis_dtype,
     );
-    let size = (*out).size as usize;
-    let elem_size = tensor_elem_size(dtype);
+    let size = (*out).count();
     // The condition is exact Bool8 storage. Branch elements are copied by
     // width, preserving every admitted branch dtype without conversion.
     unsafe fn where_copy(
         out: *mut chelis_tensor,
         then_tensor: *const chelis_tensor,
         else_tensor: *const chelis_tensor,
-        elem_size: usize,
         size: usize,
         mut cond_pick: impl FnMut(usize) -> bool,
     ) {
@@ -4150,15 +4190,11 @@ pub unsafe extern "C" fn chelis_tensor_where(
             } else {
                 else_tensor
             };
-            let dst = tensor_data(out).add(i * elem_size);
-            let src = (tensor_data(pick) as *const u8).add(i * elem_size);
-            ptr::copy_nonoverlapping(src, dst, elem_size);
+            copy_tensor_element(pick, i as i64, out, i as i64, "where");
         }
     }
     let p = Bool8::data_ptr_unchecked(cond as *mut chelis_tensor);
-    where_copy(out, then_tensor, else_tensor, elem_size, size, |i| {
-        (*p.add(i)).get()
-    });
+    where_copy(out, then_tensor, else_tensor, size, |i| (*p.add(i)).get());
     out
 }
 
@@ -4172,8 +4208,8 @@ pub unsafe extern "C" fn chelis_tensor_cumsum(
     let axis_i = tensor_normalize_axis(tensor, axis, "cumsum");
     let result_dtype = default_sum_result_dtype(dtype);
     let out = chelis_alloc(
-        (*tensor).rank,
-        (*tensor).shape.as_ptr(),
+        (*tensor).rank(),
+        (*tensor).shape().as_ptr(),
         result_dtype.id() as chelis_dtype,
     );
     // An empty operand has nothing to scan, so the axis decomposition below is
@@ -4185,18 +4221,13 @@ pub unsafe extern "C" fn chelis_tensor_cumsum(
     // panic across the C boundary) or, when it merely gets large without
     // overflowing, spin the empty loop for hours. Neither is the empty result
     // [05-OP-33] owes.
-    if (*tensor).size == 0 {
+    if (*tensor).size() == 0 {
         return out;
     }
-    let axis_size = (*tensor).shape[axis_i] as usize;
-    let mut inner = 1usize;
-    let mut outer = 1usize;
-    for i in axis_i + 1..(*tensor).rank as usize {
-        inner *= (*tensor).shape[i] as usize;
-    }
-    for i in 0..axis_i {
-        outer *= (*tensor).shape[i] as usize;
-    }
+    let iteration = metadata_or_fail(
+        (*tensor).metadata.axis_decomposition(axis_i),
+        "chelis_tensor_cumsum",
+    );
     // Cumsum is numeric only; dispatch on dtype outside the loops so
     // each precision accumulates in its native width.  Pre-migration
     // accumulated as f32 regardless, corrupting F64 / I64.  Bool is
@@ -4204,21 +4235,25 @@ pub unsafe extern "C" fn chelis_tensor_cumsum(
     unsafe fn cumsum_loop<Source, Accumulator, Output>(
         tensor: *const chelis_tensor,
         out: *mut chelis_tensor,
-        outer: usize,
-        axis_size: usize,
-        inner: usize,
+        axis: &AxisDecomposition,
     ) where
         Source: RuntimeAccumulationSource<Accumulator>,
         Accumulator: RuntimeArithmetic,
         Output: RuntimeAccumulationOutput<Accumulator>,
     {
+        let outer = metadata_or_fail(axis.outer().as_usize(), "chelis_tensor_cumsum");
+        let axis_size = metadata_or_fail(axis.extent().as_usize(), "chelis_tensor_cumsum");
+        let inner = metadata_or_fail(axis.inner().as_usize(), "chelis_tensor_cumsum");
         let input = Source::data_ptr_unchecked(tensor as *mut chelis_tensor);
         let output = Output::data_ptr_unchecked(out);
         for outer_idx in 0..outer {
             for inner_idx in 0..inner {
                 let mut running: Accumulator = Accumulator::default();
                 for axis_idx in 0..axis_size {
-                    let linear = (outer_idx * axis_size + axis_idx) * inner + inner_idx;
+                    let linear = metadata_or_fail(
+                        axis.linear_index(outer_idx, axis_idx, inner_idx),
+                        "chelis_tensor_cumsum",
+                    );
                     running =
                         running.runtime_add((*input.add(linear)).into_accumulator(), "cumsum");
                     *output.add(linear) = Output::from_accumulator(running);
@@ -4227,18 +4262,14 @@ pub unsafe extern "C" fn chelis_tensor_cumsum(
         }
     }
     match dtype {
-        RuntimeDType::F32 => cumsum_loop::<f32, f32, f32>(tensor, out, outer, axis_size, inner),
-        RuntimeDType::F64 => cumsum_loop::<f64, f64, f64>(tensor, out, outer, axis_size, inner),
-        RuntimeDType::F16 => {
-            cumsum_loop::<half::f16, f32, half::f16>(tensor, out, outer, axis_size, inner)
-        }
-        RuntimeDType::Bf16 => {
-            cumsum_loop::<half::bf16, f32, half::bf16>(tensor, out, outer, axis_size, inner)
-        }
-        RuntimeDType::I64 => cumsum_loop::<i64, i64, i64>(tensor, out, outer, axis_size, inner),
-        RuntimeDType::I32 => cumsum_loop::<i32, i32, i32>(tensor, out, outer, axis_size, inner),
-        RuntimeDType::I16 => cumsum_loop::<i16, i32, i32>(tensor, out, outer, axis_size, inner),
-        RuntimeDType::I8 => cumsum_loop::<i8, i32, i32>(tensor, out, outer, axis_size, inner),
+        RuntimeDType::F32 => cumsum_loop::<f32, f32, f32>(tensor, out, &iteration),
+        RuntimeDType::F64 => cumsum_loop::<f64, f64, f64>(tensor, out, &iteration),
+        RuntimeDType::F16 => cumsum_loop::<half::f16, f32, half::f16>(tensor, out, &iteration),
+        RuntimeDType::Bf16 => cumsum_loop::<half::bf16, f32, half::bf16>(tensor, out, &iteration),
+        RuntimeDType::I64 => cumsum_loop::<i64, i64, i64>(tensor, out, &iteration),
+        RuntimeDType::I32 => cumsum_loop::<i32, i32, i32>(tensor, out, &iteration),
+        RuntimeDType::I16 => cumsum_loop::<i16, i32, i32>(tensor, out, &iteration),
+        RuntimeDType::I8 => cumsum_loop::<i8, i32, i32>(tensor, out, &iteration),
         RuntimeDType::Bool => runtime_fail!("cumsum is undefined for bool tensors"),
     }
     out
@@ -4253,7 +4284,11 @@ pub unsafe extern "C" fn chelis_tensor_sort(
     let dtype = require_signed_integer_or_float_dtype(dtype, "sort input");
     let axis_i = tensor_normalize_axis(tensor, axis, "sort");
     let values = tensor_clone(tensor);
-    let indices = chelis_alloc((*tensor).rank, (*tensor).shape.as_ptr(), CHELIS_DTYPE_I64);
+    let indices = chelis_alloc(
+        (*tensor).rank(),
+        (*tensor).shape().as_ptr(),
+        CHELIS_DTYPE_I64,
+    );
     // An empty operand has nothing to scan, so the axis decomposition below is
     // never read. Computing it anyway is not free: `outer` is the product of
     // the extents BEFORE the axis, and for an empty tensor those extents are
@@ -4263,22 +4298,17 @@ pub unsafe extern "C" fn chelis_tensor_sort(
     // panic across the C boundary) or, when it merely gets large without
     // overflowing, spin the empty loop for hours. Neither is the empty result
     // [05-OP-33] owes.
-    if (*tensor).size == 0 {
+    if (*tensor).size() == 0 {
         let items = [
             chelis_value_take_tensor(values),
             chelis_value_take_tensor(indices),
         ];
         return chelis_tuple_from_values(items.as_ptr(), 2);
     }
-    let axis_size = (*tensor).shape[axis_i] as usize;
-    let mut inner = 1usize;
-    let mut outer = 1usize;
-    for i in axis_i + 1..(*tensor).rank as usize {
-        inner *= (*tensor).shape[i] as usize;
-    }
-    for i in 0..axis_i {
-        outer *= (*tensor).shape[i] as usize;
-    }
+    let iteration = metadata_or_fail(
+        (*tensor).metadata.axis_decomposition(axis_i),
+        "chelis_tensor_sort",
+    );
     // RT-4 F1 sibling: indices is allocated as CHELIS_DTYPE_I32, so writes
     // must go through `(int32_t*)` to match the storage layout.
     // Dispatch on values' dtype outside the loops so each precision
@@ -4289,22 +4319,32 @@ pub unsafe extern "C" fn chelis_tensor_sort(
     unsafe fn sort_loop<T: RuntimeOrdered>(
         values: *mut chelis_tensor,
         indices_data: *mut i64,
-        outer: usize,
-        axis_size: usize,
-        inner: usize,
+        axis: &AxisDecomposition,
     ) {
+        let outer = metadata_or_fail(axis.outer().as_usize(), "chelis_tensor_sort");
+        let axis_size = metadata_or_fail(axis.extent().as_usize(), "chelis_tensor_sort");
+        let inner = metadata_or_fail(axis.inner().as_usize(), "chelis_tensor_sort");
         let p = T::data_ptr_unchecked(values);
         for outer_idx in 0..outer {
             for inner_idx in 0..inner {
                 for i in 0..axis_size {
-                    let linear = (outer_idx * axis_size + i) * inner + inner_idx;
+                    let linear = metadata_or_fail(
+                        axis.linear_index(outer_idx, i, inner_idx),
+                        "chelis_tensor_sort",
+                    );
                     *indices_data.add(linear) = i as i64;
                 }
                 for i in 1..axis_size {
                     let mut j = i;
                     while j > 0 {
-                        let left = (outer_idx * axis_size + (j - 1)) * inner + inner_idx;
-                        let right = (outer_idx * axis_size + j) * inner + inner_idx;
+                        let left = metadata_or_fail(
+                            axis.linear_index(outer_idx, j - 1, inner_idx),
+                            "chelis_tensor_sort",
+                        );
+                        let right = metadata_or_fail(
+                            axis.linear_index(outer_idx, j, inner_idx),
+                            "chelis_tensor_sort",
+                        );
                         if !(*p.add(left)).should_swap_for_stable_sort(*p.add(right)) {
                             break;
                         }
@@ -4321,16 +4361,14 @@ pub unsafe extern "C" fn chelis_tensor_sort(
         }
     }
     match dtype {
-        RuntimeDType::F32 => sort_loop::<f32>(values, indices_data, outer, axis_size, inner),
-        RuntimeDType::F64 => sort_loop::<f64>(values, indices_data, outer, axis_size, inner),
-        RuntimeDType::I64 => sort_loop::<i64>(values, indices_data, outer, axis_size, inner),
-        RuntimeDType::I32 => sort_loop::<i32>(values, indices_data, outer, axis_size, inner),
-        RuntimeDType::I16 => sort_loop::<i16>(values, indices_data, outer, axis_size, inner),
-        RuntimeDType::I8 => sort_loop::<i8>(values, indices_data, outer, axis_size, inner),
-        RuntimeDType::F16 => sort_loop::<half::f16>(values, indices_data, outer, axis_size, inner),
-        RuntimeDType::Bf16 => {
-            sort_loop::<half::bf16>(values, indices_data, outer, axis_size, inner)
-        }
+        RuntimeDType::F32 => sort_loop::<f32>(values, indices_data, &iteration),
+        RuntimeDType::F64 => sort_loop::<f64>(values, indices_data, &iteration),
+        RuntimeDType::I64 => sort_loop::<i64>(values, indices_data, &iteration),
+        RuntimeDType::I32 => sort_loop::<i32>(values, indices_data, &iteration),
+        RuntimeDType::I16 => sort_loop::<i16>(values, indices_data, &iteration),
+        RuntimeDType::I8 => sort_loop::<i8>(values, indices_data, &iteration),
+        RuntimeDType::F16 => sort_loop::<half::f16>(values, indices_data, &iteration),
+        RuntimeDType::Bf16 => sort_loop::<half::bf16>(values, indices_data, &iteration),
         RuntimeDType::Bool => runtime_fail!("sort is undefined for bool tensors"),
     }
     let items = [
@@ -4352,24 +4390,23 @@ pub unsafe extern "C" fn chelis_tensor_diagonal(
     if axis1_i == axis2_i {
         runtime_fail!("diagonal expects distinct axes");
     }
-    let diag = (*tensor).shape[axis1_i].min((*tensor).shape[axis2_i]);
-    let mut out_shape = vec![0; (*tensor).rank.saturating_sub(1) as usize];
+    let diag = (*tensor).shape()[axis1_i].min((*tensor).shape()[axis2_i]);
+    let mut out_shape = vec![0; (*tensor).rank().saturating_sub(1) as usize];
     let mut pos = 0usize;
-    for i in 0..(*tensor).rank as usize {
+    for i in 0..(*tensor).rank() as usize {
         if i == axis1_i {
             out_shape[pos] = diag;
             pos += 1;
         } else if i != axis2_i {
-            out_shape[pos] = (*tensor).shape[i];
+            out_shape[pos] = (*tensor).shape()[i];
             pos += 1;
         }
     }
     let out = chelis_alloc(
-        (*tensor).rank - 1,
+        (*tensor).rank() - 1,
         out_shape.as_ptr(),
         dtype.id() as chelis_dtype,
     );
-    let elem_size = tensor_elem_size(dtype);
     // chelis#1349: `out_index` holds one coordinate per retained OUTPUT
     // axis, so the diagonal's own coordinate lives at `axis1_i`'s position
     // after `axis2_i` is removed, which is one slot earlier whenever
@@ -4384,21 +4421,19 @@ pub unsafe extern "C" fn chelis_tensor_diagonal(
     } else {
         axis1_i
     };
-    let mut out_index = vec![0; (*out).rank as usize];
-    let mut src_index = vec![0; (*tensor).rank as usize];
-    for linear in 0..(*out).size {
-        chelis_flat_to_indices(
-            linear,
-            (*out).shape.as_ptr(),
-            (*out).rank,
-            out_index.as_mut_ptr(),
+    let mut out_index = vec![0; (*out).rank() as usize];
+    let mut src_index = vec![0; (*tensor).rank() as usize];
+    for linear in 0..(*out).size() {
+        metadata_or_fail(
+            (*out).metadata.unravel(linear, &mut out_index),
+            "tensor index",
         );
         let diag_idx = out_index[diag_out_axis];
         let mut out_pos = 0usize;
         for (i, src_slot) in src_index
             .iter_mut()
             .enumerate()
-            .take((*tensor).rank as usize)
+            .take((*tensor).rank() as usize)
         {
             if i == axis1_i {
                 // `axis1_i` keeps an output slot (the diagonal's own), so
@@ -4413,16 +4448,10 @@ pub unsafe extern "C" fn chelis_tensor_diagonal(
                 out_pos += 1;
             }
         }
-        let src = chelis_indices_to_flat(
-            src_index.as_ptr(),
-            (*tensor).strides.as_ptr(),
-            (*tensor).rank,
-        );
+        let src = metadata_or_fail((*tensor).metadata.flat_index(&src_index), "tensor index");
         // Byte-stride copy of one element; preserves the full bit
         // pattern for every supported dtype.
-        let dst = tensor_data(out).add(linear as usize * elem_size);
-        let src_ptr = (tensor_data(tensor) as *const u8).add(src as usize * elem_size);
-        ptr::copy_nonoverlapping(src_ptr, dst, elem_size);
+        copy_tensor_element(tensor, src as i64, out, linear, "diagonal");
     }
     out
 }
@@ -4449,18 +4478,17 @@ pub unsafe extern "C" fn chelis_tensor_trace(
         axis1_i
     };
     let diag = chelis_tensor_diagonal(tensor, axis1_i as i32, axis2_i as i32);
-    let axis_size = (*diag).shape[reduce_axis] as usize;
-    let mut out_shape = vec![0; (*diag).rank.saturating_sub(1) as usize];
+    let mut out_shape = vec![0; (*diag).rank().saturating_sub(1) as usize];
     let mut pos = 0usize;
-    for i in 0..(*diag).rank as usize {
+    for i in 0..(*diag).rank() as usize {
         if i != reduce_axis {
-            out_shape[pos] = (*diag).shape[i];
+            out_shape[pos] = (*diag).shape()[i];
             pos += 1;
         }
     }
     let result_dtype = default_sum_result_dtype(dtype);
     let out = chelis_alloc(
-        (*diag).rank - 1,
+        (*diag).rank() - 1,
         out_shape.as_ptr(),
         result_dtype.id() as chelis_dtype,
     );
@@ -4473,18 +4501,14 @@ pub unsafe extern "C" fn chelis_tensor_trace(
     // panic across the C boundary) or, when it merely gets large without
     // overflowing, spin the empty loop for hours. Neither is the empty result
     // [05-OP-33] owes.
-    if (*out).size == 0 {
+    if (*out).size() == 0 || (*diag).size() == 0 {
         chelis_tensor_release(diag);
         return out;
     }
-    let mut inner = 1usize;
-    let mut outer = 1usize;
-    for i in reduce_axis + 1..(*diag).rank as usize {
-        inner *= (*diag).shape[i] as usize;
-    }
-    for i in 0..reduce_axis {
-        outer *= (*diag).shape[i] as usize;
-    }
+    let iteration = metadata_or_fail(
+        (*diag).metadata.axis_decomposition(reduce_axis),
+        "chelis_tensor_trace",
+    );
     // Trace is diagonal followed by [05-OP-30]'s canonical adjacent-pair
     // tree. Dispatch outside the loops so every leaf enters at the resolved
     // accumulator width and every tree node uses that width's trap/finalize
@@ -4492,53 +4516,50 @@ pub unsafe extern "C" fn chelis_tensor_trace(
     unsafe fn trace_accumulation_loop<Source, Accumulator, Output>(
         diag: *mut chelis_tensor,
         out: *mut chelis_tensor,
-        outer: usize,
-        axis_size: usize,
-        inner: usize,
+        axis: &AxisDecomposition,
     ) where
         Source: RuntimeAccumulationSource<Accumulator>,
         Accumulator: RuntimeArithmetic,
         Output: RuntimeAccumulationOutput<Accumulator>,
     {
+        let outer = metadata_or_fail(axis.outer().as_usize(), "chelis_tensor_trace");
+        let axis_size = metadata_or_fail(axis.extent().as_usize(), "chelis_tensor_trace");
+        let inner = metadata_or_fail(axis.inner().as_usize(), "chelis_tensor_trace");
         let input = Source::data_ptr_unchecked(diag);
         let output = Output::data_ptr_unchecked(out);
         for outer_idx in 0..outer {
             for inner_idx in 0..inner {
-                let mut leaves = Vec::with_capacity(axis_size);
+                let mut leaves = Vec::with_capacity(metadata_or_fail(
+                    axis.extent().scratch_len::<Accumulator>(),
+                    "trace scratch",
+                ));
                 for axis_idx in 0..axis_size {
-                    let linear = (outer_idx * axis_size + axis_idx) * inner + inner_idx;
+                    let linear = metadata_or_fail(
+                        axis.linear_index(outer_idx, axis_idx, inner_idx),
+                        "chelis_tensor_trace",
+                    );
                     leaves.push((*input.add(linear)).into_accumulator());
                 }
-                *output.add(outer_idx * inner + inner_idx) =
-                    Output::from_accumulator(runtime_balanced_sum(leaves, "trace"));
+                *output.add(metadata_or_fail(
+                    axis.reduced_index(outer_idx, inner_idx),
+                    "trace output",
+                )) = Output::from_accumulator(runtime_balanced_sum(leaves, "trace"));
             }
         }
     }
     match dtype {
-        RuntimeDType::F32 => {
-            trace_accumulation_loop::<f32, f32, f32>(diag, out, outer, axis_size, inner)
-        }
-        RuntimeDType::F64 => {
-            trace_accumulation_loop::<f64, f64, f64>(diag, out, outer, axis_size, inner)
-        }
-        RuntimeDType::I64 => {
-            trace_accumulation_loop::<i64, i64, i64>(diag, out, outer, axis_size, inner)
-        }
-        RuntimeDType::I32 => {
-            trace_accumulation_loop::<i32, i32, i32>(diag, out, outer, axis_size, inner)
-        }
-        RuntimeDType::I16 => {
-            trace_accumulation_loop::<i16, i32, i32>(diag, out, outer, axis_size, inner)
-        }
-        RuntimeDType::I8 => {
-            trace_accumulation_loop::<i8, i32, i32>(diag, out, outer, axis_size, inner)
-        }
+        RuntimeDType::F32 => trace_accumulation_loop::<f32, f32, f32>(diag, out, &iteration),
+        RuntimeDType::F64 => trace_accumulation_loop::<f64, f64, f64>(diag, out, &iteration),
+        RuntimeDType::I64 => trace_accumulation_loop::<i64, i64, i64>(diag, out, &iteration),
+        RuntimeDType::I32 => trace_accumulation_loop::<i32, i32, i32>(diag, out, &iteration),
+        RuntimeDType::I16 => trace_accumulation_loop::<i16, i32, i32>(diag, out, &iteration),
+        RuntimeDType::I8 => trace_accumulation_loop::<i8, i32, i32>(diag, out, &iteration),
         RuntimeDType::F16 => {
-            trace_accumulation_loop::<half::f16, f32, half::f16>(diag, out, outer, axis_size, inner)
+            trace_accumulation_loop::<half::f16, f32, half::f16>(diag, out, &iteration)
         }
-        RuntimeDType::Bf16 => trace_accumulation_loop::<half::bf16, f32, half::bf16>(
-            diag, out, outer, axis_size, inner,
-        ),
+        RuntimeDType::Bf16 => {
+            trace_accumulation_loop::<half::bf16, f32, half::bf16>(diag, out, &iteration)
+        }
         RuntimeDType::Bool => {
             chelis_tensor_release(diag);
             runtime_fail!("trace is undefined for bool tensors");
@@ -4574,13 +4595,13 @@ pub unsafe extern "C" fn chelis_tensor_clamp(
         );
     }
     let out = chelis_alloc(
-        (*tensor).rank,
-        (*tensor).shape.as_ptr(),
+        (*tensor).rank(),
+        (*tensor).shape().as_ptr(),
         dtype.id() as chelis_dtype,
     );
-    let size = (*out).size as usize;
-    let lo_scalar = (*lo).rank == 0;
-    let hi_scalar = (*hi).rank == 0;
+    let size = (*out).count();
+    let lo_scalar = (*lo).rank() == 0;
+    let hi_scalar = (*hi).rank() == 0;
     // Clamp is numeric only; dispatch on dtype outside the loop so
     // min / max are computed in the native precision.  Pre-migration
     // f32 read corrupted F64 / I64.  Bool undefined per Contract 3.
@@ -4657,7 +4678,7 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
         );
     }
     let result_dtype = einsum_result_dtype(dtype, accumulator);
-    let equation = parse_einsum_equation(equation, (*lhs).rank as usize, (*rhs).rank as usize);
+    let equation = parse_einsum_equation(equation, (*lhs).rank() as usize, (*rhs).rank() as usize);
     let out_labels = equation.output;
     let lhs_chars = equation.lhs;
     let rhs_chars = equation.rhs;
@@ -4670,23 +4691,23 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
     }
     for (i, &label) in lhs_chars.iter().enumerate() {
         let idx = einsum_label_index(label);
-        if label_dims[idx] >= 0 && label_dims[idx] != (*lhs).shape[i] {
+        if label_dims[idx] >= 0 && label_dims[idx] != (*lhs).shape()[i] {
             runtime_fail!(
                 "Domain: einsum label `{}` has inconsistent extents",
                 char::from(label)
             );
         }
-        label_dims[idx] = (*lhs).shape[i];
+        label_dims[idx] = (*lhs).shape()[i];
     }
     for (i, &label) in rhs_chars.iter().enumerate() {
         let idx = einsum_label_index(label);
-        if label_dims[idx] >= 0 && label_dims[idx] != (*rhs).shape[i] {
+        if label_dims[idx] >= 0 && label_dims[idx] != (*rhs).shape()[i] {
             runtime_fail!(
                 "Domain: einsum label `{}` has inconsistent extents",
                 char::from(label)
             );
         }
-        label_dims[idx] = (*rhs).shape[i];
+        label_dims[idx] = (*rhs).shape()[i];
     }
     let mut out_shape = vec![0; out_labels.len()];
     for (i, &label) in out_labels.iter().enumerate() {
@@ -4709,21 +4730,20 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
             reduction_shape.push(label_dims[idx]);
         }
     }
-    let out_size = checked_einsum_buffer_len(
-        checked_extent_product(out_shape.iter().copied(), "einsum output"),
-        result_dtype,
-        "output",
+    let output_metadata = metadata_or_fail(
+        ShapeMetadata::contiguous(&out_shape, result_dtype),
+        "einsum output",
     );
-    let reduction_total = checked_einsum_buffer_len(
-        checked_extent_product(reduction_shape.iter().copied(), "einsum reduction"),
-        accumulator,
-        "reduction",
+    let reduction_space =
+        metadata_or_fail(IterationSpace::new(&reduction_shape), "einsum reduction");
+    metadata_or_fail(
+        reduction_space
+            .elements()
+            .bytes(accumulator)
+            .and_then(ByteCount::allocation),
+        "einsum reduction buffer",
     );
-    let out = chelis_alloc(
-        out_labels.len() as c_int,
-        out_shape.as_ptr(),
-        result_dtype.id() as chelis_dtype,
-    );
+    let out = allocate_tensor(output_metadata, "einsum output");
     // Einsum is numeric only; dispatch on dtype outside the loops so
     // the multiply-add accumulates in the native precision.
     // Pre-migration f32-only multiply-add silently corrupted F64 / I64
@@ -4733,20 +4753,22 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
         lhs: *const chelis_tensor,
         rhs: *const chelis_tensor,
         out: *mut chelis_tensor,
-        out_size: usize,
         out_labels: &[u8],
         lhs_chars: &[u8],
         rhs_chars: &[u8],
         reduction_labels: &[u8],
-        out_shape: &[i64],
-        reduction_shape: &[i64],
-        reduction_total: usize,
+        reduction: &IterationSpace,
         label_values: &mut [i64; 26],
     ) where
         Source: RuntimeAccumulationSource<Accumulator>,
         Accumulator: RuntimeArithmetic,
         Output: RuntimeAccumulationOutput<Accumulator>,
     {
+        let out_size = (*out).count();
+        let reduction_total = metadata_or_fail(
+            reduction.elements().scratch_len::<Accumulator>(),
+            "einsum reduction scratch",
+        );
         let lp = Source::data_ptr_unchecked(lhs as *mut chelis_tensor);
         let rp = Source::data_ptr_unchecked(rhs as *mut chelis_tensor);
         let op = Output::data_ptr_unchecked(out);
@@ -4756,11 +4778,9 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
         let mut rhs_index = vec![0; rhs_chars.len()];
         for out_linear in 0..out_size {
             if !out_labels.is_empty() {
-                chelis_flat_to_indices(
-                    out_linear as i64,
-                    out_shape.as_ptr(),
-                    out_labels.len() as c_int,
-                    out_index.as_mut_ptr(),
+                metadata_or_fail(
+                    (*out).metadata.unravel(out_linear as i64, &mut out_index),
+                    "einsum output index",
                 );
             }
             for (i, &label) in out_labels.iter().enumerate() {
@@ -4769,11 +4789,9 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
             let mut products = Vec::with_capacity(reduction_total);
             for reduction_linear in 0..reduction_total {
                 if !reduction_labels.is_empty() {
-                    chelis_flat_to_indices(
-                        reduction_linear as i64,
-                        reduction_shape.as_ptr(),
-                        reduction_shape.len() as c_int,
-                        reduction_index.as_mut_ptr(),
+                    metadata_or_fail(
+                        reduction.unravel(reduction_linear as i64, &mut reduction_index),
+                        "einsum reduction index",
                     );
                 }
                 for (i, &label) in reduction_labels.iter().enumerate() {
@@ -4785,16 +4803,14 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
                 for (i, &label) in rhs_chars.iter().enumerate() {
                     rhs_index[i] = label_values[einsum_label_index(label)];
                 }
-                let lv = *lp.add(chelis_indices_to_flat(
-                    lhs_index.as_ptr(),
-                    (*lhs).strides.as_ptr(),
-                    lhs_chars.len() as c_int,
-                ) as usize);
-                let rv = *rp.add(chelis_indices_to_flat(
-                    rhs_index.as_ptr(),
-                    (*rhs).strides.as_ptr(),
-                    rhs_chars.len() as c_int,
-                ) as usize);
+                let lv = *lp.add(metadata_or_fail(
+                    (*lhs).metadata.flat_index(&lhs_index),
+                    "tensor index",
+                ));
+                let rv = *rp.add(metadata_or_fail(
+                    (*rhs).metadata.flat_index(&rhs_index),
+                    "tensor index",
+                ));
                 products.push(
                     lv.into_accumulator()
                         .runtime_mul(rv.into_accumulator(), "einsum"),
@@ -4809,196 +4825,154 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
             lhs,
             rhs,
             out,
-            out_size,
             &out_labels,
             &lhs_chars,
             &rhs_chars,
             &reduction_labels,
-            &out_shape,
-            &reduction_shape,
-            reduction_total,
+            &reduction_space,
             &mut label_values,
         ),
         (RuntimeDType::F32, RuntimeDType::F64) => einsum_loop::<f32, f64, f64>(
             lhs,
             rhs,
             out,
-            out_size,
             &out_labels,
             &lhs_chars,
             &rhs_chars,
             &reduction_labels,
-            &out_shape,
-            &reduction_shape,
-            reduction_total,
+            &reduction_space,
             &mut label_values,
         ),
         (RuntimeDType::F64, RuntimeDType::F64) => einsum_loop::<f64, f64, f64>(
             lhs,
             rhs,
             out,
-            out_size,
             &out_labels,
             &lhs_chars,
             &rhs_chars,
             &reduction_labels,
-            &out_shape,
-            &reduction_shape,
-            reduction_total,
+            &reduction_space,
             &mut label_values,
         ),
         (RuntimeDType::F16, RuntimeDType::F32) => einsum_loop::<half::f16, f32, half::f16>(
             lhs,
             rhs,
             out,
-            out_size,
             &out_labels,
             &lhs_chars,
             &rhs_chars,
             &reduction_labels,
-            &out_shape,
-            &reduction_shape,
-            reduction_total,
+            &reduction_space,
             &mut label_values,
         ),
         (RuntimeDType::F16, RuntimeDType::F64) => einsum_loop::<half::f16, f64, half::f16>(
             lhs,
             rhs,
             out,
-            out_size,
             &out_labels,
             &lhs_chars,
             &rhs_chars,
             &reduction_labels,
-            &out_shape,
-            &reduction_shape,
-            reduction_total,
+            &reduction_space,
             &mut label_values,
         ),
         (RuntimeDType::Bf16, RuntimeDType::F32) => einsum_loop::<half::bf16, f32, half::bf16>(
             lhs,
             rhs,
             out,
-            out_size,
             &out_labels,
             &lhs_chars,
             &rhs_chars,
             &reduction_labels,
-            &out_shape,
-            &reduction_shape,
-            reduction_total,
+            &reduction_space,
             &mut label_values,
         ),
         (RuntimeDType::Bf16, RuntimeDType::F64) => einsum_loop::<half::bf16, f64, half::bf16>(
             lhs,
             rhs,
             out,
-            out_size,
             &out_labels,
             &lhs_chars,
             &rhs_chars,
             &reduction_labels,
-            &out_shape,
-            &reduction_shape,
-            reduction_total,
+            &reduction_space,
             &mut label_values,
         ),
         (RuntimeDType::I64, RuntimeDType::I64) => einsum_loop::<i64, i64, i64>(
             lhs,
             rhs,
             out,
-            out_size,
             &out_labels,
             &lhs_chars,
             &rhs_chars,
             &reduction_labels,
-            &out_shape,
-            &reduction_shape,
-            reduction_total,
+            &reduction_space,
             &mut label_values,
         ),
         (RuntimeDType::I32, RuntimeDType::I32) => einsum_loop::<i32, i32, i32>(
             lhs,
             rhs,
             out,
-            out_size,
             &out_labels,
             &lhs_chars,
             &rhs_chars,
             &reduction_labels,
-            &out_shape,
-            &reduction_shape,
-            reduction_total,
+            &reduction_space,
             &mut label_values,
         ),
         (RuntimeDType::I32, RuntimeDType::I64) => einsum_loop::<i32, i64, i64>(
             lhs,
             rhs,
             out,
-            out_size,
             &out_labels,
             &lhs_chars,
             &rhs_chars,
             &reduction_labels,
-            &out_shape,
-            &reduction_shape,
-            reduction_total,
+            &reduction_space,
             &mut label_values,
         ),
         (RuntimeDType::I16, RuntimeDType::I32) => einsum_loop::<i16, i32, i32>(
             lhs,
             rhs,
             out,
-            out_size,
             &out_labels,
             &lhs_chars,
             &rhs_chars,
             &reduction_labels,
-            &out_shape,
-            &reduction_shape,
-            reduction_total,
+            &reduction_space,
             &mut label_values,
         ),
         (RuntimeDType::I16, RuntimeDType::I64) => einsum_loop::<i16, i64, i64>(
             lhs,
             rhs,
             out,
-            out_size,
             &out_labels,
             &lhs_chars,
             &rhs_chars,
             &reduction_labels,
-            &out_shape,
-            &reduction_shape,
-            reduction_total,
+            &reduction_space,
             &mut label_values,
         ),
         (RuntimeDType::I8, RuntimeDType::I32) => einsum_loop::<i8, i32, i32>(
             lhs,
             rhs,
             out,
-            out_size,
             &out_labels,
             &lhs_chars,
             &rhs_chars,
             &reduction_labels,
-            &out_shape,
-            &reduction_shape,
-            reduction_total,
+            &reduction_space,
             &mut label_values,
         ),
         (RuntimeDType::I8, RuntimeDType::I64) => einsum_loop::<i8, i64, i64>(
             lhs,
             rhs,
             out,
-            out_size,
             &out_labels,
             &lhs_chars,
             &rhs_chars,
             &reduction_labels,
-            &out_shape,
-            &reduction_shape,
-            reduction_total,
+            &reduction_space,
             &mut label_values,
         ),
         _ => unreachable!("einsum_result_dtype rejected every unsupported accumulator pair"),
@@ -5171,37 +5145,9 @@ pub unsafe extern "C" fn chelis_mmap_len(mapped: *const chelis_mapped_file) -> i
 
 #[no_mangle]
 pub unsafe extern "C" fn chelis_contiguous(t: *const chelis_tensor) -> *mut chelis_tensor {
-    // WS-A4: dtype-aware element sizing must mirror `chelis_alloc` exactly.
-    // Pre-WS-A4 the allocator and this routine both treated narrow dtypes as
-    // 4 bytes, so the source (4 bytes per i8 element) and destination (4
-    // bytes per i8 element) were nominally consistent. Now `chelis_alloc`
-    // sizes i8 buffers at 1 byte and i16 buffers at 2 bytes via
-    // `tensor_elem_size`, so this routine reuses the same helper; otherwise
-    // a copy of `size * 4` bytes would overrun a 1-byte-per-element
-    // destination buffer and corrupt the heap.
-    let dtype = tensor_dtype(t, "contiguous input");
-    let elem_size = tensor_elem_size(dtype);
-    if chelis_is_contiguous(t) != 0 {
-        let out = chelis_alloc((*t).rank, (*t).shape.as_ptr(), dtype.id() as chelis_dtype);
-        let bytes = (*t).size as usize * elem_size;
-        // `tensor_data(t)` and `tensor_data(out)` are both `*mut u8`
-        // post-PR-1; cast the source to `*const u8` so
-        // `copy_nonoverlapping` infers the const-reduced type.
-        ptr::copy_nonoverlapping(tensor_data(t) as *const u8, tensor_data(out), bytes);
-        return out;
-    }
-    let out = chelis_alloc((*t).rank, (*t).shape.as_ptr(), dtype.id() as chelis_dtype);
-    let mut indices = vec![0; (*t).rank as usize];
-    for i in 0..(*out).size {
-        chelis_flat_to_indices(i, (*out).shape.as_ptr(), (*out).rank, indices.as_mut_ptr());
-        let src = chelis_indices_to_flat(indices.as_ptr(), (*t).strides.as_ptr(), (*t).rank);
-        // `chelis_tensor.data` is `*mut u8` post-PR-1; the casts
-        // previously normalized the field from `*mut f32`.
-        let dst_byte = tensor_data(out).add(i as usize * elem_size);
-        let src_byte = (tensor_data(t) as *const u8).add(src as usize * elem_size);
-        ptr::copy_nonoverlapping(src_byte, dst_byte, elem_size);
-    }
-    out
+    // Every admitted host descriptor is checked contiguous metadata. A raw
+    // strided descriptor cannot be constructed through the opaque host API.
+    tensor_clone(t)
 }
 
 // `chelis_print_f32` was removed at chelis#732 Phase 2: a public
@@ -5338,27 +5284,27 @@ unsafe fn tensor_to_string(t: *const chelis_tensor) -> String {
     let dtype = tensor_dtype(t, "tensor formatting");
     // [05-OBS-4]: a rank-0 tensor renders as its single element, bare -
     // the `tensor(shape=[], data=[..])` wrapper is not an exit form.
-    if (*t).rank == 0 {
+    if (*t).rank() == 0 {
         return tensor_elem_to_string(t, dtype, 0);
     }
     let mut out = String::from("tensor(shape=[");
-    for d in 0..(*t).rank as usize {
+    for d in 0..(*t).rank() as usize {
         if d > 0 {
             out.push_str(", ");
         }
-        out.push_str(&(*t).shape[d].to_string());
+        out.push_str(&(*t).shape()[d].to_string());
     }
     out.push_str("], data=[");
     // [05-OBS-5]: truncate at 32 elements with the `, ...` marker (the
     // pre-contract form here cut at 10 with NO marker, chelis#749).
-    let n = ((*t).size as usize).min(TENSOR_RENDER_LIMIT);
+    let n = ((*t).count()).min(TENSOR_RENDER_LIMIT);
     for i in 0..n {
         if i > 0 {
             out.push_str(", ");
         }
         out.push_str(&tensor_elem_to_string(t, dtype, i));
     }
-    if (*t).size as usize > n {
+    if (*t).count() > n {
         out.push_str(", ...");
     }
     out.push_str("])");
@@ -5420,11 +5366,7 @@ mod tests {
         let mut view = Box::new(chelis_tensor {
             header: HeapHeader::new(ownership_ledger::Kind::Tensor),
             storage: source.storage,
-            shape: source.shape.clone(),
-            strides: source.strides.clone(),
-            size: source.size,
-            rank: source.rank,
-            dtype: source.dtype,
+            metadata: source.metadata.clone(),
             access: AtomicU8::new(TENSOR_ACCESS_IDLE),
             write_guard: chelis_tensor_write {
                 tensor: ptr::null_mut(),
@@ -5797,9 +5739,9 @@ mod tests {
         unsafe {
             let value = chelis_scalar_from_bits(CHELIS_DTYPE_F32, u64::from(2.5_f32.to_bits()));
             let tensor = chelis_scalar_tensor(value);
-            assert_eq!((*tensor).rank, 0, "rank-0 scalar tensor");
+            assert_eq!((*tensor).rank(), 0, "rank-0 scalar tensor");
             assert_eq!(
-                (*tensor).dtype,
+                (*tensor).dtype(),
                 CHELIS_DTYPE_F32,
                 "the f32 tag must advertise f32 storage"
             );
@@ -5817,7 +5759,7 @@ mod tests {
         unsafe {
             let value = chelis_scalar_from_bits(CHELIS_DTYPE_F32, u64::from(0.1_f32.to_bits()));
             let tensor = chelis_scalar_tensor(value);
-            assert_eq!((*tensor).dtype, CHELIS_DTYPE_F32);
+            assert_eq!((*tensor).dtype(), CHELIS_DTYPE_F32);
             assert_eq!(*(tensor_data(tensor) as *const f32), 0.1_f32);
             assert_eq!(chelis_tensor_to_scalar(tensor), value);
             chelis_tensor_release(tensor);
@@ -5829,9 +5771,9 @@ mod tests {
         unsafe {
             let value = chelis_scalar_from_bits(CHELIS_DTYPE_F64, 1.1_f64.to_bits());
             let tensor = chelis_scalar_tensor(value);
-            assert_eq!((*tensor).rank, 0, "rank-0 scalar tensor");
+            assert_eq!((*tensor).rank(), 0, "rank-0 scalar tensor");
             assert_eq!(
-                (*tensor).dtype,
+                (*tensor).dtype(),
                 CHELIS_DTYPE_F64,
                 "the f64 tag must advertise f64 storage"
             );
@@ -5986,8 +5928,8 @@ mod tests {
             let value =
                 chelis_scalar_from_bits(CHELIS_DTYPE_I64, u64::from_ne_bytes(7_i64.to_ne_bytes()));
             let tensor = chelis_scalar_tensor(value);
-            assert_eq!((*tensor).rank, 0, "rank-0 scalar tensor");
-            assert_eq!((*tensor).dtype, CHELIS_DTYPE_I64);
+            assert_eq!((*tensor).rank(), 0, "rank-0 scalar tensor");
+            assert_eq!((*tensor).dtype(), CHELIS_DTYPE_I64);
             assert_eq!(*(tensor_data(tensor) as *const i64), 7);
             assert_eq!(chelis_tensor_to_scalar(tensor), value);
             chelis_tensor_release(tensor);

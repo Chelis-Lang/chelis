@@ -4,12 +4,19 @@
 //! where {} is an inline metadata map.
 
 use chelis_deep::{
-    Atom as DeepAtom, DTYPE_BOUNDS_KEY, DeepTag, DtypeFamily, LiteralFamilyFit, LiteralSource,
+    Atom as DeepAtom, DeepTag, DtypeFamily, LiteralFamilyFit, LiteralSource,
     classify_literal_source, encode_dtype_bounds,
 };
 use chelis_unord::{UnordMap, UnordSet};
 
 use chelis_deep::Span;
+use chelis_deep::annotations::{
+    Amenability, BindingTypeOrigin, EffectMember, EffectSet as AstEffectSet, InvariantPredicate,
+    LiteralOrigin, LiteralStyle, MetadataValue as M, PipeStageOrigin, PositiveInteger, Present,
+    PropertyBinder, PropertyContracts, PropertyPreconditions, PropertyQuantifiers,
+    PropertySourceKind, ResourceEffect, RuntimeExpression, SpanId, Spanned, TypeSyntax,
+    VariableRef, VariableTuple, WrtTargets,
+};
 use chelis_deep::ast as deep;
 use chelis_vocab::EffectKind;
 
@@ -19,7 +26,11 @@ use crate::ast::*;
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Desugar parser-validated declarations. Programmatic callers must satisfy
+/// the same declaration contracts; invalid input cannot construct a Deep Node.
 pub fn desugar_program(decls: &[Decl]) -> Vec<deep::Expr> {
+    crate::parser::validate_bound_ownership(decls)
+        .expect("desugar_program requires valid signature/bound ownership");
     let ctx = DesugarCtx::new(decls);
     let exprs: Vec<deep::Expr> = decls
         .iter()
@@ -60,35 +71,27 @@ fn normalize_single(expr: &deep::Expr) -> deep::Expr {
             let elements = elems.iter().map(normalize_single).collect();
             deep::Expr::List(deep::List { elements }, *span)
         }
-        deep::Expr::Map(map, span) => {
-            let entries = map
-                .entries
-                .iter()
-                .map(|(k, v)| (k.clone(), normalize_single(v)))
-                .collect();
-            deep::Expr::Map(deep::MetaMap { entries }, *span)
-        }
+        deep::Expr::Map(map, span) => deep::Expr::Map(
+            map.map_expressions(&mut |v, _| normalize_single(v))
+                .expect("normalization preserves annotations"),
+            *span,
+        ),
         deep::Expr::MetaExpr(meta, span) => deep::Expr::MetaExpr(
             deep::MetaExpr {
-                entries: meta
-                    .entries
-                    .iter()
-                    .map(|(k, v)| (k.clone(), normalize_single(v)))
-                    .collect(),
+                metadata: meta
+                    .metadata
+                    .map_expressions(&mut |v, _| normalize_single(v))
+                    .expect("normalization preserves annotations"),
                 expr: Box::new(normalize_single(&meta.expr)),
             },
             *span,
         ),
         deep::Expr::UnknownForm(data) => deep::Expr::UnknownForm(Box::new(deep::UnknownFormData {
             head: data.head.clone(),
-            meta: deep::MetaMap {
-                entries: data
-                    .meta
-                    .entries
-                    .iter()
-                    .map(|(k, v)| (k.clone(), normalize_single(v)))
-                    .collect(),
-            },
+            meta: data
+                .meta
+                .map_expressions(&mut |v, _| normalize_single(v))
+                .expect("normalization preserves annotations"),
             children: data.children.iter().map(normalize_single).collect(),
             span: data.span,
         })),
@@ -213,16 +216,8 @@ fn int(n: i64) -> deep::Expr {
     deep::Expr::Atom(deep::Atom::Int(n), sp())
 }
 
-fn string(value: &str) -> deep::Expr {
-    deep::Expr::Atom(deep::Atom::Str(value.to_string()), sp())
-}
-
-fn bool_atom(value: bool) -> deep::Expr {
-    deep::Expr::Atom(deep::Atom::Bool(value), sp())
-}
-
 fn meta_empty() -> deep::Expr {
-    deep::Expr::Map(deep::MetaMap::default(), sp())
+    deep::Expr::Map(deep::Metadata::default(), sp())
 }
 
 fn surf_span_id(span: Span) -> Option<String> {
@@ -233,77 +228,62 @@ fn surf_span_id(span: Span) -> Option<String> {
     }
 }
 
-fn span_entry(span: Span) -> Option<(String, deep::Expr)> {
-    surf_span_id(span).map(|id| {
-        (
-            "span".to_string(),
-            deep::Expr::Atom(deep::Atom::Str(id), sp()),
-        )
-    })
+fn span_entry(span: Span) -> Option<M> {
+    surf_span_id(span)
+        .map(|id| M::Span(SpanId::try_new(id, sp()).expect("generated Surf span identifier")))
 }
-
+fn type_metadata(ty: deep::Expr) -> M {
+    M::Type(TypeSyntax::try_new(ty).expect("desugared type syntax"))
+}
 fn meta_with_type(ty: deep::Expr) -> deep::Expr {
-    meta_with_entries(vec![("type".to_string(), ty)])
+    meta_with_entries(vec![type_metadata(ty)])
 }
-
-fn meta_with_integer_float_type(ty: deep::Expr, style: Option<&str>) -> deep::Expr {
+fn meta_with_integer_float_type(ty: deep::Expr, style: Option<LiteralStyle>) -> deep::Expr {
     let mut entries = vec![
-        ("type".to_string(), ty),
-        ("literal_source".to_string(), sym("integer")),
+        type_metadata(ty),
+        M::LiteralSource(Spanned::new(LiteralOrigin::Integer, sp())),
     ];
     if let Some(style) = style {
-        entries.push(("surf_literal_style".to_string(), string(style)));
+        entries.push(M::SurfLiteralStyle(Spanned::new(style, sp())));
     }
     meta_with_entries(entries)
 }
-
-fn meta_with_entries(entries: Vec<(String, deep::Expr)>) -> deep::Expr {
-    deep::Expr::Map(deep::MetaMap { entries }, sp())
+fn meta_with_entries(entries: Vec<M>) -> deep::Expr {
+    deep::Expr::Map(
+        deep::Metadata::try_from_values(entries).expect("desugar emits distinct annotation keys"),
+        sp(),
+    )
 }
-
-fn numeric_literal_meta(ty: deep::Expr, style: &str) -> deep::Expr {
+fn numeric_literal_meta(ty: deep::Expr, style: LiteralStyle) -> deep::Expr {
     meta_with_entries(vec![
-        ("type".to_string(), ty),
-        ("surf_literal_style".to_string(), string(style)),
+        type_metadata(ty),
+        M::SurfLiteralStyle(Spanned::new(style, sp())),
     ])
 }
-
-fn add_surface_marker(expr: deep::Expr, key: &str, value: &str) -> deep::Expr {
-    let entry = (key.to_string(), string(value));
+fn with_metadata_value(expr: deep::Expr, value: M) -> deep::Expr {
     match expr {
         deep::Expr::Node(mut node, span) => {
             let mut meta = node.meta().clone();
-            meta.entries.retain(|(existing, _)| existing != key);
-            meta.entries.push(entry);
+            meta.replace(value);
             node.try_replace_meta(meta)
-                .expect("surface metadata must preserve the stamped Node invariant");
+                .expect("desugared annotation has an admissible owner");
             deep::Expr::Node(node, span)
         }
-        deep::Expr::List(list, span) => {
-            let mut elements = list.elements;
-            if elements.len() >= 2 {
-                let mut entries = match elements.remove(1) {
-                    deep::Expr::Map(map, _) => map.entries,
-                    _ => Vec::new(),
-                };
-                entries.retain(|(existing, _)| existing != key);
-                entries.push(entry);
-                elements.insert(1, meta_with_entries(entries));
+        deep::Expr::List(mut list, span) => {
+            if let Some(deep::Expr::Map(meta, _)) = list.elements.get_mut(1) {
+                meta.replace(value);
             }
-            deep::Expr::List(deep::List { elements }, span)
+            deep::Expr::List(list, span)
         }
         other => other,
     }
 }
-
-fn has_metadata_key(expr: &deep::Expr, key: &str) -> bool {
+fn has_type_metadata(expr: &deep::Expr) -> bool {
     match expr {
-        deep::Expr::Node(node, _) => node.meta().entries.iter().any(|(name, _)| name == key),
-        deep::Expr::List(list, _) => matches!(
-            list.elements.get(1),
-            Some(deep::Expr::Map(meta, _))
-                if meta.entries.iter().any(|(name, _)| name == key)
-        ),
+        deep::Expr::Node(node, _) => node.meta().ty().is_some(),
+        deep::Expr::List(list, _) => {
+            matches!(list.elements.get(1), Some(deep::Expr::Map(meta, _)) if meta.ty().is_some())
+        }
         _ => false,
     }
 }
@@ -315,7 +295,7 @@ fn node(tag: DeepTag, children: Vec<deep::Expr>) -> deep::Expr {
     deep::Expr::Node(
         Box::new(chelis_deep::node::Node::new(
             tag,
-            deep::MetaMap::default(),
+            deep::Metadata::default(),
             children,
         )),
         sp(),
@@ -353,17 +333,17 @@ fn with_dtype_bounds(expr: deep::Expr, binders: &[TypeBinder]) -> deep::Expr {
         panic!("dtype bounds attach to a stamped declaration node");
     };
     let mut meta = node.meta().clone();
-    meta.entries.push((
-        DTYPE_BOUNDS_KEY.to_string(),
-        encode_dtype_bounds(&bounds, sp()),
-    ));
+    meta.insert(M::DtypeBounds(
+        encode_dtype_bounds(&bounds, sp()).expect("distinct dtype binder names"),
+    ))
+    .expect("bounds attached once");
     node.try_replace_meta(meta)
         .expect("dtype-bound metadata preserves the stamped Node invariant");
     deep::Expr::Node(node, span)
 }
 
 /// Build a stamped Deep node with custom metadata. The `meta` argument
-/// must be an `Expr::Map(MetaMap { .. }, _)` — the MetaMap is extracted
+/// must be an `Expr::Map(Metadata { .. }, _)` — the Metadata is extracted
 /// and passed to `Node::new`.
 fn node_meta(tag: DeepTag, meta: deep::Expr, children: Vec<deep::Expr>) -> deep::Expr {
     let meta_map = match meta {
@@ -415,28 +395,9 @@ fn dvar(name: &str) -> deep::Expr {
 }
 
 fn attach_span_metadata(expr: deep::Expr, span: Span) -> deep::Expr {
-    let Some(entry) = span_entry(span) else {
-        return expr;
-    };
-
-    match expr {
-        deep::Expr::Node(mut node, node_span) => {
-            let mut meta = node.meta().clone();
-            meta.entries.retain(|(key, _)| key != "span");
-            meta.entries.push(entry);
-            node.try_replace_meta(meta)
-                .expect("span annotation must preserve the stamped Node invariant");
-            deep::Expr::Node(node, node_span)
-        }
-        deep::Expr::List(list, list_span) => {
-            let mut elements = list.elements;
-            if let Some(deep::Expr::Map(map, _)) = elements.get_mut(1) {
-                map.entries.retain(|(key, _)| key != "span");
-                map.entries.push(entry);
-            }
-            deep::Expr::List(deep::List { elements }, list_span)
-        }
-        other => other,
+    match span_entry(span) {
+        Some(entry) => with_metadata_value(expr, entry),
+        None => expr,
     }
 }
 
@@ -511,10 +472,9 @@ fn desugar_param_with_scope(
     match &param.ty {
         Some(ty) if typed_param_needs_meta_wrapper(&param.name) => deep::Expr::MetaExpr(
             deep::MetaExpr {
-                entries: vec![(
-                    "type".to_string(),
-                    desugar_type_with_scope(ty, dim_vars, tvar_set),
-                )],
+                metadata: deep::Metadata::from(type_metadata(desugar_type_with_scope(
+                    ty, dim_vars, tvar_set,
+                ))),
                 expr: Box::new(sym(&param.name)),
             },
             sp(),
@@ -602,51 +562,31 @@ fn typed_param_needs_meta_wrapper(name: &str) -> bool {
 /// Inject a type annotation into the metadata of a desugared expression.
 fn inject_type_metadata(expr: deep::Expr, ty: deep::Expr) -> deep::Expr {
     match expr {
-        deep::Expr::Node(mut node, span) => {
-            let mut meta = node.meta().clone();
-            meta.entries.retain(|(key, _)| key != "type");
-            meta.entries.push(("type".to_string(), ty));
-            node.try_replace_meta(meta)
-                .expect("type annotation must preserve the stamped Node invariant");
-            deep::Expr::Node(node, span)
-        }
-        deep::Expr::List(list, span) => {
-            let mut elements = list.elements;
-            if elements.len() >= 2 {
-                let mut entries = match elements.remove(1) {
-                    deep::Expr::Map(map, _) => map
-                        .entries
-                        .into_iter()
-                        .filter(|(key, _)| key != "type")
-                        .collect(),
-                    _ => Vec::new(),
-                };
-                entries.push(("type".to_string(), ty));
-                elements.insert(1, meta_with_entries(entries));
-            }
-            deep::Expr::List(deep::List { elements }, span)
-        }
-        // For atoms, wrap in an annotated var node
+        deep::Expr::Node(..) | deep::Expr::List(..) => with_metadata_value(expr, type_metadata(ty)),
         other => node_meta(DeepTag::Var, meta_with_type(ty), vec![other]),
     }
 }
 
-fn desugar_effect_set(effects: &[EffectExpr]) -> deep::Expr {
-    let mut children = Vec::new();
-    for effect in effects {
-        children.push(match effect {
-            EffectExpr::Diff(_) => sym("diff"),
-            EffectExpr::Random(_) => sym("random"),
-            EffectExpr::Accum(_) => sym("accum"),
-            EffectExpr::Io(_) => sym("io"),
-            EffectExpr::Test(_) => sym("test"),
-            EffectExpr::Resource(device, _) => node(
-                DeepTag::Resource,
-                vec![deep::Expr::Atom(deep::Atom::Str(device.clone()), sp())],
+fn desugar_effect_set(effects: &[EffectExpr]) -> AstEffectSet {
+    let values = effects
+        .iter()
+        .map(|effect| match effect {
+            EffectExpr::Diff(_) => EffectMember::Name(Spanned::new("diff".into(), sp())),
+            EffectExpr::Random(_) => EffectMember::Name(Spanned::new("random".into(), sp())),
+            EffectExpr::Accum(_) => EffectMember::Name(Spanned::new("accum".into(), sp())),
+            EffectExpr::Io(_) => EffectMember::Name(Spanned::new("io".into(), sp())),
+            EffectExpr::Test(_) => EffectMember::Name(Spanned::new("test".into(), sp())),
+            EffectExpr::Resource(device, _) => EffectMember::Resource(
+                ResourceEffect::new(
+                    Spanned::new(device.clone(), sp()),
+                    deep::Metadata::default(),
+                    sp(),
+                )
+                .expect("resource effect"),
             ),
-        });
-    }
-    node(DeepTag::Effects, children)
+        })
+        .collect();
+    AstEffectSet::new(deep::Metadata::default(), values, sp())
 }
 
 fn apply_effect_metadata(ty_expr: deep::Expr, effects: &Option<Vec<EffectExpr>>) -> deep::Expr {
@@ -657,7 +597,7 @@ fn apply_effect_metadata(ty_expr: deep::Expr, effects: &Option<Vec<EffectExpr>>)
         (Some(effects), deep::Expr::Node(mut node, span)) => {
             if node.tag() == DeepTag::TFn {
                 let mut meta = node.meta().clone();
-                meta.entries = vec![("eff".to_string(), desugar_effect_set(effects))];
+                meta.replace(M::Eff(desugar_effect_set(effects)));
                 node.try_replace_meta(meta)
                     .expect("effect annotation must preserve the stamped Node invariant");
             }
@@ -669,8 +609,7 @@ fn apply_effect_metadata(ty_expr: deep::Expr, effects: &Option<Vec<EffectExpr>>)
                 elements.first(),
                 Some(deep::Expr::Atom(deep::Atom::Tag(DeepTag::TFn), _))
             ) {
-                elements[1] =
-                    meta_with_entries(vec![("eff".to_string(), desugar_effect_set(effects))]);
+                elements[1] = meta_with_entries(vec![M::Eff(desugar_effect_set(effects))]);
             }
             deep::Expr::List(deep::List { elements }, span)
         }
@@ -715,25 +654,10 @@ fn is_first_argument_pipe_lambda(expr: &Expr) -> bool {
 }
 
 fn mark_call_first_pipe_stage(expr: deep::Expr) -> deep::Expr {
-    let marker = ("surf_pipe_stage".to_string(), string("call-first"));
-    match expr {
-        deep::Expr::Node(mut node, span) => {
-            let mut meta = node.meta().clone();
-            meta.entries.retain(|(key, _)| key != "surf_pipe_stage");
-            meta.entries.push(marker);
-            node.try_replace_meta(meta)
-                .expect("pipe metadata must preserve the stamped Node invariant");
-            deep::Expr::Node(node, span)
-        }
-        deep::Expr::List(mut list, span) => {
-            if let Some(deep::Expr::Map(meta, _)) = list.elements.get_mut(1) {
-                meta.entries.retain(|(key, _)| key != "surf_pipe_stage");
-                meta.entries.push(marker);
-            }
-            deep::Expr::List(list, span)
-        }
-        other => other,
-    }
+    with_metadata_value(
+        expr,
+        M::SurfPipeStage(Spanned::new(PipeStageOrigin::CallFirst, sp())),
+    )
 }
 
 fn expr_mentions_name(expr: &Expr, name: &str) -> bool {
@@ -1272,9 +1196,9 @@ impl DesugarCtx {
                     if index == 0 {
                         node_meta(
                             DeepTag::Defdim,
-                            meta_with_entries(vec![(
-                                "surf_dim_group_size".to_string(),
-                                int(names.len() as i64),
+                            meta_with_entries(vec![M::SurfDimGroupSize(
+                                PositiveInteger::try_new(int(names.len() as i64))
+                                    .expect("nonempty dimension group"),
                             )]),
                             vec![sym(name)],
                         )
@@ -1291,7 +1215,7 @@ impl DesugarCtx {
                 }
                 vec![node_meta(
                     DeepTag::Module,
-                    meta_with_entries(vec![("surf_path".to_string(), string(name))]),
+                    meta_with_entries(vec![M::SurfPath(Spanned::new(name.to_string(), sp()))]),
                     children,
                 )]
             }
@@ -1301,18 +1225,21 @@ impl DesugarCtx {
                     let name_list = bare_list(ns.iter().map(|n| sym(n)).collect());
                     vec![node_meta(
                         DeepTag::Import,
-                        meta_with_entries(vec![("surf_path".to_string(), string(module))]),
+                        meta_with_entries(vec![M::SurfPath(Spanned::new(
+                            module.to_string(),
+                            sp(),
+                        ))]),
                         vec![sym(&lower_module_path(module)), name_list],
                     )]
                 }
                 ImportKind::Qualified => vec![node_meta(
                     DeepTag::Import,
-                    meta_with_entries(vec![("surf_path".to_string(), string(module))]),
+                    meta_with_entries(vec![M::SurfPath(Spanned::new(module.to_string(), sp()))]),
                     vec![sym(&lower_module_path(module)), bare_list(vec![])],
                 )],
                 ImportKind::All => vec![node_meta(
                     DeepTag::ImportAll,
-                    meta_with_entries(vec![("surf_path".to_string(), string(module))]),
+                    meta_with_entries(vec![M::SurfPath(Spanned::new(module.to_string(), sp()))]),
                     vec![sym(&lower_module_path(module))],
                 )],
             },
@@ -1384,15 +1311,8 @@ impl DesugarCtx {
         self.current_type_binders.replace(restore_binders);
         let fn_node = node(DeepTag::Fn, vec![params_node, desugared_body]);
         let def_node = node(DeepTag::Def, vec![sym(name), fn_node]);
-        // A standalone `sig` owns this declaration's binders, so its `def`
-        // may not also bound them (`spec/04-type-system.md` §5.9). Carry the
-        // authored bound onto the `def` node so the checker rejects it by
-        // name instead of the desugarer silently discarding it.
-        let def_node = if declares_bound && self.explicit_sig_names.contains(name) {
-            with_dtype_bounds(def_node, type_binders)
-        } else {
-            def_node
-        };
+        // Bound ownership is validated before desugaring: a standalone sig
+        // and its def cannot each author bounds. Only defsig carries them.
 
         // chelis#285: when an explicit standalone `sig` already declares this
         // name, the signature synthesized below from inline annotations is
@@ -1478,43 +1398,57 @@ impl DesugarCtx {
             .collect::<Vec<_>>();
         let param_nodes = params.iter().map(desugar_param).collect::<Vec<_>>();
         let params_node = node(DeepTag::Params, param_nodes.clone());
-        let precondition_node = node(
-            DeepTag::Tuple,
+        let preconditions = PropertyPreconditions::new(
+            deep::Metadata::default(),
             preconditions
                 .iter()
-                .map(|expr| self.desugar_expr_with_scope(expr, &param_scope))
+                .map(|expr| {
+                    RuntimeExpression::try_new(self.desugar_expr_with_scope(expr, &param_scope))
+                        .expect("property expression")
+                })
                 .collect(),
+            sp(),
         );
-
+        let quantifiers = PropertyQuantifiers::new(
+            deep::Metadata::default(),
+            param_nodes
+                .into_iter()
+                .map(|p| PropertyBinder::try_from_expression(p).expect("property binder"))
+                .collect(),
+            sp(),
+        );
         let mut meta_entries = vec![
-            ("chelis_role".to_string(), string("property")),
-            ("property_source_kind".to_string(), string("user")),
-            ("property_quantifiers".to_string(), params_node.clone()),
-            ("property_preconditions".to_string(), precondition_node),
+            M::ChelisRole(Spanned::new("property".into(), sp())),
+            M::PropertySourceKind(Spanned::new(PropertySourceKind::User, sp())),
+            M::PropertyQuantifiers(quantifiers),
+            M::PropertyPreconditions(preconditions),
         ];
         let mut contract_ids = Vec::new();
         for option in options {
             match option {
-                PropertyOption::Tolerance(value, _) => meta_entries.push((
-                    "property_tolerance".to_string(),
-                    self.desugar_expr_with_scope(value, &param_scope),
+                PropertyOption::Tolerance(value, _) => meta_entries.push(M::PropertyTolerance(
+                    RuntimeExpression::try_new(self.desugar_expr_with_scope(value, &param_scope))
+                        .expect("property option expression"),
                 )),
-                PropertyOption::Seed(value, _) => meta_entries.push((
-                    "property_seed".to_string(),
-                    self.desugar_expr_with_scope(value, &param_scope),
+                PropertyOption::Seed(value, _) => meta_entries.push(M::PropertySeed(
+                    RuntimeExpression::try_new(self.desugar_expr_with_scope(value, &param_scope))
+                        .expect("property option expression"),
                 )),
-                PropertyOption::Samples(value, _) => meta_entries.push((
-                    "property_samples".to_string(),
-                    self.desugar_expr_with_scope(value, &param_scope),
+                PropertyOption::Samples(value, _) => meta_entries.push(M::PropertySamples(
+                    RuntimeExpression::try_new(self.desugar_expr_with_scope(value, &param_scope))
+                        .expect("property option expression"),
                 )),
-                PropertyOption::Contract(id, _) => contract_ids.push(string(id)),
+                PropertyOption::Contract(id, _) => {
+                    contract_ids.push(Spanned::new(id.clone(), sp()))
+                }
             }
         }
         if !contract_ids.is_empty() {
-            meta_entries.push((
-                "property_contracts".to_string(),
-                node(DeepTag::Tuple, contract_ids),
-            ));
+            meta_entries.push(M::PropertyContracts(PropertyContracts::new(
+                deep::Metadata::default(),
+                contract_ids,
+                sp(),
+            )));
         }
 
         let fn_node = node(
@@ -1567,7 +1501,7 @@ impl DesugarCtx {
             return node(DeepTag::Deftype, children);
         }
 
-        let mut meta_entries = vec![("opaque".to_string(), bool_atom(true))];
+        let mut meta_entries = vec![M::Opaque(Present::new(sp()))];
         if let Some(inv) = invariant {
             // Predicate fn node: (fn {} (params {} <binder>) <body>).
             // The body is desugared with the binder in scope.
@@ -1575,11 +1509,16 @@ impl DesugarCtx {
             let body = self.desugar_expr_with_scope(&inv.body, std::slice::from_ref(&inv.binder));
             let fn_node = node(DeepTag::Fn, vec![params_node, body]);
             let amenability = chelis_pred::classify_predicate(&fn_node);
-            meta_entries.push(("invariant".to_string(), fn_node));
-            meta_entries.push((
-                "invariant_amenability".to_string(),
-                string(amenability.as_str()),
+            meta_entries.push(M::Invariant(
+                InvariantPredicate::try_from_expression(fn_node).expect("one-binder invariant"),
             ));
+            let amenability = match amenability {
+                chelis_pred::PredAmenability::Linear => Amenability::Linear,
+                chelis_pred::PredAmenability::Polynomial => Amenability::Polynomial,
+                chelis_pred::PredAmenability::Transcendental => Amenability::Transcendental,
+                chelis_pred::PredAmenability::Opaque => Amenability::Opaque,
+            };
+            meta_entries.push(M::InvariantAmenability(Spanned::new(amenability, sp())));
         }
 
         node_meta(DeepTag::Deftype, meta_with_entries(meta_entries), children)
@@ -1658,10 +1597,22 @@ impl DesugarCtx {
             .resolve_grad_wrt_indices(f, wrt, local_fn_params)
             .unwrap_or_else(|| (0..wrt.len()).map(|index| index as i64).collect());
 
+        let mut variables = wrt.iter().map(|name| {
+            VariableRef::new(
+                Spanned::new(name.clone(), sp()),
+                deep::Metadata::default(),
+                sp(),
+            )
+            .expect("variable target")
+        });
+        let first = variables.next().expect("grad has a nonempty target list");
         let wrt_meta = if wrt.len() == 1 {
-            dvar(&wrt[0])
+            WrtTargets::Variable(first)
         } else {
-            node(DeepTag::Tuple, wrt.iter().map(|name| dvar(name)).collect())
+            WrtTargets::Tuple(
+                VariableTuple::new(deep::Metadata::default(), first, variables.collect(), sp())
+                    .expect("variable tuple"),
+            )
         };
         let index_expr = if indices.len() == 1 {
             node_meta(
@@ -1687,7 +1638,7 @@ impl DesugarCtx {
 
         node_meta(
             DeepTag::Grad,
-            meta_with_entries(vec![("wrt".to_string(), wrt_meta)]),
+            meta_with_entries(vec![M::Wrt(wrt_meta)]),
             vec![desugared_fn, index_expr],
         )
     }
@@ -1982,10 +1933,7 @@ impl DesugarCtx {
             ),
             Expr::WithSeed(seed, body, _) => node_meta(
                 DeepTag::HandleEffect,
-                meta_with_entries(vec![(
-                    "effect".to_string(),
-                    sym(EffectKind::Random.symbol()),
-                )]),
+                meta_with_entries(vec![M::Effect(Spanned::new(EffectKind::Random, sp()))]),
                 vec![
                     self.desugar_expr_with_scope(seed, local_fn_params),
                     self.desugar_expr_with_scope(body, local_fn_params),
@@ -1993,10 +1941,7 @@ impl DesugarCtx {
             ),
             Expr::WithDevice(device, body, _) => node_meta(
                 DeepTag::HandleEffect,
-                meta_with_entries(vec![(
-                    "effect".to_string(),
-                    sym(EffectKind::Resource.symbol()),
-                )]),
+                meta_with_entries(vec![M::Effect(Spanned::new(EffectKind::Resource, sp()))]),
                 vec![
                     self.desugar_expr_with_scope(device, local_fn_params),
                     self.desugar_expr_with_scope(body, local_fn_params),
@@ -2084,10 +2029,7 @@ fn bind_name_value(name: &str, value: deep::Expr, body: deep::Expr) -> deep::Exp
 fn bind_destructure_value(name: &str, value: deep::Expr, body: deep::Expr) -> deep::Expr {
     let bind_node = node_meta(
         DeepTag::Bind,
-        meta_with_entries(vec![(
-            "destructure".to_string(),
-            deep::Expr::Atom(deep::Atom::Bool(true), sp()),
-        )]),
+        meta_with_entries(vec![M::Destructure(Present::new(sp()))]),
         vec![sym(name), value],
     );
     node(DeepTag::Let, vec![bind_node, body])
@@ -2179,9 +2121,15 @@ impl DesugarCtx {
                         out = bind_name_value(name, value, out);
                     } else {
                         let value = if matches!(&binding.value, Expr::Annotate(..)) {
-                            add_surface_marker(value, "surf_binding_type", "explicit")
-                        } else if has_metadata_key(&value, "type") {
-                            add_surface_marker(value, "surf_binding_type", "inferred")
+                            with_metadata_value(
+                                value,
+                                M::SurfBindingType(Spanned::new(BindingTypeOrigin::Explicit, sp())),
+                            )
+                        } else if has_type_metadata(&value) {
+                            with_metadata_value(
+                                value,
+                                M::SurfBindingType(Spanned::new(BindingTypeOrigin::Inferred, sp())),
+                            )
                         } else {
                             value
                         };
@@ -2228,10 +2176,10 @@ fn desugar_literal(lit: &Literal) -> deep::Expr {
             let float_typed = matches!(prim, "f32" | "f64" | "bf16" | "f16");
             let ty = node(DeepTag::TPrim, vec![sym(prim)]);
             let meta = if float_typed {
-                let style = (*suffix == LiteralSuffix::F32).then_some("explicit");
+                let style = (*suffix == LiteralSuffix::F32).then_some(LiteralStyle::Explicit);
                 meta_with_integer_float_type(ty, style)
             } else if *suffix == LiteralSuffix::I32 {
-                numeric_literal_meta(ty, "explicit")
+                numeric_literal_meta(ty, LiteralStyle::Explicit)
             } else {
                 meta_with_type(ty)
             };
@@ -2244,7 +2192,7 @@ fn desugar_literal(lit: &Literal) -> deep::Expr {
         Literal::TypedFloat(f, suffix) => {
             let ty = node(DeepTag::TPrim, vec![sym(suffix.t_prim_name())]);
             let meta = if *suffix == LiteralSuffix::F32 {
-                numeric_literal_meta(ty, "explicit")
+                numeric_literal_meta(ty, LiteralStyle::Explicit)
             } else {
                 meta_with_type(ty)
             };
@@ -2358,9 +2306,9 @@ fn adopted_scalar_literal_source(
         DeepAtom::Int(value) => {
             let meta =
                 if target_tag == DeepTag::TPrim && matches!(prec, "f32" | "f64" | "bf16" | "f16") {
-                    meta_with_integer_float_type(ty, Some("unsuffixed"))
+                    meta_with_integer_float_type(ty, Some(LiteralStyle::Unsuffixed))
                 } else {
-                    numeric_literal_meta(ty, "unsuffixed")
+                    numeric_literal_meta(ty, LiteralStyle::Unsuffixed)
                 };
             Some(node_meta(
                 DeepTag::Lit,
@@ -2370,7 +2318,7 @@ fn adopted_scalar_literal_source(
         }
         DeepAtom::Float(value) => Some(node_meta(
             DeepTag::Lit,
-            numeric_literal_meta(ty, "unsuffixed"),
+            numeric_literal_meta(ty, LiteralStyle::Unsuffixed),
             vec![deep::Expr::Atom(DeepAtom::Float(*value), sp())],
         )),
         _ => None,
@@ -2461,9 +2409,9 @@ impl DesugarCtx {
                 let float_typed = matches!(prec_name, "f32" | "f64" | "bf16" | "f16");
                 let ty = node(DeepTag::TPrim, vec![sym(prec_name)]);
                 let meta = if float_typed {
-                    meta_with_integer_float_type(ty, Some("unsuffixed"))
+                    meta_with_integer_float_type(ty, Some(LiteralStyle::Unsuffixed))
                 } else {
-                    numeric_literal_meta(ty, "unsuffixed")
+                    numeric_literal_meta(ty, LiteralStyle::Unsuffixed)
                 };
                 node_meta(
                     DeepTag::Lit,
@@ -2473,7 +2421,10 @@ impl DesugarCtx {
             }
             Expr::Lit(Literal::Float(f), _) => node_meta(
                 DeepTag::Lit,
-                numeric_literal_meta(node(DeepTag::TPrim, vec![sym(prec_name)]), "unsuffixed"),
+                numeric_literal_meta(
+                    node(DeepTag::TPrim, vec![sym(prec_name)]),
+                    LiteralStyle::Unsuffixed,
+                ),
                 vec![deep::Expr::Atom(deep::Atom::Float(*f), sp())],
             ),
             // RT-2 fixup P2: the surface parser turns `-128` into
@@ -2489,9 +2440,9 @@ impl DesugarCtx {
                     let float_typed = matches!(prec_name, "f32" | "f64" | "bf16" | "f16");
                     let ty = node(DeepTag::TPrim, vec![sym(prec_name)]);
                     let meta = if float_typed {
-                        meta_with_integer_float_type(ty, Some("unsuffixed"))
+                        meta_with_integer_float_type(ty, Some(LiteralStyle::Unsuffixed))
                     } else {
-                        numeric_literal_meta(ty, "unsuffixed")
+                        numeric_literal_meta(ty, LiteralStyle::Unsuffixed)
                     };
                     node_meta(
                         DeepTag::Lit,
@@ -2501,7 +2452,10 @@ impl DesugarCtx {
                 }
                 Expr::Lit(Literal::Float(f), _) => node_meta(
                     DeepTag::Lit,
-                    numeric_literal_meta(node(DeepTag::TPrim, vec![sym(prec_name)]), "unsuffixed"),
+                    numeric_literal_meta(
+                        node(DeepTag::TPrim, vec![sym(prec_name)]),
+                        LiteralStyle::Unsuffixed,
+                    ),
                     vec![deep::Expr::Atom(deep::Atom::Float(-*f), sp())],
                 ),
                 // Non-literal `neg` operand falls through to the
@@ -3058,51 +3012,23 @@ mod tests {
         let deep = desugar_program(&decls);
         let contracts = deep
             .iter()
-            .filter_map(|expr| match expr {
-                deep::Expr::Node(node, span) => Some(node.to_list(*span)),
-                deep::Expr::List(list, _) => Some(list.clone()),
-                _ => None,
-            })
-            .find(|list| list.tag() == Some(DeepTag::Def))
-            .and_then(|list| match list.elements.get(1) {
-                Some(deep::Expr::Map(meta, _)) => meta
-                    .entries
-                    .iter()
-                    .find(|(name, _)| name == "property_contracts")
-                    .map(|(_, value)| value.clone()),
-                _ => None,
-            })
-            .and_then(|value| match value {
-                deep::Expr::Node(node, span) => {
-                    let list = node.to_list(span);
-                    Some(
-                        list.elements
-                            .iter()
-                            .skip(2)
-                            .filter_map(|expr| match expr {
-                                deep::Expr::Atom(deep::Atom::Str(value), _) => {
-                                    Some(value.as_str().to_string())
-                                }
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>(),
-                    )
+            .find_map(|expr| match expr {
+                deep::Expr::Node(node, _) if node.tag() == DeepTag::Def => {
+                    node.meta().property_contracts()
                 }
-                deep::Expr::List(list, _) => Some(
-                    list.elements
-                        .iter()
-                        .skip(2)
-                        .filter_map(|expr| match expr {
-                            deep::Expr::Atom(deep::Atom::Str(value), _) => {
-                                Some(value.as_str().to_string())
-                            }
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>(),
-                ),
+                deep::Expr::List(list, _) if list.tag() == Some(DeepTag::Def) => {
+                    match list.elements.get(1) {
+                        Some(deep::Expr::Map(meta, _)) => meta.property_contracts(),
+                        _ => None,
+                    }
+                }
                 _ => None,
             })
-            .expect("property_contracts metadata");
+            .expect("property_contracts metadata")
+            .values()
+            .iter()
+            .map(|value| value.value().as_str())
+            .collect::<Vec<_>>();
         assert_eq!(
             contracts,
             vec!["std.normal_cdf.reflection", "std.normal_cdf.range"]

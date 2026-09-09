@@ -27,10 +27,7 @@ pub(super) fn validate_binder_literal_adoption_in_program(
             continue;
         };
         let sig = signatures.get(name);
-        if sig.is_some_and(|sig| sig.dtype_bounds.is_err()) {
-            continue; // declaration collection owns this error
-        }
-        let bounds = sig.and_then(|sig| sig.dtype_bounds.as_ref().ok());
+        let bounds = sig.map(|sig| &sig.dtype_bounds);
         visit_binder_literal_uses(body, &mut |usage| {
             match usage {
             // chelis#1558: [04-DTYPE-1] constrains the cast TARGET, not the

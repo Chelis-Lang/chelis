@@ -3,16 +3,15 @@
 //! Authority: `spec/design/checker_totality.md` section C4.2 successor
 //! acceptance and `spec/design/unrepresentable_ast_domain.md` Tasks 6-8.
 
-use chelis_deep::{Atom, DeepTag, Expr, MetaMap, Span, parse_and_stamp};
+use chelis_deep::{DeepTag, Expr, Metadata, Span, parse_and_stamp};
 use chelis_types::{check_linearity, check_typed_program, errors::CheckErrorKind};
 
 fn assert_no_legacy_list(expr: &Expr) {
     match expr {
         Expr::List(_, _) => panic!("checker output normalized stamped Deep back to Expr::List"),
         Expr::Node(node, _) => {
-            for (_, value) in &node.meta().entries {
-                assert_no_legacy_list(value);
-            }
+            node.meta()
+                .visit_expressions(&mut |value, _| assert_no_legacy_list(value));
             for child in node.children_slice() {
                 assert_no_legacy_list(child);
             }
@@ -23,22 +22,18 @@ fn assert_no_legacy_list(expr: &Expr) {
             }
         }
         Expr::UnknownForm(data) => {
-            for (_, value) in &data.meta.entries {
-                assert_no_legacy_list(value);
-            }
+            data.meta
+                .visit_expressions(&mut |value, _| assert_no_legacy_list(value));
             for child in &data.children {
                 assert_no_legacy_list(child);
             }
         }
         Expr::Map(map, _) => {
-            for (_, value) in &map.entries {
-                assert_no_legacy_list(value);
-            }
+            map.visit_expressions(&mut |value, _| assert_no_legacy_list(value));
         }
         Expr::MetaExpr(meta, _) => {
-            for (_, value) in &meta.entries {
-                assert_no_legacy_list(value);
-            }
+            meta.metadata
+                .visit_expressions(&mut |value, _| assert_no_legacy_list(value));
             assert_no_legacy_list(&meta.expr);
         }
         Expr::Atom(_, _) => {}
@@ -50,12 +45,19 @@ fn assert_no_legacy_list(expr: &Expr) {
 /// The stamped carrier hands out no mutable borrow of its children or
 /// metadata, so this rebuilds the enclosing nodes inside-out and lets each
 /// `try_replace_*` revalidate the complete candidate before commit.
-fn push_meta_on_first_node(expr: &mut Expr, tag: DeepTag, entry: (String, Expr)) -> bool {
+fn push_meta_on_first_node(expr: &mut Expr, tag: DeepTag, entry: Metadata) -> bool {
     match expr {
         Expr::Node(node, _) => {
             if node.tag() == tag {
                 let mut meta = node.meta().clone();
-                meta.entries.push(entry);
+                for value in entry.values() {
+                    meta.insert(value.clone()).unwrap();
+                }
+                for (key, value) in entry.extensions().iter() {
+                    meta.extensions_mut()
+                        .insert(key.into(), value.clone())
+                        .unwrap();
+                }
                 node.try_replace_meta(meta)
                     .expect("test fixture metadata must preserve the Node invariant");
                 return true;
@@ -77,10 +79,19 @@ fn push_meta_on_first_node(expr: &mut Expr, tag: DeepTag, entry: (String, Expr))
             .children
             .iter_mut()
             .any(|child| push_meta_on_first_node(child, tag, entry.clone())),
-        Expr::Map(map, _) => map
-            .entries
-            .iter_mut()
-            .any(|(_, value)| push_meta_on_first_node(value, tag, entry.clone())),
+        Expr::Map(map, _) => {
+            let mut found = false;
+            *map = map
+                .map_expressions(&mut |value, _| {
+                    let mut value = value.clone();
+                    if !found {
+                        found = push_meta_on_first_node(&mut value, tag, entry.clone());
+                    }
+                    value
+                })
+                .unwrap();
+            found
+        }
         Expr::MetaExpr(meta, _) => push_meta_on_first_node(&mut meta.expr, tag, entry),
         Expr::Atom(_, _) | Expr::List(_, _) => false,
     }
@@ -182,17 +193,20 @@ fn effects_only_reannotation_accepts_stamped_nodes_and_rejects_other_metadata() 
     let checked = check_typed_program(&program).expect("stamped program must type-check");
 
     let mut effects_only = checked.annotated_exprs().to_vec();
-    let effect_row = Expr::node(
-        DeepTag::Effects,
-        MetaMap::default(),
-        vec![Expr::Atom(Atom::Name("io".to_string()), Span::new(0, 0))],
-        Span::new(0, 0),
-    );
+    let effect_row = Metadata::from(chelis_deep::annotations::MetadataValue::Effects(
+        chelis_deep::annotations::EffectSet::new(
+            Metadata::default(),
+            vec![chelis_deep::annotations::EffectMember::Name(
+                chelis_deep::annotations::Spanned::new("io".into(), Span::new(0, 0)),
+            )],
+            Span::new(0, 0),
+        ),
+    ));
     assert!(
         effects_only.iter_mut().any(|expr| push_meta_on_first_node(
             expr,
             DeepTag::Fn,
-            ("effects".to_string(), effect_row.clone())
+            effect_row.clone()
         )),
         "fixture contains a stamped function"
     );
@@ -204,14 +218,17 @@ fn effects_only_reannotation_accepts_stamped_nodes_and_rejects_other_metadata() 
     assert!(
         forged
             .first_mut()
-            .is_some_and(|expr| push_meta_on_first_node(
-                expr,
-                DeepTag::Def,
-                (
-                    "forged".to_string(),
-                    Expr::Atom(Atom::Bool(true), Span::new(0, 0)),
-                ),
-            )),
+            .is_some_and(|expr| push_meta_on_first_node(expr, DeepTag::Def, {
+                let mut metadata = Metadata::default();
+                metadata
+                    .extensions_mut()
+                    .insert(
+                        "forged".into(),
+                        chelis_deep::ExtensionData::parse("true").unwrap(),
+                    )
+                    .unwrap();
+                metadata
+            },)),
         "fixture contains a stamped declaration"
     );
     checked

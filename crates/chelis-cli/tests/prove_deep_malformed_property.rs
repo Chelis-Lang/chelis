@@ -12,22 +12,9 @@
 //! a genuine malformed-property discovery error and surfaces the latter as a
 //! prove error (exit 3), the way the obligation path surfaces its errors.
 //!
-//! The malformed fixture below uses the legacy `c_earchin_role:
-//! "property_witness"` marker with `property_source_kind: "user"` and NO
-//! `property_quantifiers`. The CLI-local Deep discoverer tolerates that form
-//! (it falls back to the fn parameters when `chelis_role` is absent), so the
-//! ONLY component that rejects it is the shared runner -- which means the
-//! whole error path runs THROUGH the swallow at `run_deep_properties_shared`.
-//! Without the fix this prove run exits 0 "passed"; with the fix it exits 3.
-//!
-//! These tests are gated on `chelis-prove` (the feature that compiles the
-//! shared runner and `property_run.rs`; the optional dep is enabled by
-//! `--features smt`, matching the gating of the other shared-runner prove
-//! tests). In a default no-`chelis-prove` build, `chelis prove` runs the
-//! CLI-local Deep property path instead, which tolerates the legacy fixture by
-//! design, so this regression only holds when the shared runner is compiled.
-
-#![cfg(feature = "chelis-prove")]
+//! Canonical property metadata is validated at Deep ingress. The same
+//! missing-field defect must still reject before discovery, in default and
+//! SMT builds, while a complete property runs normally.
 
 use assert_cmd::Command;
 use serde_json::Value;
@@ -39,13 +26,11 @@ use tempfile::tempdir;
 fn malformed_deep_property_missing_quantifiers_is_error_not_pass() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("malformed.dp");
-    // Classified `user` (so the shared runner owns it) but the metadata omits
-    // `property_quantifiers`. Parses and validate_deep-passes; only the shared
-    // discoverer rejects it.
+    // Canonical property role with missing required quantifiers fails at ingress.
     std::fs::write(
         &path,
         r#"
-(def {c_earchin_role: "property_witness",
+(def {chelis_role: "property",
       property_source_kind: "user"}
   malformed_missing_quantifiers
   (fn {} (params {}) (lit {type: (t-prim {} bool)} true)))
@@ -63,16 +48,15 @@ fn malformed_deep_property_missing_quantifiers_is_error_not_pass() {
 }
 
 /// JSON twin: the malformed property must NOT emit a passing property record;
-/// it must emit an error record and a summary with at least one error and
-/// zero passed.
+/// stamped ingress identifies the missing field before property discovery.
 #[test]
-fn malformed_deep_property_json_reports_error_not_passed() {
+fn malformed_deep_property_json_rejects_at_ingress() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("malformed.dp");
     std::fs::write(
         &path,
         r#"
-(def {c_earchin_role: "property_witness",
+(def {chelis_role: "property",
       property_source_kind: "user"}
   malformed_missing_quantifiers
   (fn {} (params {}) (lit {type: (t-prim {} bool)} true)))
@@ -108,18 +92,10 @@ fn malformed_deep_property_json_reports_error_not_passed() {
         "malformed property must not be reported passed; records={records:?}"
     );
 
-    // The summary must fold at least one error and report zero passed.
-    let summary = records
-        .iter()
-        .find(|record| record["kind"] == "summary")
-        .expect("summary record present");
-    assert_eq!(
-        summary["passed"], 0,
-        "malformed property must not increment passed; summary={summary}"
-    );
     assert!(
-        summary["errors"].as_u64().unwrap_or(0) >= 1,
-        "malformed property must fold an error; summary={summary}"
+        String::from_utf8_lossy(&output.stderr).contains("property_quantifiers"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 

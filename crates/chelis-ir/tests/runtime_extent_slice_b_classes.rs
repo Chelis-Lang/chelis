@@ -1834,11 +1834,9 @@ fn every_local_class_site_carries_the_carrier_its_source_names() {
 /// class whose canonical value the checker already resolved to a literal is
 /// compared against that literal, not against a binder no lane declares.
 ///
-/// The resolved size belongs to the INTERFACE member, not to the guarded one:
-/// a local member whose own dim the checker resolved is exempt by
-/// `a_local_member_the_checker_resolved_is_not_a_guard_site`'s provenance
-/// rule, so the only way a site sees a `Resolved` canonical is when a
-/// different member of its class carries the literal. Built directly because
+/// The resolved size belongs to the interface member in this fixture. A
+/// resolved size on the local member is also a claim, and is exercised by
+/// the backend's numeric_local_extent_claims_execute_exactly matrix. Built directly because
 /// the surface spelling that resolves an input extent this way is the
 /// interface half of chelis#1377, which reaches the ENTRY path instead.
 ///

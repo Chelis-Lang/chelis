@@ -417,6 +417,11 @@ fn drive_parity(path: &Path, expect_executable: bool) {
 // the harness fails loud rather than silently shrinking.
 
 #[test]
+fn parity_checked_reshape() {
+    drive_parity(&examples_root().join("checked_reshape.ch"), true);
+}
+
+#[test]
 fn parity_dict_foundation() {
     drive_parity(&examples_root().join("dict_foundation.ch"), true);
 }
@@ -424,6 +429,11 @@ fn parity_dict_foundation() {
 #[test]
 fn parity_count_bool_axes() {
     drive_parity(&examples_root().join("count_bool_axes.ch"), true);
+}
+
+#[test]
+fn parity_generic_explicit_shape() {
+    drive_parity(&examples_root().join("generic_explicit_shape.ch"), true);
 }
 
 #[test]
@@ -548,9 +558,11 @@ fn parity_rank_poly_borrow_library_only() {
 #[test]
 fn parity_corpus_is_complete() {
     let known: &[&str] = &[
+        "checked_reshape.ch",
         "constraint_directed_risk_guards.ch",
         "count_bool_axes.ch",
         "dict_foundation.ch",
+        "generic_explicit_shape.ch",
         "hash_order_determinism.ch",
         "hello_tensor.ch",
         "induction_bond.ch",

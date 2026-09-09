@@ -1,0 +1,1260 @@
+{
+  "broadcast.folded": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "xs = tensor(shape=[3], data=[1.0, 2.0, 3.0])\nout = tensor(shape=[3], data=[false, true, true])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {},
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "xs = tensor(shape=[3], data=[1.0, 2.0, 3.0])\nout = tensor(shape=[3], data=[false, true, true])",
+      "success": true
+    },
+    "issue": 1619
+  },
+  "broadcast.literal": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[3], data=[false, true, true])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[3, f32]) -> tensor[3, bool]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[3], data=[false, true, true])",
+      "success": true
+    },
+    "issue": 1619
+  },
+  "broadcast.non_unit": {
+    "c": {
+      "stage": "build",
+      "stderr": "error: Check errors: Type errors: [CheckError { kind: DimensionMismatch, message: \"expand requires the operand's extent at axis 0 to be 1, got 2: expand broadcasts a size-1 axis and cannot replace an axis that already carries data (spec/05-risc-primitives.md §2.4.1)\", suggestions: [], severity: 0.8, expected: None, got: None, span_offset: None, span_id: None }]",
+      "stdout": "",
+      "success": false
+    },
+    "check": {
+      "errors": [
+        {
+          "kind": "DimensionMismatch",
+          "message": "expand requires the operand's extent at axis 0 to be 1, got 2: expand broadcasts a size-1 axis and cannot replace an axis that already carries data (spec/05-risc-primitives.md §2.4.1)",
+          "severity": 0.8
+        }
+      ],
+      "score": 0.88,
+      "signatures": {},
+      "success": false
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "error: Type errors: [CheckError { kind: DimensionMismatch, message: \"expand requires the operand's extent at axis 0 to be 1, got 2: expand broadcasts a size-1 axis and cannot replace an axis that already carries data (spec/05-risc-primitives.md §2.4.1)\", suggestions: [], severity: 0.8, expected: None, got: None, span_offset: None, span_id: None }]",
+      "stdout": "",
+      "success": false
+    },
+    "issue": 1619
+  },
+  "broadcast.symbolic": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[3], data=[false, true, true])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[d0, f32]) -> tensor[d0, bool]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[3], data=[false, true, true])",
+      "success": true
+    },
+    "issue": 1619
+  },
+  "foreign.binding.mismatch": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[2, 2], data=[1.0, 1.0, 2.0, 2.0])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[rows, f32], tensor[cols, f32]) -> tensor[rows, *, f32]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[2, 2], data=[1.0, 1.0, 2.0, 2.0])",
+      "success": true
+    },
+    "issue": 1376
+  },
+  "foreign.binding.satisfied": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[2, 2], data=[1.0, 1.0, 2.0, 2.0])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[rows, f32], tensor[cols, f32]) -> tensor[rows, *, f32]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[2, 2], data=[1.0, 1.0, 2.0, 2.0])",
+      "success": true
+    },
+    "issue": 1376
+  },
+  "foreign.export.mismatch": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[2, 2], data=[1, 1, 2, 2])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[rows, f32], tensor[cols, f32]) -> tensor[rows, *, f32]"
+      },
+      "success": true
+    },
+    "eval": null,
+    "issue": 1376
+  },
+  "foreign.export.satisfied": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[2, 2], data=[1, 1, 2, 2])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[rows, f32], tensor[cols, f32]) -> tensor[rows, *, f32]"
+      },
+      "success": true
+    },
+    "eval": null,
+    "issue": 1376
+  },
+  "foreign.root.mismatch": {
+    "c": {
+      "stage": "no_entry",
+      "stderr": "accepted root has no C entry",
+      "stdout": "",
+      "success": false
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[rows, f32], tensor[cols, f32]) -> tensor[rows, *, f32]",
+        "main": "() -> tensor[rows, *, f32]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "warning: input contains only def declarations; nothing to evaluate",
+      "stdout": "",
+      "success": true
+    },
+    "issue": 1376
+  },
+  "foreign.root.satisfied": {
+    "c": {
+      "stage": "no_entry",
+      "stderr": "accepted root has no C entry",
+      "stdout": "",
+      "success": false
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[rows, f32], tensor[cols, f32]) -> tensor[rows, *, f32]",
+        "main": "() -> tensor[rows, *, f32]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "warning: input contains only def declarations; nothing to evaluate",
+      "stdout": "",
+      "success": true
+    },
+    "issue": 1376
+  },
+  "literal.binding.mismatch": {
+    "c": {
+      "stage": "execute",
+      "stderr": "extent `4`: claimed = 4, x axis 0 = 5\nnumeric trap: domain in load at int64",
+      "stdout": "",
+      "success": false
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[f32], tensor[rows, f32]) -> tensor[*, f32]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "error: extent `4`: claimed = 4, x axis 0 = 5\nnumeric trap: domain in load at int64",
+      "stdout": "",
+      "success": false
+    },
+    "issue": 1377
+  },
+  "literal.binding.satisfied": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[4], data=[7.0, 7.0, 7.0, 7.0])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[f32], tensor[rows, f32]) -> tensor[*, f32]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[4], data=[7.0, 7.0, 7.0, 7.0])",
+      "success": true
+    },
+    "issue": 1377
+  },
+  "literal.export.mismatch": {
+    "c": {
+      "stage": "execute",
+      "stderr": "extent `4`: claimed = 4, x axis 0 = 5\nnumeric trap: domain in load at int64",
+      "stdout": "",
+      "success": false
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[f32], tensor[rows, f32]) -> tensor[*, f32]"
+      },
+      "success": true
+    },
+    "eval": null,
+    "issue": 1377
+  },
+  "literal.export.satisfied": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[4], data=[7, 7, 7, 7])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[f32], tensor[rows, f32]) -> tensor[*, f32]"
+      },
+      "success": true
+    },
+    "eval": null,
+    "issue": 1377
+  },
+  "literal.root.mismatch": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "main = tensor(shape=[5], data=[7.0, 7.0, 7.0, 7.0, 7.0])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[f32], tensor[rows, f32]) -> tensor[*, f32]",
+        "main": "() -> tensor[4, f32]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "main = tensor(shape=[5], data=[7.0, 7.0, 7.0, 7.0, 7.0])",
+      "success": true
+    },
+    "issue": 1377
+  },
+  "literal.root.satisfied": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "main = tensor(shape=[4], data=[7.0, 7.0, 7.0, 7.0])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[f32], tensor[rows, f32]) -> tensor[*, f32]",
+        "main": "() -> tensor[4, f32]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "main = tensor(shape=[4], data=[7.0, 7.0, 7.0, 7.0])",
+      "success": true
+    },
+    "issue": 1377
+  },
+  "named.binding.mismatch": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[3], data=[7.0, 7.0, 7.0])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[f32], tensor[rows, f32], tensor[cols, f32]) -> tensor[*, f32]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[3], data=[7.0, 7.0, 7.0])",
+      "success": true
+    },
+    "issue": 1374
+  },
+  "named.binding.satisfied": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[3], data=[7.0, 7.0, 7.0])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[f32], tensor[rows, f32], tensor[cols, f32]) -> tensor[*, f32]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[3], data=[7.0, 7.0, 7.0])",
+      "success": true
+    },
+    "issue": 1374
+  },
+  "named.export.mismatch": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[3], data=[7, 7, 7])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[f32], tensor[rows, f32], tensor[cols, f32]) -> tensor[*, f32]"
+      },
+      "success": true
+    },
+    "eval": null,
+    "issue": 1374
+  },
+  "named.export.satisfied": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[3], data=[7, 7, 7])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[f32], tensor[rows, f32], tensor[cols, f32]) -> tensor[*, f32]"
+      },
+      "success": true
+    },
+    "eval": null,
+    "issue": 1374
+  },
+  "named.root.mismatch": {
+    "c": {
+      "stage": "no_entry",
+      "stderr": "accepted root has no C entry",
+      "stdout": "",
+      "success": false
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[f32], tensor[rows, f32], tensor[cols, f32]) -> tensor[*, f32]",
+        "main": "() -> tensor[*, f32]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "warning: input contains only def declarations; nothing to evaluate",
+      "stdout": "",
+      "success": true
+    },
+    "issue": 1374
+  },
+  "named.root.satisfied": {
+    "c": {
+      "stage": "no_entry",
+      "stderr": "accepted root has no C entry",
+      "stdout": "",
+      "success": false
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[f32], tensor[rows, f32], tensor[cols, f32]) -> tensor[*, f32]",
+        "main": "() -> tensor[*, f32]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "warning: input contains only def declarations; nothing to evaluate",
+      "stdout": "",
+      "success": true
+    },
+    "issue": 1374
+  },
+  "polymorphic.foreign.binding.mismatch": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[2, 2], data=[1.0, 1.0, 2.0, 2.0])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[d0, f32], tensor[d1, f32]) -> tensor[d0, *, f32]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[2, 2], data=[1.0, 1.0, 2.0, 2.0])",
+      "success": true
+    },
+    "issue": 1376
+  },
+  "polymorphic.foreign.binding.satisfied": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[2, 2], data=[1.0, 1.0, 2.0, 2.0])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[d0, f32], tensor[d1, f32]) -> tensor[d0, *, f32]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[2, 2], data=[1.0, 1.0, 2.0, 2.0])",
+      "success": true
+    },
+    "issue": 1376
+  },
+  "polymorphic.foreign.export.mismatch": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[2, 2], data=[1, 1, 2, 2])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[d0, f32], tensor[d1, f32]) -> tensor[d0, *, f32]"
+      },
+      "success": true
+    },
+    "eval": null,
+    "issue": 1376
+  },
+  "polymorphic.foreign.export.satisfied": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[2, 2], data=[1, 1, 2, 2])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[d0, f32], tensor[d1, f32]) -> tensor[d0, *, f32]"
+      },
+      "success": true
+    },
+    "eval": null,
+    "issue": 1376
+  },
+  "polymorphic.foreign.root.mismatch": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "main = tensor(shape=[2, 2], data=[1.0, 1.0, 2.0, 2.0])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[d0, f32], tensor[d1, f32]) -> tensor[d0, *, f32]",
+        "main": "() -> tensor[2, 3, f32]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "main = tensor(shape=[2, 2], data=[1.0, 1.0, 2.0, 2.0])",
+      "success": true
+    },
+    "issue": 1376
+  },
+  "polymorphic.foreign.root.satisfied": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "main = tensor(shape=[2, 2], data=[1.0, 1.0, 2.0, 2.0])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[d0, f32], tensor[d1, f32]) -> tensor[d0, *, f32]",
+        "main": "() -> tensor[2, 2, f32]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "main = tensor(shape=[2, 2], data=[1.0, 1.0, 2.0, 2.0])",
+      "success": true
+    },
+    "issue": 1376
+  },
+  "polymorphic.named.binding.mismatch": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[3], data=[7.0, 7.0, 7.0])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[f32], tensor[d0, f32], tensor[d1, f32]) -> tensor[*, f32]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[3], data=[7.0, 7.0, 7.0])",
+      "success": true
+    },
+    "issue": 1374
+  },
+  "polymorphic.named.binding.satisfied": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[3], data=[7.0, 7.0, 7.0])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[f32], tensor[d0, f32], tensor[d1, f32]) -> tensor[*, f32]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[3], data=[7.0, 7.0, 7.0])",
+      "success": true
+    },
+    "issue": 1374
+  },
+  "polymorphic.named.export.mismatch": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[3], data=[7, 7, 7])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[f32], tensor[d0, f32], tensor[d1, f32]) -> tensor[*, f32]"
+      },
+      "success": true
+    },
+    "eval": null,
+    "issue": 1374
+  },
+  "polymorphic.named.export.satisfied": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[3], data=[7, 7, 7])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[f32], tensor[d0, f32], tensor[d1, f32]) -> tensor[*, f32]"
+      },
+      "success": true
+    },
+    "eval": null,
+    "issue": 1374
+  },
+  "polymorphic.named.root.mismatch": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "main = tensor(shape=[3], data=[7.0, 7.0, 7.0])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[f32], tensor[d0, f32], tensor[d1, f32]) -> tensor[*, f32]",
+        "main": "() -> tensor[2, f32]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "main = tensor(shape=[3], data=[7.0, 7.0, 7.0])",
+      "success": true
+    },
+    "issue": 1374
+  },
+  "polymorphic.named.root.satisfied": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "main = tensor(shape=[3], data=[7.0, 7.0, 7.0])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[f32], tensor[d0, f32], tensor[d1, f32]) -> tensor[*, f32]",
+        "main": "() -> tensor[3, f32]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "main = tensor(shape=[3], data=[7.0, 7.0, 7.0])",
+      "success": true
+    },
+    "issue": 1374
+  },
+  "record.alias": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[2], data=[0.25, 0.25])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(Inputs) -> tensor[*, f32]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "error: `access` on a runtime value is not supported by IR lowering; only a compile-time-known record construction can be projected (field `q`)",
+      "stdout": "",
+      "success": false
+    },
+    "issue": 1266
+  },
+  "record.alias.bad_axis": {
+    "c": {
+      "stage": "build",
+      "stderr": "error: Check errors: Type errors: [CheckError { kind: DimensionMismatch, message: \"shape axis 2 is out of bounds for rank 2 tensor\", suggestions: [], severity: 0.8, expected: None, got: None, span_offset: None, span_id: None }]",
+      "stdout": "",
+      "success": false
+    },
+    "check": {
+      "errors": [
+        {
+          "kind": "DimensionMismatch",
+          "message": "shape axis 2 is out of bounds for rank 2 tensor",
+          "severity": 0.8
+        }
+      ],
+      "score": 0.8875,
+      "signatures": {},
+      "success": false
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "error: Type errors: [CheckError { kind: DimensionMismatch, message: \"shape axis 2 is out of bounds for rank 2 tensor\", suggestions: [], severity: 0.8, expected: None, got: None, span_offset: None, span_id: None }]",
+      "stdout": "",
+      "success": false
+    },
+    "issue": 1266
+  },
+  "record.direct": {
+    "c": {
+      "stage": "build",
+      "stderr": "error: Check errors: Type errors: [CheckError { kind: DimensionMismatch, message: \"`expand` size resolves to a runtime scalar, but no tensor in scope carries it. Runtime extents use exact `int64`; source the value from an in-scope tensor dimension or a `shape(tensor, int32-axis)` read. A bare runtime scalar has no shape identity to attach to the result yet. Tracked by Chelis-Lang/chelis#469 (spec/04-type-system.md §4.7.2)\", suggestions: [\"Source the extent from a tensor in scope with `shape(x, cast(axis, int32))`, bind that read to a `let`, or use an exact `int64` literal extent.\"], severity: 0.8, expected: None, got: None, span_offset: None, span_id: None }]",
+      "stdout": "",
+      "success": false
+    },
+    "check": {
+      "errors": [
+        {
+          "kind": "DimensionMismatch",
+          "message": "`expand` size resolves to a runtime scalar, but no tensor in scope carries it. Runtime extents use exact `int64`; source the value from an in-scope tensor dimension or a `shape(tensor, int32-axis)` read. A bare runtime scalar has no shape identity to attach to the result yet. Tracked by Chelis-Lang/chelis#469 (spec/04-type-system.md §4.7.2)",
+          "severity": 0.8,
+          "suggestions": [
+            "Source the extent from a tensor in scope with `shape(x, cast(axis, int32))`, bind that read to a `let`, or use an exact `int64` literal extent."
+          ]
+        }
+      ],
+      "score": 0.976,
+      "signatures": {},
+      "success": false
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "error: Type errors: [CheckError { kind: DimensionMismatch, message: \"`expand` size resolves to a runtime scalar, but no tensor in scope carries it. Runtime extents use exact `int64`; source the value from an in-scope tensor dimension or a `shape(tensor, int32-axis)` read. A bare runtime scalar has no shape identity to attach to the result yet. Tracked by Chelis-Lang/chelis#469 (spec/04-type-system.md §4.7.2)\", suggestions: [\"Source the extent from a tensor in scope with `shape(x, cast(axis, int32))`, bind that read to a `let`, or use an exact `int64` literal extent.\"], severity: 0.8, expected: None, got: None, span_offset: None, span_id: None }]",
+      "stdout": "",
+      "success": false
+    },
+    "issue": 1266
+  },
+  "record.direct.bad_axis": {
+    "c": {
+      "stage": "build",
+      "stderr": "error: Check errors: Type errors: [CheckError { kind: DimensionMismatch, message: \"shape axis 2 is out of bounds for rank 2 tensor\", suggestions: [], severity: 0.8, expected: None, got: None, span_offset: None, span_id: None }]",
+      "stdout": "",
+      "success": false
+    },
+    "check": {
+      "errors": [
+        {
+          "kind": "DimensionMismatch",
+          "message": "shape axis 2 is out of bounds for rank 2 tensor",
+          "severity": 0.8
+        }
+      ],
+      "score": 0.9142857142857144,
+      "signatures": {},
+      "success": false
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "error: Type errors: [CheckError { kind: DimensionMismatch, message: \"shape axis 2 is out of bounds for rank 2 tensor\", suggestions: [], severity: 0.8, expected: None, got: None, span_offset: None, span_id: None }]",
+      "stdout": "",
+      "success": false
+    },
+    "issue": 1266
+  },
+  "scope.independent": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "a = 6.0\nb = 10.0\nout = 16.0",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "total": "(&tensor[seq, f32]) -> tensor[f32]",
+        "use2": "(&tensor[batch, seq, f32]) -> tensor[f32]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "a = 6.0\nb = 10.0\nout = 16.0",
+      "success": true
+    },
+    "issue": 1566
+  },
+  "scope.unread.mismatch": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = 3.0",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[extent, f32], tensor[extent, f32]) -> tensor[f32]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = 3.0",
+      "success": true
+    },
+    "issue": 1374
+  },
+  "scope.unread.satisfied": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = 3.0",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[extent, f32], tensor[extent, f32]) -> tensor[f32]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = 3.0",
+      "success": true
+    },
+    "issue": 1374
+  },
+  "shrink.binding.mismatch": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[3], data=[2.0, 3.0, 4.0])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[rows, f32]) -> tensor[*, f32]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[3], data=[2.0, 3.0, 4.0])",
+      "success": true
+    },
+    "issue": 1397
+  },
+  "shrink.binding.satisfied": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[2], data=[2.0, 3.0])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[rows, f32]) -> tensor[*, f32]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[2], data=[2.0, 3.0])",
+      "success": true
+    },
+    "issue": 1397
+  },
+  "shrink.export.mismatch": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[3], data=[2, 3, 4])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[rows, f32]) -> tensor[*, f32]"
+      },
+      "success": true
+    },
+    "eval": null,
+    "issue": 1397
+  },
+  "shrink.export.satisfied": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[2], data=[2, 3])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[rows, f32]) -> tensor[*, f32]"
+      },
+      "success": true
+    },
+    "eval": null,
+    "issue": 1397
+  },
+  "shrink.root.mismatch": {
+    "c": {
+      "stage": "execute",
+      "stderr": "chelis: runtime dim disagrees with static extent 2 at node 2 axis 0",
+      "stdout": "",
+      "success": false
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[rows, f32]) -> tensor[*, f32]",
+        "main": "() -> tensor[2, f32]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "main = tensor(shape=[3], data=[2.0, 3.0, 4.0])",
+      "success": true
+    },
+    "issue": 1397
+  },
+  "shrink.root.satisfied": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "main = tensor(shape=[2], data=[2.0, 3.0])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[rows, f32]) -> tensor[*, f32]",
+        "main": "() -> tensor[2, f32]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "main = tensor(shape=[2], data=[2.0, 3.0])",
+      "success": true
+    },
+    "issue": 1397
+  },
+  "validation.permute.good": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[2, 3], data=[1.0, 1.0, 1.0, 2.0, 2.0, 2.0])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[2, f32]) -> tensor[2, 3, f32]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[2, 3], data=[1.0, 1.0, 1.0, 2.0, 2.0, 2.0])",
+      "success": true
+    },
+    "issue": 1512
+  },
+  "validation.permute.result": {
+    "c": {
+      "stage": "build",
+      "stderr": "error: Check errors: Type errors: [CheckError { kind: DimensionMismatch, message: \"def 'f' body doesn't match declared signature: body has type `(tensor[2, f32]) -> tensor[2, 3, f32]`, declared type is `(tensor[2, f32]) -> tensor[3, 2, f32]`\", suggestions: [], severity: 0.8, expected: None, got: None, span_offset: None, span_id: None }]",
+      "stdout": "",
+      "success": false
+    },
+    "check": {
+      "errors": [
+        {
+          "kind": "DimensionMismatch",
+          "message": "def 'f' body doesn't match declared signature: body has type `(tensor[2, f32]) -> tensor[2, 3, f32]`, declared type is `(tensor[2, f32]) -> tensor[3, 2, f32]`",
+          "severity": 0.8
+        }
+      ],
+      "score": 0.9333333333333332,
+      "signatures": {},
+      "success": false
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "error: Type errors: [CheckError { kind: DimensionMismatch, message: \"def 'f' body doesn't match declared signature: body has type `(tensor[2, f32]) -> tensor[2, 3, f32]`, declared type is `(tensor[2, f32]) -> tensor[3, 2, f32]`\", suggestions: [], severity: 0.8, expected: None, got: None, span_offset: None, span_id: None }]",
+      "stdout": "",
+      "success": false
+    },
+    "issue": 1512
+  },
+  "validation.sum.axis": {
+    "c": {
+      "stage": "build",
+      "stderr": "error: Check errors: Type errors: [CheckError { kind: DimensionMismatch, message: \"sum axis 1 is out of bounds for rank 1 tensor\", suggestions: [], severity: 0.8, expected: None, got: None, span_offset: None, span_id: None }]",
+      "stdout": "",
+      "success": false
+    },
+    "check": {
+      "errors": [
+        {
+          "kind": "DimensionMismatch",
+          "message": "sum axis 1 is out of bounds for rank 1 tensor",
+          "severity": 0.8
+        }
+      ],
+      "score": 0.925,
+      "signatures": {},
+      "success": false
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "error: Type errors: [CheckError { kind: DimensionMismatch, message: \"sum axis 1 is out of bounds for rank 1 tensor\", suggestions: [], severity: 0.8, expected: None, got: None, span_offset: None, span_id: None }]",
+      "stdout": "",
+      "success": false
+    },
+    "issue": 1512
+  },
+  "validation.sum.good": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = 6.0",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(tensor[1, f32]) -> tensor[f32]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = 6.0",
+      "success": true
+    },
+    "issue": 1512
+  },
+  "vmap.element_bound": {
+    "c": {
+      "stage": "build",
+      "stderr": "error: Check errors: Type errors: [CheckError { kind: DimensionMismatch, message: \"batch_varying_extent: vmap cannot vectorize an extent that depends on batched tensor elements: the shrink bound at surf:98..122 reads elements of vmapped argument 'x'. Compute the extent from shape() or a scalar argument, or apply the movement outside vmap.\", suggestions: [\"Compute the extent from shape() or a scalar argument, or apply the movement outside vmap\"], severity: 0.8, expected: None, got: None, span_offset: Some(98), span_id: Some(\"surf:98..122\") }]",
+      "stdout": "",
+      "success": false
+    },
+    "check": {
+      "errors": [
+        {
+          "kind": "DimensionMismatch",
+          "message": "batch_varying_extent: vmap cannot vectorize an extent that depends on batched tensor elements: the shrink bound at surf:98..122 reads elements of vmapped argument 'x'. Compute the extent from shape() or a scalar argument, or apply the movement outside vmap.",
+          "severity": 0.8,
+          "span": {
+            "offset": 98,
+            "span": "point"
+          },
+          "span_id": "surf:98..122",
+          "suggestions": [
+            "Compute the extent from shape() or a scalar argument, or apply the movement outside vmap"
+          ]
+        }
+      ],
+      "score": 0.988235294117647,
+      "signatures": {},
+      "success": false
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "error: Type errors: [CheckError { kind: DimensionMismatch, message: \"batch_varying_extent: vmap cannot vectorize an extent that depends on batched tensor elements: the shrink bound at surf:98..122 reads elements of vmapped argument 'x'. Compute the extent from shape() or a scalar argument, or apply the movement outside vmap.\", suggestions: [\"Compute the extent from shape() or a scalar argument, or apply the movement outside vmap\"], severity: 0.8, expected: None, got: None, span_offset: Some(98), span_id: Some(\"surf:98..122\") }]",
+      "stdout": "",
+      "success": false
+    },
+    "issue": 1378
+  },
+  "vmap.literal": {
+    "c": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "main = tensor(shape=[2, 2], data=[2.0, 3.0, 5.0, 6.0])",
+      "success": true
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "g": "(tensor[d0, f32]) -> tensor[2, f32]",
+        "main": "() -> tensor[2, 2, f32]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "main = tensor(shape=[2, 2], data=[2.0, 3.0, 5.0, 6.0])",
+      "success": true
+    },
+    "issue": 1378
+  },
+  "vmap.shape": {
+    "c": {
+      "stage": "no_entry",
+      "stderr": "accepted root has no C entry",
+      "stdout": "",
+      "success": false
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "g": "(tensor[d0, f32]) -> tensor[*, f32]",
+        "main": "() -> tensor[2, *, f32]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "warning: input contains only def declarations; nothing to evaluate",
+      "stdout": "",
+      "success": true
+    },
+    "issue": 1378
+  },
+  "wildcard.root": {
+    "c": {
+      "stage": "no_entry",
+      "stderr": "accepted root has no C entry",
+      "stdout": "",
+      "success": false
+    },
+    "check": {
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "g": "(tensor[d0, f32]) -> tensor[*, f32]",
+        "main": "() -> tensor[*, f32]"
+      },
+      "success": true
+    },
+    "eval": {
+      "stage": "execute",
+      "stderr": "warning: input contains only def declarations; nothing to evaluate",
+      "stdout": "",
+      "success": true
+    },
+    "issue": 1397
+  }
+}

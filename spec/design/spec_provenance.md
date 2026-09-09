@@ -101,13 +101,63 @@ behavior change SHALL:
 5. link the active OpenSpec change from its implementation pull request.
 
 Implementation may begin only after the OpenSpec proposal and requirement
-deltas have entered the human review queue. Human acceptance of an OpenSpec
-plan is review-only evidence: it authorizes the planned change but does not
-prove implementation correctness.
+deltas have been accepted into the repository. Acceptance of an OpenSpec plan
+is planning evidence only: it authorizes the planned change but does not prove
+implementation correctness.
 
 An implementation agent SHALL name the active OpenSpec change and the specific
 requirement or design section it implements. “Follow the spec” without an
 addressable requirement is not a valid implementation claim.
+
+### Automated acceptance of OpenSpec documents
+
+The maintainer authorized automated acceptance for OpenSpec document paths,
+including normative capability specifications under `openspec/specs/`.
+
+The mechanism is implemented and **not yet activated**. What exists is the
+whole path: an ordinary push to a branch starts `openspec-autoland`, which
+classifies the pushed commit with default-branch code, opens an internal
+pull request, waits for the required checks on that exact commit, and merges
+it. Nothing is approved and no protection is bypassed.
+
+Two conditions activate it, and the automation performs neither: the
+workflow files must be on the default branch, and the GitHub App this
+repository already configures must grant `Pull requests: write` on this
+repository through its installation. No new secret is introduced; the
+controller mints a short-lived, repository-scoped token per run from that
+App and lets it be revoked at job end. Without it the controller reports
+the push blocked and writes nothing, because a pull request opened with the
+built-in token starts none of the required checks and could never merge.
+`README.md` carries the details.
+
+The authorization narrows the earlier rule that implementation waits on a
+*human* review queue, because that rule bought nothing here: an OpenSpec
+document has no build and no executable behavior, so approving one adds
+latency without adding evidence. It authorizes no mechanism that could land
+anything outside the document set.
+
+Four limits are unchanged by that authorization:
+
+- **Implementation code is not covered.** A change touching any path outside
+  the document set follows the ordinary review and test path. So does a change
+  touching the acceptance policy itself: the classifier, its workflow, the
+  submission command, the consumer checker, and `openspec/config.yaml`.
+- **Automated acceptance is not correctness evidence.** It proves the path
+  boundary and schema validity. It proves nothing about whether the wording is
+  right, and it is never assurance about the implementation.
+- **The owning-authority rule still decides conflicts.** An accepted OpenSpec
+  artifact that contradicts `spec/**` or an executable oracle does not win. The
+  owning authority controls and the artifact is corrected.
+- **The review requirement for code is not reduced to enable this.** Automating
+  document acceptance must never be activated by lowering an approval or
+  code-owner requirement that also covers code paths. If a future mechanism
+  needs an approving identity, it is a dedicated one scoped to the document
+  paths, never a repository-wide relaxation.
+
+The executable contract is the `openspec-validation` capability. The
+implementation is `scripts/openspec_acceptance.py`,
+`scripts/openspec_controller.py`, `scripts/openspec_merge.py`,
+`scripts/openspec_submit.py`, and the `openspec-autoland*` workflows.
 
 ## OpenSpec boundary
 
@@ -118,6 +168,12 @@ OpenSpec remains the proposal and review workflow for changes. It is not:
 - the freshness or coverage oracle;
 - an input to canonical graph identity; or
 - a substitute for repository-owned approval and change records.
+
+Repository-owned acceptance of an OpenSpec document may be automated, per
+§ Automated acceptance of OpenSpec documents. Automating *who* records the
+acceptance does not move authority into OpenSpec: the record stays
+repository-owned, and an accepted document still authorizes nothing beyond
+planning.
 
 The staged discipline is therefore **OpenSpec for planning, then pinned Buoy
 shell interfaces plus a Chelis-owned adapter for enforcement**. Current

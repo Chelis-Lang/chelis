@@ -2,7 +2,7 @@ use chelis_deep::DeepTag;
 use chelis_unord::{UnordMap, UnordSet};
 use std::collections::BTreeMap;
 
-use chelis_deep::ast::{Atom, Expr, List, MetaMap};
+use chelis_deep::ast::{Atom, Expr, List, Metadata};
 use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::lower::top_level_lowering_map;
 use chelis_types::{
@@ -996,7 +996,7 @@ fn tag(list: &List) -> Option<DeepTag> {
     list.tag()
 }
 
-fn get_meta(list: &List) -> Option<&MetaMap> {
+fn get_meta(list: &List) -> Option<&Metadata> {
     match list.elements.get(1) {
         Some(Expr::Map(map, _)) => Some(map),
         _ => None,
@@ -1020,11 +1020,7 @@ fn carries_effect_row(expr: &Expr) -> bool {
     let Some(meta) = meta else {
         return false;
     };
-    meta.entries.iter().any(|(key, value)| {
-        key == "effects"
-            && tagged_expr_children(value)
-                .is_some_and(|(tag, children)| tag == DeepTag::Effects && !children.is_empty())
-    })
+    meta.effects().is_some_and(|row| !row.values().is_empty())
 }
 
 fn tagged_expr_children(expr: &Expr) -> Option<(DeepTag, &[Expr])> {
@@ -1039,14 +1035,14 @@ fn tagged_expr_children(expr: &Expr) -> Option<(DeepTag, &[Expr])> {
 /// by the type checker, if any. Returns `None` for non-primitive type
 /// metadata (e.g. tensor literal types) or missing metadata; eval_lit
 /// then falls back to the spec §5.3 literal default.
-fn lit_meta_prim(meta: &MetaMap) -> Option<Prim> {
-    let (_, ty_expr) = meta.entries.iter().find(|(k, _)| k == "type")?;
+fn lit_meta_prim(meta: &Metadata) -> Option<Prim> {
+    let ty_expr = meta.ty()?.expression();
     extract_prim_from_type_expr(ty_expr)
 }
 
 /// Binder name from a `(lit {type: (t-var {} p)} ...)` stamp (#1544).
-fn lit_meta_type_var_name(meta: &MetaMap) -> Option<&str> {
-    let (_, ty_expr) = meta.entries.iter().find(|(k, _)| k == "type")?;
+fn lit_meta_type_var_name(meta: &Metadata) -> Option<&str> {
+    let ty_expr = meta.ty()?.expression();
     chelis_deep::exact_type_variable_name(ty_expr)
 }
 

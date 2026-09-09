@@ -600,6 +600,7 @@ dependencies = [
 name = "chelis-deep"
 version = "0.18.6"
 dependencies = [
+ "bincode",
  "chelis-vocab",
  "miette",
  "proptest",
@@ -905,6 +906,7 @@ dependencies = [
  "half",
  "quote",
  "serde",
+ "serde_json",
  "sha2",
  "stacker",
  "syn 2.0.117",

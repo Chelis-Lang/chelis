@@ -370,18 +370,18 @@ fn a_used_bound_is_accepted_where_the_absent_one_is_not() {
 
 #[test]
 fn a_def_may_not_bound_a_binder_its_sig_owns() {
-    let errors = diagnostics(
+    let error = parse_surf(
         r#"
 sig f[p: Float]: p -> p
 def f[p: Float](x: p) -> p = x
 "#,
-    );
+    )
+    .expect_err("duplicate bound ownership must reject before desugaring");
     assert!(
-        errors.iter().any(|error| error
-            .message
-            .contains("a declaration's `defsig` owns its binders")),
-        "a bound belongs to one binder list; got:\n{}",
-        rendered(&errors)
+        error
+            .to_string()
+            .contains("a declaration's `defsig` owns its binders"),
+        "a bound belongs to one binder list; got: {error}"
     );
 }
 

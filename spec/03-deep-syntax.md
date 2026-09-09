@@ -38,7 +38,11 @@ portable across Surf and Reef boundaries.
 | `eff` | effect-set | Declared effect annotation on `t-fn` type expressions |
 | `dtype_bounds` | metadata map | Dtype-family bounds on a `defsig`'s binders; see §2.2 |
 | `effects` | effect-set | Inferred effect annotation on checked `fn` nodes |
+| `effect` | `random` / `resource` | Handled effect kind on `handle-effect`; see [04-EFF-1] |
+| `literal_source` | `integer` | Integer-written literal provenance on `lit`; see §6.4 and [04-LIT-1] |
+| `destructure` | `true` | Destructured component binding on `bind`; see spec/04 §8.2 and [04-LIN-1/2] |
 | `source` | macro invocation | Provenance: the macro call this node expanded from |
+| `wrt` | variable or nonempty tuple of variables | On `grad`: `(var {} name)` or `(tuple {} (var {} name) ...)`, preserving target order; see §2.7 |
 | `span` | string | External-source span identifier (see §1.1.1) |
 | `chelis_role` | string | Declaration role marker; `"property"` marks a `def` as a `chelis prove` property |
 | `property_source_kind` | string | Property producer: `"user"` or `"bridge:c-earchin"` |
@@ -59,7 +63,7 @@ portable across Surf and Reef boundaries.
 | `surf_binding_type` | `"inferred"` / `"explicit"` | Block-binding type origin; permitted only on the expression child of a `bind` name/value pair |
 
 The `surf_*` namespace is closed. A public Deep parser or programmatic
-validator MUST reject an unknown `surf_*` key. Resugaring MUST also reject a
+validator MUST reject an unknown `surf_*` key. Parsing, validation, and resugaring MUST reject a
 known key with any value or placement outside the table above; a standalone
 metadata map or metadata-expression wrapper is not a permitted
 placement. These five keys preserve only surface distinctions that canonical
@@ -73,6 +77,83 @@ the namespace for arbitrary provenance.
 | `lin` | `once` / `borrow` / `unrestricted` | Linearity |
 | `doc` | string | Documentation |
 | `span_*` | reserved | Span-metadata extension namespace (see §1.1.1) |
+
+> **[03-META-1]** Every key SHALL occur at most once in an annotation map,
+> including producer-specific and `span_*` extension keys. Every defined or
+> individually reserved key SHALL carry its declared value shape. A malformed value, duplicate key, or forbidden placement SHALL
+> be rejected at program-text ingress, before a semantic consumer observes
+> the program. The diagnostic SHALL identify the key, the violated contract,
+> and the offending value's source location. Programmatic node construction,
+> deserialization, and replacement SHALL enforce the same locally decidable
+> rules. Complete-tree validation SHALL additionally enforce parent and
+> sibling placement; constructing a fragment does not assert its placement.
+
+The value columns denote syntax, not implicit conversions: a string is a
+string atom, `true` is the Boolean atom, a positive integer is an integer atom
+greater than zero, and a named node has the indicated tag and child shape.
+`type` contains type syntax from §2.5. `eff` belongs on `t-fn`, `effects` on
+`fn`, and each contains an `effects` node. `chelis_role` belongs on a
+declaration; the value `"property"` specifically requires a `def`.
+Property keys belong on `def`;
+`property_source_kind` is exactly `"user"` or `"bridge:c-earchin"`.
+Property quantifiers match the ordered parameter names and written type
+annotations of the property's `fn`; equivalent typed-helper spellings and
+non-type binder metadata do not change that signature.
+`property_contracts` contains only string atoms. The `opaque`, `invariant`,
+and `invariant_amenability` keys belong on `deftype`, with the relationships
+specified in §2.2. `loc` is the four-element structural list
+`(loc file line col)`, with a string file and integer line and column;
+it does not introduce a vocabulary tag. The `lin` choices are bare names.
+Type agreement, effect membership, and binder resolution remain semantic
+checks under their owning numbered chapters; shape validation neither
+performs those checks nor treats a well-shaped annotation as trusted.
+
+> **[03-META-2]** Metadata positions SHALL have a role determined by their
+> key and enclosing metadata contract, separately from §7.2's child-index
+> roles. `property_tolerance`, `property_seed`, and `property_samples` carry
+> expressions and obey [03-ROLE-2]. `wrt` carries variable-reference syntax:
+> bare names, empty tuples, and non-variable tuple members are invalid.
+> `type` carries type syntax; the named structured values carry their
+> declared node shapes. `source` carries preserved syntax, not computation:
+> its value is a structural list headed by a macro name, and its remaining
+> elements record the original arguments without interpreting or rewriting
+> their contents as annotations or runtime expressions.
+
+> **[03-META-3]** Producer-specific keys and `span_*` extensions carry opaque
+> data. Chelis semantic passes SHALL neither interpret nor rewrite their
+> payloads. Producer tools may interpret their own data. Compiler-interpreted
+> annotations SHALL have an explicitly specified, compiler-owned key and
+> payload type; an extension key never grants compilation authority.
+
+Extension data uses Deep's lexical scalar tokens, parenthesized lists,
+ordered maps, and prefix records. List heads have no tag meaning. Nested map
+keys have no annotation meaning, including `type`, `span`, and `surf_*`.
+Nested entry order and duplicates are preserved; annotation-key uniqueness
+applies to the enclosing annotation map. Lexical syntax, escaping and balanced
+structure are checked, but AST shape, placement, binder, type and effect rules
+do not apply inside data. Scalar tokens, including numeric suffixes, retain
+their spelling; formatting may canonicalize whitespace and separators.
+
+Semantic expression traversal excludes extension data. A surviving or
+replacement AST node preserves its originating owner's extensions; copying a
+node copies them. Removing a node removes its attached extensions. A node
+synthesized without an originating owner starts with no extensions. Combining
+owners unions distinct keys and coalesces identical payloads. Conflicting
+payloads SHALL NOT overwrite one another: an optional rewrite remains
+unapplied, and a required combination reports the conflicting key. Equality
+for this combination compares data, not its diagnostic source offsets.
+AST and tooling serialization preserve the data; runtime values and machine
+code need not embed arbitrary producer annotations. The external-span
+propagation contract below remains binding.
+
+A `dtype_bounds` payload is a data map governed by §2.2: its keys are binder names, even when
+they spell `type`, `span`, or a `surf_*` name. They are not metadata keys.
+Likewise, the contents of a preserved `source` record are syntax data.
+The annotation-key uniqueness rule does not reinterpret data maps inside
+preserved `source` arguments as annotations. `dtype_bounds` independently
+requires unique binder names under §2.2. These distinctions depend on the
+enclosing role, not heuristics about key spelling. Missing optional metadata is valid; malformed present metadata
+SHALL NOT be dropped, defaulted, or coerced to absence.
 
 **Metadata propagation through transformations.** Semantic metadata and the
 validated surface-fidelity keys are preserved by all spec-defined
@@ -300,9 +381,10 @@ bound type variables to a dtype family (`spec/04-type-system.md` §5.9
 
 The value is a metadata map whose keys are binder names and whose values
 are the family names `float`, `int`, and `numeric`, spelled lowercase as
-effect names are. A key naming a variable the declaration does not bind, a
-key naming a `d-var` or `d-rank`, an unknown family name, and a value that
-is not a family name are each type-resolution errors. Bounds ride in
+effect names are. An unknown family name or a value that is not a family
+name violates the metadata shape contract [03-META-1]. A key naming a
+variable the declaration does not bind, or a key naming a `d-var` or
+`d-rank`, is a type-resolution error. Bounds ride in
 metadata for the same reason an opaque invariant does: a `defsig` *child*
 node would change its fixed two-child shape and grow the closed tag
 vocabulary. A `def` does not carry this key: the declaration's signature
@@ -491,6 +573,11 @@ wildcard spelling); it does not allocate an inference variable.
 | `cast` | `(cast {} expr target-type)` or `(cast {} expr target-type mode)` | Precision cast; the optional `trunc` mode selects [05-OP-6] |
 | `copy` | `(copy {} expr)` | Explicit tensor duplication |
 | `borrow` | `(borrow {} expr)` | Temporary read-only tensor view for a single call site |
+
+The `grad` metadata `wrt` records parameter names using [03-META-2]'s
+variable-reference syntax. Its optional child selects integer parameter
+indices under the transform's type-checking contract; metadata names are
+not runtime variable lookups and do not replace that index child.
 
 ### 2.8 Metaprogramming
 
@@ -709,6 +796,11 @@ The normal and debug emitters share this AST-backed resugarer and Surf printer.
 Debug output may append stable `-- deep-debug: ...` comments; it is not a
 second Surf dialect.
 
+Producer extensions have no Surf representation. Resugaring SHALL reject
+an extension-bearing AST with the extension key and owning source location,
+before emitting output, rather than discard data. Deep-to-Deep normalization
+preserves these payloads, including inside structural annotation containers.
+
 Surf property declarations represent user-authored properties only. They have
 no syntax for the non-forgeable `bridge:c-earchin` producer identity or for a
 producer-local `property_source_id`. Resugaring a property with either form of
@@ -727,7 +819,9 @@ matching `type` entries on a `def`, its `fn` value, and its function parameters
 when an adjacent matching `defsig` already carries the exact same types; a
 disagreement is never erased. For a standalone checked `def`, normalization may
 materialize that metadata as an adjacent `defsig` and then apply the same exact
-redundancy rule. Empty `tuple`/`t-tuple` normalize to `lit`/`t-unit`. No `app`
+redundancy rule. Empty expression `tuple` and type `t-tuple` nodes normalize
+to `lit` and `t-unit`, respectively. Syntax-valued metadata containers retain
+their declared shapes under [03-META-2]. No `app`
 normalizes to a `var`: `Ctor`, `Ctor()`, and `Ctor {}` retain their distinct
 `var`, `app`, and `record` structures. Because Surf negative
 numerals are unary minus rather than signed tokens, a negative Deep `lit`
@@ -951,7 +1045,8 @@ always learns which form was rejected.
 > by its syntactic class, which SHALL be exactly one of: a bare identifier, a
 > bare integer literal, a bare float literal, a bare string literal, a bare
 > boolean literal, an empty list, a list without a tag symbol, a metadata map,
-> or a metadata-annotated form. An implementation SHALL NOT substitute a
+> a metadata-annotated form, or opaque extension data supplied through a raw
+> programmatic API. An implementation SHALL NOT substitute a
 > placeholder for either identification. The rejection SHALL be reported at
 > the ingress boundary that reads the program text, before name resolution,
 > type checking, evaluation, lowering, or resugaring observes the program. An
@@ -982,6 +1077,9 @@ shapes; a metadata map is the `Meta` production; the four literal classes are
 producer's mistake is usually specific to one.
 
 ### 7.2 Child Roles
+
+This section classifies child indices. Metadata values have the separate
+per-key roles required by [03-META-2]; they are not unclassified children.
 
 A tagged node's children are not interchangeable. Each per-tag form in §2
 gives its children fixed meanings — `(def {} name body)` puts a declaration

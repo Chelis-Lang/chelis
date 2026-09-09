@@ -172,8 +172,9 @@ the parameter list.
 
 c-earchin compatibility:
 
-- Existing `c_earchin_role: "property_witness"` metadata is accepted as a
-  synonym for `chelis_role: "property"`.
+- Property discovery requires canonical `chelis_role: "property"` and its
+  required schema. `c_earchin_role` is opaque producer data, not a discovery
+  synonym (`spec/03-deep-syntax.md` [03-META-3]).
 - c-earchin v0.2 and later emit both canonical metadata and existing
   `c_earchin_*` metadata indefinitely.
 - The witness `def` name is the property name. `property_source_id` carries the

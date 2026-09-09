@@ -730,8 +730,8 @@ class ManifestContractTests(unittest.TestCase):
             ),
             (
                 runtime_path,
-                "    if metadata.required_bytes != storage.byte_capacity {",
-                "    if false && metadata.required_bytes != storage.byte_capacity {",
+                "    if metadata.bytes() != storage.byte_capacity {",
+                "    if false && metadata.bytes() != storage.byte_capacity {",
                 "runtime repurpose defense",
             ),
             (

@@ -88,7 +88,10 @@ pub fn validate_deep(source: &str) -> Result<(), ValidationError> {
         return Err(ValidationError::Failed(warning.message));
     }
 
-    let mut parsed = deep::Grammar::parse(deep::Rule::program, source)
+    // [03-META-3]: the sealed data parser owns extension syntax. The
+    // independent program grammar must not impose its expression grammar on it.
+    let structural_source = deep_program_projection(source, &exprs);
+    let mut parsed = deep::Grammar::parse(deep::Rule::program, &structural_source)
         .map_err(|err| ValidationError::Failed(err.to_string()))?;
     let Some(program) = parsed.next() else {
         return Err(ValidationError::Failed("empty Deep program".to_string()));
@@ -280,6 +283,63 @@ pub fn validate_desugared(source: &str) -> Result<(), ValidationError> {
 /// so a leading `;` comment is never mistaken for the tag. See issue #167.
 fn is_structural_pair(pair: &Pair<'_, deep::Rule>) -> bool {
     !matches!(pair.as_rule(), deep::Rule::comment | deep::Rule::EOI)
+}
+
+/// Private to the text ingress above: all spans come from this exact source.
+/// Replace opaque values only in the auxiliary validator's view, preserving
+/// every byte offset and newline. The returned AST and source remain untouched.
+fn deep_program_projection(source: &str, exprs: &[chelis_deep::Expr]) -> String {
+    use chelis_deep::{Expr, Metadata};
+    fn metadata(meta: &Metadata, bytes: &mut [u8]) {
+        for (_, data) in meta.extensions().iter() {
+            let span = data.span();
+            let value = &mut bytes[span.offset..span.end()];
+            for byte in value.iter_mut() {
+                if !matches!(*byte, b'\n' | b'\r') {
+                    *byte = b' ';
+                }
+            }
+            value[0] = b'0';
+        }
+        meta.visit_syntax(&mut |_, value| visit(value, bytes));
+    }
+    fn visit(expr: &Expr, bytes: &mut [u8]) {
+        match expr {
+            Expr::Node(node, _) => {
+                metadata(node.meta(), bytes);
+                for child in node.children_slice() {
+                    visit(child, bytes);
+                }
+            }
+            Expr::List(list, _) => {
+                for child in &list.elements {
+                    visit(child, bytes);
+                }
+            }
+            Expr::BareList(items, _) => {
+                for child in items {
+                    visit(child, bytes);
+                }
+            }
+            Expr::Map(meta, _) => metadata(meta, bytes),
+            Expr::MetaExpr(meta, _) => {
+                metadata(&meta.metadata, bytes);
+                visit(&meta.expr, bytes);
+            }
+            Expr::UnknownForm(data) => {
+                metadata(&data.meta, bytes);
+                for child in &data.children {
+                    visit(child, bytes);
+                }
+            }
+            Expr::Atom(..) => {}
+        }
+    }
+    let mut bytes = source.as_bytes().to_vec();
+    for expr in exprs {
+        visit(expr, &mut bytes);
+    }
+    String::from_utf8(bytes).expect("whole lexical values replaced with ASCII")
 }
 
 fn validate_deep_node(pair: Pair<'_, deep::Rule>) -> Result<(), ValidationError> {
@@ -767,6 +827,35 @@ mod tests {
     }
 
     #[test]
+    fn deep_metadata_preserves_arbitrary_macro_argument_syntax() {
+        let source = "(def {source: (macro_name {surf_future: 1, span: 2} ((original_name) ^{:type f32} x))} f (lit {} 1))";
+        validate_deep(source).unwrap();
+        validate_deep("(def {source: 1} f (lit {} 1))").unwrap_err();
+    }
+
+    #[test]
+    fn opaque_data_grammar_is_owned_by_its_parser() {
+        for payload in [
+            "1e-3f32",
+            "{type: false type: (var {}),}",
+            "^{:span 7} (missing_macro x)",
+            "(a-b \"λ\" (lit {} 7i8))",
+        ] {
+            let source = format!("(def {{tool_data: {payload}}} f (lit {{}} 1))");
+            validate_deep(&source).unwrap_or_else(|error| panic!("{source}: {error}"));
+        }
+        validate_deep("(def {property_quantifiers: (params {tool_data: 7f32})} f (lit {} 1))")
+            .unwrap();
+        for source in [
+            "(def {tool_data: {broken:}} f (lit {} 1))",
+            "(def {type: false} f (lit {} 1))",
+            "(def {tool_data: 1f32} f (var {} x y))",
+        ] {
+            assert!(validate_deep(source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
     fn deep_rejects_invalid_effects_children() {
         // chelis#1088: `(effects ...)` is only ever a metadata value in real
         // Deep, never a top-level form, so the fixture now sits where it
@@ -777,7 +866,10 @@ mod tests {
         let source = "(defsig {} f (t-fn {eff: (effects {} 1)} (t-prim {} f32)))";
         let error = validate_deep(source).expect_err("non-symbol effects child should fail");
         let rendered = error.to_string();
-        assert!(rendered.contains("`effects` must contain"), "{rendered}");
+        assert!(
+            rendered.contains("metadata `eff`") && rendered.contains("effects node"),
+            "{rendered}"
+        );
     }
 
     #[test]
@@ -790,7 +882,7 @@ mod tests {
         let error = validate_deep(source).expect_err("resource arity should fail");
         let rendered = error.to_string();
         assert!(rendered.contains("resource"), "{rendered}");
-        assert!(rendered.contains("wrong child count"), "{rendered}");
+        assert!(rendered.contains("metadata `eff`"), "{rendered}");
     }
 
     #[test]
@@ -958,7 +1050,7 @@ mod tests {
     #[test]
     fn deep_accepts_comment_before_resource_tag_in_effects() {
         assert_validates(
-            "(defsig {} f (t-fn {eff: (effects {} (; note\nresource {} foo))} (t-prim {} f32)))\n",
+            "(defsig {} f (t-fn {eff: (effects {} (; note\nresource {} \"foo\"))} (t-prim {} f32)))\n",
             "comment before nested `resource` tag",
         );
     }
@@ -1158,15 +1250,20 @@ mod tests {
     /// two implementations that have to agree with that sentence.
     #[test]
     fn deep_admits_the_declared_metadata_key_charset() {
-        for key in [
-            "dtype_bounds",
-            "chelis_role",
-            "surf_path",
-            "_leading",
-            "Upper",
+        for (key, source) in [
+            (
+                "dtype_bounds",
+                "(defsig {dtype_bounds: {p: float}} f (t-var {} p))",
+            ),
+            (
+                "chelis_role",
+                "(def {chelis_role: \"custom\"} f (lit {} 1))",
+            ),
+            ("surf_path", "(module {surf_path: \"M.Path\"} m.path)"),
+            ("_leading", "(def {_leading: x} f (lit {} 1))"),
+            ("Upper", "(def {Upper: x} f (lit {} 1))"),
         ] {
-            let source = format!("(defsig {{{key}: x}} f (t-var {{}} p))\n");
-            validate_deep(&source)
+            validate_deep(source)
                 .unwrap_or_else(|e| panic!("`{key}` is a legal metadata key: {e}"));
         }
         // The no-hyphen rule that keeps Deep symbols portable still holds.

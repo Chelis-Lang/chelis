@@ -159,6 +159,26 @@ class BaselineTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, oracle.UNCLASSIFIED_FAILURE.code)
         self.assertIn(extra.identity, caught.exception.details)
 
+    def test_a_retired_foundation_identity_cannot_be_restored(self) -> None:
+        restored = oracle.InventoryRow(
+            kind="normalized-key-arithmetic",
+            path="crates/chelis-ir/src/dag.rs",
+            owner="DimExpr::normalized_key",
+            deletion_phase=1,
+        )
+        self.assertIn(
+            restored.identity,
+            {row["identity"] for row in self.baseline["foundation_rows"]},
+        )
+        self.assertNotIn(
+            restored.identity,
+            {row["identity"] for row in self.baseline["active_debt"]},
+        )
+        with self.assertRaises(oracle.OracleFailure) as caught:
+            oracle.validate_baseline(self.baseline, (*self.rows, restored))
+        self.assertEqual(caught.exception.code, oracle.UNCLASSIFIED_FAILURE.code)
+        self.assertIn(restored.identity, caught.exception.details)
+
     def test_only_explicit_exact_arithmetic_is_final_inside_the_capacity_owner(self) -> None:
         exact = oracle.InventoryRow(
             kind="exact-capacity-arithmetic",
@@ -357,6 +377,51 @@ class MutationContractTests(unittest.TestCase):
 
 
 class ManifestTests(unittest.TestCase):
+    def test_checked_host_metadata_has_paired_profiles_and_exact_width_owners(self) -> None:
+        path = "crates/chelis-runtime/src/metadata.rs"
+        self.assertIn(path, oracle.INVENTORY_SOURCES)
+        owners = {"ElementCount::bytes", "ElementCount::scratch_len"}
+        for owner in owners:
+            self.assertTrue(oracle.owner_module_final_form("width-arithmetic", path, owner))
+            self.assertFalse(oracle.owner_module_final_form("raw-element-pointer", path, owner))
+            self.assertFalse(oracle.owner_module_final_form("width-arithmetic", path + ".other", owner))
+        self.assertFalse(oracle.owner_module_final_form("width-arithmetic", path, "new_width"))
+        final = oracle.coverage_manifest()["source_inventory"]["owner_module_final_forms"]
+        self.assertEqual(final[path], [
+            {"kind": "width-arithmetic", "owner": owner} for owner in sorted(owners)
+        ])
+        commands = [leg.argv for leg in oracle.phase0_legs()]
+        for test in ("checked_metadata", "metadata_compile", "checked_metadata_padding", "checked_c_metadata",
+                     "checked_c_indexing", "exact_tagged_c_abi",
+                     "op33_empty_tensor_axis_decomposition", "op33_tensor_validation",
+                     "op33_legal_domain_matrix", "dim_carrier_int64",
+                     "tensor_repurpose", "tensor_write_guard"):
+            self.assertTrue(any(test in command and "--release" not in command for command in commands), test)
+            self.assertTrue(any(test in command and "--release" in command for command in commands), test)
+        self.assertTrue(any(
+            probe.path == Path(path) and probe.expected_kind == "width-arithmetic"
+            for probe in oracle.phase0_mutation_probes()
+        ))
+
+    def test_retired_capacity_projection_has_a_release_execution_leg(self) -> None:
+        commands = [leg.argv for leg in oracle.phase0_legs()]
+        self.assertTrue(any(
+            "dim_expr_evaluation" in command and "--release" in command
+            for command in commands
+        ), commands)
+
+    def test_checked_c_index_projection_owners_require_their_executable_control(self) -> None:
+        manifest = oracle.coverage_manifest()
+        forms = manifest["source_inventory"]["owner_module_final_forms"]
+        for path, owner in oracle.C_INDEX_PROJECTION_OWNERS:
+            self.assertTrue(oracle.owner_module_final_form("backend-element-spelling", path, owner))
+            self.assertFalse(oracle.owner_module_final_form("width-arithmetic", path, owner))
+            self.assertFalse(oracle.owner_module_final_form("backend-element-spelling", path, owner + "_unchecked"))
+            self.assertEqual(forms[path], [{"kind": "backend-element-spelling", "owner": owner}])
+        commands = [leg.argv for leg in oracle.phase0_legs()]
+        self.assertTrue(any("chelis-backend-c" in command and "checked_c_indexing" in command for command in commands))
+        self.assertTrue(any("exec_compile" in command and "test(checked_c_indexing_)" in command for command in commands))
+
     def test_release_reproducers_and_landed_receipts_are_named(self) -> None:
         commands = [
             entry["command"] for entry in oracle.coverage_manifest()["release_reproducers"]
@@ -371,8 +436,8 @@ class ManifestTests(unittest.TestCase):
         )
         # The reproducers that hide in a debug profile must run in release.
         for command in commands:
-            if "chelis-runtime" in command or "chelis-ir" in command:
-                self.assertIn("--release", command)
+            if ("chelis-runtime" in command or "chelis-ir" in command) and "--release" not in command:
+                self.assertIn(command.replace("nextest run", "nextest run --release"), commands)
 
     def test_hardware_manifest_cannot_misreport_ignored_tests_as_executed(self) -> None:
         for probe in oracle.hardware_probe_manifest():
@@ -503,5 +568,5 @@ class RedTeamRegressionTests(unittest.TestCase):
         rust = sum(1 for path in oracle.INVENTORY_SOURCES if path.endswith(".rs"))
         headers = len(oracle.INVENTORY_SOURCES) - rust
         source = Path(oracle.__file__).read_text(encoding="utf-8")
-        self.assertIn("Sixty-three are Rust and seven are C or Objective-C headers", source)
-        self.assertEqual((rust, headers), (63, 7))
+        self.assertIn("Sixty-four are Rust and seven are C or Objective-C headers", source)
+        self.assertEqual((rust, headers), (64, 7))

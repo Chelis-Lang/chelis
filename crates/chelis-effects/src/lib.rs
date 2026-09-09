@@ -4,7 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 #[cfg(test)]
 use std::cell::RefCell;
 
-use chelis_deep::ast::{Atom, Expr, List, MetaMap};
+use chelis_deep::annotations::{
+    EffectMember, EffectSet as AstEffectSet, MetadataValue, ResourceEffect, Spanned,
+};
+use chelis_deep::ast::{Atom, Expr, List, Metadata};
 use chelis_deep::{Span, decode_effect_kind};
 use chelis_types::types::{Effect, EffectSet};
 use chelis_types::{CheckedProgram, InferResult};
@@ -350,7 +353,7 @@ fn stamped_children(expr: &Expr, expected: DeepTag) -> Option<&[Expr]> {
     stamped_parts(expr, expected).map(|(_, children)| children)
 }
 
-fn stamped_parts(expr: &Expr, expected: DeepTag) -> Option<(&MetaMap, &[Expr])> {
+fn stamped_parts(expr: &Expr, expected: DeepTag) -> Option<(&Metadata, &[Expr])> {
     match expr {
         Expr::List(list, _) if get_tag(list) == Some(expected) => {
             let Expr::Map(meta, _) = list.elements.get(1)? else {
@@ -620,38 +623,26 @@ fn annotate_effects(
     match expr {
         Expr::Atom(_, _) => expr.clone(),
         Expr::Map(map, span) => Expr::Map(
-            MetaMap {
-                entries: map
-                    .entries
-                    .iter()
-                    .map(|(key, value)| {
-                        (
-                            key.clone(),
-                            annotate_effects(value, top_level_effects, top_level_callables, locals),
-                        )
-                    })
-                    .collect(),
-            },
+            map.map_expressions(&mut |value, _| {
+                annotate_effects(value, top_level_effects, top_level_callables, locals)
+            })
+            .expect("effect annotation preserves metadata payloads"),
             *span,
         ),
         Expr::MetaExpr(meta, span) => Expr::MetaExpr(
-            chelis_deep::ast::MetaExpr {
+            chelis_deep::MetaExpr {
                 expr: Box::new(annotate_effects(
                     &meta.expr,
                     top_level_effects,
                     top_level_callables,
                     locals,
                 )),
-                entries: meta
-                    .entries
-                    .iter()
-                    .map(|(key, value)| {
-                        (
-                            key.clone(),
-                            annotate_effects(value, top_level_effects, top_level_callables, locals),
-                        )
+                metadata: meta
+                    .metadata
+                    .map_expressions(&mut |value, _| {
+                        annotate_effects(value, top_level_effects, top_level_callables, locals)
                     })
-                    .collect(),
+                    .expect("effect annotation preserves metadata payloads"),
             },
             *span,
         ),
@@ -677,7 +668,12 @@ fn annotate_effects(
             if matches!(list.elements.get(1), Some(Expr::Map(_, _))) {
                 let mut elements = Vec::with_capacity(2 + annotated_children.len());
                 elements.push(list.elements[0].clone());
-                elements.push(list.elements[1].clone());
+                elements.push(annotate_effects(
+                    &list.elements[1],
+                    top_level_effects,
+                    top_level_callables,
+                    locals,
+                ));
                 elements.extend(annotated_children);
                 if let Some(meta) = elements.get_mut(1) {
                     update_effect_metadata(
@@ -727,13 +723,18 @@ fn annotate_effects(
                         })
                         .collect()
                 };
-            let mut meta = node.meta().clone();
+            let mut meta = node
+                .meta()
+                .map_expressions(&mut |value, _| {
+                    annotate_effects(value, top_level_effects, top_level_callables, locals)
+                })
+                .expect("effect annotation preserves metadata payloads");
             if node.tag() == DeepTag::Fn {
                 let effects =
                     infer_expr_effects(expr, top_level_effects, top_level_callables, locals);
                 if !effects.is_empty() {
                     record_effect_work(|profile| profile.metadata_rewrites += 1);
-                    upsert_meta(&mut meta, "effects", effect_set_expr(&effects));
+                    meta.replace(MetadataValue::Effects(effect_set_metadata(&effects)));
                 }
             }
             Expr::node(node.tag(), meta, annotated_children, *span)
@@ -749,7 +750,12 @@ fn annotate_effects(
         ),
         Expr::UnknownForm(data) => Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
             head: data.head.clone(),
-            meta: data.meta.clone(),
+            meta: data
+                .meta
+                .map_expressions(&mut |value, _| {
+                    annotate_effects(value, top_level_effects, top_level_callables, locals)
+                })
+                .expect("effect annotation preserves metadata payloads"),
             children: data
                 .children
                 .iter()
@@ -850,7 +856,7 @@ fn update_effect_metadata(
         let effects = infer_expr_effects(expr, top_level_effects, top_level_callables, locals);
         if !effects.is_empty() {
             record_effect_work(|profile| profile.metadata_rewrites += 1);
-            upsert_meta(meta, "effects", effect_set_expr(&effects));
+            meta.replace(MetadataValue::Effects(effect_set_metadata(&effects)));
         }
     }
 }
@@ -872,15 +878,12 @@ fn validate_handler_expr(expr: &Expr, errors: &mut Vec<EffectError>) {
             }
         }
         Expr::Map(map, _) => {
-            for (_, value) in &map.entries {
-                validate_handler_expr(value, errors);
-            }
+            map.visit_expressions(&mut |value, _| validate_handler_expr(value, errors));
         }
         Expr::MetaExpr(meta, _) => {
             validate_handler_expr(&meta.expr, errors);
-            for (_, value) in &meta.entries {
-                validate_handler_expr(value, errors);
-            }
+            meta.metadata
+                .visit_expressions(&mut |value, _| validate_handler_expr(value, errors));
         }
         Expr::Atom(_, _) => {}
         Expr::Node(node, span) => {
@@ -888,9 +891,8 @@ fn validate_handler_expr(expr: &Expr, errors: &mut Vec<EffectError>) {
                 let header = shallow_node_list(node, *span);
                 validate_handler_kind(decode_effect_kind(&header), node.children_slice(), errors);
             }
-            for (_, value) in &node.meta().entries {
-                validate_handler_expr(value, errors);
-            }
+            node.meta()
+                .visit_expressions(&mut |value, _| validate_handler_expr(value, errors));
             for child in node.children_slice() {
                 validate_handler_expr(child, errors);
             }
@@ -986,27 +988,21 @@ fn declared_effects_from_defsig(expr: &Expr) -> Option<EffectSet> {
     let kids = stamped_children(expr, DeepTag::Defsig)?;
     let t_fn = kids.get(1)?;
     let (meta, _) = stamped_parts(t_fn, DeepTag::TFn)?;
-    let (_, eff_expr) = meta.entries.iter().find(|(key, _)| key == "eff")?;
-    // eff_expr is (effects {} sym sym ...)
-    let effect_children = stamped_children(eff_expr, DeepTag::Effects)?;
+    let effects = meta.eff()?;
     let mut declared = EffectSet::new();
-    for child in effect_children {
-        if let Some(name) = symbol_name(child) {
-            match name {
+    for member in effects.values() {
+        match member {
+            EffectMember::Name(name) => match name.value().as_str() {
                 "random" => declared.insert(Effect::Random),
                 "accum" => declared.insert(Effect::Accum),
                 "io" => declared.insert(Effect::Io),
                 "test" => declared.insert(Effect::Test),
-                // "diff" is currently tracked separately and does not appear in inferred sets.
+                // Diff is tracked separately from the inferred effect row.
                 _ => {}
+            },
+            EffectMember::Resource(resource) => {
+                declared.insert(Effect::Resource(resource.name().value().clone()))
             }
-        } else if let Some(resource_children) = stamped_children(child, DeepTag::Resource)
-            && let Some(device) = resource_children.first().and_then(|expr| match expr {
-                Expr::Atom(Atom::Str(value), _) => Some(value.clone()),
-                _ => None,
-            })
-        {
-            declared.insert(Effect::Resource(device));
         }
     }
     Some(declared)
@@ -1086,15 +1082,15 @@ fn validate_build_target_expr(expr: &Expr, target: &str, errors: &mut Vec<Effect
             }
         }
         Expr::Map(map, _) => {
-            for (_, value) in &map.entries {
-                validate_build_target_expr(value, target, errors);
-            }
+            map.visit_expressions(&mut |value, _| {
+                validate_build_target_expr(value, target, errors)
+            });
         }
         Expr::MetaExpr(meta, _) => {
             validate_build_target_expr(&meta.expr, target, errors);
-            for (_, value) in &meta.entries {
-                validate_build_target_expr(value, target, errors);
-            }
+            meta.metadata.visit_expressions(&mut |value, _| {
+                validate_build_target_expr(value, target, errors)
+            });
         }
         Expr::Atom(_, _) => {}
         Expr::Node(node, span) => {
@@ -1107,9 +1103,9 @@ fn validate_build_target_expr(expr: &Expr, target: &str, errors: &mut Vec<Effect
                     errors,
                 );
             }
-            for (_, value) in &node.meta().entries {
-                validate_build_target_expr(value, target, errors);
-            }
+            node.meta().visit_expressions(&mut |value, _| {
+                validate_build_target_expr(value, target, errors)
+            });
             for child in node.children_slice() {
                 validate_build_target_expr(child, target, errors);
             }
@@ -1169,61 +1165,26 @@ fn validate_build_target_handler(
     }
 }
 
-/// Decode-once (chelis#731 Phase 3): both heads here are vocabulary tags
-/// (`DeepTag::Effects`, `DeepTag::Resource`), and this runs AFTER the parser
-/// and the desugarer, so nothing upstream will stamp them. Spelling them
-/// `symbol("effects")` / `symbol("resource")` put raw vocabulary strings back
-/// into the tree, and the typed readers that gate on
-/// `tag(list) == Some(DeepTag::Effects)` reject that form outright
-/// (`declared_effects_from_meta` above; `decompile_effect_suffix_from_type_expr`
-/// and `decompile_effect_set_expr` in chelis-surf).
-///
-/// `chelis_surf::desugar::desugar_effect_set` builds the SAME node shape and
-/// was migrated to the typed constructors; this is its post-check twin and
-/// now matches it exactly. The effect NAMES stay `Atom::Name` deliberately:
-/// `random`, `accum`, `io` and `test` are payload, not vocabulary tags.
-///
-/// #908 compatibility: `carries_effect_row` in the runtime matches on
-/// `Expr::List`. `Expr::node()` now produces `Expr::Node` which that
-/// function doesn't detect. Construct as `Expr::List` directly so the
-/// effect-free guard continues to work.
-fn effect_set_expr(effects: &EffectSet) -> Expr {
-    let mut children = Vec::new();
-    for effect in effects.iter() {
-        children.push(match effect {
-            Effect::Random => symbol("random"),
-            Effect::Accum => symbol("accum"),
-            Effect::Io => symbol("io"),
-            Effect::Test => symbol("test"),
-            Effect::Resource(device) => Expr::List(
-                List {
-                    elements: vec![
-                        Expr::Atom(Atom::Tag(DeepTag::Resource), zero_span()),
-                        Expr::Map(MetaMap::default(), zero_span()),
-                        Expr::Atom(Atom::Str(device.clone()), zero_span()),
-                    ],
-                },
-                zero_span(),
+/// Convert semantic effects to their dedicated AST annotation payload.
+fn effect_set_metadata(effects: &EffectSet) -> AstEffectSet {
+    let values = effects
+        .iter()
+        .map(|effect| match effect {
+            Effect::Random => EffectMember::Name(Spanned::new("random".into(), zero_span())),
+            Effect::Accum => EffectMember::Name(Spanned::new("accum".into(), zero_span())),
+            Effect::Io => EffectMember::Name(Spanned::new("io".into(), zero_span())),
+            Effect::Test => EffectMember::Name(Spanned::new("test".into(), zero_span())),
+            Effect::Resource(device) => EffectMember::Resource(
+                ResourceEffect::new(
+                    Spanned::new(device.clone(), zero_span()),
+                    Metadata::default(),
+                    zero_span(),
+                )
+                .expect("resource effect annotations"),
             ),
-        });
-    }
-    let mut elements = Vec::with_capacity(children.len() + 2);
-    elements.push(Expr::Atom(Atom::Tag(DeepTag::Effects), zero_span()));
-    elements.push(Expr::Map(MetaMap::default(), zero_span()));
-    elements.extend(children);
-    Expr::List(List { elements }, zero_span())
-}
-
-fn upsert_meta(meta: &mut MetaMap, key: &str, value: Expr) {
-    if let Some((_, existing)) = meta
-        .entries
-        .iter_mut()
-        .find(|(entry_key, _)| entry_key == key)
-    {
-        *existing = value;
-    } else {
-        meta.entries.push((key.to_string(), value));
-    }
+        })
+        .collect();
+    AstEffectSet::new(Metadata::default(), values, zero_span())
 }
 
 fn var_name(expr: &Expr) -> Option<&str> {
@@ -1281,10 +1242,6 @@ fn string_literal(expr: &Expr) -> Option<&str> {
         }
         _ => None,
     }
-}
-
-fn symbol(name: &str) -> Expr {
-    Expr::Atom(Atom::Name(name.to_string()), zero_span())
 }
 
 fn zero_span() -> Span {
@@ -2088,60 +2045,89 @@ def entry(x: tensor[8, f32]) -> tensor[8, f32] =
 mod decode_once_producer_tests {
     use super::*;
 
-    /// chelis#731 Phase 3, found by the #887 consumption-boundary probe:
-    /// `effect_set_expr` runs after the parser and the desugarer, so its
-    /// heads are never stamped upstream. It spelled them `symbol("effects")`
-    /// / `symbol("resource")`, which put raw vocabulary strings back into the
-    /// tree - the same class as `ty_expr_to_deep` (chelis-ir), and invisible
-    /// to the standing invariant because that is asserted on parsed and
-    /// desugared trees, not on post-check synthesis.
-    ///
-    /// Both polarities: no raw vocabulary tag anywhere in the produced tree,
-    /// AND the typed readers actually see the decoded tags.
     #[test]
-    fn effect_set_expr_carries_no_raw_vocabulary_tag_strings() {
+    fn synthesized_effects_preserve_typed_members_and_decoded_wire_tags() {
         let mut effects = EffectSet::new();
         effects.insert(Effect::Random);
         effects.insert(Effect::Io);
-        effects.insert(Effect::Resource("gpu0".to_string()));
-
-        let expr = effect_set_expr(&effects);
+        effects.insert(Effect::Resource("gpu0".into()));
+        let metadata = Metadata::from(MetadataValue::Effects(effect_set_metadata(&effects)));
+        let mut payload = None;
+        metadata.visit_syntax(&mut |_, value| payload = Some(value.clone()));
+        let expr = payload.unwrap();
         assert_eq!(
             chelis_deep::validate::find_raw_vocabulary_tag(std::slice::from_ref(&expr)),
-            None,
-            "a synthesized effect-set node must not carry a raw vocabulary tag string"
+            None
         );
-        assert_eq!(
-            expr.tag(),
-            Some(DeepTag::Effects),
-            "the typed readers gate on `tag() == Some(DeepTag::Effects)`"
-        );
-
-        let Expr::List(list, _) = &expr else {
-            panic!("effect_set_expr produces a list");
+        assert_eq!(expr.tag(), Some(DeepTag::Effects));
+        let Expr::Node(node, _) = expr else {
+            panic!("structural effects node")
         };
-        let resource = children(list)
+        let resource = node
+            .children_slice()
             .iter()
             .find(|child| child.tag() == Some(DeepTag::Resource))
-            .expect("the nested resource node must be stamped too");
+            .unwrap();
         assert_eq!(resource.tag(), Some(DeepTag::Resource));
     }
 
-    /// Negative parity: the effect NAMES are payload, not vocabulary, and
-    /// must stay bare symbols. If they were ever stamped the readers below
-    /// (`symbol_name`) would stop resolving them.
     #[test]
-    fn effect_names_stay_bare_symbols() {
+    fn effect_names_are_payload_not_vocabulary_tags() {
         let mut effects = EffectSet::new();
         effects.insert(Effect::Random);
-        let expr = effect_set_expr(&effects);
-        let Expr::List(list, _) = &expr else {
-            panic!("effect_set_expr produces a list");
+        let payload = effect_set_metadata(&effects);
+        assert!(matches!(payload.values(), [EffectMember::Name(name)] if name.value() == "random"));
+    }
+
+    #[test]
+    fn effect_annotation_reaches_registered_expressions_and_preserves_data() {
+        let source = "(def {property_seed: (fn {} (params {}) (app {} (var {} debug) (lit {} 1))), custom: (fn {} (params {}) (app {} (var {} debug) (lit {} 1))), source: (original (fn {} (params {}) (app {} (var {} debug) (lit {} 1))))} f (lit {} 1))";
+        let parsed = chelis_deep::parser::parse_str(source).unwrap();
+        let Expr::Node(node, _) = &parsed[0] else {
+            panic!("stamped declaration")
         };
-        assert_eq!(
-            children(list).first().and_then(symbol_name),
-            Some("random"),
-            "effect names are payload and must remain readable as bare symbols"
-        );
+        let legacy = Expr::List(node.to_list(parsed[0].span()), parsed[0].span());
+        let unknown = Expr::UnknownForm(Box::new(chelis_deep::UnknownFormData {
+            head: "custom".into(),
+            meta: node.meta().clone(),
+            children: vec![],
+            span: parsed[0].span(),
+        }));
+        for original in [parsed[0].clone(), legacy, unknown] {
+            let rewritten = annotate_effects(
+                &original,
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+            );
+            let metadata = match &rewritten {
+                Expr::Node(node, _) => node.meta(),
+                Expr::List(list, _) => {
+                    let Expr::Map(meta, _) = &list.elements[1] else {
+                        panic!("map")
+                    };
+                    meta
+                }
+                Expr::UnknownForm(data) => &data.meta,
+                _ => unreachable!(),
+            };
+            assert_eq!(metadata.extensions(), node.meta().extensions());
+            let closure = metadata.property_seed().unwrap().expression();
+            let Expr::Node(closure, _) = closure else {
+                panic!("closure")
+            };
+            assert!(
+                closure
+                    .meta()
+                    .values()
+                    .any(|v| matches!(v, MetadataValue::Effects(_))),
+                "registered expression closure needs inferred effects"
+            );
+            assert_eq!(
+                metadata.source(),
+                node.meta().source(),
+                "preserved source is data"
+            );
+        }
     }
 }

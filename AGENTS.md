@@ -59,7 +59,8 @@ not drift.
 - Verify that inputs which should fail do fail, and with the right reason.
 - Verify that inputs which should pass do pass, with exact outputs where applicable.
 - Check docs and phase claims against the shipped behavior, not just intent.
-- Stay inside the brief: its head, files, in-scope claims, and deadline bound the round.
+- Stay inside the brief: its head, files, in-scope claims, and any explicit limits bound
+  the round.
   Record the exact reviewed commit and the worktree's baseline status, and use the
   worktree and warm target the brief hands you rather than rebuilding cold.
 - Report a P3 in one line, without reproduction. A construct no maintainer would write
@@ -67,7 +68,7 @@ not drift.
 
 ### Fresh-Context Enforcement
 
-- A pull request gets at most two fresh rounds by default; a third needs the user's
+- A pull request gets at most three fresh rounds by default; a fourth needs the user's
   explicit approval. A prose-only pull request, design documents included, gets one,
   and a second needs the same approval. Rounds run from any platform count, and the
   pull request's round record is the counter. Verification does not count against the
@@ -80,9 +81,9 @@ not drift.
   reviewer read never earns one.
 - Every round runs from an inline brief in the shape the `redteam-exec` skill carries:
   exact head, changed files, the pull request's in-scope claims, the worktree and target
-  it may use with pasted busy-signal output for that target, the context and
-  report-length budgets, the deadline (15 minutes unless the brief says otherwise), and
-  the delivery channel. The brief does not open with "read
+  it may use with pasted busy-signal output for that target, the report-length budget,
+  and the delivery channel. Context budgets and time limits are optional, with no
+  default. When set, include them in the brief. The brief does not open with "read
   `AGENTS.md`".
 - Freshness applies to the subagent's review context, not to the filesystem. Hand the
   reviewer an existing worktree and its warm target cache when the worktree is at the
@@ -124,15 +125,12 @@ not drift.
 
 - Every pull request, documentation-only work included, gets at least one compliant
   red-team round before merge. Push first, after `python3 scripts/gate.py --fast`: the
-  round reviews the pushed head while CI runs on it. The full `--local` gate covers the
-  head that goes ready-for-review. Run it late, on the committed candidate you intend
-  to ship, so one run normally suffices; when a review round changes that candidate the
-  earlier run stops describing it and you run it again. Evidence that predates the
-  repairs describes a head nobody is merging. The pull request records which head each
-  run covered, so a reader can check the evidence against the merged commit instead of
-  assuming the two match. A rebase that preserves the candidate's content is exempt per
-  [Worktree And Branch Discipline](#worktree-and-branch-discipline), and the record says
-  that the covered head differs from the merged one.
+  round reviews the pushed head while CI runs on it. Applicable CI checks must pass on
+  the head that goes ready-for-review, including any repairs made during review.
+  `--local` is optional for troubleshooting or additional local validation; it is not
+  a pull-request readiness requirement. Record the reviewed head and CI evidence in
+  the pull request. Any supporting local evidence must also name the head it covered;
+  evidence from before a repair does not validate the repaired candidate.
   [`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md) §8
   has the runs behind this rule.
 - Classify every finding against the pull request's stated scope. A finding is in scope
@@ -200,9 +198,9 @@ not drift.
 - Route confirmed in-scope findings back to the original implementation agent when it
   is still available so the fix retains its build context. Do not fix out-of-scope
   findings in the pull request; link an existing issue or file one if the defect is not
-  already tracked. Record every round's exact head, verdict, deadline, commands, finding
-  classes and scope classifications, accepted-no-action observations, linked issues,
-  and residual scope in the pull request.
+  already tracked. Record every round's exact head, verdict, commands, finding classes
+  and scope classifications, accepted-no-action observations, linked issues, residual
+  scope, and any explicit deadline in the pull request.
 
 ## Documentation And Spec Sync
 
@@ -330,15 +328,15 @@ numeric data, whether or not you have read that document:
   finding. Zero-exception classification is the landing rule: every discovered row
   must end in exactly one final authority class - structurally nonnumeric, a
   structurally recognized exact tagged carrier/transport, or an exact numeric
-  operation registration. The immutable foundation-era universe retains the old 39
-  grandfather rows, three successor overrides, and 155 permanent plain rows as
-  deletion debt owned by chelis#1288. The active primary baseline has already
-  moved 18 exact structurally nonnumeric rows, the eight tagged-carrier
-  declarations, and 123 registered numeric operations (the [05-OP-35]
-  stdlib surface registrations among them) to final authority; it
-  therefore retains no pre-ratchet grandfather rows, no successors, and 63
-  permanent plain rows as active debt, and the obsolete prelude `Json` row
-  is deleted. The
+  operation registration. Historical foundation snapshots record the old 39
+  grandfather rows, three successor overrides, and 155 permanent plain rows; the
+  executable primary census and guard retain none of those disposition lists or
+  admission paths. The active primary baseline has completed
+  that migration: all 237 rows have final authority as 66 exact structurally
+  nonnumeric rows, 16 structurally recognized tagged carriers/transports, and
+  155 registered numeric operations (the [05-OP-35] stdlib registrations among
+  them). It retains no grandfather, successor-override, permanent-disposition,
+  integer-plumbing, or other transition rows. The
   84 typed-wire and 17 registered-PyO3 baseline rows remain sealed legacy cohorts,
   while Count's wire field is final-registered. Those lists confer no authorization
   for a new, renamed, reclassified, or otherwise changed row, and a change touching one
@@ -410,9 +408,9 @@ numeric data, whether or not you have read that document:
   non-character built-in arithmetic value type - including bare `int`, `short`,
   `long`, signed/unsigned forms, pointer-sized integers, and the exact-width integer
   types - makes a callable `numeric-op`. Names and parameter-name heuristics never
-  turn a callable into plumbing. The executable census still contains three exact
-  integer-plumbing exceptions as chelis#1288 deletion debt; they cannot be copied,
-  widened, renamed, or used to authorize any changed declaration. The final rule
+  turn a callable into plumbing. The executable primary census has no
+  integer-plumbing exceptions; every arithmetic declaration follows the conservative
+  classification rule. The final rule
   registers extents, allocation sizes, indices, and dtype selectors as numeric
   operations; raw dtype selectors are forbidden.
   Conditional macro definitions
@@ -454,9 +452,78 @@ change set:
 ## OpenSpec (captured capabilities and advisory validation)
 
 The `openspec/` tree is the canonical OpenSpec planning and capability root.
-OpenSpec planning is optional. OpenSpec validation does not gate merges.
-`spec/design/spec_provenance.md` describes the future governance regime.
-This regime is not active.
+OpenSpec planning is optional. OpenSpec validation does not gate merges for
+human-reviewed changes. `spec/design/spec_provenance.md` describes the future
+governance regime. This regime is not active.
+
+### Submitting an OpenSpec document change
+
+**Push the branch. That is the whole workflow.**
+
+```sh
+git switch -c openspec/add-thing
+# edit openspec/** only
+git commit -am "docs(openspec): add the thing"
+git push -u origin HEAD
+```
+
+A push to any branch except `main` starts `openspec-autoland`: a
+permissionless signal workflow fires a `workflow_run`, the trusted
+controller re-derives the branch, commit, and repository from the API,
+classifies that exact commit with default-branch code, and opens or reuses
+one internal pull request. The merge worker then waits for the required
+checks on that commit and merges it. No local command is needed and no
+human approval is involved.
+
+`openspec-submit` (inside Devenv) is an optional local helper that
+validates before you push and reports the outcome in your terminal. It is
+not required, and it is not how a change lands.
+
+Autoland opens the pull request with a short-lived installation token,
+minted per run from the `chelis-openspec` GitHub App, which exists for this
+mechanism alone (`vars.OPENSPEC_APP_ID`,
+`secrets.OPENSPEC_APP_PRIVATE_KEY` -- not the shared `CI_APP_*`
+credentials, whose installation grants no pull-request write), scoped to this repository
+and to `Pull requests: write` alone, and revoked when the job ends. The
+built-in `GITHUB_TOKEN` cannot be used, because a pull request opened with
+it starts none of the required checks. If the App is not configured, or its
+installation lacks that permission here, the controller reports the push
+blocked and writes nothing -- it never opens a pull request that could not
+merge. `README.md` has the details.
+
+A push that touches anything outside the document set is classified
+`review`, nothing is written, and the change follows the ordinary path. Do
+not mix a document change with code in one branch if you want it to land
+automatically; split them.
+
+The document set is `openspec/project.md`, Markdown under
+`openspec/specs/`, and Markdown or `.openspec.yaml` under
+`openspec/changes/`. Normative capability specifications are included, per
+the maintainer authorization in `spec/design/spec_provenance.md`
+§ Automated acceptance of OpenSpec documents.
+
+Everything else keeps the ordinary review and test path, including any
+change to `openspec/config.yaml`, `scripts/openspec_*.py`,
+`scripts/check_openspec.py`, or any `.github/workflows/openspec-autoland*`
+file.
+
+`scripts/openspec_acceptance.py` is the single decision point, and it fails
+closed: an empty change set, an unreadable diff record, a symlink, an
+executable bit, a submodule pointer, a copy or type-change record, a
+deleted capability specification, or a rename crossing the boundary all
+route to human review. Do not add a path to its allowlist to make your
+change land; that file is itself outside the automatic path.
+
+Your branch must also carry byte-identical `.github`, `scripts`,
+`openspec/config.yaml`, Devenv, Nix, and toolchain content, compared by Git
+object id. A branch that predates a change to one of those is refused until
+you rebase -- deliberately, because a diff cannot tell "did not touch the
+workflow" apart from "carries an older workflow".
+
+**Automatic acceptance is not correctness evidence.** It proves the path
+boundary and schema validity. Where an accepted OpenSpec artifact contradicts
+`spec/**` or an executable oracle, the owning authority controls and the
+artifact is corrected.
 
 - The `openspec-validate` workflow uses a pinned `Chelis-Lang/ci` action.
   The action supplies Node 24.18.0 and the locked OpenSpec 1.6.0 package.
@@ -648,8 +715,9 @@ When a public surface has an implicit invariant, make it explicit and test it.
 - A non-trivial rebase or hand-resolved conflict requires review of the resolution
   before any history rewrite is published. Run `python3 scripts/gate.py --fast` on the
   result for a non-documentation change or the focused documentation checks for a
-  docs-only change; a content-preserving rebase does not oblige a fresh `--local` run,
-  and the record notes that the covered head is not the merged one. Never force-push a red gate. Obtain approval, then use an exact-head
+  docs-only change. A content-preserving rebase may retain supporting local evidence;
+  record that its covered head differs, and require CI on the new head. Never
+  force-push a red gate. Obtain approval, then use an exact-head
   `--force-with-lease`. A clean mechanical rebase needs no resolution review, and
   neither does one whose only hand-resolved conflicts are generated or digest lines:
   regenerate `rejection_registry_generated.rs` with
@@ -742,6 +810,24 @@ enforcement boundary.
 
 ## Commit And Pull Request Hygiene
 
+### Changelog Fragments
+
+- A behavior-changing PR must add a fragment in `changelog.d/`, using
+  `<pr-or-slug>.<added|changed|fixed>[.breaking].md`. Write the entry without its
+  outer bullet; mark breaking changes through the filename suffix.
+- Correct an existing pending fragment when follow-up work changes its claim.
+- Internal work with no release-note value may use the `no-changelog` PR label.
+  It suppresses only the missing-fragment requirement. Malformed fragments and
+  direct changelog edits still fail the required `Changelog` CI check.
+- Reserve `CHANGELOG.md` edits for release assembly. The release author runs
+  `.venv/bin/python scripts/changelog.py build --version VERSION --date YYYY-MM-DD`,
+  reviews the preview, then repeats with `--write`. Commit the assembled notes,
+  fragment deletions, and version bump together. Never recreate `[Unreleased]`.
+- [The fragment contract](changelog.d/README.md) owns the format, examples,
+  publishing behavior, and focused acceptance command.
+
+### Commit Messages
+
 - Use plain conventional commit messages with the configured human author. Do not add
   `Claude-Session`, Codex/Claude attribution, AI co-authorship markers, or AI-session
   links to commit messages or PR bodies.
@@ -768,15 +854,17 @@ Agent gates for non-documentation changes:
 
 ```sh
 python3 scripts/gate.py --fast    # before every push: fixes in place, then checks
-python3 scripts/gate.py --local   # covers the head that goes ready-for-review
-python3 scripts/gate.py --detach --local   # same run, detached
+python3 scripts/gate.py --local   # optional troubleshooting and local validation
+python3 scripts/gate.py --detach --local   # optional run, detached
 python3 scripts/gate.py --status [HANDLE]  # the detached run's real verdict
 ```
 
 `scripts/gate.py` is the single source of truth for the per-PR gate. `--fast` is the
-pre-push gate: fix-in-place, run before every push. `--local` runs on the committed
-candidate after the draft is pushed and CI has started, and must cover the head that
-goes ready-for-review. The bare full gate is CI-owned for routine PR validation. CI calls `python3 scripts/gate.py <stage>` for each split job.
+pre-push gate: fix-in-place, run before every push. CI on the pushed candidate owns
+routine PR validation and must pass before ready-for-review. `--local` is an optional
+way to reproduce checks on the developer's machine; no per-PR run is required.
+The bare full gate remains CI-owned for routine PR validation.
+CI calls `python3 scripts/gate.py <stage>` for each split job.
 `scripts/test_gate.py` pins the complete ordered set of
 single-line `run:` commands permitted in those gate-owned jobs, so shell syntax
 cannot hide an unreviewed command. To see the canonical full list and the
@@ -840,8 +928,7 @@ completion oracle, and the tracker requires every fix in that class to run
 it in a continuous job. Acceptance is exit 0 with a final `ORACLE: PASS`
 line.
 
-`--local` (chelis#360) is the gate on the committed candidate that goes
-ready-for-review. It runs
+`--local` (chelis#360) is an optional local validation command. It runs
 two of the three workspace clippy configurations (`-D warnings`, compile-only): the
 default row and the solver-free-features row. The `--no-default-features` row is
 CI-owned through `gate.py lint-and-unit`, because `check_configuration_closure.py`
@@ -849,7 +936,7 @@ reconciles every repository `.rs` file against the dep-info in the worktree's ta
 `crates/chelis-prove/src/clarabel_sos.rs` is compiled per pull request only by the
 solver-free row, and the no-default row compiles a strict subset of the default row.
 It then runs `cargo fmt --check`, `chelis lint --check .`, the deterministic
-std-bundle regeneration check, all three explicit rustdoc commands, the checkpoint and
+std-bundle regeneration check, the explicit rustdoc commands, the checkpoint and
 hash-order compile-fail fixtures, the configuration-closure check, both pipeline-core
 guards, the chelis#908 unrepresentable-domain oracle, the runtime-representation
 Phase 0 oracle, and `cargo nextest run -p <crate> --no-fail-fast` for each crate
@@ -858,18 +945,18 @@ resolved from each member's `Cargo.toml`, not the directory name). The derived c
 list is always printed; "no crate changes detected" means the per-crate stage was
 skipped, not silently empty. The workspace nextest stage is CI-owned: run `--fast`
 before every push, push before the review round so the reviewer and CI see the same
-head, run `--local` on the committed candidate that goes ready-for-review, and let CI
-(macOS Smoke is the authoritative workspace oracle) run the full suite. See [`docs/local_macos_environment.md`](docs/local_macos_environment.md)
+head, and require CI on the candidate before ready-for-review. CI runs the full suite
+(macOS Smoke is the authoritative workspace oracle). See [`docs/local_macos_environment.md`](docs/local_macos_environment.md)
 for why the workspace suite does not belong in the local loop on macOS.
 
-A cold `--local` run does not fit inside a foreground command budget, so do not start
-it as one. Launch it with `python3 scripts/gate.py --detach --local` and collect the
+If a cold `--local` run is useful, launch it with
+`python3 scripts/gate.py --detach --local` and collect the
 result with `python3 scripts/gate.py --status [HANDLE]`. The launcher's exit code is a
 launch verdict and nothing more: the run's own exit code, exit 4 for a lease timeout
 included, arrives through `--status`. Record the `--status` verdict and the head it
 covered, never the launch.
 [`docs/investigations/agent_contract_rationale.md`](docs/investigations/agent_contract_rationale.md) §8
-has the runs that produced both rules.
+has the runs behind the evidence and invocation rules.
 
 `--fast` is the inner-loop pass. It fixes in place and prints what it changed:
 `scripts/regen_all.py --tier 0` (the rejection registry, the embedded conformance
@@ -934,7 +1021,7 @@ per-stage seconds, the first failing stage, the termination class (`pass`,
 `stage-failure`, `signal`, `environment`, `preflight-stop`, `lease-timeout`,
 `user-cancel`, `internal-error`), and the files a `--fast` run changed; it then prints
 one summary line with the stage count, seconds, verdict, and report path. Record the
-`--local` run's seconds from that file in the pull request.
+seconds from that file when citing an optional `--local` run in the pull request.
 
 The gate normalizes `CARGO_TARGET_DIR` to an absolute path inside the current
 worktree and rejects paths outside it. It also sets
@@ -944,24 +1031,23 @@ These controls isolate writable state; concurrent agents may still contend
 for CPU and make each other slower. The advisory lease serializes `--local` and full
 runs across worktrees on one workstation; it never kills another process.
 
-Prose-only changes with no code, fixture, example, or structurally consumed Markdown
-are exempt from `--local`: run the focused documentation checks, push, and require green
-CI. Hosted docs-only classification is routing evidence, not proof that every changed
-Markdown control artifact has an owning validator in that workflow.
+Documentation-only changes require applicable CI on the candidate head. Hosted
+docs-only classification is routing evidence, not proof that every changed Markdown
+control artifact has an owning validator in that workflow.
 
 Markdown parsed, embedded, mirrored, or used as agent instructions is a control artifact,
-not inert prose. Run its focused validators even when CI reports `docs_only=true`. For a
-shared `agent-skills/*/SKILL.md` or red-team command-wrapper change, at minimum:
+not inert prose. Its focused validators must run even when CI reports
+`docs_only=true`. The always-run Docs job owns shared-agent-skill validation:
 
-- run the platform's skill-schema validator against every changed `SKILL.md` (in Codex,
-  use the `skill-creator` `quick_validate.py` helper),
-- run `scripts/regenerate_conformance_assets.py --check` through the uv-managed Python,
-- compare the live and embedded skill bytes and the Claude/Codex wrapper bytes, and
-- run the `chelis-conformance` `asset_drift_tripwire` and `skill_set_uniformity` tests
-  with the worktree's managed Python environment.
+- `scripts/check_agent_skills.py` validates metadata, the registered shared set,
+  source/embedded byte agreement, and Claude/Codex red-team wrapper agreement;
+- the validator and CI-routing tests exercise failure cases;
+- `chelis-conformance`'s `asset_drift_tripwire` and `skill_set_uniformity` tests
+  exercise compiled assets and downstream distribution.
 
-The always-run Docs job builds mdBook and validates the package skill/examples; it does
-not replace these shared-agent-skill checks.
+Local reruns of these checks are optional. Docs also builds mdBook and validates the
+package skill/examples. Phase-specific acceptance oracles and manual gates remain
+required; making `--local` optional does not replace those named obligations.
 
 Default-gate discipline:
 
@@ -1092,10 +1178,11 @@ has the fleet run these numbers come from.
   detect, and give mechanical work the cheap tier: waiting on CI, polling, mirroring
   bytes between files, transcribing a result. A standing instruction to economize is
   not a substitute. The tier is named per spawn, or it was never chosen.
-- Every brief states a context budget and a report-length budget, both as numbers. An
-  agent that will exceed its context budget says so and returns what it has rather
-  than continuing silently, and a report over its length budget is a defect in the
-  report rather than evidence that the budget was too small.
+- Every brief states a numeric report-length budget. A numeric context budget is also
+  required except for red-team rounds, where it is optional. An agent that will exceed
+  an explicitly set context budget says so and returns what it has rather than
+  continuing silently, and a report over its length budget is a defect in the report
+  rather than evidence that the budget was too small.
 - An orchestrator states its own context size in the message that announces a spawn,
   so the fleet's live total is visible to the user without anyone having to ask for
   it.

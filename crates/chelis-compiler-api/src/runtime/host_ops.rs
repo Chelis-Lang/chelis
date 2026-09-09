@@ -6,12 +6,11 @@ use chelis_ir::eval::{TensorValue as IrTensorValue, eval_tensor_roots_with};
 use chelis_ir::tier2;
 use chelis_types::{
     ArgReduceOp, BUILTIN_NAMES, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, NumericTrap,
-    ScalarValue, TensorReduceOp, arg_reduce_tensor_groups, cast_scalar, compare_scalar_tensor,
-    compare_scalars, compare_tensor_scalar, compare_tensors, float_binop,
-    float_scalar_tensor_binop, float_tensor_binop, float_tensor_scalar_binop, float_tensor_unop,
-    float_unop, int_binop, int_scalar_tensor_binop, int_tensor_binop, int_tensor_scalar_binop,
-    int_tensor_unop, int_unop, reduce_tensor_groups, scalar_from_f64, scalar_from_i64,
-    tensor_from_scalars, types::Prim, uniform_sample,
+    ScalarValue, TensorReduceOp, arg_reduce_tensor_groups, cast_scalar, compare_scalars,
+    compare_tensors, float_binop, float_scalar_tensor_binop, float_tensor_binop,
+    float_tensor_scalar_binop, float_tensor_unop, float_unop, int_binop, int_scalar_tensor_binop,
+    int_tensor_binop, int_tensor_scalar_binop, int_tensor_unop, int_unop, reduce_tensor_groups,
+    scalar_from_f64, scalar_from_i64, tensor_from_scalars, types::Prim, uniform_sample,
 };
 
 use super::transforms::*;
@@ -484,36 +483,36 @@ pub(super) fn compare_runtime(
         (Some(RuntimeValue::Tensor(lhs)), Some(RuntimeValue::Tensor(rhs))) => {
             tensor_compare_value(lhs, rhs, op).map(RuntimeValue::Tensor)
         }
-        (Some(RuntimeValue::Tensor(tensor)), Some(scalar))
-            if comparison_scalar(scalar).is_some() =>
-        {
-            let storage = compare_tensor_scalar(
-                op,
-                tensor.value.storage(),
-                comparison_scalar(scalar).expect("comparison scalar guard"),
-            )
-            .map_err(|error| error.to_string())?;
-            match tensor_result(tensor, storage) {
-                RuntimeValue::Tensor(value) => Ok(RuntimeValue::Tensor(value)),
-                _ => unreachable!("tensor_result always constructs a tensor"),
-            }
+        // A scalar beside a tensor. These two arms used to broadcast the
+        // scalar and return a `tensor[D, bool]`. chelis#1506 makes the form a
+        // type error under `[05-OP-36]`, so a CHECKED program can no longer
+        // reach here; this lane is also driven by API callers with unchecked
+        // input, which is why the arms become a named refusal rather than a
+        // deletion. Deleting them would fall through to the generic arm below,
+        // whose message names no rule and reads like an internal error, and
+        // `[05-UNS-4]` says a pre-codegen gate "SHALL NOT be the sole defense
+        // against an unsupported case reaching emission". Broadcasting here
+        // was itself the value substitution `[05-UNS-1]` forbids.
+        (Some(RuntimeValue::Tensor(_)), Some(scalar)) if comparison_scalar(scalar).is_some() => {
+            Err(mixed_comparison_surface_error())
         }
-        (Some(scalar), Some(RuntimeValue::Tensor(tensor)))
-            if comparison_scalar(scalar).is_some() =>
-        {
-            let storage = compare_scalar_tensor(
-                op,
-                comparison_scalar(scalar).expect("comparison scalar guard"),
-                tensor.value.storage(),
-            )
-            .map_err(|error| error.to_string())?;
-            match tensor_result(tensor, storage) {
-                RuntimeValue::Tensor(value) => Ok(RuntimeValue::Tensor(value)),
-                _ => unreachable!("tensor_result always constructs a tensor"),
-            }
+        (Some(scalar), Some(RuntimeValue::Tensor(_))) if comparison_scalar(scalar).is_some() => {
+            Err(mixed_comparison_surface_error())
         }
         other => Err(format!("comparison expects matching args, got {other:?}")),
     }
+}
+
+/// `[05-UNS-1]`: an unsupported case is refused, never substituted with a
+/// value. The checker rejects a scalar beside a tensor under `[05-OP-36]`
+/// (chelis#1506); this is the runtime backstop for input that did not come
+/// through it.
+fn mixed_comparison_surface_error() -> String {
+    "[05-UNS-1] comparison does not admit a scalar beside a tensor: \
+     spec/05-risc-primitives.md [05-OP-36] makes a mixed surface a type error. \
+     Give the scalar the tensor's shape explicitly, as in \
+     `gt(xs, expand(to_tensor([1.5f32]), 0i32, shape(xs, 0i32)))`."
+        .to_string()
 }
 
 pub(super) fn ordered_compare(

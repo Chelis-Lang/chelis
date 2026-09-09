@@ -209,6 +209,70 @@ fn hidden_value_row() {}
             )
         )
 
+    def test_checked_reshape_parity_remains_a_required_executable_row(self) -> None:
+        name = "parity_checked_reshape"
+        self.assertIn(name, oracle.REQUIRED_TESTS[oracle.PARITY_SOURCE])
+        for replacement in (
+            "{}",
+            '{ drive_parity(&examples_root().join("checked_reshape.ch"), false); }',
+        ):
+            with self.subTest(replacement=replacement):
+                sources = oracle.shipped_sources()
+                sources[oracle.PARITY_SOURCE] = oracle.replace_test_body(
+                    sources[oracle.PARITY_SOURCE], name, replacement
+                )
+                self.assertTrue(
+                    any(name in item for item in oracle.definition_digest_violations(sources))
+                )
+
+        sources = oracle.shipped_sources()
+        source = sources[oracle.PARITY_SOURCE]
+        sources[oracle.PARITY_SOURCE] = source.replace(
+            f"fn {name}()", "fn deleted_checked_reshape_row()"
+        )
+        self.assertTrue(any(name in item for item in oracle.source_violations(sources)))
+        sources[oracle.PARITY_SOURCE] = source.replace('        "checked_reshape.ch",\n', "")
+        self.assertTrue(
+            any(
+                "parity_corpus_is_complete" in item
+                for item in oracle.definition_digest_violations(sources)
+            )
+        )
+
+    def test_generic_shape_parity_remains_a_required_executable_row(self) -> None:
+        name = "parity_generic_explicit_shape"
+        for replacement in (
+            "{}",
+            '{ drive_parity(&examples_root().join("generic_explicit_shape.ch"), false); }',
+        ):
+            with self.subTest(replacement=replacement):
+                sources = oracle.shipped_sources()
+                sources[oracle.PARITY_SOURCE] = oracle.replace_test_body(
+                    sources[oracle.PARITY_SOURCE], name, replacement
+                )
+                self.assertTrue(
+                    any(name in item for item in oracle.definition_digest_violations(sources))
+                )
+        sources = oracle.shipped_sources()
+        sources[oracle.PARITY_SOURCE] = sources[oracle.PARITY_SOURCE].replace(
+            f"fn {name}()", "fn deleted_generic_shape_row()"
+        )
+        self.assertTrue(any(name in item for item in oracle.source_violations(sources)))
+
+    def test_generic_shape_cannot_leave_the_frozen_corpus_inventory(self) -> None:
+        sources = oracle.shipped_sources()
+        source = sources[oracle.PARITY_SOURCE]
+        _, _, start, end = oracle.test_definition_spans(source)["parity_corpus_is_complete"]
+        body = source[start:end].replace('        "generic_explicit_shape.ch",\n', "")
+        self.assertNotEqual(body, source[start:end])
+        sources[oracle.PARITY_SOURCE] = source[:start] + body + source[end:]
+        self.assertTrue(
+            any(
+                "parity_corpus_is_complete" in item
+                for item in oracle.definition_digest_violations(sources)
+            )
+        )
+
 
 class ComparatorAdoptionTests(unittest.TestCase):
     def test_removed_f64_oracle_spellings_stay_absent(self) -> None:

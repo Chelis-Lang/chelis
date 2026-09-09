@@ -22,6 +22,7 @@
 //! invariants. A residual irreducible `match` falls to Tier C.
 
 use chelis_deep::DeepTag;
+use chelis_deep::annotations::{MetadataValue as M, TypeSyntax};
 use chelis_unord::UnordMap;
 
 use chelis_deep::ast::{Atom, Expr};
@@ -590,19 +591,21 @@ fn const_lit_node(exprs: &[Expr], name: &str, value: f64) -> Expr {
 /// for an inlined int-typed constant (CR2-4).
 fn int_lit_node(value: i64, int_ty: &str) -> Expr {
     use chelis_deep::Span;
-    use chelis_deep::ast::{List, MetaMap};
+    use chelis_deep::ast::{List, Metadata};
     let type_node = Expr::List(
         List {
             elements: vec![
                 Expr::Atom(Atom::Tag(DeepTag::TPrim), Span::new(0, 0)),
-                Expr::Map(MetaMap::default(), Span::new(0, 0)),
+                Expr::Map(Metadata::default(), Span::new(0, 0)),
                 Expr::Atom(Atom::Name(int_ty.to_string()), Span::new(0, 0)),
             ],
         },
         Span::new(0, 0),
     );
-    let mut meta = MetaMap::default();
-    meta.entries.push(("type".to_string(), type_node));
+    let mut meta = Metadata::default();
+    meta.replace(M::Type(
+        TypeSyntax::try_new(type_node).expect("primitive type"),
+    ));
     Expr::List(
         List {
             elements: vec![
@@ -619,19 +622,21 @@ fn int_lit_node(value: i64, int_ty: &str) -> Expr {
 /// an inlined constant value (CR-8).
 fn float_lit_node(value: f64) -> Expr {
     use chelis_deep::Span;
-    use chelis_deep::ast::{List, MetaMap};
+    use chelis_deep::ast::{List, Metadata};
     let type_node = Expr::List(
         List {
             elements: vec![
                 Expr::Atom(Atom::Tag(DeepTag::TPrim), Span::new(0, 0)),
-                Expr::Map(MetaMap::default(), Span::new(0, 0)),
+                Expr::Map(Metadata::default(), Span::new(0, 0)),
                 Expr::Atom(Atom::Name("f32".to_string()), Span::new(0, 0)),
             ],
         },
         Span::new(0, 0),
     );
-    let mut meta = MetaMap::default();
-    meta.entries.push(("type".to_string(), type_node));
+    let mut meta = Metadata::default();
+    meta.replace(M::Type(
+        TypeSyntax::try_new(type_node).expect("primitive type"),
+    ));
     Expr::List(
         List {
             elements: vec![

@@ -94,9 +94,11 @@ fn only_the_exact_adopting_relation_can_stamp_a_binder_literal() {
         "def f[p: Float](x: p) -> p = (0.1 : p)\n",
         Some("[04-INF-6]"),
     );
+    let malformed = binder_program("float", "surf_literal_style: 1, ", "0.1");
+    let error = parse_and_stamp_file(&malformed).expect_err("malformed marker rejects at ingress");
+    assert!(error.to_string().contains("surf_literal_style"));
     for (label, marker) in [
         ("explicit", "surf_literal_style: \"explicit\", "),
-        ("malformed", "surf_literal_style: 1, "),
         ("missing", ""),
     ] {
         assert_deep(&binder_program("float", marker, "0.1"), "[04-INF-6]", label);

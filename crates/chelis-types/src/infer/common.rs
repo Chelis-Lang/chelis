@@ -23,7 +23,9 @@ pub(super) fn children(list: &deep::List) -> &[deep::Expr] {
 /// the #1023 migration. Stamped compiler ingress uses `Expr::Node`; readers at
 /// semantic boundaries must preserve that carrier instead of rebuilding a
 /// `List` through `Node::to_list`.
-pub(super) fn stamped_parts(expr: &deep::Expr) -> Option<(DeepTag, &deep::MetaMap, &[deep::Expr])> {
+pub(super) fn stamped_parts(
+    expr: &deep::Expr,
+) -> Option<(DeepTag, &deep::Metadata, &[deep::Expr])> {
     match expr {
         deep::Expr::Node(node, _) => Some((node.tag(), node.meta(), node.children_slice())),
         deep::Expr::List(list, _) => {
@@ -229,7 +231,7 @@ pub(super) fn expr_is_neg_var(expr: &deep::Expr) -> bool {
 }
 
 /// Get metadata map from element[1] of a list.
-pub(super) fn get_meta(list: &deep::List) -> Option<&deep::MetaMap> {
+pub(super) fn get_meta(list: &deep::List) -> Option<&deep::Metadata> {
     if list.elements.len() > 1
         && let deep::Expr::Map(meta, _) = &list.elements[1]
     {
@@ -240,10 +242,8 @@ pub(super) fn get_meta(list: &deep::List) -> Option<&deep::MetaMap> {
 
 /// True when a `deftype` node carries `opaque: true` metadata
 /// (RFC D-META; the key is unprefixed language semantics).
-pub(super) fn deftype_opaque_meta(meta: &deep::MetaMap) -> bool {
-    meta.entries.iter().any(|(key, value)| {
-        key == "opaque" && matches!(value, deep::Expr::Atom(deep::Atom::Bool(true), _))
-    })
+pub(super) fn deftype_opaque_meta(meta: &deep::Metadata) -> bool {
+    meta.opaque().is_some()
 }
 
 /// Extract a symbol name from an Expr.
@@ -659,13 +659,7 @@ pub(super) fn infer_diagonal_result_type(
 pub(super) fn macro_source(expr: &deep::Expr) -> Option<String> {
     // chelis#1107 amendment: carrier-preserving read.
     let (_, meta, _) = stamped_parts(expr)?;
-    let source = meta
-        .entries
-        .iter()
-        .find(|(key, _)| key == "source")
-        .map(|(_, value)| value)?;
-    let rendered = chelis_deep::printer::print_canonical(std::slice::from_ref(source));
-    Some(rendered.replace('\n', " ").trim().to_string())
+    Some(chelis_deep::printer::print_macro_source(meta.source()?))
 }
 
 pub(super) struct AliasExpansionSession<'a> {
@@ -958,27 +952,12 @@ pub(super) fn resolve_deep_type_with_bounds_and_dim_names(
 /// Decode a declaration node's `dtype_bounds` metadata into checker
 /// restrictions, reporting a malformed bound rather than dropping it.
 pub(super) fn declaration_dtype_bounds(
-    meta: &deep::MetaMap,
-    declaration: &str,
-    errors: &mut DiagnosticSink<'_>,
-) -> Result<UnordMap<String, TypeVarRestriction>, ErrorWitness> {
-    match chelis_deep::decode_dtype_bounds(meta) {
-        Ok(bounds) => Ok(bounds
-            .into_iter()
-            .map(|(binder, family)| (binder, restriction_for_family(family)))
-            .collect()),
-        Err(error) => Err(report_witness(
-            errors,
-            CheckError::new(
-                CheckErrorKind::MalformedForm,
-                format!("malformed dtype-family bound on `{declaration}`: {error}"),
-                vec![
-                    "declare each bound as `name: Float`, `name: Int`, or `name: Numeric`"
-                        .to_string(),
-                ],
-            ),
-        )),
-    }
+    meta: &deep::Metadata,
+) -> UnordMap<String, TypeVarRestriction> {
+    chelis_deep::decode_dtype_bounds(meta)
+        .into_iter()
+        .map(|(binder, family)| (binder, restriction_for_family(family)))
+        .collect()
 }
 
 /// Attach a declaration's resolved bounds to the substitution so
@@ -1794,9 +1773,7 @@ pub(super) fn collect_declarations(
             if kids.len() >= 2
                 && let Some(name) = symbol_name(&kids[0])
             {
-                let Ok(dtype_bounds) = declaration_dtype_bounds(meta, name, errors) else {
-                    return;
-                };
+                let dtype_bounds = declaration_dtype_bounds(meta);
                 let signature_level = subst.enter_level(vg);
                 let resolved = resolve_deep_type_with_bounds_and_dim_names(
                     &kids[1],
@@ -1910,10 +1887,7 @@ pub(super) fn collect_declarations(
             // already declares the name; without one the desugarer emits the
             // bound on the synthesized `defsig` instead.
             if let Some(name) = kids.first().and_then(symbol_name)
-                && meta
-                    .entries
-                    .iter()
-                    .any(|(key, _)| key == chelis_deep::DTYPE_BOUNDS_KEY)
+                && meta.dtype_bounds().is_some()
             {
                 errors.push(CheckError::new(
                     CheckErrorKind::TypeMismatch,
@@ -2339,6 +2313,7 @@ pub(super) fn infer_top_level(
             declared_signatures
                 .get(&name)
                 .map(|metadata| &metadata.binders),
+            &declared_type_names,
         );
         install_exact_op35_dependency_contracts(&name, declared_ty.as_ref(), &mut body_env, vg);
 

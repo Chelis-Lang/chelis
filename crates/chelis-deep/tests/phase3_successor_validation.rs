@@ -9,7 +9,15 @@ use chelis_deep::node::{Node, NodeError};
 use chelis_deep::span::Span;
 use chelis_deep::tag::DeepTag;
 use chelis_deep::validate::{WarningKind, find_raw_vocabulary_tag, validate};
-use chelis_deep::{Atom, Expr, List, MetaMap, UnknownFormData, parse_and_stamp};
+use chelis_deep::{Atom, Expr, List, Metadata, UnknownFormData, parse_and_stamp};
+
+fn probe(value: Expr) -> Result<Metadata, chelis_deep::metadata::MetadataError> {
+    let mut metadata = Metadata::default();
+    metadata.insert(chelis_deep::annotations::MetadataValue::PropertySeed(
+        chelis_deep::annotations::RuntimeExpression::try_new(value)?,
+    ))?;
+    Ok(metadata)
+}
 
 fn sp() -> Span {
     Span::new(0, 0)
@@ -20,7 +28,7 @@ fn raw_vocabulary_form(tag: &str) -> Expr {
         List {
             elements: vec![
                 Expr::Atom(Atom::Name(tag.to_string()), sp()),
-                Expr::Map(MetaMap::default(), sp()),
+                Expr::Map(Metadata::default(), sp()),
                 Expr::Atom(Atom::Int(0), sp()),
             ],
         },
@@ -43,21 +51,16 @@ fn assert_raw_tag_is_found_and_validated(expr: Expr, expected: &str) {
 
 #[test]
 fn node_metadata_and_children_are_recursive_validation_edges() {
-    let node_with_raw_metadata = Node::try_new(
-        DeepTag::Var,
-        MetaMap {
-            entries: vec![("probe".to_string(), raw_vocabulary_form("lit"))],
-        },
-        vec![Expr::Atom(Atom::Name("x".to_string()), sp())],
+    assert!(
+        probe(raw_vocabulary_form("lit"))
+            .unwrap_err()
+            .to_string()
+            .contains("lit")
     );
-    assert!(matches!(
-        node_with_raw_metadata,
-        Err(NodeError::RawVocabularyTag { ref raw_tag, .. }) if raw_tag == "lit"
-    ));
 
     let node_with_raw_child = Node::try_new(
         DeepTag::Var,
-        MetaMap::default(),
+        Metadata::default(),
         vec![raw_vocabulary_form("app")],
     );
     assert!(matches!(
@@ -71,19 +74,16 @@ fn bare_list_and_unknown_form_edges_are_recursive_validation_edges() {
     let bare = Expr::BareList(vec![raw_vocabulary_form("if")], sp());
     assert_raw_tag_is_found_and_validated(bare, "if");
 
-    let unknown_with_raw_metadata = Expr::UnknownForm(Box::new(UnknownFormData {
-        head: "future-form".to_string(),
-        meta: MetaMap {
-            entries: vec![("probe".to_string(), raw_vocabulary_form("let"))],
-        },
-        children: vec![],
-        span: sp(),
-    }));
-    assert_raw_tag_is_found_and_validated(unknown_with_raw_metadata, "let");
+    assert!(
+        probe(raw_vocabulary_form("let"))
+            .unwrap_err()
+            .to_string()
+            .contains("let")
+    );
 
     let unknown_with_raw_child = Expr::UnknownForm(Box::new(UnknownFormData {
         head: "future-form".to_string(),
-        meta: MetaMap::default(),
+        meta: Metadata::default(),
         children: vec![raw_vocabulary_form("tuple")],
         span: sp(),
     }));
@@ -98,7 +98,7 @@ fn clean_successor_carriers_remain_clean() {
 
     let unknown = Expr::UnknownForm(Box::new(UnknownFormData {
         head: "future-form".to_string(),
-        meta: MetaMap::default(),
+        meta: Metadata::default(),
         children: stamped,
         span: sp(),
     }));
@@ -157,7 +157,7 @@ fn canonical_stamped_effect_and_property_metadata_have_no_structural_warning() {
 fn node_constructor_rejects_raw_vocabulary_below_its_gate() {
     let result = Node::try_new(
         DeepTag::Def,
-        MetaMap::default(),
+        Metadata::default(),
         vec![
             Expr::Atom(Atom::Name("f".to_string()), sp()),
             raw_vocabulary_form("lit"),
@@ -181,63 +181,56 @@ fn construction_gate_descends_through_every_unvalidated_carrier() {
     // depth below them, in children and in metadata alike.
     let clean = Expr::node(
         DeepTag::Lit,
-        MetaMap::default(),
+        Metadata::default(),
         vec![Expr::Atom(Atom::Int(1), sp())],
         sp(),
     );
 
-    let buried_in_child = Expr::BareList(
-        vec![Expr::List(
-            List {
-                elements: vec![Expr::Map(
-                    MetaMap {
-                        entries: vec![("probe".to_string(), raw_vocabulary_form("if"))],
+    for (tag, payload) in [
+        (
+            "if",
+            Expr::BareList(
+                vec![Expr::List(
+                    List {
+                        elements: vec![raw_vocabulary_form("if")],
                     },
                     sp(),
                 )],
-            },
-            sp(),
-        )],
-        sp(),
-    );
-    assert!(
-        matches!(
+                sp(),
+            ),
+        ),
+        (
+            "tuple",
+            Expr::UnknownForm(Box::new(UnknownFormData {
+                head: "future-form".into(),
+                meta: Metadata::default(),
+                children: vec![Expr::BareList(vec![raw_vocabulary_form("tuple")], sp())],
+                span: sp(),
+            })),
+        ),
+    ] {
+        assert!(
+            probe(payload.clone())
+                .unwrap_err()
+                .to_string()
+                .contains(tag)
+        );
+        assert!(matches!(
             Node::try_new(
                 DeepTag::App,
-                MetaMap::default(),
-                vec![clean.clone(), buried_in_child],
+                Metadata::default(),
+                vec![clean.clone(), payload]
             ),
-            Err(NodeError::RawVocabularyTag { ref raw_tag, .. }) if raw_tag == "if"
-        ),
-        "a raw tag under BareList/List/Map must still be rejected"
-    );
-
-    let buried_in_metadata = Expr::UnknownForm(Box::new(UnknownFormData {
-        head: "future-form".to_string(),
-        meta: MetaMap::default(),
-        children: vec![Expr::BareList(vec![raw_vocabulary_form("tuple")], sp())],
-        span: sp(),
-    }));
-    assert!(
-        matches!(
-            Node::try_new(
-                DeepTag::App,
-                MetaMap {
-                    entries: vec![("probe".to_string(), buried_in_metadata)],
-                },
-                vec![clean.clone()],
-            ),
-            Err(NodeError::RawVocabularyTag { ref raw_tag, .. }) if raw_tag == "tuple"
-        ),
-        "a raw tag under an UnknownForm in metadata must still be rejected"
-    );
+            Err(NodeError::RawVocabularyTag { .. })
+        ));
+    }
 
     // Stopping at one stamped child must not stop the scan of its siblings.
     assert!(
         matches!(
             Node::try_new(
                 DeepTag::App,
-                MetaMap::default(),
+                Metadata::default(),
                 vec![clean, raw_vocabulary_form("let")],
             ),
             Err(NodeError::RawVocabularyTag { ref raw_tag, .. }) if raw_tag == "let"
@@ -266,12 +259,12 @@ fn deeply_nested_stamped_construction_scans_each_level_once() {
     // `construction_scan_stops_at_a_stamped_node_boundary`.
     let mut expr = Expr::node(
         DeepTag::Lit,
-        MetaMap::default(),
+        Metadata::default(),
         vec![Expr::Atom(Atom::Int(1), sp())],
         sp(),
     );
     for _ in 0..1000 {
-        expr = Expr::node(DeepTag::App, MetaMap::default(), vec![expr], sp());
+        expr = Expr::node(DeepTag::App, Metadata::default(), vec![expr], sp());
     }
 
     assert_eq!(find_raw_vocabulary_tag(std::slice::from_ref(&expr)), None);
@@ -281,44 +274,36 @@ fn deeply_nested_stamped_construction_scans_each_level_once() {
 fn node_metadata_replacement_revalidates_before_commit() {
     let mut node = Node::try_new(
         DeepTag::Var,
-        MetaMap::default(),
+        Metadata::default(),
         vec![Expr::Atom(Atom::Name("x".to_string()), sp())],
     )
     .expect("clean node must construct");
 
-    let rejected = node.try_replace_meta(MetaMap {
-        entries: vec![("probe".to_string(), raw_vocabulary_form("lit"))],
-    });
-    assert!(matches!(
-        rejected,
-        Err(NodeError::RawVocabularyTag { ref raw_tag, .. }) if raw_tag == "lit"
-    ));
-    assert!(
-        node.meta().entries.is_empty(),
-        "a rejected replacement must leave the original metadata intact"
-    );
-
-    node.try_replace_meta(MetaMap {
-        entries: vec![(
-            "span".to_string(),
-            Expr::Atom(Atom::Str("source:1".to_string()), sp()),
-        )],
-    })
-    .expect("clean annotation metadata must remain writable");
-    assert_eq!(node.meta().entries.len(), 1);
+    let candidate = node.meta().clone();
+    let rejected = chelis_deep::annotations::RuntimeExpression::try_new(raw_vocabulary_form("lit"));
+    assert!(rejected.unwrap_err().to_string().contains("lit"));
+    assert!(candidate.is_empty());
+    assert!(node.meta().is_empty());
+    node.try_replace_meta(Metadata::from(
+        chelis_deep::annotations::MetadataValue::Span(
+            chelis_deep::annotations::SpanId::try_new("source:1".into(), sp()).unwrap(),
+        ),
+    ))
+    .unwrap();
+    assert_eq!(node.meta().span_id().unwrap().value(), "source:1");
 }
 
 #[test]
 fn node_child_replacement_revalidates_before_commit() {
     let original = Expr::node(
         DeepTag::Lit,
-        MetaMap::default(),
+        Metadata::default(),
         vec![Expr::Atom(Atom::Int(1), sp())],
         sp(),
     );
     let mut node = Node::try_new(
         DeepTag::Def,
-        MetaMap::default(),
+        Metadata::default(),
         vec![
             Expr::Atom(Atom::Name("f".to_string()), sp()),
             original.clone(),
@@ -341,7 +326,7 @@ fn node_child_replacement_revalidates_before_commit() {
 #[test]
 fn node_children_replacement_revalidates_arity_before_commit() {
     let original = Expr::Atom(Atom::Name("x".to_string()), sp());
-    let mut node = Node::try_new(DeepTag::Var, MetaMap::default(), vec![original.clone()])
+    let mut node = Node::try_new(DeepTag::Var, Metadata::default(), vec![original.clone()])
         .expect("clean node must construct");
 
     let rejected = node.try_replace_children(Vec::new());
@@ -357,7 +342,7 @@ fn node_children_replacement_revalidates_arity_before_commit() {
 fn node_constructor_rejects_tag_atom_at_runtime_expr_slot() {
     let result = Node::try_new(
         DeepTag::Def,
-        MetaMap::default(),
+        Metadata::default(),
         vec![
             Expr::Atom(Atom::Name("f".to_string()), sp()),
             Expr::Atom(Atom::Tag(DeepTag::Lit), sp()),
@@ -378,7 +363,7 @@ fn node_public_api_exposes_no_raw_mutable_child_borrows() {
 fn typed_expr_constructor_produces_a_gated_node() {
     let expr = Expr::node(
         DeepTag::Lit,
-        MetaMap::default(),
+        Metadata::default(),
         vec![Expr::Atom(Atom::Int(1), sp())],
         sp(),
     );
@@ -390,7 +375,7 @@ fn typed_expr_constructor_cannot_bypass_runtime_roles() {
     let result = std::panic::catch_unwind(|| {
         Expr::node(
             DeepTag::Def,
-            MetaMap::default(),
+            Metadata::default(),
             vec![
                 Expr::Atom(Atom::Name("f".to_string()), sp()),
                 Expr::Atom(Atom::Name("unwrapped_name".to_string()), sp()),

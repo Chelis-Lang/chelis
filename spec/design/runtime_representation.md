@@ -29,8 +29,6 @@ Those facts are still optional at their highest-risk consumers:
   can bypass;
 - equal-width representations remain interchangeable to a cast even though
   [04-NUM-8] says their bits have different meanings;
-- `DimExpr::normalized_key` uses saturating products, so two unequal symbolic
-  capacities can compare equal before allocation;
 - Python and the HIP support header independently mirror a fixed-rank,
   int32-sized device tensor whose element pointer is `float *`; and
 - backend element spellings and stores are text selected at call sites, so a
@@ -71,8 +69,9 @@ The class has already survived local repairs:
 3. [#1360] made HIP allocation and element spelling agree for Bool8 and made the
    unsupported kernels fail loudly. The required Bool8 operation family remains
    [#1364]; a width assertion alone cannot prove a kernel writes canonical 0/1.
-4. Host runtime allocation now uses checked metadata, while compiler capacity
-   equivalence still saturates before the runtime sees a value ([#888]).
+4. Host runtime allocation gained checked metadata while compiler capacity
+   equivalence still saturated before the runtime saw a value ([#888]); the
+   exact capacity authority and legacy retirement below remove that path.
 5. `Repr` derives byte width but not [04-NUM-8]'s arithmetic representation
    ([#899]). The missing fact is restated or inferred wherever a lane needs it.
 
@@ -365,6 +364,37 @@ an exact key rule or return `NotProvenEqual`; it may not add a lossy fallback.
 Memory planners may reuse storage only when both the exact capacity key and the
 exact `Repr` agree. A failure to prove equality loses reuse, never correctness.
 
+#### Legacy capacity authority retirement (#888)
+
+The closeout removes `DimExprKey`, `DimExpr::normalized_key`, and their rational
+normalizer; there is no compatibility alias. The only remaining production
+caller was `specialize::dims_equivalent`, which compared single `DimInfo`
+atoms. It compares resolved literal values or unresolved symbol spellings
+directly through `DimExpr::from`, preserving that local axis-pattern decision.
+It neither proves storage capacity nor manufactures a scoped source identity.
+
+`DimExpr` remains the renderable/evaluable extent carrier. Its finite
+`evaluate` and `as_concrete` projections use checked multiplication, returning
+their existing error and `None` channels on overflow. Exact mathematical
+identity remains exclusively `CapacityKey::prove_equal`.
+
+The old rational-equivalence corpus migrates to the private exact-key tests:
+product-only equivalences remain positive; symbolic cancellation, quotient
+reassociation, and zero/partial-domain erasure become negative controls.
+The original large-product key witness is retained in
+`capacity_key::tests::capacity_key_products_use_arbitrary_precision_without_collision`;
+the C/HIP `issue_888_capacity_collision` suites continue to prove placement.
+This closeout does not complete Phase 1: #889's mandatory checked runtime
+metadata and the composite Phase 1 oracle still have to land.
+
+The Phase 0 coverage freeze moves to name the inverted shared-plan witness,
+execute finite-projection overflow controls in release, and add a mutation
+restoring `DimExpr::normalized_key`. That restored owner must be rejected as
+unclassified even though it existed in the immutable foundation. Paired
+compile-fail/compiling API probes independently prevent the retired key and
+method from returning. The foundation identities remain byte-identical;
+only deleted active debt is removed and current samples are refreshed.
+
 ### C2.2 Runtime metadata types
 
 All host and device allocation/view paths consume privately constructed values:
@@ -393,6 +423,149 @@ parallel helper that may remain optional.
 Failures occur before allocation or access and retain the owning operation's
 typed `Domain`/`Overflow` behavior. Release and debug builds execute the same
 checked path.
+
+#### Host checked-metadata delivery (#889)
+
+The host slice moves the private metadata authority into `chelis-runtime`'s
+`metadata` module. The opaque tensor stores one `ShapeMetadata` rather than
+independently assignable shape, strides, count, rank, and dtype. Metadata is
+immutable after checked construction; repurpose replaces it atomically after
+the existing uniqueness, provenance, and exact-storage-capacity checks.
+Storage capacity is a validated `ByteCount`. This is metadata privacy, not the
+later descriptor/element-pointer ownership seal.
+
+`ElementCount` owns zero-aware extent products. `ShapeMetadata` additionally
+derives every canonical suffix stride using checked arithmetic: an empty
+`[MAX, MAX, 0]` is valid, while `[0, MAX, MAX]` still has an unrepresentable
+stride. No operation derives its own product from raw tensor extents. Indexed
+movement uses checked metadata indexing and byte-range projection; axis loops
+receive checked decomposition from metadata. Empty operations return before
+requesting irrelevant nonempty iteration spaces. `IterationSpace` owns contraction
+loop extents without inventing storage strides for a domain that has no tensor.
+Scratch entry counts use the same checked count/byte/target projection, but their
+width is the physical Rust entry layout (which may include an accumulator or
+index), not a second interpretation of a Chelis stored representation.
+
+Public host views remain contiguous under [05-OP-31]. This slice introduces no
+new strided-view ABI or device descriptor. Entry borrows validate the declared
+capacity against the checked contiguous range; the physical foreign allocation
+and lifetime remain caller obligations. Allocation and byte-copy submission
+receive `AllocationBytes`, never recompute count times width. Public count and
+shape observation project the validated int64 values without re-evaluation.
+
+Padding preserves its int64 width until checked shape construction, and uses
+metadata-derived offsets. Nested tensor ingress and padding write scalar bits
+through a tensor-and-index boundary that checks representation and byte range,
+not a raw data pointer plus an independently calculated offset.
+
+The host slice's acceptance surface runs `checked_metadata`,
+`checked_metadata_padding`, `metadata_compile`, and the existing
+`exact_tagged_c_abi`, `op33_empty_tensor_axis_decomposition`, and
+`op33_tensor_validation` integration suites in both debug and release, together
+with the dtype-domain matrix, int64 carrier, repurpose, and write-guard controls.
+The int64 carrier's existing greater-than-8-GiB allocation test remains an
+explicitly ignored manual gate owned by #1112; it is not an executed receipt.
+The final Phase 1 command still additionally
+requires generated-C adoption and execution-receipt/mutation integration;
+host-only green does not close #889 or #893.
+
+This delivery explicitly amends the Phase 0 coverage freeze: register the private
+`metadata.rs` source and the exact width owners `ElementCount::bytes` (the closed
+representation width) and `ElementCount::scratch_len` (physical scratch layout).
+Neither admits another owner, pointer cast, or dtype authority. Both feed checked
+byte construction and allocation projection. Optimized executable mutations must
+reject weakened extent, count, byte, stride, target, capacity, and scratch checks;
+paired compiling/noncompiling callers prove the private construction boundary and
+the field-exposure mutation proves that boundary's test sensitivity. An added
+unregistered width owner in this same module must fail the structural inventory.
+The 358 immutable foundation rows remain byte-identical. Two retired raw-index
+helper rows leave the active debt (345 to 343); no new foundation debt is added.
+The host contract suites run in both profiles through the existing Phase 0
+command and hosted job. Their addition is supporting evidence for this host
+slice, not the final Phase 1 completion oracle.
+
+#### Generated C snapshot and reshape delivery (#889)
+
+Generated DAG snapshots consume `chelis_tensor_stride` and
+`chelis_tensor_byte_count`, projections of the host's private checked metadata.
+The byte count describes the logical copy range, not spare storage capacity.
+The host stride adapter delegates to the same observation. Neither emitter
+reconstructs those values from raw shape and dtype observations.
+
+DAG reshape calls `chelis_tensor_check_reshape` before destination allocation or
+repurpose, transporting the same target shape as that submission through exact
+tagged int64 rank and extent scalars, like the existing repurpose boundary.
+Host reshape delegates
+to `chelis_tensor_reshape`, whose runtime owner validates a flat exact int64 list,
+constructs checked target metadata, checks equal counts, and copies through
+`AllocationBytes` into an independent result. Empty copies submit no null-pointer
+memory operation. All four declarations have exact [05-OP-33] registrations.
+This is a separable adoption of existing checked metadata; it creates no new
+descriptor or Python interface.
+
+The slice's acceptance surface combines `checked_c_metadata` in debug and release,
+optimized generated host/DAG reshape execution with undefined-behavior
+sanitization, and bounded emitter delegation controls. Positive cases include all
+nine representations, exact stored bits, scalar and zero-extent shapes, int64
+metadata above int32, and metadata observation during a write guard. Negative
+cases cover malformed carriers, invalid axes, unequal counts, overflow of count,
+stride or byte size, and data access during a write guard. A mutation that restores
+raw snapshot arithmetic must fail the bounded delegation control. The Phase 0
+coverage freeze is explicitly extended with these supporting tests and mutation;
+its 358-row immutable foundation inventory is unchanged. The two retired
+emitter spelling owners leave active debt (343 to 341).
+
+#### Generated C shared indexing delivery (#889)
+
+The shared elementwise cohort saves runtime-checked scalar/identity projections
+before allocating or repurposing output storage. `ShapeMetadata` validates a
+tensor-domain projection; `IterationSpace` validates an unmaterialized domain
+without imposing storage bytes or suffix strides. [05-OP-33] owns the two C
+signatures and their exact tagged-int64 boundary. No Python interface changes.
+
+The bounded DAG cohort is `emit_binary`, `emit_floor_div`,
+`emit_floor_div_reduced_f`, `emit_binary_reduced_f`, `emit_binary_func`,
+`emit_cmplt`, `emit_unary`, `emit_integer_abs`, `emit_recip`, `emit_unary_func`,
+`emit_unary_reduced_f`, `emit_recip_reduced_f`, `emit_binary_func_reduced_f`,
+`emit_extrema_adjoint`, `emit_unary_func_reduced_f`, `emit_fused_elem`,
+`emit_realize`, and `emit_cast`. The host cohort is checked cast plus the four
+binary/unary operator/function dispatch arms. Their loops use the checked output
+count and `i * step`; direct-index fast paths additionally require identity
+projections or at most one output element. Cast failure selection retains the
+smallest failing domain index and applies the saved projection when reclassifying
+that input. The host's two coordinate helpers are deleted; its BLAS stride
+observer and the public raw movement/reduction helpers remain.
+
+The supporting acceptance surface is the existing Phase 0 command, extended with
+the runtime `checked_c_indexing` suite in debug and release, the backend's exact
+18+5 cohort control, optimized generated-C sanitizer execution, and the existing
+dtype, cast, and storage-reuse suites. Runtime mutations execute removed shape
+checking and incorrect scalar/identity steps against real owner tests. Emitter
+controls reject restored raw indexing, late validation, unchecked loop bounds,
+and scalar admission to fast paths. The registered `checked_reshape.ch` example
+also exercises ordinary elementwise composition and a checked cast.
+
+This is one shippable slice because the new index projections and their emitter
+consumers establish one shared iteration contract. The Phase 0 coverage digest
+changes to bind these commands and controls; its 358 immutable foundation rows
+remain unchanged. Fifteen retired load/store-template owners leave active debt
+(341 to 326); reduced-float and other surviving obligations keep their rows. This supporting
+evidence does not implement or pass the complete Phase 1 receipt/mutation oracle.
+
+The two new emitter projection helpers are exact final metadata owners in the
+inventory, alongside the existing checked runtime owners. Their int64 declarations
+are projections of the registered [05-OP-33] operations. The executable recorder
+compiles those production methods and rejects restored raw calculations, constant
+steps, and weakened identity conditions. This final classification is limited to
+these two methods and `backend-element-spelling`; another numeric or width owner
+still fails the inventory. It adds no foundation or active debt.
+
+Generated C adoption still requires movement and reduction indexing, sparse/BLAS loop
+domains, Count/window scratch allocation, and the complete Phase 1 execution
+receipt/mutation oracle remain outstanding. Host-only results do not establish
+device execution or close #889/#893. Generated host/device descriptors and
+validated Python/DLPack wrappers remain under #893/#1345; #1288 consumes those
+interfaces and owns their exact discovery and authority registrations.
 
 ## C3. One generated host/device descriptor schema
 

@@ -321,6 +321,12 @@ chelis_option *chelis_dict_get_scalar(const chelis_dict *dict, chelis_value key,
 int32_t chelis_tensor_rank(const chelis_tensor *tensor);
 int64_t chelis_tensor_shape(const chelis_tensor *tensor, int32_t axis);
 int64_t chelis_tensor_numel(const chelis_tensor *tensor);
+int64_t chelis_tensor_stride(const chelis_tensor *tensor, int32_t axis);
+int64_t chelis_tensor_byte_count(const chelis_tensor *tensor);
+int64_t chelis_tensor_elementwise_index_step(const chelis_tensor *input, const chelis_tensor *domain);
+int64_t chelis_tensor_elementwise_index_step_for_shape(const chelis_tensor *input, chelis_scalar rank, const chelis_scalar *shape);
+void chelis_tensor_check_reshape(const chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *shape);
+chelis_tensor *chelis_tensor_reshape(const chelis_tensor *tensor, const chelis_list *shape);
 
 chelis_string chelis_string_from_cstr(const char *value);
 const char *chelis_string_data(chelis_string value);

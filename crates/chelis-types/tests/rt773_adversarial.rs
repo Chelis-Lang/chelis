@@ -48,10 +48,7 @@ fn node_type_meta(expr: &Expr) -> Option<&Expr> {
     let Some(Expr::Map(meta, _)) = list.elements.get(1) else {
         return None;
     };
-    meta.entries
-        .iter()
-        .find(|(key, _)| key == "type")
-        .map(|(_, value)| value)
+    meta.ty().map(|ty| ty.expression())
 }
 
 fn app_callee_name(expr: &Expr) -> Option<&str> {
@@ -83,20 +80,16 @@ fn visit<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
             }
         }
         Expr::Map(map, _) => {
-            for (_, value) in &map.entries {
-                visit(value, f);
-            }
+            map.visit_expressions(&mut |value, _| visit(value, f));
         }
         Expr::MetaExpr(meta, _) => {
-            for (_, value) in &meta.entries {
-                visit(value, f);
-            }
+            meta.metadata
+                .visit_expressions(&mut |value, _| visit(value, f));
             visit(&meta.expr, f);
         }
         Expr::Node(node, _) => {
-            for (_, value) in &node.meta().entries {
-                visit(value, f);
-            }
+            node.meta()
+                .visit_expressions(&mut |value, _| visit(value, f));
             for child in node.children_iter() {
                 match child {
                     chelis_deep::node::ChildRef::Expr(expr)
@@ -115,9 +108,7 @@ fn visit<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
             }
         }
         Expr::UnknownForm(data) => {
-            for (_, value) in &data.meta.entries {
-                visit(value, f);
-            }
+            data.meta.visit_expressions(&mut |value, _| visit(value, f));
             for child in &data.children {
                 visit(child, f);
             }

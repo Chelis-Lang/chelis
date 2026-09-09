@@ -17,13 +17,14 @@
 //! shares the derived-obligation run across the two surfaces.
 
 use chelis_deep::DeepTag;
+use chelis_deep::annotations::{MetadataValue as M, TypeSyntax};
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
 };
 
 use chelis_compiler_api::schema::{EvalRequest, ExecutionValue, SourceKind, TensorValue};
-use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr, List as DeepList, MetaMap};
+use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr, List as DeepList, Metadata};
 use chelis_surf::ast::{
     BinOp, Decl, Expr, LetBinding, LetPattern, Literal, Param, PropertyOption, TypeExpr,
 };
@@ -3762,8 +3763,8 @@ fn discover_deep_properties_expr(
                         body: deep_fn_body(fn_expr).cloned().ok_or_else(|| {
                             format!("property `{name}` def body must be a callable `fn`")
                         })?,
-                        samples: deep_int_meta(meta, "property_samples"),
-                        seed: deep_int_meta(meta, "property_seed").map(|value| value as u64),
+                        samples: deep_int_meta(meta.property_samples()),
+                        seed: deep_int_meta(meta.property_seed()).map(|value| value as u64),
                     });
                 }
             }
@@ -3789,24 +3790,22 @@ enum DeepSourceKind {
 /// matching the CLI discoverer's `property_source_kind` (F6): `None` for a
 /// non-property def; `Err` for a `chelis_role: "property"` def with an
 /// absent or invalid `property_source_kind` (a malformed property is an
-/// error on BOTH surfaces, never silently skipped). The legacy
-/// `c_earchin_role` witness without an explicit kind defaults to Bridge.
-fn deep_property_source_kind(meta: &MetaMap, name: &str) -> Result<Option<DeepSourceKind>, String> {
+/// error on BOTH surfaces, never silently skipped). Producer extensions
+/// carry no property-discovery authority.
+fn deep_property_source_kind(
+    meta: &Metadata,
+    name: &str,
+) -> Result<Option<DeepSourceKind>, String> {
     let has_chelis = meta
-        .entries
-        .iter()
-        .any(|(k, v)| k == "chelis_role" && string_value(v) == Some("property"));
-    let has_legacy = meta
-        .entries
-        .iter()
-        .any(|(k, v)| k == "c_earchin_role" && string_value(v) == Some("property_witness"));
-    if !has_chelis && !has_legacy {
+        .chelis_role()
+        .is_some_and(|value| value.value() == "property");
+    if !has_chelis {
         return Ok(None);
     }
-    let Some(kind) = deep_meta_value(meta, "property_source_kind").and_then(string_value) else {
-        if has_legacy {
-            return Ok(Some(DeepSourceKind::Bridge));
-        }
+    let Some(kind) = meta
+        .property_source_kind()
+        .map(|value| value.value().spelling())
+    else {
         return Err(format!(
             "property `{name}` metadata must include string `property_source_kind`"
         ));
@@ -4326,7 +4325,7 @@ fn deep_proposition(preconditions: &[DeepExpr], body: &DeepExpr) -> DeepExpr {
 /// consumer view. This does not normalize, clone, or reconstruct the tree: new
 /// file ingress stays in the role-typed representation while legacy callers
 /// remain readable until the carrier is deleted atomically.
-fn deep_node_parts(expr: &DeepExpr) -> Option<(DeepTag, &MetaMap, &[DeepExpr])> {
+fn deep_node_parts(expr: &DeepExpr) -> Option<(DeepTag, &Metadata, &[DeepExpr])> {
     match expr {
         DeepExpr::Node(node, _) => Some((node.tag(), node.meta(), node.children_slice())),
         DeepExpr::List(list, _) => {
@@ -4339,24 +4338,16 @@ fn deep_node_parts(expr: &DeepExpr) -> Option<(DeepTag, &MetaMap, &[DeepExpr])> 
     }
 }
 
-fn meta_map(expr: &DeepExpr) -> Option<&MetaMap> {
+fn meta_map(expr: &DeepExpr) -> Option<&Metadata> {
     match expr {
         DeepExpr::Map(map, _) => Some(map),
         _ => None,
     }
 }
 
-fn deep_meta_value<'a>(meta: &'a MetaMap, key: &str) -> Option<&'a DeepExpr> {
-    meta.entries
-        .iter()
-        .find_map(|(entry_key, value)| (entry_key == key).then_some(value))
-}
-
-fn deep_int_meta(meta: &MetaMap, key: &str) -> Option<usize> {
-    match deep_meta_value(meta, key).and_then(deep_int_value) {
-        Some(value) if value >= 0 => Some(value as usize),
-        _ => None,
-    }
+fn deep_int_meta(value: Option<&chelis_deep::annotations::RuntimeExpression>) -> Option<usize> {
+    let value = deep_int_value(value?.expression())?;
+    usize::try_from(value).ok()
 }
 
 fn deep_int_value(expr: &DeepExpr) -> Option<i64> {
@@ -4369,26 +4360,22 @@ fn deep_int_value(expr: &DeepExpr) -> Option<i64> {
     }
 }
 
-fn deep_property_params(meta: &MetaMap) -> Option<Vec<Param>> {
-    let (tag, _, children) = deep_node_parts(deep_meta_value(meta, "property_quantifiers")?)?;
-    if tag != DeepTag::Params {
-        return None;
-    }
-    let mut params = Vec::new();
-    for child in children {
-        if let Some(param) = deep_param(child) {
-            params.push(param);
-        }
-    }
-    Some(params)
+fn deep_property_params(meta: &Metadata) -> Option<Vec<Param>> {
+    meta.property_quantifiers()?
+        .values()
+        .iter()
+        .map(|binder| deep_param(&binder.to_expression()))
+        .collect()
 }
 
-fn deep_property_preconditions(meta: &MetaMap) -> Option<Vec<DeepExpr>> {
-    let (tag, _, children) = deep_node_parts(deep_meta_value(meta, "property_preconditions")?)?;
-    if tag != DeepTag::Tuple {
-        return None;
-    }
-    Some(children.to_vec())
+fn deep_property_preconditions(meta: &Metadata) -> Option<Vec<DeepExpr>> {
+    Some(
+        meta.property_preconditions()?
+            .values()
+            .iter()
+            .map(|value| value.expression().clone())
+            .collect(),
+    )
 }
 
 fn type_expr_from_deep(expr: &DeepExpr) -> Option<TypeExpr> {
@@ -4473,7 +4460,8 @@ fn deep_param(expr: &DeepExpr) -> Option<Param> {
     let ty = elements
         .get(1)
         .and_then(meta_map)
-        .and_then(|meta| deep_meta_value(meta, "type"))
+        .and_then(|meta| meta.ty())
+        .map(|ty| ty.expression())
         .and_then(type_expr_from_deep);
     Some(Param {
         name: name.to_string(),
@@ -4535,23 +4523,34 @@ fn deep_bool(value: bool) -> DeepExpr {
 fn deep_string(value: &str) -> DeepExpr {
     DeepExpr::Atom(DeepAtom::Str(value.to_string()), deep_span())
 }
-fn deep_map(entries: Vec<(String, DeepExpr)>) -> DeepExpr {
-    DeepExpr::Map(MetaMap { entries }, deep_span())
+fn deep_map(values: Vec<M>) -> DeepExpr {
+    DeepExpr::Map(
+        Metadata::try_from_values(values).expect("distinct producer annotations"),
+        deep_span(),
+    )
 }
 fn deep_list(elements: Vec<DeepExpr>) -> DeepExpr {
     DeepExpr::List(DeepList { elements }, deep_span())
 }
 fn deep_node(tag: &str, children: Vec<DeepExpr>) -> DeepExpr {
-    let mut elements = vec![deep_symbol(tag), deep_map(Vec::new())];
+    let mut elements = vec![
+        DeepExpr::Atom(
+            DeepAtom::Tag(DeepTag::parse(tag).expect("vocabulary builder")),
+            deep_span(),
+        ),
+        deep_map(Vec::new()),
+    ];
     elements.extend(children);
     deep_list(elements)
 }
-fn deep_node_meta(
-    tag: &str,
-    entries: Vec<(String, DeepExpr)>,
-    children: Vec<DeepExpr>,
-) -> DeepExpr {
-    let mut elements = vec![deep_symbol(tag), deep_map(entries)];
+fn deep_node_meta(tag: &str, entries: Vec<M>, children: Vec<DeepExpr>) -> DeepExpr {
+    let mut elements = vec![
+        DeepExpr::Atom(
+            DeepAtom::Tag(DeepTag::parse(tag).expect("vocabulary builder")),
+            deep_span(),
+        ),
+        deep_map(entries),
+    ];
     elements.extend(children);
     deep_list(elements)
 }
@@ -4561,9 +4560,9 @@ fn deep_var(name: &str) -> DeepExpr {
 fn deep_lit(value: DeepExpr, ty_name: &str) -> DeepExpr {
     deep_node_meta(
         "lit",
-        vec![(
-            "type".to_string(),
-            deep_node("t-prim", vec![deep_symbol(ty_name)]),
+        vec![M::Type(
+            TypeSyntax::try_new(deep_node("t-prim", vec![deep_symbol(ty_name)]))
+                .expect("primitive type"),
         )],
         vec![value],
     )
@@ -4575,12 +4574,6 @@ fn list_tag_from_list(list: &DeepList) -> Option<DeepTag> {
 fn symbol_text(expr: &DeepExpr) -> Option<&str> {
     match expr {
         DeepExpr::Atom(DeepAtom::Name(value), _) => Some(value),
-        _ => None,
-    }
-}
-fn string_value(expr: &DeepExpr) -> Option<&str> {
-    match expr {
-        DeepExpr::Atom(DeepAtom::Str(value), _) => Some(value),
         _ => None,
     }
 }

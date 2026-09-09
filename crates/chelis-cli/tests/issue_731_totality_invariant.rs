@@ -148,21 +148,29 @@ fn collect_tree_traces(expr: &deep::Expr, path: &str, check_stamp: bool, out: &m
     match expr {
         deep::Expr::Atom(_, _) => {}
         deep::Expr::Map(map, _) => {
-            for (key, value) in &map.entries {
-                if key == "type" {
-                    continue;
+            map.visit_syntax(&mut |key, value| {
+                if key.spelling() != "type" {
+                    collect_tree_traces(
+                        value,
+                        &format!("{path}.{}", key.spelling()),
+                        check_stamp,
+                        out,
+                    );
                 }
-                collect_tree_traces(value, &format!("{path}.{key}"), check_stamp, out);
-            }
+            });
         }
         deep::Expr::MetaExpr(meta, _) => {
             collect_tree_traces(&meta.expr, path, check_stamp, out);
-            for (key, value) in &meta.entries {
-                if key == "type" {
-                    continue;
+            meta.metadata.visit_syntax(&mut |key, value| {
+                if key.spelling() != "type" {
+                    collect_tree_traces(
+                        value,
+                        &format!("{path}.{}", key.spelling()),
+                        check_stamp,
+                        out,
+                    );
                 }
-                collect_tree_traces(value, &format!("{path}.{key}"), check_stamp, out);
-            }
+            });
         }
         deep::Expr::List(list, _) => {
             let tag = tag_of(list);
@@ -170,12 +178,12 @@ fn collect_tree_traces(expr: &deep::Expr, path: &str, check_stamp: bool, out: &m
                 && let (Some(tag), Some(deep::Expr::Map(meta, _))) = (tag, list.elements.get(1))
                 && !NON_TYPE_STAMPED_TAGS.contains(&tag)
             {
-                match meta.entries.iter().find(|(key, _)| key == "type") {
+                match meta.ty() {
                     None => out.push(format!(
                         "{path}/{tag}: stamp-eligible node with no `type:` stamp \
                          (a silent Type::Error verdict)"
                     )),
-                    Some((_, value)) if is_error_type_stamp(value) => out.push(format!(
+                    Some(value) if is_error_type_stamp(value.expression()) => out.push(format!(
                         "{path}/{tag}: `type:` stamp is `(t-var {{}} _)` \
                          (the Type::Error encoding)"
                     )),

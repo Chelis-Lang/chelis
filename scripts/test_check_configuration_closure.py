@@ -30,6 +30,8 @@ import sys
 import tempfile
 import unittest
 
+import yaml
+
 
 SCRIPT = Path(__file__).with_name("check_configuration_closure.py")
 SPEC = importlib.util.spec_from_file_location("check_configuration_closure", SCRIPT)
@@ -323,19 +325,14 @@ class MatrixCoverageTests(unittest.TestCase):
         self.assertEqual(set(gate_rows.values()), {CLOSURE.PER_PULL_REQUEST})
         self.assertIn("no-default-features", gate_rows)
 
-    def test_gate_rows_list_macos_exactly_when_local_runs_them(self) -> None:
-        # No continuous job runs Clippy on macOS, so a gate-owned row is
-        # linted there only by `gate.py --local` on a developer's Mac. The
-        # `hosts` tuple must therefore say macOS exactly for the rows the
-        # `--local` subset still runs; `--local` keeps two of the three so
-        # leg 3 passes on a fresh target, and the third is CI-only.
-        gate_spec = importlib.util.spec_from_file_location(
-            "gate_for_closure_hosts", SCRIPT.with_name("gate.py")
-        )
-        assert gate_spec is not None and gate_spec.loader is not None
-        gate = importlib.util.module_from_spec(gate_spec)
-        sys.modules[gate_spec.name] = gate
-        gate_spec.loader.exec_module(gate)
+    def test_gate_rows_list_macos_exactly_when_ci_runs_them(self) -> None:
+        # Coverage at the registered cadence comes from hosted execution.
+        # test_hosted_validation separately rejects skipped or nonblocking
+        # Clippy steps and an aggregate that does not require their result.
+        workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/ci.yml").read_text())
+        job = workflow["jobs"]["macos-workspace-shard"]
+        self.assertEqual(job["runs-on"], "macos-latest")
+        commands = [step.get("run") for step in job["steps"]]
         checked = 0
         for run in CLOSURE.CLIPPY_MATRIX:
             if run.owner != "scripts/gate.py":
@@ -343,8 +340,8 @@ class MatrixCoverageTests(unittest.TestCase):
             checked += 1
             self.assertEqual(
                 "macos" in run.hosts,
-                list(run.command) in gate.LOCAL_STATIC_COMMANDS,
-                f"{run.label}: hosts {run.hosts} disagree with --local membership",
+                " ".join(run.command) in commands,
+                f"{run.label}: hosts {run.hosts} disagree with hosted macOS commands",
             )
         self.assertEqual(checked, 3)
         by_label = {run.label: run for run in CLOSURE.CLIPPY_MATRIX}

@@ -325,12 +325,14 @@ fn the_surf_deep_round_trip_law_holds_for_every_resugarable_type_variable() {
                 .unwrap_or_else(|error| panic!("`{name}` must still resugar: {error}"));
             let redesugared = desugar_program(&parse_str(&surf).expect("reparse"));
             assert_eq!(
-                print_canonical_flat(&chelis_surf::resugar::normalize_deep_for_surface_roundtrip(
-                    &deep
-                )),
-                print_canonical_flat(&chelis_surf::resugar::normalize_deep_for_surface_roundtrip(
-                    &redesugared
-                )),
+                print_canonical_flat(
+                    &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&deep)
+                        .expect("normalize valid source metadata"),
+                ),
+                print_canonical_flat(
+                    &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&redesugared)
+                        .expect("normalize valid round-trip metadata"),
+                ),
                 "desugar(resugar(deep)) must reproduce the Deep for `{name}`:\n{surf}"
             );
         }

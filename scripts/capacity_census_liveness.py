@@ -40,12 +40,6 @@ CENSUS_RELS = (
 )
 ISSUE_REF = re.compile(r"chelis#(\d+)")
 LEGACY_TRANSITION_DISPOSITIONS_BY_FAMILY = {
-    "primary": frozenset(
-        {
-            "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)",
-            "permanent-disposition([05-OP-2] source-faithful prelude Json numeric split; exact descriptor ratified 2026-08-04)",
-        }
-    ),
     "wire": frozenset(
         {
             "permanent-disposition(C6 dtype-tagged wire schema complete descriptor set ratified 2026-08-04)",

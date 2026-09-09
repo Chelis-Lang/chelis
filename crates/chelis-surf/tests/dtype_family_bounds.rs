@@ -191,12 +191,16 @@ fn desugar_of_resugar_is_the_identity_on_bounded_declarations() {
         // `span` is derived surface provenance normalized away by
         // spec/03 §6.3.2, exactly as the canonical-Surf law harness does.
         assert_eq!(
-            print_canonical(&chelis_surf::resugar::normalize_deep_for_surface_roundtrip(
-                &desugar_program(&recovered)
-            )),
-            print_canonical(&chelis_surf::resugar::normalize_deep_for_surface_roundtrip(
-                &deep
-            )),
+            print_canonical(
+                &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&desugar_program(
+                    &recovered
+                ))
+                .expect("valid metadata for round-trip normalization")
+            ),
+            print_canonical(
+                &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&deep)
+                    .expect("valid metadata for round-trip normalization")
+            ),
             "resugar/desugar is not the identity for `{source}`"
         );
     }
@@ -226,9 +230,8 @@ fn resugaring_an_unbounded_sig_adds_no_binder_list() {
 
 #[test]
 fn a_malformed_deep_bound_fails_resugaring_closed() {
-    let deep = deep_parse_strict("(defsig {dtype_bounds: {p: signed}} f (t-var {} p))")
-        .expect("Deep parses; the family name is a resugaring concern");
-    resugar_program(&deep).expect_err("an unknown family must not resugar");
+    deep_parse_strict("(defsig {dtype_bounds: {p: signed}} f (t-var {} p))")
+        .expect_err("unknown dtype families are rejected at ingress");
 }
 
 fn binder_deep(body: &str) -> Vec<chelis_deep::Expr> {
@@ -298,9 +301,26 @@ fn unrepresentable_binder_literal_provenance_fails_resugaring() {
         "surf_literal_style: 1, ",
         "",
     ] {
-        let deep = binder_deep(&format!(
-            "(cast {{}} (lit {{{marker}type: (t-var {{}} p)}} 0.1) (t-var {{}} p))"
-        ));
-        resugar_program(&deep).expect_err("unrepresentable binder provenance");
+        let source = format!(
+            "(defsig {{dtype_bounds: {{p: float}}}} scale (t-fn {{}} (t-var {{}} p) (t-var {{}} p))) (def {{}} scale (fn {{}} (params {{}} (x {{type: (t-var {{}} p)}})) (cast {{}} (lit {{{marker}type: (t-var {{}} p)}} 0.1) (t-var {{}} p))))"
+        );
+        match deep_parse_strict(&source) {
+            Ok(deep) => {
+                resugar_program(&deep).expect_err("unrepresentable binder provenance");
+            }
+            Err(error) => assert!(error.to_string().contains("surf_literal_style")),
+        }
     }
+}
+
+#[test]
+fn duplicate_authored_bounds_reject_before_deep_construction() {
+    for source in [
+        "sig f[p: Float, p: Int]: p -> p\ndef f(x) = x",
+        "def f[p: Float, p: Int](x: p) -> p = x",
+    ] {
+        assert!(chelis_surf::parser::parse_str(source).is_err(), "{source}");
+    }
+    let declarations = chelis_surf::parser::parse_str("def f[p: Float](x: p) -> p = x").unwrap();
+    chelis_surf::desugar::desugar_program(&declarations);
 }

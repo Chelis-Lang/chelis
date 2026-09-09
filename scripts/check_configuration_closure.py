@@ -57,17 +57,13 @@ class ClippyRun:
     label: str
     command: tuple[str, ...]
     owner: str
-    #: Hosts the owner runs this on. For `scripts/gate.py` that means the
-    #: developer's host under `--local`, which `AGENTS.md` makes mandatory
-    #: once per pull request before ready-for-review. No continuous job runs
-    #: Clippy on macOS, so macOS coverage is gate-local; the design document
-    #: records that residual. A gate-owned row therefore lists macOS only
-    #: when `--local` runs it: `no-default-features` is CI-only, because
-    #: `--local` keeps only the two rows leg 3 needs on a fresh target
-    #: (`scripts/test_check_configuration_closure.py` locks the pairing).
-    #: "linux" on that row means the hosted `lint-and-unit` job lints it on
-    #: Linux for every pull request; a developer running `--local` on Linux
-    #: skips it too and is covered by the same job.
+    #: Hosts covered at the registered cadence. The gate owns the canonical
+    #: per-pull-request commands; CI's `lint-and-unit` job runs all three on
+    #: Linux, and `macos-workspace-shard` runs default and solver-free Clippy
+    #: on macOS. `no-default-features` still has Linux coverage only.
+    #: `scripts/test_check_configuration_closure.py` checks the macOS command
+    #: pairing; `scripts/test_hosted_validation.py` guards its required CI
+    #: routing. Optional `--local` execution is supporting evidence.
     hosts: tuple[str, ...]
     cadence: str
 

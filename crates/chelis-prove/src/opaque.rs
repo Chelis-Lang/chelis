@@ -15,6 +15,7 @@
 //! recomputed from the predicate via `chelis_pred::classify_predicate`.
 
 use chelis_deep::DeepTag;
+use chelis_deep::annotations::{MetadataKey as K, MetadataValue as M, TypeSyntax};
 use chelis_unord::{UnordMap, UnordSet};
 
 use chelis_deep::ast::{Atom, Expr};
@@ -179,18 +180,15 @@ fn symbol_text(expr: &Expr) -> Option<&str> {
     }
 }
 
-fn meta_value<'a>(expr: &'a Expr, key: &str) -> Option<&'a Expr> {
-    let meta = match expr {
-        Expr::Node(node, _) => node.meta(),
+fn annotations(expr: &Expr) -> Option<&chelis_deep::Metadata> {
+    match expr {
+        Expr::Node(node, _) => Some(node.meta()),
         Expr::List(list, _) => match list.elements.get(1) {
-            Some(Expr::Map(meta, _)) => meta,
-            _ => return None,
+            Some(Expr::Map(meta, _)) => Some(meta),
+            _ => None,
         },
-        _ => return None,
-    };
-    meta.entries
-        .iter()
-        .find_map(|(entry_key, value)| (entry_key == key).then_some(value))
+        _ => None,
+    }
 }
 
 // ===========================================================================
@@ -284,17 +282,11 @@ fn opaque_invariant_from_deftype(
 ) -> Option<Result<OpaqueInvariant, OpaqueInvariantRejection>> {
     // Require opaque: true and an invariant fn node in the metadata. Absent
     // either, this is not an invariant-carrying opaque type -> skip.
-    let opaque = matches!(
-        meta_value(deftype, "opaque"),
-        Some(Expr::Atom(Atom::Bool(true), _))
-    );
-    if !opaque {
-        return None;
-    }
-    let predicate = meta_value(deftype, "invariant")?.clone();
-    if tag(&predicate) != Some(DeepTag::Fn) {
-        return None;
-    }
+    let metadata = annotations(deftype)?;
+    metadata.opaque()?;
+    let predicate =
+        crate::deep_compat::normalize_nodes_to_lists(&[metadata.invariant()?.to_expression()])
+            .remove(0);
 
     // From here it IS an invariant-carrying opaque type. ANY failure to model
     // its representation is a covered-or-rejected ERROR, never a silent skip.
@@ -611,7 +603,9 @@ pub(crate) fn const_declared_int_type(exprs: &[Expr], name: &str) -> Option<Stri
         if tag(expr) != Some(DeepTag::Lit) {
             return None;
         }
-        if let Some(ty) = meta_value(expr, "type")
+        if let Some(ty) = annotations(expr)
+            .and_then(|meta| meta.ty())
+            .map(|ty| ty.expression())
             && tag(ty) == Some(DeepTag::TPrim)
         {
             return symbol_text(children(ty).first()?).map(str::to_string);
@@ -1853,7 +1847,13 @@ fn sym(s: &str) -> Expr {
     Expr::Atom(Atom::Name(s.to_string()), span0())
 }
 fn node(tag: &str, kids: Vec<Expr>) -> Expr {
-    let mut elements = vec![sym(tag), Expr::Map(Default::default(), span0())];
+    let mut elements = vec![
+        Expr::Atom(
+            Atom::Tag(DeepTag::parse(tag).expect("vocabulary builder")),
+            span0(),
+        ),
+        Expr::Map(Default::default(), span0()),
+    ];
     elements.extend(kids);
     Expr::List(chelis_deep::ast::List { elements }, span0())
 }
@@ -1873,10 +1873,10 @@ fn access_node(target: Expr, field: &str) -> Expr {
     node("access", vec![target, sym(field)])
 }
 fn typed_lit(prim: &str, value: Expr) -> Expr {
-    let mut entries = chelis_deep::ast::MetaMap::default();
-    entries
-        .entries
-        .push(("type".to_string(), node("t-prim", vec![sym(prim)])));
+    let mut entries = chelis_deep::ast::Metadata::default();
+    entries.replace(M::Type(
+        TypeSyntax::try_new(node("t-prim", vec![sym(prim)])).expect("primitive type"),
+    ));
     Expr::List(
         chelis_deep::ast::List {
             elements: vec![sym("lit"), Expr::Map(entries, span0()), value],
@@ -2125,8 +2125,8 @@ fn strip_invariant_metadata(expr: &Expr) -> Expr {
             let tag = node.tag();
             let mut meta = node.meta().clone();
             if tag == DeepTag::Deftype {
-                meta.entries
-                    .retain(|(key, _)| key != "invariant" && key != "invariant_amenability");
+                meta.remove(K::Invariant);
+                meta.remove(K::InvariantAmenability);
             }
             let children = node
                 .children_slice()
@@ -2144,13 +2144,10 @@ fn strip_invariant_metadata(expr: &Expr) -> Expr {
             if list.tag() == Some(DeepTag::Deftype)
                 && let Some(Expr::Map(map, mspan)) = elements.get(1)
             {
-                let kept: Vec<(String, Expr)> = map
-                    .entries
-                    .iter()
-                    .filter(|(k, _)| k != "invariant" && k != "invariant_amenability")
-                    .cloned()
-                    .collect();
-                elements[1] = Expr::Map(chelis_deep::ast::MetaMap { entries: kept }, *mspan);
+                let mut metadata = map.clone();
+                metadata.remove(K::Invariant);
+                metadata.remove(K::InvariantAmenability);
+                elements[1] = Expr::Map(metadata, *mspan);
             }
             Expr::List(chelis_deep::ast::List { elements }, *span)
         }

@@ -83,6 +83,7 @@ pub enum SizeProvenance {
 #[derive(Debug, Clone, Default)]
 struct TypeResolutionScope {
     binders: Option<UnordSet<String>>,
+    type_vars: UnordMap<String, TypeVar>,
 }
 
 /// Constructor identity selected by declaration/import scope.
@@ -267,8 +268,17 @@ impl Env {
     /// Install the binder set owned by the declaration whose body is about to
     /// be inferred. Callers use a cloned `Env`, so this scope cannot leak to a
     /// sibling declaration or back into a reusable library snapshot.
-    pub(crate) fn set_type_resolution_binders(&mut self, binders: Option<&UnordSet<String>>) {
+    pub(crate) fn set_type_resolution_binders(
+        &mut self,
+        binders: Option<&UnordSet<String>>,
+        type_names: &UnordMap<TypeVar, String>,
+    ) {
         self.type_resolution_scope.binders = binders.cloned();
+        self.type_resolution_scope.type_vars = type_names
+            .to_sorted()
+            .into_iter()
+            .map(|(var, name)| (name.clone(), *var))
+            .collect();
     }
 
     /// Binder names visible to a nested source annotation in this lexical
@@ -276,6 +286,10 @@ impl Env {
     /// `d-rank` nodes do not allocate inference variables.
     pub(crate) fn type_resolution_binders(&self) -> Option<&UnordSet<String>> {
         self.type_resolution_scope.binders.as_ref()
+    }
+
+    pub(crate) fn type_resolution_variables(&self) -> &UnordMap<String, TypeVar> {
+        &self.type_resolution_scope.type_vars
     }
 
     pub(crate) fn set_exact_stdlib_expected_result(&mut self, result: Option<Type>) {

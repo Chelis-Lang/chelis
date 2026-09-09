@@ -615,11 +615,13 @@ const INVARIANT_WITHOUT_OPAQUE: &str = "(module {} m.wf \
 /// invoked from the typed entry; its readers could not decode the carrier.
 #[test]
 fn invariant_without_opaque_is_rejected_on_both_ingresses() {
-    assert_agree_and_reject(
-        INVARIANT_WITHOUT_OPAQUE,
-        "requires `@opaque`",
-        "deftype with invariant and no opaque",
-    );
+    let error = parse_and_stamp_file(INVARIANT_WITHOUT_OPAQUE)
+        .expect_err("invalid metadata cannot create a stamped Node");
+    assert!(error.to_string().contains("opaque"));
+    let error = chelis_deep::parser::parse_str(INVARIANT_WITHOUT_OPAQUE)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("invariant") && error.contains("opaque"));
 }
 
 /// PP7 row 4's over-rejection control, DISPOSITION LOCK (green before and

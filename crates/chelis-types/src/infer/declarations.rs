@@ -1084,9 +1084,9 @@ fn collect_top_level_references(
     match expr {
         deep::Expr::Atom(_, _) => {}
         deep::Expr::Map(map, _) => {
-            for (_, value) in &map.entries {
+            map.visit_syntax(&mut |_, value| {
                 collect_top_level_references(value, vertex_by_name, bound, references);
-            }
+            });
         }
         // Metadata describes the expression; it is not executed as part of a
         // top-level initializer. The stamped expression itself still is.
@@ -1732,7 +1732,7 @@ pub(super) fn param_has_consuming_use_inner(
     stack_guard!("param_has_consuming_use_inner", expr, false);
     match expr {
         deep::Expr::Atom(_, _) => false,
-        deep::Expr::Map(map, _) => map.entries.iter().any(|(_, value)| {
+        deep::Expr::Map(map, _) => map.any_syntax(&mut |value| {
             param_has_consuming_use_inner(
                 value,
                 param,
@@ -2115,10 +2115,9 @@ pub(super) fn expr_mentions_unshadowed_name(
     stack_guard!("expr_mentions_unshadowed_name", expr, false);
     match expr {
         deep::Expr::Atom(_, _) => false,
-        deep::Expr::Map(map, _) => map
-            .entries
-            .iter()
-            .any(|(_, value)| expr_mentions_unshadowed_name(value, name, bound)),
+        deep::Expr::Map(map, _) => {
+            map.any_syntax(&mut |value| expr_mentions_unshadowed_name(value, name, bound))
+        }
         deep::Expr::MetaExpr(meta, _) => expr_mentions_unshadowed_name(&meta.expr, name, bound),
         deep::Expr::List(list, _) => match get_tag(list) {
             Some(DeepTag::Var) => var_name_list(list) == Some(name) && !is_bound_name(name, bound),
@@ -2425,15 +2424,11 @@ pub(super) fn param_source_infos(expr: &deep::Expr) -> Vec<(String, bool)> {
                 let deep::Expr::Atom(deep::Atom::Name(name), _) = meta.expr.as_ref() else {
                     return None;
                 };
-                Some((
-                    name.clone(),
-                    meta.entries.iter().any(|(key, _)| key == "type"),
-                ))
+                Some((name.clone(), meta.metadata.ty().is_some()))
             }
             deep::Expr::List(param_list, _) => {
                 let name = param_list.elements.first().and_then(symbol_name)?;
-                let written = get_meta(param_list)
-                    .is_some_and(|meta| meta.entries.iter().any(|(key, _)| key == "type"));
+                let written = get_meta(param_list).is_some_and(|meta| meta.ty().is_some());
                 Some((name.to_string(), written))
             }
             deep::Expr::BareList(elements, _) => {
@@ -2442,7 +2437,7 @@ pub(super) fn param_source_infos(expr: &deep::Expr) -> Vec<(String, bool)> {
                     let deep::Expr::Map(meta, _) = expr else {
                         return false;
                     };
-                    meta.entries.iter().any(|(key, _)| key == "type")
+                    meta.ty().is_some()
                 });
                 Some((name.to_string(), written))
             }

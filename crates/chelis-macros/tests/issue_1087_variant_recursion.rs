@@ -17,7 +17,7 @@
 //! (`expansion.rs::parsed_deep_internal_macro_expands_from_raw_form_boundary`)
 //! must stay green UNMODIFIED beside these.
 
-use chelis_deep::ast::{Atom, Expr, List, MetaMap, UnknownFormData};
+use chelis_deep::ast::{Atom, Expr, List, Metadata, UnknownFormData};
 use chelis_deep::{DeepTag, Span};
 use chelis_macros::{ExpansionOptions, expand_program};
 
@@ -38,6 +38,47 @@ const BUMP_MACRO: &str =
     "(defmacro {} bump (params {} x) (app {} (var {} add) (var {} x) (lit {} 1.0)))";
 
 #[test]
+fn macro_replacements_preserve_owners_and_reject_conflicting_data() {
+    let source = "(defmacro {} keep (params {} x) (var {template: 1} x)) (def {} f (app {call_data: 3} (var {} keep) (lit {argument: 2} 7)))";
+    let parsed = chelis_deep::parser::parse_str(source).unwrap();
+    let options = ExpansionOptions {
+        max_iterations: 100,
+        load_std_prelude: false,
+    };
+    let expanded = expand_program(&parsed, &options).unwrap();
+    let body = match &expanded.exprs()[0] {
+        Expr::List(list, _) => &list.elements[3],
+        Expr::Node(node, _) => node.expr_child(1),
+        other => panic!("definition: {other:?}"),
+    };
+    let metadata = match body {
+        Expr::List(list, _) => match &list.elements[1] {
+            Expr::Map(meta, _) => meta,
+            _ => panic!("metadata"),
+        },
+        Expr::Node(node, _) => node.meta(),
+        Expr::MetaExpr(meta, _) => &meta.metadata,
+        other => panic!("replacement: {other:?}"),
+    };
+    for key in ["template", "argument", "call_data"] {
+        assert!(
+            metadata.extensions().get(key).is_some(),
+            "{key}: {metadata:?}"
+        );
+    }
+    let conflict = source.replace("argument: 2", "template: 2");
+    let parsed = chelis_deep::parser::parse_str(&conflict).unwrap();
+    let before = parsed.clone();
+    assert!(
+        expand_program(&parsed, &options)
+            .unwrap_err()
+            .to_string()
+            .contains("template")
+    );
+    assert_eq!(parsed, before);
+}
+
+#[test]
 fn macro_invocation_inside_bare_list_expands() {
     // `(future-form {} ...)` at the lenient top level stamps as a BareList
     // (unknown head at a bare/syntax position). The invocation nested inside
@@ -53,17 +94,16 @@ fn macro_invocation_inside_bare_list_expands() {
 }
 
 #[test]
-fn macro_invocation_inside_unknown_form_children_and_meta_expands() {
+fn macro_invocation_expands_in_children_and_is_preserved_in_extension_data() {
     // A def body with an unknown head stamps as an UnknownForm at the
-    // RuntimeExpr slot. Invocations in BOTH its metadata values and its
-    // children must expand.
+    // RuntimeExpr slot. Its live children expand; recorded producer data stays intact.
     let text = expand_deep(&format!(
         "{BUMP_MACRO}\n(def {{}} f (mystery {{note: (app {{}} (var {{}} bump) (lit {{}} 1.0))}} \
          (app {{}} (var {{}} bump) (lit {{}} 2.0))))"
     ));
     assert!(
-        !text.contains(" bump)"),
-        "invocations in UnknownForm children and meta must expand: {text}"
+        text.contains(" bump)"),
+        "the extension invocation remains opaque: {text}"
     );
     assert!(text.contains(" add)"), "expansion output present: {text}");
 }
@@ -111,7 +151,7 @@ fn atom_name(name: &str) -> Expr {
 }
 
 fn empty_map() -> Expr {
-    Expr::Map(MetaMap::default(), sp())
+    Expr::Map(Metadata::default(), sp())
 }
 
 fn tag_list(tag: DeepTag, children: Vec<Expr>) -> Expr {
@@ -135,7 +175,7 @@ fn hygienize_renames_binders_inside_unknown_form() {
             tag_list(DeepTag::Bind, vec![atom_name("tmp"), var_ref("v")]),
             Expr::UnknownForm(Box::new(UnknownFormData {
                 head: "mystery".to_string(),
-                meta: MetaMap::default(),
+                meta: Metadata::default(),
                 children: vec![var_ref("tmp")],
                 span: sp(),
             })),
@@ -202,13 +242,11 @@ fn substitute_reaches_params_inside_bare_list() {
 
 // ── Metadata-value recursion (PR #1319 review) ───────────────────────
 //
-// Metadata values are full Deep expressions (spec/03 section 1.1), so the
-// macro walks treat them like children. The `source` provenance record is
-// the one exception: it stores the original invocation verbatim and every
-// compiler pass except error reporting ignores it.
+// Registered expression fields participate in macros. Producer extensions
+// and historical source are opaque data under [03-META-2/3].
 
 #[test]
-fn macro_invocation_inside_nested_meta_map_expands() {
+fn macro_invocation_inside_extension_data_is_preserved() {
     // The review probe, verbatim: a map nested inside an UnknownForm
     // metadata value hid the invocation from the one-level metadata walk.
     let text = expand_deep(&format!(
@@ -216,10 +254,13 @@ fn macro_invocation_inside_nested_meta_map_expands() {
          (lit {{}} 2.0))}}}} (lit {{}} 0.0)))"
     ));
     assert!(
-        !text.contains(" bump)"),
-        "an invocation below a nested metadata map must expand: {text}"
+        text.contains(" bump)"),
+        "an invocation in producer data remains data: {text}"
     );
-    assert!(text.contains(" add)"), "expansion output present: {text}");
+    assert!(
+        !text.contains(" add)"),
+        "producer data is not expanded: {text}"
+    );
 }
 
 #[test]
@@ -228,7 +269,7 @@ fn macro_invocation_inside_vocabulary_node_metadata_expands() {
     // is element 1 of the walked List, so an invocation in one of its
     // values must expand too.
     let text = expand_deep(&format!(
-        "{BUMP_MACRO}\n(def {{note: (app {{}} (var {{}} bump) (lit {{}} 1.0))}} f (lit {{}} 0.0))"
+        "{BUMP_MACRO}\n(def {{property_seed: (app {{}} (var {{}} bump) (lit {{}} 1.0))}} f (lit {{}} 0.0))"
     ));
     assert!(
         !text.contains(" bump)"),
@@ -238,23 +279,23 @@ fn macro_invocation_inside_vocabulary_node_metadata_expands() {
 }
 
 #[test]
-fn substitute_reaches_params_inside_nested_meta_map() {
+fn substitution_preserves_extension_data_and_rewrites_live_children() {
     // A macro parameter referenced from a map nested inside a metadata
     // value must receive its argument.
     let text = expand_deep(
         "(defmacro {} inject_meta (params {} v) \
-           (carrier {outer: {inner: (var {} v)}} (lit {} 0.0)))\n\
+           (carrier {outer: {inner: (var {} v)}} (var {} v)))\n\
          (def {} f (app {} (var {} inject_meta) (lit {} 7.0)))",
     );
     assert!(
-        !text.contains(" v)"),
-        "the parameter reference below a nested metadata map must substitute: {text}"
+        text.contains(" v)"),
+        "producer data retains its original reference: {text}"
     );
     assert!(text.contains("7"), "the argument arrives: {text}");
 }
 
 #[test]
-fn hygienize_renames_reach_references_inside_nested_meta_map() {
+fn hygiene_preserves_extension_references_and_renames_live_children() {
     // The macro body binds `tmp`; a reference from a map nested inside an
     // UnknownForm metadata value must follow the hygiene rename.
     let body = tag_list(
@@ -263,16 +304,16 @@ fn hygienize_renames_reach_references_inside_nested_meta_map() {
             tag_list(DeepTag::Bind, vec![atom_name("tmp"), var_ref("v")]),
             Expr::UnknownForm(Box::new(UnknownFormData {
                 head: "mystery".to_string(),
-                meta: MetaMap {
-                    entries: vec![(
-                        "outer".to_string(),
-                        Expr::Map(
-                            MetaMap {
-                                entries: vec![("inner".to_string(), var_ref("tmp"))],
-                            },
-                            sp(),
-                        ),
-                    )],
+                meta: {
+                    let mut outer = Metadata::default();
+                    outer
+                        .extensions_mut()
+                        .insert(
+                            "outer".into(),
+                            chelis_deep::ExtensionData::parse("{inner: (var {} tmp)}").unwrap(),
+                        )
+                        .unwrap();
+                    outer
                 },
                 children: vec![var_ref("tmp")],
                 span: sp(),
@@ -314,8 +355,8 @@ fn hygienize_renames_reach_references_inside_nested_meta_map() {
     .expect("expansion must succeed");
     let text = chelis_deep::printer::print_canonical(expanded.exprs());
     assert!(
-        !text.contains(" tmp)"),
-        "the reference below a nested metadata map must follow the rename: {text}"
+        text.contains(" tmp)"),
+        "the producer reference must remain unchanged: {text}"
     );
     assert!(
         text.contains("tmp_macro_"),

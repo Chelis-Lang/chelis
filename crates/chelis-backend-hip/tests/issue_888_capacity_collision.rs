@@ -6,8 +6,8 @@
 //! predicates, so #888 was one class with two production paths. Both
 //! adapters now consume the same exact `CapacityKey` storage plan.
 //!
-//! Mechanism, in one paragraph. `DimExprKey` folds concrete dimension factors
-//! with `saturating_mul` (`chelis_ir::dag`), and saturation is not injective:
+//! Historical mechanism: `DimExprKey` folded concrete dimension factors
+//! with `saturating_mul`, and saturation is not injective:
 //! two products that both exceed `usize::MAX` clamp to the same
 //! `usize::MAX`. The retired HIP planner compared that lossy key when a
 //! symbolic capacity was not concrete, allowing distinct capacities to share
@@ -17,7 +17,7 @@
 //! loads, but neither target mechanic is capacity authority.
 
 use chelis_backend_hip::memory::{MemoryPlan, NodeMemoryKind};
-use chelis_ir::dag::{Dag, DimExpr, DimExprKey, DimInfo, NodeId, RiscOp, TensorType};
+use chelis_ir::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::ownership::plan_hip_storage;
 use chelis_types::types::Prim;
 mod support;
@@ -158,19 +158,6 @@ fn exact_hip_planner_separates_saturated_legacy_key_collision() {
         logical_elements(&large),
         "the two capacities are structurally distinct expressions"
     );
-
-    // Historical premise: the retired lossy keys collide. This equality is
-    // evidence for the regression and is no longer storage authority.
-    let small_capacity = logical_elements(&small);
-    let large_capacity = logical_elements(&large);
-    assert_eq!(small_capacity.as_concrete(), None);
-    assert_eq!(large_capacity.as_concrete(), None);
-    let saturated = DimExprKey::Mul(vec![
-        DimExprKey::Concrete(usize::MAX),
-        DimExprKey::Sym("n".to_string()),
-    ]);
-    assert_eq!(small_capacity.normalized_key(), saturated);
-    assert_eq!(large_capacity.normalized_key(), saturated);
 }
 
 /// Negative parity for the case above, and the proof that saturation is the

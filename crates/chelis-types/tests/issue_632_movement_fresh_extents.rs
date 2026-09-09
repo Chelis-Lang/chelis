@@ -78,7 +78,7 @@ fn stamped_app_type(exprs: &[Expr], builtin: &str) -> Option<String> {
         if list_tag(list) == Some("app")
             && list.elements.get(2).and_then(var_name) == Some(builtin)
             && let Some(Expr::Map(meta, _)) = list.elements.get(1)
-            && let Some((_, ty)) = meta.entries.iter().find(|(key, _)| key == "type")
+            && let Some(ty) = meta.ty().map(|ty| ty.expression())
         {
             return Some(print_canonical(std::slice::from_ref(ty)));
         }

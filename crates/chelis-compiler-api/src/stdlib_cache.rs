@@ -93,7 +93,8 @@ use crate::schema::{Diagnostic, GeneralKind};
 /// the serialized `Subst`: under `spec/04-type-system.md` section 4.7.2
 /// nothing is deferred, so a V12 entry carries two fields where the
 /// following ones are now expected.
-const STDLIB_CACHE_FORMAT_VERSION: u32 = 13;
+// Opaque producer annotations use an explicit data wire variant.
+const STDLIB_CACHE_FORMAT_VERSION: u32 = 14;
 
 /// The typechecked + lowered chelis-std library sub-context.
 ///
@@ -547,19 +548,19 @@ mod tests {
 
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes() {
-        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 13);
+        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 14);
     }
 
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes_and_nominal_kinds() {
-        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 13);
+        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 14);
     }
 
     #[test]
     fn preceding_payload_version_is_a_clean_cache_miss() {
         let decls = sample_decls("preceding_version");
         let current_key = stdlib_cache_key(&decls, TEST_SOURCE_DIGEST);
-        let preceding_key = stdlib_cache_key_at_version(&decls, TEST_SOURCE_DIGEST, 10);
+        let preceding_key = stdlib_cache_key_at_version(&decls, TEST_SOURCE_DIGEST, 13);
         assert_ne!(current_key, preceding_key);
 
         let dir = tempfile::tempdir().expect("tempdir");
@@ -577,6 +578,10 @@ mod tests {
             "negative-control fixture must exist"
         );
         assert_ne!(current_path, preceding_path);
+        cache_envelope::save(&current_path, current_key, &context).expect("current fixture saves");
+        let current: Option<StdLibContext> =
+            cache_envelope::load(&current_path, current_key).expect("current fixture loads");
+        assert!(current.is_some(), "current producer and consumer must hit");
     }
 
     /// A minimal well-formed `Decl` slice for key-stability tests. The

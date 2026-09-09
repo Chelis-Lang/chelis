@@ -73,7 +73,12 @@ const EFFECT_KIND_CONSUMERS: &[Consumer] = &[
     Consumer {
         source: ConsumerSource::File("crates/chelis-surf/src/desugar.rs"),
         role: "Surf-to-Deep canonical effect serialization",
-        required: &["use chelis_vocab::EffectKind", ".symbol()"],
+        required: &[
+            "use chelis_vocab::EffectKind",
+            "M::Effect",
+            "EffectKind::Random",
+            "EffectKind::Resource",
+        ],
         forbidden: &[
             "meta_with_entries(vec![(\"effect\".to_string(), sym(\"random\"))])",
             "meta_with_entries(vec![(\"effect\".to_string(), sym(\"resource\"))])",
@@ -83,7 +88,8 @@ const EFFECT_KIND_CONSUMERS: &[Consumer] = &[
         source: ConsumerSource::File("crates/chelis-surf/src/resugar.rs"),
         role: "shared Deep-to-Surf AST handle-effect resugaring",
         required: &[
-            "use chelis_vocab::{EffectKind, EffectKindInput}",
+            "use chelis_vocab::EffectKind",
+            ".effect()",
             "decode_effect_kind(",
         ],
         forbidden: &[

@@ -45,6 +45,14 @@ Obligations:
    form of the chelis#885 oracle; obligation 2's structural-name controls
    are its over-application guard.
 
+8. [03-META-1/2/3]: metadata shapes and roles reject at ingress, with positive
+   controls for opaque extensions, binder-map data, provenance, and canonical wrt.
+   The compiled suites prove opaque formatting and execution, explicit Surf
+   rejection, replacement ownership and conflicts, and macro/effect traversal.
+   Obligation 5 also runs all 30 typed payloads, previous-producer JSON/binary
+   fixtures, API privacy and raw-reader controls, linear admission cost, and
+   the scalar/tensor duplicate-stamp execution corpus.
+
 Usage:
 
     .venv/bin/python scripts/unrepresentable_domain_oracle.py
@@ -234,6 +242,32 @@ TOP_LEVEL_ACCEPTED_FIXTURES: list[tuple[str, str]] = [
     ("type declaration", "(deftype {} Color () (variant {} Red))"),
 ]
 
+# [03-META-1/2]: structural and expression-valued metadata rejection parity.
+METADATA_REJECTED_FIXTURES: list[tuple[str, str, str]] = [
+    ("resource device is not a string", '(defsig {} f (t-fn {eff: (effects {} (resource {} 42))} (t-prim {} int32))) (def {} f (fn {} (params {}) (lit {} 1)))', "eff"),
+    ("nested expression name", '(def {property_seed: (app {} missing)} f (lit {} 1))', "property_seed"),
+    ("integer path", '(module {surf_path: 1} m.path)', "surf_path"),
+    ("node path", '(module {surf_path: (lit {} 1)} m.path)', "surf_path"),
+    ("mismatched path", '(module {surf_path: "Totally.Different"} m.path)', "surf_path"),
+    ("bare differentiation name", '(def {} g (grad {wrt: unwrapped} (var {} f)))', "wrt"),
+    ("bare property expression", '(def {property_seed: unwrapped} f (lit {} 1))', "property_seed"),
+    ("nested malformed span", '(def {property_seed: (lit {span: 1} 2)} f (lit {} 1))', "span"),
+    ("duplicate extension", '(def {custom: 1, custom: 2} f (lit {} 1))', "custom"),
+    ("duplicate producer span extension", '(def {span_future: 1, span_future: 2} f (lit {} 1))', "span_future"),
+    ("duplicate annotation", '(def {span: "a", span: "b"} f (lit {} 1))', "span"),
+    ("wrong bound family", '(defsig {dtype_bounds: {p: signed}} f (t-var {} p))', "dtype_bounds"),
+    ("incomplete dimension group", '(defdim {surf_dim_group_size: 2} n)', "surf_dim_group_size"),
+]
+METADATA_ACCEPTED_FIXTURES: list[tuple[str, str]] = [
+    ("opaque malformed-looking data", '(def {custom: {type: "ablation", inner: (lit {span: 1, surf_future: true} (var {})), inner: (unknown_macro unbound)}} f (lit {} 1))'),
+    ("resource device string", '(defsig {} f (t-fn {eff: (effects {} (resource {} "gpu:0"))} (t-prim {} int32))) (def {} f (fn {} (params {}) (lit {} 1)))'),
+    ("matching path and opaque span", '(module {surf_path: "M.Path", span: ""} m.path (def {} f (lit {} 1)))'),
+    ("extensions and preserved provenance", '(def {source: (macro_name {surf_future: 1, span: 2} original_name), custom: {inner: (lit {span: "id"} 2)}, span_future: (a b)} f (lit {} 1))'),
+    ("dtype binder named like metadata", '(defsig {dtype_bounds: {span: float}} f (t-fn {} (t-var {} span) (t-var {} span))) (def {} f (fn {} (params {} (x {type: (t-var {} span)})) (var {} x)))'),
+    ("canonical differentiation name", '(defsig {} f (t-fn {} (t-prim {} f32) (t-prim {} f32))) (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (app {} (var {} mul) (var {} x) (var {} x)))) (def {} g (grad {wrt: (var {} x)} (var {} f) (lit {} 0)))'),
+]
+
+
 # ── Compiled Rust obligations ────────────────────────────────────────
 
 STAMP_NEXTEST_COMMAND: tuple[str, ...] = (
@@ -242,10 +276,38 @@ STAMP_NEXTEST_COMMAND: tuple[str, ...] = (
     "run",
     "-p",
     "chelis-deep",
+    "-p",
+    "chelis-types",
+    "-p",
+    "chelis-surf",
+    "-p",
+    "chelis-cli",
+    "-p",
+    "chelis-macros",
+    "--test",
+    "extension_data",
+    "--test",
+    "opaque_extensions",
+    "--test",
+    "issue_1087_variant_recursion",
     "--test",
     "stamp_to_typed",
     "--test",
     "phase3_successor_validation",
+    "--test",
+    "metadata_contract",
+    "--test",
+    "typed_metadata",
+    "--test",
+    "typed_metadata_api",
+    "--test",
+    "issue_1544_binder_cast_precision",
+    "--test",
+    "metadata_ingress",
+    "--test",
+    "canonical_surf",
+    "--test",
+    "canonical_surf_roundtrip",
 )
 
 # chelis#1088. The compiler-API embedding surface is not reachable from the
@@ -852,7 +914,10 @@ def check_stamp_pass_integration_tests() -> None:
     `crates/chelis-deep/tests/stamp_to_typed.rs`.
     """
     print("── Obligation 5: stamp pass integration tests green ──")
-    run_compiled_suite("stamp_to_typed + phase3_successor_validation", STAMP_NEXTEST_COMMAND)
+    run_compiled_suite("stamp and typed annotation contracts", STAMP_NEXTEST_COMMAND, timeout=900)
+    run_compiled_suite("typed annotation API privacy and positive controls", ("cargo", "test", "-p", "chelis-deep", "--doc"))
+    run_compiled_suite("opaque effect traversal and data grammar boundary", ("cargo", "test", "-p", "chelis-effects", "-p", "chelis-validate", "--lib"))
+    run_compiled_suite("annotation admission scaling", ("cargo", "test", "-p", "chelis-deep", "--lib", "nested_typed_annotation_admission_scales_linearly"))
 
 
 def check_compiler_api_ingress() -> None:
@@ -870,6 +935,34 @@ def check_compiler_api_ingress() -> None:
     )
 
 
+def check_metadata_contract() -> None:
+    """Obligation 8: metadata shape, role, and CLI rejection parity."""
+    print("── Obligation 8: [03-META-1/2] metadata contracts ──")
+    cases = [(name, source, key) for name, source, key in METADATA_REJECTED_FIXTURES]
+    cases.extend((name, source, None) for name, source in METADATA_ACCEPTED_FIXTURES)
+    for name, source, key in cases:
+        fixture = write_fixture(source)
+        try:
+            checked = run_chelis_check(fixture)
+            report = parse_check_json(checked.stdout)
+            errors = report.get("errors", [])
+            if key is not None:
+                if checked.returncode == 0 or not errors or report.get("score") == 1 or key not in json.dumps(errors):
+                    raise OracleFailure(f"[{name}] malformed metadata must reject with its key and a non-perfect score: {report}")
+            elif checked.returncode != 0 or errors or report.get("score") != 1:
+                raise OracleFailure(f"[{name}] valid metadata must check at score 1 with no errors: {report}")
+            validated = run_chelis_validate(fixture)
+            rendered = validated.stdout + validated.stderr
+            if key is not None:
+                if validated.returncode == 0 or key not in rendered:
+                    raise OracleFailure(f"[{name}] validate --deep must reject and identify {key}: {rendered}")
+            elif validated.returncode != 0:
+                raise OracleFailure(f"[{name}] valid metadata must validate: {rendered}")
+            print(f"  PASS: {name} (check and validate agree)")
+        finally:
+            fixture.unlink(missing_ok=True)
+
+
 # ── Main ─────────────────────────────────────────────────────────────
 
 
@@ -881,6 +974,7 @@ OBLIGATIONS = (
     check_stamp_pass_integration_tests,
     check_compiler_api_ingress,
     check_name_in_expr_rejected,
+    check_metadata_contract,
 )
 
 

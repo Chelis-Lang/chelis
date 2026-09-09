@@ -23,27 +23,26 @@ before consuming any package or symbol metadata.
 
 ## 3. Compiler API Wire Contract
 
-WireDag JSON is an exact-version contract. Schema version 7 is explicitly
+WireDag JSON is an exact-version contract. Schema version 8 is explicitly
 present in every payload and is the only accepted version. A missing version,
-versions 1 through 6, and every future version are decode errors before any IR
+versions 1 through 7, and every future version are decode errors before any IR
 node is consumed. There is no versionless default, legacy migration, additive-
 variant tolerance, or best-effort compatibility path.
 
-Version 7 preserves version 6's `WireRiscOp::Count { axes }`; `axes` is the complete
+`WireRiscOp::Count { axes }` carries the complete
 non-empty vector of unique normalized original-axis positions in strictly
 descending order under [05-OP-29]. An encoder rejects any empty, duplicate,
 increasing, source-order, or out-of-range vector rather than rewriting it,
 and the decoder rejects an empty,
 duplicate, increasing, or out-of-range vector before IR construction.
 
-Version 7 also preserves version 6's padding representation:
-`WireRiscOp::Pad { fill: ScalarValue, ... }`. The scalar tag and payload must
+`WireRiscOp::Pad { fill: ScalarValue, ... }` carries a scalar whose tag and payload must
 be the exact active tensor element dtype required by the padded tensor and
 preserve its stored bits; a raw JSON number, an untagged payload, a string-mode
-fill, or a mismatched dtype is a decode error before IR construction. No v5
+fill, or a mismatched dtype is a decode error before IR construction. No
 numeric-fill migration or inferred fill dtype exists.
 
-Version 7 includes the distinct `WireRiscOp::Relu` and
+The wire carries the distinct `WireRiscOp::Relu` and
 `WireRiscOp::ReluAdjoint` identities required by [05-OP-43]. `Relu` has
 exactly one input; `ReluAdjoint` has exactly two, ordered as the forward input
 and incoming cotangent. Every input has the output's exact float dtype and
@@ -52,7 +51,7 @@ unresolved input, or shape/dtype mismatch is a decode error before IR
 construction; the decoder does not replace either identity with an extrema
 operation.
 
-Version 7 represents every runtime movement bound and reshape target with the
+Every runtime movement bound and reshape target uses the
 tagged `WireRtDim` carrier defined by [05-MOV-1]. In particular,
 `WireRiscOp::Expand.size` is a `WireRtDim`, never a display string.
 `InputAxis { tensor, axis }` names an absolute nonzero input slot of the owning
@@ -62,8 +61,201 @@ int64 node. The decoder enforces the owner matrix from
 `spec/05-risc-primitives.md` §2.4.1, the source rank and dtype, the normalized
 axis range, and the exact input cardinality before IR construction.
 
-Every tagged variant must be known to the version 7 decoder. `OneHot` remains only a transient
+Every tagged variant must be known to the version 8 decoder. `OneHot` remains only a transient
 IR/specialization marker and backends must not receive it after specialization.
+
+Execution-value envelopes carry the independently required exact
+`schema_version: 3`. Missing, older, and future execution versions are rejected
+before decoding values. An execution version never substitutes for WireDag
+version validation, or conversely. Tensor bindings in requests use the same
+execution-value carrier grammar. A cache containing these objects validates
+its enclosing compatibility identity before decoding them; it cannot provide
+an alternate legacy decoder for a usable value.
+
+(These wire requirements are not fully implemented; see chelis#1288.)
+
+### 3.1 Numeric Values And Structural Fields
+
+A compiler API field SHALL retain the semantic domain defined by its owning
+language contract. Its integer or floating-point representation, field name,
+or enclosing variant tag does not establish a different domain. Each field of
+a container retains its own contract; a structural field does not confer its
+meaning on a numeric sibling or descendant.
+
+A field carrying a Chelis numeric value SHALL preserve its declared dtype and
+full value set under [04-NUM-11]. An application-level variant tag SHALL NOT
+substitute for the payload's dtype contract or turn arbitrary numeric data
+into source-location or reference metadata. A tagged `f64` payload therefore
+does not acquire source-location semantics merely by being tagged; a numeric
+carrier remains subject to its exact declared dtype contract.
+
+Source coordinates and measured source extents MAY be represented as structural
+location fields rather than Chelis scalar values. Their domain is a position or
+measured extent in a source context, governed by [04-FIT-16/17] for diagnostics
+and `spec/03-deep-syntax.md` §1.1.1 for external-source identities. The source
+context may be supplied by the enclosing document or request. This permission
+does not extend to arbitrary counts or numeric payloads merely named as source
+metadata; the owning source-location contract must govern the field.
+
+A scoped input reference, such as `WireRtDim::InputAxis.tensor`, denotes a slot
+in the owning node's inputs and is resolved and validated under §3's reference
+contract. Its magnitude is not the selected tensor extent. The associated axis
+literal and the selected extent retain their separate int32 and int64 domains.
+
+Structural transport does not waive the governing requirements on a consumer.
+In particular, runtime rank, extents, strides, element counts, and byte capacities
+retain [04-NUM-11]'s descriptor domains and validation requirements; they cannot
+inherit source-location or input-reference semantics through an outer tag.
+
+### 3.2 Exact Numeric Value Codec
+
+The scalar wire carrier is exactly one of these shapes, with `dtype` drawn
+from the closed primitive vocabulary of spec/04 §1.1:
+
+| dtype family | scalar object | storage object |
+|---|---|---|
+| `f64`, `f32`, `f16`, `bf16` | `{"dtype":p,"bits":h}` | `{"dtype":p,"bits":[h,...]}` |
+| `int64`, `int32`, `int16`, `int8` | `{"dtype":p,"value":n}` | `{"dtype":p,"values":[n,...]}` |
+| `bool` | `{"dtype":"bool","value":b}` | `{"dtype":"bool","values":[b,...]}` |
+
+Here `p` is a JSON string naming the exact dtype, `b` is a JSON boolean,
+and `n` is an exact signed JSON integer within that dtype's range, never a
+float or numeric string. `h` is a JSON string of lowercase hexadecimal digits
+containing the stored IEEE bits, most significant digit first, with no sign,
+prefix, separators, or whitespace. Its exact digit counts are
+f64: 16; f32: 8; f16: 4; bf16: 4. Leading zeroes are required to reach that
+width. The encoding is independent of machine endianness.
+
+All bit patterns are representable, including finite values, subnormals,
+positive and negative zero, infinities, and quiet or signaling NaNs with their
+payloads and signs. No codec normalizes a NaN payload or a signed zero.
+Transport is a bit move, not numeric finalization; arithmetic and conversion
+still obey [04-NUM-2]. A numeric JSON float, `null`, a wrong-width or uppercase
+bit string, a mismatched payload member, a reserved dtype, or an extra payload
+member is rejected. There is one encoding per stored value, not alternative
+number and bit encodings. Numeric integers never pass through binary64.
+
+Numeric scalar execution values use `{"type":"scalar","value":s}`, where
+`s` is the scalar carrier above. Boolean execution values retain
+`{"type":"bool","value":b}`. Tensor execution values use
+`{"type":"tensor","value":{"shape":[d,...],"data":t}}`, where `t` is
+the storage carrier and each `d` is an exact nonnegative int64 JSON integer.
+Non-scalar aggregate execution variants retain their recursive element order
+and constructor identity; their numeric descendants use these carriers.
+The dimension vector has dynamic int32 rank, and the exact product of its
+extents equals the payload's element count, including scalar-shaped and
+empty tensors. Checked count and target-capacity admission precedes allocation
+or access under [04-NUM-11].
+
+`Const.value`, `Pad.fill`, and `ConstTensor.data` use the same scalar/storage
+grammar, not private alternate encodings. `UniformLike.low`, `UniformLike.high`,
+and `Dropout.rate` use scalar carriers of the exact active float dtype of the
+template/input. Their value-domain checks remain [05-OP-8/37], before Random
+consumption; the codec neither inserts casts nor implements an adjoint.
+Their `seed` fields are exact uint64 JSON integers holding [05-RNG-1]'s
+two's-complement image of a signed int64 seed. Every seed bit is significant;
+zero is a seed, not absence, and there is no default seed.
+
+### 3.3 Source Syntax And Locations
+
+`WireDeepAtom.Int` and `WireLiteral.Int`/`TypedInt` preserve exact signed i64
+source values. Their Float/TypedFloat counterparts preserve finite binary64
+lexical values as JSON numbers, including negative zero; source syntax admits
+no infinity or NaN. A typed suffix retains its source spelling and is admitted
+against spec/02 P10 and spec/03 §6.4's closed suffix and literal-origin rules.
+The lexical carrier does not replace the selected literal dtype or perform
+its target-width rounding. Integer-written float literals keep the exact
+integer until the governing source admission performs that rounding.
+
+A raw source DTO is not an admitted executable AST. Parsing a DTO, preserving
+macro history, or transporting an extension annotation does not establish
+well-formed tags, defined-key placement, uniqueness, type correctness, or
+permission to execute. Every path that materializes executable syntax runs
+the owning source admission, including live annotation expressions. Unknown
+extension data has no measured-source or numeric-operation authority.
+
+`WireSurfExpr.TupleGet.index` and `Vmap.axis` retain signed i64 source spelling
+as JSON integers until normal source admission. Tuple selection requires the
+owning tuple index contract; a vmap axis must satisfy the int32 axis contract.
+Absence of `Vmap.axis` denotes the specified axis-zero syntax; a supplied
+out-of-domain integer is not replaced by zero.
+
+`Span.offset`/`len` and `DiagnosticSpan.Point.offset`/`Range.offset`/`Range.len`
+are exact nonnegative u64 JSON integers counting UTF-8 bytes in the enclosing
+document or request's source context. A measured range is half-open, and
+its endpoint is the exact sum of offset and length. Transport does not require
+possession of a foreign source buffer; local slicing checks endpoint arithmetic,
+target representability, bounds and UTF-8 boundaries before access. A point
+has no extent. An absent location, a point, and a measured empty range remain
+distinct under [04-FIT-16/17]. Source identity is independently optional and
+opaque; neither its spelling nor a coordinate can manufacture the other.
+
+### 3.4 References, Dimensions And Operation Parameters
+
+A reference is resolved only in its declared owner and namespace.
+Reference fields are exact nonnegative u64 JSON integers unless the table
+specifies u32. A decoder never narrows a reference to fit a host index.
+
+| fields | scope and admission |
+|---|---|
+| `WireDagNode.id`, `WireDagNode.inputs`, `WireDag.roots` | Node IDs are unique zero-based positions in the owning ordered DAG; inputs refer to earlier nodes and roots to existing nodes. Zero is an ordinary node ID. |
+| `LowerResult.named_roots`, `GradResult.output_node`, `GradResult.grad_nodes_by_name`, `GradResult.forward_nodes_by_name` | IDs select nodes in that result's DAG; a name never changes the owning DAG. |
+| `EvaluatedRoot.node_id` | Identity in the evaluated graph associated with that result; without that graph it remains an opaque result identity and cannot be dereferenced. |
+| `WireFusedInput.External.index` | Zero-based slot in the owning fused node's external inputs. |
+| `WireFusedInput.PreviousStep.index` | Zero-based strictly earlier step in the owning ordered fused program. |
+| `WireRtDim.Node.input`, `WireRtDim.InputAxis.tensor` | Absolute nonzero slot in the owning operation's input vector, subject to §3's owner/source/axis checks. |
+| `WireInferredType.Var.id`, `WireInferredPrecision.Var.id` | Exact u32 identity in the owning inference product's type-variable namespace. |
+| `WireInferredDim.Var.id`, `WireInferredDim.Rank.id` | Exact u32 identities in that inference product's distinct dimension-variable and rank-variable namespaces. |
+| `WireDag.schema_version`, `EvalResult.schema_version` | Exact u32 version discriminants governed by §3, with no missing-value default. |
+
+`WireDimInfo.Lit.size`, `WireDimInfo.Named.size` when present,
+`WireInferredDim.Lit.size`, `WireDimExpr.Concrete.value`, and
+`WireRtDim.Lit.value` are nonnegative exact int64 JSON integers. An absent
+named size is unresolved, not zero. Multiplication and division expression
+structure is preserved; exact intermediate products and partial division
+validity are not replaced by saturated machine integers. A transported
+expression or observed runtime equality does not prove capacity equality.
+Symbol resolution, program scope and representation equality remain required
+at the consumer that claims reuse.
+
+Every positional `WireRiscOp` axis, including reduction/gather/scatter/shape
+axes and permutation entries, is a normalized nonnegative int32 JSON integer
+under [05-DIM-3]. Its owning operation checks rank, uniqueness and order as
+applicable. Window shapes and strides are positive exact int64 JSON integers
+under [05-OP-39]. `OneHot.vocab` is a positive exact int64 extent and does not
+authorize the transient operation to reach a backend. `WireRtDim.ToEnd` and
+`Sym` remain distinct variants with the owner restrictions of [05-MOV-1];
+numeric sentinel values cannot stand for them. Literal bounds and extents
+retain their operation-specific zero/positivity/range rules.
+
+### 3.5 Fixed-Dtype Report Numbers
+
+Compiler report quantities are numeric values, not structural metadata.
+Bounds alone never establish transport authority. Their recognized wire form
+is a fixed-dtype JSON-number adapter over the canonical sealed numeric carrier:
+the owning field contract fixes `f64` or `int64`, and both construction and
+decode validate that exact dtype and the field's domain. A wrapper or numeric
+range annotation without this carrier/codec contract is insufficient.
+
+`score`, all four fitness components, and diagnostic `severity` have the
+finite f64 unit-interval domains of spec/04 §6.4. Encoding emits the exact
+shortest round-trippable binary64 JSON number and preserves signed zero;
+decoding performs the JSON-to-f64 interpretation once and validates the
+result. It does not subsequently round to another dtype, clamp, or supply a
+missing value. This codec cannot encode NaN or infinity as `null`.
+
+`typed_nodes`, `untyped_nodes`, `total_nodes`, `rewritten_calls`, and
+`renamed_references` are nonnegative exact int64 JSON integers. The latter
+two count the call sites and reference occurrences actually rewritten by
+that result, not attempted edits. `peak_device_bytes_estimate`, when present,
+is a nonnegative exact int64 estimate of peak simultaneously live device
+allocation bytes for the compiled entry; absence means no estimate is
+available, while zero is an actual zero-byte estimate. It is not an
+allocation authorization or a proof of target capacity. Producer overflow
+is an error, never a wrapped count or a fabricated estimate. Report integers
+are decoded as integers and never via f64. `CheckResult`/`WireCheckResult`
+and `Diagnostic`/`WireDiagnostic` obey the same numeric contract despite
+their distinct producer and consumer types.
 
 ## 4. Invariant Revalidation At Decode Boundaries
 

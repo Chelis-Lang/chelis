@@ -15,7 +15,7 @@ kernel behavior. It proves three things and nothing more:
 
 The inventory's completeness claim is over `INVENTORY_SOURCES`: an explicit,
 reviewed list of the repository files that can carry a representation seam.
-Sixty-three are Rust and seven are C or Objective-C headers. A completeness
+Sixty-four are Rust and seven are C or Objective-C headers. A completeness
 claim stated over a *language* instead cannot be discharged, because a reviewer
 can always name one more construct; stated over a file list it is decidable,
 and `_assert_source_list_current` proves the list still equals the tracked
@@ -62,7 +62,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "7566ad7643214ed95a25b49e9ecf6e477619e8616c82de20b29ab01fdeefddb3"
+FREEZE_SHA256 = "978f9fcdec0efb941fa778e66893c32a530f01765594d04dcf01c13c1ee78498"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -156,6 +156,7 @@ INVENTORY_SOURCES: tuple[str, ...] = (
     "crates/chelis-runtime/src/format_shortest.rs",
     "crates/chelis-runtime/src/ieee_narrow.rs",
     "crates/chelis-runtime/src/lib.rs",
+    "crates/chelis-runtime/src/metadata.rs",
     "crates/chelis-runtime/src/ownership_ledger.rs",
     "crates/chelis-runtime/src/runtime_dtype_contract_tests.rs",
     "crates/chelis-vocab/src/lib.rs",)
@@ -180,6 +181,12 @@ CAPACITY_KEY_OWNER = "crates/chelis-ir/src/capacity_key.rs"
 CAPACITY_KEY_EXACT_PRODUCT_OWNER = "ExactLiteralProduct::include"
 VOCAB_OWNER = "crates/chelis-vocab/src/lib.rs"
 ELEMENT_OWNER = "crates/chelis-runtime/src/element.rs"
+METADATA_OWNER = "crates/chelis-runtime/src/metadata.rs"
+METADATA_FINAL_WIDTH_OWNERS = ("ElementCount::bytes", "ElementCount::scratch_len")
+C_INDEX_PROJECTION_OWNERS = (
+    ("crates/chelis-backend-c/src/emit.rs", "CEmitter::emit_elementwise_index_steps"),
+    ("crates/chelis-backend-c/src/host_emit.rs", "HostEmitter < 'a >::emit_elementwise_index_step"),
+)
 ELEMENT_FINAL_CONTRACT_OWNERS = (
     "ElementStorage for f64", "ElementStorage for f32",
     "ElementStorage for F16Bits", "ElementStorage for Bf16Bits",
@@ -207,7 +214,7 @@ VOCAB_FINAL_CONTRACT_OWNERS = (
 
 
 def owner_module_final_form(kind: str, path: str, owner: str) -> bool:
-    """Exact owners backed by the capacity, vocabulary, and element contracts."""
+    """Exact owners backed by the capacity, vocabulary, element, and metadata contracts."""
 
     return (
         kind == "exact-capacity-arithmetic"
@@ -225,6 +232,13 @@ def owner_module_final_form(kind: str, path: str, owner: str) -> bool:
             (kind == "dtype-contract" and owner in ELEMENT_FINAL_CONTRACT_OWNERS)
             or (kind == "width-arithmetic" and owner == "assert_registration")
         )
+    ) or (
+        path == METADATA_OWNER
+        and kind == "width-arithmetic"
+        and owner in METADATA_FINAL_WIDTH_OWNERS
+    ) or (
+        kind == "backend-element-spelling"
+        and (path, owner) in C_INDEX_PROJECTION_OWNERS
     )
 
 
@@ -593,6 +607,14 @@ def coverage_manifest(probes: Sequence[MutationProbe] | None = None) -> dict[str
             "identity": "kind|path|owner, where owner is the seam's enclosing declaration",
             "expected_success": "every hit is exact active debt from the frozen foundation",
             "owner_module_final_forms": {
+                **{
+                    path: [{"kind": "backend-element-spelling", "owner": owner}]
+                    for path, owner in C_INDEX_PROJECTION_OWNERS
+                },
+                METADATA_OWNER: [
+                    {"kind": "width-arithmetic", "owner": owner}
+                    for owner in METADATA_FINAL_WIDTH_OWNERS
+                ],
                 ELEMENT_OWNER: [
                     {"kind": "dtype-contract", "owner": owner}
                     for owner in ELEMENT_FINAL_CONTRACT_OWNERS
@@ -862,6 +884,17 @@ fn runtime_representation_phase0_byte_width() -> usize {
     )
 
 
+def mutate_metadata_owner_width(source: str) -> str:
+    return _append_probe(
+        source,
+        "runtime_representation_phase0_unchecked_metadata_width",
+        """#[allow(dead_code)]
+fn runtime_representation_phase0_unchecked_metadata_width() -> usize {
+    size_of::<f32>()
+}""",
+    )
+
+
 def mutate_normalized_key_arithmetic(source: str) -> str:
     return _append_probe(
         source,
@@ -869,6 +902,25 @@ def mutate_normalized_key_arithmetic(source: str) -> str:
         """#[allow(dead_code)]
 fn runtime_representation_phase0_saturating_fold(concrete: usize, value: usize) -> usize {
     concrete.saturating_mul(value)
+}""",
+    )
+
+
+def mutate_retired_capacity_normalizer(source: str) -> str:
+    """An old normalizer identity cannot re-enter the shrink-only debt set."""
+
+    return _append_probe(
+        source,
+        "runtime_representation_retired_normalizer",
+        """// runtime_representation_retired_normalizer
+impl DimExpr {
+    pub fn normalized_key(&self) -> usize {
+        match self {
+            Self::Mul(lhs, rhs) => lhs.as_concrete().unwrap_or(usize::MAX)
+                .saturating_mul(rhs.as_concrete().unwrap_or(usize::MAX)),
+            _ => self.as_concrete().unwrap_or(usize::MAX),
+        }
+    }
 }""",
     )
 
@@ -1333,6 +1385,8 @@ def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
         _probe("load-store-template", "crates/chelis-backend-c/src/host_emit.rs", mutate_load_store_template),
         _probe("narrow-metadata", "crates/chelis-python/src/lib.rs", mutate_narrow_metadata),
         _probe("normalized-key-arithmetic", "crates/chelis-ir/src/dag.rs", mutate_normalized_key_arithmetic),
+        _probe("normalized-key-arithmetic", "crates/chelis-ir/src/dag.rs", mutate_retired_capacity_normalizer,
+               expected_owners=("DimExpr::normalized_key",)),
         _probe(
             "saturating-capacity-fold",
             CAPACITY_KEY_OWNER,
@@ -1350,6 +1404,7 @@ def phase0_mutation_probes() -> tuple[MutationProbe, ...]:
         ),
         _probe("raw-element-pointer", "crates/chelis-runtime/src/ieee_narrow.rs", mutate_raw_element_pointer),
         _probe("width-arithmetic", "crates/chelis-runtime/src/format_shortest.rs", mutate_width_arithmetic),
+        _probe("width-arithmetic", METADATA_OWNER, mutate_metadata_owner_width),
         _probe(
             "unknown-arithmetic-spelling",
             "crates/chelis-runtime/include/chelis_simd.h",
@@ -1606,6 +1661,60 @@ def run_phase0_mutations() -> None:
 
 def phase0_legs() -> tuple[OracleLeg, ...]:
     return (
+        *(OracleLeg(
+            f"checked host metadata {profile} contract",
+            (
+                "cargo", "nextest", "run", *flags, "-p", "chelis-runtime",
+                "--features", "ownership-ledger",
+                "--test", "checked_metadata", "--test", "metadata_compile",
+                "--test", "checked_metadata_padding", "--test", "checked_c_metadata",
+                "--test", "checked_c_indexing",
+                "--test", "exact_tagged_c_abi",
+                "--test", "op33_empty_tensor_axis_decomposition",
+                "--test", "op33_tensor_validation",
+                "--test", "op33_legal_domain_matrix", "--test", "dim_carrier_int64",
+                "--test", "tensor_repurpose", "--test", "tensor_write_guard",
+            ),
+        ) for profile, flags in (("debug", ()), ("release", ("--release",)))),
+        OracleLeg(
+            "checked C snapshot delegation and restoration mutations",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_metadata"),
+        ),
+        OracleLeg(
+            "checked C shared indexing cohort and restoration mutations",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_indexing"),
+        ),
+        OracleLeg(
+            "checked C shared indexing optimized sanitizer execution",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "exec_compile",
+             "-E", "test(checked_c_indexing_)"),
+        ),
+        OracleLeg(
+            "checked C shared indexing dtype dispatch and storage reuse",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--lib",
+             "--test", "host_emit_dtype_dispatch", "--test", "dtype_matrix_bf16_f16",
+             "--test", "fused_in_place_exec", "--test", "fused_in_place_forall_alias"),
+        ),
+        OracleLeg(
+            "checked C shared indexing cast behavior and first failure",
+            ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "issue_759_checked_cast_default",
+             "--test", "cast_trunc", "--test", "cbackend_cast_memcpy",
+             "--test", "cbackend_cast_arithmetic_composition"),
+        ),
+        OracleLeg(
+            "checked C reshape and shared indexing example parity",
+            ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "parity",
+             "-E", "test(parity_checked_reshape)"),
+        ),
+        OracleLeg(
+            "checked C DAG reshape optimized UBSan execution",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--lib",
+             "-E", "test(checked_c_metadata_dag_reshape_executes_under_ubsan)"),
+        ),
+        OracleLeg(
+            "checked C host reshape optimized UBSan execution",
+            ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "cbackend_reshape_memcpy"),
+        ),
         OracleLeg(
             "sealed runtime element contract",
             ("cargo", "nextest", "run", "--release", "-p", "chelis-runtime", "--test", "element_contract"),
@@ -1629,13 +1738,12 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
             "opaque capacity key public surface",
             ("cargo", "test", "--release", "-p", "chelis-ir", "--doc", "capacity_key"),
         ),
-        # [#888] has three witnesses at two levels: the key-level collision in
-        # the IR, and the planner-level consequence in each backend that
-        # consumes the key. The two planners carry the same defect in verbatim
-        # copies, so one witness would understate the class. All three must
-        # INVERT when Phase 1's exact CapacityKey lands, never be deleted.
+        # The private CapacityKey leg above inverts #888's original key-level
+        # witness. These shared-plan and backend-adapter legs preserve its
+        # allocation consequences without retaining a lossy production API.
+        # Finite DimExpr projections must reject overflow in release too.
         OracleLeg(
-            "capacity collision key-level release reproducer",
+            "exact shared capacity and finite projection release controls",
             (
                 "cargo",
                 "nextest",
@@ -1645,6 +1753,8 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
                 "chelis-ir",
                 "--test",
                 "issue_888_capacity_collision",
+                "--test",
+                "dim_expr_evaluation",
             ),
         ),
         OracleLeg(

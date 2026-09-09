@@ -19,7 +19,7 @@ pub(super) enum OwnedTypeMetadataResolution {
 /// exposes an explicit binder set.
 pub(super) fn annotation_binder_mode(env: &Env) -> BinderMode<'_> {
     env.type_resolution_binders()
-        .map(BinderMode::Explicit)
+        .map(|names| BinderMode::Lexical(names, env.type_resolution_variables()))
         .unwrap_or(BinderMode::ClosedInput)
 }
 
@@ -836,14 +836,7 @@ pub(super) fn seed_literal_form(expr: &deep::Expr) -> SeedLiteralForm {
         _ => match stamped_parts(expr) {
             Some((DeepTag::Lit, meta, lit_kids)) => match lit_kids.first() {
                 Some(deep::Expr::Atom(deep::Atom::Int(value), _)) => {
-                    let is_int64 = meta.entries.iter().any(|(key, meta_value)| {
-                        key == "type"
-                            && matches!(
-                                stamped_parts(meta_value),
-                                Some((DeepTag::TPrim, _, prim_kids))
-                                    if prim_kids.first().and_then(symbol_name) == Some("int64")
-                            )
-                    });
+                    let is_int64 = meta.ty().is_some_and(|ty| matches!(stamped_parts(ty.expression()), Some((DeepTag::TPrim, _, prim_kids)) if prim_kids.first().and_then(symbol_name) == Some("int64")));
                     Some((is_int64, *value))
                 }
                 // A `(lit ...)` wrapping a non-int value is not an int seed.
@@ -1037,7 +1030,7 @@ pub(super) fn infer_lit(
     vg: &mut VarGen,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
-    mut type_metadata_resolution: Option<&mut Option<OwnedTypeMetadataResolution>>,
+    type_metadata_resolution: Option<&mut Option<OwnedTypeMetadataResolution>>,
 ) -> Type {
     let meta = get_meta(list);
     let kids = children(list);
@@ -1067,41 +1060,13 @@ pub(super) fn infer_lit(
     // `List`. The old `Expr::List`-only destructure therefore selected no
     // range-check row at all, and `(lit {type: (t-prim {} int8)} 200)` was
     // accepted by `check_typed_program` while `check_ir_program` rejected it.
-    let meta_prim_name = meta.and_then(|m| {
-        m.entries.iter().find_map(|(k, v)| {
-            if k == "type"
-                && let Some((DeepTag::TPrim, _, prim_kids)) = stamped_parts(v)
-            {
-                prim_kids.first().and_then(symbol_name)
-            } else {
-                None
-            }
-        })
-    });
-    let mut literal_sources = meta
-        .into_iter()
-        .flat_map(|meta| &meta.entries)
-        .filter(|(key, _)| key == "literal_source")
-        .map(|(_, value)| value);
-    let literal_source = literal_sources.next();
-    let duplicate_literal_source = literal_sources.next().is_some();
-    let integer_source_marker = matches!(
-        literal_source,
-        Some(deep::Expr::Atom(deep::Atom::Name(name), _)) if name == "integer"
-    );
-    if duplicate_literal_source || literal_source.is_some() && !integer_source_marker {
-        return report(
-            errors,
-            CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                "literal_source metadata must be the single value `integer`".to_string(),
-                vec![
-                    "The marker exists only for an integer-spelled literal bound directly at a float dtype"
-                        .to_string(),
-                ],
-            ),
-        );
-    }
+    let meta_prim_name =
+        meta.and_then(|m| m.ty())
+            .and_then(|ty| match stamped_parts(ty.expression()) {
+                Some((DeepTag::TPrim, _, prim_kids)) => prim_kids.first().and_then(symbol_name),
+                _ => None,
+            });
+    let integer_source_marker = meta.and_then(|m| m.literal_source()).is_some();
     if let Some(prim_name) = meta_prim_name
         && let Some(deep::Expr::Atom(deep::Atom::Int(n), _)) = value_atom
     {
@@ -1169,47 +1134,46 @@ pub(super) fn infer_lit(
     }
 
     // Check metadata for type annotation
-    if let Some(meta) = meta {
-        for (key, val) in &meta.entries {
-            if key == "type" {
-                let resolved = match resolve_deep_type(
-                    val,
-                    vg,
-                    adt_reg,
-                    TypeUseSite::Annotation,
-                    annotation_binder_mode(env),
-                    errors,
-                ) {
-                    Ok(ty) => ty,
-                    Err(witness) => {
-                        if let Some(owner) = type_metadata_resolution.as_deref_mut() {
-                            *owner = Some(OwnedTypeMetadataResolution::Failed(witness));
-                        }
-                        return propagate(&witness);
-                    }
-                };
-                if let Some(owner) = type_metadata_resolution.as_deref_mut() {
-                    *owner = Some(OwnedTypeMetadataResolution::Resolved(resolved.clone()));
+    if let Some(ty) = meta.and_then(|m| m.ty()) {
+        let val = ty.expression();
+        let resolved = match resolve_deep_type(
+            val,
+            vg,
+            adt_reg,
+            TypeUseSite::Annotation,
+            annotation_binder_mode(env),
+            errors,
+        ) {
+            Ok(ty) => ty,
+            Err(witness) => {
+                if let Some(owner) = type_metadata_resolution {
+                    *owner = Some(OwnedTypeMetadataResolution::Failed(witness));
                 }
-                // chelis#1131 / spec/03 §6.4: `lit` has a closed canonical
-                // atom-to-primitive matrix. The sole cross-family form is an
-                // exact Int payload carrying `literal_source: integer` and a
-                // float target; it preserves one target-width rounding under
-                // [04-NUM-1]/[04-NUM-14]. Enforce the matrix after transparent
-                // aliases resolve so every Deep ingress gets one decision.
-                if let Type::Prim(prim) = &resolved {
-                    let atom_family = value_atom.and_then(|value| match value {
-                        deep::Expr::Atom(deep::Atom::Int(_), _) => Some("integer"),
-                        deep::Expr::Atom(deep::Atom::Float(_), _) => Some("floating-point"),
-                        deep::Expr::Atom(deep::Atom::Bool(_), _) => Some("boolean"),
-                        deep::Expr::Atom(deep::Atom::Str(_), _) => Some("string"),
-                        _ => None,
-                    });
-                    let integer_spelled_float = integer_source_marker
-                        && prim.is_float()
-                        && matches!(value_atom, Some(deep::Expr::Atom(deep::Atom::Int(_), _)));
-                    if integer_source_marker && !integer_spelled_float {
-                        return report(
+                return propagate(&witness);
+            }
+        };
+        if let Some(owner) = type_metadata_resolution {
+            *owner = Some(OwnedTypeMetadataResolution::Resolved(resolved.clone()));
+        }
+        // chelis#1131 / spec/03 §6.4: `lit` has a closed canonical
+        // atom-to-primitive matrix. The sole cross-family form is an
+        // exact Int payload carrying `literal_source: integer` and a
+        // float target; it preserves one target-width rounding under
+        // [04-NUM-1]/[04-NUM-14]. Enforce the matrix after transparent
+        // aliases resolve so every Deep ingress gets one decision.
+        if let Type::Prim(prim) = &resolved {
+            let atom_family = value_atom.and_then(|value| match value {
+                deep::Expr::Atom(deep::Atom::Int(_), _) => Some("integer"),
+                deep::Expr::Atom(deep::Atom::Float(_), _) => Some("floating-point"),
+                deep::Expr::Atom(deep::Atom::Bool(_), _) => Some("boolean"),
+                deep::Expr::Atom(deep::Atom::Str(_), _) => Some("string"),
+                _ => None,
+            });
+            let integer_spelled_float = integer_source_marker
+                && prim.is_float()
+                && matches!(value_atom, Some(deep::Expr::Atom(deep::Atom::Int(_), _)));
+            if integer_source_marker && !integer_spelled_float {
+                return report(
                             errors,
                             CheckError::new(
                                 CheckErrorKind::TypeMismatch,
@@ -1221,69 +1185,65 @@ pub(super) fn infer_lit(
                                 ],
                             ),
                         );
-                    }
-                    let canonical_pair = integer_spelled_float
-                        || match value_atom {
-                            Some(deep::Expr::Atom(deep::Atom::Int(_), _)) => prim.is_integer(),
-                            Some(deep::Expr::Atom(deep::Atom::Float(_), _)) => prim.is_float(),
-                            Some(deep::Expr::Atom(deep::Atom::Bool(_), _)) => *prim == Prim::Bool,
-                            Some(deep::Expr::Atom(deep::Atom::Str(_), _)) => *prim == Prim::String,
-                            _ => false,
-                        };
-                    if !canonical_pair {
-                        let family = atom_family.unwrap_or("non-scalar");
-                        return report(
-                            errors,
-                            CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                format!(
-                                    "{family} atom cannot carry `{resolved}` literal metadata: \
+            }
+            let canonical_pair = integer_spelled_float
+                || match value_atom {
+                    Some(deep::Expr::Atom(deep::Atom::Int(_), _)) => prim.is_integer(),
+                    Some(deep::Expr::Atom(deep::Atom::Float(_), _)) => prim.is_float(),
+                    Some(deep::Expr::Atom(deep::Atom::Bool(_), _)) => *prim == Prim::Bool,
+                    Some(deep::Expr::Atom(deep::Atom::Str(_), _)) => *prim == Prim::String,
+                    _ => false,
+                };
+            if !canonical_pair {
+                let family = atom_family.unwrap_or("non-scalar");
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::TypeMismatch,
+                        format!(
+                            "{family} atom cannot carry `{resolved}` literal metadata: \
                                      Deep literals require the canonical atom/primitive pairing \
                                      (integer→integer, float→float, boolean→bool, \
                                      string→string), or the explicitly marked integer-spelled \
                                      float form (spec/03-deep-syntax.md §6.4)"
-                                ),
-                                vec![
-                                    "Emit the atom kind that denotes the declared primitive \
+                        ),
+                        vec![
+                            "Emit the atom kind that denotes the declared primitive \
                                      family; use `cast` for a value conversion rather than \
                                      contradictory literal metadata"
-                                        .to_string(),
-                                ],
-                            ),
-                        );
-                    }
-                } else if integer_source_marker {
-                    return report(
-                        errors,
-                        CheckError::new(
-                            CheckErrorKind::TypeMismatch,
-                            "literal_source: integer requires a primitive float type".to_string(),
-                            vec![
-                                "Remove the marker from non-primitive literal metadata".to_string(),
-                            ],
-                        ),
-                    );
-                }
-                // RFC D-CHECK lit-forge gate: `{type: (t-adt ...)}`
-                // metadata on a literal outside the defining module
-                // forges an opaque value. Reachable from BOTH
-                // surfaces: Surf expression ascription
-                // (`0.5 : Probability`) and block-binding ascription
-                // desugar to exactly this metadata (RT-0), so the
-                // gate is not scoped to `.dp` ingestion.
-                // `resolve_deep_type` expands transparent
-                // aliases, so `0.5 : P2` cannot launder the gate.
-                if let Type::Adt(adt_name, _) | Type::KindedAdt(adt_name, _) = &resolved {
-                    crate::opacity::check_opaque_use(
-                        crate::opacity::OpaqueAction::LitForge,
-                        adt_name,
-                        adt_reg,
-                        errors,
-                    );
-                }
-                return resolved;
+                                .to_string(),
+                        ],
+                    ),
+                );
             }
+        } else if integer_source_marker {
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    "literal_source: integer requires a primitive float type".to_string(),
+                    vec!["Remove the marker from non-primitive literal metadata".to_string()],
+                ),
+            );
         }
+        // RFC D-CHECK lit-forge gate: `{type: (t-adt ...)}`
+        // metadata on a literal outside the defining module
+        // forges an opaque value. Reachable from BOTH
+        // surfaces: Surf expression ascription
+        // (`0.5 : Probability`) and block-binding ascription
+        // desugar to exactly this metadata (RT-0), so the
+        // gate is not scoped to `.dp` ingestion.
+        // `resolve_deep_type` expands transparent
+        // aliases, so `0.5 : P2` cannot launder the gate.
+        if let Type::Adt(adt_name, _) | Type::KindedAdt(adt_name, _) = &resolved {
+            crate::opacity::check_opaque_use(
+                crate::opacity::OpaqueAction::LitForge,
+                adt_name,
+                adt_reg,
+                errors,
+            );
+        }
+        return resolved;
     }
 
     if integer_source_marker {
