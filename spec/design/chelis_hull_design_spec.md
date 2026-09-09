@@ -625,6 +625,39 @@ The evaluator is intentionally simple and slow. Tensors are nested lists of scal
 
 ### 4.1 Pinned evaluator decisions for v0.1.0
 
+**Independent directional reference (2026-09-09; implementation pending).**
+Add a separate Hull numerical kernel over the existing locally nameless `Term`
+and an explicit environment of primal/direction pairs. Its first profile admits
+f32 scalar/tensor values, bound references, strict lets, add, multiply, positional
+sum and same-rank unit-axis expand. A let alias models numerical sharing; it
+does not model an owner allocation. This kernel does not evaluate `TGrad`, call
+Chelis's AD implementation or LaCaDiLE's generated reverse evaluator, or change
+the ordinary reference evaluator/checker/generator fragment.
+
+Each successful result contains the complete primal and directional f32 buffers
+and their ordered shape. Validate every supplied pair's equal shape, nonnegative
+extents, exact bounded cardinality and finite elements before use, including
+unused environment entries. Constants have zero direction. Add acts on both
+components; multiplication uses `(x*y, dx*y + x*dy)` with both consumer ports.
+Sum and expand apply their existing validated coordinate operation to each
+component. Lets extend both environments together, respecting de Bruijn scope.
+Invalid references, shapes or buffers, unsupported terms, nonfinite numerical
+results and exhausted traversal depth must be distinct non-success outcomes.
+The caller still bounds total work/memory; this is not a hardened service.
+
+This is a finite-f32 execution of the formal directional rules, not the
+derivative of a rounded machine function or an IEEE/real agreement theorem.
+Acceptance tests use bounded exactly representable examples: identity, constants,
+`x*x+x`, two independent inputs, unused inputs, sharing and nested/shadowed lets,
+coordinate-distinct rectangular and repeated axes, empty/singleton sum and
+inner/middle expand. Check primals against ordinary Hull value evaluation and
+directions against hand calculations. Mutation tests must detect a missing
+multiplication port, zero direction and wrong axis/coordinate mapping. Run the
+package build and complete suite; existing campaign obligations remain intact.
+Compiler-gradient comparison, dtype/bit transport, fixed randomness, Resource,
+ownership checking, arbitrary calls/control flow and exact integers are separate
+integration obligations, not completed or silently skipped by this first kernel.
+
 **Broadcast-coordinate repair (Hull #20, 2026-09-09; acceptance pending).**
 The `EExpand`/`TExpand` model implements the same-rank unit-axis rule above.
 For concrete `TData`, validate nonnegative extents, exact buffer cardinality,
