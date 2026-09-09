@@ -1996,7 +1996,7 @@ fn builtin_layer_norm() {
         "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} f32))} 0))
          (def {} gamma (lit {type: (t-tensor {} (d-name {} hidden) (t-prim {} f32))} 0))
          (def {} beta (lit {type: (t-tensor {} (d-name {} hidden) (t-prim {} f32))} 0))
-         (def {} y (app {} (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta)))",
+         (def {} y (app {} (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta) (lit {type: (t-prim {} f32)} 0.00001)))",
     );
 }
 
@@ -2006,7 +2006,7 @@ fn builtin_layer_norm_rejects_rank2_gamma() {
         "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} f32))} 0))
          (def {} gamma (lit {type: (t-tensor {} (d-name {} hidden) (d-name {} extra) (t-prim {} f32))} 0))
          (def {} beta (lit {type: (t-tensor {} (d-name {} hidden) (t-prim {} f32))} 0))
-         (def {} y (app {} (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta)))",
+         (def {} y (app {} (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta) (lit {type: (t-prim {} f32)} 0.00001)))",
         CheckErrorKind::DimensionMismatch,
     );
 }
@@ -2017,7 +2017,7 @@ fn builtin_layer_norm_rejects_precision_mismatch() {
         "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} f32))} 0))
          (def {} gamma (lit {type: (t-tensor {} (d-name {} hidden) (t-prim {} bf16))} 0))
          (def {} beta (lit {type: (t-tensor {} (d-name {} hidden) (t-prim {} f32))} 0))
-         (def {} y (app {} (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta)))",
+         (def {} y (app {} (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta) (lit {type: (t-prim {} f32)} 0.00001)))",
         CheckErrorKind::PrecisionMismatch,
     );
 }

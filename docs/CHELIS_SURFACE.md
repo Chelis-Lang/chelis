@@ -218,7 +218,7 @@ and AD so its zero-boundary rule cannot be confused with `max_elem`'s tie rule.
 | `matmul` | `expand`+`mul`+`sum`, pattern-matched to BLAS (`spec/05` §4.1); optional `accumulator` | differentiable |
 | `mean` | `div(sum(x,axis), axis extent)` | differentiable |
 | `softmax` | max-shift + `exp` + `sum` + `div` (`spec/05` §4.2) | differentiable |
-| `layer_norm` | mean/var normalize + affine (`spec/05` §4.4) | differentiable |
+| `layer_norm` | explicit epsilon plus mean/var normalize + affine (`spec/05` §4.4) | differentiable |
 | `conv` | N-dimensional padded window gather → one matrix contraction → reshape/permute; explicit per-axis int64 strides and `(low,high)` padding pairs (`spec/05` §4.5) | differentiable |
 
 The derived activations and arithmetic also have a host-lane C-emit path
@@ -227,8 +227,9 @@ effectively `DAG+Host`, but their canonical lowering is the DAG.
 
 **Documented composite lowerings** that are spec-level recipes, not builtins in the
 closed vocabulary (provided via desugaring or `chelis-std`/shell libraries):
-`linear`, `cross_entropy`, `embedding`, `multi_head_attention`, `im2col`, `argmax`
-(`spec/05` §3.5, §4.3–4.7).
+`linear`, `cross_entropy`, `embedding`, `multi_head_attention`, `argmax`
+(`spec/05` §3.5, §4.3–4.7). Window matrix extraction in §4.5 is a
+convolution lowering step, not a separate callable.
 
 `normalize` is an ordinary user-defined name, not a builtin. An undeclared
 call is an unbound-variable error under `spec/05` §3.4.

@@ -681,14 +681,38 @@ pub fn lower_matmul(
         parent_span,
     );
 
-    add_synth(
+    let accumulator = RiscOp::default_matmul_accumulator(a_ty.precision)
+        .expect("lower_matmul requires an admitted floating operand precision");
+    let sum_ty = TensorType {
+        dims: result_ty.dims.clone(),
+        precision: accumulator,
+    };
+    let sum = add_synth(
         dag,
-        RiscOp::sum_default(lead_len + 1, a_ty.precision)
-            .expect("lower_matmul operand precision should accept reduce_sum"),
+        RiscOp::Sum {
+            axis: lead_len + 1,
+            accumulator,
+        },
         vec![product],
-        result_ty,
+        sum_ty,
         parent_span,
-    )
+    );
+    // [04-NUM-8] / section 5.7.1: the reduction produces the accumulator
+    // dtype. Matmul finalizes that value into the operand dtype explicitly,
+    // including when an empty contraction stays in the primitive graph.
+    if accumulator == a_ty.precision {
+        sum
+    } else {
+        add_synth(
+            dag,
+            RiscOp::Cast {
+                new_precision: a_ty.precision,
+            },
+            vec![sum],
+            result_ty,
+            parent_span,
+        )
+    }
 }
 
 fn broadcast_leading_dims(lhs: &[DimInfo], rhs: &[DimInfo]) -> Vec<DimInfo> {
@@ -831,6 +855,42 @@ fn checked_dim_compatible(current: &DimInfo, target: &DimInfo) -> bool {
     }
 }
 
+/// Keep the reduction result at its accumulator dtype, then explicitly
+/// finalize into the enclosing float composition's storage dtype (§5.7.1).
+fn lower_sum_to_storage(
+    dag: &mut Dag,
+    x: NodeId,
+    axis: usize,
+    result_ty: &TensorType,
+    parent_span: Option<&str>,
+) -> NodeId {
+    let accumulator = RiscOp::default_reduce_sum_accumulator(result_ty.precision)
+        .expect("checked reduction dtype");
+    let sum = add_synth(
+        dag,
+        RiscOp::Sum { axis, accumulator },
+        vec![x],
+        TensorType {
+            dims: result_ty.dims.clone(),
+            precision: accumulator,
+        },
+        parent_span,
+    );
+    if accumulator == result_ty.precision {
+        sum
+    } else {
+        add_synth(
+            dag,
+            RiscOp::Cast {
+                new_precision: result_ty.precision,
+            },
+            vec![sum],
+            result_ty.clone(),
+            parent_span,
+        )
+    }
+}
+
 /// softmax(x, axis) = exp(x - max_reduce(x, axis)) / sum(exp(x - max_reduce(x, axis)), axis)
 ///
 /// Lowering (spec §4.2): numerically stable softmax via max subtraction.
@@ -883,14 +943,7 @@ pub fn lower_softmax(
     let exp_shifted = add_synth(dag, RiscOp::Exp, vec![shifted], ty.clone(), parent_span);
 
     // 5. sum(exp, axis)
-    let sum_exp = add_synth(
-        dag,
-        RiscOp::sum_default(axis, ty.precision)
-            .expect("softmax operand precision should accept reduce_sum"),
-        vec![exp_shifted],
-        red_ty,
-        parent_span,
-    );
+    let sum_exp = lower_sum_to_storage(dag, exp_shifted, axis, &red_ty, parent_span);
 
     // 6. expand sum back to original shape
     let sum_expanded = add_synth(
@@ -925,14 +978,7 @@ pub fn lower_mean(
     let red_ty = reduced_type(ty, axis);
 
     // sum(x, axis)
-    let sum_node = add_synth(
-        dag,
-        RiscOp::sum_default(axis, ty.precision)
-            .expect("mean operand precision should accept reduce_sum"),
-        vec![x],
-        red_ty.clone(),
-        parent_span,
-    );
+    let sum_node = lower_sum_to_storage(dag, x, axis, &red_ty, parent_span);
 
     // The divisor is the reduced-axis extent. When that extent is a
     // concrete literal the divisor is a compile-time `Const` (the simple
@@ -974,14 +1020,7 @@ pub fn lower_mean(
             );
             dag.add_shape_dep(ones, x);
             // sum the ones over `axis` -> the runtime extent, reduced shape.
-            add_synth(
-                dag,
-                RiscOp::sum_default(axis, ty.precision)
-                    .expect("mean count precision should accept reduce_sum"),
-                vec![ones],
-                red_ty.clone(),
-                parent_span,
-            )
+            lower_sum_to_storage(dag, ones, axis, &red_ty, parent_span)
         }
     };
 
@@ -989,7 +1028,7 @@ pub fn lower_mean(
     lower_div(dag, sum_node, divisor, &red_ty, parent_span)
 }
 
-/// layer_norm(x, gamma, beta) over the last axis.
+/// layer_norm(x, gamma, beta, epsilon) over the last axis.
 #[allow(clippy::too_many_arguments)]
 pub fn lower_layer_norm(
     dag: &mut Dag,
@@ -999,7 +1038,7 @@ pub fn lower_layer_norm(
     x_ty: &TensorType,
     gamma_ty: &TensorType,
     beta_ty: &TensorType,
-    eps: f64,
+    epsilon: NodeId,
     parent_span: Option<&str>,
 ) -> NodeId {
     let axis = x_ty.dims.len().saturating_sub(1);
@@ -1034,17 +1073,15 @@ pub fn lower_layer_norm(
         x_ty.clone(),
         parent_span,
     );
-    let eps_const = add_synth(
-        dag,
-        RiscOp::synth_const(x_ty.precision, eps),
-        vec![],
-        x_ty.clone(),
-        parent_span,
-    );
+    let epsilon_ty = TensorType {
+        dims: vec![],
+        precision: x_ty.precision,
+    };
+    let epsilon_expanded = expand_to_match(dag, epsilon, epsilon_ty, x, &x_ty.dims, parent_span);
     let denom_sq = add_synth(
         dag,
         RiscOp::Add,
-        vec![var_expanded, eps_const],
+        vec![var_expanded, epsilon_expanded],
         x_ty.clone(),
         parent_span,
     );
@@ -1860,8 +1897,14 @@ mod tests {
             scale_ty.clone(),
             None,
         );
+        let epsilon = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 1e-5),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         let result = lower_layer_norm(
-            &mut dag, x, gamma, beta, &x_ty, &scale_ty, &scale_ty, 1e-5, None,
+            &mut dag, x, gamma, beta, &x_ty, &scale_ty, &scale_ty, epsilon, None,
         );
 
         let ops: Vec<_> = dag.nodes().iter().map(|n| &n.op).collect();
@@ -1919,8 +1962,14 @@ mod tests {
             scale_ty.clone(),
             None,
         );
+        let epsilon = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 1e-5),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         let _ = lower_layer_norm(
-            &mut dag, x, gamma, beta, &x_ty, &scale_ty, &scale_ty, 1e-5, None,
+            &mut dag, x, gamma, beta, &x_ty, &scale_ty, &scale_ty, epsilon, None,
         );
         assert!(
             dag.nodes().iter().any(|node| {
@@ -2069,8 +2118,14 @@ mod tests {
             scale_ty.clone(),
             None,
         );
+        let epsilon = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 1e-5),
+            vec![],
+            scalar_f32(),
+            None,
+        );
         let _ = lower_layer_norm(
-            &mut dag, x, gamma, beta, &x_ty, &scale_ty, &scale_ty, 1e-5, None,
+            &mut dag, x, gamma, beta, &x_ty, &scale_ty, &scale_ty, epsilon, None,
         );
     }
 

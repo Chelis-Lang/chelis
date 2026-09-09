@@ -8875,10 +8875,11 @@ impl LowerCtx {
                 let node = tier2::lower_mean(&mut self.dag, x, axis, &x_ty, parent_span.as_deref());
                 self.attach_reuse_hint(node, app_span, &[x])
             }
-            "layer_norm" if args.len() == 3 => {
+            "layer_norm" if args.len() == 4 => {
                 let x = self.lower_expr_node(&args[0], "layer_norm input");
                 let gamma = self.lower_expr_node(&args[1], "layer_norm gamma");
                 let beta = self.lower_expr_node(&args[2], "layer_norm beta");
+                let epsilon = self.lower_expr_node(&args[3], "layer_norm epsilon");
                 let x_ty = self
                     .dag
                     .get(x)
@@ -8903,10 +8904,10 @@ impl LowerCtx {
                     &x_ty,
                     &gamma_ty,
                     &beta_ty,
-                    1e-5,
+                    epsilon,
                     parent_span.as_deref(),
                 );
-                self.attach_reuse_hint(node, app_span, &[x, gamma, beta])
+                self.attach_reuse_hint(node, app_span, &[x, gamma, beta, epsilon])
             }
             "conv" if args.len() == 4 => {
                 let input = self.lower_expr_node(&args[0], "conv input");

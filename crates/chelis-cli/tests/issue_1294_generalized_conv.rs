@@ -109,16 +109,64 @@ fn input_adjoint_reverses_overlapping_windows() {
 }
 
 #[test]
-fn empty_channel_contraction_returns_zeros() {
-    let source = "def convolve(x: tensor[1,0,3,f32], k: tensor[1,0,1,f32]) -> tensor[1,1,3,f32] = conv(x,k,[1i64],[(0i64,0i64)])\nempty: List[f32] = []\nx: tensor[1,0,3,f32] = reshape(to_tensor(empty),[1i64,0i64,3i64])\nk: tensor[1,0,1,f32] = reshape(to_tensor(empty),[1i64,0i64,1i64])\nresult = convolve(x,k)\n";
-    assert_eq!(
-        parse_tensor_data(&evaluate(source), "result"),
-        vec![0., 0., 0.]
-    );
-    assert_eq!(
-        parse_tensor_data(&build_and_run(source, "conv_empty_channels"), "result"),
-        vec![0., 0., 0.]
-    );
+fn empty_convolution_dimensions_preserve_float_dtype_and_spatial_shape() {
+    // [05-OP-51]: zero input channels produce dtype zero, whereas zero
+    // batch/output channels produce empty tensors. Spatial validation still
+    // applies (negative controls live in issue_1294_generalized_conv checker tests).
+    for dtype in ["f16", "bf16", "f32", "f64"] {
+        for (name, input, kernel, output, input_count, kernel_count, expected) in [
+            (
+                "input_channels",
+                "1,0,3",
+                "1,0,1",
+                "1,1,3",
+                0,
+                0,
+                vec![0., 0., 0.],
+            ),
+            ("batch", "0,1,3", "1,1,1", "0,1,3", 0, 1, vec![]),
+            ("output_channels", "1,1,3", "0,1,1", "1,0,3", 3, 0, vec![]),
+        ] {
+            let shape_list = |dims: &str| {
+                dims.split(',')
+                    .map(|d| format!("{d}i64"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            let values = |count| {
+                (0..count)
+                    .map(|_| format!("1.0{dtype}"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            let source = format!(
+                "def convolve(x: tensor[{input},{dtype}], k: tensor[{kernel},{dtype}]) -> tensor[{output},{dtype}] = conv(x,k,[1i64],[(0i64,0i64)])\nxs: List[{dtype}] = [{}]\nks: List[{dtype}] = [{}]\nx: tensor[{input},{dtype}] = reshape(to_tensor(xs),[{}])\nk: tensor[{kernel},{dtype}] = reshape(to_tensor(ks),[{}])\nresult = convolve(x,k)\n",
+                values(input_count),
+                values(kernel_count),
+                shape_list(input),
+                shape_list(kernel)
+            );
+            for actual in [
+                evaluate(&source),
+                build_and_run(&source, &format!("conv_empty_{name}_{dtype}")),
+            ] {
+                if expected.is_empty() {
+                    assert!(actual.contains("data=[]"), "{name} {dtype}: {actual}");
+                } else {
+                    assert_eq!(
+                        parse_tensor_data(&actual, "result"),
+                        expected,
+                        "{name} {dtype}: {actual}"
+                    );
+                }
+                let shape = output.replace(',', ", ");
+                assert!(
+                    actual.contains(&format!("result = tensor(shape=[{shape}],")),
+                    "{name} {dtype}: {actual}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

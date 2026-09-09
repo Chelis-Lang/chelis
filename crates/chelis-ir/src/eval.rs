@@ -4253,7 +4253,7 @@ mod tests {
             (def {} beta (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} beta))
             (def {} y
               (app {type: (t-tensor {} (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))}
-                   (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta)))
+                   (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta) (lit {type: (t-prim {} f32)} 0.00001)))
         "#;
         let dag = lower(src);
         let mut inputs = UnordMap::new();

@@ -219,8 +219,6 @@ and float precisions as their tensor forms and use the same adjoint rule.
 > selection identity and never lowers through arithmetic negation. `bool`,
 > `string`, reserved dtype spellings, mixed dtypes or surfaces, and mismatched
 > tensor dimensions are type errors.
->
-
 
 ### 2.2 Elementwise Unary
 
@@ -326,7 +324,6 @@ denotes the input dimensions with the complete selected axis set `K` removed.
 > the adjoint reverses that composition. Mixed, duplicate, dynamic, absent,
 > ambiguous, or out-of-range axes are type errors. `mean` has no accumulator
 > parameter of its own.
->
 
 > **[05-OP-12]** `max_reduce(x, axes...) -> result` admits every active signed
 > integer and float tensor dtype and returns that same dtype with the selected
@@ -348,7 +345,6 @@ denotes the input dimensions with the complete selected axis set `K` removed.
 > highest-original-position-first composition of this exact graph; its
 > adjoint reverses that composition. Integer operands are forward-only and
 > `grad` rejects them.
->
 
 > **[05-OP-13]** `min_reduce(x, axes...) -> result` has the same dtype,
 > finalization, empty-axis, accumulator, and differentiation contract as
@@ -359,7 +355,6 @@ denotes the input dimensions with the complete selected axis set `K` removed.
 > to the selected non-NaN minimum, including equal positive or negative
 > infinities, receives the upstream cotangent divided by the number of equal
 > minima.
->
 
 > **[05-OP-14]** `prod_reduce(x, axes...) -> result` admits every active signed
 > integer and float tensor dtype and returns that same dtype with the selected
@@ -385,7 +380,6 @@ denotes the input dimensions with the complete selected axis set `K` removed.
 > One or more axes use spec/04 §4.5.3's validation and
 > highest-original-position-first composition of this exact balanced graph;
 > reverse mode differentiates the composed graph in reverse order.
->
 
 > **[05-OP-15]** `argmax_reduce(x, axis) -> result` admits every active
 > signed integer and float tensor dtype and returns `int64` indices with the
@@ -396,13 +390,11 @@ denotes the input dimensions with the complete selected axis set `K` removed.
 > execution-time extent is zero, the operation traps `Domain` as operation
 > `argmax_reduce` at result dtype `int64`. It has no accumulator and is
 > non-differentiable: `grad` rejects it.
->
 
 > **[05-OP-16]** `argmin_reduce(x, axis) -> result` has the signature, dtype,
 > exact-comparison, empty-axis, accumulator, and non-differentiability
 > contract of [05-OP-15], returning the lowest NaN index when present and
 > otherwise the lowest axis index whose stored value is minimal.
->
 
 > **[05-OP-29]** `count(x, axes...) -> result` admits exactly a `bool` tensor operand
 > and returns an `int64` tensor whose dimensions are the operand dimensions
@@ -427,7 +419,6 @@ denotes the input dimensions with the complete selected axis set `K` removed.
 > `AdRejectionReason::IntegerReductionOutput`; it never receives a silent zero
 > cotangent.
 
-
 *(Not fully implemented; chelis#1287 owns the evaluator and C delivery,
 chelis#1291 the HIP and Metal kernels.)*
 
@@ -449,7 +440,6 @@ chelis#1291 the HIP and Metal kernels.)*
 > removed axis and finalizes it at the operand dtype. Signed-integer forms are
 > forward-only and `grad` rejects them. No backend may substitute a left fold,
 > stride-4 cascade, library-selected tree, or bool-to-integer promotion.
-
 
 **Axis:** Integer index into the input rank. Non-negative axes are
 zero-indexed from the front. A negative axis indexes from the end:
@@ -654,7 +644,6 @@ substitute zero merely because a backend lacks a second-order kernel.
 > float forms use the exact `ReduceWindowGrad` graph. No target-specific rank,
 > reducer, dtype, first-order-only, host-fallback, alias, or compatibility
 > identity belongs to this atom.
-
 
 **Reduction order.** `sum`, `prod_reduce`, and `count` use one canonical
 balanced tree. Level zero is the reduced slice in its specified positional
@@ -909,7 +898,6 @@ per [05-DIM-2] — extent-domain out, axis-domain in.
 > not block differentiation of a surrounding graph, and never silently
 > becomes a structural `grad` rejection. No accumulator rule applies.
 
-
 Two semantic use shapes exist, and they are distinct:
 
 - **As an extent argument** to `expand` / `insert` / `reshape`, a `shape()`
@@ -1001,7 +989,6 @@ compile-time-only alias.
 > balanced tree. The sampled `u_i` values are the exact forward values at that
 > arithmetic width. It has no accumulator parameter.
 
-
 > **[05-OP-37]** `dropout(input, rate) -> result` admits every active float
 > dtype `p`, requires `input: &tensor[D,p]` and a scalar `rate: p`, and returns
 > `tensor[D,p]`. The rate must be finite and satisfy `0 <= rate < 1`; validation
@@ -1032,7 +1019,6 @@ compile-time-only alias.
 > Dropped elements contribute positive zero and the contributions combine by
 > the canonical adjacent-pair balanced tree. The mask comparison itself has
 > zero cotangent. The operation has no accumulator parameter.
-
 
 > **[05-RNG-1]** Every conforming evaluation of a `with seed(N)` program
 > produces byte-identical random results for the same seed, dynamic
@@ -1087,7 +1073,6 @@ program did not request.
 > has no accumulator. `bool`, `string`, reserved dtype spellings, mixed dtypes
 > or surfaces, and mismatched tensor dimensions are type errors.
 
-
 ### 3.2 Comparison and Logical Operations
 
 | Name | Integer lowering | Float lowering |
@@ -1116,13 +1101,11 @@ order.
 > mismatched tensor dimensions, or any non-`bool` operand is a type error. The
 > operation is pure, performs no arithmetic or dtype conversion, has no
 > accumulator, and is non-differentiable: `grad` rejects it.
->
 
 > **[05-OP-27]** `or(left, right) -> result` has the signature, surface,
 > shape, evaluation-order, rejection, purity, accumulator, and differentiation
 > contract of [05-OP-26]. Its result is true exactly when either operand is
 > true and is false otherwise, applied element-wise for tensors.
->
 
 > **[05-OP-28]** `not(value) -> result` admits exactly one `bool` scalar or
 > `bool` tensor and returns `bool` on the same surface and, for a tensor, with
@@ -1131,7 +1114,6 @@ order.
 > non-`bool` operand is a type error. The operation is pure, performs no
 > arithmetic or dtype conversion, has no accumulator, and is
 > non-differentiable: `grad` rejects it.
-
 
 > **[05-OP-36]** `comparison(left, right) -> result` governs exactly the seven
 > language identities `cmplt`, `lt`, `eq`, `neq`, `gt`, `gte`, and `lte`.
@@ -1173,7 +1155,6 @@ order.
 > No identity has an alias, grandfathered path, deprecated spelling, or
 > compatibility wrapper.
 
-
 Logical operations do not alias arithmetic primitives. An implementation may
 use an internal representation-specific lowering only when it preserves the
 three atoms above and never admits `bool` to a numeric capability or kernel.
@@ -1212,8 +1193,6 @@ intact Tier-2 identity.
 > rather than to `max_elem`'s tie rule. Non-float operands are type errors.
 > The operation has no accumulator. The internal `ReluAdjoint` identity has
 > this cotangent contract.
->
-
 
 ### 3.4 Higher-Level Operations
 
@@ -1244,8 +1223,8 @@ first-class unary primitive `RiscOp::Cos` (see §2.2), alongside `tan`,
 | Helper | Decomposes to |
 |---|---|
 | `argmax(x, axis)` | comparison chain via `cmplt` + `max_elem` |
-| `gather(x, idx, axis)` | one-hot encoding via `reshape`, `expand`, `mul`, `sum` |
-| `im2col(x, kh, kw, ...)` | `stride`, `pad`, `reshape`, `permute` |
+| `gather(x, idx, axis)` | Direct `Gather` selection under §3.5.1 and [05-OP-52] |
+| Window matrix extraction | The rank-generic pad/gather/reshape graph in §4.5; this is a lowering step, not a callable |
 | `where(cond, a, b)` | Element-wise selection of `a` where `cond` is true and `b` where it is false; the boolean condition is not converted to or combined through a numeric dtype |
 
 The sparse operations lower to the first-class
@@ -1501,7 +1480,6 @@ traps `Test` with its supplied label and the operation name.
 > state. No dtype-named, rank-named, evaluator-only, legacy, or compatibility
 > identity is part of this atom.
 
-
 ### 3.6.2 Sequence-padding builders
 
 > **[05-OP-9]** `pad_sequences(sequences: List[List[T]], pad: T) ->
@@ -1523,7 +1501,6 @@ traps `Test` with its supplied label and the operation name.
 > forward-only and its source and `pad` components are non-differentiable
 > under spec/06 §2.1. The operation has no public accumulator parameter.
 
-
 > **[05-OP-10]** `pad_sequences_to(sequences: List[List[T]], width: int64,
 > pad: T) -> tensor[len(sequences), width, T]` has the same dtype,
 > element-movement, float-domain differentiation, and no-public-accumulator
@@ -1536,7 +1513,6 @@ traps `Test` with its supplied label and the operation name.
 > cotangent. The `pad` cotangent uses [05-OP-9]'s exact traversal, arithmetic,
 > tree, and positive-zero rule over the padded result cells. `width` is
 > non-differentiable.
-
 
 ### 3.6.3 Canonical value-to-string conversion
 
@@ -1563,7 +1539,6 @@ traps `Test` with its supplied label and the operation name.
 > lane produces byte-identical text for the same admitted stored value. The
 > operation is pure, performs no arithmetic or dtype conversion, is
 > non-differentiable (`grad` rejects it), and has no accumulator.
-
 
 ### 3.7 Host-Lane Data I/O Numeric Operations
 
@@ -1634,7 +1609,6 @@ exact ADT identity by [05-OP-34].
 > with `AdRejectionReason::PiecewiseConstant`, rather than receiving a silent
 > zero cotangent. It has no accumulator.
 
-
 #### Numeric ingestion atom
 
 > **[05-OP-2]** Ingestion preserves the source format's numeric
@@ -1690,7 +1664,6 @@ exact ADT identity by [05-OP-34].
 > parsers are structurally rejected inside `grad`; they have no cotangent and
 > may not be replaced by a silent zero. They have no accumulator.
 
-
 #### Exact construction atom
 
 > **[05-OP-4]** `JsonFloat(value)` accepts exactly f64 and
@@ -1724,7 +1697,6 @@ exact ADT identity by [05-OP-34].
 > `to_csv(table: List[Dict[string,string]]) -> string` returns the serialized
 > text table. Text serialization is non-differentiable and outside AD; it
 > has no accumulator.
-
 
 #### Exact public scalar and container boundaries
 
@@ -2661,7 +2633,6 @@ not a mode parameter to `cast`.
 > constant), so it carries the `no_grad` rule — a gradient goal through it is a clean
 > error, never a silent zero that masks a modeling bug (same discipline as `argmax`).
 
-
 `cast_trunc(x, T)` agrees with `cast(x, T)` exactly when `x` is already
 finite and integral and in range (both yield the same integer); it differs
 only by *defining* the fractional case as truncation where `cast` traps
@@ -2762,7 +2733,6 @@ path even though bare `round` under `grad` remains a structural
 >
 > Accumulator: None. Each primitive finalizes its own result; an algebraic
 > rewrite may not introduce another trap or change a float operation order.
->
 
 #### Unary arithmetic
 
@@ -2798,7 +2768,6 @@ path even though bare `round` under `grad` remains a structural
 > Constants and intermediate arithmetic remain at the operand dtype.
 >
 > Accumulator: None; no operation widens through an unrelated dtype.
->
 
 #### Bitwise arithmetic
 
@@ -2825,7 +2794,6 @@ path even though bare `round` under `grad` remains a structural
 > Adjoint: These discrete operations structurally reject differentiation.
 >
 > Accumulator: None.
->
 
 #### Activation compositions
 
@@ -2855,7 +2823,6 @@ path even though bare `round` under `grad` remains a structural
 >
 > Accumulator: Softmax reductions use [05-OP-30]'s declared accumulator and
 > canonical balanced tree. Pointwise activations have no accumulator.
->
 
 #### Movement identities
 
@@ -2891,7 +2858,6 @@ path even though bare `round` under `grad` remains a structural
 >
 > Accumulator: Forward movement has no numeric accumulator. Repeated float
 > cotangents use [05-OP-30]'s canonical reduction contract.
->
 
 #### Shape and scalar boundaries
 
@@ -2919,14 +2885,13 @@ path even though bare `round` under `grad` remains a structural
 > differentiated data is structurally rejected.
 >
 > Accumulator: Only exact checked int64 metadata multiplication for numel; no floating accumulator.
->
 
 #### Contractions and normalization graphs
 
 > **[05-OP-51]** Signature: `matmul(a,b)` uses section 4.1's batched matrix signature;
 > `einsum(equation,a,b)` takes a string equation and two tensors;
 > `conv(input,kernel,strides:List[int64],padding:List[(int64,int64)])` uses section 4.5's
-> layout; `layer_norm(x,gamma,beta)` uses section 4.4's trailing-axis
+> layout; `layer_norm(x,gamma,beta,epsilon:p)` uses section 4.4's trailing-axis
 > normalization and affine parameters.
 >
 > Domain: Matmul, conv, and layer_norm operands share one active float
@@ -2938,9 +2903,9 @@ path even though bare `round` under `grad` remains a structural
 > [05-DIM-3]'s kinds.
 >
 > Result: The output shape and primitive graph are the section 4
-> definitions. Layer normalization's epsilon is the decimal constant 0.00001
-> rounded once to the operand storage dtype before entering that graph; the
-> trailing hidden extent is positive. Conv computes cross-correlation
+> definitions. Layer normalization's epsilon is an explicit scalar of the
+> operand dtype, consumed at its stored value without an implicit default;
+> the trailing hidden extent is positive. Conv computes cross-correlation
 > without flipping the kernel, for every positive spatial rank r. Input and
 > kernel have rank r+2; the first two axes are batch/input-channel and
 > output-channel/input-channel respectively. Spatial axis j in the input
@@ -2971,7 +2936,7 @@ path even though bare `round` under `grad` remains a structural
 > Adjoint: Matmul and einsum contract the upstream cotangent with the other
 > operand along the complementary axes. Convolution reverses the exact
 > gather/multiply/reduce graph. Layer normalization differentiates its
-> mean/variance and affine composition. Every path preserves shape and
+> mean/variance and affine composition, including the epsilon operand. Every path preserves shape and
 > applies spec/06's accumulation order; no identity receives an invented
 > zero adjoint.
 >
@@ -3014,7 +2979,6 @@ path even though bare `round` under `grad` remains a structural
 > Accumulator: Additive data/cotangent collisions use the exact same-dtype
 > accumulation and order specified in section 3.5 and spec/06. Replacement
 > has no numeric accumulator.
->
 
 #### Tensor ordering and selection
 
@@ -3055,7 +3019,6 @@ path even though bare `round` under `grad` remains a structural
 > Accumulator: Cumsum and trace use the accumulator and operation order of
 > [05-OP-33]; selection and split have no accumulator. Cotangent collisions
 > obey spec/06.
->
 
 #### List structure and counts
 
@@ -3093,7 +3056,6 @@ path even though bare `round` under `grad` remains a structural
 >
 > Accumulator: No forward numeric accumulator. Repeated cotangent
 > destinations use spec/06's ordered own-width combination.
->
 
 #### Higher-order List identities
 
@@ -3133,7 +3095,6 @@ path even though bare `round` under `grad` remains a structural
 > Accumulator: Fold and scan retain A at each step; each numeric callback
 > result finalizes at its own declared dtype before becoming the next state.
 > Cotangent combination follows spec/06's order.
->
 
 #### Dictionary identities
 
@@ -3171,7 +3132,6 @@ path even though bare `round` under `grad` remains a structural
 >
 > Accumulator: No forward numeric accumulator. Shared value cotangents
 > combine at their declared widths under spec/06.
->
 
 #### List/tensor conversion
 
@@ -3216,7 +3176,6 @@ path even though bare `round` under `grad` remains a structural
 > differentiated data structurally rejects under spec/06.
 >
 > Accumulator: None.
->
 
 #### String identities
 
@@ -3242,7 +3201,6 @@ path even though bare `round` under `grad` remains a structural
 > Adjoint: These string operations structurally reject differentiation; no numeric cotangent is fabricated.
 >
 > Accumulator: None.
->
 
 #### Explicit text parsers
 
@@ -3335,7 +3293,6 @@ path even though bare `round` under `grad` remains a structural
 > Adjoint: CSV parsing and text access structurally reject differentiation.
 >
 > Accumulator: None.
->
 
 #### Tensor concatenation
 
@@ -3362,7 +3319,6 @@ path even though bare `round` under `grad` remains a structural
 > zero cotangent; integer/bool differentiated data structurally rejects.
 >
 > Accumulator: Only checked int64 metadata addition; no forward numeric element accumulator.
->
 
 #### Checked cast identity
 
@@ -3389,8 +3345,6 @@ path even though bare `round` under `grad` remains a structural
 > differentiation.
 >
 > Accumulator: None.
->
-
 
 ## 4. Standard Lowerings (Tier 2 → Tier 1)
 
@@ -3402,16 +3356,23 @@ matmul(A: tensor[..., i, j, p], B: tensor[..., j, k, p],
        → tensor[..., i, k, p]
 ```
 
-Lowering:
+First align the leading batch axes explicitly: prepend missing axes with
+`insert`, then use `expand` only on an existing extent of one whose target
+extent differs. Incompatible non-unit extents are rejected. Let `b` be the
+number of aligned batch axes, and `acc` the resolved accumulator precision.
+The graph uses zero-based axis indices (int32) and int64 extents:
+
 ```
-1. A_expanded = expand(A, [..., i, j, 1])      ;; add dimension for k
-2. B_expanded = expand(B, [..., 1, j, k])      ;; add dimension for i
-3. product    = mul(A_expanded, B_expanded)     ;; [..., i, j, k]
-4. result     = sum(product, axis=-2,           ;; [..., i, k] — sum over j
-                    accumulator=acc)             ;; in `acc` precision
-5. (optional) result = cast(result, p)          ;; downcast back to operand
-                                                 ;; precision when acc != p
+1. A_expanded = insert(A, b+2, k)             ;; [..., i, j, k]
+2. B_expanded = insert(B, b, i)               ;; [..., i, j, k]
+3. product = mul(A_expanded, B_expanded)
+4. accumulated = sum(product, axis=b+1, accumulator=acc) ;; [..., i, k, acc]
+5. result = cast(accumulated, p)             ;; identity when acc == p
 ```
+
+Step 4 denotes the IR reduction, whose output dtype is its accumulator;
+step 5 restores the declared matrix result dtype. `insert` introduces and
+replicates a new axis; `expand` only broadcasts an existing unit axis.
 
 This is the Einstein summation form. The lowering's step-4 `sum` is
 [05-OP-30]'s canonical balanced tree, so `matmul`'s result bits are
@@ -3443,7 +3404,7 @@ rationale are in `spec/04-type-system.md` §5.7.1.
 
 Integer matmul (operands of `int8` / `int16` / `int32` / `int64`) is not
 admitted in the active matmul signature; see `spec/04-type-system.md` §5.7.2
-for rationale. Use `reduce_sum` over an explicit `expand`+`mul` lowering for
+for rationale. Use `reduce_sum` over an explicit `insert`+`mul` lowering for
 integer inner products.
 
 ### 4.2 Softmax
@@ -3452,53 +3413,70 @@ integer inner products.
 softmax(x: tensor[D, p], axis: int) → tensor[D, p]
 ```
 
-Lowering:
+Normalize the selected axis to its nonnegative index `a`; let
+`extent = shape(x,a)`. Restore a reduced axis by inserting it at that same
+position, including when it is not the trailing axis:
+
 ```
-1. m = max_reduce(x, axis)                      ;; numerical stability
-2. m_expanded = expand(m, x.shape)              ;; broadcast max back
-3. shifted = sub(x, m_expanded)                 ;; x - max(x)
-4. e = exp(shifted)                             ;; exp(x - max(x))
-5. s = sum(e, axis)                             ;; sum of exponentials
-6. s_expanded = expand(s, x.shape)              ;; broadcast sum back
-7. result = div(e, s_expanded)                  ;; normalize
+1. m = max_reduce(x, a)
+2. m_expanded = insert(m, a, extent)
+3. shifted = sub(x, m_expanded)
+4. e = exp(shifted)
+5. s = sum(e, a)
+6. s_expanded = insert(s, a, extent)
+7. result = div(e, s_expanded)
 ```
 
 ### 4.3 Cross-Entropy Loss
 
 ```
-cross_entropy(logits: tensor[batch, classes, p], labels: tensor[batch, int32]) → tensor[batch, p]
+cross_entropy(logits: tensor[batch, classes, p], labels: tensor[batch, i_signed]) → tensor[batch, p]
 ```
 
 Lowering:
 ```
-1. log_probs = log(softmax(logits, axis=-1))    ;; log-softmax
-2. gathered  = gather(log_probs, labels, axis=-1) ;; select correct class
-3. result    = neg(gathered)                     ;; negate
+1. log_probs = log(softmax(logits, 1))
+2. selected = gather(log_probs, labels, 1)    ;; [batch, batch]
+3. paired = diagonal(selected, 0, 1)          ;; [batch]: log_probs[b, labels[b]]
+4. result = neg(paired)
 ```
 
-Note: Surf-level `gather` is specified to decompose further into combinations of
-`reshape`, `expand`, `mul`, and `sum` using one-hot encoding. The compiler may
-special-case this pattern for efficiency by replacing it with the specialized
-`RiscOp::Gather` / `RiscOp::ScatterAdd` sparse nodes before codegen.
+`i_signed` is any active signed-integer dtype. Labels must be in `[0,classes)` and the classes extent must be positive.
+The diagonal couples each label to its own batch row. A fused selection may
+avoid materializing the intermediate matrix only while preserving these
+exact values, bounds failures, and adjoints. `gather` has [05-OP-52]'s direct
+selection contract; one-hot arithmetic is not an equivalent definition for
+unselected nonfinite values.
 
 ### 4.4 Layer Normalization
 
 ```
-layer_norm(x: tensor[..., hidden, p], gamma: tensor[hidden, p], beta: tensor[hidden, p]) → tensor[..., hidden, p]
+layer_norm(x: tensor[..., hidden, p], gamma: tensor[hidden, p],
+           beta: tensor[hidden, p], epsilon: p) → tensor[..., hidden, p]
 ```
 
-Lowering:
+`epsilon` is an explicit float scalar of dtype `p`, with no implicit value.
+Its stored value participates in the graph under the ordinary float rules,
+including nonfinite values. Let `a` be the input's trailing axis and
+`hidden = shape(x,a)`, which must be positive.
+
 ```
-1. m = mean(x, axis=-1)                         ;; mean over last dim
-2. m_exp = expand(m, x.shape)
+1. m = mean(x, a)
+2. m_exp = insert(m, a, hidden)
 3. centered = sub(x, m_exp)
-4. var = mean(mul(centered, centered), axis=-1)  ;; variance
-5. var_exp = expand(var, x.shape)
-6. normed = div(centered, sqrt(add(var_exp, const(eps))))  ;; normalize
-7. gamma_exp = expand(gamma, x.shape)
-8. beta_exp = expand(beta, x.shape)
-9. result = add(mul(normed, gamma_exp), beta_exp)  ;; scale and shift
+4. var = mean(mul(centered, centered), a)
+5. var_exp = insert(var, a, hidden)
+6. normed = div(centered, sqrt(add(var_exp, epsilon_exp)))
+7. result = add(mul(normed, gamma_exp), beta_exp)
 ```
+
+Here `gamma_exp` and `beta_exp` are constructed by inserting each input
+leading axis before the affine parameter's trailing axis, in input order,
+with its exact `shape(x,axis)` extent. Construct `epsilon_exp` from
+`scalar_to_tensor(epsilon)` by inserting all input axes in order with those
+same extents. All three operands then have exactly `x`'s shape; no implicit
+scalar or tensor broadcasting is part of the recipe. Differentiation
+reverses this graph for the input, both affine parameters, and epsilon.
 
 ### 4.5 Convolution
 
@@ -3538,33 +3516,52 @@ adjoint contract. Specialization does not create a public rank-named builtin.
 ### 4.6 Embedding
 
 ```
-embedding(indices: tensor[batch, seq, int32], table: tensor[vocab, dim, p]) → tensor[batch, seq, dim, p]
+embedding(indices: tensor[..index_axes, i], table: tensor[vocab, ..entry_axes, p])
+  → tensor[..index_axes, ..entry_axes, p]
 ```
 
-Lowering via one-hot + matmul:
-```
-1. one_hot = ... (indices to one-hot via const + eq + expand)
-2. result = matmul(one_hot, table)
-```
-
-Or via gather (which itself lowers further).
+Here `i` is any active signed-integer dtype and `p` is any active tensor
+element dtype. The index axes and entry axes are independent rank spreads.
+The graph is exactly `gather(table, indices, 0)`: each index selects one
+table entry without arithmetic on its stored values. Out-of-range indices
+fail under [05-OP-52]. The float-table adjoint scatters and accumulates
+cotangents under that atom; indices have zero cotangent. A one-hot matrix
+contraction is not equivalent: zero times an unselected NaN or infinity can
+change the selected result.
 
 ### 4.7 Multi-Head Attention
 
 ```
-multi_head_attention(q, k, v: tensor[batch, heads, seq, dim, p],
-                     mask: tensor[batch, 1, seq, seq, bool])
-  → tensor[batch, heads, seq, dim, p]
+multi_head_attention(q: tensor[..batch, queries, key_dim, p],
+                     k: tensor[..batch, keys, key_dim, p],
+                     v: tensor[..batch, keys, value_dim, p],
+                     mask: tensor[..batch, queries, keys, bool], scale: p)
+  → tensor[..batch, queries, value_dim, p]
 ```
 
-Lowering:
+The leading axes are explicit matching batch axes, including any authored
+head axes; query count, key count, and value width need not coincide.
+`scale` is an explicit scalar of the shared active float dtype. A caller
+choosing inverse-square-root scaling supplies that value at its declared
+dtype. The mask has the score shape; a shared mask is aligned explicitly
+with `insert` or unit-axis `expand` before this composition.
+
 ```
-1. scale = const(1.0 / sqrt(dim))
-2. scores = mul(matmul(q, permute(k, [0,1,3,2])), scale)  ;; Q @ K^T / sqrt(d)
-3. masked = where mask is false, replace with -inf         ;; via mul + add with mask
-4. weights = softmax(scores, axis=-1)
-5. output = matmul(weights, v)
+1. k_transposed = permute(k, (...batch_axes, last_axis, second_last_axis))
+2. raw_scores = matmul(q, k_transposed)
+3. scores = mul(raw_scores, scale_exp)
+4. masked = where(mask, scores, negative_infinity_exp)
+5. weights = softmax(masked, last_axis)
+6. output = matmul(weights, v)
 ```
+
+The permutation is an explicit tuple of every axis, exchanging only the
+last two. `scale_exp` and `negative_infinity_exp` insert all score axes into
+rank-zero tensors containing the supplied scale and dtype negative infinity.
+`where` selects values with a bool condition under [05-OP-53]; it performs
+no mask-to-number conversion or multiply/add masking. A fully masked row
+follows the ordinary nonfinite softmax graph; it does not acquire a default
+zero result.
 
 ---
 

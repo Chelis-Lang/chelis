@@ -1661,7 +1661,13 @@ those normative amendments; numerical-kind restrictions remain controlling.
 The accompanying contract mutations guard the expanded domains and exact
 metadata signatures. The changed [05-OP-38] and region digests identify the
 amended contract, and the oracle now executes the generalized convolution
-checker and evaluation/C tests as supporting behavior evidence.
+checker and evaluation/C tests as supporting behavior evidence. The section-4
+recipe corrections replace obsolete axis insertion and arithmetic selection
+with their controlling primitives. Layer normalization's epsilon is explicit
+and typed; scalar kernel inputs preserve every active scalar dtype through
+the existing tagged carrier. The whitespace cleanup removes empty quote tails
+and duplicate separators without changing normative block membership; the
+affected atom and region digests are recomputed from that exact text.
 
 The same change extends the frozen Phase 3 example corpus with
 `explicit_normalization.ch` and its executable eval/C parity row. The
@@ -2465,6 +2471,8 @@ The standalone schema-1 receipt is
 committed source bytes before and after execution and records actual selected
 and passed case identities, including negative and mutation obligations.
 A zero-match, skipped, duplicate, stale, or failed execution cannot pass.
+The existing #1296 composite manifest registers this exact child command and
+PASS marker; its other unresolved prerequisites still fail closed.
 
 This prerequisite's release exit is semantic membership closure. It does not
 certify Table A/B target cells, all builtin behavior across lanes, or the
@@ -2477,11 +2485,25 @@ migrated together; there is no public `conv2d` compatibility identity. The
 static lowering builds a window matrix in the contract's channel/kernel
 order and performs one contraction across its full reduction axis. Numerical
 checks cover evaluation and compiled C at spatial ranks one through three
-and all four float dtypes, plus the input adjoint of overlapping windows.
+and all four float dtypes, the input and kernel adjoints of overlapping
+windows, and zero input-channel, batch, and output-channel extents at every
+float dtype. Accumulator-typed reductions and explicit result casts preserve
+the storage dtype even when an empty graph stays in RISC.
 They do not establish dynamic-shape, accelerator, or full higher-order AD
 conformance. Runtime metadata and symbolic extents still require the checker
 and target capability work owned by #731 and #730; literal-only lowering is
 an implementation gap, not a restriction on the normative signature.
+
+Layer normalization takes an explicit same-dtype scalar epsilon through the
+checker, graph, evaluator, and generated C. Tests compare nondefault epsilon
+values at all four float widths and exercise its adjoint. Standard section-4
+recipes use `insert` for new axes, pair batch labels with a diagonal, and use
+`gather`/`where` for selection without arithmetic on unselected NaNs or
+infinities. These controls are included in the closure oracle's selected Rust
+binaries; they do not imply full recipe conformance on every backend.
+The nontrailing softmax test executes f64 in the evaluator and asserts the
+existing C `max_reduce` Unimplemented disposition (#729); its other three
+float widths execute in both lanes.
 
 The same authority audit generalizes [05-OP-57]'s `to_list` to recursively
 nested Lists for every positive tensor rank and [05-OP-38]'s `tensor_scan`

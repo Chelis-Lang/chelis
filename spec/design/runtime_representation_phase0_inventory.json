@@ -2309,10 +2309,6 @@
       "sample": "{}int64_t {shape_name}[{}] = {{ {} }};"
     },
     {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_tensor_call",
-      "sample": "((int8_t*){tensor_name}_write.data)[0] = {value_name};"
-    },
-    {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::emit_sparse_gather_summary_body",
       "sample": "{} int64_t {target}_g = (chelis_host_tensor_dtype({indices_ct}) == CHELIS_DTYPE_I64) ? (int64_t)(..."
     },

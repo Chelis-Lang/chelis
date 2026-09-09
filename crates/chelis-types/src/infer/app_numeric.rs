@@ -133,8 +133,12 @@ pub(super) fn operand_dtype_rejection(
     }
 
     let ok = match fname {
-        "matmul" | "layer_norm" => {
+        "matmul" => {
             matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
+        }
+        "layer_norm" => {
+            matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
+                || matches!(resolved, Type::Prim(prim) if prim.is_float())
         }
         "add" | "mul" | "sub" | "max_elem" | "min_elem" | "neg" | "floor_div" | "floor"
         | "ceil" | "round" => {

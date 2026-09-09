@@ -2168,12 +2168,13 @@ pub fn builtin_env() -> (Env, VarGen) {
         env.bind(name.to_string(), scheme);
     }
 
-    fn tensor_triop_return_first(name: &str, env: &mut Env, vg: &mut VarGen) {
+    fn tensor_layer_norm(name: &str, env: &mut Env, vg: &mut VarGen) {
         let t1 = vg.fresh_tvar();
         let t2 = vg.fresh_tvar();
         let t3 = vg.fresh_tvar();
+        let epsilon = vg.fresh_tvar();
         let scheme = Scheme {
-            tvars: vec![t1, t2, t3],
+            tvars: vec![t1, t2, t3, epsilon],
             tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
@@ -2182,6 +2183,7 @@ pub fn builtin_env() -> (Env, VarGen) {
                     borrowed(Type::Var(t1)),
                     borrowed(Type::Var(t2)),
                     borrowed(Type::Var(t3)),
+                    borrowed(Type::Var(epsilon)),
                 ],
                 Box::new(Type::Var(t1)),
             ),
@@ -2626,7 +2628,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_reduce_to_out("mean", &mut env, &mut vg);
 
     tensor_binop_to_out("matmul", &mut env, &mut vg);
-    tensor_triop_return_first("layer_norm", &mut env, &mut vg);
+    tensor_layer_norm("layer_norm", &mut env, &mut vg);
     tensor_conv("conv", &mut env, &mut vg);
     tensor_reduce_to_out("sum", &mut env, &mut vg);
     tensor_reduce_to_out("count", &mut env, &mut vg);

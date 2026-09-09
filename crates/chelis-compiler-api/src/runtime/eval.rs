@@ -4,7 +4,7 @@ use std::fs;
 
 use chelis_deep::ast::{Atom, Expr, List};
 use chelis_deep::{Span, decode_effect_kind};
-use chelis_ir::dag::{DimInfo, NodeId, RiscOp};
+use chelis_ir::dag::{DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::host::{HostDefKernel, RandomLoweringState, host_def_kernel};
 use chelis_ir::tier2;
@@ -2941,9 +2941,33 @@ impl<'a> EvalContext<'a> {
                 let x = expect_tensor_arg(args, 0)?;
                 let gamma = expect_tensor_arg(args, 1)?;
                 let beta = expect_tensor_arg(args, 2)?;
+                let epsilon = match args.get(3) {
+                    Some(RuntimeValue::Scalar(value)) if value.dtype() == x.precision => {
+                        value.value()
+                    }
+                    Some(RuntimeValue::Tensor(value))
+                        if value.precision == x.precision && value.value.shape.is_empty() =>
+                    {
+                        value.value.storage().scalar_at(0)
+                    }
+                    _ => {
+                        return Err(
+                            "layer_norm epsilon must be a scalar of the operand dtype".to_string()
+                        );
+                    }
+                };
                 eval_composed_triop(&x, &gamma, &beta, |dag, x_id, gamma_id, beta_id, tys| {
+                    let epsilon_id = dag.add_node(
+                        RiscOp::Const { value: epsilon },
+                        vec![],
+                        TensorType {
+                            dims: vec![],
+                            precision: epsilon.prim(),
+                        },
+                        None,
+                    );
                     tier2::lower_layer_norm(
-                        dag, x_id, gamma_id, beta_id, tys.0, tys.1, tys.2, 1e-5, None,
+                        dag, x_id, gamma_id, beta_id, tys.0, tys.1, tys.2, epsilon_id, None,
                     )
                 })
                 .map(RuntimeValue::Tensor)

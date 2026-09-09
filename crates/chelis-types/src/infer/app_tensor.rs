@@ -12,8 +12,8 @@ pub(super) fn check_layer_norm_signature(
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) -> Type {
-    if arg_tys.len() != 3 {
-        return report_builtin_arity_bare(errors, "layer_norm", "3 arguments", arg_tys.len());
+    if arg_tys.len() != 4 {
+        return report_builtin_arity_bare(errors, "layer_norm", "4 arguments", arg_tys.len());
     }
 
     let x_ty = type_for_readonly_check(&arg_tys[0], subst);
@@ -117,7 +117,34 @@ pub(super) fn check_layer_norm_signature(
         );
     }
 
+    if let TensorPrec::Concrete(prim) = x_prec {
+        if !prim.is_float() {
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::PrecisionMismatch,
+                    "layer_norm requires one active float dtype".to_string(),
+                    vec![],
+                ),
+            );
+        }
+        let epsilon_ty = type_for_readonly_check(&arg_tys[3], subst);
+        if let Err(error) = unify(&epsilon_ty, &Type::Prim(prim), subst) {
+            return report(errors, error.into());
+        }
+    }
+
     let hidden_dim = x_dims.last().cloned().expect("checked non-empty");
+    if subst.apply_dim(&hidden_dim) == Dim::Lit(0) {
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                "layer_norm requires a positive hidden extent".to_string(),
+                vec![],
+            ),
+        );
+    }
     if let Err(te) = unify_dim(&hidden_dim, &gamma_dims[0], subst) {
         return report(errors, te.into());
     }
