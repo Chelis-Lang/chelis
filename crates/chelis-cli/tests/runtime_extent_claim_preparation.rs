@@ -342,7 +342,7 @@ fn receipt(stage: &str, output: &std::process::Output) -> Value {
         "stderr":String::from_utf8_lossy(&output.stderr).trim()})
 }
 
-fn driver(inputs: &[Input]) -> (String, Vec<String>) {
+fn driver(inputs: &[Input], header: &str) -> (String, Vec<String>) {
     let mut text = String::from(
         "\n#include <stdio.h>\n#include <stdlib.h>\nint main(int argc, char **argv) {\n(void)argc;\n(void)argv;\n",
     );
@@ -371,7 +371,22 @@ fn driver(inputs: &[Input]) -> (String, Vec<String>) {
         .map(|i| format!("a{i}"))
         .collect::<Vec<_>>()
         .join(",");
-    text.push_str(&format!("chelis_tensor *result = f({args});\n"));
+    if header.lines().any(|line| line.starts_with("chelis_tensor* f(")) {
+        text.push_str(&format!("chelis_tensor *result = f({args});\n"));
+    } else {
+        // A single pure tensor definition is exported through the named
+        // kernel ABI. Exercise that public entry rather than inventing a
+        // host wrapper which the compiler did not emit.
+        assert_eq!(
+            header.trim(),
+            "void fixture(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);",
+            "unknown exported fixture ABI"
+        );
+        text.push_str(&format!(
+            "chelis_tensor *inputs[] = {{{args}}};\nchelis_tensor *result = NULL;\nfixture(inputs, {}, &result, 1);\n",
+            inputs.len()
+        ));
+    }
     text.push_str(
         r#"printf("out = tensor(shape=[");
 for (int32_t axis = 0; axis < chelis_tensor_rank(result); ++axis) {
@@ -466,7 +481,8 @@ fn observe(case: &Case) -> Value {
                 !source.contains("int main("),
                 "export fixture unexpectedly contains an entry"
             );
-            let (driver, args) = driver(inputs);
+            let header = fs::read_to_string(out.join("fixture.h")).expect("exported header");
+            let (driver, args) = driver(inputs, &header);
             source.push_str(&driver);
             fs::write(&c_path, &source).expect("append exported runtime caller");
             args
@@ -1154,5 +1170,191 @@ fn helper_signature_guard_order_contract() {
         failures.extend(contract_failures(case, &observed));
     }
     assert_eq!(fixtures.len(), 44);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// #1686/#1687 retain the original #1375/#597/#1619 host exits. These
+/// expectations come from section 4.7 and [05-MOV-1], never from lane agreement.
+#[test]
+fn omitted_extent_claim_contract() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut fixtures = Vec::new();
+    {
+        let mut add =
+            |family: &str, issue, def: &str, signature, inputs, expected, main_signature: &str| {
+                let mut routes = Vec::new();
+                call_matrix(&mut routes, family, issue, def, signature, inputs, expected);
+                for case in routes {
+                    let main = case
+                        .source
+                        .contains("def main()")
+                        .then(|| main_signature.to_owned());
+                    fixtures.push((case, main));
+                }
+            };
+        for (kind, claim, signature) in [
+            ("named", "n", "(tensor[d0, f32]) -> tensor[d0, 2, f32]"),
+            ("literal", "2", "(tensor[d0, f32]) -> tensor[2, 2, f32]"),
+        ] {
+            for n in [4, 6] {
+                let expected = match (kind, n) {
+                    ("literal", 4) => Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]),
+                    ("literal", 6) => Expected::Domain("reshape", &["claimed = 2", "axis 0 = 3"]),
+                    ("named", 4) => Expected::Domain("reshape", &["claimed = 4", "axis 0 = 2"]),
+                    ("named", 6) => Expected::Domain("reshape", &["claimed = 6", "axis 0 = 3"]),
+                    _ => unreachable!(),
+                };
+                let main_extent = if kind == "literal" { 2 } else { n };
+                for (form, body) in [
+                    (
+                        "direct",
+                        "reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])",
+                    ),
+                    (
+                        "alias",
+                        "{\n  k = floor_div(shape(x, 0i32), 2i64)\n  target = k\n  reshape(x, [target, 2i64])\n}",
+                    ),
+                ] {
+                    add(
+                        &format!("omitted.reshape.{kind}.{form}.x{n}"),
+                        1686,
+                        &format!("def f(x: tensor[n, f32]) -> tensor[{claim}, 2, f32] = {body}"),
+                        signature,
+                        vec![vector(n)],
+                        expected.clone(),
+                        &format!("() -> tensor[{main_extent}, 2, f32]"),
+                    );
+                }
+                let g = format!(
+                    "def g(x: tensor[n, f32]) -> tensor[{claim}, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])"
+                );
+                add(
+                    &format!("omitted.reshape.{kind}.nested.x{n}"),
+                    1686,
+                    &format!("{g}\ndef f(x: tensor[n, f32]) -> tensor[{claim}, 2, f32] = g(x)"),
+                    signature,
+                    vec![vector(n)],
+                    expected.clone(),
+                    &format!("() -> tensor[{main_extent}, 2, f32]"),
+                );
+                add(
+                    &format!("omitted.reshape.{kind}.discarded.x{n}"),
+                    1686,
+                    &format!(
+                        "{g}\ndef f(x: tensor[n, f32]) -> tensor[n, f32] = {{\n  _ = g(x)\n  x\n}}"
+                    ),
+                    "(tensor[d0, f32]) -> tensor[d0, f32]",
+                    vec![vector(n)],
+                    if kind == "literal" && n == 4 {
+                        Expected::Tensor(vec![4], vec![1.0, 2.0, 3.0, 4.0])
+                    } else {
+                        expected
+                    },
+                    &format!("() -> tensor[{n}, f32]"),
+                );
+            }
+        }
+        // A named claim can agree with independently computed arithmetic.
+        // Retain the operation, rather than replacing it with a literal reshape.
+        for n in [4, 6] {
+            add(
+                &format!("omitted.reshape.named.match.x{n}"),
+                1686,
+                "def f(x: tensor[n, f32]) -> tensor[n, 1, f32] = reshape(x, [floor_div(shape(x, 0i32), 1i64), 1i64])",
+                "(tensor[d0, f32]) -> tensor[d0, 1, f32]",
+                vec![vector(n)],
+                Expected::Tensor(vec![n, 1], (1..=n).map(|v| v as f64).collect()),
+                &format!("() -> tensor[{n}, 1, f32]"),
+            );
+        }
+        for good in [true, false] {
+            let b = Input {
+                dims: vec![if good { 1 } else { 2 }],
+                values: if good { vec![5.0] } else { vec![5.0, 6.0] },
+            };
+            let mismatch = Expected::Domain("load", &["claimed = 1", "b axis 0 = 2"]);
+            for (form, body) in [
+                ("literal", "expand(b, 0i32, 3i64)"),
+                ("let", "{\n  k = 3i64\n  expand(b, 0i32, k)\n}"),
+                (
+                    "alias",
+                    "{\n  operand = b\n  alias = operand\n  expand(alias, 0i32, 3i64)\n}",
+                ),
+            ] {
+                add(
+                    &format!("omitted.unit.{form}"),
+                    1687,
+                    &format!("def f(b: tensor[unit, f32]) -> tensor[3, f32] = {body}"),
+                    "(tensor[unit, f32]) -> tensor[3, f32]",
+                    vec![b.clone()],
+                    if good {
+                        Expected::Tensor(vec![3], vec![5.0; 3])
+                    } else {
+                        mismatch.clone()
+                    },
+                    "() -> tensor[3, f32]",
+                );
+            }
+            let g = "def g(b: tensor[unit, f32], xs: tensor[n, f32]) -> tensor[n, f32] = mul(xs, expand(b, 0i32, shape(xs, 0i32)))";
+            for (form, def, discarded) in [
+                ("shape", g.replace("def g(", "def f("), false),
+                (
+                    "nested",
+                    format!(
+                        "{g}\ndef f(b: tensor[unit, f32], xs: tensor[n, f32]) -> tensor[n, f32] = g(b, xs)"
+                    ),
+                    false,
+                ),
+                (
+                    "discarded",
+                    format!(
+                        "{g}\ndef f(b: tensor[unit, f32], xs: tensor[n, f32]) -> tensor[n, f32] = {{\n  _ = g(b, xs)\n  xs\n}}"
+                    ),
+                    true,
+                ),
+            ] {
+                add(
+                    &format!("omitted.unit.{form}"),
+                    1687,
+                    &def,
+                    "(tensor[unit, f32], tensor[d0, f32]) -> tensor[d0, f32]",
+                    vec![b.clone(), vector(3)],
+                    if good {
+                        Expected::Tensor(
+                            vec![3],
+                            if discarded {
+                                vec![1.0, 2.0, 3.0]
+                            } else {
+                                vec![5.0, 10.0, 15.0]
+                            },
+                        )
+                    } else {
+                        mismatch.clone()
+                    },
+                    "() -> tensor[3, f32]",
+                );
+            }
+        }
+    }
+    assert_eq!(
+        fixtures.len(),
+        90,
+        "three routes for every positive/negative operation form"
+    );
+    let mut failures = Vec::new();
+    for (case, main_signature) in &fixtures {
+        let observation = observe(case);
+        println!("{}: {}", case.id, observation);
+        failures.extend(contract_failures(case, &observation));
+        if let Some(expected) = main_signature {
+            let observed = &observation["check"]["signatures"]["main"];
+            if observed != expected {
+                failures.push(format!(
+                    "{}.main.signature: expected {expected}, observed {observed}",
+                    case.id
+                ));
+            }
+        }
+    }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
