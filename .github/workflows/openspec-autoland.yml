@@ -140,9 +140,20 @@ jobs:
       # `administration` key, so GITHUB_TOKEN can never hold it. The worker
       # discovers the required contexts through `GET .../branches/{branch}`,
       # which needs only `contents: read` and carries the same data.
+      #
+      # `checks: read` is what lets the worker read the results at all.
+      # `GET .../commits/{sha}/check-runs` needs the `checks` permission,
+      # and `statuses: read` covers the commit-status half of the same
+      # read. Their absence is not obvious from a log: discovery of the
+      # required contexts succeeds and prints all of them, and the 403
+      # arrives only when the first result is fetched, so it reads as a
+      # working worker that failed for no stated reason. That is exactly
+      # how the first hosted merge attempt failed.
       actions: read
+      checks: read
       contents: write
       pull-requests: write
+      statuses: read
     steps:
       - name: Check out the trusted base revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
