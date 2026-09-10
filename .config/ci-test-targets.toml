@@ -3,6 +3,14 @@
 version = 1
 
 [[target]]
+package = "chelis-compiler-api"
+name = "issue_1741_scalar_gradient_api"
+
+[[target]]
+package = "chelis-cli"
+name = "issue_1741_scalar_gradient_cli"
+
+[[target]]
 package = "chelis-deep"
 name = "roundtrip"
 

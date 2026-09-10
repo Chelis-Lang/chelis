@@ -14,12 +14,14 @@ use super::*;
 
 enum ArgRepack {
     Tensor,
+    Scalar(Prim),
     Structured { shape: GradListShape },
 }
 
 #[derive(Clone)]
 enum GradListShape {
     Leaf,
+    ScalarLeaf(Prim),
     Unit,
     List(Vec<GradListShape>),
     Tuple(Vec<GradListShape>),
@@ -33,34 +35,72 @@ enum GradListShape {
 impl GradListShape {
     fn leaf_count(&self) -> usize {
         match self {
-            Self::Leaf => 1,
+            Self::Leaf | Self::ScalarLeaf(_) => 1,
             Self::Unit => 0,
             Self::List(items) | Self::Tuple(items) => items.iter().map(Self::leaf_count).sum(),
             Self::Adt { fields, .. } => fields.iter().map(Self::leaf_count).sum(),
         }
     }
 
-    fn repack(&self, leaves: &mut impl Iterator<Item = RuntimeValue>) -> RuntimeValue {
-        match self {
+    fn repack(
+        &self,
+        leaves: &mut impl Iterator<Item = RuntimeValue>,
+    ) -> Result<RuntimeValue, String> {
+        Ok(match self {
             Self::Leaf => leaves.next().expect("gradient leaf count checked above"),
+            Self::ScalarLeaf(prim) => repack_scalar_gradient(
+                leaves.next().expect("gradient leaf count checked above"),
+                *prim,
+            )?,
             Self::Unit => RuntimeValue::Unit,
-            Self::List(items) => {
-                RuntimeValue::List(items.iter().map(|item| item.repack(leaves)).collect())
-            }
-            Self::Tuple(items) => {
-                RuntimeValue::Tuple(items.iter().map(|item| item.repack(leaves)).collect())
-            }
+            Self::List(items) => RuntimeValue::List(
+                items
+                    .iter()
+                    .map(|item| item.repack(leaves))
+                    .collect::<Result<_, _>>()?,
+            ),
+            Self::Tuple(items) => RuntimeValue::Tuple(
+                items
+                    .iter()
+                    .map(|item| item.repack(leaves))
+                    .collect::<Result<_, _>>()?,
+            ),
             Self::Adt {
                 ctor,
                 field_names,
                 fields,
             } => RuntimeValue::Adt {
                 ctor: ctor.clone(),
-                fields: fields.iter().map(|field| field.repack(leaves)).collect(),
+                fields: fields
+                    .iter()
+                    .map(|field| field.repack(leaves))
+                    .collect::<Result<_, _>>()?,
                 field_names: field_names.clone(),
             },
-        }
+        })
     }
+}
+
+/// spec/06 §2.1 gives a float scalar the same scalar cotangent type. The
+/// DAG uses rank-zero tensors for both kinds, so retain the typed primal's
+/// carrier distinction before marshalling and restore it after evaluation.
+/// Read the finalized tagged element directly: this is not a numeric cast.
+fn repack_scalar_gradient(value: RuntimeValue, prim: Prim) -> Result<RuntimeValue, String> {
+    let RuntimeValue::Tensor(tensor) = value else {
+        return Err("host runtime: scalar gradient root is not a DAG tensor".into());
+    };
+    if !tensor.value.shape.is_empty() || tensor.value.len() != 1 || tensor.value.prim() != prim {
+        return Err(format!(
+            "host runtime: scalar gradient expected one rank-zero {} result, got rank {} with {} elements at {}",
+            prim.name(),
+            tensor.value.shape.len(),
+            tensor.value.len(),
+            tensor.value.prim().name()
+        ));
+    }
+    Ok(RuntimeValue::from_scalar_value(
+        tensor.value.storage().scalar_at(0),
+    ))
 }
 
 impl<'a> EvalContext<'a> {
@@ -95,7 +135,7 @@ impl<'a> EvalContext<'a> {
         // pytree of every wrt-selected target's fields, concatenated in
         // parameter order); each plan slot says how many of those flat
         // roots the target owns and what structure to fold them back into
-        // (a bare tensor, or a recursive List/tuple/ADT value). This is the
+        // (a scalar, a tensor, or a recursive List/tuple/ADT value). This is the
         // eval-lane twin of the IR lowering's `GradResultPlan` list. Only
         // wrt-selected differentiable targets get a slot; a non-selected
         // or non-differentiable argument still marshals its placeholders
@@ -234,8 +274,8 @@ impl<'a> EvalContext<'a> {
             placeholder_names.push(placeholder);
             placeholder_types.push(tensor_type.clone());
             // chelis#520 D2: a wrt-selected float tensor/scalar argument owns
-            // one gradient root, packed back as a bare tensor. A non-float or
-            // non-selected argument owns none (matching the IR lowering's
+            // one gradient root, packed back with its original carrier. A
+            // non-float or non-selected argument owns none (matching the IR lowering's
             // `is_selected_wrt`), so it gets no repack slot even though its
             // placeholder is still marshalled (the body may read it).
             if matches!(kind, TransformKind::Grad) {
@@ -245,7 +285,10 @@ impl<'a> EvalContext<'a> {
                         .as_ref()
                         .is_none_or(|indices| indices.contains(&index));
                 if selected {
-                    arg_repacks.push(ArgRepack::Tensor);
+                    arg_repacks.push(match value {
+                        RuntimeValue::Scalar(payload) => ArgRepack::Scalar(payload.dtype()),
+                        _ => ArgRepack::Tensor,
+                    });
                 }
             }
         }
@@ -365,14 +408,14 @@ impl<'a> EvalContext<'a> {
                 let mut no_leaves = std::iter::empty();
                 let mut empty_slots = arg_repacks.iter().map(|slot| match slot {
                     ArgRepack::Structured { shape } => shape.repack(&mut no_leaves),
-                    ArgRepack::Tensor => {
+                    ArgRepack::Tensor | ArgRepack::Scalar(_) => {
                         unreachable!("guarded by empty List repack check")
                     }
                 });
                 return Ok(if arg_repacks.len() == 1 {
-                    empty_slots.next().expect("one empty List slot")
+                    empty_slots.next().expect("one empty List slot")?
                 } else {
-                    RuntimeValue::Tuple(empty_slots.collect())
+                    RuntimeValue::Tuple(empty_slots.collect::<Result<_, _>>()?)
                 });
             }
             let kind_label = match kind {
@@ -491,18 +534,10 @@ impl<'a> EvalContext<'a> {
             TransformKind::Vmap => "vmap",
         };
         let packed = pack_dag_roots(&dag, &roots, &values, kind_label)?;
-        // chelis#520 D2: when at least one differentiated target is an ADT,
-        // re-collapse the FLAT gradient roots into the per-argument pytree
-        // structure (the gradient of a `Box`-shaped argument is a
-        // `Box`-shaped value; a multi-target result is a tuple whose ADT
-        // slot is a field-wise gradient struct and whose tensor slot is the
-        // bare gradient). A pure-tensor grad needs no re-collapse: `packed`
-        // is already the flat tuple the pre-#520 contract specifies, and
-        // the eval-root display (chelis#614) walks it component-wise.
-        let has_structured_slot = arg_repacks
-            .iter()
-            .any(|slot| matches!(slot, ArgRepack::Structured { .. }));
-        if matches!(kind, TransformKind::Grad) && has_structured_slot {
+        // Restore every selected target's cotangent carrier and recursive
+        // shape, including scalar leaves. DAG rank alone cannot distinguish
+        // a scalar from a genuine rank-zero tensor (spec/06 §2.1).
+        if matches!(kind, TransformKind::Grad) && !arg_repacks.is_empty() {
             let flat: Vec<RuntimeValue> = match packed {
                 RuntimeValue::Tuple(items) => items,
                 single => vec![single],
@@ -519,7 +554,7 @@ impl<'a> EvalContext<'a> {
             let expected: usize = arg_repacks
                 .iter()
                 .map(|slot| match slot {
-                    ArgRepack::Tensor => 1,
+                    ArgRepack::Tensor | ArgRepack::Scalar(_) => 1,
                     ArgRepack::Structured { shape } => shape.leaf_count(),
                 })
                 .sum();
@@ -539,7 +574,11 @@ impl<'a> EvalContext<'a> {
                     ArgRepack::Tensor => {
                         slots.push(flat_iter.next().expect("count checked above"));
                     }
-                    ArgRepack::Structured { shape } => slots.push(shape.repack(&mut flat_iter)),
+                    ArgRepack::Scalar(prim) => slots.push(repack_scalar_gradient(
+                        flat_iter.next().expect("count checked above"),
+                        *prim,
+                    )?),
+                    ArgRepack::Structured { shape } => slots.push(shape.repack(&mut flat_iter)?),
                 }
             }
             return Ok(match slots.len() {
@@ -842,7 +881,10 @@ fn stage_grad_list_value(
             placeholder_types.push(tensor_type.clone());
             let differentiable = tensor_type.precision.is_float();
             let shape = if differentiable {
-                GradListShape::Leaf
+                match value {
+                    RuntimeValue::Scalar(payload) => GradListShape::ScalarLeaf(payload.dtype()),
+                    _ => GradListShape::Leaf,
+                }
             } else {
                 GradListShape::Unit
             };
@@ -1521,4 +1563,34 @@ pub(super) fn find_reachable_host_only_builtin_call(
         }
     }
     hit
+}
+
+#[cfg(test)]
+mod scalar_gradient_tests {
+    use super::*;
+
+    #[test]
+    fn scalar_repacking_preserves_declared_dtype_and_signed_zero() {
+        for prim in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+            let tensor = RuntimeTensorValue::from_wide("test", prim, vec![], vec![-0.0]).unwrap();
+            let result = repack_scalar_gradient(RuntimeValue::Tensor(tensor), prim).unwrap();
+            let RuntimeValue::Scalar(payload) = result else {
+                panic!("scalar required")
+            };
+            assert_eq!(payload.dtype(), prim);
+            assert!(payload.as_f64_lossy().is_sign_negative());
+        }
+    }
+
+    #[test]
+    fn scalar_repacking_rejects_wrong_rank_or_dtype_without_coercion() {
+        for (prim, shape, values) in [
+            (Prim::F32, vec![1], vec![1.0]),
+            (Prim::F64, vec![], vec![1.0]),
+            (Prim::F32, vec![0], vec![]),
+        ] {
+            let tensor = RuntimeTensorValue::from_wide("test", prim, shape, values).unwrap();
+            assert!(repack_scalar_gradient(RuntimeValue::Tensor(tensor), Prim::F32).is_err());
+        }
+    }
 }

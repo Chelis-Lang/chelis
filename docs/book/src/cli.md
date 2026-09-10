@@ -349,6 +349,13 @@ unsupported reason under `--tier smt-only`; `auto` may fuzz-validate them
 instead. Conditional scalar gradients and differentiated casts remain outside
 the prover subset until the compiler can build them.
 
+Scalar gradients remain scalars when consumed by another expression. For
+example, `grad(fn (x: f32) -> exp(x), wrt=x)(1.0f32) > 0.0f32` evaluates to
+`true`; an equivalent property can be checked with `--tier fuzz-only` or
+`--tier auto`. This does not permit implicit scalar/tensor comparisons:
+the gradient of a rank-zero tensor remains a tensor and needs an explicit
+`tensor_to_scalar` before a scalar comparison.
+
 Contract-backed Reef proofs resolve their implementation through the linker.
 For example, a property importing `Nautilus.Stats.quantile_vec` can request
 `std.quantile.monotonicity`; Tier B couples two calls only when their tensor
