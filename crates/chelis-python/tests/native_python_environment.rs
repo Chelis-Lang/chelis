@@ -9,18 +9,20 @@ use std::process::Command;
 fn selected_python_packages_load_with_clean_ambient_environment() {
     const WORKER: &str = "CHELIS_NATIVE_ENV_TEST_WORKER";
     if std::env::var_os(WORKER).is_none() {
-        let result = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "selected_python_packages_load_with_clean_ambient_environment",
-                "--nocapture",
-            ])
-            .env(WORKER, "1")
-            .env_remove("PYTHONPATH")
-            .env_remove("PYTHONHOME")
-            .env_remove("PYTHONUSERBASE")
-            .output()
-            .unwrap();
+        let result = support::capture::worker_output(
+            "selected_python_packages_load_with_clean_ambient_environment",
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "selected_python_packages_load_with_clean_ambient_environment",
+                    "--nocapture",
+                ])
+                .env(WORKER, "1")
+                .env_remove("PYTHONPATH")
+                .env_remove("PYTHONHOME")
+                .env_remove("PYTHONUSERBASE"),
+        )
+        .unwrap();
         assert!(
             result.status.success(),
             "{}\n{}",

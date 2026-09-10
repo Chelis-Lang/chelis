@@ -8,7 +8,11 @@ use std::process::Command;
 
 fn fixture(directory: &ArtifactDirectory) {
     let library = directory.path().join("fixture.so");
-    std::fs::write(&library, b"capture support fixture; not an executable receipt").unwrap();
+    std::fs::write(
+        &library,
+        b"capture support fixture; not an executable receipt",
+    )
+    .unwrap();
     std::fs::write(
         directory.path().join("loaded-model.json"),
         serde_json::to_vec(&serde_json::json!({"path":library,"library":"fixture.so"})).unwrap(),
@@ -73,7 +77,10 @@ fn repeated_case_instances_are_distinct_and_never_overwrite_prior_artifacts() {
     second.finish().unwrap();
     assert!(first.path().join("completion.json").is_file());
     assert!(second.path().join("completion.json").is_file());
-    assert!(first.finish().is_err(), "completion must not overwrite a receipt");
+    assert!(
+        first.finish().is_err(),
+        "completion must not overwrite a receipt"
+    );
 }
 
 #[test]
@@ -97,15 +104,18 @@ fn actual_child_failure_preserves_command_status_and_both_streams() {
     let directory = ArtifactDirectory::for_capture(root.path(), "suite", "exact_case").unwrap();
     let executable = pyo3_build_config::get().executable.as_ref().unwrap();
     let mut command = Command::new(executable);
-    command.args(["-I", "-c", "import sys; print('out'); print('err', file=sys.stderr); sys.exit(7)"]);
+    command.args([
+        "-I",
+        "-c",
+        "import sys; print('out'); print('err', file=sys.stderr); sys.exit(7)",
+    ]);
     let output = directory.command_output("compiler", &mut command).unwrap();
     assert_eq!(output.status.code(), Some(7));
     assert_eq!(output.stdout, b"out\n");
     assert_eq!(output.stderr, b"err\n");
-    let record: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(directory.path().join("compiler.json")).unwrap(),
-    )
-    .unwrap();
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(directory.path().join("compiler.json")).unwrap())
+            .unwrap();
     assert_eq!(record["returncode"], 7);
     assert_eq!(record["command"][0], executable);
     assert!(!directory.path().join("completion.json").exists());
@@ -122,17 +132,25 @@ fn snapshot_retains_original_bytes_without_extending_original_directory_lifetime
     Python::with_gil(|py| {
         let globals = PyDict::new(py);
         directory.install(py, &globals).unwrap();
-        globals.set_item("actual_path", library.to_str().unwrap()).unwrap();
+        globals
+            .set_item("actual_path", library.to_str().unwrap())
+            .unwrap();
         py.run(c"import types\nmodel = types.SimpleNamespace(path=actual_path)\n_capture_native_model(model)\ndel model", Some(&globals), None).unwrap();
         globals.clear();
     });
     drop(original);
-    assert!(!library.exists(), "capture must not preserve the original TempDir");
-    assert_eq!(std::fs::read(directory.path().join("loaded-artifacts/model.so")).unwrap(), b"snapshot helper control");
+    assert!(
+        !library.exists(),
+        "capture must not preserve the original TempDir"
+    );
+    assert_eq!(
+        std::fs::read(directory.path().join("loaded-artifacts/model.so")).unwrap(),
+        b"snapshot helper control"
+    );
     directory.finish().unwrap();
-    let record: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(directory.path().join("loaded-model.json")).unwrap(),
-    ).unwrap();
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(directory.path().join("loaded-model.json")).unwrap())
+            .unwrap();
     assert_eq!(record["path"], library.to_str().unwrap());
     assert_eq!(record["files"][0]["original"], library.to_str().unwrap());
 }

@@ -44,23 +44,26 @@ fn spec(name: &str, dims: Value) -> Value {
     json!({"name":name,"dtype":"f32","dims":dims})
 }
 fn run_case(inputs: Value, outputs: Value, body: &str) {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = support::capture::ArtifactDirectory::new().unwrap();
     let source = directory.path().join("named.c");
     let library = directory
         .path()
         .join(format!("named.{}", std::env::consts::DLL_EXTENSION));
     std::fs::write(&source, SOURCE).unwrap();
-    let compiled = Command::new("cc")
-        .args(["-std=c11", "-Wall", "-Wextra", "-Werror", "-fPIC"])
-        .arg(if cfg!(target_os = "macos") {
-            "-dynamiclib"
-        } else {
-            "-shared"
-        })
-        .arg(&source)
-        .arg("-o")
-        .arg(&library)
-        .output()
+    let compiled = directory
+        .command_output(
+            "compiler",
+            Command::new("cc")
+                .args(["-std=c11", "-Wall", "-Wextra", "-Werror", "-fPIC"])
+                .arg(if cfg!(target_os = "macos") {
+                    "-dynamiclib"
+                } else {
+                    "-shared"
+                })
+                .arg(&source)
+                .arg("-o")
+                .arg(&library),
+        )
         .unwrap();
     assert!(
         compiled.status.success(),
@@ -78,6 +81,7 @@ fn run_case(inputs: Value, outputs: Value, body: &str) {
         let native = PyModule::new(py, "native_named_dimensions").unwrap();
         chelis_python::register_module(&native).unwrap();
         let globals = PyDict::new(py);
+        directory.install(py, &globals).unwrap();
         globals.set_item("native", native).unwrap();
         globals
             .set_item("library_path", library.to_str().unwrap())
@@ -86,7 +90,7 @@ fn run_case(inputs: Value, outputs: Value, body: &str) {
 import ctypes, gc, numpy as np
 fixture = ctypes.CDLL(library_path)
 fixture.fixture_extent.argtypes = [ctypes.c_int, ctypes.c_int64]
-model = native.load(library_path)
+model = _capture_native_model(native.load(library_path))
 def rejects(call):
     try: call()
     except ValueError: pass
@@ -100,6 +104,9 @@ def rejects(call):
             &globals,
         );
     });
+    directory
+        .finish()
+        .expect("retain successful dimension case artifacts");
 }
 #[test]
 fn repeated_input_names_bind_once_across_inputs_and_returned_outputs() {

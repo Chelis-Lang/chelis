@@ -13,16 +13,14 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
 
 fn run_case(case: &str) {
-    let directory = tempfile::tempdir().expect("test artifact directory");
+    let directory = support::capture::ArtifactDirectory::new().expect("test artifact directory");
     support::initialize();
     Python::with_gil(|py| {
         let native = PyModule::new(py, "native_tensor_boundary").expect("module");
         chelis_python::register_module(&native).expect("native registration");
         let globals = PyDict::new(py);
         globals.set_item("native", native).unwrap();
-        globals
-            .set_item("artifact_root", directory.path().to_str().unwrap())
-            .unwrap();
+        directory.install(py, &globals).unwrap();
         let setup = r#"
 import ctypes
 import gc
@@ -33,7 +31,7 @@ def model_for(shape, dtype='f32'):
     spelling = ', '.join([*(str(extent) for extent in shape), dtype])
     source = Path(artifact_root) / ('model_' + dtype + '_' + str(len(shape)) + '.ch')
     source.write_text(f'def main(x: tensor[{spelling}]) -> tensor[{spelling}] = copy(x)\n')
-    return native.compile_and_load(str(source))
+    return _capture_native_model(native.compile_and_load(str(source)))
 
 def capsule_name(capsule):
     get_name = ctypes.pythonapi.PyCapsule_GetName
@@ -52,9 +50,11 @@ def rank_roundtrip(shape):
     model = model_for(shape)
     source = np.ones(shape, dtype=np.float32)
     output = model(source)
+    assert type(output) is native.NativeTensor
     assert tuple(output.shape) == shape
     assert all(type(extent) is int for extent in output.shape)
     assert output.__dlpack_device__() == (1, 0)
+    assert all(type(component) is int for component in output.__dlpack_device__())
     observed = np.from_dlpack(output)
     assert observed.shape == shape
     assert observed.dtype == source.dtype
@@ -64,6 +64,9 @@ def rank_roundtrip(shape):
         let source = CString::new(format!("{setup}\n{case}\n")).unwrap();
         support::run_case(py, &source, &globals);
     });
+    directory
+        .finish()
+        .expect("retain successful native case artifacts");
 }
 
 #[test]
@@ -144,6 +147,10 @@ output = model_for((2,))(np.ones((2,), dtype=np.float32))
 assert capsule_name(output.__dlpack__(stream=None)) in (b'dltensor', b'dltensor_versioned')
 for stream in (-2, -1, 0, 1, 2, 17):
     rejects(lambda: output.__dlpack__(stream=stream), (TypeError, ValueError, BufferError))
+for stream in (False, True, 1.0, '1', (0,)):
+    rejects(lambda: output.__dlpack__(stream=stream), (TypeError,))
+pointer_overflow = 1 << (ctypes.sizeof(ctypes.c_size_t) * 8)
+rejects(lambda: output.__dlpack__(stream=pointer_overflow), (ValueError,))
 "#,
     );
 }
@@ -156,13 +163,29 @@ output = model_for((2,))(np.ones((2,), dtype=np.float32))
 rejects(lambda: output.__dlpack__(None), (TypeError,))
 for value in ('1.0', (1,), (1, 0, 0), (-1, 0), (1, -1), (1.5, 0)):
     rejects(lambda: output.__dlpack__(max_version=value), (TypeError, ValueError))
+for value in ((False, 0), (1, True)):
+    rejects(lambda: output.__dlpack__(max_version=value), (TypeError,))
+for value in ((1 << 32, 0), (1, 1 << 32)):
+    rejects(lambda: output.__dlpack__(max_version=value), (ValueError,))
 for value in ('cpu', (1,), (1, 0, 0), (1, -1), (1, 0.5)):
     rejects(lambda: output.__dlpack__(dl_device=value), (TypeError, ValueError))
+rejects(lambda: output.__dlpack__(dl_device=(0, 0)), (ValueError,))
+for value in ((True, 0), (1, False)):
+    rejects(lambda: output.__dlpack__(dl_device=value), (TypeError,))
+for value in ((1 << 31, 0), (1, 1 << 31)):
+    rejects(lambda: output.__dlpack__(dl_device=value), (OverflowError,))
 assert capsule_name(output.__dlpack__(dl_device=(1, 0), copy=False)) in (b'dltensor', b'dltensor_versioned')
 import enum
 class Device(enum.Enum):
     CPU = 1
+class InvalidDevice(enum.Enum):
+    TEXT = 'cpu'
+    BOOLEAN = True
 assert capsule_name(output.__dlpack__(dl_device=(Device.CPU, 0), copy=False)) in (b'dltensor', b'dltensor_versioned')
+for value in InvalidDevice:
+    rejects(lambda: output.__dlpack__(dl_device=(value, 0)), (TypeError,))
+for value in (0, 1, 1.0, 'False'):
+    rejects(lambda: output.__dlpack__(copy=value), (TypeError,))
 rejects(lambda: output.__dlpack__(dl_device=(10, 0), copy=False), (BufferError,))
 "#,
     );

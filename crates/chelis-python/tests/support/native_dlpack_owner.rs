@@ -10,16 +10,14 @@ mod environment;
 
 #[test]
 fn mismatched_dlpack_request_rejects_and_releases_only_its_retained_owner() {
-    let directory = tempfile::tempdir().expect("artifact directory");
+    let directory = environment::capture::ArtifactDirectory::new().expect("artifact directory");
     environment::initialize();
     Python::with_gil(|py| {
         let native = PyModule::new(py, "native_dlpack_owner").expect("module");
         register_module(&native).expect("actual native registration");
         let globals = PyDict::new(py);
         globals.set_item("native", native).unwrap();
-        globals
-            .set_item("artifact_root", directory.path().to_str().unwrap())
-            .unwrap();
+        directory.install(py, &globals).unwrap();
         let run = |source: &str| py.run(&CString::new(source).unwrap(), Some(&globals), None);
         let outcome = (|| -> PyResult<()> {
             run(r#"
@@ -29,7 +27,7 @@ from pathlib import Path
 import numpy as np
 source = Path(artifact_root) / 'owners.ch'
 source.write_text('def main(x: tensor[2, f32]) -> tensor[2, f32] = copy(x)\n')
-model = native.compile_and_load(str(source))
+model = _capture_native_model(native.compile_and_load(str(source)))
 input_a = np.array([3, 4], dtype=np.float32)
 input_b = np.array([8, 9], dtype=np.float32)
 input_a_ref = weakref.ref(input_a)
@@ -99,4 +97,7 @@ assert input_b_ref() is None, 'consumer deletion leaked the retained input'
         environment::run_case(py, &CString::new("").unwrap(), &globals);
         outcome.expect("actual owner request validation and lifetime");
     });
+    directory
+        .finish()
+        .expect("retain successful owner case artifacts");
 }

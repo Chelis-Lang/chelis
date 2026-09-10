@@ -1,6 +1,7 @@
 //! Test-only embedded Python setup, shared by directly discovered native suites.
 //! No installation, skip, system-interpreter fallback, or process-global env writes.
 
+pub mod capture;
 use pyo3::{prelude::*, types::PyList};
 use std::{
     path::{Path, PathBuf},

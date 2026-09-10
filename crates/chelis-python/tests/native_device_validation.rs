@@ -79,33 +79,36 @@ fn run_shape(shape: Vec<i32>, body: &str) {
     run_outputs(shape, 1, body);
 }
 fn run_outputs(shape: Vec<i32>, output_count: usize, body: &str) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = support::capture::ArtifactDirectory::new().unwrap();
     let source = dir.path().join("device.c");
     let library = dir
         .path()
         .join(format!("device.{}", std::env::consts::DLL_EXTENSION));
     std::fs::write(&source, SOURCE).unwrap();
-    let result = Command::new("cc")
-        .args(["-std=c11", "-Wall", "-Wextra", "-Werror", "-fPIC"])
-        .arg(if cfg!(target_os = "macos") {
-            "-dynamiclib"
-        } else {
-            "-shared"
-        })
-        .arg("-I")
-        .arg(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../chelis-backend-hip/runtime"
-        ))
-        .arg("-I")
-        .arg(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../chelis-runtime/include"
-        ))
-        .arg(&source)
-        .arg("-o")
-        .arg(&library)
-        .output()
+    let result = dir
+        .command_output(
+            "compiler",
+            Command::new("cc")
+                .args(["-std=c11", "-Wall", "-Wextra", "-Werror", "-fPIC"])
+                .arg(if cfg!(target_os = "macos") {
+                    "-dynamiclib"
+                } else {
+                    "-shared"
+                })
+                .arg("-I")
+                .arg(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../chelis-backend-hip/runtime"
+                ))
+                .arg("-I")
+                .arg(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../chelis-runtime/include"
+                ))
+                .arg(&source)
+                .arg("-o")
+                .arg(&library),
+        )
         .unwrap();
     assert!(
         result.status.success(),
@@ -123,6 +126,7 @@ fn run_outputs(shape: Vec<i32>, output_count: usize, body: &str) {
         let module = PyModule::new(py, "native_device_validation").unwrap();
         chelis_python::register_module(&module).unwrap();
         let globals = PyDict::new(py);
+        dir.install(py, &globals).unwrap();
         globals.set_item("native", module).unwrap();
         globals
             .set_item("library_path", library.to_str().unwrap())
@@ -148,7 +152,7 @@ class Tensor:
     def untyped_storage(self): return self.storage
 saved_torch = sys.modules.get('torch')
 sys.modules['torch'] = types.SimpleNamespace(Tensor=Tensor)
-model = native.load(library_path)
+model = _capture_native_model(native.load(library_path))
 source = Tensor()
 "#;
         let script = format!(
@@ -159,6 +163,8 @@ source = Tensor()
         );
         support::run_case(py, &CString::new(script).unwrap(), &globals);
     });
+    dir.finish()
+        .expect("retain successful device case artifacts");
 }
 #[test]
 fn dynamic_device_owners_preserve_rank_device_and_input_lifetime() {
@@ -167,8 +173,10 @@ fn dynamic_device_owners_preserve_rank_device_and_input_lifetime() {
             rank,
             r#"
 output = model(source)
+assert type(output) is native.NativeTensor
 assert output.shape == shape
 assert output.__dlpack_device__() == (10, 1)
+assert all(type(component) is int for component in output.__dlpack_device__())
 assert fixture.fixture_imports() == 1 and fixture.fixture_calls() == 1
 assert fixture.fixture_live() == 1
 ref = weakref.ref(source)
@@ -302,11 +310,13 @@ assert fixture.fixture_live() == 0
 fn owner_rejection_case(test: &str, mode: i32) {
     const WORKER: &str = "CHELIS_DEVICE_OWNER_TEST_WORKER";
     if std::env::var_os(WORKER).is_none() {
-        let child = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", test, "--nocapture"])
-            .env(WORKER, "1")
-            .output()
-            .unwrap();
+        let child = support::capture::worker_output(
+            test,
+            Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test, "--nocapture"])
+                .env(WORKER, "1"),
+        )
+        .unwrap();
         assert!(
             child.status.success(),
             "device owner rejection child failed ({}): {}\n{}",
@@ -364,6 +374,7 @@ fn device_owner_distinct_named_outputs_keep_independent_lifetimes() {
         r#"
 outputs = model(source)
 assert list(outputs) == ['left', 'right']
+assert all(type(value) is native.NativeTensor for value in outputs.values())
 assert outputs['left'].shape == [2] and outputs['right'].shape == [2]
 assert fixture.fixture_live() == 2
 left = outputs.pop('left')

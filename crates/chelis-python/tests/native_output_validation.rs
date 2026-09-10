@@ -99,25 +99,28 @@ void fixture_entry(Tensor **inputs, int input_count, Tensor **outputs, int outpu
 
 fn run_case(outputs: &[&str], body: &str) {
     support::initialize();
-    let directory = tempfile::tempdir().unwrap();
+    let directory = support::capture::ArtifactDirectory::new().unwrap();
     let source = directory.path().join("fixture.c");
     let library = directory
         .path()
         .join(format!("fixture.{}", std::env::consts::DLL_EXTENSION));
     std::fs::write(&source, SOURCE).unwrap();
-    let output = Command::new("cc")
-        .args([
-            "-std=c11", "-Wall", "-Wextra", "-Werror", "-fPIC", "-pthread",
-        ])
-        .arg(if cfg!(target_os = "macos") {
-            "-dynamiclib"
-        } else {
-            "-shared"
-        })
-        .arg(&source)
-        .arg("-o")
-        .arg(&library)
-        .output()
+    let output = directory
+        .command_output(
+            "compiler",
+            Command::new("cc")
+                .args([
+                    "-std=c11", "-Wall", "-Wextra", "-Werror", "-fPIC", "-pthread",
+                ])
+                .arg(if cfg!(target_os = "macos") {
+                    "-dynamiclib"
+                } else {
+                    "-shared"
+                })
+                .arg(&source)
+                .arg("-o")
+                .arg(&library),
+        )
         .expect("compile actual foreign ABI fixture");
     assert!(
         output.status.success(),
@@ -144,6 +147,7 @@ fn run_case(outputs: &[&str], body: &str) {
         let native = PyModule::new(py, "native_output_validation").unwrap();
         chelis_python::register_module(&native).unwrap();
         let globals = PyDict::new(py);
+        directory.install(py, &globals).unwrap();
         globals.set_item("native", native).unwrap();
         globals
             .set_item("library_path", library.to_str().unwrap())
@@ -155,7 +159,7 @@ import numpy as np
 fixture = ctypes.CDLL(library_path)
 fixture.fixture_mode.argtypes = [ctypes.c_int]
 fixture.fixture_live.restype = ctypes.c_int
-model = native.load(library_path)
+model = _capture_native_model(native.load(library_path))
 source = np.array([10, 20], dtype=np.float32)
 "#;
         support::run_case(
@@ -164,6 +168,9 @@ source = np.array([10, 20], dtype=np.float32)
             &globals,
         );
     });
+    directory
+        .finish()
+        .expect("retain successful output case artifacts");
 }
 
 #[test]
@@ -172,9 +179,11 @@ fn actual_single_output_is_validated_before_native_tensor_construction() {
         &["result"],
         r#"
 output = model(source)
+assert type(output) is native.NativeTensor
 assert tuple(output.shape) == (2,)
 assert output.dtype == 'float32'
 assert output.__dlpack_device__() == (1, 0)
+assert all(type(component) is int for component in output.__dlpack_device__())
 assert np.from_dlpack(output).tolist() == [1, 2]
 assert fixture.fixture_live() == 1
 del output
@@ -192,6 +201,7 @@ fn actual_named_outputs_preserve_dictionary_behavior_and_release_every_owner() {
 outputs = model(source)
 assert type(outputs) is dict
 assert list(outputs) == ['left', 'right']
+assert all(type(value) is native.NativeTensor for value in outputs.values())
 assert np.from_dlpack(outputs['left']).tolist() == [1, 2]
 assert np.from_dlpack(outputs['right']).tolist() == [2, 3]
 assert fixture.fixture_live() == 2
@@ -202,6 +212,7 @@ assert fixture.fixture_live() == 0
 fixture.fixture_mode(12)
 outputs = model(source)
 assert list(outputs) == ['left', 'right']
+assert all(type(value) is native.NativeTensor for value in outputs.values())
 left = np.from_dlpack(outputs['left'])
 right = np.from_dlpack(outputs['right'])
 assert left.tolist() == right.tolist() == [1, 2]

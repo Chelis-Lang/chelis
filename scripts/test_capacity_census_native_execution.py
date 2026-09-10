@@ -60,7 +60,7 @@ class RuntimeArtifactTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        self.root = Path(self.directory.name)
+        self.root = Path(self.directory.name).resolve()
         self.target = self.root / "target/owned"
         self.target.mkdir(parents=True)
         self.source = self.root / "crates/chelis-runtime/src/lib.rs"
@@ -98,7 +98,7 @@ class RetainedCaptureTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        self.root = Path(self.directory.name)
+        self.root = Path(self.directory.name).resolve()
         self.group = execution.GROUPS[0]
         self.case = self.root / "fixtures" / self.group.selected[0] / "instance-1"
         self.case.mkdir(parents=True)
@@ -109,7 +109,10 @@ class RetainedCaptureTests(unittest.TestCase):
             "compiled/program.c": b"/* generated fixture source */",
             "compiled/chelis_runtime.h": b"/* current embedded header */",
             "compiled/program.so": b"actual library stand-in for pure record validation",
-            "compiled/program.json": b'{"abi_version":2,"target":"c"}',
+            "compiled/program.json": json.dumps({"abi_version": 2, "target": "c",
+                "source_path": str(self.case / "program.ch"),
+                "source_hash": hashlib.sha256(b"def main(x: tensor[1,f32]) -> tensor[1,f32] = copy(x)\n").hexdigest(),
+            }).encode(),
             "compiled/libchelis_runtime.a": self.runtime,
         }
         original = self.root / "deleted-original"
@@ -241,6 +244,7 @@ class NativeExecutionIntegration(unittest.TestCase):
         for path in candidates:
             with self.subTest(path=path):
                 original = path.read_bytes()
+                status = path.stat()
                 try:
                     path.write_bytes(original + b"changed")
                     with self.assertRaises(GraphError): self.witness.validate()
@@ -248,6 +252,8 @@ class NativeExecutionIntegration(unittest.TestCase):
                     with self.assertRaises(GraphError): self.witness.validate()
                 finally:
                     path.write_bytes(original)
+                    path.chmod(status.st_mode)
+                    os.utime(path, ns=(status.st_atime_ns, status.st_mtime_ns))
         with mock.patch.object(execution, "_source_packet", return_value={"head": "changed"}):
             with self.assertRaises(GraphError): self.witness.validate()
         self.witness.validate()
