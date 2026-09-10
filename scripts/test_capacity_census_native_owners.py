@@ -77,9 +77,9 @@ class NativeOwnerIntegration(unittest.TestCase):
         from capacity_census_native_owners import resolve_native_ownership
 
         return resolve_native_ownership(
-            RustdocGraph(copy.deepcopy(documents or self.documents)),
-            copy.deepcopy(raw or self.raw),
-            registrations or self.registrations,
+            RustdocGraph(copy.deepcopy(self.documents if documents is None else documents)),
+            self.raw if raw is None else raw,
+            self.registrations if registrations is None else registrations,
         )
 
     def test_actual_registration_rustdoc_and_native4_form_one_bounded_report(self):
