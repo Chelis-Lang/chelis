@@ -1079,6 +1079,24 @@ Python host and DLPack paths use a private validated wrapper. DLPack export may
 release an opaque pointer only together with the exact dtype, shape, stride,
 byte offset, device, and deleter metadata derived from that wrapper.
 
+The native entry's private `CompiledInputs` retains the admitted lane and an
+immutable `Arc<ShapeBindings>`; `execute_checked` carries that same owner into
+`RawOutputs` alongside all output owners and retained Python inputs. Only
+`ShapeBindings::admit` constructs its private name-to-int64 map from explicit
+manifest literals and already checked input metadata. Spec/11 §1.2 and spec/04
+§4.1 govern the equalities: wildcard `*` axes never enter the map. Output
+adoption checks the actual descriptor against those bindings before constructing
+`ValidatedTensor`. No name parser, symbolic-expression evaluator, or guessed
+bijection against the code generator's interface-witness list participates.
+
+The private device handle retains its artifact `Library` through the exact
+opaque-owner finalizer. Input admission proves pointer offset and remaining
+capacity against retained framework storage before importing its checked raw
+packet. Each output's device comes from its own opaque owner and agrees with
+the actual HIP current device. DLPack's validated synchronization request uses
+the retained library's successful device barrier before capsule construction;
+the protocol's explicit no-synchronization request remains distinct.
+
 Delivery is split without weakening this contract. Phase 2 owns the
 Python/device/DLPack wrappers because they depend on the generated device
 descriptor. Phase 3 owns the repository runtime and public C entries and
