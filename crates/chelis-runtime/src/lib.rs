@@ -21,8 +21,9 @@ mod element;
 mod ieee_narrow;
 mod metadata;
 use metadata::{
-    AllocationBytes, AxisDecomposition, ByteCount, ElementCount, IterationSpace, MetadataError,
-    ReductionMetadata, ShapeMetadata, SparseMetadata,
+    AllocationBytes, AxisDecomposition, ByteCount, ElementCount, IterationSpace, MatmulDimension,
+    MatmulMetadata, MatmulPart, MetadataError, ReductionMetadata, ShapeMetadata, SparseMetadata,
+    WindowMetadata,
 };
 mod ownership_ledger;
 
@@ -2445,6 +2446,284 @@ fn affine_result<T>(result: Result<T, MetadataError>, op: &str) -> T {
         eprintln!("{error}");
         runtime_fail!("numeric trap: {class} in {op} at int64")
     })
+}
+
+pub type chelis_window_op = c_int;
+pub const CHELIS_WINDOW_SUM: chelis_window_op = 0;
+pub const CHELIS_WINDOW_MEAN: chelis_window_op = 1;
+pub const CHELIS_WINDOW_MAX: chelis_window_op = 2;
+pub const CHELIS_WINDOW_MIN: chelis_window_op = 3;
+pub const CHELIS_WINDOW_GRAD: chelis_window_op = 4;
+pub type chelis_window_side = c_int;
+pub const CHELIS_WINDOW_SOURCE: chelis_window_side = 0;
+pub const CHELIS_WINDOW_RESULT: chelis_window_side = 1;
+pub struct chelis_window_plan {
+    metadata: WindowMetadata,
+    op: &'static str,
+}
+impl chelis_window_plan {
+    fn shape(&self, side: chelis_window_side) -> &ShapeMetadata {
+        match side {
+            CHELIS_WINDOW_SOURCE => self.metadata.input(),
+            CHELIS_WINDOW_RESULT => self.metadata.result(),
+            _ => affine_result(
+                Err(MetadataError::Domain("invalid window side".into())),
+                self.op,
+            ),
+        }
+    }
+}
+unsafe fn window_plan<'a>(plan: *const chelis_window_plan) -> &'a chelis_window_plan {
+    if plan.is_null() {
+        affine_result::<()>(
+            Err(MetadataError::Domain("null window plan".into())),
+            "reduce_window",
+        );
+    }
+    &*plan
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_window_plan(
+    input: *const chelis_tensor,
+    count: chelis_scalar,
+    window: *const chelis_scalar,
+    steps: *const chelis_scalar,
+    operation: chelis_window_op,
+) -> *mut chelis_window_plan {
+    let op = match operation {
+        CHELIS_WINDOW_SUM => "reduce_window_sum",
+        CHELIS_WINDOW_MEAN => "reduce_window_mean",
+        CHELIS_WINDOW_MAX => "reduce_window_max",
+        CHELIS_WINDOW_MIN => "reduce_window_min",
+        CHELIS_WINDOW_GRAD => "reduce_window_grad",
+        _ => affine_result(
+            Err(MetadataError::Domain("invalid window operation".into())),
+            "reduce_window",
+        ),
+    };
+    tensor_metadata_dtype(input, op);
+    let window = reduction_array(count, window, op);
+    let steps = reduction_array(count, steps, op);
+    let metadata = affine_result(WindowMetadata::new(&(*input).metadata, &window, &steps), op);
+    Box::into_raw(Box::new(chelis_window_plan { metadata, op }))
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_window_extent(
+    plan: *const chelis_window_plan,
+    side: chelis_window_side,
+    axis: chelis_scalar,
+) -> i64 {
+    let plan = window_plan(plan);
+    affine_result(
+        plan.shape(side).extent_at(affine_scalar(axis, plan.op)),
+        plan.op,
+    )
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_window_count(plan: *const chelis_window_plan) -> i64 {
+    window_plan(plan).metadata.count().get()
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_window_index(
+    plan: *const chelis_window_plan,
+    group: chelis_scalar,
+    leaf: chelis_scalar,
+) -> i64 {
+    let plan = window_plan(plan);
+    affine_result(
+        plan.metadata
+            .index(affine_scalar(group, plan.op), affine_scalar(leaf, plan.op)),
+        plan.op,
+    )
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_window_check_tensor(
+    plan: *const chelis_window_plan,
+    tensor: *const chelis_tensor,
+    side: chelis_window_side,
+) {
+    let plan = window_plan(plan);
+    let dtype = tensor_metadata_dtype(tensor, plan.op);
+    let expected = plan.shape(side);
+    if dtype != expected.dtype() || (*tensor).shape() != expected.shape() {
+        affine_result::<()>(
+            Err(MetadataError::Domain(
+                "window tensor shape or dtype mismatch".into(),
+            )),
+            plan.op,
+        );
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_window_check_target(
+    plan: *const chelis_window_plan,
+    side: chelis_window_side,
+    rank: chelis_scalar,
+    shape: *const chelis_scalar,
+) {
+    let plan = window_plan(plan);
+    let shape = reduction_array(rank, shape, plan.op);
+    if shape != plan.shape(side).shape() {
+        affine_result::<()>(
+            Err(MetadataError::Domain("window target shape mismatch".into())),
+            plan.op,
+        );
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_window_plan_release(plan: *mut chelis_window_plan) {
+    window_plan(plan);
+    drop(Box::from_raw(plan));
+}
+
+#[allow(non_camel_case_types)]
+pub type chelis_matmul_part = c_int;
+pub const CHELIS_MATMUL_LEFT: chelis_matmul_part = 0;
+pub const CHELIS_MATMUL_RIGHT: chelis_matmul_part = 1;
+pub const CHELIS_MATMUL_RESULT: chelis_matmul_part = 2;
+#[allow(non_camel_case_types)]
+pub type chelis_matmul_dimension_kind = c_int;
+pub const CHELIS_MATMUL_ROWS: chelis_matmul_dimension_kind = 0;
+pub const CHELIS_MATMUL_COLUMNS: chelis_matmul_dimension_kind = 1;
+pub const CHELIS_MATMUL_REDUCTION: chelis_matmul_dimension_kind = 2;
+#[allow(non_camel_case_types)]
+pub struct chelis_matmul_plan {
+    metadata: MatmulMetadata,
+}
+
+fn matmul_part(part: chelis_matmul_part) -> MatmulPart {
+    match part {
+        CHELIS_MATMUL_LEFT => MatmulPart::Left,
+        CHELIS_MATMUL_RIGHT => MatmulPart::Right,
+        CHELIS_MATMUL_RESULT => MatmulPart::Result,
+        _ => affine_result(
+            Err(MetadataError::Domain("invalid matmul part".into())),
+            "matmul",
+        ),
+    }
+}
+unsafe fn matmul_plan<'a>(plan: *const chelis_matmul_plan) -> &'a MatmulMetadata {
+    if plan.is_null() {
+        affine_result::<()>(
+            Err(MetadataError::Domain("null matmul plan".into())),
+            "matmul",
+        );
+    }
+    &(*plan).metadata
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_matmul_plan(
+    left: *const chelis_tensor,
+    right: *const chelis_tensor,
+    exemplar: chelis_scalar,
+) -> *mut chelis_matmul_plan {
+    tensor_metadata_dtype(left, "matmul");
+    tensor_metadata_dtype(right, "matmul");
+    let dtype = reduction_exemplar(exemplar, "matmul");
+    let metadata = affine_result(
+        MatmulMetadata::new(&(*left).metadata, &(*right).metadata, dtype),
+        "matmul",
+    );
+    Box::into_raw(Box::new(chelis_matmul_plan { metadata }))
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_matmul_extent(
+    plan: *const chelis_matmul_plan,
+    axis: chelis_scalar,
+) -> i64 {
+    affine_result(
+        matmul_plan(plan)
+            .result()
+            .extent_at(affine_scalar(axis, "matmul")),
+        "matmul",
+    )
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_matmul_dimension(
+    plan: *const chelis_matmul_plan,
+    dimension: chelis_matmul_dimension_kind,
+) -> i64 {
+    let dimension = match dimension {
+        CHELIS_MATMUL_ROWS => MatmulDimension::Rows,
+        CHELIS_MATMUL_COLUMNS => MatmulDimension::Columns,
+        CHELIS_MATMUL_REDUCTION => MatmulDimension::Reduction,
+        _ => affine_result(
+            Err(MetadataError::Domain("invalid matmul dimension".into())),
+            "matmul",
+        ),
+    };
+    matmul_plan(plan).dimension(dimension)
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_matmul_batch_count(plan: *const chelis_matmul_plan) -> i64 {
+    matmul_plan(plan).batches().get()
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_matmul_matrix_count(
+    plan: *const chelis_matmul_plan,
+    part: chelis_matmul_part,
+) -> i64 {
+    matmul_plan(plan).matrix_count(matmul_part(part)).get()
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_matmul_index(
+    plan: *const chelis_matmul_plan,
+    part: chelis_matmul_part,
+    batch: chelis_scalar,
+    element: chelis_scalar,
+) -> i64 {
+    affine_result(
+        matmul_plan(plan).index(
+            matmul_part(part),
+            affine_scalar(batch, "matmul"),
+            affine_scalar(element, "matmul"),
+        ),
+        "matmul",
+    )
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_matmul_check_target(
+    plan: *const chelis_matmul_plan,
+    rank: chelis_scalar,
+    shape: *const chelis_scalar,
+) {
+    let shape = reduction_array(rank, shape, "matmul");
+    if shape != matmul_plan(plan).result().shape() {
+        affine_result::<()>(
+            Err(MetadataError::Domain("matmul target shape mismatch".into())),
+            "matmul",
+        );
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_matmul_check_scratch(
+    plan: *const chelis_matmul_plan,
+    part: chelis_matmul_part,
+    exemplar: chelis_scalar,
+) {
+    let dtype = reduction_exemplar(exemplar, "matmul");
+    affine_result(
+        matmul_plan(plan)
+            .matrix_count(matmul_part(part))
+            .bytes(dtype)
+            .and_then(ByteCount::allocation),
+        "matmul",
+    );
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_matmul_check_vendor(
+    plan: *const chelis_matmul_plan,
+    maximum: chelis_scalar,
+) {
+    affine_result(
+        matmul_plan(plan).check_vendor(affine_scalar(maximum, "matmul")),
+        "matmul",
+    );
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_matmul_plan_release(plan: *mut chelis_matmul_plan) {
+    matmul_plan(plan);
+    drop(Box::from_raw(plan));
 }
 
 #[allow(non_camel_case_types)]

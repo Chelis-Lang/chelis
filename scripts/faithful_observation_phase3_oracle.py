@@ -59,6 +59,7 @@ REQUIRED_TESTS = {
     PARITY_SOURCE: {
         "parity_checked_reshape",
         "parity_checked_sparse_axes",
+        "parity_checked_window_geometry",
         "parity_dict_foundation",
         "parity_count_bool_axes",
         "parity_explicit_normalization",
@@ -180,7 +181,8 @@ REQUIRED_TEST_DEFINITION_SHA256: dict[Path, dict[str, str]] = {
         "parity_constraint_directed_risk_guards_library_only": "ac6933d790a89ff00d7658e1260d61614ccc2547d9a91a67a0aa98918e33ca32",
         "parity_count_bool_axes": "66e82bb4aeedafabc5d77eefeec25cb2728085becf2fdf44c335631fde750ba9",
         "parity_checked_sparse_axes": "69b1b926e2294ef2dcf704f68d218f0c692788c943aa3f6a88ed06e331e107b0",
-        "parity_corpus_is_complete": "16483022d06347f71e1adb3abbc519a22157b83682b45b764b37815979d07080",
+        "parity_checked_window_geometry": "9df8502bf07ccbbd5731c79596d328130cddedede4217f7af585063404cc64dc",
+        "parity_corpus_is_complete": "6603a110d51e7c5629d9d6e1026f2ca6ecfa4e05d565aa2df32caa91180e41ee",
         "parity_explicit_normalization": "d09c17ffa744ee21214877d59476ce58441480e4f6f8a29d6eb5edf3ad1417cb",
         "parity_dict_foundation": "1bfd21bf0d78c9f36869908852a963037e0f13e36d5f9bc73b77131ff9d2970f",
         "parity_generic_explicit_shape": "72ebff1fb9ca21ef52e6622c724f90e7f24f9054c8bff0b5c582be8582007f73",

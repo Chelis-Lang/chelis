@@ -91,10 +91,6 @@ enum SparseEmission {
 struct MatmulEmitSpec {
     a: NodeId,
     b: NodeId,
-    batch_dims: Vec<DimExpr>,
-    m: DimExpr,
-    n: DimExpr,
-    k: DimExpr,
     /// Inner-product accumulator precision per `spec/04-type-system.md`
     /// §5.7 / §5.7.1. Drives BLAS dispatch: F32 → `cblas_sgemm`,
     /// F64 → `cblas_dgemm`. Sourced from the `RiscOp::BlasMatmul`
@@ -298,7 +294,10 @@ impl CEmitter {
         let mut e = CEmitter {
             lines: Vec::new(),
             indent: 0,
-            use_blas: options.use_blas,
+            use_blas: dag
+                .nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::BlasMatmul { .. })),
             math_lib,
             reduction_inlined: reduction_inlined
                 .to_sorted()
@@ -319,6 +318,7 @@ impl CEmitter {
         e.line("#include <assert.h>");
         if e.use_blas {
             e.line("#include \"chelis_blas.h\"");
+            e.line(&Self::blas_integer_support());
         }
         if e.math_lib != crate::MathLib::None {
             e.line("#include \"chelis_math.h\"");
@@ -1051,7 +1051,7 @@ impl CEmitter {
                     &node.inputs,
                     &node.output_type,
                     dag,
-                );
+                )?;
             }
             RiscOp::Argmax { axis } => {
                 self.emit_reduce_argcmp(id, *axis, &node.inputs, &node.output_type, dag, true)?;
@@ -1112,10 +1112,10 @@ impl CEmitter {
                 self.emit_fused_elem(id, ops, &node.inputs, &node.output_type, in_place)?;
             }
             RiscOp::BlasMatmul {
-                batch_dims,
-                m,
-                n,
-                k,
+                batch_dims: _,
+                m: _,
+                n: _,
+                k: _,
                 accumulator,
             } => {
                 // WS-A1: bind `accumulator` explicitly; the previous
@@ -1133,10 +1133,6 @@ impl CEmitter {
                     &MatmulEmitSpec {
                         a: node.inputs[0],
                         b: node.inputs[1],
-                        batch_dims: batch_dims.clone(),
-                        m: m.clone(),
-                        n: n.clone(),
-                        k: k.clone(),
                         accumulator: *accumulator,
                         operand_precision,
                     },
@@ -4155,285 +4151,204 @@ impl CEmitter {
     }
 
     // ---- BLAS matmul ----
+    /// Bind the integer width to both actual vendor prototypes. A header whose
+    /// published type and prototypes disagree fails compilation before any call.
+    pub(crate) fn blas_integer_support() -> String {
+        let f32_type = Self::elem_type(&TensorType {
+            dims: vec![],
+            precision: Prim::F32,
+        });
+        let f64_type = Self::elem_type(&TensorType {
+            dims: vec![],
+            precision: Prim::F64,
+        });
+        format!(
+            r#"
+#ifndef CHELIS_C_BLAS_CONTRACT
+#define CHELIS_C_BLAS_CONTRACT
+#if defined(__APPLE__)
+typedef __LAPACK_int chelis_blas_integer;
+typedef enum CBLAS_ORDER chelis_blas_layout;
+#elif defined(OPENBLAS_VERSION)
+typedef blasint chelis_blas_integer;
+typedef enum CBLAS_ORDER chelis_blas_layout;
+#elif defined(CBLAS_INT)
+typedef CBLAS_INT chelis_blas_integer;
+typedef CBLAS_LAYOUT chelis_blas_layout;
+#else
+#error "CBLAS header must declare its supported signed dimension type"
+#endif
+_Static_assert((chelis_blas_integer)-1 < 0, "CBLAS dimensions must be signed");
+_Static_assert(sizeof(chelis_blas_integer) == 4 || sizeof(chelis_blas_integer) == 8, "unsupported CBLAS dimension width");
+typedef void (*chelis_sgemm_signature)(chelis_blas_layout, enum CBLAS_TRANSPOSE, enum CBLAS_TRANSPOSE, chelis_blas_integer, chelis_blas_integer, chelis_blas_integer, {f32_type}, const {f32_type}*, chelis_blas_integer, const {f32_type}*, chelis_blas_integer, {f32_type}, {f32_type}*, chelis_blas_integer);
+typedef void (*chelis_dgemm_signature)(chelis_blas_layout, enum CBLAS_TRANSPOSE, enum CBLAS_TRANSPOSE, chelis_blas_integer, chelis_blas_integer, chelis_blas_integer, {f64_type}, const {f64_type}*, chelis_blas_integer, const {f64_type}*, chelis_blas_integer, {f64_type}, {f64_type}*, chelis_blas_integer);
+_Static_assert(_Generic(&cblas_sgemm, chelis_sgemm_signature: 1, default: 0), "CBLAS sgemm dimension contract mismatch");
+_Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "CBLAS dgemm dimension contract mismatch");
+#define CHELIS_BLAS_MAXIMUM (sizeof(chelis_blas_integer) == 8 ? INT64_MAX : INT32_MAX)
+#endif
+"#
+        )
+    }
+
+    fn emit_matmul_plan(&mut self, id: usize, spec: &MatmulEmitSpec, ty: &TensorType) {
+        let a = spec.a.0;
+        let b = spec.b.0;
+        let dtype = Self::dtype_macro(ty);
+        let index = Self::elem_type(&TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        });
+        self.line(&format!("chelis_matmul_plan *t{id}_matmul = chelis_tensor_matmul_plan(t{a}, t{b}, chelis_scalar_from_bits({dtype}, UINT64_C(0)));"));
+        let extents = (0..ty.dims.len()).map(|axis| (axis, format!("chelis_matmul_extent(t{id}_matmul, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {axis}))"))).collect::<Vec<_>>();
+        self.emit_runtime_dim_sites(id, &extents);
+        let rank = ty.dims.len();
+        let shape = Self::tagged_shape_literal(ty);
+        self.line(&format!("chelis_matmul_check_target(t{id}_matmul, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {rank}), {shape});"));
+        self.line(&format!("chelis_matmul_check_vendor(t{id}_matmul, chelis_scalar_from_bits(CHELIS_DTYPE_I64, CHELIS_BLAS_MAXIMUM));"));
+        for (name, dimension) in [("m", "ROWS"), ("n", "COLUMNS"), ("k", "REDUCTION")] {
+            self.line(&format!("{index} t{id}_{name} = chelis_matmul_dimension(t{id}_matmul, CHELIS_MATMUL_{dimension});"));
+        }
+        self.line(&format!(
+            "{index} t{id}_batch_count = chelis_matmul_batch_count(t{id}_matmul);"
+        ));
+        if matches!(spec.operand_precision, Prim::F16 | Prim::Bf16) {
+            for (name, part) in [("af", "LEFT"), ("bf", "RIGHT"), ("cf", "RESULT")] {
+                if name == "cf" && !Self::is_reduced_float(ty) {
+                    continue;
+                }
+                self.line(&format!("{index} t{id}_{name}_count = chelis_matmul_matrix_count(t{id}_matmul, CHELIS_MATMUL_{part});"));
+                self.line(&format!("chelis_matmul_check_scratch(t{id}_matmul, CHELIS_MATMUL_{part}, chelis_scalar_from_bits(CHELIS_DTYPE_F32, UINT64_C(0)));"));
+            }
+        }
+    }
+
     fn emit_blas_matmul(&mut self, id: usize, spec: &MatmulEmitSpec, ty: &TensorType) {
-        // WS-1: bf16 / f16 OPERAND matmul routes through a dedicated
-        // convert-then-sgemm wrapper (allocate f32 scratch buffers,
-        // convert operands, dispatch `cblas_sgemm`, downcast result
-        // back if the destination is bf16/f16, write directly if the
-        // destination is f32, per spec §5.7.1). Dispatch is by
-        // operand precision, not by output precision: a bf16-input
-        // matmul that the matmul-pattern detector emits with an
-        // f32 output (because Sum's accumulator-pinned output is f32)
-        // still needs operand conversion to read the `uint16_t`
-        // storage as f32.
         if matches!(spec.operand_precision, Prim::Bf16 | Prim::F16) {
             self.emit_blas_matmul_reduced_f(id, spec, ty);
             return;
         }
-        // WS-A1: dispatch f32 -> cblas_sgemm and f64 -> cblas_dgemm by the
-        // IR-pinned accumulator precision (see the match below). The
-        // historical F32-only assert that lived here was lifted with WS-A1;
-        // upstream guards in verify.rs and validate_supported_precisions
-        // reject unsupported accumulator dtypes before they reach this
-        // function.
         let a = spec.a.0;
         let b = spec.b.0;
-        let m_expr = Self::emit_dim_expr(&spec.m);
-        let n_expr = Self::emit_dim_expr(&spec.n);
-        let k_expr = Self::emit_dim_expr(&spec.k);
-        // Dispatch BLAS routine and matching scalar literals from the IR-
-        // pinned accumulator precision per spec §5.7 / §5.7.1. f32 → sgemm,
-        // f64 → dgemm. Other accumulator dtypes are rejected upstream by
-        // the F1 guards in `verify.rs` and `validate_supported_precisions`,
-        // so this function only sees f32 / f64. The guards mean an
-        // unexpected accumulator here is a backend bug, not a user error.
-        let (gemm, alpha, beta, ptr_ty) = match spec.accumulator {
-            Prim::F32 => ("cblas_sgemm", "1.0f", "0.0f", "float"),
-            Prim::F64 => ("cblas_dgemm", "1.0", "0.0", "double"),
-            other => panic!(
-                "C backend BLAS dispatch reached unsupported accumulator `{}` at \
-                 node {id}; the F1 guard in verify.rs / validate_supported_precisions \
-                 should have rejected this earlier (spec/04-type-system.md §5.7.1)",
-                other.name()
-            ),
+        let (gemm, alpha, beta) = match spec.accumulator {
+            Prim::F32 => ("cblas_sgemm", "1.0f", "0.0f"),
+            Prim::F64 => ("cblas_dgemm", "1.0", "0.0"),
+            other => panic!("unsupported verified BLAS accumulator {}", other.name()),
         };
-        self.line(&format!("chelis_tensor *t{id}_a = t{a};"));
-        self.line(&format!(
-            "if (!(t{a}_rank >= 2 && t{a}_strides[t{a}_rank - 1] == 1 && t{a}_strides[t{a}_rank - 2] == {k_expr})) {{"
-        ));
-        self.indent += 1;
-        self.line("abort();");
-        self.indent -= 1;
-        self.line("}");
-        self.line(&format!("chelis_tensor *t{id}_b = t{b};"));
-        self.line(&format!(
-            "if (!(t{b}_rank >= 2 && t{b}_strides[t{b}_rank - 1] == 1 && t{b}_strides[t{b}_rank - 2] == {n_expr})) {{"
-        ));
-        self.indent += 1;
-        self.line("abort();");
-        self.indent -= 1;
-        self.line("}");
+        let element = Self::elem_type(ty);
+        let index = Self::elem_type(&TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        });
+        self.emit_matmul_plan(id, spec, ty);
         self.emit_slot_wrapper(id, ty);
-        if spec.batch_dims.is_empty() {
-            self.line(&format!(
-                "{gemm}(CblasRowMajor, CblasNoTrans, CblasNoTrans, {m_expr}, {n_expr}, {k_expr}, {alpha}, ({ptr_ty}*)t{a}_data, {k_expr}, ({ptr_ty}*)t{b}_data, {n_expr}, {beta}, ({ptr_ty}*)t{id}_data, {n_expr});"
-            ));
-        } else {
-            let batch_count = spec
-                .batch_dims
-                .iter()
-                .map(Self::emit_dim_expr)
-                .reduce(|lhs, rhs| format!("({lhs} * {rhs})"))
-                .unwrap_or_else(|| "1".to_string());
-            self.line(&format!("int64_t t{id}_batch_count = {batch_count};"));
-            self.line(&format!(
-                "for (int64_t t{id}_batch = 0; t{id}_batch < t{id}_batch_count; t{id}_batch++) {{"
-            ));
-            self.indent += 1;
-            self.line(&format!("int64_t t{id}_rem = t{id}_batch;"));
-            self.line(&format!("int64_t t{id}_a_offset = 0;"));
-            self.line(&format!("int64_t t{id}_b_offset = 0;"));
-            self.line(&format!("int64_t t{id}_out_offset = 0;"));
-            for axis in (0..spec.batch_dims.len()).rev() {
-                let dim_expr = Self::emit_dim_expr(&spec.batch_dims[axis]);
-                self.line(&format!(
-                    "int64_t t{id}_coord_{axis} = t{id}_rem % ({dim_expr});"
-                ));
-                self.line(&format!("t{id}_rem /= ({dim_expr});"));
-                self.line(&format!(
-                    "t{id}_a_offset += t{id}_coord_{axis} * t{a}_strides[{axis}];"
-                ));
-                self.line(&format!(
-                    "t{id}_b_offset += t{id}_coord_{axis} * t{b}_strides[{axis}];"
-                ));
-                self.line(&format!(
-                    "t{id}_out_offset += t{id}_coord_{axis} * t{id}_strides[{axis}];"
-                ));
-            }
-            self.line(&format!(
-                "{gemm}(CblasRowMajor, CblasNoTrans, CblasNoTrans, {m_expr}, {n_expr}, {k_expr}, {alpha}, ({ptr_ty}*)t{a}_data + t{id}_a_offset, {k_expr}, ({ptr_ty}*)t{b}_data + t{id}_b_offset, {n_expr}, {beta}, ({ptr_ty}*)t{id}_data + t{id}_out_offset, {n_expr});"
-            ));
-            self.indent -= 1;
-            self.line("}");
+        self.line(&format!("if (t{id}_k == 0) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "if (t{id}_byte_capacity != 0) memset(t{id}_data, 0, (size_t)t{id}_byte_capacity);"
+        ));
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        self.line(&format!(
+            "for ({index} t{id}_batch = 0; t{id}_batch < t{id}_batch_count; ++t{id}_batch) {{"
+        ));
+        self.indent += 1;
+        for (name, part) in [("a", "LEFT"), ("b", "RIGHT"), ("out", "RESULT")] {
+            self.line(&format!("{index} t{id}_{name}_offset = chelis_matmul_index(t{id}_matmul, CHELIS_MATMUL_{part}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, t{id}_batch), chelis_scalar_from_bits(CHELIS_DTYPE_I64, 0));"));
         }
-        self.line(&format!(
-            "if (t{id}_a != t{a}) chelis_tensor_release(t{id}_a);"
-        ));
-        self.line(&format!(
-            "if (t{id}_b != t{b}) chelis_tensor_release(t{id}_b);"
-        ));
+        self.line(&format!("{gemm}(CblasRowMajor, CblasNoTrans, CblasNoTrans, (chelis_blas_integer)t{id}_m, (chelis_blas_integer)t{id}_n, (chelis_blas_integer)t{id}_k, {alpha}, (const {element}*)t{a}_data + t{id}_a_offset, (chelis_blas_integer)t{id}_k, (const {element}*)t{b}_data + t{id}_b_offset, (chelis_blas_integer)t{id}_n, {beta}, ({element}*)t{id}_data + t{id}_out_offset, (chelis_blas_integer)t{id}_n);"));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!("chelis_matmul_plan_release(t{id}_matmul);"));
     }
 
-    /// WS-1: bf16 / f16 matmul via the convert-then-sgemm wrapper. Per
-    /// spec/04-type-system.md §5.7.1 the accumulator dtype is f32
-    /// even when the operand and output dtypes are bf16/f16; this
-    /// path materializes that pin by allocating two f32 scratch
-    /// buffers for the operands, an f32 scratch buffer for the
-    /// `cblas_sgemm` output, and converting back to the destination
-    /// reduced-float precision element-wise. Scratch lifetimes are
-    /// per-call (`malloc` / `free` inside the emitted wrapper scope,
-    /// no buffer pooling).
-    ///
-    /// Routes through the existing contiguity-promotion preamble
-    /// (`chelis_contiguous` on operands when the trailing strides
-    /// don't match the M/N/K layout) so the conversion always reads
-    /// from a stride-1, row-major source.
+    /// Keep the IR-pinned f32 accumulator and destination conversion. Scratch
+    /// capacity belongs to checked metadata; storage belongs to runtime tensors.
     fn emit_blas_matmul_reduced_f(&mut self, id: usize, spec: &MatmulEmitSpec, ty: &TensorType) {
+        assert_eq!(spec.accumulator, Prim::F32, "verified BLAS accumulator");
         let a = spec.a.0;
         let b = spec.b.0;
-        let m_expr = Self::emit_dim_expr(&spec.m);
-        let n_expr = Self::emit_dim_expr(&spec.n);
-        let k_expr = Self::emit_dim_expr(&spec.k);
-        let reduced_to_f32 = Self::reduced_to_f32_fn(spec.operand_precision);
-        // Two output-precision cases per the matmul-pattern detector +
-        // user-constructed matmul shape:
-        //   * Output is bf16/f16: convert f32 accumulator buffer back
-        //     into the destination element-wise.
-        //   * Output is f32: write `cblas_sgemm`'s result directly into
-        //     `t{id}_data` with no intermediate scratch buffer.
-        let output_is_reduced = Self::is_reduced_float(ty);
-        let f32_to_reduced = if output_is_reduced {
-            Some(Self::f32_to_reduced_fn(ty.precision))
-        } else {
-            None
-        };
-        // The IR contract is that the matmul accumulator for bf16/f16
-        // operands is f32 (spec §5.7.1). The verifier enforces it.
-        if spec.accumulator != Prim::F32 {
-            panic!(
-                "WS-1: bf16/f16 matmul wrapper expects f32 accumulator per \
-                 spec/04-type-system.md §5.7.1, got `{}` at node {id}",
-                spec.accumulator.name()
-            );
-        }
-        // Promote operands to contiguous row-major if they don't
-        // already satisfy `cblas_sgemm`'s leading-dimension contract.
-        // Same shape as the f32/f64 path.
-        self.line(&format!("chelis_tensor *t{id}_a = t{a};"));
-        self.line(&format!(
-            "if (!(t{a}_rank >= 2 && t{a}_strides[t{a}_rank - 1] == 1 && t{a}_strides[t{a}_rank - 2] == {k_expr})) {{"
-        ));
-        self.indent += 1;
-        self.line("abort();");
-        self.indent -= 1;
-        self.line("}");
-        self.line(&format!("chelis_tensor *t{id}_b = t{b};"));
-        self.line(&format!(
-            "if (!(t{b}_rank >= 2 && t{b}_strides[t{b}_rank - 1] == 1 && t{b}_strides[t{b}_rank - 2] == {n_expr})) {{"
-        ));
-        self.indent += 1;
-        self.line("abort();");
-        self.indent -= 1;
-        self.line("}");
+        let to_f32 = Self::reduced_to_f32_fn(spec.operand_precision);
+        let output_reduced = Self::is_reduced_float(ty);
+        let element = Self::elem_type(ty);
+        let operand = Self::elem_type(&TensorType {
+            dims: vec![],
+            precision: spec.operand_precision,
+        });
+        let f32_type = Self::elem_type(&TensorType {
+            dims: vec![],
+            precision: Prim::F32,
+        });
+        let index = Self::elem_type(&TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        });
+        self.emit_matmul_plan(id, spec, ty);
         self.emit_slot_wrapper(id, ty);
-        self.line("/* spec/04-type-system.md §5.7.1: bf16/f16 matmul uses f32 accumulator */");
+        self.line(&format!("if (t{id}_k == 0) {{"));
+        self.indent += 1;
         self.line(&format!(
-            "int64_t t{id}_mk = (int64_t)({m_expr}) * (int64_t)({k_expr});"
+            "if (t{id}_byte_capacity != 0) memset(t{id}_data, 0, (size_t)t{id}_byte_capacity);"
         ));
-        self.line(&format!(
-            "int64_t t{id}_kn = (int64_t)({k_expr}) * (int64_t)({n_expr});"
-        ));
-        self.line(&format!(
-            "int64_t t{id}_mn = (int64_t)({m_expr}) * (int64_t)({n_expr});"
-        ));
-        self.line(&format!(
-            "float *t{id}_af = (float*)malloc((size_t)t{id}_mk * sizeof(float));"
-        ));
-        self.line(&format!(
-            "float *t{id}_bf = (float*)malloc((size_t)t{id}_kn * sizeof(float));"
-        ));
-        // Output scratch only needed when the destination is bf16/f16;
-        // an f32 destination accumulates directly into `t{id}_data`.
-        if output_is_reduced {
-            self.line(&format!(
-                "float *t{id}_cf = (float*)malloc((size_t)t{id}_mn * sizeof(float));"
-            ));
-        }
-        if spec.batch_dims.is_empty() {
-            self.line(&format!(
-                "for (int64_t i = 0; i < t{id}_mk; i++) t{id}_af[i] = {reduced_to_f32}(((const uint16_t*)t{a}_data)[i]);"
-            ));
-            self.line(&format!(
-                "for (int64_t i = 0; i < t{id}_kn; i++) t{id}_bf[i] = {reduced_to_f32}(((const uint16_t*)t{b}_data)[i]);"
-            ));
-            let c_arg = if output_is_reduced {
-                format!("t{id}_cf")
-            } else {
-                format!("(float*)t{id}_data")
-            };
-            self.line(&format!(
-                "cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, {m_expr}, {n_expr}, {k_expr}, 1.0f, t{id}_af, {k_expr}, t{id}_bf, {n_expr}, 0.0f, {c_arg}, {n_expr});"
-            ));
-            if let Some(f32_to_reduced) = f32_to_reduced {
-                self.line(&format!(
-                    "for (int64_t i = 0; i < t{id}_mn; i++) ((uint16_t*)t{id}_data)[i] = {f32_to_reduced}(t{id}_cf[i]);"
-                ));
+        self.indent -= 1;
+        self.line(&format!("}} else if (t{id}_batch_count != 0) {{"));
+        self.indent += 1;
+        for name in ["af", "bf", "cf"] {
+            if name == "cf" && !output_reduced {
+                continue;
             }
-        } else {
-            let batch_count = spec
-                .batch_dims
-                .iter()
-                .map(Self::emit_dim_expr)
-                .reduce(|lhs, rhs| format!("({lhs} * {rhs})"))
-                .unwrap_or_else(|| "1".to_string());
-            self.line(&format!("int64_t t{id}_batch_count = {batch_count};"));
+            self.line(&format!("chelis_tensor *t{id}_{name}_scratch = chelis_alloc(1, &t{id}_{name}_count, CHELIS_DTYPE_F32);"));
+            self.line(&format!("chelis_tensor_write *t{id}_{name}_guard = chelis_tensor_begin_write(t{id}_{name}_scratch);"));
+            self.line(&format!("{f32_type} *t{id}_{name} = ({f32_type}*)chelis_tensor_write_view(t{id}_{name}_guard).data;"));
+        }
+        self.line(&format!(
+            "for ({index} t{id}_batch = 0; t{id}_batch < t{id}_batch_count; ++t{id}_batch) {{"
+        ));
+        self.indent += 1;
+        for (name, source, part) in [("af", a, "LEFT"), ("bf", b, "RIGHT")] {
             self.line(&format!(
-                "for (int64_t t{id}_batch = 0; t{id}_batch < t{id}_batch_count; t{id}_batch++) {{"
+                "for ({index} t{id}_i = 0; t{id}_i < t{id}_{name}_count; ++t{id}_i) {{"
             ));
             self.indent += 1;
-            self.line(&format!("int64_t t{id}_rem = t{id}_batch;"));
-            self.line(&format!("int64_t t{id}_a_offset = 0;"));
-            self.line(&format!("int64_t t{id}_b_offset = 0;"));
-            self.line(&format!("int64_t t{id}_out_offset = 0;"));
-            for axis in (0..spec.batch_dims.len()).rev() {
-                let dim_expr = Self::emit_dim_expr(&spec.batch_dims[axis]);
-                self.line(&format!(
-                    "int64_t t{id}_coord_{axis} = t{id}_rem % ({dim_expr});"
-                ));
-                self.line(&format!("t{id}_rem /= ({dim_expr});"));
-                self.line(&format!(
-                    "t{id}_a_offset += t{id}_coord_{axis} * t{a}_strides[{axis}];"
-                ));
-                self.line(&format!(
-                    "t{id}_b_offset += t{id}_coord_{axis} * t{b}_strides[{axis}];"
-                ));
-                self.line(&format!(
-                    "t{id}_out_offset += t{id}_coord_{axis} * t{id}_strides[{axis}];"
-                ));
-            }
-            self.line(&format!(
-                "for (int64_t i = 0; i < t{id}_mk; i++) t{id}_af[i] = {reduced_to_f32}(((const uint16_t*)t{a}_data)[t{id}_a_offset + i]);"
-            ));
-            self.line(&format!(
-                "for (int64_t i = 0; i < t{id}_kn; i++) t{id}_bf[i] = {reduced_to_f32}(((const uint16_t*)t{b}_data)[t{id}_b_offset + i]);"
-            ));
-            let c_arg = if output_is_reduced {
-                format!("t{id}_cf")
-            } else {
-                format!("(float*)t{id}_data + t{id}_out_offset")
-            };
-            self.line(&format!(
-                "cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, {m_expr}, {n_expr}, {k_expr}, 1.0f, t{id}_af, {k_expr}, t{id}_bf, {n_expr}, 0.0f, {c_arg}, {n_expr});"
-            ));
-            if let Some(f32_to_reduced) = f32_to_reduced {
-                self.line(&format!(
-                    "for (int64_t i = 0; i < t{id}_mn; i++) ((uint16_t*)t{id}_data)[t{id}_out_offset + i] = {f32_to_reduced}(t{id}_cf[i]);"
-                ));
-            }
+            self.line(&format!("{index} t{id}_source = chelis_matmul_index(t{id}_matmul, CHELIS_MATMUL_{part}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, t{id}_batch), chelis_scalar_from_bits(CHELIS_DTYPE_I64, t{id}_i));"));
+            self.line(&format!("t{id}_{name}[t{id}_i] = {to_f32}(((const {operand}*)t{source}_data)[t{id}_source]);"));
             self.indent -= 1;
             self.line("}");
         }
-        self.line(&format!("free(t{id}_af);"));
-        self.line(&format!("free(t{id}_bf);"));
-        if output_is_reduced {
-            self.line(&format!("free(t{id}_cf);"));
+        let output = if output_reduced {
+            format!("t{id}_cf")
+        } else {
+            self.line(&format!("{index} t{id}_out_offset = chelis_matmul_index(t{id}_matmul, CHELIS_MATMUL_RESULT, chelis_scalar_from_bits(CHELIS_DTYPE_I64, t{id}_batch), chelis_scalar_from_bits(CHELIS_DTYPE_I64, 0));"));
+            format!("({f32_type}*)t{id}_data + t{id}_out_offset")
+        };
+        self.line(&format!("cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, (chelis_blas_integer)t{id}_m, (chelis_blas_integer)t{id}_n, (chelis_blas_integer)t{id}_k, 1.0f, t{id}_af, (chelis_blas_integer)t{id}_k, t{id}_bf, (chelis_blas_integer)t{id}_n, 0.0f, {output}, (chelis_blas_integer)t{id}_n);"));
+        if output_reduced {
+            let from_f32 = Self::f32_to_reduced_fn(ty.precision);
+            self.line(&format!(
+                "for ({index} t{id}_i = 0; t{id}_i < t{id}_cf_count; ++t{id}_i) {{"
+            ));
+            self.indent += 1;
+            self.line(&format!("{index} t{id}_destination = chelis_matmul_index(t{id}_matmul, CHELIS_MATMUL_RESULT, chelis_scalar_from_bits(CHELIS_DTYPE_I64, t{id}_batch), chelis_scalar_from_bits(CHELIS_DTYPE_I64, t{id}_i));"));
+            self.line(&format!(
+                "(({element}*)t{id}_data)[t{id}_destination] = {from_f32}(t{id}_cf[t{id}_i]);"
+            ));
+            self.indent -= 1;
+            self.line("}");
         }
-        self.line(&format!(
-            "if (t{id}_a != t{a}) chelis_tensor_release(t{id}_a);"
-        ));
-        self.line(&format!(
-            "if (t{id}_b != t{b}) chelis_tensor_release(t{id}_b);"
-        ));
+        self.indent -= 1;
+        self.line("}");
+        for name in ["af", "bf", "cf"] {
+            if name == "cf" && !output_reduced {
+                continue;
+            }
+            self.line(&format!("chelis_tensor_end_write(t{id}_{name}_guard);"));
+            self.line(&format!("chelis_tensor_release(t{id}_{name}_scratch);"));
+        }
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!("chelis_matmul_plan_release(t{id}_matmul);"));
     }
 
     fn emit_sparse_gather(
@@ -5158,6 +5073,61 @@ impl CEmitter {
     /// (and the CLI's mirror); the `panic!` below is a defensive backstop so
     /// silent truncation cannot recur if some path reaches emit unguarded.
     #[allow(clippy::too_many_arguments)]
+    fn emit_window_plan(
+        &mut self,
+        id: usize,
+        input: usize,
+        window: &[usize],
+        strides: &[usize],
+        ty: &TensorType,
+        operation: &str,
+        side: &str,
+    ) -> Result<(), Unsupported> {
+        let array = |values: &[usize]| -> Result<String, Unsupported> {
+            if values.is_empty() {
+                return Ok("NULL".into());
+            }
+            let values = values
+                .iter()
+                .map(|&value| {
+                    let value = i64::try_from(value).map_err(|_| {
+                        Unsupported::new(
+                            UnsupportedKind::Construct("a window parameter outside int64".into()),
+                            format!("the C DAG emitter (node {id})"),
+                            Stage::Codegen("c"),
+                            chelis_types::deliberate_rejection!(
+                                "[05-RWIN-1]",
+                                "window extents and strides require positive int64 values"
+                            ),
+                        )
+                    })?;
+                    Ok(format!(
+                        "chelis_scalar_from_bits(CHELIS_DTYPE_I64, UINT64_C({value}))"
+                    ))
+                })
+                .collect::<Result<Vec<_>, Unsupported>>()?;
+            Ok(format!("(chelis_scalar[]){{{}}}", values.join(", ")))
+        };
+        let window = array(window)?;
+        let count = strides.len();
+        let strides = array(strides)?;
+        self.line(&format!("chelis_window_plan *t{id}_window = chelis_tensor_window_plan(t{input}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {count}), {window}, {strides}, {operation});"));
+        let extents = (0..ty.dims.len()).map(|axis| (axis, format!("chelis_window_extent(t{id}_window, {side}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {axis}))"))).collect::<Vec<_>>();
+        self.emit_runtime_dim_sites(id, &extents);
+        let shape = Self::tagged_shape_literal(ty);
+        let rank = ty.dims.len();
+        self.line(&format!("chelis_window_check_target(t{id}_window, {side}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {rank}), {shape});"));
+        let index = Self::elem_type(&TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        });
+        self.line(&format!(
+            "{index} t{id}_window_count = chelis_window_count(t{id}_window);"
+        ));
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn emit_reduce_window(
         &mut self,
         id: usize,
@@ -5258,15 +5228,24 @@ impl CEmitter {
                 ));
             }
         }
-        let window_volume: usize = window_shape.iter().product();
+        let operation = match reducer {
+            ReduceWindowKind::Sum => "CHELIS_WINDOW_SUM",
+            ReduceWindowKind::Mean => "CHELIS_WINDOW_MEAN",
+            ReduceWindowKind::Max => "CHELIS_WINDOW_MAX",
+            ReduceWindowKind::Min => "CHELIS_WINDOW_MIN",
+        };
+        self.emit_window_plan(
+            id,
+            a,
+            window_shape,
+            strides,
+            ty,
+            operation,
+            "CHELIS_WINDOW_RESULT",
+        )?;
         self.emit_slot_wrapper(id, ty);
-        // NOTE (#172 sibling, intentionally NOT changed here): windowed
-        // Max/Min keep C99 `fmaxf`/`fminf` (NaN-dropping). The #172 fix
-        // scopes NaN propagation to the `max_reduce` / `min_reduce`
-        // reductions; flipping reduce_window forward without also defining
-        // the NaN gradient-routing in the windowed backward (the `ext`
-        // recompute below) would introduce a fwd/bwd inconsistency. Tracked
-        // as a follow-up; reduce_window has its own parity gate (spec §2.3).
+        // Arithmetic policy is unchanged here; #1298 owns canonical window
+        // accumulation and extrema NaN/adjoint remediation.
         let (init_literal, combine_template) = match reducer {
             ReduceWindowKind::Max => (
                 "-INFINITY",
@@ -5280,7 +5259,6 @@ impl CEmitter {
                 ("0.0f", "acc += ((const float*)t{a}_data)[src_idx];")
             }
         };
-
         self.line("#pragma omp parallel for");
         self.line(&format!(
             "for (int64_t outer = 0; outer < t{id}_size; outer++) {{"
@@ -5288,70 +5266,21 @@ impl CEmitter {
         self.indent += 1;
         self.line(&format!("float acc = {init_literal};"));
         self.line(&format!(
-            "int64_t out_indices[t{id}_rank > 0 ? t{id}_rank : 1];"
+            "for (int64_t leaf = 0; leaf < t{id}_window_count; leaf++) {{"
         ));
-        self.line(&format!(
-            "chelis_flat_to_indices(outer, t{id}_shape, t{id}_rank, out_indices);"
-        ));
-        // Generate nested window loops. Each windowed axis gets its
-        // own loop variable __w{i}; the leading axes are passed
-        // through from `out_indices[..leading]`.
-        for (i, w) in window_shape.iter().enumerate() {
-            self.line(&format!("for (int __w{i} = 0; __w{i} < {w}; __w{i}++) {{"));
-            self.indent += 1;
-        }
-        self.line(&format!(
-            "int64_t full_indices[t{a}_rank > 0 ? t{a}_rank : 1];"
-        ));
-        for d in 0..leading {
-            self.line(&format!("full_indices[{d}] = out_indices[{d}];"));
-        }
-        for (i, s) in strides.iter().enumerate() {
-            let axis = leading + i;
-            self.line(&format!(
-                "full_indices[{axis}] = out_indices[{axis}] * {s} + __w{i};"
-            ));
-        }
-        self.line(&format!(
-            "int64_t src_idx = chelis_indices_to_flat(full_indices, t{a}_strides, t{a}_rank);"
-        ));
-        let combine = combine_template.replace("{a}", &a.to_string());
-        self.line(&combine);
-        for _ in 0..n {
-            self.indent -= 1;
-            self.line("}");
-        }
+        self.indent += 1;
+        self.line(&format!("int64_t src_idx = chelis_window_index(t{id}_window, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)leaf));"));
+        self.line(&combine_template.replace("{a}", &a.to_string()));
+        self.indent -= 1;
+        self.line("}");
         if matches!(reducer, ReduceWindowKind::Mean) {
-            self.line(&format!("acc /= {}.0f;", window_volume));
+            self.line(&format!("acc /= (float)t{id}_window_count;"));
         }
         self.line(&format!("((float*)t{id}_data)[outer] = acc;"));
         self.indent -= 1;
         self.line("}");
+        self.line(&format!("chelis_window_plan_release(t{id}_window);"));
         Ok(())
-    }
-
-    /// Emit the per-window `full_indices` source multi-index used by the
-    /// `reduce_window` adjoint: leading axes pass through from
-    /// `out_indices`, windowed axis `i` is `out_indices[axis]*stride + __w{i}`.
-    /// Assumes the `__w{i}` loop variables and `out_indices` are in scope.
-    fn emit_reduce_window_grad_full_indices(
-        &mut self,
-        leading: usize,
-        strides: &[usize],
-        input: usize,
-    ) {
-        self.line(&format!(
-            "int64_t full_indices[t{input}_rank > 0 ? t{input}_rank : 1];"
-        ));
-        for d in 0..leading {
-            self.line(&format!("full_indices[{d}] = out_indices[{d}];"));
-        }
-        for (i, s) in strides.iter().enumerate() {
-            let axis = leading + i;
-            self.line(&format!(
-                "full_indices[{axis}] = out_indices[{axis}] * {s} + __w{i};"
-            ));
-        }
     }
 
     /// Reverse-mode adjoint of `reduce_window_*` (`RiscOp::ReduceWindowGrad`).
@@ -5361,7 +5290,7 @@ impl CEmitter {
     /// shape. Each window's `g` is scattered (overlap-add) back over the
     /// window — `Sum` adds `g`, `Mean` adds `g / window_volume`, and
     /// `Max`/`Min` add `g` only at positions equal to that window's extreme
-    /// (ties distribute, matching the `max_reduce` mask adjoint). See
+    /// (existing tie/NaN arithmetic remains tracked by #1298). Geometry follows
     /// `spec/05-risc-primitives.md` §2.3.1.
     ///
     /// Emitted **serially** (no `#pragma omp parallel for`): overlapping
@@ -5377,7 +5306,7 @@ impl CEmitter {
         inputs: &[NodeId],
         ty: &TensorType,
         dag: VerifiedDagView<'_>,
-    ) {
+    ) -> Result<(), Unsupported> {
         let x = inputs[0].0;
         let g = inputs[1].0;
         let x_node = dag.get(inputs[0]).unwrap();
@@ -5405,89 +5334,61 @@ impl CEmitter {
             in_rank >= n,
             "reduce_window_grad: output rank {in_rank} smaller than window arity {n}"
         );
-        let leading = in_rank - n;
-        let window_volume: usize = window_shape.iter().product();
-
-        self.emit_slot_wrapper(id, ty);
-
-        // din accumulates with `+=`, so it must start at zero.
+        self.emit_window_plan(
+            id,
+            x,
+            window_shape,
+            strides,
+            ty,
+            "CHELIS_WINDOW_GRAD",
+            "CHELIS_WINDOW_SOURCE",
+        )?;
         self.line(&format!(
-            "for (int64_t __i = 0; __i < t{id}_size; __i++) {{ ((float*)t{id}_data)[__i] = 0.0f; }}"
+            "chelis_window_check_tensor(t{id}_window, t{g}, CHELIS_WINDOW_RESULT);"
         ));
-
-        // Serial scatter over each cotangent (forward-output) position.
+        self.emit_slot_wrapper(id, ty);
+        self.line(&format!(
+            "for (int64_t i = 0; i < t{id}_size; i++) {{ ((float*)t{id}_data)[i] = 0.0f; }}"
+        ));
+        // Serial cotangent/leaf order preserves deterministic overlap addition.
         self.line(&format!(
             "for (int64_t outer = 0; outer < t{g}_size; outer++) {{"
         ));
         self.indent += 1;
         self.line(&format!("float gval = ((const float*)t{g}_data)[outer];"));
-        self.line(&format!(
-            "int64_t out_indices[t{g}_rank > 0 ? t{g}_rank : 1];"
-        ));
-        self.line(&format!(
-            "chelis_flat_to_indices(outer, t{g}_shape, t{g}_rank, out_indices);"
-        ));
-
-        let is_extreme = matches!(reducer, ReduceWindowKind::Max | ReduceWindowKind::Min);
-        if is_extreme {
-            // First pass: the window extreme over `x` (needed to decide
-            // which positions receive the gradient).
+        if matches!(reducer, ReduceWindowKind::Max | ReduceWindowKind::Min) {
             let (init, cmp) = match reducer {
                 ReduceWindowKind::Max => ("-INFINITY", "fmaxf"),
                 _ => ("INFINITY", "fminf"),
             };
             self.line(&format!("float ext = {init};"));
-            for (i, w) in window_shape.iter().enumerate() {
-                self.line(&format!("for (int __w{i} = 0; __w{i} < {w}; __w{i}++) {{"));
-                self.indent += 1;
-            }
-            self.emit_reduce_window_grad_full_indices(leading, strides, x);
             self.line(&format!(
-                "int64_t src_idx = chelis_indices_to_flat(full_indices, t{x}_strides, t{x}_rank);"
+                "for (int64_t leaf = 0; leaf < t{id}_window_count; leaf++) {{"
             ));
+            self.indent += 1;
+            self.line(&format!("int64_t src_idx = chelis_window_index(t{id}_window, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)leaf));"));
             self.line(&format!(
                 "ext = {cmp}(ext, ((const float*)t{x}_data)[src_idx]);"
             ));
-            for _ in 0..n {
-                self.indent -= 1;
-                self.line("}");
-            }
-        }
-
-        // Scatter pass: distribute `gval` into the windowed `din` positions.
-        for (i, w) in window_shape.iter().enumerate() {
-            self.line(&format!("for (int __w{i} = 0; __w{i} < {w}; __w{i}++) {{"));
-            self.indent += 1;
-        }
-        self.emit_reduce_window_grad_full_indices(leading, strides, x);
-        self.line(&format!(
-            "int64_t dst_idx = chelis_indices_to_flat(full_indices, t{id}_strides, t{id}_rank);"
-        ));
-        match reducer {
-            ReduceWindowKind::Sum => {
-                self.line(&format!("((float*)t{id}_data)[dst_idx] += gval;"));
-            }
-            ReduceWindowKind::Mean => {
-                self.line(&format!(
-                    "((float*)t{id}_data)[dst_idx] += gval / {window_volume}.0f;"
-                ));
-            }
-            ReduceWindowKind::Max | ReduceWindowKind::Min => {
-                self.line(&format!(
-                    "int64_t src_idx = chelis_indices_to_flat(full_indices, t{x}_strides, t{x}_rank);"
-                ));
-                self.line(&format!(
-                    "if (((const float*)t{x}_data)[src_idx] == ext) {{ ((float*)t{id}_data)[dst_idx] += gval; }}"
-                ));
-            }
-        }
-        for _ in 0..n {
             self.indent -= 1;
             self.line("}");
         }
-
+        self.line(&format!(
+            "for (int64_t leaf = 0; leaf < t{id}_window_count; leaf++) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!("int64_t dst_idx = chelis_window_index(t{id}_window, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)leaf));"));
+        match reducer {
+            ReduceWindowKind::Sum => self.line(&format!("((float*)t{id}_data)[dst_idx] += gval;")),
+            ReduceWindowKind::Mean => self.line(&format!("((float*)t{id}_data)[dst_idx] += gval / (float)t{id}_window_count;")),
+            ReduceWindowKind::Max | ReduceWindowKind::Min => self.line(&format!("if (((const float*)t{x}_data)[dst_idx] == ext) {{ ((float*)t{id}_data)[dst_idx] += gval; }}")),
+        }
         self.indent -= 1;
         self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!("chelis_window_plan_release(t{id}_window);"));
+        Ok(())
     }
 
     // ---- Argmax / Argmin ----

@@ -175,7 +175,7 @@ use crate::host_abi::{
     HostAbiMatchArm as HostMatchArm, HostAbiParam as HostParam, HostAbiProgram as HostProgram,
     HostAbiType, HostAbiType as HostType, ProjectedHostProgram, ProjectedHostSite,
 };
-use chelis_ir::dag::{DimExpr, DimInfo, RiscOp, TensorType};
+use chelis_ir::dag::{DimInfo, RiscOp, TensorType};
 use chelis_ir::ownership::{
     HostSiteId, VerifiedApplyKind, VerifiedBlockId, VerifiedDagView, VerifiedEdgeView,
     VerifiedHostAction, VerifiedHostOperation, VerifiedHostTensorHelperView,
@@ -454,6 +454,7 @@ pub(crate) fn emit_host_abi_program(
     ]);
     if helper_requirements.needs_blas_header {
         out.push("#include \"chelis_blas.h\"".to_string());
+        out.push(CEmitter::blas_integer_support());
     }
     if helper_requirements.needs_math_header {
         out.push("#include \"chelis_math.h\"".to_string());
@@ -5653,135 +5654,86 @@ impl<'a> HostEmitter<'a> {
         let rhs = tensor_args
             .get(summary.rhs_input)
             .expect("summary rhs input index");
-        let m_expr = self.summary_dim_expr(&summary.m, summary, &tensor_args);
-        let n_expr = self.summary_dim_expr(&summary.n, summary, &tensor_args);
-        let k_expr = self.summary_dim_expr(&summary.k, summary, &tensor_args);
+        let plan = self.next_temp("blas_plan");
+        let index_type = sparse_elem_type(Prim::Int64);
+        let element = sparse_elem_type(Prim::F32);
+        self.lines.push(format!("{}chelis_matmul_plan *{plan} = chelis_tensor_matmul_plan({lhs}, {rhs}, chelis_scalar_from_bits(CHELIS_DTYPE_F32, UINT64_C(0)));", self.indent));
+        // The summary's declared output remains an independent target claim.
         let output_dims = summary
-            .batch_dims
+            .output
+            .dims
             .iter()
-            .chain([&summary.m, &summary.n])
-            .map(|dim| self.summary_dim_expr(dim, summary, &tensor_args))
+            .map(|dim| match dim {
+                DimInfo::Lit(value) | DimInfo::Named(_, Some(value)) => value.to_string(),
+                DimInfo::Named(name, None) => self
+                    .summary_symbol_expr(name, summary, &tensor_args)
+                    .unwrap_or_else(|| {
+                        panic!("BLAS summary output symbol `{name}` has no input binding")
+                    }),
+            })
             .collect::<Vec<_>>();
+        let rank = output_dims.len();
+        let tagged = output_dims
+            .iter()
+            .map(|d| format!("chelis_scalar_from_bits(CHELIS_DTYPE_I64, {d})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.lines.push(format!("{}chelis_matmul_check_target({plan}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {rank}), (chelis_scalar[]){{ {tagged} }});", self.indent));
+        self.lines.push(format!("{}chelis_matmul_check_vendor({plan}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, CHELIS_BLAS_MAXIMUM));", self.indent));
         let shape_name = self.next_temp("blas_shape");
+        let shape = (0..rank).map(|axis| format!("chelis_matmul_extent({plan}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {axis}))")).collect::<Vec<_>>().join(", ");
         self.lines.push(format!(
-            "{}int64_t {shape_name}[{}] = {{ {} }};",
-            self.indent,
-            output_dims.len(),
-            output_dims.join(", ")
-        ));
-        self.lines.push(format!(
-            "{}{target} = chelis_alloc({}, {shape_name}, CHELIS_DTYPE_F32);",
-            self.indent,
-            output_dims.len()
-        ));
-
-        let lhs_contig = self.next_temp("blas_lhs");
-        let rhs_contig = self.next_temp("blas_rhs");
-        self.lines.push(format!(
-            "{}chelis_tensor *{lhs_contig} = {lhs};",
+            "{}{index_type} {shape_name}[{rank}] = {{ {shape} }};",
             self.indent
         ));
-        self.lines.push(format!(
-            "{}if (!(chelis_tensor_rank({lhs_contig}) >= 2 && chelis_host_tensor_stride({lhs_contig}, chelis_tensor_rank({lhs_contig}) - 1) == 1 && chelis_host_tensor_stride({lhs_contig}, chelis_tensor_rank({lhs_contig}) - 2) == {k_expr})) {{",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}    {lhs_contig} = chelis_contiguous({lhs_contig});",
-            self.indent
-        ));
-        self.lines.push(format!("{}}}", self.indent));
-        self.lines.push(format!(
-            "{}chelis_tensor *{rhs_contig} = {rhs};",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}if (!(chelis_tensor_rank({rhs_contig}) >= 2 && chelis_host_tensor_stride({rhs_contig}, chelis_tensor_rank({rhs_contig}) - 1) == 1 && chelis_host_tensor_stride({rhs_contig}, chelis_tensor_rank({rhs_contig}) - 2) == {n_expr})) {{",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}    {rhs_contig} = chelis_contiguous({rhs_contig});",
-            self.indent
-        ));
-        self.lines.push(format!("{}}}", self.indent));
-
-        if summary.batch_dims.is_empty() {
-            let (guard, view) = self.begin_tensor_write(target);
-            self.lines.push(format!(
-                "{}cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, {m_expr}, {n_expr}, {k_expr}, 1.0f, (const float*)chelis_host_tensor_data({lhs_contig}), {k_expr}, (const float*)chelis_host_tensor_data({rhs_contig}), {n_expr}, 0.0f, (float*){view}.data, {n_expr});",
-                self.indent
-            ));
-            self.end_tensor_write(&guard);
-        } else {
-            let batch_count = summary
-                .batch_dims
-                .iter()
-                .map(|dim| self.summary_dim_expr(dim, summary, &tensor_args))
-                .reduce(|lhs, rhs| format!("({lhs} * {rhs})"))
-                .unwrap_or_else(|| "1".to_string());
-            let batch = self.next_temp("blas_batch");
-            let rem = self.next_temp("blas_rem");
-            let lhs_offset = self.next_temp("blas_lhs_offset");
-            let rhs_offset = self.next_temp("blas_rhs_offset");
-            let out_offset = self.next_temp("blas_out_offset");
-            let out_strides = (0..summary.batch_dims.len())
-                .map(|axis| {
-                    let stride = self.next_temp(&format!("blas_out_stride_{axis}"));
-                    self.lines.push(format!(
-                        "{}int64_t {stride} = chelis_host_tensor_stride({target}, {axis});",
-                        self.indent
-                    ));
-                    stride
-                })
-                .collect::<Vec<_>>();
-            let (guard, view) = self.begin_tensor_write(target);
-            self.lines.push(format!(
-                "{}for (int64_t {batch} = 0; {batch} < {batch_count}; {batch}++) {{",
-                self.indent
-            ));
-            self.lines
-                .push(format!("{}    int64_t {rem} = {batch};", self.indent));
-            self.lines
-                .push(format!("{}    int64_t {lhs_offset} = 0;", self.indent));
-            self.lines
-                .push(format!("{}    int64_t {rhs_offset} = 0;", self.indent));
-            self.lines
-                .push(format!("{}    int64_t {out_offset} = 0;", self.indent));
-            for axis in (0..summary.batch_dims.len()).rev() {
-                let dim_expr =
-                    self.summary_dim_expr(&summary.batch_dims[axis], summary, &tensor_args);
-                let coord = self.next_temp(&format!("blas_coord_{axis}"));
-                self.lines.push(format!(
-                    "{}    int64_t {coord} = {rem} % ({dim_expr});",
-                    self.indent
-                ));
-                self.lines
-                    .push(format!("{}    {rem} /= ({dim_expr});", self.indent));
-                self.lines.push(format!(
-                    "{}    {lhs_offset} += {coord} * chelis_host_tensor_stride({lhs_contig}, {axis});",
-                    self.indent
-                ));
-                self.lines.push(format!(
-                    "{}    {rhs_offset} += {coord} * chelis_host_tensor_stride({rhs_contig}, {axis});",
-                    self.indent
-                ));
-                self.lines.push(format!(
-                    "{}    {out_offset} += {coord} * {};",
-                    self.indent, out_strides[axis]
-                ));
-            }
-            self.lines.push(format!(
-                "{}    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, {m_expr}, {n_expr}, {k_expr}, 1.0f, (const float*)chelis_host_tensor_data({lhs_contig}) + {lhs_offset}, {k_expr}, (const float*)chelis_host_tensor_data({rhs_contig}) + {rhs_offset}, {n_expr}, 0.0f, (float*){view}.data + {out_offset}, {n_expr});",
-                self.indent
-            ));
-            self.lines.push(format!("{}}}", self.indent));
-            self.end_tensor_write(&guard);
+        let m = self.next_temp("blas_m");
+        let n = self.next_temp("blas_n");
+        let k = self.next_temp("blas_k");
+        for (name, dimension) in [(&m, "ROWS"), (&n, "COLUMNS"), (&k, "REDUCTION")] {
+            self.lines.push(format!("{}{index_type} {name} = chelis_matmul_dimension({plan}, CHELIS_MATMUL_{dimension});", self.indent));
         }
+        let count = self.next_temp("blas_batches");
         self.lines.push(format!(
-            "{}if ({lhs_contig} != {lhs}) chelis_tensor_release({lhs_contig});",
+            "{}{index_type} {count} = chelis_matmul_batch_count({plan});",
             self.indent
         ));
         self.lines.push(format!(
-            "{}if ({rhs_contig} != {rhs}) chelis_tensor_release({rhs_contig});",
+            "{}{target} = chelis_alloc({rank}, {shape_name}, CHELIS_DTYPE_F32);",
+            self.indent
+        ));
+        let (guard, view) = self.begin_tensor_write(target);
+        self.lines.push(format!("{}if ({k} == 0) {{", self.indent));
+        let bytes = self.next_temp("blas_bytes");
+        self.lines.push(format!(
+            "{}    {index_type} {bytes} = chelis_tensor_byte_count({target});",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}    if ({bytes} != 0) memset({view}.data, 0, (size_t){bytes});",
+            self.indent
+        ));
+        self.lines.push(format!("{}}} else {{", self.indent));
+        let batch = self.next_temp("blas_batch");
+        let lhs_offset = self.next_temp("blas_lhs_offset");
+        let rhs_offset = self.next_temp("blas_rhs_offset");
+        let out_offset = self.next_temp("blas_out_offset");
+        self.lines.push(format!(
+            "{}    for ({index_type} {batch} = 0; {batch} < {count}; ++{batch}) {{",
+            self.indent
+        ));
+        for (name, part) in [
+            (&lhs_offset, "LEFT"),
+            (&rhs_offset, "RIGHT"),
+            (&out_offset, "RESULT"),
+        ] {
+            self.lines.push(format!("{}        {index_type} {name} = chelis_matmul_index({plan}, CHELIS_MATMUL_{part}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {batch}), chelis_scalar_from_bits(CHELIS_DTYPE_I64, 0));", self.indent));
+        }
+        self.lines.push(format!("{}        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, (chelis_blas_integer){m}, (chelis_blas_integer){n}, (chelis_blas_integer){k}, 1.0f, (const {element}*)chelis_host_tensor_data({lhs}) + {lhs_offset}, (chelis_blas_integer){k}, (const {element}*)chelis_host_tensor_data({rhs}) + {rhs_offset}, (chelis_blas_integer){n}, 0.0f, ({element}*){view}.data + {out_offset}, (chelis_blas_integer){n});", self.indent));
+        self.lines.push(format!("{}    }}", self.indent));
+        self.lines.push(format!("{}}}", self.indent));
+        self.end_tensor_write(&guard);
+        self.lines.push(format!(
+            "{}chelis_matmul_plan_release({plan});",
             self.indent
         ));
         Ok(())
@@ -5856,30 +5808,6 @@ impl<'a> HostEmitter<'a> {
                     }
                 }
             }
-        }
-    }
-
-    fn summary_dim_expr(
-        &self,
-        dim: &DimExpr,
-        summary: &HostBlasMatmulSummary,
-        tensor_args: &[String],
-    ) -> String {
-        match dim {
-            DimExpr::Concrete(value) => value.to_string(),
-            DimExpr::Sym(name) => self
-                .summary_symbol_expr(name, summary, tensor_args)
-                .unwrap_or_else(|| panic!("BLAS summary symbol `{name}` has no input binding")),
-            DimExpr::Mul(lhs, rhs) => format!(
-                "({} * {})",
-                self.summary_dim_expr(lhs, summary, tensor_args),
-                self.summary_dim_expr(rhs, summary, tensor_args)
-            ),
-            DimExpr::Div(lhs, rhs) => format!(
-                "({} / {})",
-                self.summary_dim_expr(lhs, summary, tensor_args),
-                self.summary_dim_expr(rhs, summary, tensor_args)
-            ),
         }
     }
 

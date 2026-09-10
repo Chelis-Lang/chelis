@@ -93,7 +93,7 @@ fn c_backend_blas_matmul_bf16_routes_through_convert_then_sgemm_post_ws_1() {
         "WS-1: bf16 matmul must convert operands to f32 before BLAS dispatch; got:\n{src}"
     );
     assert!(
-        src.contains("cblas_sgemm"),
+        src.contains("cblas_sgemm("),
         "WS-1: bf16 matmul must dispatch cblas_sgemm against the f32 scratch buffers; got:\n{src}"
     );
     assert!(
@@ -136,7 +136,7 @@ fn c_backend_blas_matmul_f16_routes_through_convert_then_sgemm_post_ws_1() {
         "WS-1: f16 matmul must convert operands to f32 before BLAS dispatch; got:\n{src}"
     );
     assert!(
-        src.contains("cblas_sgemm"),
+        src.contains("cblas_sgemm("),
         "WS-1: f16 matmul must dispatch cblas_sgemm against the f32 scratch buffers; got:\n{src}"
     );
     assert!(
@@ -186,11 +186,11 @@ fn c_backend_f64_matmul_emits_cblas_dgemm_not_sgemm() {
     let result = codegen_with_options(&dag, "f64_mm", opts).unwrap();
     let src = &result.c_source;
     assert!(
-        src.contains("cblas_dgemm"),
+        src.contains("cblas_dgemm("),
         "f64 matmul must emit cblas_dgemm; got source:\n{src}"
     );
     assert!(
-        !src.contains("cblas_sgemm"),
+        !src.contains("cblas_sgemm("),
         "f64 matmul must NOT emit cblas_sgemm (the F1 footgun); got source:\n{src}"
     );
     // Result tensor data must be reinterpreted as `double*`, not `float*`,

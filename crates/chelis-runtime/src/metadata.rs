@@ -47,6 +47,235 @@ pub(crate) struct IterationSpace {
     elements: ElementCount,
 }
 
+/// Valid-padding window geometry independent of source storage and arithmetic.
+pub(crate) struct WindowMetadata {
+    input: ShapeMetadata,
+    result: ShapeMetadata,
+    window: Box<[i64]>,
+    steps: Box<[i64]>,
+    leading: usize,
+    count: ElementCount,
+}
+
+impl WindowMetadata {
+    pub(crate) fn new(
+        input: &ShapeMetadata,
+        window: &[i64],
+        steps: &[i64],
+    ) -> Result<Self, MetadataError> {
+        if window.is_empty() || window.len() != steps.len() || window.len() > input.shape.len() {
+            return Err(MetadataError::Domain(
+                "window and stride arity outside input rank".into(),
+            ));
+        }
+        ElementCount::scratch_entries(window.len(), 0)?.scratch_len::<i64>()?;
+        let leading = input.shape.len() - window.len();
+        let mut shape = input.shape.to_vec();
+        for (i, (&w, &step)) in window.iter().zip(steps).enumerate() {
+            let axis = leading + i;
+            if w <= 0 || step <= 0 || w > input.shape[axis] {
+                return Err(MetadataError::Domain(
+                    "window or stride outside valid-padding domain".into(),
+                ));
+            }
+            shape[axis] = input.shape[axis]
+                .checked_sub(w)
+                .and_then(|n| n.checked_div(step))
+                .and_then(|n| n.checked_add(1))
+                .ok_or(MetadataError::Overflow("window extent exceeds int64"))?;
+        }
+        let result = ShapeMetadata::contiguous(&shape, input.dtype())?;
+        result.bytes().allocation()?;
+        let count = ElementCount::from_extents(if result.elements().get() == 0 {
+            &[0]
+        } else {
+            window
+        })?;
+        Ok(Self {
+            input: input.clone(),
+            result,
+            window: window.into(),
+            steps: steps.into(),
+            leading,
+            count,
+        })
+    }
+    pub(crate) fn input(&self) -> &ShapeMetadata {
+        &self.input
+    }
+    pub(crate) fn result(&self) -> &ShapeMetadata {
+        &self.result
+    }
+    pub(crate) fn count(&self) -> ElementCount {
+        self.count
+    }
+    pub(crate) fn index(&self, group: i64, leaf: i64) -> Result<i64, MetadataError> {
+        self.result.require_index(group)?;
+        if leaf < 0 || leaf >= self.count.get() {
+            return Err(MetadataError::Domain(
+                "window leaf outside iteration domain".into(),
+            ));
+        }
+        let mut group_remaining = group;
+        let mut leaf_remaining = leaf;
+        let mut source_index = 0_i64;
+        for axis in (0..self.input.shape.len()).rev() {
+            let coordinate = group_remaining % self.result.shape[axis];
+            group_remaining /= self.result.shape[axis];
+            let coordinate = if axis < self.leading {
+                coordinate
+            } else {
+                let window_axis = axis - self.leading;
+                let offset = leaf_remaining % self.window[window_axis];
+                leaf_remaining /= self.window[window_axis];
+                coordinate
+                    .checked_mul(self.steps[window_axis])
+                    .and_then(|n| n.checked_add(offset))
+                    .ok_or(MetadataError::Overflow("window coordinate exceeds int64"))?
+            };
+            if coordinate >= self.input.shape[axis] {
+                return Err(MetadataError::Domain(
+                    "window coordinate outside source".into(),
+                ));
+            }
+            source_index = coordinate
+                .checked_mul(self.input.strides[axis])
+                .and_then(|n| source_index.checked_add(n))
+                .ok_or(MetadataError::Overflow("window index exceeds int64"))?;
+        }
+        self.input.require_index(source_index)?;
+        Ok(source_index)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum MatmulPart {
+    Left,
+    Right,
+    Result,
+}
+#[derive(Clone, Copy)]
+pub(crate) enum MatmulDimension {
+    Rows,
+    Columns,
+    Reduction,
+}
+
+/// One checked matrix domain after explicit batch alignment. No payload is held.
+pub(crate) struct MatmulMetadata {
+    result: ShapeMetadata,
+    dimensions: [i64; 3],
+    matrices: [ElementCount; 3],
+    totals: [ElementCount; 3],
+    batches: ElementCount,
+}
+
+impl MatmulMetadata {
+    pub(crate) fn new(
+        left: &ShapeMetadata,
+        right: &ShapeMetadata,
+        dtype: RuntimeDType,
+    ) -> Result<Self, MetadataError> {
+        let rank = left.shape.len();
+        if rank < 2
+            || right.shape.len() != rank
+            || left.dtype() != right.dtype()
+            || left.shape[..rank - 2] != right.shape[..rank - 2]
+            || left.shape[rank - 1] != right.shape[rank - 2]
+        {
+            return Err(MetadataError::Domain(
+                "matmul operand shape or dtype mismatch".into(),
+            ));
+        }
+        let m = left.shape[rank - 2];
+        let n = right.shape[rank - 1];
+        let k = left.shape[rank - 1];
+        let mut shape = left.shape.to_vec();
+        shape[rank - 1] = n;
+        let result = ShapeMetadata::contiguous(&shape, dtype)?;
+        result.bytes().allocation()?;
+        let empty = result.elements().get() == 0;
+        let batches = ElementCount::from_extents(if empty { &[0] } else { &shape[..rank - 2] })?;
+        let matrices = if empty {
+            [ElementCount::from_extents(&[0])?; 3]
+        } else {
+            [
+                ElementCount::from_extents(&[m, k])?,
+                ElementCount::from_extents(&[k, n])?,
+                ElementCount::from_extents(&[m, n])?,
+            ]
+        };
+        let totals = [left.elements(), right.elements(), result.elements()];
+        Ok(Self {
+            result,
+            dimensions: [m, n, k],
+            matrices,
+            totals,
+            batches,
+        })
+    }
+    pub(crate) fn result(&self) -> &ShapeMetadata {
+        &self.result
+    }
+    pub(crate) fn dimension(&self, dimension: MatmulDimension) -> i64 {
+        self.dimensions[match dimension {
+            MatmulDimension::Rows => 0,
+            MatmulDimension::Columns => 1,
+            MatmulDimension::Reduction => 2,
+        }]
+    }
+    pub(crate) fn batches(&self) -> ElementCount {
+        self.batches
+    }
+    fn part_index(part: MatmulPart) -> usize {
+        match part {
+            MatmulPart::Left => 0,
+            MatmulPart::Right => 1,
+            MatmulPart::Result => 2,
+        }
+    }
+    pub(crate) fn matrix_count(&self, part: MatmulPart) -> ElementCount {
+        self.matrices[Self::part_index(part)]
+    }
+    pub(crate) fn index(
+        &self,
+        part: MatmulPart,
+        batch: i64,
+        element: i64,
+    ) -> Result<i64, MetadataError> {
+        let matrix = self.matrix_count(part).get();
+        if batch < 0 || batch >= self.batches.get() || element < 0 || element >= matrix {
+            return Err(MetadataError::Domain(
+                "matmul index outside batch or matrix".into(),
+            ));
+        }
+        let index = batch
+            .checked_mul(matrix)
+            .and_then(|n| n.checked_add(element))
+            .ok_or(MetadataError::Overflow("matmul index exceeds int64"))?;
+        if index >= self.totals[Self::part_index(part)].get() {
+            return Err(MetadataError::Domain("matmul index outside operand".into()));
+        }
+        Ok(index)
+    }
+    pub(crate) fn check_vendor(&self, limit: i64) -> Result<(), MetadataError> {
+        if limit <= 0 {
+            return Err(MetadataError::Domain(
+                "matmul vendor dimension limit must be positive".into(),
+            ));
+        }
+        if self.batches.get() != 0
+            && self.dimension(MatmulDimension::Reduction) != 0
+            && self.dimensions.iter().any(|&extent| extent > limit)
+        {
+            return Err(MetadataError::Overflow(
+                "matmul dimension exceeds vendor argument domain",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// The checked row-major domain shared by gather and scatter consumers.
 pub(crate) struct SparseMetadata {
     base: ShapeMetadata,

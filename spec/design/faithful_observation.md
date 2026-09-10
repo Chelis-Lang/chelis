@@ -939,6 +939,13 @@ both evaluator and generated C. Guard mutations reject deleting or emptying the
 row, making it library-only, or removing its corpus entry; every previous corpus
 entry remains required.
 
+The checked-window metadata delivery adds `checked_window_geometry.ch` and
+`parity_checked_window_geometry`, preserving every prior corpus entry. Four f32
+forward reducers execute on a leading-axis input with valid padding and stride
+two. Empty/deleted/library-only parity rows and corpus removal remain rejected.
+Independent native tests cover gradient geometry and invalid runtime target or
+cotangent shapes; this example does not claim window arithmetic remediation.
+
 Three digest-locked behavioral canaries perturb the compiled observation before
 the shared comparator, drive the shared `assert_expected` helper with a
 known-wrong expected value, and present an adjacent f32 result while the

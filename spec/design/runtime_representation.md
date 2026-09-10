@@ -613,9 +613,9 @@ from 324 to 321. Checked-add/multiply and bounds mutations execute against the
 private metadata owner. No new inventory identity or owner exception is admitted.
 The complete Phase 1 oracle remains a separate deliverable.
 
-After the reduction/Count and sparse deliveries below, generated C adoption still
-requires BLAS loop domains and window metadata/scratch allocation. The
-complete Phase 1 execution receipt/mutation oracle remains outstanding. Host-only results do not establish
+After the reduction/Count, sparse, BLAS, and window deliveries below, remaining
+host metadata consumers and the complete Phase 1 execution receipt/mutation oracle
+remain outstanding. Host-only results do not establish
 device execution or close #889/#893. Generated host/device descriptors and
 validated Python/DLPack wrappers remain under #893/#1345; #1288 consumes those
 interfaces and owns their exact discovery and authority registrations.
@@ -678,6 +678,74 @@ The Phase 0 foundation keeps all 358 identities. Replacing thirteen raw sparse
 consumer owners reduces active debt from 313 to 300 without a new exception. The
 coverage freeze adds these executable suites; it does not establish the complete
 Phase 1 execution-receipt oracle or the remaining BLAS/window/host consumers.
+
+
+#### Generated C BLAS submission metadata (#889)
+
+Already selected internal BLAS nodes and host summaries obtain a `MatmulMetadata`
+plan after explicit batch alignment. Its operand/result snapshots own complete
+shapes, batch counts, per-matrix counts, checked matrix indices, and allocation
+bounds. Required declarations and native link flags follow the selected nodes, including
+when no further specialization was requested. Exact result-shape and vendor-dimension checks precede output allocation
+or reuse. Reduced-float conversion scratch uses checked f32 capacities and runtime
+tensor owners/write guards; one batch loop consumes checked source/result indices.
+Empty results make no vendor call, and zero contraction writes dtype-zero output.
+
+The generated translation unit binds its dimension type to the actual sgemm and
+dgemm function prototypes using C11 type assertions. Accelerate's `__LAPACK_int`,
+OpenBLAS's `blasint`, and Netlib's `CBLAS_INT` declarations select a signed 32- or
+64-bit domain; a missing, unsigned, unsupported-width, or inconsistent declaration
+fails compilation. These declarations are compiler-private, so the published
+Chelis ABI stays configuration invariant. Tagged int64 dimensions are checked
+against that domain before casts at the call. Exact per-matrix f32 scratch bytes
+are checked even when source storage uses f16/bf16.
+
+This is metadata adoption, not algorithm selection. [05-OP-30]'s canonical
+contraction rule still prevents shape-only BLAS specialization; production host
+preparation continues clearing those summaries. Direct internal node and summary
+fixtures exercise the submission boundary without re-enabling a vendor shortcut.
+Operand/accumulator/destination dtype choices and conversion arithmetic stay pinned
+by the existing IR. The bounded oracle combines private metadata/projection and
+construction controls, runtime C plan tests in debug/release, generated native
+sanitizer tests, and actual/fake vendor-header width/prototype controls. It does
+not prove vendor arithmetic equivalent for unrestricted inputs or complete Phase 1.
+The 358-entry foundation is unchanged; five retired BLAS consumer identities reduce
+active debt from 300 to 295 without an owner exception. Coverage adds the matrix
+runtime suite in both profiles, delegation bypass controls, and native submission
+and vendor-prototype execution. Production matrix-index and vendor-range mutations
+must fail with overflow checks disabled; virtual f16 operands demonstrate a fitting
+source allocation whose f32 scratch capacity overflows.
+
+
+#### Generated C window geometry (#889)
+
+`WindowMetadata` snapshots complete source/result shapes and positive trailing
+window/stride lists, checks valid-padding extents, and maps a result position and
+row-major leaf to a checked source index. Seven OP33 entry points expose that
+immutable plan without retaining payload or tensor ownership. Shape and dtype
+validation precede generated forward/gradient allocation, including same-capacity
+wrong shapes. Leading empty axes have no reachable index and no unused window
+product. The generated loops carry int64 positions and use no rank-sized coordinate
+arrays or compiler-computed window-volume product. Forward leaves and serial
+cotangent/leaf updates retain their prior order.
+
+The bounded acceptance surface combines `checked_metadata`, `metadata_compile`,
+`checked_c_window`, native `exec_compile::checked_windows_*`, existing window
+emission/numerical tests, and `parity_checked_window_geometry`. Production
+stride/valid-padding mutations must fail with overflow checks disabled; private
+fields reject outside mutation. Runtime tests cover all nine storage dtypes and
+five diagnostic selectors, invalid tags/axes/indices/targets, source write guards,
+release and repurpose. Native f32 fixtures exercise four forward reducers and
+four gradients, both nonempty and leading-empty, plus incorrect result/cotangent
+shapes under optimized ASan/UBSan. The executable example runs Eval/C parity.
+
+This delivery preserves the existing f32/static-window-output admission and the
+existing accumulation/NaN/tie behavior. #1298 owns window arithmetic remediation;
+these geometry tests do not establish its full normative contract. The 358-row
+foundation stays identical, and the removed gradient coordinate template reduces
+active debt from 295 to 294 without adding an owner exception. The complete Phase
+1 oracle, remaining host metadata consumers, and Phase 2 ABI/Python/DLPack work
+remain separate obligations.
 
 
 ## C3. One generated host/device descriptor schema

@@ -243,8 +243,8 @@ fn c_backend_blas_matmul_f64_does_not_silently_lower_to_sgemm() {
             // single-precision GEMM. Source data is `double*`; calling
             // sgemm on double data is silent data corruption.
             let src: String = src;
-            let mentions_sgemm = src.contains("cblas_sgemm");
-            let mentions_dgemm = src.contains("cblas_dgemm");
+            let mentions_sgemm = src.contains("cblas_sgemm(");
+            let mentions_dgemm = src.contains("cblas_dgemm(");
             assert!(
                 !mentions_sgemm || mentions_dgemm,
                 "C backend silently emitted cblas_sgemm (single precision) for an \
@@ -295,7 +295,7 @@ fn c_backend_blas_matmul_bf16_routes_through_convert_then_sgemm_post_ws_1() {
         "WS-1: bf16 matmul must convert operands to f32 before BLAS dispatch; got:\n{src}"
     );
     assert!(
-        src.contains("cblas_sgemm"),
+        src.contains("cblas_sgemm("),
         "WS-1: bf16 matmul must dispatch cblas_sgemm against the f32 scratch buffers; got:\n{src}"
     );
     assert!(
