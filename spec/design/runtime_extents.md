@@ -471,8 +471,8 @@ cargo nextest run -p chelis-cli -p chelis-ir -p chelis-compiler-api -p chelis-ba
   --test runtime_extent_claim_preparation --test runtime_extent_checked_transport \
   --test wire_extent_witness --test disk_cache \
   --test issue_513_symbolic_axis_adjoints --test exec_compile \
-  --test runtime_extent_slice_b --test issue_912_root_boundary \
-  -E 'binary(runtime_extent_claim_preparation) | binary(runtime_extent_checked_transport) | binary(wire_extent_witness) | test(=cached_imports_preserve_computed_claims_and_unit_preconditions) | test(=previous_checked_extent_cache_is_rejected_before_payload_decode) | test(context_decode_rejects_missing_or_forged_authored_signatures) | binary(issue_513_symbolic_axis_adjoints) | test(static_reshape_folding_requires_independent_axis_sources) | test(checked_remainder) | test(staged_plan_) | test(cse_preserves_executed_random_draws) | test(=a_local_unit_extent_claim_is_guarded_on_the_hip_host_lowering) | test(=hip_tensor_root_uses_the_manifest_to_emit_a_gpu_executable)'
+  --test runtime_extent_slice_b --test issue_912_root_boundary --test cli \
+  -E 'binary(runtime_extent_claim_preparation) | binary(runtime_extent_checked_transport) | binary(wire_extent_witness) | test(=cached_imports_preserve_computed_claims_and_unit_preconditions) | test(=previous_checked_extent_cache_is_rejected_before_payload_decode) | test(context_decode_rejects_missing_or_forged_authored_signatures) | binary(issue_513_symbolic_axis_adjoints) | test(static_reshape_folding_requires_independent_axis_sources) | test(checked_remainder) | test(staged_plan_) | test(cse_preserves_executed_random_draws) | test(=a_local_unit_extent_claim_is_guarded_on_the_hip_host_lowering) | test(=hip_tensor_root_uses_the_manifest_to_emit_a_gpu_executable) | test(=build_hip_executes_host_reduce_window_with_exact_shape_and_values) | test(=build_hip_host_rejects_unimplemented_window_dtype_cleanly)'
 ```
 
 The new public matrix has 117 initial exported/binding/main fixtures, 69
@@ -485,7 +485,10 @@ fixtures, 60 capture/order fixtures, six eager-source fixtures, six scoped-witne
 fixtures, 12 HIP host CLI/API executions and 36 handled-Random fixtures. Thirty tuple and scalar/tensor-view fixtures
 cover structured captures and both aliases at a stage cut. These
 559 public fixture variants check declarations independently of actual
-shape/value or required failure. Random values are checked at exact f32 bits.
+shape/value or required failure. Random values are checked at exact f32 bits. Two integration controls execute a
+checked HIP host window entry with exact shape/data and require a clean error
+for its unimplemented bf16 cell. Current [05-RWIN-2] permits the operation;
+these controls distinguish the selected host implementation from device support.
 Claim mismatches require Domain/reshape/int64. Scheduling fixtures
 independently require Eval's division-by-zero/floor_div/int64 diagnostic and
 the C integer helper's existing division-by-zero failure; they do not certify
