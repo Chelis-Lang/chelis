@@ -1,0 +1,147 @@
+//! #1269: a pinned reader must see every operation-vocabulary change.
+use chelis_compiler_api::schema::{WIRE_DAG_SCHEMA_VERSION, WireDag, WireRiscOp};
+use serde::Deserialize;
+
+// Capture the actual serde decoder's closed vocabulary, rather than maintaining
+// another production enum or parsing Rust source. An unexpected decoder path is
+// a test failure, never an empty vocabulary that can pass the pin.
+#[derive(Debug)]
+struct VocabularyError(Vec<String>);
+
+impl std::fmt::Display for VocabularyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "operation vocabulary: {:?}", self.0)
+    }
+}
+
+impl std::error::Error for VocabularyError {}
+
+impl serde::de::Error for VocabularyError {
+    fn custom<T: std::fmt::Display>(message: T) -> Self {
+        panic!("unexpected vocabulary decoder error: {message}")
+    }
+
+    fn unknown_variant(_: &str, variants: &'static [&'static str]) -> Self {
+        Self(variants.iter().map(|name| (*name).to_owned()).collect())
+    }
+}
+
+#[test]
+fn wire_dag_operation_vocabulary_is_pinned_to_version_9() {
+    let decoder = serde::de::value::MapDeserializer::<_, VocabularyError>::new(
+        [("kind", "__unknown_operation__")].into_iter(),
+    );
+    let VocabularyError(mut actual) = WireRiscOp::deserialize(decoder).unwrap_err();
+    let mut expected = vec![
+        "add",
+        "sub",
+        "mul",
+        "div",
+        "floor_div",
+        "trunc_div",
+        "cmp_lt",
+        "max_elem",
+        "min_elem",
+        "extrema_adjoint",
+        "relu",
+        "relu_adjoint",
+        "neg",
+        "recip",
+        "exp",
+        "log",
+        "sin",
+        "sqrt",
+        "cos",
+        "tan",
+        "atan",
+        "abs",
+        "floor",
+        "ceil",
+        "round",
+        "uniform_like",
+        "dropout",
+        "sum",
+        "count",
+        "max_reduce",
+        "min_reduce",
+        "prod_reduce",
+        "reduce_window",
+        "reduce_window_grad",
+        "argmax",
+        "argmin",
+        "reshape",
+        "permute",
+        "expand",
+        "one_hot",
+        "pad",
+        "shrink",
+        "stride",
+        "const",
+        "const_tensor",
+        "shape",
+        "extent_witness",
+        "load",
+        "store",
+        "copy",
+        "drop",
+        "realize",
+        "cast",
+        "cast_trunc",
+        "fused_elem",
+        "blas_matmul",
+        "gather",
+        "scatter_add",
+        "scatter",
+        "scatter_elements",
+    ];
+    actual.sort();
+    expected.sort();
+    assert_eq!(
+        WIRE_DAG_SCHEMA_VERSION, 9,
+        "review vocabulary and migration history with every version change"
+    );
+    assert_eq!(actual.len(), 60);
+    assert_eq!(
+        actual, expected,
+        "operation changes require a schema-version and migration-history review"
+    );
+}
+
+#[test]
+fn cast_trunc_has_its_exact_wire_spelling_and_round_trips() {
+    let op = WireRiscOp::CastTrunc {
+        new_precision: "int32".into(),
+    };
+    let encoded = serde_json::to_value(&op).unwrap();
+    assert_eq!(
+        encoded,
+        serde_json::json!({"kind": "cast_trunc", "new_precision": "int32"})
+    );
+    assert!(
+        matches!(serde_json::from_value::<WireRiscOp>(encoded).unwrap(),
+        WireRiscOp::CastTrunc { new_precision } if new_precision == "int32")
+    );
+}
+
+#[test]
+fn cast_trunc_rejects_unknown_spelling_and_missing_target() {
+    for encoded in [
+        serde_json::json!({"kind": "cast_truncate", "new_precision": "int32"}),
+        serde_json::json!({"kind": "cast_trunc"}),
+    ] {
+        assert!(serde_json::from_value::<WireRiscOp>(encoded).is_err());
+    }
+}
+
+#[test]
+fn wire_dag_accepts_current_version_and_rejects_missing_old_and_future_versions() {
+    let mut encoded =
+        serde_json::json!({"schema_version": WIRE_DAG_SCHEMA_VERSION, "nodes": [], "roots": []});
+    assert!(WireDag::from_validated_json(&encoded.to_string()).is_ok());
+    for version in [WIRE_DAG_SCHEMA_VERSION - 1, WIRE_DAG_SCHEMA_VERSION + 1] {
+        encoded["schema_version"] = version.into();
+        assert!(WireDag::from_validated_json(&encoded.to_string()).is_err());
+    }
+    encoded.as_object_mut().unwrap().remove("schema_version");
+    assert!(WireDag::from_validated_json(&encoded.to_string()).is_err());
+}
