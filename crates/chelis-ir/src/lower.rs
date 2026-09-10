@@ -127,6 +127,7 @@ enum StaticPatternMatch {
 /// arm.
 fn match_static_pattern(
     pattern: &Expr,
+    host: Option<&HostAggregateType>,
     ctor: &str,
     field_names: Option<&[String]>,
     fields: &[LoweredValue],
@@ -140,6 +141,7 @@ fn match_static_pattern(
             Some(name) => StaticPatternMatch::Match(vec![(
                 name.to_string(),
                 LoweredValue::Adt {
+                    host: host.cloned(),
                     ctor: ctor.to_string(),
                     field_names: field_names.map(<[String]>::to_vec),
                     fields: fields.to_vec(),
@@ -153,11 +155,12 @@ fn match_static_pattern(
             else {
                 return StaticPatternMatch::Unsupported("a malformed `pat-as`".to_string());
             };
-            match match_static_pattern(inner, ctor, field_names, fields) {
+            match match_static_pattern(inner, host, ctor, field_names, fields) {
                 StaticPatternMatch::Match(mut binds) => {
                     binds.push((
                         name.to_string(),
                         LoweredValue::Adt {
+                            host: host.cloned(),
                             ctor: ctor.to_string(),
                             field_names: field_names.map(<[String]>::to_vec),
                             fields: fields.to_vec(),
@@ -4136,6 +4139,7 @@ fn rebuild_runtime_list_view(
     items: Vec<LoweredValue>,
 ) -> LoweredValue {
     LoweredValue::Adt {
+        host: None,
         ctor: RUNTIME_LIST_VIEW_CTOR.to_string(),
         field_names: None,
         fields: vec![
@@ -4208,10 +4212,12 @@ fn rebuild_recursive_list_like(
                 .collect(),
         ),
         LoweredValue::Adt {
+            host,
             ctor,
             field_names,
             fields,
         } => LoweredValue::Adt {
+            host: host.clone(),
             ctor: ctor.clone(),
             field_names: field_names.clone(),
             fields: fields
@@ -4227,12 +4233,14 @@ fn rebuild_recursive_list_like(
 /// list-append result.
 fn rebuild_cons_chain(items: Vec<LoweredValue>) -> LoweredValue {
     let mut chain = LoweredValue::Adt {
+        host: None,
         ctor: "Nil".to_string(),
         field_names: None,
         fields: Vec::new(),
     };
     for item in items.into_iter().rev() {
         chain = LoweredValue::Adt {
+            host: None,
             ctor: "Cons".to_string(),
             field_names: None,
             fields: vec![item, chain],
@@ -4921,6 +4929,12 @@ enum CallableExpr {
 }
 
 #[derive(Clone)]
+struct HostAggregateType {
+    ty: crate::host_type_state::HostTypeTerm,
+    metadata: Metadata,
+}
+
+#[derive(Clone)]
 enum LoweredValue {
     Node(NodeId),
     Host {
@@ -4937,6 +4951,9 @@ enum LoweredValue {
     /// (field-wise ADT gradients, the pytree contract of
     /// spec/design/differentiable_language.md Decision 6).
     Adt {
+        /// Checked host identity retained alongside the native field graph.
+        /// Constructor spelling and numeric leaves cannot reconstruct it.
+        host: Option<HostAggregateType>,
         ctor: String,
         /// Declared field names for record-syntax constructors, in the
         /// order `fields` was built; `None` for positional constructors.
@@ -4989,6 +5006,7 @@ impl LoweredValue {
                 ctor,
                 field_names,
                 fields,
+                ..
             } => Value::Adt {
                 ctor: ctor.clone(),
                 field_names: field_names.clone(),
@@ -5078,10 +5096,12 @@ impl LoweredValue {
                     .collect(),
             ),
             Self::Adt {
+                host,
                 ctor,
                 field_names,
                 fields,
             } => Self::Adt {
+                host: host.clone(),
                 ctor: ctor.clone(),
                 field_names: field_names.clone(),
                 fields: fields
@@ -6076,7 +6096,7 @@ impl<'program> LowerCtx<'program> {
                 .map(|item| self.host_value_type(item))
                 .collect::<Option<Vec<_>>>()
                 .map(HostTypeTerm::Tuple),
-            LoweredValue::Adt { .. } => None,
+            LoweredValue::Adt { host, .. } => host.as_ref().map(|host| host.ty.clone()),
         }
     }
 
@@ -6088,10 +6108,10 @@ impl<'program> LowerCtx<'program> {
             .collect()
     }
 
-    /// A native tuple keeps its leaf nodes for tensor consumers. A host
-    /// consumer gets a pure tuple construction over those already evaluated
-    /// leaves, never a replay of the tuple's original computations or effects.
-    fn stage_host_tuple_capture(
+    /// Native aggregates keep their field graph for tensor consumers. A host
+    /// consumer reconstructs their typed structure over already evaluated
+    /// leaves, never replaying the original computations or effects.
+    fn stage_host_aggregate_capture(
         &mut self,
         value: &LoweredValue,
         at: &Expr,
@@ -6114,6 +6134,52 @@ impl<'program> LowerCtx<'program> {
                         .iter()
                         .map(|item| expression(ctx, item, captures, span)),
                 );
+            } else if let LoweredValue::Adt {
+                ctor,
+                field_names,
+                fields,
+                host,
+            } = value
+            {
+                let host = host.as_ref().expect("typed aggregate constructor");
+                elements[1] = Expr::Map(host.metadata.clone(), span);
+                if let Some(names) = field_names {
+                    elements[0] = Expr::Atom(Atom::Tag(DeepTag::Record), span);
+                    elements.push(Expr::Atom(Atom::Name(ctor.clone()), span));
+                    elements.extend(names.iter().zip(fields).map(|(name, field)| {
+                        Expr::List(
+                            List {
+                                elements: vec![
+                                    Expr::Atom(Atom::Tag(DeepTag::Kv), span),
+                                    Expr::Map(Metadata::default(), span),
+                                    Expr::Atom(Atom::Name(name.clone()), span),
+                                    expression(ctx, field, captures, span),
+                                ],
+                            },
+                            span,
+                        )
+                    }));
+                } else if fields.is_empty() {
+                    elements[0] = Expr::Atom(Atom::Tag(DeepTag::Var), span);
+                    elements.push(Expr::Atom(Atom::Name(ctor.clone()), span));
+                } else {
+                    elements[0] = Expr::Atom(Atom::Tag(DeepTag::App), span);
+                    elements.push(Expr::List(
+                        List {
+                            elements: vec![
+                                Expr::Atom(Atom::Tag(DeepTag::Var), span),
+                                Expr::Map(Metadata::default(), span),
+                                Expr::Atom(Atom::Name(ctor.clone()), span),
+                            ],
+                        },
+                        span,
+                    ));
+                    elements.extend(
+                        fields
+                            .iter()
+                            .map(|field| expression(ctx, field, captures, span)),
+                    );
+                }
             } else {
                 let stage_value = match value {
                     LoweredValue::Node(id) => StageValue::Tensor(*id),
@@ -6133,7 +6199,7 @@ impl<'program> LowerCtx<'program> {
         }
         let ty = self.host_value_type(value).unwrap_or_else(|| {
             raise_lowering_error(
-                "a staged tuple capture has an untyped leaf",
+                "a staged aggregate capture has an untyped leaf",
                 Some(at.span()),
                 at.span_id().map(str::to_owned),
             )
@@ -6165,6 +6231,7 @@ impl<'program> LowerCtx<'program> {
                     | DeepTag::Access
                     | DeepTag::TupleGet
                     | DeepTag::Cast
+                    | DeepTag::Lit
                     | DeepTag::Var,
                 _,
                 _
@@ -6185,10 +6252,11 @@ impl<'program> LowerCtx<'program> {
         }
         let mut referenced = UnordSet::new();
         crate::host::collect_deep_var_names(expr, &mut referenced);
-        let host_capture = referenced
-            .to_sorted()
-            .into_iter()
-            .any(|name| matches!(self.bindings.get(name), Some(LoweredValue::Host { .. })));
+        let host_capture = referenced.to_sorted().into_iter().any(|name| {
+            self.bindings
+                .get(name)
+                .is_some_and(|value| !matches!(value, LoweredValue::Node(_)))
+        });
         let params = scope
             .to_sorted()
             .into_iter()
@@ -6212,18 +6280,20 @@ impl<'program> LowerCtx<'program> {
         if !host_capture && !host_form && !opaque {
             return None;
         }
+        // Selection commits to preserving this source's obligations. A bad
+        // capture must fail here even before the first source is appended;
+        // falling back to ordinary host execution would lose the claims.
+        self.host_stage_status
+            .set(crate::host::staged::StagingStatus::HasSources);
         let mut captures = Vec::new();
         for name in referenced.into_sorted() {
             if let Some(value) = self.bindings.get(&name).cloned() {
                 let captured = match &value {
                     LoweredValue::Node(id) => StageValue::Tensor(*id),
                     LoweredValue::Host { id, .. } => StageValue::Host(*id),
-                    LoweredValue::Tuple(_) => self.stage_host_tuple_capture(&value, expr),
-                    _ => raise_lowering_error(
-                        "a staged aggregate capture needs an explicit host value",
-                        Some(expr.span()),
-                        expr.span_id().map(str::to_owned),
-                    ),
+                    LoweredValue::Tuple(_) | LoweredValue::Adt { .. } => {
+                        self.stage_host_aggregate_capture(&value, expr)
+                    }
                 };
                 captures.push((
                     name.clone(),
@@ -6277,8 +6347,6 @@ impl<'program> LowerCtx<'program> {
             expression: expr.clone(),
             captures,
         });
-        self.host_stage_status
-            .set(crate::host::staged::StagingStatus::HasSources);
         Some(lowered)
     }
 
@@ -6331,7 +6399,7 @@ impl<'program> LowerCtx<'program> {
         if let Some(s) = expr.span_id() {
             self.current_span_id = Some(s.to_owned());
         }
-        let result = match expr {
+        let mut result = match expr {
             Expr::Atom(atom, _) => self.lower_atom(atom),
             Expr::List(list, span) => self.lower_list(list, *span, claim),
             Expr::Map(_, _) => raise_malformed_deep(
@@ -6351,6 +6419,16 @@ impl<'program> LowerCtx<'program> {
                 self.current_span_id.clone(),
             ),
         };
+        if let LoweredValue::Adt { host, .. } = &mut result
+            && let Some(ty) = host_ty.as_ref()
+        {
+            *host = Some(HostAggregateType {
+                ty: ty.clone(),
+                metadata: stamped_parts(expr)
+                    .map(|(_, metadata, _)| metadata.clone())
+                    .unwrap_or_default(),
+            });
+        }
         if let Some(id) = result.as_single_node() {
             if let Some(ty) = host_ty.filter(|ty| !ty.is_unresolved()) {
                 self.host_value_types.entry(id).or_insert(ty);
@@ -6984,6 +7062,7 @@ impl<'program> LowerCtx<'program> {
             }
             if self.allow_host_list_ad_rewrites && name == "Nil" {
                 return LoweredValue::Adt {
+                    host: None,
                     ctor: "Nil".to_string(),
                     field_names: None,
                     fields: Vec::new(),
@@ -7020,6 +7099,7 @@ impl<'program> LowerCtx<'program> {
                 && name.chars().next().is_some_and(|ch| ch.is_uppercase())
             {
                 return LoweredValue::Adt {
+                    host: None,
                     ctor: name.clone(),
                     field_names: None,
                     fields: Vec::new(),
@@ -7080,6 +7160,7 @@ impl<'program> LowerCtx<'program> {
         {
             if self.allow_host_list_ad_rewrites && func_name == "Cons" && elems.len() == 5 {
                 return LoweredValue::Adt {
+                    host: None,
                     ctor: "Cons".to_string(),
                     field_names: None,
                     fields: vec![self.lower_expr(&elems[3]), self.lower_expr(&elems[4])],
@@ -7119,6 +7200,7 @@ impl<'program> LowerCtx<'program> {
                     .map(|arg| self.lower_expr(arg))
                     .collect::<Vec<_>>();
                 return LoweredValue::Adt {
+                    host: None,
                     ctor: func_name.clone(),
                     field_names: None,
                     fields,
@@ -7252,10 +7334,12 @@ impl<'program> LowerCtx<'program> {
                     .collect(),
             ),
             LoweredValue::Adt {
+                host,
                 ctor,
                 field_names,
                 fields,
             } => LoweredValue::Adt {
+                host: host.clone(),
                 ctor,
                 field_names,
                 fields: fields
@@ -11188,6 +11272,7 @@ impl<'program> LowerCtx<'program> {
                 Some(LoweredValue::Tuple(blended))
             }
             LoweredValue::Adt {
+                host,
                 ctor,
                 field_names,
                 fields: first_fields,
@@ -11210,6 +11295,7 @@ impl<'program> LowerCtx<'program> {
                     blended.push(self.blend_runtime_list_items(&fields, effective_index)?);
                 }
                 Some(LoweredValue::Adt {
+                    host: host.clone(),
                     ctor: ctor.clone(),
                     field_names: field_names.clone(),
                     fields: blended,
@@ -14537,12 +14623,16 @@ impl<'program> LowerCtx<'program> {
                     .get(*id)
                     .map(|node| node.output_type.clone())
                     .unwrap_or_else(Self::default_type);
-                LoweredValue::Node(self.dag.add_node(
+                let copy = self.dag.add_node(
                     RiscOp::Copy,
                     vec![*id],
                     output_type,
                     self.current_span_id.clone(),
-                ))
+                );
+                if let Some(ty) = self.host_value_types.get(id).cloned() {
+                    self.host_value_types.insert(copy, ty);
+                }
+                LoweredValue::Node(copy)
             }
             LoweredValue::Tuple(items) => LoweredValue::Tuple(
                 items
@@ -14551,10 +14641,12 @@ impl<'program> LowerCtx<'program> {
                     .collect(),
             ),
             LoweredValue::Adt {
+                host,
                 ctor,
                 field_names,
                 fields,
             } => LoweredValue::Adt {
+                host: host.clone(),
                 ctor: ctor.clone(),
                 field_names: field_names.clone(),
                 fields: fields
@@ -14632,6 +14724,7 @@ impl<'program> LowerCtx<'program> {
             fields.push(self.lower_expr(value));
         }
         LoweredValue::Adt {
+            host: None,
             ctor,
             field_names: Some(field_names),
             fields,
@@ -14654,6 +14747,7 @@ impl<'program> LowerCtx<'program> {
                 ctor,
                 field_names: Some(names),
                 fields,
+                ..
             } => names
                 .iter()
                 .position(|name| name == field)
@@ -14691,6 +14785,7 @@ impl<'program> LowerCtx<'program> {
         }
         let scrutinee = self.lower_expr(&elems[2]);
         let LoweredValue::Adt {
+            host,
             ctor,
             field_names,
             fields,
@@ -14713,7 +14808,13 @@ impl<'program> LowerCtx<'program> {
             else {
                 continue;
             };
-            match match_static_pattern(pattern, &ctor, field_names.as_deref(), &fields) {
+            match match_static_pattern(
+                pattern,
+                host.as_ref(),
+                &ctor,
+                field_names.as_deref(),
+                &fields,
+            ) {
                 StaticPatternMatch::NoMatch => continue,
                 StaticPatternMatch::Unsupported(reason) => {
                     self.reject_static_adt(
@@ -14960,11 +15061,13 @@ mod tests {
         use crate::lowering_trace::Value;
         let original = LoweredValue::Tuple(vec![
             LoweredValue::Adt {
+                host: None,
                 ctor: "Mixed".into(),
                 field_names: Some(vec!["t".into(), "n".into()]),
                 fields: vec![LoweredValue::Node(NodeId(7)), LoweredValue::Tuple(vec![])],
             },
             LoweredValue::Adt {
+                host: None,
                 ctor: "Positional".into(),
                 field_names: None,
                 fields: vec![LoweredValue::Node(NodeId(2))],

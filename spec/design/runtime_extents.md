@@ -417,9 +417,12 @@ fixture covers bitwise, metadata, list, helper and scalar-conditional producers,
 with direct and bound/copied results. Non-tensor locals retain typed host values;
 capture identity is keyed by the producing node or host value, never the binder
 spelling. Scalar/tensor conversions receive distinct view nodes before partition,
-so both aliases retain their host surfaces. Native tuple captures are constructed
-from already evaluated typed leaves, including nested tuples; tensor consumers
-retain the original leaf graph. Packing does not replay arithmetic or effects.
+so both aliases retain their host surfaces. Native aggregates retain their checked host type and constructor metadata beside
+their field graph. Captures reconstruct that typed structure from already evaluated
+leaves, including nested lists and tuples; tensor consumers retain the original
+leaf graph. Packing does not replay arithmetic or effects. Host literals use typed
+source values. Once a source is selected, capture failure cannot fall back to
+unclaimed execution.
 Static function aliases retain their resolved definition at the binding
 position: Eval captures the existing function value, and C projects that same
 identity into direct calls while respecting nested binders. Later shadowing cannot
@@ -483,8 +486,9 @@ three executable example controls, 24 grad/vmap controls
 and 16 imported-call controls. The staged-source coverage adds 60 producer
 fixtures, 60 capture/order fixtures, six eager-source fixtures, six scoped-witness
 fixtures, 12 HIP host CLI/API executions and 36 handled-Random fixtures. Thirty tuple and scalar/tensor-view fixtures
-cover structured captures and both aliases at a stage cut. These
-559 public fixture variants check declarations independently of actual
+cover structured captures and both aliases at a stage cut. Twenty-four native-list
+and host-literal fixtures retain constructor types and claims. These
+583 public fixture variants check declarations independently of actual
 shape/value or required failure. Random values are checked at exact f32 bits. Two integration controls execute a
 checked HIP host window entry with exact shape/data and require a clean error
 for its unimplemented bf16 cell. Current [05-RWIN-2] permits the operation;

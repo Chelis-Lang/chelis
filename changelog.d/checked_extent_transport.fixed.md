@@ -7,5 +7,5 @@ Computed remainder targets retain result claims on Eval and C, including HIP hos
 
 Host scalar reshape targets retain checked claims through a shared staged plan,
 including list-derived sizes, scalar conditionals, tuple captures, scalar/tensor
-views and aliased helper calls. Stages
+views, native lists, host literals and aliased helper calls. Stages
 preserve eager evaluation, handled Random streams and imported definitions.
