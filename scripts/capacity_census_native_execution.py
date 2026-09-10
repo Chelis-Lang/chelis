@@ -189,7 +189,13 @@ def _source_packet(root):
     for raw in sorted(paths.split(b"\0")):
         if raw:
             relative = raw.decode()
-            records.append({"path": relative, "sha256": hashlib.sha256((root / relative).read_bytes()).hexdigest()})
+            path = root / relative
+            if path.is_symlink():
+                kind, content = "symlink", os.fsencode(os.readlink(path))
+            else:
+                _require(path.is_file(), "missing or unsupported tracked native source input: " + relative)
+                kind, content = "file", path.read_bytes()
+            records.append({"path": relative, "kind": kind, "sha256": hashlib.sha256(content).hexdigest()})
     return {"head": head.decode().strip(), "common_source_sha256": source_identity(root), "files": records}
 
 
