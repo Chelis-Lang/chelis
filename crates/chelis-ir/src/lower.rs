@@ -6290,15 +6290,13 @@ impl<'program> LowerCtx<'program> {
                     .host_sources
                     .iter()
                     .any(|source| source.value == crate::host::staged::StageValue::Tensor(id))
-            {
-                if self.host_external_inputs.contains_key(&id)
+                && (self.host_external_inputs.contains_key(&id)
                     || self.program_defs.get(name.as_str()).is_some_and(|body| {
                         !matches!(stamped_parts(body), Some((DeepTag::Fn, _, _)))
-                    })
-                {
-                    self.host_external_inputs
-                        .insert(id, name.as_str().to_owned());
-                }
+                    }))
+            {
+                self.host_external_inputs
+                    .insert(id, name.as_str().to_owned());
             }
         }
         self.current_span_id = saved_span_id;
