@@ -12,6 +12,59 @@ from test_capacity_census_graph import primitive, reference
 
 
 class NativeOwnerShapeControls(unittest.TestCase):
+    def test_tensor_owner_choice_requires_exact_retained_handle_payloads(self):
+        from capacity_census_native_bindings import require_tensor_owner_choices
+
+        artifact, field = private_owner_fixture()
+        second = artifact.field("0", reference(31, reference(33)))
+        artifact.external(31, "alloc::sync::Arc")
+        artifact.external(32, "chelis_python::CpuTensorHandle")
+        artifact.external(33, "chelis_python::GpuTensorHandle")
+        artifact.external(34, "alloc::vec::Vec")
+        artifact.doc["index"]["2"]["inner"]["module"]["items"] = []
+        root = artifact.doc["index"]["0"]["inner"]["module"]
+        root["items"].append(20)
+        root["is_crate"] = True
+        artifact.doc["paths"]["20"]["path"] = ["chelis_python", "TensorOwner"]
+        item = artifact.doc["index"]["20"]
+        item.update(name="TensorOwner", visibility="crate")
+        item["span"]["filename"] = "crates/chelis-python/src/lib.rs"
+        item["inner"] = {"enum": {"generics": {"params": []}, "variants": [21, 22],
+                                  "has_stripped_variants": False}}
+        for variant_id, name, field_id, payload in (
+            (21, "Cpu", field, reference(31, reference(32))),
+            (22, "Gpu", second, reference(31, reference(33))),
+        ):
+            artifact.add(variant_id, name, {"variant": {"kind": {"tuple": [field_id]},
+                                                       "discriminant": None}},
+                         visibility="default")
+            artifact.doc["index"][str(field_id)].update(name="0", visibility="default")
+            artifact.doc["index"][str(field_id)]["inner"]["struct_field"] = payload
+        self.assertEqual(require_tensor_owner_choices(RustdocGraph([artifact.doc])), ("Cpu", "Gpu"))
+        for mutation in ("raw-number", "tagged-number", "wrong-owner", "wrong-container",
+                         "renamed", "missing", "extra"):
+            changed = copy.deepcopy(artifact.doc)
+            body = changed["index"]["20"]["inner"]["enum"]
+            payload = changed["index"][str(field)]["inner"]
+            if mutation == "raw-number":
+                payload["struct_field"] = primitive("f64")
+            elif mutation == "tagged-number":
+                payload["struct_field"] = reference(31, primitive("f64"))
+            elif mutation == "wrong-owner":
+                payload["struct_field"] = reference(31, reference(33))
+            elif mutation == "wrong-container":
+                payload["struct_field"] = reference(34, reference(32))
+            elif mutation == "renamed":
+                changed["index"]["21"]["name"] = "TaggedNumber"
+            elif mutation == "missing":
+                body["variants"].pop()
+            else:
+                changed["index"]["23"] = copy.deepcopy(changed["index"]["22"])
+                changed["index"]["23"].update(id=23, name="Other")
+                body["variants"].append(23)
+            with self.subTest(mutation=mutation), self.assertRaises(GraphError):
+                require_tensor_owner_choices(RustdocGraph([changed]))
+
     def test_tuple_owner_preserves_every_private_positional_field(self):
         from capacity_census_native_bindings import require_private_tuple_owner
 
