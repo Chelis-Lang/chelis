@@ -72,6 +72,7 @@ class NativeBoundaryObligations(unittest.TestCase):
         artifact.doc["index"]["20"]["name"] = "NativeTensor"
         artifact.doc["index"]["20"]["span"]["filename"] = "crates/chelis-python/src/lib.rs"
         artifact.doc["index"]["2"]["inner"]["module"]["items"] = []
+        artifact.doc["index"]["0"]["inner"]["module"]["items"].append(20)
         artifact.doc["index"][str(field)]["visibility"] = {
             "restricted": {"parent": 0, "path": "::"},
         }
