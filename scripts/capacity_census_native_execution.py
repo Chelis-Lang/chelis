@@ -13,6 +13,11 @@ import subprocess
 import sys
 import tempfile
 
+if __name__ == "__main__":
+    # PYTHONSAFEPATH excludes script-directory discovery. The fixed worker
+    # imports only its own current source directory, never an ambient path.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from capacity_census_graph import GraphError
 from capacity_census_wire_adapters import _target_lease, canonical, source_identity
 from capacity_census_wire_calls import record_process
@@ -359,6 +364,8 @@ def _validate_captures(directory, group, runtime_digest, binary):
 
 
 def _collect_worker(root, target, directory, name):
+    _require((root / "scripts/capacity_census_native_execution.py").resolve() == Path(__file__).resolve(),
+             "native worker root differs from its current source")
     groups = [group for group in GROUPS if group.name == name]
     _require(len(groups) == 1, "unknown fixed native execution group")
     group = groups[0]
