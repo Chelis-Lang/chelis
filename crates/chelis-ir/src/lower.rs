@@ -12729,6 +12729,7 @@ impl LowerCtx {
         let elements: Vec<Expr> = collect_cons_chain(expr)?.into_iter().cloned().collect();
         let mut op_dims = Vec::with_capacity(elements.len());
         let mut ty_dims = Vec::with_capacity(elements.len());
+        let mut computed_targets = Vec::new();
         let srcs = Vec::new();
         for (axis, elem) in elements.iter().enumerate() {
             if extract_int_for_dim(elem).is_none()
@@ -12738,15 +12739,11 @@ impl LowerCtx {
                 // call site. A result claim is attached via axis provenance
                 // after the body lowers, before any fold or graph transport.
                 let actual = self.lower_expr_node(elem, "computed reshape target");
-                let ty = self.dag.get(actual).expect("target").output_type.clone();
-                let target =
-                    self.dag
-                        .add_node(RiscOp::Copy, vec![actual], ty, self.current_span_id.clone());
-                self.reshape_targets.insert(target, axis);
                 let slot = inputs.len();
-                inputs.push(target);
+                inputs.push(actual);
+                computed_targets.push((axis, slot));
                 op_dims.push(RtDim::Node(slot));
-                ty_dims.push(DimInfo::Named(format!("_rt_dim_{}_{axis}", target.0), None));
+                ty_dims.push(DimInfo::Named(format!("_rt_dim_{}_{axis}", actual.0), None));
                 continue;
             }
             if let Some(value) = extract_int_for_dim(elem) {
@@ -12845,6 +12842,24 @@ impl LowerCtx {
         if op_dims.is_empty() {
             None
         } else {
+            // The entire list evaluates before reshape introduces any claim
+            // guard (spec/04 §4.7.3). Reserve checking positions only after all
+            // target producers, and retain those producers even when a caller
+            // discards the reshape and only its required check remains live.
+            let shape_sources = inputs.clone();
+            for (axis, slot) in computed_targets {
+                let actual = inputs[slot];
+                let ty = self.dag.get(actual).expect("target").output_type.clone();
+                let target =
+                    self.dag
+                        .add_node(RiscOp::Copy, vec![actual], ty, self.current_span_id.clone());
+                for &source in &shape_sources {
+                    self.dag.add_shape_dep(target, source);
+                }
+                self.reshape_targets.insert(target, axis);
+                inputs[slot] = target;
+                ty_dims[axis] = DimInfo::Named(format!("_rt_dim_{}_{axis}", target.0), None);
+            }
             Some((op_dims, ty_dims, srcs))
         }
     }

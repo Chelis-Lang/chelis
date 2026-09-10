@@ -32,6 +32,7 @@ struct Case {
 enum Expected {
     Tensor(Vec<usize>, Vec<f64>),
     Domain(&'static str, &'static [&'static str]),
+    TargetDivisionByZero,
     Reject(&'static str),
 }
 
@@ -675,6 +676,21 @@ fn contract_failures(case: &Case, observation: &Value) -> Vec<String> {
                         .iter()
                         .all(|record| context_has_record(stderr, record))
             }
+            Expected::TargetDivisionByZero => {
+                // The existing C integer helper uses its older diagnostic.
+                // Assert each lane's arithmetic failure independently: an
+                // earlier reshape claim failure does not satisfy this case.
+                run["stage"] == "execute"
+                    && run["success"] == false
+                    && stderr.lines().any(|line| {
+                        line.strip_prefix("error: ").unwrap_or(line)
+                            == if lane == "eval" {
+                                "numeric trap: division by zero in floor_div at int64"
+                            } else {
+                                "integer division or remainder by zero"
+                            }
+                    })
+            }
             Expected::Reject(_) => unreachable!(),
         };
         if !satisfied {
@@ -1267,6 +1283,156 @@ fn helper_signature_guard_order_contract() {
 
 /// Result claims follow axis provenance, including an inferred helper result.
 /// Each call route checks the declared type independently of either runtime.
+#[test]
+fn computed_claim_complete_shape_list_precedes_guards() {
+    // Spec/04 §4.7 places local guards at the introducing operation;
+    // §4.7.3 requires the complete shape list to evaluate first. Both a
+    // matching and mismatching first axis must reach a later target failure.
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut fixtures = Vec::new();
+    for (kind, claim, second, n, divisor, denominator, signature, expected) in [
+        (
+            "literal_later_trap",
+            "4",
+            2,
+            4,
+            2,
+            "sub(shape(x, 0i32), 4i64)",
+            "(tensor[d0, f32]) -> tensor[4, 2, f32]",
+            Expected::TargetDivisionByZero,
+        ),
+        (
+            "literal_positive",
+            "4",
+            2,
+            8,
+            2,
+            "sub(shape(x, 0i32), 4i64)",
+            "(tensor[d0, f32]) -> tensor[4, 2, f32]",
+            Expected::Tensor(vec![4, 2], (1..=8).map(f64::from).collect()),
+        ),
+        (
+            "literal_claim",
+            "4",
+            2,
+            6,
+            2,
+            "sub(shape(x, 0i32), 4i64)",
+            "(tensor[d0, f32]) -> tensor[4, 2, f32]",
+            Expected::Domain("reshape", &["claimed = 4", "reshape axis 0 = 3"]),
+        ),
+        (
+            "named_bad_first_later_trap",
+            "n",
+            2,
+            4,
+            2,
+            "sub(shape(x, 0i32), 4i64)",
+            "(tensor[d0, f32]) -> tensor[d0, 2, f32]",
+            Expected::TargetDivisionByZero,
+        ),
+        (
+            "named_good_first_later_trap",
+            "n",
+            2,
+            4,
+            1,
+            "sub(shape(x, 0i32), 4i64)",
+            "(tensor[d0, f32]) -> tensor[d0, 2, f32]",
+            Expected::TargetDivisionByZero,
+        ),
+        (
+            "named_positive",
+            "n",
+            1,
+            4,
+            1,
+            "shape(x, 0i32)",
+            "(tensor[d0, f32]) -> tensor[d0, 1, f32]",
+            Expected::Tensor(vec![4, 1], vec![1.0, 2.0, 3.0, 4.0]),
+        ),
+        (
+            "named_claim",
+            "n",
+            1,
+            4,
+            2,
+            "shape(x, 0i32)",
+            "(tensor[d0, f32]) -> tensor[d0, 1, f32]",
+            Expected::Domain("reshape", &["claimed = 4", "reshape axis 0 = 2"]),
+        ),
+    ] {
+        let reshape = format!(
+            "reshape(x, [floor_div(shape(x, 0i32), {divisor}i64), floor_div(shape(x, 0i32), {denominator})])"
+        );
+        for (wrapper, body) in [
+            ("direct", reshape.clone()),
+            ("copy", format!("copy({reshape})")),
+        ] {
+            let mut routes = Vec::new();
+            call_matrix(
+                &mut routes,
+                &format!("complete_shape_list.{kind}.{wrapper}"),
+                1686,
+                &format!("def f(x: tensor[n, f32]) -> tensor[{claim}, {second}, f32] = {body}"),
+                signature,
+                vec![vector(n)],
+                expected.clone(),
+            );
+            for case in routes {
+                let rows = if claim == "n" { n } else { 4 };
+                let main = case
+                    .source
+                    .contains("def main()")
+                    .then(|| format!("() -> tensor[{rows}, {second}, f32]"));
+                fixtures.push((case, main));
+            }
+        }
+    }
+    // Only the first result axis is claimed. If the result is discarded,
+    // retaining that claim must also retain the later unclaimed target's
+    // computation, including a possible arithmetic failure.
+    for n in [4, 8] {
+        let mut routes = Vec::new();
+        call_matrix(
+            &mut routes,
+            &format!("complete_shape_list.discarded.x{n}"),
+            1686,
+            "def g(x: tensor[n, f32]) -> tensor[4, *, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), floor_div(shape(x, 0i32), sub(shape(x, 0i32), 4i64))])\ndef f(x: tensor[n, f32]) -> tensor[f32] = {\n  discarded = g(x)\n  scalar_to_tensor(9.0f32)\n}",
+            "(tensor[d0, f32]) -> tensor[f32]",
+            vec![vector(n)],
+            if n == 4 {
+                Expected::TargetDivisionByZero
+            } else {
+                Expected::Tensor(vec![], vec![9.0])
+            },
+        );
+        for case in routes {
+            let main = case
+                .source
+                .contains("def main()")
+                .then(|| "() -> tensor[f32]".to_owned());
+            fixtures.push((case, main));
+        }
+    }
+    assert_eq!(fixtures.len(), 48);
+    let mut failures = Vec::new();
+    for (case, main_signature) in fixtures {
+        let observed = observe(&case);
+        println!("{}: {}", case.id, observed);
+        failures.extend(contract_failures(&case, &observed));
+        if let Some(signature) = main_signature
+            && observed["check"]["signatures"]["main"] != signature
+        {
+            failures.push(format!(
+                "{} main signature: {} != {signature}",
+                case.id, observed["check"]["signatures"]["main"]
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 #[test]
 fn computed_claim_result_graph_contract() {
     assert!(gcc_available(), "C toolchain required; no lane may skip");

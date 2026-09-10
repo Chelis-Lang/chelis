@@ -349,7 +349,11 @@ carriers to the construction and consumer inventory above:
   `ExtentWitness`, selected within the current signature activation before
   substitution. The nonempty `claims` list contains ordered diagnostic labels,
   not identities. Each requirement is checked in list order. The checked scalar
-  becomes the reshape target before allocation. Its computed axis has a fresh
+  becomes the reshape target before allocation. All shape-list expressions
+  lower before any of its check carriers; existing `shape_deps` retain every
+  target producer when only a discarded result's check remains live. Thus a
+  later target's arithmetic failure precedes a reshape claim check, as §4.7.3
+  requires. Its computed axis has a fresh
   runtime identity; the declared requirement remains an explicit checked edge.
 - `CheckedUnitAxis { axis }` consumes the original tensor and that same
   tensor-axis witness carrying requirement one. Verification requires both
@@ -412,10 +416,14 @@ cargo nextest run -p chelis-cli -p chelis-ir -p chelis-compiler-api --lib \
 ```
 
 The new public matrix has 117 initial exported/binding/main fixtures, 69
-result-graph fixtures, three executable example controls, 24 grad/vmap controls
+result-graph fixtures, 48 complete-shape-list scheduling fixtures,
+three executable example controls, 24 grad/vmap controls
 and 12 imported-call controls. Every
 case checks declarations independently of actual shape/value or required
-Domain failure. The same command retains the earlier literal and helper-order
+failure. Claim mismatches require Domain/reshape/int64. Scheduling fixtures
+independently require Eval's division-by-zero/floor_div/int64 diagnostic and
+the C integer helper's existing division-by-zero failure; they do not certify
+that helper's diagnostic parity. The same command retains the earlier literal and helper-order
 receipts, checks IR rewrites and malformed wire edges, and executes matching
 and mismatching calls from both disk and worker caches. The ignored full-class
 `claimed_extent_contract` is a separate, still-pending #1277 exit, not a receipt
@@ -712,6 +720,9 @@ rewrites and wire/cache boundaries. `computed_claim_result_graph_contract` adds
 69 exact-type/value/failure cases for copy, negation, static conditionals, inferred
 helpers, aliases, same-spelled binders in different signatures and an untaken
 invalid branch, each across exports, bindings and inlined main.
+`computed_claim_complete_shape_list_precedes_guards` adds 48 cases covering
+later target-expression failures, first-axis matching/mismatching controls,
+exact positive values, wrappers and discarded results on those same routes.
 The `omitted_extent_claim_contract` runner
 must assert declarations, actual shape/values and runtime Domain failures on
 exported calls, bindings and inlined main before either issue closes. HIP/Metal
