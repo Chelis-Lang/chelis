@@ -141,7 +141,9 @@ jobs:
           path: ${{ steps.cvc5key.outputs.dir }}
           key: ${{ steps.cvc5key.outputs.key }}
 
-      - name: Run smt-gated chelis-prove tests
+      # Every integration entry installs its shared libtest worker before
+      # solving; keep default parallelism to exercise process containment.
+      - name: Run smt-gated chelis-prove unit and integration tests
         run: cargo test -p chelis-prove --features smt
 
       - name: Run carcara-gated chelis-prove tests

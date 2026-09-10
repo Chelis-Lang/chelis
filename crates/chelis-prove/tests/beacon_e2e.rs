@@ -8,6 +8,8 @@
 //!   cargo test -p chelis-prove --test beacon_e2e -- --ignored --nocapture
 //! ```
 
+mod support;
+
 use std::process::Command;
 
 use chelis_compiler_api::schema::{SourceKind, WIRE_DAG_SCHEMA_VERSION};
@@ -138,6 +140,7 @@ fn verified_zonotope_shim(bin: &str, store: WireDagByteStore) -> BeaconShim {
 #[test]
 #[ignore] // requires CHELIS_BEACON_BIN
 fn beacon_e2e_live_shim_to_real_binary_sound_green() {
+    crate::support::isolate();
     let bin = require_arb_enabled_beacon();
     let store = WireDagByteStore::new();
     // x in [0,1], f(x) = x^2 in [0,1]; use wider claimed range [-1,2] to
@@ -174,6 +177,7 @@ fn beacon_e2e_live_shim_to_real_binary_sound_green() {
 #[test]
 #[ignore] // requires CHELIS_BEACON_BIN
 fn beacon_e2e_forward_goal_wrong_range_not_green() {
+    crate::support::isolate();
     let bin = require_arb_enabled_beacon();
     let store = WireDagByteStore::new();
     // x in [0,1], f(x) = x^2 is in [0,1], NOT [10,20] — Beacon must reject
@@ -198,6 +202,7 @@ fn beacon_e2e_forward_goal_wrong_range_not_green() {
 #[test]
 #[ignore] // requires CHELIS_BEACON_BIN
 fn beacon_e2e_corrupt_store_hash_mismatch_fails_before_laundering() {
+    crate::support::isolate();
     let bin = require_arb_enabled_beacon();
     let extracted = simple_square_goal(-1.0, 2.0);
     let mut corrupt_bytes = extracted.wire_dag_bytes.clone();
@@ -229,6 +234,7 @@ fn beacon_e2e_corrupt_store_hash_mismatch_fails_before_laundering() {
 #[test]
 #[ignore] // requires CHELIS_BEACON_BIN
 fn beacon_e2e_bs_call_vec_live_shim_round_trip_uses_chelis_wi3_bytes() {
+    crate::support::isolate();
     let bin = require_arb_enabled_beacon();
     let extracted = bs_call_vec_atm_goal(10.0, 11.0);
     assert_eq!(
@@ -280,6 +286,7 @@ fn beacon_e2e_bs_call_vec_live_shim_round_trip_uses_chelis_wi3_bytes() {
 #[test]
 #[ignore] // requires CHELIS_BEACON_BIN
 fn beacon_e2e_registry_dispatch_routes_box_range() {
+    crate::support::isolate();
     let bin = require_arb_enabled_beacon();
     let store = WireDagByteStore::new();
     let extracted = simple_square_goal(-1.0, 2.0);
@@ -300,6 +307,7 @@ fn beacon_e2e_registry_dispatch_routes_box_range() {
 #[test]
 #[ignore] // requires CHELIS_BEACON_BIN
 fn beacon_e2e_gradient_goal_verified_greek() {
+    crate::support::isolate();
     use chelis_compiler_api::compiler;
     use chelis_compiler_api::schema::GradRequest;
     use chelis_prove::graph_extract::box_range_goal_from_wire_dag;

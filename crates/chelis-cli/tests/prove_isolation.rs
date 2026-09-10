@@ -68,6 +68,21 @@ fn isolated_worker_proves_obligations_at_smt_tier() {
     );
 }
 
+/// Test-worker transport is selected by the explicit test-support entry,
+/// never by an ambient marker in a production host's environment.
+#[test]
+fn production_worker_keeps_stdout_transport_with_a_libtest_marker() {
+    let output = Command::new(chelis_bin())
+        .arg("prove")
+        .arg(flagship_example())
+        .env("CHELIS_PROVE_TEST_WORKER", "support::solver_worker")
+        .output()
+        .expect("spawn chelis prove");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{output:?}");
+    assert!(stdout.contains("proved (smt)"), "{stdout}");
+}
+
 /// The point of isolation: a worker that ABORTS on every solve (cvc5's actual
 /// failure mode -- an uncatchable C++ process abort) must NOT take `chelis`
 /// down. The parent must exit successfully and the obligations must fall to

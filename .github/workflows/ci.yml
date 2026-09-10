@@ -404,6 +404,11 @@ jobs:
       - name: Run cvc5 engine smoke tests
         run: cargo test -p chelis-prove --features smt --lib cvc5_engine_
 
+      # Integration binaries link chelis-prove without cfg(test). Exercise
+      # their explicit libtest worker route as well as the unit-test route.
+      - name: Run SMT integration containment controls
+        run: cargo test -p chelis-prove --features smt --test integration_solver_isolation
+
       # chelis#1125 PP7: `crates/chelis-cli/tests/prove_deep_obligations.rs` is
       # `#![cfg(feature = "smt")]` and had NO invocation anywhere. The gate
       # never passes `--features smt`, this job tested only `chelis-prove`, and

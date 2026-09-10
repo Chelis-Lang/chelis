@@ -12,6 +12,8 @@
 //! call (and any env mutation), serializing the env so a child never observes
 //! another test's scenario.
 
+mod support;
+
 use std::sync::{Mutex, MutexGuard};
 
 use base64::Engine as _;
@@ -149,6 +151,7 @@ fn evidence_error(discharge: &chelis_prove::Discharge) -> Option<String> {
 
 #[test]
 fn proved_maps_to_sound_approximate_over_approximation() {
+    crate::support::isolate();
     let _g = with_scenario("proved");
     let discharge = shim().discharge(&box_goal(), FAST_TIMEOUT_MS);
     assert_eq!(*discharge.result(), TierBResult::Proved);
@@ -175,6 +178,7 @@ fn proved_maps_to_sound_approximate_over_approximation() {
 
 #[test]
 fn proved_oracle_unverified_maps_to_untrusted_empty_never_a_proof() {
+    crate::support::isolate();
     let _g = with_scenario("proved_oracle_unverified");
     let discharge = shim().discharge(&box_goal(), FAST_TIMEOUT_MS);
     assert!(
@@ -197,6 +201,7 @@ fn proved_oracle_unverified_maps_to_untrusted_empty_never_a_proof() {
 
 #[test]
 fn refuted_oracle_verified_maps_to_disproved_sound_approximate() {
+    crate::support::isolate();
     let _g = with_scenario("refuted_verified");
     let discharge = shim().discharge(&box_goal(), FAST_TIMEOUT_MS);
     match discharge.result() {
@@ -224,6 +229,7 @@ fn refuted_oracle_verified_maps_to_disproved_sound_approximate() {
 
 #[test]
 fn refuted_oracle_unverified_maps_to_disproved_untrusted() {
+    crate::support::isolate();
     let _g = with_scenario("refuted_unverified");
     let discharge = shim().discharge(&box_goal(), FAST_TIMEOUT_MS);
     assert!(
@@ -248,6 +254,7 @@ fn refuted_oracle_unverified_maps_to_disproved_untrusted() {
 
 #[test]
 fn refuted_without_oracle_flag_defaults_to_untrusted() {
+    crate::support::isolate();
     let _g = with_scenario("refuted_no_flag");
     let discharge = shim().discharge(&box_goal(), FAST_TIMEOUT_MS);
     assert!(matches!(discharge.result(), TierBResult::Disproved(_)));
@@ -265,6 +272,7 @@ fn refuted_without_oracle_flag_defaults_to_untrusted() {
 
 #[test]
 fn nonzero_exit_maps_to_untrusted_error_with_stderr_in_evidence() {
+    crate::support::isolate();
     let _g = with_scenario("nonzero_exit");
     let discharge = shim().discharge(&box_goal(), FAST_TIMEOUT_MS);
     assert!(matches!(discharge.result(), TierBResult::Error(_)));
@@ -287,6 +295,7 @@ fn nonzero_exit_maps_to_untrusted_error_with_stderr_in_evidence() {
 
 #[test]
 fn unparseable_report_maps_to_untrusted_error_fail_closed() {
+    crate::support::isolate();
     let _g = with_scenario("unparseable");
     let discharge = shim().discharge(&box_goal(), FAST_TIMEOUT_MS);
     assert!(matches!(discharge.result(), TierBResult::Error(_)));
@@ -305,6 +314,7 @@ fn unparseable_report_maps_to_untrusted_error_fail_closed() {
 
 #[test]
 fn hang_is_hard_killed_at_timeout_and_maps_to_untrusted_error() {
+    crate::support::isolate();
     let _g = with_scenario("hang");
     let start = std::time::Instant::now();
     let discharge = shim().discharge(&box_goal(), 500);
@@ -330,6 +340,7 @@ fn hang_is_hard_killed_at_timeout_and_maps_to_untrusted_error() {
 
 #[test]
 fn from_env_with_unset_var_yields_no_shim_no_crash() {
+    crate::support::isolate();
     let guard = SCENARIO_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -347,6 +358,7 @@ fn from_env_with_unset_var_yields_no_shim_no_crash() {
 
 #[test]
 fn from_env_with_set_var_constructs_a_shim() {
+    crate::support::isolate();
     let guard = SCENARIO_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -369,6 +381,7 @@ fn from_env_with_set_var_constructs_a_shim() {
 
 #[test]
 fn dag_hash_mismatch_fails_closed_before_spawning_beacon() {
+    crate::support::isolate();
     let _g = with_scenario("proved"); // would prove, but the mismatch fails first
     let store = WireDagByteStore::new();
     store.insert(fake_dag_hash(), b"totally different bytes".to_vec());
@@ -390,6 +403,7 @@ fn dag_hash_mismatch_fails_closed_before_spawning_beacon() {
 
 #[test]
 fn empty_store_byte_miss_fails_closed_not_a_crash() {
+    crate::support::isolate();
     let _g = with_scenario("proved");
     let shim = BeaconShim::new(MOCK_BIN, WireDagByteStore::new());
     let discharge = shim.discharge(&box_goal(), FAST_TIMEOUT_MS);
@@ -408,6 +422,7 @@ fn empty_store_byte_miss_fails_closed_not_a_crash() {
 
 #[test]
 fn unpopulated_ir_handle_fails_closed() {
+    crate::support::isolate();
     let _g = with_scenario("proved");
     let goal = Goal::box_range(
         IntervalBox {
@@ -436,6 +451,7 @@ fn unpopulated_ir_handle_fails_closed() {
 
 #[test]
 fn fitness_accepts_box_range_rejects_smt() {
+    crate::support::isolate();
     use chelis_prove::solver::{CmpOp, SmtExpr, SmtSort};
     use chelis_prove::tier_b::SmtProperty;
     let shim = shim();
@@ -460,6 +476,7 @@ fn fitness_accepts_box_range_rejects_smt() {
 /// proof: it fails closed. (Defends the fitness gate.)
 #[test]
 fn discharging_an_smt_goal_directly_fails_closed() {
+    crate::support::isolate();
     use chelis_prove::solver::{CmpOp, SmtExpr, SmtSort};
     use chelis_prove::tier_b::SmtProperty;
     let smt_goal = Goal::smt(SmtProperty {
@@ -489,6 +506,7 @@ fn discharging_an_smt_goal_directly_fails_closed() {
 
 #[test]
 fn request_carries_exact_base64_bytes_and_expected_hash() {
+    crate::support::isolate();
     let _g = with_scenario("echo_request");
     // echo_request mirrors the request back; the shim then fails to parse it as
     // a CheckReport (it is the request, not a report), so the discharge is an
@@ -544,6 +562,7 @@ fn request_carries_exact_base64_bytes_and_expected_hash() {
 
 #[test]
 fn verified_zonotope_mode_emits_exact_selector_string() {
+    crate::support::isolate();
     let _g = with_scenario("echo_request");
     let discharge = shim()
         .with_oracle_mode(BeaconOracleMode::VerifiedZonotope)
@@ -570,6 +589,7 @@ fn verified_zonotope_mode_emits_exact_selector_string() {
 
 #[test]
 fn verified_zonotope_mode_does_not_launder_unverified_proof() {
+    crate::support::isolate();
     let _g = with_scenario("proved_oracle_unverified");
     let discharge = shim()
         .with_oracle_mode(BeaconOracleMode::VerifiedZonotope)
@@ -591,6 +611,7 @@ fn verified_zonotope_mode_does_not_launder_unverified_proof() {
 
 #[test]
 fn temp_file_transport_proved_maps_identically() {
+    crate::support::isolate();
     let _g = with_scenario("proved");
     let discharge = shim()
         .with_transport(RequestTransport::TempFile)
@@ -610,6 +631,7 @@ fn temp_file_transport_proved_maps_identically() {
 
 #[test]
 fn nonexistent_binary_fails_closed_not_a_crash() {
+    crate::support::isolate();
     let _g = with_scenario("proved");
     let shim = BeaconShim::new("/nonexistent/path/to/chelis-beacon-xyz", populated_store());
     let discharge = shim.discharge(&box_goal(), FAST_TIMEOUT_MS);
@@ -624,6 +646,7 @@ fn nonexistent_binary_fails_closed_not_a_crash() {
 
 #[test]
 fn store_round_trips_inserted_bytes() {
+    crate::support::isolate();
     let store = WireDagByteStore::new();
     store.insert(fake_dag_hash(), fake_wire_dag_bytes());
     // (no public getter; round-trip is observed through the shim succeeding)
@@ -641,6 +664,7 @@ fn store_round_trips_inserted_bytes() {
 #[cfg(not(feature = "smt"))]
 #[test]
 fn box_range_goal_with_no_beacon_registered_is_no_fit_unsupported() {
+    crate::support::isolate();
     use chelis_prove::DischargeRegistry;
     let registry = DischargeRegistry::with_builtin_engines();
     assert_eq!(registry.selected_engine_name(&box_goal()), None);
@@ -653,6 +677,7 @@ fn box_range_goal_with_no_beacon_registered_is_no_fit_unsupported() {
 #[cfg(not(feature = "smt"))]
 #[test]
 fn registered_beacon_shim_is_selected_for_box_range_goal() {
+    crate::support::isolate();
     use chelis_prove::DischargeRegistry;
     let mut registry = DischargeRegistry::with_builtin_engines();
     registry.register(Box::new(shim()));
@@ -667,6 +692,7 @@ fn registered_beacon_shim_is_selected_for_box_range_goal() {
 /// changes the variant shape trips this integration test too.
 #[test]
 fn box_goal_is_box_range_shaped() {
+    crate::support::isolate();
     assert!(matches!(box_goal().shape, GoalShape::BoxRange { .. }));
 }
 
@@ -681,6 +707,7 @@ fn box_goal_is_box_range_shaped() {
 
 #[test]
 fn large_request_against_non_draining_child_hard_kills_not_deadlocks() {
+    crate::support::isolate();
     let _g = with_scenario("hang_no_drain");
     // Stdin transport configured explicitly: the auto-fallback must override it
     // for this oversized request, or the write deadlocks.
@@ -709,6 +736,7 @@ fn large_request_against_non_draining_child_hard_kills_not_deadlocks() {
 /// temp file, emits proved) round-trips to a Proved + SoundApproximate discharge.
 #[test]
 fn large_request_proved_verdict_is_delivered_not_lost() {
+    crate::support::isolate();
     let _g = with_scenario("proved");
     let shim =
         BeaconShim::new(MOCK_BIN, large_populated_store()).with_transport(RequestTransport::Stdin); // auto-falls-back to TempFile
@@ -733,6 +761,7 @@ fn large_request_proved_verdict_is_delivered_not_lost() {
 /// pins that a small request is NOT forced onto the temp file.)
 #[test]
 fn small_request_stays_on_stdin_and_proves() {
+    crate::support::isolate();
     let _g = with_scenario("proved");
     let discharge = shim()
         .with_transport(RequestTransport::Stdin)
@@ -746,6 +775,7 @@ fn small_request_stays_on_stdin_and_proves() {
 /// temp-file child is reaped, not just the stdin one.)
 #[test]
 fn large_request_temp_file_fallback_hard_kills_a_draining_hang() {
+    crate::support::isolate();
     let _g = with_scenario("hang"); // drains the temp file, then sleeps 600s
     let shim =
         BeaconShim::new(MOCK_BIN, large_populated_store()).with_transport(RequestTransport::Stdin);
@@ -767,6 +797,7 @@ fn large_request_temp_file_fallback_hard_kills_a_draining_hang() {
 
 #[test]
 fn proved_with_oracle_verified_false_fails_closed_to_untrusted() {
+    crate::support::isolate();
     let _g = with_scenario("proved_oracle_false");
     let discharge = shim().discharge(&box_goal(), FAST_TIMEOUT_MS);
     assert!(
@@ -798,6 +829,7 @@ fn proved_with_oracle_verified_false_fails_closed_to_untrusted() {
 /// `proved` report that omits the field entirely.
 #[test]
 fn proved_with_absent_oracle_flag_stays_sound_approximate() {
+    crate::support::isolate();
     let _g = with_scenario("proved_no_flag");
     let discharge = shim().discharge(&box_goal(), FAST_TIMEOUT_MS);
     assert_eq!(
@@ -815,6 +847,7 @@ fn proved_with_absent_oracle_flag_stays_sound_approximate() {
 
 #[test]
 fn verified_zonotope_mode_does_not_launder_unverified_transport_or_invalid_reports() {
+    crate::support::isolate();
     let cases = [
         (
             "proved_oracle_unverified",
@@ -867,6 +900,7 @@ fn verified_zonotope_mode_does_not_launder_unverified_transport_or_invalid_repor
 /// signal reason, not a hang or a silent pass.
 #[test]
 fn crash_signal_maps_to_untrusted_error_with_signal_reason() {
+    crate::support::isolate();
     let _g = with_scenario("crash");
     let start = std::time::Instant::now();
     let discharge = shim().discharge(&box_goal(), FAST_TIMEOUT_MS);
@@ -898,6 +932,7 @@ fn crash_signal_maps_to_untrusted_error_with_signal_reason() {
 /// is an honest unparseable-report error, not a hang or a proof.
 #[test]
 fn partial_output_maps_to_untrusted_error_unparseable() {
+    crate::support::isolate();
     let _g = with_scenario("partial_output");
     let discharge = shim().discharge(&box_goal(), FAST_TIMEOUT_MS);
     assert!(matches!(discharge.result(), TierBResult::Error(_)));

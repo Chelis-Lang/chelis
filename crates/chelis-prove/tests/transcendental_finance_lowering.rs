@@ -21,6 +21,8 @@
 //! cvc5-only oracle (mirrors cross_engine_oracle.rs's file-level gate).
 #![cfg(feature = "smt")]
 
+mod support;
+
 use chelis_prove::composition::CompositeVerdict;
 use chelis_prove::property_runner::{
     PropertyOutcome, PropertyRunOptions, PropertyRunResult, PropertyStatus, PropertyTier,
@@ -89,6 +91,7 @@ def f(a: f32, b: f32) -> f32 = {
 
 #[test]
 fn let_bound_intermediate_in_nested_call_lowers_to_smt() {
+    crate::support::isolate();
     // Sub-problem-1 regression lock: the `d1`-style substitution must thread a
     // let-bound intermediate through a nested call argument without leaking it
     // as a free cvc5 Var.
@@ -113,6 +116,7 @@ fn let_bound_intermediate_in_nested_call_lowers_to_smt() {
 
 #[test]
 fn bs_call_positive_smt_only_is_honest_unsupported() {
+    crate::support::isolate();
     // chelis#434 + chelis#637: EVEN WITH the certified-envelope lane fully wired,
     // Black-Scholes positivity stays honestly `unsupported`. Two independent
     // reasons keep it there: (1) the oracle's wide guards leave the transcendental
@@ -158,6 +162,7 @@ fn bs_call_positive_smt_only_is_honest_unsupported() {
 
 #[test]
 fn bs_call_positive_is_never_falsely_proven_under_auto() {
+    crate::support::isolate();
     // Fail-closed across the tier: under `auto` the transcendental goal falls
     // through to fuzz; a fuzz pass is empirical, NOT a proof. It must never read
     // as a `proven_*` badge and must never surface a `status: error`.
@@ -204,6 +209,7 @@ const ERF_FALSE_SOURCE: &str = r#"module M
 
 #[test]
 fn envelope_provable_goal_flips_to_proven_modulo_certified_envelope() {
+    crate::support::isolate();
     let outcome = run_one(ERF_BOUND_SOURCE, "smt-only", 0);
     assert_eq!(
         outcome.status,
@@ -232,6 +238,7 @@ fn envelope_provable_goal_flips_to_proven_modulo_certified_envelope() {
 
 #[test]
 fn envelope_covered_false_goal_declines_never_green() {
+    crate::support::isolate();
     // smt-only: the residual is falsifiable in the over-approximation, so the
     // lane declines to an HONEST `unsupported` — never green, never a false proof.
     let outcome = run_one(ERF_FALSE_SOURCE, "smt-only", 0);

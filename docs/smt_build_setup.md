@@ -75,7 +75,9 @@ SMT smoke lane. It installs the cvc5 build prerequisites, runs
 `cargo build -p chelis-cli --features smt`, verifies the built binary discharges
 a real obligation through cvc5 with `.github/scripts/verify_release_smt.py`, and
 runs a narrow cvc5 engine smoke (`cargo test -p chelis-prove --features smt
---lib cvc5_engine_`). It is a non-gate job (rule-id GATE-SCOPE-SMT in
+--lib cvc5_engine_`) and the integration worker controls (`cargo test -p
+chelis-prove --features smt --test integration_solver_isolation`). It is a
+non-gate job (rule-id GATE-SCOPE-SMT in
 `scripts/test_gate.py`): out of `scripts/gate.py` scope by design, like the
 sanitizer job, because cvc5 builds from source and is not a per-PR
 developer-loop prerequisite.

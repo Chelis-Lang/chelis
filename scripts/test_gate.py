@@ -3482,6 +3482,10 @@ class SmtCiSplitTests(unittest.TestCase):
             "cargo test -p chelis-prove --features smt --lib cvc5_engine_",
             block,
         )
+        self.assertIn(
+            "cargo test -p chelis-prove --features smt --test integration_solver_isolation",
+            block,
+        )
         # chelis#1125 PP7: prove_deep_obligations.rs is `#![cfg(feature =
         # "smt")]` and had no runner anywhere, so its assertion that the `.dp`
         # surface proves at `proof_tier = smt` could not fail. The step below
