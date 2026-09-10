@@ -343,6 +343,19 @@ void chelis_tensor_shrink_shape(const chelis_tensor *tensor, chelis_scalar rank,
 void chelis_tensor_stride_shape(const chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *steps, chelis_scalar *shape);
 int64_t chelis_tensor_affine_index(const chelis_tensor *tensor, const chelis_scalar *coordinates, const chelis_scalar *offsets, const chelis_scalar *steps);
 
+/* OP33 checked metadata only: no tensor payload allocation or ownership. */
+typedef struct chelis_metadata_plan chelis_metadata_plan;
+chelis_metadata_plan *chelis_metadata_plan_new(chelis_scalar rank, const chelis_scalar *shape, chelis_scalar exemplar);
+chelis_metadata_plan *chelis_metadata_plan_view(chelis_scalar rank, const chelis_scalar *shape, const chelis_scalar *strides, chelis_scalar exemplar, chelis_scalar byte_capacity);
+int32_t chelis_metadata_plan_rank(const chelis_metadata_plan *plan);
+const int64_t *chelis_metadata_plan_shape(const chelis_metadata_plan *plan);
+const int64_t *chelis_metadata_plan_strides(const chelis_metadata_plan *plan);
+int64_t chelis_metadata_plan_count(const chelis_metadata_plan *plan);
+int64_t chelis_metadata_plan_byte_count(const chelis_metadata_plan *plan);
+chelis_dtype chelis_metadata_plan_dtype(const chelis_metadata_plan *plan);
+void chelis_metadata_plan_check_capacity(const chelis_metadata_plan *plan, chelis_scalar byte_capacity);
+void chelis_metadata_plan_release(chelis_metadata_plan *plan);
+
 typedef enum {
     CHELIS_REDUCE_SUM = 0, CHELIS_REDUCE_COUNT = 1, CHELIS_REDUCE_MAX = 2,
     CHELIS_REDUCE_MIN = 3, CHELIS_REDUCE_PROD = 4, CHELIS_REDUCE_ARGMAX = 5,

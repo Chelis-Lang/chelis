@@ -2458,6 +2458,222 @@ fn affine_result<T>(result: Result<T, MetadataError>, op: &str) -> T {
     })
 }
 
+// OP33 metadata-only ownership. The closed layout prevents a strided view
+// from entering the runtime's contiguous indexing and payload algorithms.
+enum MetadataPlanLayout {
+    Contiguous(ShapeMetadata),
+    Strided(StridedMetadata),
+}
+
+#[allow(non_camel_case_types)]
+pub struct chelis_metadata_plan {
+    layout: MetadataPlanLayout,
+}
+
+impl chelis_metadata_plan {
+    fn shape(&self) -> &[i64] {
+        match &self.layout {
+            MetadataPlanLayout::Contiguous(metadata) => metadata.shape(),
+            MetadataPlanLayout::Strided(metadata) => metadata.shape(),
+        }
+    }
+
+    fn strides(&self) -> &[i64] {
+        match &self.layout {
+            MetadataPlanLayout::Contiguous(metadata) => metadata.strides(),
+            MetadataPlanLayout::Strided(metadata) => metadata.strides(),
+        }
+    }
+
+    fn rank(&self) -> i32 {
+        match &self.layout {
+            MetadataPlanLayout::Contiguous(metadata) => metadata.rank(),
+            MetadataPlanLayout::Strided(metadata) => metadata.rank(),
+        }
+    }
+
+    fn elements(&self) -> ElementCount {
+        match &self.layout {
+            MetadataPlanLayout::Contiguous(metadata) => metadata.elements(),
+            MetadataPlanLayout::Strided(metadata) => metadata.elements(),
+        }
+    }
+
+    fn bytes(&self) -> ByteCount {
+        match &self.layout {
+            MetadataPlanLayout::Contiguous(metadata) => metadata.bytes(),
+            MetadataPlanLayout::Strided(metadata) => metadata.bytes(),
+        }
+    }
+
+    fn dtype(&self) -> RuntimeDType {
+        match &self.layout {
+            MetadataPlanLayout::Contiguous(metadata) => metadata.dtype(),
+            MetadataPlanLayout::Strided(metadata) => metadata.dtype(),
+        }
+    }
+
+    fn require_capacity(&self, capacity: ByteCount) -> Result<(), MetadataError> {
+        capacity.allocation()?;
+        match &self.layout {
+            MetadataPlanLayout::Contiguous(metadata) => metadata.require_capacity(capacity),
+            MetadataPlanLayout::Strided(metadata) => metadata.require_capacity(capacity),
+        }
+    }
+}
+
+fn metadata_plan_input_rank(rank: chelis_scalar) -> usize {
+    let rank = affine_scalar(rank, "metadata_plan");
+    if rank < 0 {
+        affine_result::<()>(
+            Err(MetadataError::Domain("negative metadata rank".into())),
+            "metadata_plan",
+        );
+    }
+    let rank = affine_result(
+        i32::try_from(rank).map_err(|_| MetadataError::Overflow("metadata rank exceeds int32")),
+        "metadata_plan",
+    ) as usize;
+    let entries = affine_result(ElementCount::scratch_entries(rank, 0), "metadata_plan");
+    affine_result(entries.scratch_len::<chelis_scalar>(), "metadata_plan");
+    rank
+}
+
+fn metadata_plan_array_preflight(values: *const chelis_scalar, rank: usize) {
+    if rank != 0 && (values.is_null() || values.addr() % std::mem::align_of::<chelis_scalar>() != 0)
+    {
+        affine_result::<()>(
+            Err(MetadataError::Domain(
+                "null or misaligned metadata array".into(),
+            )),
+            "metadata_plan",
+        );
+    }
+}
+
+unsafe fn metadata_plan_owner<'a>(plan: *const chelis_metadata_plan) -> &'a chelis_metadata_plan {
+    // Physical allocation and live-owner provenance remain the C caller's
+    // obligation. Null/alignment checks precede creating any Rust reference.
+    if plan.is_null() || plan.addr() % std::mem::align_of::<chelis_metadata_plan>() != 0 {
+        affine_result::<()>(
+            Err(MetadataError::Domain(
+                "null or misaligned metadata plan".into(),
+            )),
+            "metadata_plan",
+        );
+    }
+    &*plan
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_metadata_plan_new(
+    rank: chelis_scalar,
+    shape: *const chelis_scalar,
+    exemplar: chelis_scalar,
+) -> *mut chelis_metadata_plan {
+    let rank = metadata_plan_input_rank(rank);
+    metadata_plan_array_preflight(shape, rank);
+    let dtype = reduction_exemplar(exemplar, "metadata_plan");
+    let shape = affine_array(shape, rank, "metadata_plan");
+    let metadata = affine_result(ShapeMetadata::contiguous(&shape, dtype), "metadata_plan");
+    affine_result(metadata.bytes().allocation(), "metadata_plan");
+    Box::into_raw(Box::new(chelis_metadata_plan {
+        layout: MetadataPlanLayout::Contiguous(metadata),
+    }))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_metadata_plan_view(
+    rank: chelis_scalar,
+    shape: *const chelis_scalar,
+    strides: *const chelis_scalar,
+    exemplar: chelis_scalar,
+    byte_capacity: chelis_scalar,
+) -> *mut chelis_metadata_plan {
+    let rank = metadata_plan_input_rank(rank);
+    metadata_plan_array_preflight(shape, rank);
+    metadata_plan_array_preflight(strides, rank);
+    let dtype = reduction_exemplar(exemplar, "metadata_plan");
+    let capacity = affine_result(
+        ByteCount::from_declared(affine_scalar(byte_capacity, "metadata_plan")),
+        "metadata_plan",
+    );
+    let shape = affine_array(shape, rank, "metadata_plan");
+    let strides = affine_array(strides, rank, "metadata_plan");
+    let metadata = affine_result(
+        StridedMetadata::new(&shape, &strides, dtype, capacity),
+        "metadata_plan",
+    );
+    Box::into_raw(Box::new(chelis_metadata_plan {
+        layout: MetadataPlanLayout::Strided(metadata),
+    }))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_metadata_plan_rank(plan: *const chelis_metadata_plan) -> i32 {
+    metadata_plan_owner(plan).rank()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_metadata_plan_shape(
+    plan: *const chelis_metadata_plan,
+) -> *const i64 {
+    let shape = metadata_plan_owner(plan).shape();
+    if shape.is_empty() {
+        ptr::null()
+    } else {
+        shape.as_ptr()
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_metadata_plan_strides(
+    plan: *const chelis_metadata_plan,
+) -> *const i64 {
+    let strides = metadata_plan_owner(plan).strides();
+    if strides.is_empty() {
+        ptr::null()
+    } else {
+        strides.as_ptr()
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_metadata_plan_count(plan: *const chelis_metadata_plan) -> i64 {
+    metadata_plan_owner(plan).elements().get()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_metadata_plan_byte_count(plan: *const chelis_metadata_plan) -> i64 {
+    metadata_plan_owner(plan).bytes().get()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_metadata_plan_dtype(
+    plan: *const chelis_metadata_plan,
+) -> chelis_dtype {
+    metadata_plan_owner(plan).dtype().id() as chelis_dtype
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_metadata_plan_check_capacity(
+    plan: *const chelis_metadata_plan,
+    byte_capacity: chelis_scalar,
+) {
+    let plan = metadata_plan_owner(plan);
+    let capacity = affine_result(
+        ByteCount::from_declared(affine_scalar(byte_capacity, "metadata_plan")),
+        "metadata_plan",
+    );
+    affine_result(plan.require_capacity(capacity), "metadata_plan");
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_metadata_plan_release(plan: *mut chelis_metadata_plan) {
+    metadata_plan_owner(plan);
+    drop(Box::from_raw(plan));
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn chelis_tensor_check_literal(
     rank: chelis_scalar,

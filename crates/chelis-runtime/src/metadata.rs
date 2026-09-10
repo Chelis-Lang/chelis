@@ -2,7 +2,7 @@
 
 #[allow(unused_imports)]
 pub(crate) use chelis_abi::metadata::{
-    AllocationBytes, ByteCount, ElementCount, MetadataError, ShapeMetadata,
+    AllocationBytes, ByteCount, ElementCount, MetadataError, ShapeMetadata, StridedMetadata,
 };
 use chelis_vocab::RuntimeDType;
 
