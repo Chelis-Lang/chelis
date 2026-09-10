@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "freeze_sha256": "b2205e8d5160c9fe6f7760fca9e448b0b4c755981a881fe9954ebcb85dcf7f5e",
+  "freeze_sha256": "6d8b172ec3067b130ec5c7c997e984be1ae2080f149cfdb54f6bd9bceb5aec3b",
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -611,7 +611,7 @@
       "deletion_phase": 2
     },
     {
-      "identity": "kind=direct-data-access|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx::emit_literal_tensor",
+      "identity": "kind=direct-data-access|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx < 'program >::emit_literal_tensor",
       "deletion_phase": 3
     },
     {
@@ -1123,27 +1123,27 @@
       "deletion_phase": 1
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx::flattened_list_source_parts",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx < 'program >::flattened_list_source_parts",
       "deletion_phase": 1
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx::fold_shape_derived_static_size",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx < 'program >::fold_shape_derived_static_size",
       "deletion_phase": 1
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx::gather_values_rank",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx < 'program >::gather_values_rank",
       "deletion_phase": 1
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx::lower_builtin_app",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx < 'program >::lower_builtin_app",
       "deletion_phase": 1
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx::lower_plain_callable_app",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx < 'program >::lower_plain_callable_app",
       "deletion_phase": 1
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx::static_numel_from_expr",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx < 'program >::static_numel_from_expr",
       "deletion_phase": 1
     },
     {
@@ -1989,7 +1989,7 @@
       "sample": "CHELIS_HIP_CHECK(hipMemcpy(dst->data, view.data, dst->size * chelis_gpu_dtype_size(dst->dtype), h..."
     },
     {
-      "identity": "kind=direct-data-access|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx::emit_literal_tensor",
+      "identity": "kind=direct-data-access|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx < 'program >::emit_literal_tensor",
       "sample": "literal . data"
     },
     {
@@ -2317,27 +2317,27 @@
       "sample": "kids . len () . saturating_sub (1)"
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx::flattened_list_source_parts",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx < 'program >::flattened_list_source_parts",
       "sample": "product . checked_mul (concrete_dim_len (dim) ?)"
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx::fold_shape_derived_static_size",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx < 'program >::fold_shape_derived_static_size",
       "sample": "self . fold_shape_derived_static_size (& operands [0] , sources) ? . checked_mul (self . fold_sha..."
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx::gather_values_rank",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx < 'program >::gather_values_rank",
       "sample": "ascribed_result_ty . dims . len () . saturating_sub (indices_rank) . saturating_add (1)"
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx::lower_builtin_app",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx < 'program >::lower_builtin_app",
       "sample": "self . random_counter . wrapping_mul (0x9E37_79B9_7F4A_7C15)"
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx::lower_plain_callable_app",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx < 'program >::lower_plain_callable_app",
       "sample": "depth . saturating_sub (1)"
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx::static_numel_from_expr",
+      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx < 'program >::static_numel_from_expr",
       "sample": "product . checked_mul (concrete_dim_len (dim) ?)"
     },
     {
@@ -2618,7 +2618,7 @@
       "artifact": "the frozen INVENTORY_SOURCES file list",
       "enumerator": "chelis-repr-inventory: syn for Rust; clang's front end under fixed target lanes, a committed stub SDK, and a scrubbed environment for C and Objective-C headers, classified with the capacity census's closed type-word lists",
       "universe": {
-        "registered_sources": 72,
+        "registered_sources": 73,
         "roots": [
           "crates/chelis-runtime/src/**/*.rs",
           "crates/chelis-runtime/include/**/*.h",

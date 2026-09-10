@@ -1113,6 +1113,17 @@ seam: foundation rows, active debt, and mutation implementations remain unchange
 The source count and integrity digest include this file, with the existing
 `unregistered-inventory-source` mutation covering the source-list-only move.
 
+The checked-extent staged plan registers `chelis-ir/src/host/staged.rs` in
+that source universe. It composes existing tagged values and DAG carriers,
+without adding a representation seam. Borrowing its checked program changes
+seven existing scanner-qualified owners from `LowerCtx::method` to
+`LowerCtx < 'program >::method`. This is an exact one-to-one owner rename:
+each row retains its kind, source path and deletion phase. The integrity digest
+includes those seven names and the additional source. The existing
+unregistered-source, unregistered-subdirectory, direct-data-access and
+normalized-key-arithmetic mutations continue to reject new debt; the rename
+adds no exception or detector admission rule.
+
 ## B2. Invariants at every phase boundary
 
 1. The public C ABI remains [05-OP-31]/[05-OP-44]-exact and

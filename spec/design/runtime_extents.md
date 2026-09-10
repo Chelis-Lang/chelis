@@ -671,9 +671,12 @@ existing value after a discarded call, alias chains, borrows and shadowing.
 All 40 cases pass.
 Phase B attaches the direct public runner to its two inlined-root rows and
 adds `claim.literal.nested_and_unused.eval_c`. The 55-case preparation
-baseline now has 51 unmet cells: 24 declared signatures are preserved and
-two formerly silent #1377 inlined failures trap. The remaining 18 repaired
-signature cells belong to #1374/#1376/#1397; their execution gaps stay open.
+baseline at that delivery had 51 unmet cells: 24 declared signatures were
+preserved and two formerly silent #1377 inlined failures trapped. C2.4's
+checked transport reduces the same preparation baseline to 35 unmet cells.
+The preserved named `insert` declarations and executable roots do not prove
+caller equality or attribution; #1374/#1376 and #1397's general root gaps
+remain open.
 
 The suite's rows distinguish:
 
