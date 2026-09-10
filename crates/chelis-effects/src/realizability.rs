@@ -1018,12 +1018,14 @@ fn collect_manifest_entries(
             )
         });
 
-    // Parameterized functions are declarations rather than observations.
+    // Function-typed entries, including aliases, are callable rather than
+    // observations. Only an actual nullary function declaration is applied.
     // A nullary arrow-form def is an owed root: evaluation applies its thunk
     // and surfaces the return value (chelis#947), so unwrap its sole return
     // type for dotted expansion.
+    let is_declaration = body.is_some_and(|body| body.tag() == Some(DeepTag::Fn));
     let (observation_ty, nullary_declaration) = match tagged_children(&ty) {
-        Some((DeepTag::TFn, [return_ty])) => {
+        Some((DeepTag::TFn, [return_ty])) if is_declaration => {
             // Auto-applying an effectful thunk merely to observe it would run
             // an effect that an unselected declaration otherwise runs zero
             // times. Only effect-free nullary definitions are value roots;

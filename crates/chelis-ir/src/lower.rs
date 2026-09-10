@@ -5897,7 +5897,7 @@ impl LowerCtx {
 
     fn add_named_roots(&mut self, prefix: &str, value: &LoweredValue) {
         match value {
-            LoweredValue::Node(id) if !prefix.contains('.') => {
+            LoweredValue::Node(id) if !prefix.contains('.') && !self.dag.roots().contains(id) => {
                 // Top-level def whose body lowered to a single existing
                 // node — no new Store is emitted. This is a region-merge
                 // during lowering: the def's source region and the
@@ -5912,6 +5912,9 @@ impl LowerCtx {
                 self.dag.add_root(*id);
             }
             LoweredValue::Node(id) => {
+                // A second declaration can name the same value. Give its
+                // observation a distinct Store identity: add_root deduplicates
+                // node IDs, while the checked manifest owes both names.
                 let output_type = self
                     .dag
                     .get(*id)

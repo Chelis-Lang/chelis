@@ -158,6 +158,11 @@ itself lives outside `src/` and does not declare a top-level `module`.
 
 ### Targeted evaluation and root manifests
 
+Function aliases remain callable entries, without display roots of their own.
+Calls through them produce ordinary observable results. A nullary function
+alias remains callable when passed as an argument or stored in a local binding;
+only an actual effect-free nullary definition is automatically observed.
+
 `chelis eval --target eval|c|hip|metal` computes the root manifest against the
 selected backend's capabilities. The default is `eval`. This is useful when a
 program must be compared with a generated artifact: for example, an f64 root

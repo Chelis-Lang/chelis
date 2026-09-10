@@ -76,6 +76,27 @@ fn library_fixture() -> (TempDir, PathBuf) {
     (dir, root)
 }
 
+#[test]
+fn issue1493_cached_context_keeps_aliases_callable_and_observes_results() {
+    let (_dir, root) = library_fixture();
+    let context = compile_reef_context(Path::new("/tmp/x"), &root).unwrap();
+    let restored = CompiledContext::decode(&context.encode().unwrap()).unwrap();
+    let snippet = "module App.Eval\nimport Mylib.Math (square)\nalias: (int32) -> int32 = square\nsecond = alias\ndef user() -> int32 = second(3)\n";
+    for ctx in [&context, &restored] {
+        let results = eval_many_in_context(ctx, snippet, &["user".into(), "alias".into()]);
+        let value = results[0].1.as_ref().unwrap();
+        assert_eq!(value.roots.len(), 1);
+        assert_eq!(value.roots[0].name.as_deref(), Some("user"));
+        assert_eq!(value.roots[0].display.as_deref(), Some("9"));
+        let alias = results[1].1.as_ref().unwrap();
+        assert!(alias.roots.is_empty(), "{alias:?}");
+        let all = eval_in_context(ctx, snippet).unwrap();
+        assert_eq!(all.roots.len(), 1);
+        assert_eq!(all.roots[0].name.as_deref(), Some("user"));
+        assert_eq!(all.roots[0].display.as_deref(), Some("9"));
+    }
+}
+
 /// Strip `Decl::Module` wrappers so the inner decls can be passed to
 /// `compile_with_reef_graph` (which expects a flat decl list).
 fn flatten_module_decls(decls: &[chelis_surf::ast::Decl]) -> Vec<chelis_surf::ast::Decl> {
