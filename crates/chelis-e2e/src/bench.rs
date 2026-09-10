@@ -1310,6 +1310,7 @@ fn write_runtime_files(dir: &Path, hip: bool) -> Result<(), String> {
     let cpu_runtime = cpu_runtime_dir();
     for header in &[
         "chelis_runtime.h",
+        "chelis_runtime_views.h",
         "chelis_runtime_dtype.h",
         "chelis_blas.h",
         "chelis_simd.h",

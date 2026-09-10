@@ -29,6 +29,18 @@ fn require_companion(files: &[chelis_compiler_api::schema::GeneratedFile]) {
         assert_eq!(matches[0].contents, contents, "stale {name}");
     }
 }
+fn require_runtime_views(files: &[chelis_compiler_api::schema::GeneratedFile]) {
+    let matches: Vec<_> = files
+        .iter()
+        .filter(|file| file.path == "chelis_runtime_views.h")
+        .collect();
+    assert_eq!(matches.len(), 1, "missing/duplicate runtime views header");
+    assert_eq!(
+        matches[0].contents,
+        include_str!("../../chelis-runtime/include/chelis_runtime_views.h"),
+        "stale runtime views header"
+    );
+}
 #[test]
 fn hip_tensor_and_host_artifacts_materialize_exact_companion_inputs() {
     let tensor = compile_for_execution(request(
@@ -37,12 +49,15 @@ fn hip_tensor_and_host_artifacts_materialize_exact_companion_inputs() {
     ))
     .unwrap();
     require_companion(&tensor.compile_result.files);
+    require_runtime_views(&tensor.compile_result.files);
     let host = compile(request("message = \"hello\"\n", CompileTarget::Hip)).unwrap();
     require_companion(&host.files);
+    require_runtime_views(&host.files);
 }
 #[test]
 fn c_artifacts_do_not_gain_an_unlinked_device_companion() {
     let host = compile(request("message = \"hello\"\n", CompileTarget::C)).unwrap();
+    require_runtime_views(&host.files);
     assert!(
         !host
             .files

@@ -131,6 +131,7 @@ fn copy_runtime_artifacts(dst: &Path) {
     let include_dir = cpu_runtime_include_dir();
     for header in &[
         "chelis_runtime.h",
+        "chelis_runtime_views.h",
         "chelis_runtime_dtype.h",
         "chelis_blas.h",
         "chelis_simd.h",
@@ -414,13 +415,13 @@ fn dedicated_relu_and_adjoint_emit_strict_bit_preserving_kernels() {
     );
     assert!(!source.contains("fmax"), "{source}");
     assert!(
-        source.contains("int64_t chelis_output_shape_0[1] = { 4 };")
-            && source.contains("int64_t chelis_output_shape_1[1] = { 4 };")
+        source.contains("chelis_device_metadata chelis_output_shape_0[1] = { 4 };")
+            && source.contains("chelis_device_metadata chelis_output_shape_1[1] = { 4 };")
             && source
                 .contains("outputs[0] = chelis_alloc(1, chelis_output_shape_0, CHELIS_DTYPE_F32);")
             && source
                 .contains("outputs[1] = chelis_alloc(1, chelis_output_shape_1, CHELIS_DTYPE_F32);"),
-        "host output shapes must match chelis_alloc's int64_t ABI: {source}"
+        "host output shapes must use the generated int64 metadata alias: {source}"
     );
     assert!(
         !source.contains("(int64_t[])"),
@@ -1169,7 +1170,7 @@ fn s12_symbolic_repeated_occurrences_check_every_non_canonical_input() {
     assert!(
         result
             .c_source
-            .contains("int64_t batch = input_view_0->shape[0];")
+            .contains("chelis_device_metadata batch = input_view_0->shape[0];")
     );
     assert!(
         result.c_source.contains("input_view_1->shape[0] != batch"),
@@ -1210,13 +1211,14 @@ fn s12_slot_backed_kernels_iterate_over_logical_size_after_dce() {
     let src = &result.c_source;
 
     assert!(
-        src.contains("int64_t fill_size = d_t"),
+        src.contains("chelis_device_metadata fill_size = d_t"),
         "Slot-backed fill kernels must iterate over logical size"
     );
     assert!(
         !src.lines().any(|line| {
             let trimmed = line.trim_start();
-            trimmed.starts_with("int64_t fill_size =") && trimmed.contains("->byte_capacity")
+            trimmed.starts_with("chelis_device_metadata fill_size =")
+                && trimmed.contains("->byte_capacity")
         }),
         "Fill kernels must not iterate over slot capacity"
     );
@@ -1966,7 +1968,7 @@ fn s15_device_entrypoint_is_emitted_for_direct_gpu_execution() {
     assert!(
         result
             .c_source
-            .contains("extern \"C\" void test_device_entry_device(const chelis_device_tensor_owner *const *inputs, int32_t n_in, chelis_device_tensor_owner **outputs, int32_t n_out)"),
+            .contains("extern \"C\" void test_device_entry_device(const chelis_device_tensor_owner *const *inputs, chelis_device_rank n_in, chelis_device_tensor_owner **outputs, chelis_device_rank n_out)"),
         "HIP codegen must emit the device-native ABI entrypoint for Python direct execution"
     );
     assert!(

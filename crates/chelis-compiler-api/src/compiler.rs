@@ -54,6 +54,10 @@ const RUNTIME_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../chelis-runtime/include/chelis_runtime.h"
 ));
+const RUNTIME_VIEWS_H: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-runtime/include/chelis_runtime_views.h"
+));
 const RUNTIME_DTYPE_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../chelis-runtime/include/chelis_runtime_dtype.h"
@@ -3726,6 +3730,10 @@ fn compile_result_c(
                 contents: RUNTIME_H.to_string(),
             },
             GeneratedFile {
+                path: "chelis_runtime_views.h".to_string(),
+                contents: RUNTIME_VIEWS_H.to_string(),
+            },
+            GeneratedFile {
                 path: "chelis_runtime_dtype.h".to_string(),
                 contents: RUNTIME_DTYPE_H.to_string(),
             },
@@ -3761,6 +3769,10 @@ fn compile_result_hip(
             GeneratedFile {
                 path: "chelis_runtime.h".to_string(),
                 contents: RUNTIME_H.to_string(),
+            },
+            GeneratedFile {
+                path: "chelis_runtime_views.h".to_string(),
+                contents: RUNTIME_VIEWS_H.to_string(),
             },
             GeneratedFile {
                 path: "chelis_runtime_dtype.h".to_string(),
@@ -3817,6 +3829,10 @@ fn compile_result_hip_host(
             GeneratedFile {
                 path: "chelis_runtime.h".to_string(),
                 contents: RUNTIME_H.to_string(),
+            },
+            GeneratedFile {
+                path: "chelis_runtime_views.h".to_string(),
+                contents: RUNTIME_VIEWS_H.to_string(),
             },
             GeneratedFile {
                 path: "chelis_runtime_dtype.h".to_string(),

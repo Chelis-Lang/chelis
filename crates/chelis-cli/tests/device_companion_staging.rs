@@ -22,6 +22,11 @@ fn hip_build_stages_companion_once_and_c_build_excludes_it() {
             "{target}: {}",
             String::from_utf8_lossy(&result.stderr)
         );
+        assert_eq!(
+            fs::read_to_string(output.join("chelis_runtime_views.h")).unwrap(),
+            include_str!("../../chelis-runtime/include/chelis_runtime_views.h"),
+            "{target}: stale runtime views header"
+        );
         for (name, expected) in [
             (
                 "chelis_device_owner.cpp",

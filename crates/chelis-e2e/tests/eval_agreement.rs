@@ -193,6 +193,7 @@ fn compile_and_run(dag: &Dag, func_name: &str) -> String {
     let rt_dir = runtime_src_dir();
     for header in &[
         "chelis_runtime.h",
+        "chelis_runtime_views.h",
         "chelis_runtime_dtype.h",
         "chelis_blas.h",
         "chelis_simd.h",

@@ -139,6 +139,7 @@ fn compile_and_run_kernel(test_name: &str, c_source: &str, main_c: &str) -> Stri
     let include_dir = runtime_include_dir();
     for hdr in &[
         "chelis_runtime.h",
+        "chelis_runtime_views.h",
         "chelis_runtime_dtype.h",
         "chelis_blas.h",
         "chelis_simd.h",
