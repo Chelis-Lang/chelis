@@ -353,7 +353,10 @@ carriers to the construction and consumer inventory above:
   lower before any of its check carriers; existing `shape_deps` retain every
   target producer when only a discarded result's check remains live. Thus a
   later target's arithmetic failure precedes a reshape claim check, as §4.7.3
-  requires. Its computed axis has a fresh
+  requires. Existing static arithmetic folding is retained only when producing
+  literals or external literal axes checked at entry independently prove the
+  source extents. Folded source dependencies and the scalar claim carrier remain;
+  computed result metadata cannot supply a proof. Its computed axis has a fresh
   runtime identity; the declared requirement remains an explicit checked edge.
 - `CheckedUnitAxis { axis }` consumes the original tensor and that same
   tensor-axis witness carrying requirement one. Verification requires both
@@ -412,11 +415,13 @@ The completion oracle for these two host obligations is:
 cargo nextest run -p chelis-cli -p chelis-ir -p chelis-compiler-api --lib \
   --test runtime_extent_claim_preparation --test runtime_extent_checked_transport \
   --test wire_extent_witness --test disk_cache \
-  -E 'binary(runtime_extent_claim_preparation) | binary(runtime_extent_checked_transport) | binary(wire_extent_witness) | test(=cached_imports_preserve_computed_claims_and_unit_preconditions) | test(=previous_checked_extent_cache_is_rejected_before_payload_decode) | test(context_decode_rejects_missing_or_forged_authored_signatures)'
+  --test issue_513_symbolic_axis_adjoints \
+  -E 'binary(runtime_extent_claim_preparation) | binary(runtime_extent_checked_transport) | binary(wire_extent_witness) | test(=cached_imports_preserve_computed_claims_and_unit_preconditions) | test(=previous_checked_extent_cache_is_rejected_before_payload_decode) | test(context_decode_rejects_missing_or_forged_authored_signatures) | binary(issue_513_symbolic_axis_adjoints) | test(static_reshape_folding_requires_independent_axis_sources)'
 ```
 
 The new public matrix has 117 initial exported/binding/main fixtures, 69
 result-graph fixtures, 48 complete-shape-list scheduling fixtures,
+six folded-source caller-guard fixtures,
 three executable example controls, 24 grad/vmap controls
 and 12 imported-call controls. Every
 case checks declarations independently of actual shape/value or required
@@ -424,7 +429,8 @@ failure. Claim mismatches require Domain/reshape/int64. Scheduling fixtures
 independently require Eval's division-by-zero/floor_div/int64 diagnostic and
 the C integer helper's existing division-by-zero failure; they do not certify
 that helper's diagnostic parity. The same command retains the earlier literal and helper-order
-receipts, checks IR rewrites and malformed wire edges, and executes matching
+receipts and the existing reshape arithmetic gradient/finite-difference controls,
+checks independent static-source proofs, IR rewrites and malformed wire edges, and executes matching
 and mismatching calls from both disk and worker caches. The ignored full-class
 `claimed_extent_contract` is a separate, still-pending #1277 exit, not a receipt
 for these two issues. The named `insert` preparation cases now retain declared

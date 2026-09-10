@@ -11823,6 +11823,29 @@ impl LowerCtx {
         })
     }
 
+    /// Resolve only a producing literal or an external axis whose literal
+    /// declaration is checked at entry. Computed result metadata is no proof.
+    fn independently_known_axis_extent(&self, id: NodeId, axis: usize) -> Option<i64> {
+        use crate::axis_sources::AxisSource;
+        match crate::axis_sources::output_axis_sources(&self.dag, id).get(axis)? {
+            AxisSource::Literal { value } => Some(*value),
+            AxisSource::ExternalAxis { load, axis } => {
+                match self.dag.get(*load)?.output_type.dims.get(*axis)? {
+                    DimInfo::Lit(value) => i64::try_from(*value).ok(),
+                    _ => None,
+                }
+            }
+            AxisSource::InputAxis {
+                input,
+                axis: RtAxis::Lit(axis),
+            } => self.independently_known_axis_extent(
+                *self.dag.get(id)?.inputs.get(*input)?,
+                usize::try_from(*axis).ok()?,
+            ),
+            _ => None,
+        }
+    }
+
     /// chelis#513 gap 3 (school im2col witness): const-fold a `reshape`
     /// TARGET dim that is integer ARITHMETIC over static leaves, where a
     /// leaf may additionally be a `shape(operand, axis)` read (direct or a
@@ -11836,11 +11859,12 @@ impl LowerCtx {
     /// dims, which the backward `Expand`/`Sum` inherited and
     /// `symbolic_occurrences` ICE'd on.
     ///
-    /// Exactness contract: folds ONLY when every leaf is static.
-    ///   - a symbolic operand axis returns `None` (the caller then fails
-    ///     LOUD via [`Self::is_shape_derived_arith_dim`]; the symbolic-sig
-    ///     arithmetic target stays fail-closed, pinned in
-    ///     `issue_513_symbolic_axis_adjoints.rs`),
+    /// Exactness contract: folds ONLY when every leaf is independently static.
+    ///   - producing literal axes and literal external declarations checked at
+    ///     entry supply proof; computed result metadata does not,
+    ///   - a symbolic or computed operand axis returns `None`, preserving the
+    ///     ordinary runtime scalar path and its checks,
+    ///   - every folded shape source remains a dependency of the consumer,
     ///   - `add`/`sub`/`mul`/`neg` use checked i64 arithmetic (overflow folds
     ///     to `None`, never a wrapped extent),
     ///   - `floor_div`/`trunc_div`/`mod` fold only on a non-negative lhs with
@@ -11851,7 +11875,11 @@ impl LowerCtx {
     /// Takes `&mut self` because resolving a shape read lowers its operand
     /// (idempotent for the bound-`var` operands this walks; the same contract
     /// as [`Self::input_axis_source_from_shape_arg`]).
-    fn fold_shape_derived_static_size(&mut self, expr: &Expr) -> Option<i64> {
+    fn fold_shape_derived_static_size(
+        &mut self,
+        expr: &Expr,
+        sources: &mut Vec<NodeId>,
+    ) -> Option<i64> {
         if let Some(n) = extract_int_for_dim(expr) {
             return Some(n);
         }
@@ -11859,12 +11887,22 @@ impl LowerCtx {
         // in `shape_bindings`) of a statically-sized operand axis folds to
         // that extent; a symbolic extent fails the fold.
         if let Some((operand, axis)) = self.shape_app_operand_axis_resolved(expr) {
+            // Speculation must not lower a call and then lower it again when
+            // the fold declines. Inspect an already-bound source first; all
+            // other expressions stay on the ordinary runtime path.
+            let mut binding = &operand;
+            while let Some((DeepTag::Borrow, _, children)) = stamped_parts(binding) {
+                binding = children.first()?;
+            }
+            let name = bare_var_name(binding)?;
+            let bound = self.bindings.get(&name)?.as_single_node()?;
+            let value = self.independently_known_axis_extent(bound, axis)?;
+            // This bound read is idempotent and preserves its source spans.
             let operand_id = self.lower_expr(&operand).as_single_node()?;
-            return match self.dag.get(operand_id)?.output_type.dims.get(axis)? {
-                DimInfo::Lit(n) => i64::try_from(*n).ok(),
-                DimInfo::Named(_, Some(n)) => i64::try_from(*n).ok(),
-                DimInfo::Named(_, None) => None,
-            };
+            if !sources.contains(&operand_id) {
+                sources.push(operand_id);
+            }
+            return Some(value);
         }
         let Expr::List(list, _) = expr else {
             return None;
@@ -11876,35 +11914,37 @@ impl LowerCtx {
                 .static_size_bindings
                 .get(&bare_var_name(expr)?)
                 .copied(),
-            Some(DeepTag::Cast) => self.fold_shape_derived_static_size(children(list).first()?),
+            Some(DeepTag::Cast) => {
+                self.fold_shape_derived_static_size(children(list).first()?, sources)
+            }
             Some(DeepTag::App) => {
                 let kids = children(list);
                 let op = bare_var_name(kids.first()?)?;
                 let operands = &kids[1..];
                 match (op.as_str(), operands.len()) {
                     ("neg", 1) => self
-                        .fold_shape_derived_static_size(&operands[0])?
+                        .fold_shape_derived_static_size(&operands[0], sources)?
                         .checked_neg(),
                     ("add", 2) => self
-                        .fold_shape_derived_static_size(&operands[0])?
-                        .checked_add(self.fold_shape_derived_static_size(&operands[1])?),
+                        .fold_shape_derived_static_size(&operands[0], sources)?
+                        .checked_add(self.fold_shape_derived_static_size(&operands[1], sources)?),
                     ("sub", 2) => self
-                        .fold_shape_derived_static_size(&operands[0])?
-                        .checked_sub(self.fold_shape_derived_static_size(&operands[1])?),
+                        .fold_shape_derived_static_size(&operands[0], sources)?
+                        .checked_sub(self.fold_shape_derived_static_size(&operands[1], sources)?),
                     ("mul", 2) => self
-                        .fold_shape_derived_static_size(&operands[0])?
-                        .checked_mul(self.fold_shape_derived_static_size(&operands[1])?),
+                        .fold_shape_derived_static_size(&operands[0], sources)?
+                        .checked_mul(self.fold_shape_derived_static_size(&operands[1], sources)?),
                     ("floor_div" | "trunc_div", 2) => {
-                        let lhs = self.fold_shape_derived_static_size(&operands[0])?;
-                        let rhs = self.fold_shape_derived_static_size(&operands[1])?;
+                        let lhs = self.fold_shape_derived_static_size(&operands[0], sources)?;
+                        let rhs = self.fold_shape_derived_static_size(&operands[1], sources)?;
                         if lhs < 0 || rhs <= 0 {
                             return None;
                         }
                         lhs.checked_div(rhs)
                     }
                     ("mod", 2) => {
-                        let lhs = self.fold_shape_derived_static_size(&operands[0])?;
-                        let rhs = self.fold_shape_derived_static_size(&operands[1])?;
+                        let lhs = self.fold_shape_derived_static_size(&operands[0], sources)?;
+                        let rhs = self.fold_shape_derived_static_size(&operands[1], sources)?;
                         if lhs < 0 || rhs <= 0 {
                             return None;
                         }
@@ -12730,15 +12770,42 @@ impl LowerCtx {
         let mut op_dims = Vec::with_capacity(elements.len());
         let mut ty_dims = Vec::with_capacity(elements.len());
         let mut computed_targets = Vec::new();
-        let srcs = Vec::new();
+        let mut srcs = Vec::new();
         for (axis, elem) in elements.iter().enumerate() {
             if extract_int_for_dim(elem).is_none()
                 && (self.is_shape_derived_arith_dim(elem) || self.is_runtime_scalar_var(elem))
             {
-                // Preserve the actual computation even at an inlined constant
-                // call site. A result claim is attached via axis provenance
-                // after the body lowers, before any fold or graph transport.
-                let actual = self.lower_expr_node(elem, "computed reshape target");
+                // A successful static fold proves the target from producing
+                // literals or checked input axes, never claimed result metadata.
+                // Keep a scalar carrier even after folding so an inlined result
+                // claim can still compare its independently resolved witness.
+                let actual = if let Some(value) =
+                    self.fold_shape_derived_static_size(elem, &mut srcs)
+                {
+                    if value < 0 {
+                        raise_lowering_error(
+                            format!(
+                                "reshape target dim is shape()-derived integer arithmetic that folds to the negative extent {value}; a reshape extent must be non-negative (chelis#513)"
+                            ),
+                            Some(elem.span()),
+                            elem.span_id().map(ToOwned::to_owned),
+                        );
+                    }
+                    self.dag.add_node(
+                        RiscOp::Const {
+                            value: chelis_types::scalar_from_i64("reshape", Prim::Int64, value)
+                                .expect("exact int64 target"),
+                        },
+                        Vec::new(),
+                        TensorType {
+                            dims: Vec::new(),
+                            precision: Prim::Int64,
+                        },
+                        self.current_span_id.clone(),
+                    )
+                } else {
+                    self.lower_expr_node(elem, "computed reshape target")
+                };
                 let slot = inputs.len();
                 inputs.push(actual);
                 computed_targets.push((axis, slot));
@@ -12771,7 +12838,7 @@ impl LowerCtx {
                     axis: RtAxis::Lit(i32::try_from(source_axis).ok()?),
                 });
                 ty_dims.push(dim);
-            } else if let Some(value) = self.fold_shape_derived_static_size(elem) {
+            } else if let Some(value) = self.fold_shape_derived_static_size(elem, &mut srcs) {
                 // chelis#513 gap 3: static integer arithmetic over shape()
                 // reads of statically-sized axes (the school im2col target
                 // form `mul(b_d, a_d)`) folds to a concrete literal dim. A
@@ -12846,7 +12913,8 @@ impl LowerCtx {
             // guard (spec/04 §4.7.3). Reserve checking positions only after all
             // target producers, and retain those producers even when a caller
             // discards the reshape and only its required check remains live.
-            let shape_sources = inputs.clone();
+            let mut shape_sources = inputs.clone();
+            shape_sources.extend(srcs.iter().copied());
             for (axis, slot) in computed_targets {
                 let actual = inputs[slot];
                 let ty = self.dag.get(actual).expect("target").output_type.clone();
@@ -14695,6 +14763,67 @@ mod tests {
             let _ = ctx.lower_expr(expr);
         }
         ctx.dag
+    }
+
+    #[test]
+    fn static_reshape_folding_requires_independent_axis_sources() {
+        let mut ctx = LowerCtx::new(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        );
+        let input = ctx.dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Lit(4)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let copied = ctx.dag.add_node(
+            RiscOp::Copy,
+            vec![input],
+            TensorType {
+                dims: vec![DimInfo::Lit(99)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        assert_eq!(ctx.independently_known_axis_extent(input, 0), Some(4));
+        assert_eq!(
+            ctx.independently_known_axis_extent(copied, 0),
+            Some(4),
+            "a wrapper's claimed metadata is not its actual source"
+        );
+        let actual = ctx.dag.add_node(
+            RiscOp::Const {
+                value: chelis_types::scalar_from_i64("reshape", Prim::Int64, 2).unwrap(),
+            },
+            vec![],
+            TensorType {
+                dims: vec![],
+                precision: Prim::Int64,
+            },
+            None,
+        );
+        let reshape = ctx.dag.add_node(
+            RiscOp::Reshape {
+                new_shape: vec![RtDim::Node(1)],
+            },
+            vec![input, actual],
+            TensorType {
+                dims: vec![DimInfo::Lit(99)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        assert_eq!(
+            ctx.independently_known_axis_extent(reshape, 0),
+            None,
+            "an operation's result claim cannot certify a scalar target"
+        );
     }
 
     #[test]

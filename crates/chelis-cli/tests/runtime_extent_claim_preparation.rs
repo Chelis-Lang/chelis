@@ -33,6 +33,7 @@ enum Expected {
     Tensor(Vec<usize>, Vec<f64>),
     Domain(&'static str, &'static [&'static str]),
     TargetDivisionByZero,
+    EntryShapeMismatch(&'static str),
     Reject(&'static str),
 }
 
@@ -691,6 +692,9 @@ fn contract_failures(case: &Case, observation: &Value) -> Vec<String> {
                             }
                     })
             }
+            Expected::EntryShapeMismatch(context) => {
+                run["stage"] == "execute" && run["success"] == false && stderr.contains(context)
+            }
             Expected::Reject(_) => unreachable!(),
         };
         if !satisfied {
@@ -1283,6 +1287,50 @@ fn helper_signature_guard_order_contract() {
 
 /// Result claims follow axis provenance, including an inferred helper result.
 /// Each call route checks the declared type independently of either runtime.
+#[test]
+fn static_reshape_folding_preserves_declaring_input_contract() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut cases = Vec::new();
+    for n in [2, 3] {
+        call_matrix(
+            &mut cases,
+            &format!("static_reshape_source.x{n}"),
+            1686,
+            "def f(unread: tensor[2, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [mod(shape(unread, 0i32), 4i64), 2i64])",
+            "(tensor[2, f32], tensor[d0, f32]) -> tensor[2, 2, f32]",
+            vec![vector(n), vector(4)],
+            if n == 2 {
+                Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])
+            } else {
+                Expected::Domain("load", &["claimed = 2", "unread axis 0 = 3"])
+            },
+        );
+    }
+    assert_eq!(cases.len(), 6);
+    let mut failures = Vec::new();
+    for mut case in cases {
+        if case.id.contains("x3.") {
+            case.expected = if case.exported.is_some() {
+                Expected::EntryShapeMismatch("input `unread` axis 0 expected 2, got 3")
+            } else {
+                // Concrete incompatible arguments are static type errors;
+                // only the externally supplied input reaches an ABI check.
+                Expected::Reject("dimension mismatch")
+            };
+        }
+        let observed = observe(&case);
+        println!("{}: {}", case.id, observed);
+        failures.extend(contract_failures(&case, &observed));
+        if !matches!(case.expected, Expected::Reject(_))
+            && case.source.contains("def main()")
+            && observed["check"]["signatures"]["main"] != "() -> tensor[2, 2, f32]"
+        {
+            failures.push(format!("{}: declared main shape changed", case.id));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 #[test]
 fn computed_claim_complete_shape_list_precedes_guards() {
     // Spec/04 §4.7 places local guards at the introducing operation;
