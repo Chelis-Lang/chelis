@@ -1051,6 +1051,11 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_tensor_check_literal ( chelis_scalar rank , const chelis_scalar * shape , chelis_scalar exemplar , chelis_scalar count ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_tensor_check_permute ( const chelis_tensor * tensor , chelis_scalar rank , const chelis_scalar * shape , const chelis_scalar * axes ) ;",
       "flags": []
     },
@@ -1097,6 +1102,11 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_tensor_unravel_index ( const chelis_tensor * tensor , chelis_scalar index , chelis_scalar * coordinates ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_tensor_write_literal ( chelis_tensor_write * guard , chelis_scalar count , const chelis_scalar * values ) ;",
       "flags": []
     },
     {

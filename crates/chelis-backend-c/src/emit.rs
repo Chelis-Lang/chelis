@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use chelis_ir::dag::{
-    Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStep,
-    FusedStepOp, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim, SymbolicDimSource, TensorType,
+    Dag, DagNode, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStep, FusedStepOp, NodeId,
+    ReduceWindowKind, RiscOp, RtAxis, RtDim, SymbolicDimSource, TensorType,
 };
 use chelis_ir::ownership::{
     CStorageLane, ReusableOwnedStorage, VerifiedDagAction, VerifiedDagProgram, VerifiedDagView,
@@ -802,7 +802,7 @@ impl CEmitter {
         }
         match &node.op {
             RiscOp::Const { value } => self.emit_const(id, value, &node.output_type)?,
-            RiscOp::ConstTensor { data } => self.emit_const_tensor(id, data, &node.output_type),
+            RiscOp::ConstTensor { data } => self.emit_const_tensor(id, data, &node.output_type)?,
             RiscOp::Shape { axis } => self.emit_shape(id, *axis, &node.inputs, &node.output_type),
             RiscOp::ExtentWitness {
                 parameter,
@@ -1694,11 +1694,7 @@ impl CEmitter {
     }
 
     fn shape_literal(ty: &TensorType) -> String {
-        let dims: Vec<String> = ty
-            .dims
-            .iter()
-            .map(|dim| Self::emit_dim_expr(&DimExpr::from(dim)))
-            .collect();
+        let dims: Vec<String> = ty.dims.iter().map(Self::emit_dim_info).collect();
         if dims.is_empty() {
             "NULL".to_string()
         } else {
@@ -1741,7 +1737,7 @@ impl CEmitter {
             .dims
             .iter()
             .map(|dim| {
-                let extent = Self::emit_dim_expr(&DimExpr::from(dim));
+                let extent = Self::emit_dim_info(dim);
                 // The constructor's uint64 bits parameter preserves an int64
                 // extent's bits by C's defined modulo conversion, including
                 // negative values that the metadata owner then rejects.
@@ -1767,24 +1763,10 @@ impl CEmitter {
         }
     }
 
-    fn emit_dim_expr(expr: &DimExpr) -> String {
-        match expr {
-            DimExpr::Concrete(n) => n.to_string(),
-            DimExpr::Sym(name) => name.clone(),
-            DimExpr::Mul(lhs, rhs) => {
-                format!(
-                    "({} * {})",
-                    Self::emit_dim_expr(lhs),
-                    Self::emit_dim_expr(rhs)
-                )
-            }
-            DimExpr::Div(lhs, rhs) => {
-                format!(
-                    "({} / {})",
-                    Self::emit_dim_expr(lhs),
-                    Self::emit_dim_expr(rhs)
-                )
-            }
+    fn emit_dim_info(dim: &DimInfo) -> String {
+        match dim {
+            DimInfo::Lit(n) | DimInfo::Named(_, Some(n)) => n.to_string(),
+            DimInfo::Named(name, None) => name.clone(),
         }
     }
 
@@ -2163,96 +2145,65 @@ impl CEmitter {
         }
     }
 
-    /// Emit a multi-element constant tensor as a C array initialized
-    /// with the literal data values, then memcpy into the tensor slot.
-    /// The sealed storage (chelis#856) reads exactly per family: the
-    /// integer arms take exact i64 values, the float arms the exact
-    /// f64 images.
+    /// A literal's tagged count and every finalized scalar agree with its
+    /// checked destination before storage submission. No raw payload copy or
+    /// backend width fallback participates in this path.
     fn emit_const_tensor(
         &mut self,
         id: usize,
         storage: &chelis_types::TensorStorage,
         ty: &TensorType,
-    ) {
-        let exact_ints = storage.to_i64_exact_vec();
-        let data: Vec<f64> = storage.to_f64_lossy_vec();
-        self.emit_slot_wrapper(id, ty);
-        match ty.precision {
-            Prim::F32 => {
-                // Use a uint32_t array of bit patterns (compile-time constants),
-                // then memcpy into the tensor. This avoids function-call
-                // initializers that C89/C99 reject in static arrays.
-                let values: Vec<String> = data
-                    .iter()
-                    .map(|v| {
-                        let bits = (*v as f32).to_bits();
-                        format!("0x{bits:08x}u")
-                    })
-                    .collect();
-                self.line(&format!(
-                    "{{ static const uint32_t __bits[] = {{ {} }};",
-                    values.join(", ")
-                ));
-                self.line(&format!(
-                    "  memcpy(t{id}_data, __bits, {}u * sizeof(uint32_t)); }}",
-                    data.len()
-                ));
-            }
-            Prim::F64 => {
-                let values: Vec<String> = data
-                    .iter()
-                    .map(|v| {
-                        let bits = v.to_bits();
-                        format!("0x{bits:016x}uLL")
-                    })
-                    .collect();
-                self.line(&format!(
-                    "{{ static const uint64_t __bits[] = {{ {} }};",
-                    values.join(", ")
-                ));
-                self.line(&format!(
-                    "  memcpy(t{id}_data, __bits, {}u * sizeof(uint64_t)); }}",
-                    data.len()
-                ));
-            }
-            Prim::Int32 => {
-                let values: Vec<String> = match &exact_ints {
-                    Some(ints) => ints.iter().map(|v| format!("{}", *v as i32)).collect(),
-                    None => data.iter().map(|v| format!("{}", *v as i32)).collect(),
-                };
-                self.line(&format!(
-                    "{{ static const int32_t __data[] = {{ {} }};",
-                    values.join(", ")
-                ));
-                self.line(&format!(
-                    "  memcpy(t{id}_data, __data, {}u * sizeof(int32_t)); }}",
-                    data.len()
-                ));
-            }
-            Prim::Int64 => {
-                let values: Vec<String> = match &exact_ints {
-                    Some(ints) => ints.iter().map(|v| format!("{}", *v)).collect(),
-                    None => data.iter().map(|v| format!("{}", *v as i64)).collect(),
-                };
-                self.line(&format!(
-                    "{{ static const int64_t __data[] = {{ {} }};",
-                    values.join(", ")
-                ));
-                self.line(&format!(
-                    "  memcpy(t{id}_data, __data, {}u * sizeof(int64_t)); }}",
-                    data.len()
-                ));
-            }
-            _ => {
-                // Fallback: fill element by element via bit-cast helpers.
-                for (i, v) in data.iter().enumerate() {
-                    let bits = (*v as f32).to_bits();
-                    self.line(&format!(
-                        "((float*)t{id}_data)[{i}] = chelis_f32_from_bits(0x{bits:08x}u);"
-                    ));
-                }
-            }
+    ) -> Result<(), Unsupported> {
+        let invalid = |detail: &str| {
+            Unsupported::new(
+                UnsupportedKind::Construct("an inconsistent finalized tensor literal".into()),
+                format!("the C DAG emitter (node {id}): {detail}"),
+                Stage::Codegen("c"),
+                chelis_types::deliberate_rejection!(
+                    "[05-OP-33]",
+                    "literal count and dtype must agree with the checked result metadata"
+                ),
+            )
+        };
+        if storage.prim() != ty.precision {
+            return Err(invalid("storage dtype differs from result dtype"));
         }
+        let count =
+            i64::try_from(storage.len()).map_err(|_| invalid("literal count exceeds int64"))?;
+        let dtype = Self::dtype_macro(ty);
+        let rank = Self::ndim(ty);
+        let shape = Self::tagged_shape_literal(ty);
+        self.line(&format!("chelis_tensor_check_literal(chelis_scalar_from_bits(CHELIS_DTYPE_I64, {rank}), {shape}, chelis_scalar_from_bits({dtype}, UINT64_C(0)), chelis_scalar_from_bits(CHELIS_DTYPE_I64, {count}));"));
+        self.emit_slot_wrapper(id, ty);
+        let values = if count == 0 {
+            "NULL".to_owned()
+        } else {
+            let images = (0..storage.len())
+                .map(|index| {
+                    let bits = match storage.scalar_at(index).element_ref() {
+                        ElementRef::I8(n) => u64::from(n as u8),
+                        ElementRef::I16(n) => u64::from(n as u16),
+                        ElementRef::I32(n) => u64::from(n as u32),
+                        ElementRef::I64(n) => n as u64,
+                        ElementRef::F64(n) => n.to_bits(),
+                        ElementRef::F32(n) => u64::from(n.to_bits()),
+                        ElementRef::F16(n) => u64::from(n.to_bits()),
+                        ElementRef::Bf16(n) => u64::from(n.to_bits()),
+                        ElementRef::Bool(n) => u64::from(n),
+                    };
+                    format!(
+                        "{{ .dtype = {dtype}, .reserved = {{0}}, .bits = UINT64_C(0x{bits:016x}) }}"
+                    )
+                })
+                .collect::<Vec<_>>();
+            self.line(&format!(
+                "static const chelis_scalar t{id}_literal[] = {{ {} }};",
+                images.join(", ")
+            ));
+            format!("t{id}_literal")
+        };
+        self.line(&format!("chelis_tensor_write_literal(t{id}_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {count}), {values});"));
+        Ok(())
     }
 
     // ---- Load ----
@@ -5905,7 +5856,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             }
             // A symbolic dim (reshape targets only; verify rejects it in
             // movement bounds) is a declared C variable, exactly as
-            // `emit_dim_expr` renders `DimExpr::Sym`.
+            // `emit_dim_info` renders a runtime-bound named dimension.
             RtDim::Sym(name) => name.clone(),
         }
     }
@@ -6040,7 +5991,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         // Check every submitted axis, including static and symbolic bystanders.
         // Equal element counts alone cannot authorize a different movement shape.
         for (axis, dim) in ty.dims.iter().enumerate() {
-            let expected = Self::emit_dim_expr(&DimExpr::from(dim));
+            let expected = Self::emit_dim_info(dim);
             self.line(&format!(
                 "if (t{id}_movement_shape[{axis}].bits != ({expected})) {{ fprintf(stderr, \"movement target mismatch at node {id} axis {axis}\\n\"); chelis_numeric_trap(\"numeric trap: domain in {op} at int64\"); }}"
             ));

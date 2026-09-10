@@ -2018,6 +2018,26 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         surface: StaticSurfaceDescriptor::new(
             PRIMARY_CENSUS_FAMILY,
             "header-export",
+            "chelis_runtime.h: void chelis_tensor_check_literal ( chelis_scalar rank , const chelis_scalar * shape , chelis_scalar exemplar , chelis_scalar count ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_check_literal` validates a complete result shape and literal",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_tensor_write_literal ( chelis_tensor_write * guard , chelis_scalar count , const chelis_scalar * values ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_write_literal` takes a live tensor write guard, an exact tagged",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
             "chelis_runtime.h: chelis_window_plan * chelis_tensor_window_plan ( const chelis_tensor * input , chelis_scalar count , const chelis_scalar * window , const chelis_scalar * steps , chelis_window_op operation ) ;",
             &[],
         ),
