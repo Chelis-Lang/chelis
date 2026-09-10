@@ -1,0 +1,191 @@
+//! Spec 11: registered HIP calls import checked storage and adopt opaque owners.
+//! The SDK/foreign artifact is simulated; this is not GPU execution evidence.
+use pyo3::{
+    prelude::*,
+    types::{PyDict, PyModule},
+};
+use std::{ffi::CString, process::Command};
+const SOURCE: &str = r#"
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include "chelis_device_descriptor.h"
+typedef struct { chelis_gpu_tensor packet; int32_t device; int64_t shape[64], strides[64]; float payload[2]; } Owner;
+static int live, imports, calls, mode, current = 1;
+int fixture_live(void) { return live; }
+int fixture_imports(void) { return imports; }
+int fixture_calls(void) { return calls; }
+void fixture_mode(int value) { mode = value; }
+int hipGetDevice(int *device) { *device = current; return 0; }
+Owner *chelis_device_tensor_import(const chelis_gpu_tensor *packet) {
+    Owner *owner = calloc(1, sizeof(Owner));
+    owner->packet = *packet;
+    if (packet->rank < 0 || packet->rank > 64 || packet->ownership) abort();
+    memcpy(owner->shape, packet->shape, packet->rank * sizeof(int64_t));
+    memcpy(owner->strides, packet->strides, packet->rank * sizeof(int64_t));
+    owner->packet.shape = owner->shape; owner->packet.strides = owner->strides;
+    owner->device = current; ++live; ++imports; return owner;
+}
+const chelis_gpu_tensor *chelis_device_tensor_view(const Owner *owner) { return &owner->packet; }
+int32_t chelis_device_tensor_device(const Owner *owner) { return owner->device; }
+void chelis_device_tensor_release(Owner *owner) { --live; free(owner); }
+void fixture_entry(const Owner *const *inputs, int32_t input_count, Owner **outputs, int32_t output_count) {
+    if (input_count != 1) abort();
+    ++calls;
+    for (int i = 0; i < output_count; ++i) {
+        Owner *output = calloc(1, sizeof(Owner));
+        *output = *inputs[0];
+        output->packet.shape = output->shape; output->packet.strides = output->strides;
+        output->packet.data = output->payload; output->packet.ownership = 1;
+        output->packet.byte_capacity = output->packet.count * 4;
+        int64_t stride = 1;
+        for (int axis = output->packet.rank - 1; axis >= 0; --axis) {
+            output->strides[axis] = stride; stride *= output->shape[axis];
+        }
+        if (mode == 1) output->packet.rank = INT32_MAX;
+        if (mode == 2) output->packet.shape = NULL;
+        if (mode == 3) output->packet.strides = NULL;
+        if (mode == 4) output->packet.reserved[1] = 1;
+        if (mode == 5) output->packet.ownership = 0;
+        if (mode == 6) output->packet.byte_capacity = 3;
+        if (mode == 7) output->packet.count += 1;
+        if (mode == 8) output->device = 2;
+        if (mode == 9) output->packet.strides = (const int64_t *)1;
+        outputs[i] = output; ++live;
+    }
+}
+"#;
+fn run_case(rank: usize, body: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("device.c");
+    let library = dir
+        .path()
+        .join(format!("device.{}", std::env::consts::DLL_EXTENSION));
+    std::fs::write(&source, SOURCE).unwrap();
+    let result = Command::new("cc")
+        .args(["-std=c11", "-Wall", "-Wextra", "-Werror", "-fPIC"])
+        .arg(if cfg!(target_os = "macos") {
+            "-dynamiclib"
+        } else {
+            "-shared"
+        })
+        .arg("-I")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../chelis-backend-hip/runtime"
+        ))
+        .arg("-I")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../chelis-runtime/include"
+        ))
+        .arg(&source)
+        .arg("-o")
+        .arg(&library)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let mut shape = vec![1; rank];
+    if rank > 0 {
+        shape[rank - 1] = 2;
+    }
+    let spec = |name: &str| serde_json::json!({"name":name,"dtype":"f32","dims":shape.iter().map(|n|serde_json::json!({"size":n})).collect::<Vec<_>>()});
+    let manifest = serde_json::json!({"abi_version":2,"target":"hip","host_entry_name":"unused_host","device_entry_name":"fixture_entry","inputs":[spec("x")],"outputs":[spec("result")],"source_path":dir.path().join("absent.ch"),"source_hash":"fixture"});
+    std::fs::write(
+        library.with_extension("json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    Python::with_gil(|py| {
+        let module = PyModule::new(py, "native_device_validation").unwrap();
+        chelis_python::register_module(&module).unwrap();
+        let globals = PyDict::new(py);
+        globals.set_item("native", module).unwrap();
+        globals
+            .set_item("library_path", library.to_str().unwrap())
+            .unwrap();
+        globals.set_item("shape", shape).unwrap();
+        let setup = r#"
+import ctypes, gc, sys, types, weakref
+fixture = ctypes.CDLL(library_path)
+fixture.fixture_mode.argtypes = [ctypes.c_int]
+class Storage:
+    def __init__(self): self.buffer = (ctypes.c_float * 8)(); self.bytes = 32
+    def data_ptr(self): return ctypes.addressof(self.buffer)
+    def nbytes(self): return self.bytes
+class Tensor:
+    def __init__(self):
+        self.shape = shape; self.dtype = 'torch.float32'
+        self.device = types.SimpleNamespace(type='cuda', index=1)
+        self.storage = Storage(); self.offset = 1; self.pointer_delta = 0
+        self.strides = [2] * len(shape)
+    def stride(self): return self.strides
+    def storage_offset(self): return self.offset
+    def data_ptr(self): return self.storage.data_ptr() + self.offset * 4 + self.pointer_delta
+    def untyped_storage(self): return self.storage
+saved_torch = sys.modules.get('torch')
+sys.modules['torch'] = types.SimpleNamespace(Tensor=Tensor)
+model = native.load(library_path)
+source = Tensor()
+"#;
+        let script = format!("{setup}\ntry:\n{}\nfinally:\n    if saved_torch is None: sys.modules.pop('torch', None)\n    else: sys.modules['torch'] = saved_torch\n", body.lines().map(|line|format!("    {line}\n")).collect::<String>());
+        py.run(&CString::new(script).unwrap(), Some(&globals), None)
+            .expect("actual registered device call");
+    });
+}
+#[test]
+fn dynamic_device_owners_preserve_rank_device_and_input_lifetime() {
+    for rank in [0, 1, 9, 33] {
+        run_case(
+            rank,
+            r#"
+output = model(source)
+assert output.shape == shape
+assert output.__dlpack_device__() == (10, 1)
+assert fixture.fixture_imports() == 1 and fixture.fixture_calls() == 1
+assert fixture.fixture_live() == 1
+ref = weakref.ref(source)
+del source, model; gc.collect()
+assert ref() is not None
+assert output.__dlpack_device__() == (10, 1)
+del output; gc.collect()
+assert ref() is None and fixture.fixture_live() == 0
+"#,
+        );
+    }
+}
+#[test]
+fn invalid_storage_offset_capacity_and_context_never_reach_import_or_entry() {
+    for mutation in [
+        "source.offset = -1",
+        "source.offset = 9",
+        "source.pointer_delta = 4",
+        "source.storage.bytes = 8",
+        "source.strides = [-1]",
+        "source.device.index = 2",
+        "source.device.index = None",
+    ] {
+        run_case(1, &format!("{mutation}\ntry:\n    model(source)\n    raise AssertionError('invalid input admitted')\nexcept (ValueError, OverflowError):\n    pass\nassert fixture.fixture_imports() == 0 and fixture.fixture_calls() == 0\nassert fixture.fixture_live() == 0"));
+    }
+}
+#[test]
+fn malformed_dynamic_outputs_release_every_returned_owner() {
+    run_case(
+        1,
+        r#"
+for mode in range(1, 10):
+    fixture.fixture_mode(mode)
+    try:
+        model(source)
+        raise AssertionError('invalid output admitted')
+    except ValueError:
+        pass
+    gc.collect()
+    assert fixture.fixture_live() == 0
+"#,
+    );
+}
