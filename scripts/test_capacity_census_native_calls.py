@@ -351,6 +351,33 @@ pub fn live(value: [i64; 2]) -> Capsule<2> { adopt(value) }
         self.assertEqual(closed["formal_inputs"][0]["type"]["shape"]["length"], 2)
         self.assertEqual(closed["substitutions"][0]["kind"], "const")
 
+    def test_impl_const_arguments_do_not_inherit_the_impls_generic_parameters(self):
+        # PyO3 emits precisely this shape for PyFunctionArgument<'a, 'py, false>.
+        # The anonymous bool body belongs syntactically to the generic impl,
+        # but is not its associated method and has no inherited substitutions.
+        for flag in ("false", "true"):
+            evidence = self.observe("""
+trait Argument<'a, const FLAG: bool> { fn get(self) -> i64; }
+struct Model<T>(T);
+impl<'a, T> Argument<'a, FLAG_VALUE> for &'a Model<T> {
+    fn get(self) -> i64 { 7 }
+}
+pub fn live(value: &Model<i64>) -> i64 { Argument::get(value) }
+""".replace("FLAG_VALUE", flag))
+            self.assertEqual(evidence.raw["errors"], [])
+            constants = [body for body in evidence.raw["bodies"]
+                         if body["formal_result"]["shape"] == {"tag": "primitive", "name": "bool"}]
+            self.assertTrue(constants)
+            for body in constants:
+                self.assertIsNone(body["implementation"])
+                self.assertEqual(body["substitutions"], [])
+            methods = [body for body in evidence.raw["bodies"] if named(body, "get")]
+            self.assertTrue(any(body["open_type_or_const"] for body in methods))
+            self.assertTrue(any(not body["open_type_or_const"] for body in methods))
+            for body in methods:
+                self.assertEqual(body["implementation"]["trait"]["path"], "::Argument")
+                self.assertIn("Model", json.dumps(body["implementation"]["self_type"]))
+
     def test_indirect_call_and_branch_or_divergence_are_explicit_obligations(self):
         evidence = self.observe(
             """
