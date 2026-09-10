@@ -2311,6 +2311,17 @@ impl HipEmitter {
             .map(|slot| (slot.id, slot.first_owner))
             .collect::<Vec<_>>();
         for (slot, owner) in slots {
+            if matches!(
+                self.plan.node_kind(owner),
+                NodeMemoryKind::UniqueInput { .. }
+            ) {
+                // Device inputs borrow caller storage; their host-mirror slot
+                // is absent on this entry path and never authorizes reuse.
+                self.line(&format!(
+                    "chelis_device_tensor_owner *chelis_slot{slot} = NULL;"
+                ));
+                continue;
+            }
             let ty = &dag
                 .get(owner)
                 .expect("verified slot first owner")
@@ -4772,7 +4783,7 @@ mod tests {
         let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 
         assert!(hip.contains("extern \\\"C\\\" __global__ void kernel_fused_3("));
-        assert!(hip.contains("d_t3 = chelis_gpu_alloc_view(1, (int[]){ 4 }, CHELIS_DTYPE_F32, d_t1->data, (d_t1->byte_capacity / chelis_dtype_size(d_t1->dtype)));"));
+        assert!(hip.contains("o_t3 = chelis_device_tensor_borrow(plan_t3, d_t1->data,"));
         // Aliased external (ext0 ↔ x) must NOT carry __restrict__.
         assert!(!hip.contains("const float *__restrict__ ext0"));
         // Output must NOT carry __restrict__ — it aliases ext0.

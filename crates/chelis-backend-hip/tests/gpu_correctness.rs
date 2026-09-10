@@ -251,6 +251,7 @@ fn cpu_runtime_library_path() -> PathBuf {
 }
 
 fn copy_runtime_artifacts(dst: &Path) {
+    support::stage_device_runtime(dst);
     let include_dir = cpu_runtime_include_dir();
     for header in &[
         "chelis_runtime.h",
@@ -571,6 +572,7 @@ fn compile_and_run_output_and_inputs(
     compile_cmd.args(&result.compile_flags);
     compile_cmd.arg(tmp.path().join("main.cpp"));
     compile_cmd.arg(tmp.path().join("model.cpp"));
+    compile_cmd.arg(tmp.path().join("chelis_device_owner.cpp"));
     compile_cmd.arg(format!("-L{}", tmp.path().display()));
     compile_cmd.arg("-lchelis_runtime");
     compile_cmd.arg("-lpthread");
@@ -635,6 +637,7 @@ fn compile_and_run_single_output(dag: &Dag, func_name: &str, inputs: &[TestInput
     compile_cmd.args(&result.compile_flags);
     compile_cmd.arg(tmp.path().join("main.cpp"));
     compile_cmd.arg(tmp.path().join("model.cpp"));
+    compile_cmd.arg(tmp.path().join("chelis_device_owner.cpp"));
     compile_cmd.arg(format!("-L{}", tmp.path().display()));
     compile_cmd.arg("-lchelis_runtime");
     compile_cmd.arg("-lpthread");
@@ -795,6 +798,7 @@ int main(void) {{
     compile_cmd.args(&result.compile_flags);
     compile_cmd.arg(tmp.path().join("main.cpp"));
     compile_cmd.arg(tmp.path().join("model.cpp"));
+    compile_cmd.arg(tmp.path().join("chelis_device_owner.cpp"));
     compile_cmd.arg(format!("-L{}", tmp.path().display()));
     compile_cmd.arg("-lchelis_runtime");
     compile_cmd.arg("-lpthread");
@@ -869,6 +873,7 @@ fn compile_and_run_output_cases(
     compile_cmd.args(&result.compile_flags);
     compile_cmd.arg(tmp.path().join("main.cpp"));
     compile_cmd.arg(tmp.path().join("model.cpp"));
+    compile_cmd.arg(tmp.path().join("chelis_device_owner.cpp"));
     compile_cmd.arg(format!("-L{}", tmp.path().display()));
     compile_cmd.arg("-lchelis_runtime");
     compile_cmd.arg("-lpthread");
@@ -1041,6 +1046,7 @@ int main(void) {{
     compile_cmd.args(&result.compile_flags);
     compile_cmd.arg(tmp.path().join("main.cpp"));
     compile_cmd.arg(tmp.path().join("model.cpp"));
+    compile_cmd.arg(tmp.path().join("chelis_device_owner.cpp"));
     compile_cmd.arg(format!("-L{}", tmp.path().display()));
     compile_cmd.arg("-lchelis_runtime");
     compile_cmd.arg("-lpthread");
@@ -1120,6 +1126,7 @@ int main(void) {{
     compile_cmd.args(&result.compile_flags);
     compile_cmd.arg(tmp.path().join("main.cpp"));
     compile_cmd.arg(tmp.path().join("model.cpp"));
+    compile_cmd.arg(tmp.path().join("chelis_device_owner.cpp"));
     compile_cmd.arg(format!("-L{}", tmp.path().display()));
     compile_cmd.arg("-lchelis_runtime");
     compile_cmd.arg("-lpthread");
@@ -3058,6 +3065,7 @@ fn compile_and_run_single_output_f64(
     compile_cmd.args(&result.compile_flags);
     compile_cmd.arg(tmp.path().join("main.cpp"));
     compile_cmd.arg(tmp.path().join("model.cpp"));
+    compile_cmd.arg(tmp.path().join("chelis_device_owner.cpp"));
     compile_cmd.arg(format!("-L{}", tmp.path().display()));
     compile_cmd.arg("-lchelis_runtime");
     compile_cmd.arg("-lpthread");
@@ -3588,6 +3596,7 @@ int main(void) {{
     compile_cmd.args(&result.compile_flags);
     compile_cmd.arg(tmp.path().join("main.cpp"));
     compile_cmd.arg(tmp.path().join("model.cpp"));
+    compile_cmd.arg(tmp.path().join("chelis_device_owner.cpp"));
     compile_cmd.arg(format!("-L{}", tmp.path().display()));
     compile_cmd.arg("-lchelis_runtime");
     compile_cmd.arg("-lpthread");

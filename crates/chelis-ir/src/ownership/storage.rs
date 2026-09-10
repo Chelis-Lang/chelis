@@ -1162,7 +1162,7 @@ mod tests {
         );
         let reshape = dag.add_node(
             RiscOp::Reshape {
-                shape: vec![crate::dag::RtDim::Lit(6)],
+                new_shape: vec![crate::dag::RtDim::Lit(6)],
             },
             vec![permute],
             vector(6, Prim::F32),

@@ -791,7 +791,7 @@ extern \"C\" __global__ void {kernel_name}(
 
 /// Generate kernel source for uniform_like random fill. [05-OP-8] binds
 /// each output width to its own affine: f32 uses fmaf and f64 uses fma.
-pub fn uniform_like(_rank: usize, kernel_name: &str, kind: ElemKind) -> String {
+pub fn uniform_like(rank: usize, kernel_name: &str, kind: ElemKind) -> String {
     let ty = kind.c_type();
     let sampler = match kind {
         ElemKind::F32 => "chelis_uniform_sample_f32",

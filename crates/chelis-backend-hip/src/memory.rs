@@ -171,7 +171,7 @@ impl MemoryPlan {
         }
         for slot in &self.slots {
             lines.push(format!(
-                "    chelis_device_tensor_release(chelis_slot{});",
+                "    if (chelis_slot{0}) chelis_device_tensor_release(chelis_slot{0});",
                 slot.id
             ));
         }
