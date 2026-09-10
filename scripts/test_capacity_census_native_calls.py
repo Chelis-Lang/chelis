@@ -240,6 +240,28 @@ pub fn live(v: Vec<i64>) -> ValidatedTensor { ValidatedTensor::admit(v) }
             {"admit", "relocated"},
         )
 
+    def test_union_constructor_records_only_the_compiler_selected_field(self):
+        evidence = self.observe(
+            """
+union NativeValue { integer: i64, floating: f64 }
+pub fn integer(value: i64) -> NativeValue { NativeValue { integer: value } }
+pub fn floating(value: f64) -> NativeValue { NativeValue { floating: value } }
+"""
+        )
+        rows = aggregates_named(evidence, "NativeValue")
+        self.assertEqual(len(rows), 2)
+        selected = {
+            row["caller"]["definition"]["item_name"]: [
+                field["definition"]["item_name"] for field in row["fields"]
+            ]
+            for row in rows
+        }
+        self.assertEqual(
+            selected,
+            {"integer": ["integer"], "floating": ["floating"]},
+        )
+        self.assertEqual(evidence.raw["errors"], [])
+
     def test_payload_alias_generic_nesting_and_lifetime_only_openness_are_recorded(self):
         integer = self.observe(
             """
@@ -337,6 +359,66 @@ pub fn live(ok: bool, value: &CompiledInputs, callback: fn(&CompiledInputs) -> u
         self.assertTrue(any(len(block["successors"]) > 1 for block in live["blocks"]))
         self.assertTrue(any(call["target"] is not None for call in evidence.raw["calls"]))
         self.assertTrue(all("unwind" in call for call in evidence.raw["calls"]))
+
+    def test_control_flow_and_assignment_kinds_are_exact_mir_variants(self):
+        evidence = self.observe(
+            """
+struct CompiledInputs(Vec<i64>);
+fn execute_checked(value: &CompiledInputs) -> usize { value.0.len() }
+pub fn live(ok: bool, raw: Vec<i64>) -> usize {
+    let admitted = CompiledInputs(raw);
+    if ok { execute_checked(&admitted) } else { 0 }
+}
+"""
+        )
+        terminators = {
+            block["terminator"]
+            for body in evidence.raw["bodies"]
+            for block in body["blocks"]
+        }
+        self.assertTrue({"SwitchInt", "Call", "Return"} <= terminators)
+        self.assertTrue(
+            terminators
+            <= {
+                "Goto",
+                "SwitchInt",
+                "UnwindResume",
+                "UnwindTerminate",
+                "Return",
+                "Unreachable",
+                "Drop",
+                "Call",
+                "TailCall",
+                "Assert",
+                "Yield",
+                "CoroutineDrop",
+                "FalseEdge",
+                "FalseUnwind",
+                "InlineAsm",
+            }
+        )
+        rvalues = {flow["rvalue"] for flow in evidence.raw["flows"]}
+        self.assertIn("call-result", rvalues)
+        rvalues.remove("call-result")
+        self.assertTrue({"Use", "Ref", "Aggregate"} <= rvalues)
+        self.assertTrue(
+            rvalues
+            <= {
+                "Use",
+                "Repeat",
+                "Ref",
+                "ThreadLocalRef",
+                "RawPtr",
+                "Cast",
+                "BinaryOp",
+                "UnaryOp",
+                "Discriminant",
+                "Aggregate",
+                "CopyForDeref",
+                "WrapUnsafeBinder",
+                "Reborrow",
+            }
+        )
 
     def test_assignment_places_join_constructor_call_and_return(self):
         evidence = self.observe(

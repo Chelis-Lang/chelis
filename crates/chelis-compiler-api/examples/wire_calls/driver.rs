@@ -550,12 +550,42 @@ fn native_operand<'tcx>(
     ])
 }
 
-fn variant_tag(debug: String) -> String {
-    debug
-        .split([' ', '{', '('])
-        .next()
-        .unwrap_or("unknown")
-        .to_string()
+fn native_terminator_kind(kind: &mir::TerminatorKind<'_>) -> &'static str {
+    match kind {
+        mir::TerminatorKind::Goto { .. } => "Goto",
+        mir::TerminatorKind::SwitchInt { .. } => "SwitchInt",
+        mir::TerminatorKind::UnwindResume => "UnwindResume",
+        mir::TerminatorKind::UnwindTerminate(_) => "UnwindTerminate",
+        mir::TerminatorKind::Return => "Return",
+        mir::TerminatorKind::Unreachable => "Unreachable",
+        mir::TerminatorKind::Drop { .. } => "Drop",
+        mir::TerminatorKind::Call { .. } => "Call",
+        mir::TerminatorKind::TailCall { .. } => "TailCall",
+        mir::TerminatorKind::Assert { .. } => "Assert",
+        mir::TerminatorKind::Yield { .. } => "Yield",
+        mir::TerminatorKind::CoroutineDrop => "CoroutineDrop",
+        mir::TerminatorKind::FalseEdge { .. } => "FalseEdge",
+        mir::TerminatorKind::FalseUnwind { .. } => "FalseUnwind",
+        mir::TerminatorKind::InlineAsm { .. } => "InlineAsm",
+    }
+}
+
+fn native_rvalue_kind(value: &mir::Rvalue<'_>) -> &'static str {
+    match value {
+        mir::Rvalue::Use(..) => "Use",
+        mir::Rvalue::Repeat(..) => "Repeat",
+        mir::Rvalue::Ref(..) => "Ref",
+        mir::Rvalue::ThreadLocalRef(..) => "ThreadLocalRef",
+        mir::Rvalue::RawPtr(..) => "RawPtr",
+        mir::Rvalue::Cast(..) => "Cast",
+        mir::Rvalue::BinaryOp(..) => "BinaryOp",
+        mir::Rvalue::UnaryOp(..) => "UnaryOp",
+        mir::Rvalue::Discriminant(..) => "Discriminant",
+        mir::Rvalue::Aggregate(..) => "Aggregate",
+        mir::Rvalue::CopyForDeref(..) => "CopyForDeref",
+        mir::Rvalue::WrapUnsafeBinder(..) => "WrapUnsafeBinder",
+        mir::Rvalue::Reborrow(..) => "Reborrow",
+    }
 }
 
 struct NativeRvaluePlaces<'tcx> {
@@ -647,10 +677,7 @@ impl<'tcx> NativeDiscovery<'tcx> {
                 ("block", block.as_usize().to_string()),
                 ("cleanup", data.is_cleanup.to_string()),
                 ("statements", data.statements.len().to_string()),
-                (
-                    "terminator",
-                    quoted(variant_tag(format!("{:?}", term.kind))),
-                ),
+                ("terminator", quoted(native_terminator_kind(&term.kind))),
                 (
                     "successors",
                     array(term.successors().map(|next| next.as_usize().to_string())),
@@ -710,15 +737,63 @@ impl<'tcx> NativeDiscovery<'tcx> {
                         "destination",
                         native_place(tcx, *destination, destination_type),
                     ),
-                    ("rvalue", quoted(variant_tag(format!("{value:?}")))),
+                    ("rvalue", quoted(native_rvalue_kind(value))),
                     ("sources", array(sources)),
                 ]));
                 if let mir::Rvalue::Aggregate(kind, operands) = value
-                    && let mir::AggregateKind::Adt(def, variant, args, ..) = &**kind
+                    && let mir::AggregateKind::Adt(def, variant, args, _, active_field) = &**kind
                 {
                     let adt = tcx.adt_def(*def);
+                    if variant.as_usize() >= adt.variants().len() {
+                        self.errors.insert(format!(
+                            "invalid native ADT aggregate variant in {} at bb{}[{}]",
+                            tcx.def_path_str(owner),
+                            block.as_usize(),
+                            statement_index,
+                        ));
+                        continue;
+                    }
+                    let variant_fields = &adt.variant(*variant).fields;
+                    let field_operands: Vec<_> = match active_field {
+                        Some(field) => {
+                            if !adt.is_union()
+                                || operands.len() != 1
+                                || field.as_usize() >= variant_fields.len()
+                            {
+                                self.errors.insert(format!(
+                                    "invalid native union aggregate shape in {} at bb{}[{}]",
+                                    tcx.def_path_str(owner),
+                                    block.as_usize(),
+                                    statement_index,
+                                ));
+                                continue;
+                            }
+                            let Some(operand) = operands.iter().next() else {
+                                self.errors.insert(format!(
+                                    "missing native union aggregate operand in {} at bb{}[{}]",
+                                    tcx.def_path_str(owner),
+                                    block.as_usize(),
+                                    statement_index,
+                                ));
+                                continue;
+                            };
+                            vec![(&variant_fields[*field], operand)]
+                        }
+                        None => {
+                            if adt.is_union() || variant_fields.len() != operands.len() {
+                                self.errors.insert(format!(
+                                    "invalid native ADT aggregate shape in {} at bb{}[{}]",
+                                    tcx.def_path_str(owner),
+                                    block.as_usize(),
+                                    statement_index,
+                                ));
+                                continue;
+                            }
+                            variant_fields.iter().zip(operands.iter()).collect()
+                        }
+                    };
                     let mut fields = Vec::new();
-                    for (field, operand) in adt.variant(*variant).fields.iter().zip(operands) {
+                    for (field, operand) in field_operands {
                         let value = self.normalize(
                             owner,
                             substitutions,
