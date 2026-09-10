@@ -1925,7 +1925,10 @@ pub(crate) fn try_lower_staged_host_region(
         let root = result.expect_node("staged host tensor region");
         ctx.dag.add_root(root);
         let mut evaluation = ctx.execution.take().map(|mut metadata| {
-            metadata.order = ctx.dag.nodes().iter().map(|node| node.id).collect();
+            metadata.spine.record_nodes(&ctx.dag);
+            metadata
+                .complete(&ctx.dag)
+                .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None));
             crate::evaluation::StagedEvaluationPlan::new(ctx.dag.clone(), metadata)
                 .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None))
         });
@@ -6919,6 +6922,10 @@ impl<'program> LowerCtx<'program> {
         self.next_host_value += 1;
         self.host_sources.push(HostSource {
             before: self.dag.nodes().len(),
+            occurrences_before: self
+                .execution
+                .as_ref()
+                .map(|execution| execution.spine.occurrence_count()),
             value: StageValue::Host(id),
             ty,
             expression,
@@ -7051,6 +7058,10 @@ impl<'program> LowerCtx<'program> {
             };
         self.host_sources.push(HostSource {
             before,
+            occurrences_before: self
+                .execution
+                .as_ref()
+                .map(|execution| execution.spine.occurrence_count()),
             value,
             ty,
             expression: expr.clone(),

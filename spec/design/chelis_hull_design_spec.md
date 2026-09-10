@@ -1137,6 +1137,9 @@ explicit plan-selection API also admits a draw-free region without changing
 the profile used by ordinary evaluator dispatch. Other exclusions remain errors.
 The owning copy/drop, context-composition and AD/splice boundaries map the existing
 sequence rather than recovering source controls by sorting a resulting graph.
+Host partitioning uses occurrence cuts recorded at the actual source action;
+even a control-only segment executes before that action. Segment frames retain
+the same invocation's saved keys and scope state across those cuts.
 Validation requires the complete selected graph, source census in order,
 balanced unique seed scopes and forward/replay dominance. Joint deletion of
 runtime controls or draw metadata cannot delete the source census.

@@ -80,6 +80,7 @@ fn dropout_entered_error_prefix_and_nested_handler_unwind_preserve_parent() {
         program: Some(&checked),
         def_kernels: UnordMap::new(),
         transcript: Vec::new(),
+        transcript_capture: None,
         resolving_top_levels: Vec::new(),
         random_seed: Some(42),
         random_counter: 5,

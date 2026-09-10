@@ -479,6 +479,7 @@ struct DrawKey {
 pub struct StagedEvaluationPlan {
     logical: EvaluationPlan,
     segments: Vec<EvaluationSegment>,
+    source_position: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -492,19 +493,46 @@ impl StagedEvaluationPlan {
         Ok(Self {
             logical: EvaluationPlan::new(dag, metadata)?,
             segments: Vec::new(),
+            source_position: 0,
         })
     }
 
-    pub(crate) fn append_segment(&mut self, dag: Dag, remap: &UnordMap<NodeId, NodeId>) {
+    pub(crate) fn source_position(&self) -> usize {
+        self.source_position
+    }
+
+    pub(crate) fn source_len(&self) -> usize {
+        self.logical.metadata.spine.source.len()
+    }
+
+    pub(crate) fn append_segment(
+        &mut self,
+        dag: Dag,
+        remap: &UnordMap<NodeId, NodeId>,
+        source_end: usize,
+    ) -> Result<(), String> {
+        let occurrences = self
+            .logical
+            .metadata
+            .spine
+            .source
+            .get(self.source_position..source_end)
+            .ok_or("staged execution has an invalid source occurrence cut")?
+            .iter()
+            .map(|event| event.id)
+            .collect();
         let mut metadata = self.logical.metadata.clone();
+        metadata.spine = metadata.spine.selected(remap, &occurrences)?;
         metadata.sites = metadata
             .sites
             .into_sorted()
             .into_iter()
             .filter_map(|(node, site)| remap.get(&node).map(|mapped| (*mapped, site)))
             .collect();
-        metadata.order = dag.nodes().iter().map(|node| node.id).collect();
+        metadata.complete(&dag)?;
         self.segments.push(EvaluationSegment { dag, metadata });
+        self.source_position = source_end;
+        Ok(())
     }
 
     /// Start one invocation. Its keys and scope counters survive every cut.
@@ -512,6 +540,9 @@ impl StagedEvaluationPlan {
         &'a self,
         context: &'a mut RandomExecutionContext,
     ) -> Result<StagedEvaluationFrame<'a>, String> {
+        if self.source_position != self.source_len() {
+            return Err("staged execution omits source occurrences".into());
+        }
         Ok(StagedEvaluationFrame {
             frame: self.logical.frame(context)?,
             segments: self.segments.iter(),
@@ -714,10 +745,50 @@ mod tests {
                             scope: ScopeId(1),
                         },
                     );
+                    let enter = Control::Enter {
+                        scope: ScopeId(1),
+                        seed: 42,
+                    };
+                    let leave = Control::Leave { scope: ScopeId(1) };
+                    logical.metadata.spine.source[0].kind = SourceKind::Forward {
+                        node: NodeId(1),
+                        draw: DrawId(0),
+                        scope: ScopeId(1),
+                    };
+                    logical.metadata.spine.source.insert(
+                        0,
+                        crate::execution_spine::Occurrence {
+                            id: OccurrenceId(1),
+                            kind: SourceKind::Control(enter),
+                        },
+                    );
+                    logical
+                        .metadata
+                        .spine
+                        .source
+                        .push(crate::execution_spine::Occurrence {
+                            id: OccurrenceId(2),
+                            kind: SourceKind::Control(leave),
+                        });
+                    logical.metadata.spine.steps.insert(
+                        1,
+                        Step::Control {
+                            occurrence: OccurrenceId(1),
+                            control: enter,
+                        },
+                    );
+                    logical.metadata.spine.steps.insert(
+                        3,
+                        Step::Control {
+                            occurrence: OccurrenceId(2),
+                            control: leave,
+                        },
+                    );
                 }
                 let ty = logical.dag.get(NodeId(0)).unwrap().output_type.clone();
                 let sources = [HostSource {
                     before: 2,
+                    occurrences_before: Some(if nested { 3 } else { 1 }),
                     value: StageValue::Host(HostValueId(0)),
                     ty: HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64)),
                     expression: chelis_deep::parser::parse_str("(lit {type: (t-prim {} int64)} 0)")
@@ -1018,6 +1089,68 @@ mod tests {
             .retain(|step| matches!(step, Step::Node(_)));
         plan.metadata.scopes.truncate(1);
         assert!(plan.validate().unwrap_err().contains("source occurrence"));
+    }
+
+    #[test]
+    fn staged_control_only_segment_requires_the_actual_source_cut() {
+        use crate::host::staged::{HostSource, HostStage, HostValueId, StageValue};
+        use crate::host_type_state::{HostPrecisionTerm, HostTypeTerm};
+        use std::collections::BTreeMap;
+        let logical = lower_source(
+            "(handle-effect {effect: random} (lit {type: (t-prim {} int64)} 42) (var {} x))",
+        );
+        for cut in [Some(2), None, Some(3)] {
+            let mut companion =
+                StagedEvaluationPlan::new(logical.dag.clone(), logical.metadata.clone()).unwrap();
+            let sources = [HostSource {
+                before: 0,
+                occurrences_before: cut,
+                value: StageValue::Host(HostValueId(0)),
+                ty: HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64)),
+                expression: chelis_deep::parser::parse_str("(lit {type: (t-prim {} int64)} 0)")
+                    .unwrap()
+                    .remove(0),
+                captures: Vec::new(),
+            }];
+            let partition = crate::host::staged::partition(
+                &logical.dag,
+                &sources,
+                &[],
+                &BTreeMap::from([(NodeId(0), "x".into())]),
+                &BTreeMap::new(),
+                Some(&mut companion),
+            );
+            if cut != Some(2) {
+                assert!(partition.unwrap_err().contains("source"));
+                continue;
+            }
+            let partition = partition.unwrap();
+            assert!(matches!(
+                partition.stages(),
+                [
+                    HostStage::Kernel { .. },
+                    HostStage::Source { .. },
+                    HostStage::Kernel { .. }
+                ]
+            ));
+            assert_eq!(companion.segments[0].metadata.spine.source.len(), 2);
+            assert!(companion.segments[1].metadata.spine.source.is_empty());
+            let mut context = context();
+            context.state.counter = 17;
+            let mut frame = companion.frame(&mut context).unwrap();
+            frame.eval_next_kernel(|_| None).unwrap();
+            assert_eq!(frame.frame.scopes, [ScopeId(0)]);
+            frame.with_context(|context| {
+                assert_eq!(context.state.counter, 17);
+                context.state.counter += 1;
+            });
+            frame
+                .eval_next_kernel(|name| {
+                    (name == "x").then(|| TensorValue::from_vec(vec![32], vec![1.0; 32]))
+                })
+                .unwrap();
+            frame.with_context(|context| assert_eq!(context.state.counter, 18));
+        }
     }
 
     #[test]
