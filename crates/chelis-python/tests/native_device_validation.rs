@@ -282,7 +282,8 @@ fn owner_rejection_case(test: &str, mode: i32) {
             .unwrap();
         assert!(
             child.status.success(),
-            "device owner rejection child failed: {}\n{}",
+            "device owner rejection child failed ({}): {}\n{}",
+            child.status,
             String::from_utf8_lossy(&child.stdout),
             String::from_utf8_lossy(&child.stderr)
         );
