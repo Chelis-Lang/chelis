@@ -24,7 +24,7 @@
 //! ## Fixture
 //!
 //! `cbackend_numel_empty_tensor_matches_eval`:
-//!   1. Eval `result = numel(to_tensor([]))` via `chelis eval --file` and
+//!   1. Eval `numel(to_tensor(empty_values))` with `empty_values: List[f32]` and
 //!      assert stdout is `0`.
 //!   2. Build the same program with `chelis build --target c`, compile with
 //!      gcc, run the binary; assert stdout is `result = 0`.
@@ -177,7 +177,8 @@ fn gcc_compile_and_run(build_dir: &Path, kernel_c: &Path, name: &str) -> String 
 
 #[test]
 fn cbackend_numel_empty_tensor_matches_eval() {
-    let source = "result = numel(to_tensor([]))\n";
+    let source =
+        "result = {\n  empty_values: List[f32] = []\n  numel(to_tensor(empty_values))\n}\n";
     let name = "numel_empty_agreement";
 
     let eval_out = chelis_eval(source, name);

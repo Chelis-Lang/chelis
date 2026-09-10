@@ -30,6 +30,20 @@ The canonical Deep form names each dimension and the precision:
 (t-tensor {} (d-name {} batch) (d-name {} seq) (t-prim {} f32))
 ```
 
+An empty List keeps its declared element dtype when converted to a tensor:
+
+```chelis-surf
+empty_values: List[f64] = []
+empty_tensor = to_tensor(empty_values)
+empty_rows: List[List[f64]] = [[], []]
+empty_matrix = to_tensor(empty_rows)
+```
+
+These tensors have shapes `[0]` and `[2, 0]`, both with dtype `f64`.
+`eval --json` exposes the dtype even when there are no elements to print.
+Eval rejects unconstrained `to_tensor([])`; declare the List element type as above.
+A missing inner extent is an error; empty payloads do not supply shape evidence.
+
 ## A small typed program
 
 ```chelis-surf

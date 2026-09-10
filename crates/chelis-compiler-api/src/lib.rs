@@ -17,6 +17,10 @@ pub mod schema;
 mod source_wire;
 pub mod stdlib_cache;
 pub mod target_capability;
+mod transcript_capture;
+pub use transcript_capture::{
+    TranscriptCapture, TranscriptCaptureGuard, install_transcript_capture,
+};
 
 #[cfg(test)]
 mod source_arch;
