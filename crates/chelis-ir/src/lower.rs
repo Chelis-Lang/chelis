@@ -4264,7 +4264,7 @@ fn returned_binding_name(mut expr: &Expr) -> Option<String> {
                 let name = bare_var_name(expr)?;
                 let mut binding_expr = None;
                 while let Some(bindings) = scopes.pop() {
-                    if let Some(index) = bindings.chunks_exact(2).rposition(|pair|
+                    if let Some(index) = bindings.as_chunks::<2>().0.iter().rposition(|pair|
                         matches!(&pair[0], Expr::Atom(Atom::Name(bound), _) if bound == &name)) {
                         scopes.push(&bindings[..index * 2]);
                         binding_expr = Some(&bindings[index * 2 + 1]);
@@ -6400,7 +6400,7 @@ impl LowerCtx {
             // their own claims and evaluation positions.
             let mut returned = claim.and_then(|_| returned_binding_name(&elems[3]));
             let mut claimed_binding = None;
-            for (index, binding) in bind_kids.chunks_exact(2).enumerate().rev() {
+            for (index, binding) in bind_kids.as_chunks::<2>().0.iter().enumerate().rev() {
                 if let Expr::Atom(Atom::Name(name), _) = &binding[0]
                     && returned.as_ref() == Some(name)
                 {
@@ -12194,7 +12194,7 @@ impl LowerCtx {
                             RiscOp::Load { name } => name.as_str().to_owned(),
                             _ => "expand".into(),
                         },
-                        axis: rt_axis.clone(),
+                        axis: rt_axis,
                         requirements: Vec::new(),
                     },
                     vec![input],
