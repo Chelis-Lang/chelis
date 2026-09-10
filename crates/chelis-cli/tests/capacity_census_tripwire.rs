@@ -45,6 +45,9 @@ mod c_lexical;
 #[path = "../../../tests/support/c_preprocessor.rs"]
 mod c_preprocessor;
 
+#[path = "../../../tests/support/c_include.rs"]
+mod c_include;
+
 #[path = "../../../tests/support/capacity_census_backend_headers.rs"]
 mod backend_headers;
 
@@ -2921,20 +2924,12 @@ fn published_headers_on_disk(include_dir: &Path) -> BTreeSet<String> {
     out
 }
 
-/// A `#include` of a local header by EITHER spelling. `cc -E -I <dir>`
-/// resolves `<x>` against the include path exactly as it resolves `"x"`, so
-/// a raw-source guard that follows only quoted includes leaves a local
-/// header reachable solely through `#include <x>` outside every raw-source
-/// scan (round-3 red team P2). Callers filter by resolution inside the
-/// include directory, which keeps system includes out.
+/// Recognize both literal include spellings. Resolution separately preserves
+/// the compiler's search order: a quoted include first tries the including
+/// header's directory, while an angle include uses the published include root.
+/// Both spellings participate in attribution and conditional-macro guards.
 fn local_include(line: &str) -> Option<&str> {
-    let rest = line.trim_start().strip_prefix("#include")?.trim_start();
-    let close = match rest.chars().next()? {
-        '"' => '"',
-        '<' => '>',
-        _ => return None,
-    };
-    rest[1..].split(close).next()
+    c_include::include_name(line)
 }
 
 fn header_source_closure(include_dir: &Path, roots: &[&str]) -> BTreeMap<String, String> {
@@ -2947,11 +2942,11 @@ fn header_source_closure(include_dir: &Path, roots: &[&str]) -> BTreeMap<String,
         let path = include_dir.join(&name);
         let source =
             fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        for line in source.lines() {
-            if let Some(included) = local_include(line)
-                && include_dir.join(included).is_file()
-            {
-                pending.push(included.to_string());
+        for (_, line) in logical_lines(&strip_c_comments(&source)) {
+            if let Some(included) = c_include::resolve(&name, &line, |candidate| {
+                include_dir.join(candidate).is_file()
+            }) {
+                pending.push(included);
             }
         }
         sources.insert(name, source);
@@ -3152,11 +3147,13 @@ fn closure_conditional_macro_taint(
     let edges: Vec<(String, String)> = sources
         .iter()
         .flat_map(|(name, source)| {
-            source
-                .lines()
-                .filter_map(local_include)
-                .filter(|included| sources.contains_key(*included))
-                .map(|included| (name.clone(), included.to_string()))
+            logical_lines(&strip_c_comments(source))
+                .into_iter()
+                .filter_map(|(_, line)| {
+                    c_include::resolve(name, &line, |candidate| sources.contains_key(candidate))
+                })
+                .map(|included| (name.clone(), included))
+                .collect::<Vec<_>>()
         })
         .collect();
     loop {
@@ -3214,8 +3211,11 @@ fn assert_context_invariant_headers(include_dir: &Path, roots: &[&str]) {
             }
 
             let varying = conditional_stack.iter().any(|frame| *frame);
-            if varying && let Some(included) = local_include(trimmed) {
-                conditional_includes.insert(included.to_string());
+            if varying
+                && let Some(included) =
+                    c_include::resolve(name, trimmed, |candidate| sources.contains_key(candidate))
+            {
+                conditional_includes.insert(included);
             }
             let extern_wrapper = trimmed == "extern \"C\" {" || trimmed == "}";
             if varying && brace_depth == 0 && !trimmed.starts_with('#') {
@@ -3258,6 +3258,20 @@ fn assert_context_invariant_headers(include_dir: &Path, roots: &[&str]) {
                 dependent
             })
             .collect();
+        // A conditional include can expose ABI through an otherwise empty
+        // intermediate header. Follow its complete local closure before
+        // deciding that the conditional branch declares no public surface.
+        let mut pending: Vec<_> = conditional_includes.iter().cloned().collect();
+        while let Some(included) = pending.pop() {
+            for (_, line) in logical_lines(&strip_c_comments(&sources[&included])) {
+                if let Some(child) = c_include::resolve(&included, &line, |candidate| {
+                    sources.contains_key(candidate)
+                }) && conditional_includes.insert(child.clone())
+                {
+                    pending.push(child);
+                }
+            }
+        }
         let conditional_include_rows: Vec<Row> = conditional_includes
             .iter()
             .filter_map(|included| sources.get(included).map(|source| (included, source)))

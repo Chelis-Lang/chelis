@@ -48,15 +48,28 @@ fn nested_generated_headers_have_the_same_raw_and_preprocessed_identity() {
         "backend-relative-closure",
         &[
             ("root.h", "#include \"detail/entry.h\"\n"),
-            ("detail/entry.h", "# include \"packet.h\"\n#include \"../common.h\"\n"),
-            ("detail/packet.h", "typedef struct { long long count; } chelis_packet;\n"),
+            (
+                "detail/entry.h",
+                "# include \"packet.h\"\n#include \"../common.h\"\n",
+            ),
+            (
+                "detail/packet.h",
+                "typedef struct { long long count; } chelis_packet;\n",
+            ),
             ("common.h", "long long chelis_count(void);\n"),
         ],
     );
-    let rows = scan(&dir, &["root.h"], &[c_preprocessor::Environment::native_c()]);
+    let rows = scan(
+        &dir,
+        &["root.h"],
+        &[c_preprocessor::Environment::native_c()],
+    );
     fs::remove_dir_all(&dir).unwrap();
     assert_eq!(rows.len(), 2, "{rows:?}");
-    assert!(rows.iter().any(|row| row.id.starts_with("detail/packet.h:")));
+    assert!(
+        rows.iter()
+            .any(|row| row.id.starts_with("detail/packet.h:"))
+    );
     assert!(rows.iter().any(|row| row.id.starts_with("common.h:")));
 }
 
@@ -78,13 +91,24 @@ fn nested_includes_cannot_hide_conditional_abi_or_macro_taint() {
     ] {
         let dir = planted_include_dir(
             &format!("backend-{label}"),
-            &[("root.h", root), ("detail/entry.h", entry), ("detail/packet.h", packet)],
+            &[
+                ("root.h", root),
+                ("detail/entry.h", entry),
+                ("detail/packet.h", packet),
+            ],
         );
         let error = expect_census_panic(|| {
-            scan(&dir, &["root.h"], &[c_preprocessor::Environment::native_c()]);
+            scan(
+                &dir,
+                &["root.h"],
+                &[c_preprocessor::Environment::native_c()],
+            );
         });
         fs::remove_dir_all(&dir).unwrap();
-        assert!(error.contains("CONTEXT-VARYING PUBLIC ABI"), "{label}: {error}");
+        assert!(
+            error.contains("CONTEXT-VARYING PUBLIC ABI"),
+            "{label}: {error}"
+        );
     }
 }
 
