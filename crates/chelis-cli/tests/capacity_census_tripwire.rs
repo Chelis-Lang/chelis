@@ -718,6 +718,76 @@ macro_rules! final_numeric_row {
 const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     final_numeric_row!(
         "header-export",
+        "chelis_runtime.h: int64_t chelis_metadata_plan_byte_offset ( const chelis_metadata_plan * plan , chelis_scalar linear_index ) ;",
+        &["numeric-op"],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_byte_offset` takes a canonical tagged int64 logical"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: chelis_device_tensor_owner * chelis_device_tensor_alloc ( chelis_metadata_plan * plan ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_gpu_tensor` observation. `chelis_device_tensor_alloc` consumes one"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: chelis_device_tensor_owner * chelis_device_tensor_borrow ( chelis_metadata_plan * plan , void * data , chelis_scalar byte_capacity ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_device_tensor_borrow` consumes one live metadata plan, validates its"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: chelis_device_tensor_owner * chelis_device_tensor_import ( const chelis_gpu_tensor * packet ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_device_tensor_import` validates every field of a generated raw packet"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: const chelis_gpu_tensor * chelis_device_tensor_view ( const chelis_device_tensor_owner * owner ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_device_tensor_view` returns a const generated packet observation tied"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: int32_t chelis_device_tensor_device ( const chelis_device_tensor_owner * owner ) ;",
+        &["numeric-op"],
+        "[05-OP-33]",
+        "`chelis_device_tensor_device` returns the owner's exact nonnegative int32"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: chelis_device_tensor_owner * chelis_device_tensor_clone ( const chelis_device_tensor_owner * source ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_device_tensor_clone` returns a distinct owner with a new contiguous"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: void chelis_device_tensor_release ( chelis_device_tensor_owner * owner ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_device_tensor_release` consumes one live opaque owner exactly once,"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: void chelis_device_tensor_copy_from_host ( chelis_device_tensor_owner * destination , const chelis_tensor * source ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_device_tensor_copy_from_host` and `chelis_device_tensor_copy_to_host`"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: void chelis_device_tensor_copy_to_host ( chelis_tensor_write * destination , const chelis_device_tensor_owner * source ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_device_tensor_copy_from_host` and `chelis_device_tensor_copy_to_host`"
+    ),
+    final_numeric_row!(
+        "header-export",
         "chelis_runtime.h: chelis_metadata_plan * chelis_metadata_plan_new ( chelis_scalar rank , const chelis_scalar * shape , chelis_scalar exemplar ) ;",
         &[],
         "[05-OP-33]",
