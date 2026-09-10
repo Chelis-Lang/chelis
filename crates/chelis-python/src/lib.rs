@@ -1282,7 +1282,7 @@ fn artifact_manifest_inner(
         .canonicalize()
         .unwrap_or_else(|_| source_path.to_path_buf());
     ArtifactManifest {
-        abi_version: ArtifactAbiVersion::V1,
+        abi_version: ArtifactAbiVersion::V2,
         target: artifact.compile_result.target,
         host_entry_name: artifact.host_entry_name.clone(),
         device_entry_name: artifact.device_entry_name.clone(),
@@ -2370,7 +2370,7 @@ loss = (mean(x, 0) : tensor[f32])
     #[test]
     fn compiled_manifest_version_admission_precedes_metadata_and_library_use() {
         let valid = serde_json::json!({
-            "abi_version": 1, "target": "c", "host_entry_name": "chelis_main",
+            "abi_version": 2, "target": "c", "host_entry_name": "chelis_main",
             "inputs": [], "outputs": [], "source_path": "", "source_hash": ""
         });
         let manifest: ArtifactManifest = serde_json::from_value(valid.clone()).unwrap();
@@ -2390,13 +2390,14 @@ loss = (mean(x, 0) : tensor[f32])
             for header in [
                 "",
                 ",\"abi_version\":0",
-                ",\"abi_version\":2",
+                ",\"abi_version\":1",
+                ",\"abi_version\":3",
                 ",\"abi_version\":4294967295",
                 ",\"abi_version\":-1",
-                ",\"abi_version\":1.0",
+                ",\"abi_version\":2.0",
                 ",\"abi_version\":true",
-                ",\"abi_version\":\"1\"",
-                ",\"abi_version\":1,\"abi_version\":1",
+                ",\"abi_version\":\"2\"",
+                ",\"abi_version\":2,\"abi_version\":2",
             ] {
                 // Bad metadata appears first; unsupported/missing versions must
                 // fail at the envelope before visiting it or loading a library.

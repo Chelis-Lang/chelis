@@ -282,7 +282,7 @@ def structural_evidence():
             ),
             ("json",),
         ),
-        "artifact-abi-version": pairs("ArtifactAbiVersion", "1", ("0", "2")),
+        "artifact-abi-version": pairs("ArtifactAbiVersion", "2", ("0", "1", "3")),
     }
     for carrier, tag, role in (
         ("WireInferredType", "var", "inferred-type-variable"),
