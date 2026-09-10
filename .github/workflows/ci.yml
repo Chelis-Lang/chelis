@@ -223,7 +223,7 @@ jobs:
   script-unit:
     name: Script and Python Unit Tests (Linux)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
     needs: [changes]
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     permissions:
@@ -231,7 +231,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # Script guards also build and execute the C6 wire consumer tests.
+      # Small compiler fixtures remain here; full C6 execution is nightly-owned.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -241,8 +241,7 @@ jobs:
       - name: Create uv-managed venv + wire libpython rpath
         run: python3 scripts/ci_setup_uv_python.py
 
-      # cargo-nextest is intentionally absent, so the expensive structural
-      # profile oracle self-skips here and runs on the full nightly worker.
+      # Python execution ownership is explicit, independent of installed tools.
       - name: Install shared-skill validator dependency
         run: uv pip install --python .venv/bin/python PyYAML==6.0.3
 
@@ -250,10 +249,19 @@ jobs:
         run: uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml
 
       - name: Script unit tests (scripts/test_*.py)
-        run: .venv/bin/python -m unittest discover -s scripts -p 'test_*.py'
+        run: .venv/bin/python scripts/ci_script_tests.py pr
 
       - name: Python binding ingress unit tests
         run: .venv/bin/python -m unittest discover -s bindings/python/tests -p 'test_*.py'
+
+      - name: Upload script selection and timings
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: script-tests-pr
+          path: target/ci-script-tests/pr
+          if-no-files-found: error
+          retention-days: 14
 
   # Preserve the required branch-protection context while the independent
   # Rust and Python policy workers execute in parallel.

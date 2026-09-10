@@ -47,6 +47,9 @@
 //! Originally gated `#[ignore]` in the failing-test commit; flipped to
 //! running in the fix commit on this branch.
 
+#[path = "../../../tests/support/runtime_archive.rs"]
+mod runtime_archive;
+
 use assert_cmd::Command;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -166,8 +169,11 @@ fn patch_emitted_kernel(kernel_c: &Path) {
 /// Compile `kernel.c + main.c + libchelis_runtime.a` and run the
 /// binary, returning stdout on success.
 fn gcc_compile_and_run(build_dir: &Path, kernel_c: &Path, main_c: &Path) -> String {
-    let canonical = target_debug_dir().join("libchelis_runtime.a");
-    ensure_runtime_static_lib(&canonical).expect("materialize libchelis_runtime.a");
+    let canonical = runtime_archive::explicit().unwrap_or_else(|| {
+        let archive = target_debug_dir().join("libchelis_runtime.a");
+        ensure_runtime_static_lib(&archive).expect("materialize libchelis_runtime.a");
+        archive
+    });
 
     let bin = build_dir.join("test_bin");
     let compile = StdCommand::new("gcc")
@@ -296,8 +302,11 @@ int main(int argc, char **argv) {{
         ),
     )
     .unwrap();
-    let runtime = target_debug_dir().join("libchelis_runtime.a");
-    ensure_runtime_static_lib(&runtime).unwrap();
+    let runtime = runtime_archive::explicit().unwrap_or_else(|| {
+        let archive = target_debug_dir().join("libchelis_runtime.a");
+        ensure_runtime_static_lib(&archive).unwrap();
+        archive
+    });
     let binary = build.path().join("checked_reshape_probe");
     let compiled = StdCommand::new("gcc")
         .args([

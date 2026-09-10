@@ -1035,9 +1035,9 @@ class ListOutputTests(unittest.TestCase):
         )
         self.assertIn(command, [gate.render(entry) for entry in gate.full_command_list()])
 
-    def test_runtime_representation_phase0_oracle_is_continuous_and_local(self):
+    def test_runtime_representation_phase1_oracle_is_continuous_and_local(self):
         command = (
-            "<managed-python> scripts/runtime_representation_oracle.py --phase 0"
+            "<managed-python> scripts/runtime_representation_oracle.py --phase 1"
         )
         # The oracle is a stage of its own so hosted CI can give it a runner of
         # its own; it must not also ride on the integration support slice.
@@ -2073,7 +2073,7 @@ class CiParityTests(unittest.TestCase):
         )
         block = _ci_job_block("script-unit")
         dependencies = "uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml"
-        scripts = ".venv/bin/python -m unittest discover -s scripts -p 'test_*.py'"
+        scripts = ".venv/bin/python scripts/ci_script_tests.py pr"
         bindings = ".venv/bin/python -m unittest discover -s bindings/python/tests -p 'test_*.py'"
         for command in (dependencies, scripts, bindings):
             _assert_executable_run_once(block, command)
@@ -2198,7 +2198,7 @@ class CiParityTests(unittest.TestCase):
         self.assertNotIn("compiled-value-ownership-phase0-oracle", aggregate_block)
         self.assertIn("compiled-value-ownership-phase0-oracle", _workflow_job_block(CI_YML.with_name("heavy-e2e.yml"), "report"))
 
-    def test_runtime_representation_phase0_oracle_is_a_dedicated_gate_job(self):
+    def test_runtime_representation_phase1_oracle_is_a_dedicated_gate_job(self):
         workspace_block = _ci_job_block("ci-fast")
         ownership_block = _ci_job_block("compiled-value-ownership-phase0-oracle")
         oracle_block = _ci_job_block("runtime-representation-phase0-oracle")
@@ -2206,11 +2206,19 @@ class CiParityTests(unittest.TestCase):
         command = "python3 scripts/gate.py runtime-representation"
 
         self.assertIn(
-            "name: Runtime Representation Phase 0 Oracle",
+            "name: Runtime Representation Phase 1 Oracle",
             oracle_block,
         )
         self.assertNotIn("    needs:", oracle_block)
         self.assertIn("contents: read", oracle_block)
+        self.assertIn(
+            "name: runtime-representation-phase1-receipts",
+            oracle_block,
+        )
+        self.assertIn(
+            "path: target/runtime-representation-phase1/",
+            oracle_block,
+        )
         self.assertIn("dtolnay/rust-toolchain@stable", oracle_block)
         self.assertIn("python3 scripts/ci_setup_uv_python.py", oracle_block)
         self.assertIn("taiki-e/install-action@nextest", oracle_block)
@@ -2238,7 +2246,9 @@ class CiParityTests(unittest.TestCase):
             "cargo nextest run --workspace --profile ci-full "
             "--ignore-default-filter "
             "--features chelis-types/generalize-sweep-oracle --no-fail-fast "
-            "-E 'not (binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/) "
+            "-E 'not (binary_id(/^chelis-compiler-api::capacity_census_wire$/) | "
+            "binary_id(/^chelis-python::capacity_census_bindings$/) | "
+            "binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/) "
             "| (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) "
             "& test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/)))' "
             "--partition hash:${{ matrix.shard }}/4"
@@ -2341,7 +2351,7 @@ class CiParityTests(unittest.TestCase):
         for job, (artifact, path) in expectations.items():
             with self.subTest(job=job):
                 block = _ci_job_block(job)
-                self.assertEqual(block.count("uses: actions/upload-artifact@v7"), 2 if job == "ci-fast" else 1)
+                self.assertEqual(block.count("uses: actions/upload-artifact@v7"), 2 if job in {"ci-fast", "dtype-phase3-oracle"} else 1)
                 self.assertIn(f"name: {artifact}", block)
                 self.assertIn(f"path: {path}", block)
                 self.assertIn("if-no-files-found: error", block)
@@ -2539,7 +2549,7 @@ class CiParityTests(unittest.TestCase):
                 block = _ci_job_block(job)
                 _assert_read_only_workspace_cache(block)
 
-    def test_capacity_rustdoc_cache_is_restored_by_both_census_consumers(self):
+    def test_capacity_rustdoc_cache_is_restored_by_its_linux_owner(self):
         path = "path: target/agents/729-capacity-rustdoc"
         key = (
             "key: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-"
@@ -2551,16 +2561,16 @@ class CiParityTests(unittest.TestCase):
         generalization = _ci_job_block("generalize-sweep-oracle-shard")
         for name, block in (
             ("dtype-phase3-oracle", dtype),
-            ("generalize-sweep-oracle-shard", generalization),
         ):
             with self.subTest(job=name):
-                self.assertEqual(block.count("uses: actions/cache/restore@v4"), 1)
+                self.assertEqual(block.count("uses: actions/cache/restore@v4"), 2)
                 self.assertIn(path, block)
                 self.assertIn(key, block)
-        self.assertEqual(dtype.count("uses: actions/cache/save@v4"), 1)
+        self.assertEqual(dtype.count("uses: actions/cache/save@v4"), 2)
         self.assertNotIn("github.event_name == 'push'", dtype)
         self.assertIn("github.ref == 'refs/heads/main'", dtype)
         self.assertNotIn("uses: actions/cache/save@v4", generalization)
+        self.assertNotIn("uses: actions/cache/restore@v4", generalization)
 
     def test_nextest_jobs_share_one_reef_fixture_root_per_runner(self):
         setting = (

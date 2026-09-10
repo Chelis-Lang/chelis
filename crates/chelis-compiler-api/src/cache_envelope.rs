@@ -74,12 +74,12 @@ pub(crate) trait CachePayload:
 }
 
 impl CachePayload for crate::LibraryContext {
-    const FORMAT_VERSION: u32 = 12;
+    const FORMAT_VERSION: u32 = 13;
     const KEY_DOMAIN: &'static [u8] = b"chelis_library_typecheck_v";
 }
 
 impl CachePayload for crate::StdLibContext {
-    const FORMAT_VERSION: u32 = 16;
+    const FORMAT_VERSION: u32 = 17;
     const KEY_DOMAIN: &'static [u8] = b"chelis_std_typecheck_v";
 }
 
@@ -198,6 +198,8 @@ pub(crate) fn lowered_library_payload_matches(
                 == sorted_map_bytes(expected.symbol_table())?
             && sorted_btree_map_bytes(cached.program_defs())?
                 == sorted_btree_map_bytes(expected.program_defs())?
+            && sorted_btree_map_bytes(cached.program_signatures())?
+                == sorted_btree_map_bytes(expected.program_signatures())?
             && sorted_btree_map_bytes(cached.program_types())?
                 == sorted_btree_map_bytes(expected.program_types())?
             && sorted_btree_map_bytes(cached.lowered_names())?

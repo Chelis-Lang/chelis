@@ -1096,6 +1096,7 @@ impl HipEmitter {
                 "kernel_floor_div{}",
                 Self::dtype_kernel_suffix(operand_prec())
             )),
+            RiscOp::Mod => return Err(Self::remainder_unsupported(node)),
             RiscOp::TruncDiv => Some(format!(
                 "kernel_trunc_div{}",
                 Self::dtype_kernel_suffix(operand_prec())
@@ -1256,7 +1257,10 @@ impl HipEmitter {
             // `reject_unsupported_hip_ops` rejects it cleanly before
             // codegen, so no kernel name is registered. The launch-emit arm
             // below is a defensive `todo!` if one ever reaches codegen.
-            RiscOp::Shape { .. } | RiscOp::ExtentWitness { .. } => None,
+            RiscOp::Shape { .. }
+            | RiscOp::ExtentWitness { .. }
+            | RiscOp::CheckedReshapeExtent { .. }
+            | RiscOp::CheckedUnitAxis { .. } => None,
             RiscOp::Const { .. } => Some(format!("kernel_fill_{}", kind_for_node(node)?.suffix())),
             RiscOp::ConstTensor { .. } => {
                 Some(format!("kernel_fill_{}", kind_for_node(node)?.suffix()))
@@ -1425,6 +1429,7 @@ impl HipEmitter {
             // chelis#178: truncating (round-toward-zero) division. Integer
             // operands only — native `/` is exactly the C truncating
             // quotient, so it reuses the typed binary template.
+            RiscOp::Mod => return Err(Self::remainder_unsupported(node)),
             RiscOp::TruncDiv => {
                 let prec = operand_prec();
                 debug_assert!(
@@ -1741,6 +1746,7 @@ impl HipEmitter {
             ),
             // chelis#178: floor / truncating integer division launch like
             // any other binary elementwise kernel.
+            RiscOp::Mod => return Err(Self::remainder_unsupported(node)),
             RiscOp::FloorDiv | RiscOp::TruncDiv => self.emit_binary_launch(
                 id,
                 &resolved_kernel_name()?,
@@ -1963,7 +1969,10 @@ impl HipEmitter {
             // `reject_unsupported_hip_ops` (compiler-api + CLI mirror); this
             // `todo!` is a defensive backstop matching the ReduceWindow
             // stubs above, reached only if some path bypasses that guard.
-            RiscOp::Shape { .. } | RiscOp::ExtentWitness { .. } => {
+            RiscOp::Shape { .. }
+            | RiscOp::ExtentWitness { .. }
+            | RiscOp::CheckedReshapeExtent { .. }
+            | RiscOp::CheckedUnitAxis { .. } => {
                 todo!(
                     "runtime `shape` value read must have been rejected before HIP codegen by [05-SHAPE-1]. Use `--target c`."
                 )
@@ -3775,6 +3784,18 @@ impl HipEmitter {
     /// These arms exist so a future HIP implementation has to remove
     /// this rejection deliberately rather than inherit `cast`'s
     /// unguarded conversion by accident.
+    fn remainder_unsupported(node: &DagNode) -> Unsupported {
+        Unsupported::new(
+            UnsupportedKind::Op("mod".to_string()),
+            format!("the HIP kernel set (node {})", node.id.0),
+            Stage::Codegen("hip"),
+            chelis_types::unimplemented_rejection!(
+                1277,
+                "checked integer remainder has no device kernel; the C host path preserves [05-OP-64] DivZero traps"
+            ),
+        )
+    }
+
     fn cast_trunc_unsupported(node: &DagNode) -> Unsupported {
         Unsupported::new(
             UnsupportedKind::Op("cast_trunc".to_string()),
@@ -3801,6 +3822,7 @@ impl HipEmitter {
             | RiscOp::Div
             | RiscOp::FloorDiv
             | RiscOp::TruncDiv
+            | RiscOp::Mod
             | RiscOp::MaxElem
             | RiscOp::MinElem
             | RiscOp::ExtremaAdjoint { .. }
@@ -3851,7 +3873,7 @@ impl HipEmitter {
             // `Shape` materializes a fresh rank-0 scalar (trivially
             // contiguous). It is HIP-rejected before codegen under
             // [05-SHAPE-1], so this arm is only for classification completeness.
-            | RiscOp::Shape { .. } | RiscOp::ExtentWitness { .. } => true,
+            | RiscOp::Shape { .. } | RiscOp::ExtentWitness { .. } | RiscOp::CheckedReshapeExtent { .. } | RiscOp::CheckedUnitAxis { .. } => true,
             RiscOp::Count { .. } => true,
             RiscOp::Reshape { .. } | RiscOp::Store { .. } => {
                 Self::node_is_statically_contiguous(dag, dag.get(id).unwrap().inputs[0])

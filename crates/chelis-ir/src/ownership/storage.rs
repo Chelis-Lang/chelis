@@ -651,12 +651,15 @@ fn classify_nodes(
                 | RiscOp::ConstTensor { .. }
                 | RiscOp::Shape { .. }
                 | RiscOp::ExtentWitness { .. }
+                | RiscOp::CheckedReshapeExtent { .. }
+                | RiscOp::CheckedUnitAxis { .. }
                 | RiscOp::Add
                 | RiscOp::Sub
                 | RiscOp::Mul
                 | RiscOp::Div
                 | RiscOp::FloorDiv
                 | RiscOp::TruncDiv
+                | RiscOp::Mod
                 | RiscOp::CmpLt
                 | RiscOp::MaxElem
                 | RiscOp::MinElem

@@ -60,6 +60,12 @@ use std::process::Command;
 /// agree. Sorted by path, which is also the order the failure message prints.
 const ALLOWED: &[(&str, usize, usize, &str)] = &[
     (
+        "crates/chelis-backend-c/src/emit.rs",
+        1,
+        0,
+        "the local unit-witness diagnostic names expand; insert has no singleton-input obligation",
+    ),
+    (
         "crates/chelis-backend-metal/src/kernels.rs",
         0,
         1,
@@ -151,9 +157,9 @@ const ALLOWED: &[(&str, usize, usize, &str)] = &[
     ),
     (
         "crates/chelis-ir/src/eval.rs",
-        3,
+        4,
         0,
-        "DAG evaluator shape messages for `RiscOp::Expand`, the one IR op both spellings lower to, so no `insert` literal exists at this level: `expand at node {}: axis {} out of bounds for rank {} tensor` on the insert-form and same-rank arms, and `expand at node {}: output rank {} must equal input rank {} or {}`. The unit-extent claim's [04-NUM-9] line was a fourth until chelis#1277 B2r unified the evaluator's local guard consumers; `local_guard_verdict` interpolates the site's own operation, so that word now reaches the message from `UnitExtentClaim::trap_op` in `axis_sources.rs` rather than from a literal here",
+        "DAG evaluator shape messages for `RiscOp::Expand`, the one IR op both spellings lower to, so no `insert` literal exists at this level: `expand at node {}: axis {} out of bounds for rank {} tensor` on the insert-form and same-rank arms, and `expand at node {}: output rank {} must equal input rank {} or {}`. The unit-extent claim's [04-NUM-9] line was a fourth until chelis#1277 B2r unified the evaluator's local guard consumers; `local_guard_verdict` interpolates the site's own operation, so that word now reaches the message from `UnitExtentClaim::trap_op` in `axis_sources.rs` rather than from a literal here. The new fourth literal is the explicit LocalExpand witness site, which retains that same unit-only diagnostic after inlining",
     ),
     (
         "crates/chelis-ir/src/grad.rs",
@@ -170,9 +176,9 @@ const ALLOWED: &[(&str, usize, usize, &str)] = &[
     ),
     (
         "crates/chelis-ir/src/lower.rs",
-        22,
-        10,
-        "the lowering dispatch carries both, and the shared movement arm now names its callee through `{callee}` rather than hard-coding `expand`: the named-collision raise, the operand-desync raise, the non-literal-axis construct, and both size diagnostics moved with the arm split, which is what took this row from 28/3 to 22/10, the last move being the chelis#318 extent-recovery fixture, whose program raises the rank and so spells `insert`. The surplus 23 are embedded Deep fixtures spelling `(var {} expand)` and prose in comments, neither of which a program can reach. Re-checked at S2b as the previous reason asked; B2b's widening of the sourceless-size rejection is still outstanding",
+        18,
+        19,
+        "the dispatch preserves both spellings; nine embedded rank-raising fixtures now use insert, and the five new expand literals name only checked singleton-broadcast construction and diagnostics. The new witnesses have no insert counterpart because insert does not require a singleton operand",
     ),
     (
         "crates/chelis-ir/src/tier2.rs",

@@ -778,6 +778,7 @@ impl CEmitter {
                 | RiscOp::Mul
                 | RiscOp::Div
                 | RiscOp::TruncDiv
+                | RiscOp::Mod
                 | RiscOp::FloorDiv
                 | RiscOp::MaxElem
                 | RiscOp::MinElem
@@ -793,25 +794,56 @@ impl CEmitter {
             RiscOp::ConstTensor { data } => self.emit_const_tensor(id, data, &node.output_type)?,
             RiscOp::Shape { axis } => self.emit_shape(id, *axis, &node.inputs, &node.output_type),
             RiscOp::ExtentWitness {
+                site,
                 parameter,
                 axis: RtAxis::Lit(axis),
                 requirements,
             } => {
+                let operation = match site {
+                    chelis_ir::dag::ExtentWitnessSite::Caller => "load",
+                    chelis_ir::dag::ExtentWitnessSite::LocalExpand => "expand",
+                };
                 let input = node.inputs[0].0;
-                let parameter =
-                    chelis_ir::span_sanitize::sanitize_for_format_string(parameter).to_string();
+                let parameter = match site {
+                    chelis_ir::dag::ExtentWitnessSite::Caller => {
+                        chelis_ir::span_sanitize::sanitize_for_format_string(parameter).to_string()
+                    }
+                    chelis_ir::dag::ExtentWitnessSite::LocalExpand => format!("node {input}"),
+                };
                 for required in requirements {
                     let required = required.as_i64_exact().expect("verified int64 requirement");
                     self.line(&format!(
                         "if (chelis_tensor_shape(t{input}, {axis}) != {required}) {{"
                     ));
                     self.indent += 1;
-                    self.line(&format!("fprintf(stderr, \"extent `{required}`: claimed = {required}, {parameter} axis {axis} = %lld\\n\", (long long)chelis_tensor_shape(t{input}, {axis}));"));
-                    self.line("chelis_numeric_trap(\"numeric trap: domain in load at int64\");");
+                    self.line(&format!("fprintf(stderr, \"extent `{required}`: claimed = %lld, {parameter} axis {axis} = %lld\\n\", (long long){required}, (long long)chelis_tensor_shape(t{input}, {axis}));"));
+                    self.line(&format!(
+                        "chelis_numeric_trap(\"numeric trap: domain in {operation} at int64\");"
+                    ));
                     self.indent -= 1;
                     self.line("}");
                 }
                 self.emit_shape(id, *axis as usize, &node.inputs, &node.output_type);
+            }
+            RiscOp::CheckedReshapeExtent {
+                claims,
+                axis: RtAxis::Lit(axis),
+            } => {
+                let actual = node.inputs[0].0;
+                for (claim, input) in claims.iter().zip(&node.inputs[1..]) {
+                    let required = input.0;
+                    let claim = chelis_ir::span_sanitize::sanitize_for_format_string(claim);
+                    self.line(&format!("if (((const int64_t*)t{actual}_data)[0] != ((const int64_t*)t{required}_data)[0]) {{"));
+                    self.indent += 1;
+                    self.line(&format!("fprintf(stderr, \"extent `{claim}`: claimed = %lld, reshape axis {axis} = %lld\\n\", (long long)((const int64_t*)t{required}_data)[0], (long long)((const int64_t*)t{actual}_data)[0]);"));
+                    self.line("chelis_numeric_trap(\"numeric trap: domain in reshape at int64\");");
+                    self.indent -= 1;
+                    self.line("}");
+                }
+                self.emit_realize(id, &node.inputs, &node.output_type);
+            }
+            RiscOp::CheckedUnitAxis { .. } => {
+                self.emit_realize(id, &node.inputs, &node.output_type)
             }
             RiscOp::Load { .. } => unreachable!("handled in emit_dag"),
             RiscOp::Add => self.emit_binary(id, "+", &node.inputs, &node.output_type),
@@ -823,6 +855,7 @@ impl CEmitter {
             // portable zero-divisor guard for integer dtypes. `trunc_div`
             // is integer-only, so this is exactly C truncating division.
             RiscOp::TruncDiv => self.emit_binary(id, "/", &node.inputs, &node.output_type),
+            RiscOp::Mod => self.emit_binary(id, "%", &node.inputs, &node.output_type),
             // chelis#178: `floor_div` rounds the quotient toward -inf.
             // Integer operands use native `/` plus a remainder-sign
             // correction; float operands use `floorf(a / b)`.
@@ -2226,7 +2259,7 @@ impl CEmitter {
         // `chelis_int_div_guard`, which aborts with the same clean diagnostic
         // the evaluator emits. Float `/` is IEEE-754 (`1.0/0.0 == inf`) and
         // is never guarded; `+`/`*`/`fmaxf` never divide.
-        let checked_int = ty.precision.is_integer() && matches!(op, "+" | "-" | "*" | "/");
+        let checked_int = ty.precision.is_integer() && matches!(op, "+" | "-" | "*" | "/" | "%");
         let elem_expr = |lhs: String, rhs: String| -> String {
             if is_relu_adjoint {
                 // [05-OP-43]: select g only for +0 < x. Selection preserves
@@ -2243,6 +2276,7 @@ impl CEmitter {
                 "-" => "sub",
                 "*" => "mul",
                 "/" => "trunc_div",
+                "%" => "mod",
                 _ => unreachable!(),
             };
             let overflow = NumericTrap::Overflow {
@@ -2260,15 +2294,22 @@ impl CEmitter {
                 "*" => format!(
                     "({et})chelis_int_checked_mul((int64_t)({lhs}), (int64_t)({rhs}), {bits}, {overflow:?})"
                 ),
-                "/" => {
+                "/" | "%" => {
                     let zero = NumericTrap::DivZero {
                         op: op_name,
                         prim: ty.precision,
                     }
                     .to_string();
-                    format!(
-                        "({lhs} / ({et})chelis_int_checked_divisor((int64_t)({lhs}), (int64_t)({rhs}), {bits}, {zero:?}, {overflow:?}))"
-                    )
+                    let expression = format!(
+                        "({lhs} {op} ({et})chelis_int_checked_divisor((int64_t)({lhs}), (int64_t)({rhs}), {bits}, {zero:?}, {overflow:?}))"
+                    );
+                    if op == "%" {
+                        // The exact remainder is zero even when MIN / -1 has
+                        // no representable quotient. Do not evaluate that C %.
+                        format!("(({rhs}) == -1 ? ({et})0 : {expression})")
+                    } else {
+                        expression
+                    }
                 }
                 _ => unreachable!(),
             }

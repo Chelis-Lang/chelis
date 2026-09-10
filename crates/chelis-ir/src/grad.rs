@@ -292,6 +292,12 @@ fn grad_dag_checked_impl(
                     reason: AdRejectionReason::PiecewiseConstant,
                 });
             }
+            RiscOp::Mod => {
+                return Err(AdError::NotSupported {
+                    op: "mod",
+                    reason: AdRejectionReason::PiecewiseConstant,
+                });
+            }
             RiscOp::TruncDiv => {
                 return Err(AdError::NotSupported {
                     op: "trunc_div",
@@ -356,6 +362,7 @@ pub fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::Div => "div",
         RiscOp::FloorDiv => "floor_div",
         RiscOp::TruncDiv => "trunc_div",
+        RiscOp::Mod => "mod",
         RiscOp::CmpLt => "cmplt",
         RiscOp::MaxElem => "max_elem",
         RiscOp::MinElem => "min_elem",
@@ -395,6 +402,8 @@ pub fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::Stride { .. } => "stride",
         RiscOp::Shape { .. } => "shape",
         RiscOp::ExtentWitness { .. } => "extent_witness",
+        RiscOp::CheckedReshapeExtent { .. } => "reshape",
+        RiscOp::CheckedUnitAxis { .. } => "load",
         RiscOp::Const { .. } => "const",
         RiscOp::ConstTensor { .. } => "const_tensor",
         RiscOp::Load { .. } => "load",
@@ -1074,7 +1083,7 @@ fn compute_adjoints(
             let zero = dag.add_node(RiscOp::synth_const(ty.precision, 0.0), vec![], ty, None);
             Some(vec![(x, zero)])
         }
-        RiscOp::FloorDiv | RiscOp::TruncDiv => {
+        RiscOp::FloorDiv | RiscOp::TruncDiv | RiscOp::Mod => {
             // chelis#178: floor / truncating integer division are
             // non-differentiable (piecewise constant) — grad_dag_checked
             // will have already rejected these; this arm is a safety net
@@ -1095,7 +1104,11 @@ fn compute_adjoints(
         }
         RiscOp::Dropout { rate, seed } => {
             let x = node.inputs[0];
-            let ty = forward.get(x).unwrap().output_type.clone();
+            // Replay owns the forward mask's exact layout. A checked reshape
+            // can retain a computed input axis while dropout's result carries
+            // its proven literal claim; substituting that input type here
+            // would change the replay contract despite identical shapes.
+            let ty = node.output_type.clone();
             let dx = dag.add_node(
                 RiscOp::Dropout {
                     rate: *rate,
@@ -1949,6 +1962,27 @@ fn compute_adjoints(
             // Fused nodes should be un-fused before AD; gradient through fusion
             // is not yet supported.
             None
+        }
+        RiscOp::CheckedReshapeExtent { .. } => Some(vec![]),
+        RiscOp::CheckedUnitAxis {
+            axis: crate::dag::RtAxis::Lit(axis),
+        } => {
+            let input = node.inputs[0];
+            let input_ty = forward
+                .get(input)
+                .expect("checked input")
+                .output_type
+                .clone();
+            let mut inputs = vec![g];
+            let mut new_shape = restore_target(dag, forward, input, &input_ty.dims, &mut inputs);
+            // Restore the parameter's shape through the checked witness. A
+            // known bad caller must reach the primal Domain check, rather
+            // than make a literal-sized cotangent fail graph verification.
+            let slot = inputs.len();
+            inputs.push(node.inputs[1]);
+            new_shape[*axis as usize] = RtDim::Node(slot);
+            let gradient = dag.add_node(RiscOp::Reshape { new_shape }, inputs, input_ty, None);
+            Some(vec![(input, gradient)])
         }
         RiscOp::Copy => Some(vec![(node.inputs[0], g)]),
         RiscOp::Drop => None,

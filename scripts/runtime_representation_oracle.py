@@ -15,7 +15,7 @@ kernel behavior. It proves three things and nothing more:
 
 The inventory's completeness claim is over `INVENTORY_SOURCES`: an explicit,
 reviewed list of the repository files that can carry a representation seam.
-Sixty-seven are Rust and seven are C or Objective-C headers. A completeness
+Sixty-eight are Rust and seven are C or Objective-C headers. A completeness
 claim stated over a *language* instead cannot be discharged, because a reviewer
 can always name one more construct; stated over a file list it is decidable,
 and `_assert_source_list_current` proves the list still equals the tracked
@@ -51,6 +51,7 @@ import hashlib
 import inspect
 import json
 import subprocess
+import sys
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -62,7 +63,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "0e4fb995f407085df124c712e8144bed92c257496f5ebfb58f4b18a4feff8e86"
+FREEZE_SHA256 = "6de229484dcf97e72bab1d6ef0ed8206458b6a60c5b64ad82bd049464b8c64c0"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -122,6 +123,7 @@ INVENTORY_SOURCES: tuple[str, ...] = (
     "crates/chelis-ir/src/fuse.rs",
     "crates/chelis-ir/src/grad.rs",
     "crates/chelis-ir/src/host.rs",
+    "crates/chelis-ir/src/host/staged.rs",
     "crates/chelis-ir/src/host_type_state.rs",
     "crates/chelis-ir/src/lib.rs",
     "crates/chelis-ir/src/load_store_name.rs",
@@ -2008,8 +2010,16 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = _parse_args()
+    if args.phase == 1:
+        sys.path.insert(0, str(REPO_ROOT))
+        from scripts.runtime_representation_phase1 import run
+        try:
+            run()
+        except (RuntimeError, OSError, ValueError, KeyError, TypeError) as error:
+            raise OracleFailure(str(error)) from error
+        return 0
     if args.phase != 0:
-        raise OracleFailure("only runtime-representation Phase 0 is implemented")
+        raise OracleFailure("only runtime-representation Phases 0 and 1 are implemented")
     if args.regenerate:
         regenerate()
         return 0
@@ -2021,4 +2031,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except OracleFailure as error:
-        raise SystemExit(f"RUNTIME REPRESENTATION PHASE 0: FAIL: {error}") from error
+        phase = sys.argv[sys.argv.index("--phase") + 1] if "--phase" in sys.argv else "?"
+        raise SystemExit(f"RUNTIME REPRESENTATION PHASE {phase}: FAIL: {error}") from error

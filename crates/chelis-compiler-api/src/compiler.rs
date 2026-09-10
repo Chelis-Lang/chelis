@@ -40,12 +40,12 @@ use crate::schema::{
     LowerResult, ParseRequest, ParseResult, RenameRequest, RenameResult, ReplaceFunctionRequest,
     ReplaceFunctionResult, RootManifestEntryResult, RootManifestResult, SourceKind, Span,
     ValidateMode, ValidateRequest, ValidateResult, WireBinOp, WireDag, WireDagNode,
-    WireDagSchemaError, WireDimExpr, WireDimInfo, WireExtremaKind, WireExtremaOperand,
-    WireFusedInput, WireFusedStep, WireFusedStepOp, WireImportKind, WireLetBinding, WireLetPattern,
-    WireMatchArm, WireParam, WirePattern, WirePropertyOption, WireRecordExprField,
-    WireRecordPatternField, WireRecordTypeField, WireRiscOp, WireRtAxis, WireRtDim, WireSurfDecl,
-    WireSurfExpr, WireSurfTypeExpr, WireTensorType, WireTypeInvariant, WireUnaryOp, WireVariant,
-    WireVariantFields,
+    WireDagSchemaError, WireDimExpr, WireDimInfo, WireExtentWitnessSite, WireExtremaKind,
+    WireExtremaOperand, WireFusedInput, WireFusedStep, WireFusedStepOp, WireImportKind,
+    WireLetBinding, WireLetPattern, WireMatchArm, WireParam, WirePattern, WirePropertyOption,
+    WireRecordExprField, WireRecordPatternField, WireRecordTypeField, WireRiscOp, WireRtAxis,
+    WireRtDim, WireSurfDecl, WireSurfExpr, WireSurfTypeExpr, WireTensorType, WireTypeInvariant,
+    WireUnaryOp, WireVariant, WireVariantFields,
 };
 use crate::schema::{stage_error, stage_error_with_span, unsupported_stage_error};
 use crate::source_wire::{SourceWireResult, wire_deep_expr, wire_literal};
@@ -2178,16 +2178,31 @@ fn execution_artifact_from_compiled_observed(
                 .as_ref()
                 .map(chelis_ir::host::host_program_requires_host_backend)
                 .unwrap_or(false);
-            let preferred_entry_dag = host_compiled
+            let preferred_entry = host_compiled
                 .host
                 .as_ref()
-                .and_then(chelis_ir::host::preferred_tensor_entry_name)
-                .and_then(|name| {
-                    chelis_ir::host::lower_named_tensor_entry_dag(compiled.checked(), name)
-                });
-            if compiled.dag.roots().is_empty()
-                && preferred_entry_dag.is_none()
-                && host_requires_host_backend
+                .and_then(chelis_ir::host::preferred_tensor_entry_name);
+            let preferred_entry_is_host = match preferred_entry {
+                Some(name) => {
+                    crate::target_capability::hip_entry_lane(compiled.checked(), name)
+                        .map_err(unsupported_stage_error)?
+                        == chelis_types::types::Lane::Host
+                }
+                None => false,
+            };
+            let preferred_entry_dag = preferred_entry.and_then(|name| {
+                chelis_ir::host::lower_named_tensor_entry_dag(compiled.checked(), name)
+            });
+            let has_host_roots = compiled
+                .manifest()
+                .entries
+                .iter()
+                .any(|entry| entry.lane == chelis_types::types::Lane::Host);
+            if (has_host_roots
+                || preferred_entry_is_host
+                || (compiled.dag.roots().is_empty()
+                    && preferred_entry_dag.is_none()
+                    && host_requires_host_backend))
                 && let Some(host_program) = host_compiled.host.as_ref()
             {
                 reject_unsupported_effect_ops_in_host_program(host_program, BuildTarget::Hip)?;
@@ -2513,12 +2528,8 @@ fn compile_rewritten_decls_in_context(
     // `unknown runtime name pkg__chelis__std__Std__Time__is_leap_year`
     // on any new-code call into a library function.
     let library_runtime = LibraryRuntime {
-        exprs: context.library_checked().annotated_exprs().to_vec(),
-        type_env: context.library_checked().type_env().clone(),
-        lowered_names: crate::runtime::library_lowered_names(
-            context.library_checked().annotated_exprs(),
-            context.library_checked().type_env(),
-        ),
+        checked: context.library_checked().clone(),
+        lowered_names: crate::runtime::library_lowered_names(context.library_checked()),
     };
 
     Ok(CompiledSource {
@@ -2861,8 +2872,7 @@ fn eval_compiled(
     let host_outcome = if let Some(library) = compiled.library_runtime.as_ref() {
         evaluate_host_program_with_library_and_types(
             compiled.checked(),
-            &library.exprs,
-            &library.type_env,
+            Some(&library.checked),
             Some(&library.lowered_names),
             crate::runtime::HostEvaluationInputs {
                 roots: &tensor_values_by_name,
@@ -3567,15 +3577,9 @@ fn required_inputs_for_dag_root(dag: &Dag, root: NodeId) -> BTreeSet<String> {
 /// references when called from new code.
 #[derive(Clone)]
 struct LibraryRuntime {
-    /// Library `def` annotated_exprs. Pulled into `top_level_defs`
-    /// before the new-code defs so new-code can shadow on collision.
-    exprs: Vec<DeepExpr>,
-    /// Library-side type-env. Bucket 1 (`grad`/`vmap`/`realize` host
-    /// runtime support) routes through `lower_subexpr_program`, which
-    /// expects the merged library + new-code Deep type-env so a
-    /// library-name reference inside a `grad` body resolves the same
-    /// way it does in the monolithic compile.
-    type_env: BTreeMap<String, DeepExpr>,
+    /// The checked proof, definitions and declarations travel together;
+    /// imported calls consult the same kernel owner as generated C.
+    checked: CheckedProgram,
     /// Library-side lowered-vs-host classification. Threaded through
     /// so `evaluate_host_program_with_library`'s "is this a tensor
     /// root vs a host-init" decision is byte-identical to what the
@@ -5055,7 +5059,10 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                     ),
                 ));
             }
-            RiscOp::Shape { .. } | RiscOp::ExtentWitness { .. } => {
+            RiscOp::Shape { .. }
+            | RiscOp::ExtentWitness { .. }
+            | RiscOp::CheckedReshapeExtent { .. }
+            | RiscOp::CheckedUnitAxis { .. } => {
                 return Err(unsupported_gate_error(
                     format!(
                         "`chelis build --target hip` does not support the runtime `shape` \
@@ -6212,6 +6219,7 @@ fn wire_op(op: &RiscOp, precision: Prim) -> WireResult<WireRiscOp> {
         RiscOp::Div => WireRiscOp::Div,
         RiscOp::FloorDiv => WireRiscOp::FloorDiv,
         RiscOp::TruncDiv => WireRiscOp::TruncDiv,
+        RiscOp::Mod => WireRiscOp::Mod,
         RiscOp::CmpLt => WireRiscOp::CmpLt,
         RiscOp::MaxElem => WireRiscOp::MaxElem,
         RiscOp::MinElem => WireRiscOp::MinElem,
@@ -6361,10 +6369,17 @@ fn wire_op(op: &RiscOp, precision: Prim) -> WireResult<WireRiscOp> {
             axis: wire_axis(*axis)?,
         },
         RiscOp::ExtentWitness {
+            site,
             parameter,
             axis: chelis_ir::dag::RtAxis::Lit(axis),
             requirements,
         } => WireRiscOp::ExtentWitness {
+            site: match site {
+                chelis_ir::dag::ExtentWitnessSite::Caller => WireExtentWitnessSite::Caller,
+                chelis_ir::dag::ExtentWitnessSite::LocalExpand => {
+                    WireExtentWitnessSite::LocalExpand
+                }
+            },
             parameter: parameter.clone(),
             axis: WireRtAxis::Lit { value: *axis },
             requirements: requirements
@@ -6372,6 +6387,18 @@ fn wire_op(op: &RiscOp, precision: Prim) -> WireResult<WireRiscOp> {
                 .copied()
                 .map(NonnegativeExtent::try_from)
                 .collect::<WireResult<_>>()?,
+        },
+        RiscOp::CheckedReshapeExtent {
+            claims,
+            axis: chelis_ir::dag::RtAxis::Lit(axis),
+        } => WireRiscOp::CheckedReshapeExtent {
+            claims: claims.clone(),
+            axis: WireRtAxis::Lit { value: *axis },
+        },
+        RiscOp::CheckedUnitAxis {
+            axis: chelis_ir::dag::RtAxis::Lit(axis),
+        } => WireRiscOp::CheckedUnitAxis {
+            axis: WireRtAxis::Lit { value: *axis },
         },
         RiscOp::Load { name } => WireRiscOp::Load {
             name: name.as_str().to_string(),
@@ -6497,6 +6524,7 @@ mod tests {
             .collect();
         let witness = dag.add_node(
             RiscOp::ExtentWitness {
+                site: chelis_ir::dag::ExtentWitnessSite::Caller,
                 parameter: "x".into(),
                 axis: RtAxis::Lit(0),
                 requirements,
@@ -6530,7 +6558,7 @@ mod tests {
         let dag = native_wire_witness_fixture();
         let projected = wire_dag(&dag).unwrap();
         let json = serde_json::to_value(&projected).unwrap();
-        assert_eq!(json["schema_version"], 9);
+        assert_eq!(json["schema_version"], 10);
         assert_eq!(
             json["nodes"][1]["op"]["requirements"],
             serde_json::json!([4, 4, 9])

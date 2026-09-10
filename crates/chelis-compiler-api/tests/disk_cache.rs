@@ -109,6 +109,119 @@ fn collect_named_roots_json(roots: &[EvaluatedRoot], names: &[&str]) -> BTreeMap
 const SNIPPET: &str =
     "module App.Eval\nimport Mylib.Math (add)\n\ndef main_value() -> int32 = add(3, 4)\n";
 
+#[test]
+fn previous_checked_extent_cache_is_rejected_before_payload_decode() {
+    use sha2::{Digest, Sha256};
+    let bytes = include_bytes!("fixtures/checked_extent_cache_v18/context-v18.ctx");
+    let producer: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/checked_extent_cache_v18/producer.json"
+    ))
+    .unwrap();
+    assert_eq!(producer["magic"], "CHELIS_CTX_V18");
+    assert!(bytes.starts_with(b"CHELIS_CTX_V18\n"));
+    assert_eq!(
+        format!("{:x}", Sha256::digest(bytes)),
+        producer["context_sha256"]
+    );
+    assert_eq!(producer["old_result"]["exit"], 0);
+    assert!(
+        producer["old_result"]["stdout"]
+            .as_str()
+            .unwrap()
+            .contains("shape=[3, 2]")
+    );
+    let error =
+        CompiledContext::decode(bytes).expect_err("genuine old producer lacks checked claims");
+    assert!(error.contains("magic"), "{error}");
+}
+
+#[test]
+fn cached_imports_preserve_computed_claims_and_unit_preconditions() {
+    use chelis_compiler_api::schema::ExecutionValue;
+    for (definition, good_argument, bad_argument, shape, values, operation, context) in [
+        (
+            "def f(x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [bitand(floor_div(numel(x), 2i64), 3i64), 2i64])",
+            "to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32])",
+            "to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32])",
+            vec![2, 2],
+            vec![1.0, 2.0, 3.0, 4.0],
+            "reshape",
+            "reshape axis 0 = 3",
+        ),
+        (
+            "def f(x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])",
+            "to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32])",
+            "to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32])",
+            vec![2, 2],
+            vec![1.0, 2.0, 3.0, 4.0],
+            "reshape",
+            "reshape axis 0 = 3",
+        ),
+        (
+            "def f(b: tensor[unit, f32]) -> tensor[3, f32] = expand(b, 0i32, 3i64)",
+            "to_tensor([5.0f32])",
+            "to_tensor([5.0f32, 6.0f32])",
+            vec![3],
+            vec![5.0; 3],
+            "load",
+            "b axis 0 = 2",
+        ),
+    ] {
+        let (_directory, root) = library_fixture();
+        fs::write(
+            root.join("mylib/src/math.ch"),
+            format!("module Mylib.Math\nexport (f)\n{definition}\n"),
+        )
+        .unwrap();
+        let home = root.join("reef-home");
+        let original = compile_reef_context(&home, &root).unwrap();
+        let path = root.join("claims.ctx");
+        original.save(&path).unwrap();
+        let disk = CompiledContext::load_if_fresh(&path, &home, &root)
+            .unwrap()
+            .expect("current disk hit");
+        let worker =
+            CompiledContext::decode(&original.encode().unwrap()).expect("current worker hit");
+        for cached in [&original, &disk, &worker] {
+            for prefix in ["out =", "def main() ="] {
+                let source = |argument: &str| {
+                    format!("module App.Eval\nimport Mylib.Math (f)\n{prefix} f({argument})\n")
+                };
+                let result = eval_in_context(cached, &source(good_argument))
+                    .expect("matching claim executes");
+                let tensors = result
+                    .roots
+                    .iter()
+                    .filter_map(|root| match &root.value {
+                        ExecutionValue::Tensor { value } => Some(value),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(tensors.len(), 1, "{result:?}");
+                assert_eq!(tensors[0].shape, shape);
+                let chelis_types::StorageView::F32(actual) = tensors[0].data.view() else {
+                    panic!("f32 result required")
+                };
+                assert_eq!(actual, values);
+                let error = eval_in_context(cached, &source(bad_argument))
+                    .expect_err("mismatching claim must fail after cache admission")
+                    .errors
+                    .iter()
+                    .map(|diagnostic| diagnostic.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(
+                    error.contains(&format!("numeric trap: domain in {operation} at int64")),
+                    "{error}"
+                );
+                assert!(error.contains(context), "{error}");
+                let required = if operation == "reshape" { 2 } else { 1 };
+                assert!(error.contains(&format!("claimed = {required}")), "{error}");
+            }
+        }
+    }
+}
+
 // ---- (a) cold-build-then-load round-trip ----------------------------------
 
 #[test]

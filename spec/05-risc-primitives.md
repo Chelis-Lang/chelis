@@ -3031,8 +3031,10 @@ path even though bare `round` under `grad` remains a structural
 > mathematically, without introducing intermediate overflow. Float floor
 > division is the own-width IEEE quotient followed by floor.
 >
-> Failure: Integer zero divisors trap Domain. Unrepresentable signed
-> arithmetic and signed minimum divided by -1 trap Overflow. Float
+> Failure: Integer zero divisors trap DivZero under [04-NUM-9].
+> Unrepresentable signed arithmetic traps Overflow, including signed minimum
+> divided by -1 for `floor_div` and `trunc_div`. Remainder of signed minimum
+> by -1 is zero; the intermediate quotient need not be representable. Float
 > exceptional results follow [04-NUM-2]; no integer computation passes
 > through a float. Static failures are diagnosed when concrete, and runtime
 > failures use [04-NUM-9].

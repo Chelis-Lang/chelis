@@ -41,6 +41,229 @@ fn tensor(result: &EvalResult, name: &str) -> Vec<f64> {
         .collect()
 }
 
+// [04] section 4.7 claims must survive the [05-OP-37] source plan,
+// including retained dead draws and first-order replay.
+#[test]
+fn checked_extent_dropout_source_and_gradient_keep_computed_claims() {
+    let helper = "def checked(x: tensor[n, f32]) -> tensor[16, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])\n";
+    let loss = "def loss(x: tensor[n, f32]) -> tensor[f32] = sum(sum(dropout(checked(x), 0.5f32), 0), 0)\n";
+    for gradient in [false, true] {
+        let body = if gradient {
+            "grad(loss)(x)"
+        } else {
+            "dropout(checked(x), 0.5f32)"
+        };
+        let source = format!(
+            "{helper}{loss}def sample(x: tensor[n, f32]) = with seed(42i64) {{\n dead = dropout(x, 0.0f32)\n _ = drop(dead)\n {body}\n}}\n"
+        );
+        let prepared = prepare_eval(request(&source)).unwrap();
+        for count in [32, 34, 32] {
+            let inputs = BTreeMap::from([(
+                "x".into(),
+                TensorValue {
+                    shape: vec![count],
+                    data: wire_values::storage_f32(vec![1.0; count as usize]),
+                },
+            )]);
+            for result in [
+                eval_selected(
+                    EvalRequest {
+                        source_kind: SourceKind::Surf,
+                        source: source.clone(),
+                        bindings: inputs.clone(),
+                    },
+                    &["sample".into()],
+                ),
+                prepared.eval_root(inputs, "sample"),
+            ] {
+                if count == 32 {
+                    assert_eq!(tensor(&result.unwrap(), "sample"), mask(1));
+                } else {
+                    let error = result.unwrap_err();
+                    assert!(
+                        error
+                            .errors
+                            .iter()
+                            .any(|error| error.message.contains("claimed = 16")
+                                && error.message.contains("reshape axis 0 = 17")
+                                && error
+                                    .message
+                                    .contains("numeric trap: domain in reshape at int64")),
+                        "gradient={gradient}: {error:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn checked_unit_axis_dropout_source_and_gradient_preserve_domain_checks() {
+    for gradient in [false, true] {
+        let result = if gradient { "grad(loss)(b)" } else { "draw(b)" };
+        let source = format!(
+            "def draw(b: tensor[unit, f32]) -> tensor[32, f32] = dropout(expand(b, 0i32, 32i64), 0.5f32)\ndef loss(b: tensor[unit, f32]) -> tensor[f32] = sum(draw(b), 0)\ndef sample(b: tensor[unit, f32]) = with seed(42i64) {{\n dead = dropout(b, 0.0f32)\n _ = drop(dead)\n {result}\n}}\n"
+        );
+        let prepared = prepare_eval(request(&source)).unwrap();
+        for count in [1, 2, 1] {
+            let inputs = BTreeMap::from([(
+                "b".into(),
+                TensorValue {
+                    shape: vec![count],
+                    data: wire_values::storage_f32(vec![1.0; count as usize]),
+                },
+            )]);
+            for result in [
+                eval_selected(
+                    EvalRequest {
+                        source_kind: SourceKind::Surf,
+                        source: source.clone(),
+                        bindings: inputs.clone(),
+                    },
+                    &["sample".into()],
+                ),
+                prepared.eval_root(inputs, "sample"),
+            ] {
+                if count == 1 {
+                    let expected = if gradient {
+                        vec![mask(1).iter().sum()]
+                    } else {
+                        mask(1)
+                    };
+                    assert_eq!(tensor(&result.unwrap(), "sample"), expected);
+                } else {
+                    let error = result.unwrap_err();
+                    assert!(
+                        error
+                            .errors
+                            .iter()
+                            .any(|error| error.message.contains("claimed = 1")
+                                && error.message.contains("axis 0 = 2")
+                                && error
+                                    .message
+                                    .contains("numeric trap: domain in load at int64")),
+                        "gradient={gradient}: {error:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn checked_extent_dropout_context_cache_keeps_claims_and_fresh_replay() {
+    use chelis_compiler_api::compiler::{eval_in_context, prepare_eval_in_context};
+    use chelis_compiler_api::{COMPILER_VERSION, compile_reef_context};
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::create_dir(directory.path().join("src")).unwrap();
+    std::fs::write(directory.path().join("reef.toml"), format!(
+        "[package]\nname = \"extent_dropout_probe\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Probe\"\n"
+    )).unwrap();
+    std::fs::write(directory.path().join("src/draw.ch"),
+        "module Probe.Draw\nexport (draw, loss)\ndef checked(x: tensor[n, f32]) -> tensor[16, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])\ndef draw(x: tensor[n, f32]) -> tensor[16, 2, f32] = dropout(checked(x), 0.5f32)\ndef loss(x: tensor[n, f32]) -> tensor[f32] = sum(sum(draw(x), 0), 0)\n"
+    ).unwrap();
+    let context = compile_reef_context(directory.path(), directory.path()).unwrap();
+    let wire = context.encode().unwrap();
+    let decoded = chelis_compiler_api::context::CompiledContext::decode(&wire).unwrap();
+    for context in [&context, &decoded] {
+        for gradient in [false, true] {
+            for count in [32, 34, 32] {
+                let ones = std::iter::repeat_n("1.0f32", count)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let body = if gradient { "grad(loss)(x)" } else { "draw(x)" };
+                let source = format!(
+                    "module Probe.Eval\nimport Probe.Draw (draw, loss)\ndef main() = with seed(42i64) {{\n x = to_tensor([{ones}])\n dead = dropout(x, 0.0f32)\n _ = drop(dead)\n {body}\n}}\n"
+                );
+                let prepared = prepare_eval_in_context(context, &source).unwrap();
+                for result in [
+                    eval_in_context(context, &source),
+                    prepared.eval_root(BTreeMap::new(), "main"),
+                    prepared.eval_root(BTreeMap::new(), "main"),
+                ] {
+                    if count == 32 {
+                        assert_eq!(tensor(&result.unwrap(), "main"), mask(1));
+                    } else {
+                        let error = result.unwrap_err();
+                        assert!(
+                            error
+                                .errors
+                                .iter()
+                                .any(|error| error.message.contains("claimed = 16")
+                                    && error.message.contains("reshape axis 0 = 17")
+                                    && error
+                                        .message
+                                        .contains("numeric trap: domain in reshape at int64")),
+                            "gradient={gradient}: {error:?}"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(context.encode().unwrap(), wire);
+    }
+}
+
+#[test]
+fn checked_extent_dropout_helper_keeps_result_claim_and_source_trap_order() {
+    for count in [32, 34] {
+        let inputs = BTreeMap::from([(
+            "x".into(),
+            TensorValue {
+                shape: vec![count],
+                data: wire_values::storage_f32(vec![1.0; count as usize]),
+            },
+        )]);
+        for (body, operation) in [
+            (
+                "reshape(dropout(x, 0.5f32), [floor_div(shape(x, 0i32), 2i64), 2i64])",
+                "reshape",
+            ),
+            (
+                "{\n dead = dropout(x, 1.0f32)\n _ = drop(dead)\n reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])\n}",
+                "dropout",
+            ),
+            (
+                "dropout(reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64]), 1.0f32)",
+                if count == 32 { "dropout" } else { "reshape" },
+            ),
+        ] {
+            let source = format!(
+                "def draw(x: tensor[n, f32]) -> tensor[16, 2, f32] = {body}\ndef sample(x: tensor[n, f32]) = with seed(42i64) {{ draw(x) }}\n"
+            );
+            let prepared = prepare_eval(request(&source)).unwrap();
+            for result in [
+                eval_selected(
+                    EvalRequest {
+                        source_kind: SourceKind::Surf,
+                        source: source.clone(),
+                        bindings: inputs.clone(),
+                    },
+                    &["sample".into()],
+                ),
+                prepared.eval_root(inputs.clone(), "sample"),
+            ] {
+                if count == 32 && operation == "reshape" {
+                    assert_eq!(tensor(&result.unwrap(), "sample"), mask(0));
+                } else {
+                    let error = result.unwrap_err();
+                    let dtype = if operation == "dropout" {
+                        "f32"
+                    } else {
+                        "int64"
+                    };
+                    assert!(
+                        error.errors.iter().any(|error| error
+                            .message
+                            .contains(&format!("numeric trap: domain in {operation} at {dtype}"))),
+                        "{body}: {error:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 // Independent transcription of [05-RNG-1], never an evaluator helper.
 fn mask(ordinal: u64) -> Vec<f64> {
     mask_with_seed(42, ordinal)

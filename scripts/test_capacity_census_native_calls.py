@@ -35,6 +35,14 @@ def aggregates_named(evidence, name):
     ]
 
 
+def constructor_uses_named(evidence, name):
+    return [
+        use
+        for use in evidence.raw["constructor_uses"]
+        if use["carrier"].get("item_name") == name
+    ]
+
+
 class NativeEvidenceShapeControls(unittest.TestCase):
     def fixture(self):
         from capacity_census_wire_calls import COMPILER
@@ -48,13 +56,14 @@ class NativeEvidenceShapeControls(unittest.TestCase):
             "def_path_hash": "DefPathHash(Fingerprint(0, 0))",
         }
         return {
-            "format": 3,
+            "format": 4,
             "scope": "native-bindings",
             "compiler": COMPILER,
             "crate": definition,
             "bodies": [],
             "calls": [],
             "aggregates": [],
+            "constructor_uses": [],
             "flows": [],
             "errors": [],
             "rustc_command": [],
@@ -79,6 +88,22 @@ class NativeEvidenceShapeControls(unittest.TestCase):
                 changed["authority"] = "TaggedTransport"
             else:
                 changed["aggregates"] = {}
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                read_evidence(changed)
+
+    def test_constructor_census_is_mandatory_and_old_native_format_is_rejected(self):
+        from capacity_census_wire_calls import read_evidence
+
+        raw = self.fixture()
+        self.assertEqual(read_evidence(raw).raw["constructor_uses"], [])
+        for mutation in ("missing", "wrong-list", "old-format", "old-without-census"):
+            changed = copy.deepcopy(raw)
+            if mutation in {"old-format", "old-without-census"}:
+                changed["format"] = 3
+            if mutation in {"missing", "old-without-census"}:
+                del changed["constructor_uses"]
+            elif mutation == "wrong-list":
+                changed["constructor_uses"] = {}
             with self.subTest(mutation=mutation), self.assertRaises(ValueError):
                 read_evidence(changed)
 
@@ -136,6 +161,237 @@ class NativeCompilerCollectionControls(unittest.TestCase):
             scope="native-bindings",
         )
 
+    def test_direct_aggregate_and_foreign_constructor_callback_are_distinct(self):
+        # spec/11 §1.2 requires validation before wrapper construction. A raw
+        # constructor exposed to a callback is an obligation, not validation.
+        evidence = self.observe("""
+pub struct Tensor(i64);
+pub fn direct(value: i64) -> Tensor { Tensor(value) }
+pub fn callback(values: Vec<i64>) -> Vec<Tensor> {
+    values.into_iter().map(Tensor).collect()
+}
+""")
+        self.assertEqual(evidence.raw["errors"], [])
+        self.assertEqual(
+            {row["caller"]["definition"]["item_name"]
+             for row in aggregates_named(evidence, "Tensor")},
+            {"direct"},
+        )
+        uses = constructor_uses_named(evidence, "Tensor")
+        self.assertEqual(len(uses), 1)
+        use = uses[0]
+        self.assertEqual(use["caller"]["definition"]["item_name"], "callback")
+        self.assertEqual(use["kind"], "Ctor(Struct, Fn)")
+        self.assertNotEqual(use["definition"], use["carrier"])
+        self.assertEqual(use["variant_definition"], use["carrier"])
+        self.assertEqual(use["formal_result"]["nominal"], use["carrier"])
+        self.assertEqual(use["formal_inputs"][0]["shape"],
+                         {"tag": "primitive", "name": "i64"})
+        self.assertEqual(use["fields"][0]["definition"]["item_name"], "0")
+        self.assertEqual(use["fields"][0]["type"], use["formal_inputs"][0])
+        self.assertEqual(use["context"], "terminator")
+        self.assertIsNone(use["cast"])
+
+    def test_tuple_enum_constructor_values_keep_exact_variant_fields(self):
+        evidence = self.observe("""
+pub enum Payload<T, const N: usize> { Left(T, [i64; N]), Right(T) }
+pub fn left() -> fn(i64, [i64; 2]) -> Payload<i64, 2> {
+    Payload::<i64, 2>::Left
+}
+pub fn right() -> fn(i64) -> Payload<i64, 2> { Payload::<i64, 2>::Right }
+""")
+        self.assertEqual(evidence.raw["errors"], [])
+        uses = {row["caller"]["definition"]["item_name"]: row
+                for row in constructor_uses_named(evidence, "Payload")}
+        self.assertEqual(set(uses), {"left", "right"})
+        left, right = uses["left"], uses["right"]
+        self.assertEqual(left["kind"], "Ctor(Variant, Fn)")
+        self.assertEqual(left["carrier"], right["carrier"])
+        self.assertNotEqual(left["definition"], right["definition"])
+        self.assertNotEqual(left["variant_definition"], right["variant_definition"])
+        self.assertEqual(left["variant_definition"]["item_name"], "Left")
+        self.assertEqual(right["variant_definition"]["item_name"], "Right")
+        self.assertEqual([field["definition"]["item_name"] for field in left["fields"]],
+                         ["0", "1"])
+        self.assertEqual(len(right["fields"]), 1)
+        self.assertNotEqual(left["fields"][0]["definition"],
+                            right["fields"][0]["definition"])
+        self.assertEqual([field["type"] for field in left["fields"]],
+                         left["formal_inputs"])
+        self.assertEqual(left["formal_inputs"][1]["shape"]["length"], 2)
+        self.assertEqual([arg["kind"] for arg in left["arguments"]], ["type", "const"])
+
+    def test_stored_returned_and_reified_constructor_values_are_collected(self):
+        evidence = self.observe("""
+pub struct Tensor(i64);
+pub fn local(value: i64) -> Tensor {
+    let constructor = Tensor;
+    let copied = constructor;
+    let pointer: fn(i64) -> Tensor = copied;
+    pointer(value)
+}
+pub fn returned() -> impl Fn(i64) -> Tensor { Tensor }
+pub fn stored() -> Vec<fn(i64) -> Tensor> { vec![Tensor] }
+pub fn foreign_pointer(pointer: fn(i64) -> Tensor) -> fn(i64) -> Tensor { pointer }
+""")
+        self.assertEqual(evidence.raw["errors"], [])
+        uses = constructor_uses_named(evidence, "Tensor")
+        self.assertEqual({row["caller"]["definition"]["item_name"] for row in uses},
+                         {"local", "returned", "stored"})
+        local = [row for row in uses if row["caller"]["definition"]["item_name"] == "local"]
+        self.assertTrue(any(row["operand"]["kind"] == "constant" for row in local))
+        self.assertTrue(any(row["operand"]["kind"] in {"copy", "move"} for row in local))
+        reified = [row for row in uses if row["cast"] is not None]
+        self.assertTrue(reified)
+        for row in reified:
+            self.assertIn("ReifyFnPointer", row["cast"]["kind"])
+            self.assertIn("fn(", row["cast"]["target"]["text"])
+            self.assertEqual(row["context"], "statement")
+
+    def test_promoted_constructor_values_are_collected(self):
+        evidence = self.observe("""
+pub struct Tensor(i64);
+pub fn table() -> &'static [fn(i64) -> Tensor] { &[Tensor] }
+pub fn borrowed() -> &'static fn(i64) -> Tensor {
+    &(Tensor as fn(i64) -> Tensor)
+}
+""")
+        self.assertEqual(evidence.raw["errors"], [])
+        uses = constructor_uses_named(evidence, "Tensor")
+        self.assertEqual(
+            {row["caller"]["definition"]["item_name"] for row in uses},
+            {"table", "borrowed"},
+        )
+        self.assertEqual(len(uses), 2)
+        self.assertTrue(all(row["promoted"] is not None for row in uses))
+
+    def test_constructor_occurrence_rows_have_an_exact_fail_closed_shape(self):
+        from capacity_census_wire_calls import read_evidence
+
+        evidence = self.observe("""
+pub struct Tensor(i64);
+pub fn callback() -> fn(i64) -> Tensor { Tensor }
+""")
+        self.assertEqual(evidence.raw["errors"], [])
+        row = constructor_uses_named(evidence, "Tensor")[0]
+        for key in row:
+            changed = copy.deepcopy(evidence.raw)
+            del changed["constructor_uses"][0][key]
+            with self.subTest(mutation=f"missing-{key}"), self.assertRaises(ValueError):
+                read_evidence(changed)
+        for mutation in ("extra", "wrong-fields", "wrong-promoted", "wrong-cast"):
+            changed = copy.deepcopy(evidence.raw)
+            occurrence = changed["constructor_uses"][0]
+            if mutation == "extra":
+                occurrence["authority"] = "TaggedTransport"
+            elif mutation == "wrong-fields":
+                occurrence["fields"] = {}
+            elif mutation == "wrong-promoted":
+                occurrence["promoted"] = "0"
+            else:
+                occurrence["cast"] = {}
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                read_evidence(changed)
+
+    def test_const_and_static_constructor_pointer_origins_are_collected(self):
+        evidence = self.observe("""
+pub struct Tensor(i64);
+pub const SAVED: fn(i64) -> Tensor = Tensor;
+pub static STATIC: fn(i64) -> Tensor = Tensor;
+impl Tensor { pub const CONSTRUCTOR: fn(i64) -> Self = Self; }
+pub fn live(value: i64) -> Tensor { SAVED(value) }
+""")
+        self.assertEqual(evidence.raw["errors"], [])
+        uses = constructor_uses_named(evidence, "Tensor")
+        owners = {row["caller"]["definition"]["item_name"] for row in uses}
+        self.assertTrue({"SAVED", "STATIC", "CONSTRUCTOR"} <= owners)
+        for row in uses:
+            if row["caller"]["definition"]["item_name"] in {"SAVED", "STATIC", "CONSTRUCTOR"}:
+                self.assertIsNotNone(row["cast"])
+                self.assertEqual(row["formal_result"]["nominal"], row["carrier"])
+
+    def test_repeated_constructor_operands_keep_distinct_location_identities(self):
+        evidence = self.observe("""
+pub struct Tensor(i64);
+fn sink<A, B>(_: A, _: B) {}
+pub fn repeated() { sink(Tensor, Tensor) }
+""")
+        self.assertEqual(evidence.raw["errors"], [])
+        uses = [row for row in constructor_uses_named(evidence, "Tensor")
+                if row["caller"]["definition"]["item_name"] == "repeated"]
+        self.assertEqual(len(uses), 2)
+        first, second = uses
+        self.assertEqual(first["definition"], second["definition"])
+        self.assertEqual((first["block"], first["statement"]),
+                         (second["block"], second["statement"]))
+        self.assertNotEqual(first["operand_index"], second["operand_index"])
+        self.assertTrue(all(row["context"] == "terminator" for row in uses))
+        for row in uses:
+            body = next(body for body in evidence.raw["bodies"]
+                        if body["definition"] == row["caller"]["definition"])
+            self.assertEqual(body["substitutions"], row["caller"]["substitutions"])
+            self.assertEqual(body["ancestors"], row["caller"]["ancestors"])
+            block = next(block for block in body["blocks"] if block["block"] == row["block"])
+            self.assertEqual(row["statement"], block["statements"])
+
+    def test_generic_constructor_values_retain_type_and_const_substitutions(self):
+        evidence = self.observe("""
+pub struct Capsule<T, const N: usize>(T, [i64; N]);
+fn constructor<T, const N: usize>() -> fn(T, [i64; N]) -> Capsule<T, N> {
+    Capsule::<T, N>
+}
+pub fn integer() -> fn(i64, [i64; 2]) -> Capsule<i64, 2> { constructor::<i64, 2>() }
+pub fn floating() -> fn(f64, [i64; 3]) -> Capsule<f64, 3> { constructor::<f64, 3>() }
+""")
+        self.assertEqual(evidence.raw["errors"], [])
+        uses = constructor_uses_named(evidence, "Capsule")
+        self.assertTrue(any(row["caller"]["open_type_or_const"] for row in uses))
+        closed = [row for row in uses if not row["caller"]["open_type_or_const"]]
+        self.assertEqual(
+            {(row["formal_inputs"][0]["shape"]["name"],
+              row["formal_inputs"][1]["shape"]["length"]) for row in closed},
+            {("i64", 2), ("f64", 3)},
+        )
+        for row in closed:
+            self.assertEqual([arg["kind"] for arg in row["arguments"]], ["type", "const"])
+            self.assertEqual([field["type"] for field in row["fields"]], row["formal_inputs"])
+            self.assertFalse(row["formal_result"]["open"])
+
+    def test_same_named_function_and_bare_pointer_are_not_raw_constructors(self):
+        evidence = self.observe("""
+pub struct Tensor(i64);
+mod decoy { pub fn Tensor(value: i64) -> super::Tensor { super::Tensor(value) } }
+impl Tensor { pub fn new(value: i64) -> Self { Self(value) } }
+pub fn actual() -> fn(i64) -> Tensor { Tensor }
+pub fn named() -> fn(i64) -> Tensor { decoy::Tensor }
+pub fn method() -> fn(i64) -> Tensor { Tensor::new }
+pub fn pointer(value: fn(i64) -> Tensor) -> fn(i64) -> Tensor { value }
+""")
+        self.assertEqual(evidence.raw["errors"], [])
+        self.assertEqual(
+            {row["caller"]["definition"]["item_name"]
+             for row in constructor_uses_named(evidence, "Tensor")},
+            {"actual"},
+        )
+
+    def test_unit_values_are_not_reported_as_callable_constructor_capabilities(self):
+        # This census concerns FnDef constructor exposure. Unit/constant values
+        # and arbitrary unsafe construction need their own consumer obligations.
+        evidence = self.observe("""
+pub struct Unit;
+pub enum Value { Empty, Data(i64) }
+pub fn unit() -> Unit { Unit }
+pub fn empty() -> Value { Value::Empty }
+pub fn data() -> fn(i64) -> Value { Value::Data }
+""")
+        self.assertEqual(evidence.raw["errors"], [])
+        self.assertEqual(constructor_uses_named(evidence, "Unit"), [])
+        self.assertEqual(
+            {row["variant_definition"]["item_name"]
+             for row in constructor_uses_named(evidence, "Value")},
+            {"Data"},
+        )
+
     def test_compiler_records_exact_impl_owner_and_ignores_same_named_helper(self):
         evidence = self.observe(
             """
@@ -165,7 +421,7 @@ pub fn live(value: ValidatedTensor) -> Vec<i64> { Export::export(value) }
             "impl",
             call[0]["callee"]["resolved"]["definition"]["path"],
         )
-        self.assertEqual(evidence.raw["format"], 3)
+        self.assertEqual(evidence.raw["format"], 4)
         self.assertEqual(evidence.raw["scope"], "native-bindings")
         self.assertIn("--crate-name=native_fixture", evidence.raw["rustc_command"])
         self.assertEqual(len(evidence.raw["inputs"]), 1)

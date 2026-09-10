@@ -2,7 +2,8 @@ name: Linux Extended Validation
 
 # Daily/manual exhaustive coverage. The full workspace pass deliberately
 # includes PR tests as well as expensive integrations; no default filter
-# can hide a newly added target. Feature and phase oracles retain their own
+# can hide a newly added target. The two census targets execute in dtype only.
+# Feature and phase oracles retain their own
 # acceptance commands. All ignored tests still need explicit/manual owners.
 on:
   schedule:
@@ -51,14 +52,6 @@ jobs:
           shared-key: linux-workspace
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # The unfiltered suite executes the same nested census builds as the
-      # dtype oracle. Reuse its existing cache rather than compiling it cold.
-      - name: Restore capacity rustdoc build
-        uses: actions/cache/restore@v4
-        with:
-          path: target/agents/729-capacity-rustdoc
-          key: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/capacity_census_typed.py', 'crates/chelis-compiler-api/**', 'crates/chelis-python/**') }}
-
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
@@ -71,7 +64,7 @@ jobs:
       - name: Full non-ignored workspace suite
         env:
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
-        run: cargo nextest run --workspace --profile ci-full --ignore-default-filter --no-fail-fast
+        run: cargo nextest run --workspace --profile ci-full --ignore-default-filter --no-fail-fast -E 'not (binary_id(/^chelis-compiler-api::capacity_census_wire$/) | binary_id(/^chelis-python::capacity_census_bindings$/))'
 
       - name: Verify nextest profile coverage
         run: .venv/bin/python -m unittest scripts.test_nextest_profile_partition.ProfilePartitionTests
@@ -89,14 +82,84 @@ jobs:
         if: always()
         run: cargo test -p chelis-cli --test chelis_std_self_test_corpus -- --ignored --nocapture
 
+  script-nightly:
+    name: Script Integration Tests (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Ubuntu)
+        uses: ./.github/actions/free-disk-space
+
+      - name: Install C dependencies
+        run: python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv + wire libpython rpath
+        run: python3 scripts/ci_setup_uv_python.py
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-script-nightly
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install Python binding dependencies
+        run: uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml
+
+      - name: Install shared-skill validator dependency
+        run: uv pip install --python .venv/bin/python PyYAML==6.0.3
+
+      - name: Restore script compiler builds
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            target/agents/wire-codec-rustdoc
+            target/agents/native-bindings-driver
+            target/graph-fixture-target
+          key: ${{ runner.os }}-${{ runner.arch }}-script-execution-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-script-execution-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+
+      - name: Run script integration tests
+        run: .venv/bin/python scripts/ci_script_tests.py nightly
+
+      - name: Save script compiler builds
+        if: ${{ success() && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            target/agents/wire-codec-rustdoc
+            target/agents/native-bindings-driver
+            target/graph-fixture-target
+          key: ${{ runner.os }}-${{ runner.arch }}-script-execution-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+
+      - name: Upload script selection and timings
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: script-tests-nightly
+          path: target/ci-script-tests/nightly
+          if-no-files-found: error
+          retention-days: 14
+
   dtype-phase3-oracle:
     name: Dtype Phase 0-3 Oracle
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     permissions:
       contents: read
       issues: read
     env:
+      CHELIS_CI_TIMING_DIR: ${{ github.workspace }}/target/ci-script-tests/census/timings
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
@@ -131,6 +194,17 @@ jobs:
         with:
           path: target/agents/729-capacity-rustdoc
           key: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/capacity_census_typed.py', 'crates/chelis-compiler-api/**', 'crates/chelis-python/**') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-
+
+      - name: Restore census control builds
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            target/agents/wire-codec-rustdoc
+            target/agents/native-bindings-driver
+            target/graph-fixture-target
+          key: ${{ runner.os }}-${{ runner.arch }}-census-controls-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-census-controls-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -162,6 +236,25 @@ jobs:
         with:
           path: target/agents/729-capacity-rustdoc
           key: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/capacity_census_typed.py', 'crates/chelis-compiler-api/**', 'crates/chelis-python/**') }}
+
+      - name: Save census control builds
+        if: ${{ success() && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            target/agents/wire-codec-rustdoc
+            target/agents/native-bindings-driver
+            target/graph-fixture-target
+          key: ${{ runner.os }}-${{ runner.arch }}-census-controls-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+
+      - name: Upload census subprocess timings
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: script-tests-census
+          path: target/ci-script-tests/census
+          if-no-files-found: error
+          retention-days: 14
 
   faithful-observation-phase2-oracle:
     name: Faithful Observation Phase 2 Oracle
@@ -244,7 +337,7 @@ jobs:
         run: .venv/bin/python scripts/compiled_value_ownership_oracle.py --phase launch
 
   runtime-representation-phase0-oracle:
-    name: Runtime Representation Phase 0 Oracle
+    name: Runtime Representation Phase 1 Oracle
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -281,6 +374,15 @@ jobs:
 
       - name: Gate (runtime representation stage)
         run: python3 scripts/gate.py runtime-representation
+
+      - name: Upload runtime representation execution receipts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: runtime-representation-phase1-receipts
+          path: target/runtime-representation-phase1/
+          if-no-files-found: error
+          retention-days: 14
 
   generalize-sweep-oracle-shard:
     name: Typecheck Level Generalization Oracle (shard ${{ matrix.shard }}/4)
@@ -322,19 +424,13 @@ jobs:
           shared-key: linux-workspace
           save-if: false
 
-      - name: Restore capacity rustdoc build
-        uses: actions/cache/restore@v4
-        with:
-          path: target/agents/729-capacity-rustdoc
-          key: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/capacity_census_typed.py', 'crates/chelis-compiler-api/**', 'crates/chelis-python/**') }}
-
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
       - name: Typecheck level generalization oracle
         env:
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
-        run: cargo nextest run --workspace --profile ci-full --ignore-default-filter --features chelis-types/generalize-sweep-oracle --no-fail-fast -E 'not (binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/) | (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/)))' --partition hash:${{ matrix.shard }}/4
+        run: cargo nextest run --workspace --profile ci-full --ignore-default-filter --features chelis-types/generalize-sweep-oracle --no-fail-fast -E 'not (binary_id(/^chelis-compiler-api::capacity_census_wire$/) | binary_id(/^chelis-python::capacity_census_bindings$/) | binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/) | (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/)))' --partition hash:${{ matrix.shard }}/4
 
       - name: Verify generalization lane selection
         if: matrix.shard == 1
@@ -516,7 +612,7 @@ jobs:
 
   report:
     name: Surface nightly status
-    needs: [dtype-phase3-oracle, faithful-observation-phase2-oracle, compiled-value-ownership-phase0-oracle, runtime-representation-phase0-oracle, generalize-sweep-oracle-shard, full-workspace, integration-support, backend-sanitizers-full]
+    needs: [script-nightly, dtype-phase3-oracle, faithful-observation-phase2-oracle, compiled-value-ownership-phase0-oracle, runtime-representation-phase0-oracle, generalize-sweep-oracle-shard, full-workspace, integration-support, backend-sanitizers-full]
     if: always() && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

@@ -24,7 +24,7 @@ use chelis_compiler_api::schema::{
 use chelis_types::types::Lane;
 
 /// chelis#1376's callee: the declared result claims `m` on axis 1 while the
-/// `expand` reads `n` for it.
+/// `insert` reads `n` for it.
 const CALLEE_1376: &str = "def f(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, m, f32] = \
                            insert(x, 1, shape(x, 0))\n";
 
@@ -96,24 +96,40 @@ fn bound_parameterized_entry_preserves_its_host_call_error() {
     );
 }
 
-/// The CLI form: `main` is a nullary fn root, which realizability assigns to
-/// the host lane, so the application of `f` is interpreted and the declared
-/// claim on `f`'s result is never compared against the value.
-///
-/// EVIDENTIARY STATUS on `801f92c02`: disposition lock for the lane and for
-/// the shape. The `[2, 2]` value is chelis#1376's `silent_unguarded`
-/// baseline; the routing alone does not move it (the kernel has no guard for
-/// the claim until B2a's DAG-evaluator guard is underneath), so this
-/// assertion holds on this head and flips only at the rebase onto B2a.
+/// A matching call still routes the nullary main through the host lane.
 #[test]
 fn host_applied_def_main_is_a_host_lane_root() {
     let result = eval(EvalRequest {
         source_kind: SourceKind::Surf,
-        source: HOST_APPLIED_1376.to_string(),
+        source: HOST_APPLIED_1376.replace("3.0f32, 4.0f32, 5.0f32", "3.0f32, 4.0f32"),
         bindings: BTreeMap::new(),
     })
     .unwrap_or_else(|err| panic!("eval failed: {err:?}"));
 
     assert_eq!(lane_of(&result, "main"), Lane::Host);
     assert_eq!(root_shape(&result, "main"), vec![2, 2]);
+}
+
+/// Measured #1376 residue: the mismatch now fails at the local extent
+/// consumer. Correct declaring-caller witness attribution remains #1277 work;
+/// this disposition lock is not the named-claim acceptance oracle.
+#[test]
+fn host_applied_mismatch_preserves_the_current_local_failure() {
+    let error = eval(EvalRequest {
+        source_kind: SourceKind::Surf,
+        source: HOST_APPLIED_1376.to_string(),
+        bindings: BTreeMap::new(),
+    })
+    .expect_err("a claimed 3 cannot silently return an actual axis of 2");
+    let messages = error
+        .errors
+        .iter()
+        .map(|d| d.message.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(messages.contains("claimed = 3, node "), "{messages}");
+    assert!(
+        messages.ends_with("axis 1 = 2\nnumeric trap: domain in expand at int64"),
+        "{messages}"
+    );
 }

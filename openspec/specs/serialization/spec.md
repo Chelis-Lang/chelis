@@ -43,11 +43,11 @@ NOT be published as a frozen low-level guarantee while the implementation evolve
 - **WHEN** documenting `.chb`
 - **THEN** the project does not publish a frozen low-level layout guarantee while the format is still expected to evolve
 
-### Requirement: Exact WireDag schema version 9
+### Requirement: Exact WireDag schema version 10
 
-The compiler-API JSON WireDag surface SHALL carry explicit schema version 9,
-and version 9 SHALL be the only accepted version. Missing, versionless,
-versions 1 through 8, future, unknown-variant, and best-effort payloads SHALL
+The compiler-API JSON WireDag surface SHALL carry explicit schema version 10,
+and version 10 SHALL be the only accepted version. Missing, versionless,
+versions 1 through 9, future, unknown-variant, and best-effort payloads SHALL
 fail before IR construction. `Count.axes` SHALL already be the complete
 non-empty unique normalized original-axis vector in strictly descending order;
 encoder and decoder both reject a noncanonical vector. `Pad.fill` SHALL be a
@@ -56,13 +56,30 @@ Runtime movement and reshape metadata SHALL use the structural `WireRtDim`
 carrier. [05-OP-43]'s `Relu` and `ReluAdjoint` SHALL cross the wire as distinct
 identities with one and two inputs respectively; every input SHALL have the
 output's exact float dtype and dimensions. `ExtentWitness` SHALL retain its
-ordered fixed-int64 requirements and provenance, while `shape_deps` SHALL be
-u64 references to earlier nodes. All three provenance/dependency node fields
+ordered fixed-int64 requirements and provenance. Its mandatory `site` SHALL
+be exactly `caller` or `local_expand`, preserving call-entry `load` diagnostics
+with parameter context or local `expand` diagnostics with observed-input-node
+context respectively. Missing or unknown sites SHALL fail decoding.
+`shape_deps` SHALL be u64 references to earlier nodes. All three provenance/dependency node fields
 SHALL be explicit, including empty lists and a null span identity.
+
+`Mod` SHALL retain [05-OP-64]'s exact signed-remainder identity with two
+earlier input nodes, each with its output's integer dtype and dimension list.
+Other arities, dtypes or shapes SHALL fail encoding and decoding.
+
+`CheckedReshapeExtent` SHALL preserve separate scalar-int64 input edges for
+the actual computed extent and each required extent, plus a nonempty ordered
+list of corresponding diagnostic labels and a normalized result-axis position.
+Every requirement SHALL have its own input edge; all equalities SHALL be
+checked in list order before forwarding the actual extent. `CheckedUnitAxis` SHALL reference the
+original tensor and an `ExtentWitness` for that exact tensor axis with an
+explicit requirement of one; only that axis may refine to one. Missing fields,
+wrong input/output types, a different witness axis or tensor, and unrelated
+shape refinements SHALL fail encoding and decoding.
 
 #### Scenario: Unknown or older schema fails before IR construction
 
-- **WHEN** a consumer receives a versionless, v1-v8, future-version, or unknown-variant WireDag payload
+- **WHEN** a consumer receives a versionless, v1-v9, future-version, or unknown-variant WireDag payload
 - **THEN** decoding fails before any IR node is materialized
 
 #### Scenario: Noncanonical Count axes are not rewritten

@@ -404,8 +404,7 @@ pub(crate) fn evaluate_host_program_filtered(
 ) -> Result<RuntimeOutcome, RuntimeFailure> {
     evaluate_host_program_with_library_and_types(
         program,
-        &[],
-        &BTreeMap::new(),
+        None,
         None,
         HostEvaluationInputs {
             roots: tensor_bindings,
@@ -441,8 +440,7 @@ pub(crate) fn evaluate_host_program_filtered(
 /// inner fn body the same way the C backend does.
 pub(crate) fn evaluate_host_program_with_library_and_types(
     program: &CheckedProgram,
-    library_exprs: &[Expr],
-    library_type_env: &BTreeMap<String, Expr>,
+    library: Option<&CheckedProgram>,
     library_lowered_names: Option<&BTreeMap<String, bool>>,
     inputs: HostEvaluationInputs<'_>,
     selected_roots: Option<&[String]>,
@@ -452,6 +450,23 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         roots: tensor_bindings,
         bindings: bound_evaluation_inputs,
     } = inputs;
+    let empty_types = BTreeMap::new();
+    let library_exprs = library.map(CheckedProgram::exprs).unwrap_or(&[]);
+    let library_type_env = library
+        .map(CheckedProgram::type_env)
+        .unwrap_or(&empty_types);
+    // Looking up an imported function in the new-code-only program silently
+    // interpreted it without the kernel's declared shape obligations.
+    let kernel_program = library
+        .map(|library| {
+            CheckedProgram::compose(library, program)
+                .ok_or_else(|| "runtime kernel program lost its checked library proof".to_owned())
+        })
+        .transpose()
+        .map_err(|message| RuntimeFailure {
+            message,
+            transcript: Vec::new(),
+        })?;
     // Lowered classification. A new-code value binding that references a
     // library function (e.g. `imported_val = lib_add(20, 22)`) must
     // inherit that function's host-lane-vs-tensor-lane classification —
@@ -549,7 +564,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         type_env,
         adt_fields,
         tensor_bindings,
-        program: Some(program),
+        program: Some(kernel_program.as_ref().unwrap_or(program)),
         def_kernels: UnordMap::new(),
         transcript: Vec::new(),
         resolving_top_levels: Vec::new(),
@@ -803,11 +818,8 @@ fn register_top_level_defs(
 /// the new-code lowering map merges with library state instead of
 /// re-deriving the wrong answer for library names that shadow
 /// builtins.
-pub(crate) fn library_lowered_names(
-    library_exprs: &[Expr],
-    library_type_env: &BTreeMap<String, Expr>,
-) -> BTreeMap<String, bool> {
-    top_level_lowering_map(library_exprs, library_type_env)
+pub(crate) fn library_lowered_names(library: &CheckedProgram) -> BTreeMap<String, bool> {
+    top_level_lowering_map(library.annotated_exprs(), library.type_env())
 }
 
 fn top_level_items(exprs: &[Expr]) -> Vec<&Expr> {

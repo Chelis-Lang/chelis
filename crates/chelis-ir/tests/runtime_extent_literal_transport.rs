@@ -18,6 +18,7 @@ fn claimed_witness(dag: &mut Dag, required: &[i64]) -> chelis_ir::dag::NodeId {
     );
     dag.add_node(
         RiscOp::ExtentWitness {
+            site: chelis_ir::dag::ExtentWitnessSite::Caller,
             parameter: "x".into(),
             axis: RtAxis::Lit(0),
             requirements: required

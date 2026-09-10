@@ -218,7 +218,7 @@ def structural_evidence():
         ),
         "dag-root": pairs("WireDag", "owned-reference", ("root-owner",)),
         "dag-version": pairs(
-            "WireDag", "empty", ("version-None", "version-8", "version-10")
+            "WireDag", "empty", ("version-None", "version-9", "version-11")
         ),
         "earlier-shape-dependency": pairs(
             "WireDag",

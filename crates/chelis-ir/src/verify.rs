@@ -83,6 +83,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             | RiscOp::Div
             | RiscOp::FloorDiv
             | RiscOp::TruncDiv
+            | RiscOp::Mod
             | RiscOp::CmpLt
             | RiscOp::MaxElem
             | RiscOp::MinElem => {
@@ -90,6 +91,13 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     errors.push(format!(
                         "binary op at node {} has {} inputs (expected 2)",
                         node.id.0, arity
+                    ));
+                }
+
+                if matches!(node.op, RiscOp::Mod) && !node.output_type.precision.is_integer() {
+                    errors.push(format!(
+                        "mod at node {} requires an integer dtype",
+                        node.id.0
                     ));
                 }
 
@@ -102,6 +110,22 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                         errors.push(format!(
                             "binary op at node {} has mismatched precisions: {:?} vs {:?}",
                             node.id.0, lhs.output_type.precision, rhs.output_type.precision
+                        ));
+                    }
+
+                    if matches!(node.op, RiscOp::Mod)
+                        && (node.output_type.precision != lhs.output_type.precision
+                            || node.output_type.dims.len() != lhs.output_type.dims.len()
+                            || node
+                                .output_type
+                                .dims
+                                .iter()
+                                .zip(&lhs.output_type.dims)
+                                .any(|(out, input)| !dims_compatible(out, input)))
+                    {
+                        errors.push(format!(
+                            "mod at node {} output must match its input shape and dtype",
+                            node.id.0
                         ));
                     }
 
@@ -433,10 +457,18 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     ));
                 }
             }
-            RiscOp::ReluAdjoint => {
+            RiscOp::CheckedReshapeExtent { claims, .. } => {
+                if claims.is_empty() || arity != claims.len() + 1 {
+                    errors.push(format!(
+                        "checked reshape extent at node {} requires an actual and one scalar input per nonempty claim",
+                        node.id.0
+                    ));
+                }
+            }
+            RiscOp::CheckedUnitAxis { .. } | RiscOp::ReluAdjoint => {
                 if arity != 2 {
                     errors.push(format!(
-                        "relu adjoint at node {} has {} inputs (expected 2)",
+                        "binary checked op at node {} has {} inputs (expected 2)",
                         node.id.0, arity
                     ));
                 }
@@ -602,6 +634,67 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     "extent witness at node {} requires nonnegative int64 literals",
                     node.id.0
                 ));
+            }
+        }
+
+        if let RiscOp::CheckedReshapeExtent {
+            axis: crate::dag::RtAxis::Lit(axis),
+            ..
+        } = node.op
+        {
+            if axis < 0 {
+                errors.push(format!(
+                    "checked reshape extent at node {} requires a nonnegative result axis",
+                    node.id.0
+                ));
+            }
+            let scalar =
+                |ty: &crate::dag::TensorType| ty.dims.is_empty() && ty.precision == Prim::Int64;
+            if !scalar(&node.output_type)
+                || node.inputs.iter().any(|input| {
+                    dag.get(*input)
+                        .is_none_or(|input| !scalar(&input.output_type))
+                })
+            {
+                errors.push(format!(
+                    "checked reshape extent at node {} requires scalar int64 inputs and output",
+                    node.id.0
+                ));
+            }
+        }
+        if let RiscOp::CheckedUnitAxis {
+            axis: crate::dag::RtAxis::Lit(axis),
+        } = node.op
+        {
+            let valid = (|| {
+                let [input, witness] = node.inputs.as_slice() else {
+                    return None;
+                };
+                let input_node = dag.get(*input)?;
+                let witness = dag.get(*witness)?;
+                let RiscOp::ExtentWitness {
+                    axis: crate::dag::RtAxis::Lit(observed_axis),
+                    requirements,
+                    ..
+                } = &witness.op
+                else {
+                    return None;
+                };
+                if witness.inputs.as_slice() != [*input]
+                    || *observed_axis != axis
+                    || !requirements
+                        .iter()
+                        .any(|value| value.prim() == Prim::Int64 && value.as_i64_exact() == Some(1))
+                {
+                    return None;
+                }
+                let mut refined = input_node.output_type.clone();
+                *refined.dims.get_mut(usize::try_from(axis).ok()?)? = DimInfo::Lit(1);
+                (refined == node.output_type).then_some(())
+            })()
+            .is_some();
+            if !valid {
+                errors.push(format!("checked unit axis at node {} requires its own tensor-axis witness with requirement one and only that axis refined", node.id.0));
             }
         }
 
