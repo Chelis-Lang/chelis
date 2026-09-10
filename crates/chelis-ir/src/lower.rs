@@ -6421,12 +6421,13 @@ impl<'program> LowerCtx<'program> {
         };
         if let LoweredValue::Adt { host, .. } = &mut result
             && let Some(ty) = host_ty.as_ref()
+            && let Some((_, metadata, _)) = stamped_parts(expr)
         {
+            // Wrappers and bare aliases retain the constructor metadata already
+            // carried by their inner value; only a stamped expression replaces it.
             *host = Some(HostAggregateType {
                 ty: ty.clone(),
-                metadata: stamped_parts(expr)
-                    .map(|(_, metadata, _)| metadata.clone())
-                    .unwrap_or_default(),
+                metadata: metadata.clone(),
             });
         }
         if let Some(id) = result.as_single_node() {
