@@ -680,6 +680,43 @@ coverage freeze adds these executable suites; it does not establish the complete
 Phase 1 execution-receipt oracle or the remaining BLAS/window/host consumers.
 
 
+#### Generated C BLAS submission metadata (#889)
+
+Already selected internal BLAS nodes and host summaries obtain a `MatmulMetadata`
+plan after explicit batch alignment. Its operand/result snapshots own complete
+shapes, batch counts, per-matrix counts, checked matrix indices, and allocation
+bounds. Required declarations and native link flags follow the selected nodes, including
+when no further specialization was requested. Exact result-shape and vendor-dimension checks precede output allocation
+or reuse. Reduced-float conversion scratch uses checked f32 capacities and runtime
+tensor owners/write guards; one batch loop consumes checked source/result indices.
+Empty results make no vendor call, and zero contraction writes dtype-zero output.
+
+The generated translation unit binds its dimension type to the actual sgemm and
+dgemm function prototypes using C11 type assertions. Accelerate's `__LAPACK_int`,
+OpenBLAS's `blasint`, and Netlib's `CBLAS_INT` declarations select a signed 32- or
+64-bit domain; a missing, unsigned, unsupported-width, or inconsistent declaration
+fails compilation. These declarations are compiler-private, so the published
+Chelis ABI stays configuration invariant. Tagged int64 dimensions are checked
+against that domain before casts at the call. Exact per-matrix f32 scratch bytes
+are checked even when source storage uses f16/bf16.
+
+This is metadata adoption, not algorithm selection. [05-OP-30]'s canonical
+contraction rule still prevents shape-only BLAS specialization; production host
+preparation continues clearing those summaries. Direct internal node and summary
+fixtures exercise the submission boundary without re-enabling a vendor shortcut.
+Operand/accumulator/destination dtype choices and conversion arithmetic stay pinned
+by the existing IR. The bounded oracle combines private metadata/projection and
+construction controls, runtime C plan tests in debug/release, generated native
+sanitizer tests, and actual/fake vendor-header width/prototype controls. It does
+not prove vendor arithmetic equivalent for unrestricted inputs or complete Phase 1.
+The 358-entry foundation is unchanged; five retired BLAS consumer identities reduce
+active debt from 300 to 295 without an owner exception. Coverage adds the matrix
+runtime suite in both profiles, delegation bypass controls, and native submission
+and vendor-prototype execution. Production matrix-index and vendor-range mutations
+must fail with overflow checks disabled; virtual f16 operands demonstrate a fitting
+source allocation whose f32 scratch capacity overflows.
+
+
 ## C3. One generated host/device descriptor schema
 
 A new leaf crate, `chelis-abi`, depends only on `chelis-vocab` outside the

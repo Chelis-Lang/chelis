@@ -130,6 +130,12 @@ class SemanticAuthorityTests(unittest.TestCase):
             ):
                 semantics.validate_semantics(wrong, self.spec)
 
+    def test_matmul_diagnostic_reference_does_not_confer_builtin_authority(self):
+        semantics.validate_semantics(self.rows, self.spec)
+        wrong = {**self.rows, "Numeric:matmul:TableA": "[05-OP-33]"}
+        with self.assertRaisesRegex(registry.RegistryError, "govern"):
+            semantics.validate_semantics(wrong, self.spec)
+
     def test_actual_contract_does_not_require_field_labels(self):
         import re
         changed = re.sub(r"\b(?:Signature|Domain|Result|Failure|Adjoint|Accumulator):", "", self.spec)

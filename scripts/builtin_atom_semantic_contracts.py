@@ -101,6 +101,7 @@ CALLABLE_CLAUSES = {
         (("len",), "`len(xs)` accepts List[T] or Dict[K,V] and returns int64"),
         (("max_elem",),
          "`max_elem(left, right) -> result` and `min_elem(left, right) -> result` each admit two values"),
+        (("matmul",), "`matmul(a,b)` uses section 4.1's batched matrix signature"),
         (("mean",), "`mean(x, axes...) -> result` admits a tensor operand of"),
         (("mmap_read", "read_bytes"), "`print(value)->unit!{IO}`, `debug(value)->value!{IO}`"),
         (("rank",), "`rank(x)` and `numel(x)` borrow a tensor and return int32 and int64 respectively"),

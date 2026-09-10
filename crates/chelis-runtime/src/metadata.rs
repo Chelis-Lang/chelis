@@ -47,6 +47,134 @@ pub(crate) struct IterationSpace {
     elements: ElementCount,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum MatmulPart {
+    Left,
+    Right,
+    Result,
+}
+#[derive(Clone, Copy)]
+pub(crate) enum MatmulDimension {
+    Rows,
+    Columns,
+    Reduction,
+}
+
+/// One checked matrix domain after explicit batch alignment. No payload is held.
+pub(crate) struct MatmulMetadata {
+    result: ShapeMetadata,
+    dimensions: [i64; 3],
+    matrices: [ElementCount; 3],
+    totals: [ElementCount; 3],
+    batches: ElementCount,
+}
+
+impl MatmulMetadata {
+    pub(crate) fn new(
+        left: &ShapeMetadata,
+        right: &ShapeMetadata,
+        dtype: RuntimeDType,
+    ) -> Result<Self, MetadataError> {
+        let rank = left.shape.len();
+        if rank < 2
+            || right.shape.len() != rank
+            || left.dtype() != right.dtype()
+            || left.shape[..rank - 2] != right.shape[..rank - 2]
+            || left.shape[rank - 1] != right.shape[rank - 2]
+        {
+            return Err(MetadataError::Domain(
+                "matmul operand shape or dtype mismatch".into(),
+            ));
+        }
+        let m = left.shape[rank - 2];
+        let n = right.shape[rank - 1];
+        let k = left.shape[rank - 1];
+        let mut shape = left.shape.to_vec();
+        shape[rank - 1] = n;
+        let result = ShapeMetadata::contiguous(&shape, dtype)?;
+        result.bytes().allocation()?;
+        let empty = result.elements().get() == 0;
+        let batches = ElementCount::from_extents(if empty { &[0] } else { &shape[..rank - 2] })?;
+        let matrices = if empty {
+            [ElementCount::from_extents(&[0])?; 3]
+        } else {
+            [
+                ElementCount::from_extents(&[m, k])?,
+                ElementCount::from_extents(&[k, n])?,
+                ElementCount::from_extents(&[m, n])?,
+            ]
+        };
+        let totals = [left.elements(), right.elements(), result.elements()];
+        Ok(Self {
+            result,
+            dimensions: [m, n, k],
+            matrices,
+            totals,
+            batches,
+        })
+    }
+    pub(crate) fn result(&self) -> &ShapeMetadata {
+        &self.result
+    }
+    pub(crate) fn dimension(&self, dimension: MatmulDimension) -> i64 {
+        self.dimensions[match dimension {
+            MatmulDimension::Rows => 0,
+            MatmulDimension::Columns => 1,
+            MatmulDimension::Reduction => 2,
+        }]
+    }
+    pub(crate) fn batches(&self) -> ElementCount {
+        self.batches
+    }
+    fn part_index(part: MatmulPart) -> usize {
+        match part {
+            MatmulPart::Left => 0,
+            MatmulPart::Right => 1,
+            MatmulPart::Result => 2,
+        }
+    }
+    pub(crate) fn matrix_count(&self, part: MatmulPart) -> ElementCount {
+        self.matrices[Self::part_index(part)]
+    }
+    pub(crate) fn index(
+        &self,
+        part: MatmulPart,
+        batch: i64,
+        element: i64,
+    ) -> Result<i64, MetadataError> {
+        let matrix = self.matrix_count(part).get();
+        if batch < 0 || batch >= self.batches.get() || element < 0 || element >= matrix {
+            return Err(MetadataError::Domain(
+                "matmul index outside batch or matrix".into(),
+            ));
+        }
+        let index = batch
+            .checked_mul(matrix)
+            .and_then(|n| n.checked_add(element))
+            .ok_or(MetadataError::Overflow("matmul index exceeds int64"))?;
+        if index >= self.totals[Self::part_index(part)].get() {
+            return Err(MetadataError::Domain("matmul index outside operand".into()));
+        }
+        Ok(index)
+    }
+    pub(crate) fn check_vendor(&self, limit: i64) -> Result<(), MetadataError> {
+        if limit <= 0 {
+            return Err(MetadataError::Domain(
+                "matmul vendor dimension limit must be positive".into(),
+            ));
+        }
+        if self.batches.get() != 0
+            && self.dimension(MatmulDimension::Reduction) != 0
+            && self.dimensions.iter().any(|&extent| extent > limit)
+        {
+            return Err(MetadataError::Overflow(
+                "matmul dimension exceeds vendor argument domain",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// The checked row-major domain shared by gather and scatter consumers.
 pub(crate) struct SparseMetadata {
     base: ShapeMetadata,

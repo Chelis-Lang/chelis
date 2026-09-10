@@ -344,6 +344,19 @@ typedef enum {
     CHELIS_SPARSE_GATHER = 0, CHELIS_SPARSE_ADD = 1,
     CHELIS_SPARSE_REPLACE = 2, CHELIS_SPARSE_ELEMENTS = 3
 } chelis_sparse_op;
+typedef enum { CHELIS_MATMUL_LEFT = 0, CHELIS_MATMUL_RIGHT = 1, CHELIS_MATMUL_RESULT = 2 } chelis_matmul_part;
+typedef enum { CHELIS_MATMUL_ROWS = 0, CHELIS_MATMUL_COLUMNS = 1, CHELIS_MATMUL_REDUCTION = 2 } chelis_matmul_dimension_kind;
+typedef struct chelis_matmul_plan chelis_matmul_plan;
+chelis_matmul_plan *chelis_tensor_matmul_plan(const chelis_tensor *left, const chelis_tensor *right, chelis_scalar exemplar);
+int64_t chelis_matmul_extent(const chelis_matmul_plan *plan, chelis_scalar axis);
+int64_t chelis_matmul_dimension(const chelis_matmul_plan *plan, chelis_matmul_dimension_kind dimension);
+int64_t chelis_matmul_batch_count(const chelis_matmul_plan *plan);
+int64_t chelis_matmul_matrix_count(const chelis_matmul_plan *plan, chelis_matmul_part part);
+int64_t chelis_matmul_index(const chelis_matmul_plan *plan, chelis_matmul_part part, chelis_scalar batch, chelis_scalar element);
+void chelis_matmul_check_target(const chelis_matmul_plan *plan, chelis_scalar rank, const chelis_scalar *shape);
+void chelis_matmul_check_scratch(const chelis_matmul_plan *plan, chelis_matmul_part part, chelis_scalar exemplar);
+void chelis_matmul_check_vendor(const chelis_matmul_plan *plan, chelis_scalar maximum);
+void chelis_matmul_plan_release(chelis_matmul_plan *plan);
 typedef struct chelis_sparse_plan chelis_sparse_plan;
 chelis_sparse_plan *chelis_tensor_sparse_plan(const chelis_tensor *base, const chelis_tensor *indices, const chelis_tensor *updates, chelis_scalar axis, chelis_sparse_op operation);
 int64_t chelis_sparse_extent(const chelis_sparse_plan *plan, chelis_scalar axis);
