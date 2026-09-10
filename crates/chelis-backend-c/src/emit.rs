@@ -1694,7 +1694,7 @@ impl CEmitter {
     }
 
     fn shape_literal(ty: &TensorType) -> String {
-        let dims: Vec<String> = ty.dims.iter().map(|dim| Self::emit_dim_info(dim)).collect();
+        let dims: Vec<String> = ty.dims.iter().map(Self::emit_dim_info).collect();
         if dims.is_empty() {
             "NULL".to_string()
         } else {
