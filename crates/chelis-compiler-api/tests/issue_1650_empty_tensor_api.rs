@@ -122,3 +122,62 @@ fn malformed_heterogeneous_and_unresolved_nested_shapes_reject() {
         );
     }
 }
+
+/// A separate signature carries the same checked precision evidence as
+/// annotated parameters, even when the List is computed in the body.
+#[test]
+fn separate_signatures_preserve_computed_list_element_dtypes() {
+    for dtype in ["int32", "int64", "f32", "f64"] {
+        let definitions =
+            "sig make[p: Numeric]: p -> tensor[n, p]\ndef make(x) = to_tensor(drop([x], 1i64))\n";
+        tensor(
+            &format!("{definitions}out = make(cast(1, {dtype}))\n"),
+            dtype,
+            &[0],
+            &[],
+        );
+        tensor(
+            &format!(
+                "{}out = make(cast(1, {dtype}))\n",
+                definitions.replace("drop([x], 1i64)", "[x]")
+            ),
+            dtype,
+            &[1],
+            &[1.0],
+        );
+    }
+}
+
+#[test]
+fn separate_signature_calls_keep_declared_and_checked_binders_independent() {
+    tensor(
+        "sig make[p: Numeric]: p -> tensor[n, p]\ndef make(x) = to_tensor([add(x, cast(1, p))])\nfirst = make(1.0f64)\nout = make(1i64)\n",
+        "int64",
+        &[1],
+        &[2.0],
+    );
+    tensor(
+        "sig make[p: Numeric]: p -> tensor[n, p]\ndef make(x) = to_tensor(drop([x], 1i64))\nfirst = make(1i64)\nout = make(1.0f64)\n",
+        "f64",
+        &[0],
+        &[],
+    );
+}
+
+#[test]
+fn separate_signatures_do_not_supply_unrelated_or_conflicting_dtypes() {
+    for source in [
+        "sig make[p: Numeric]: p -> p\ndef make(x) = { unused = to_tensor([]); x }\nout = make(1i64)\n",
+        "sig make[p: Numeric]: p -> tensor[n, p]\ndef make(x) = to_tensor([x, true])\nout = make(1i64)\n",
+    ] {
+        assert!(
+            eval(EvalRequest {
+                source_kind: SourceKind::Surf,
+                source: source.into(),
+                bindings: Default::default(),
+            })
+            .is_err(),
+            "must reject: {source}"
+        );
+    }
+}

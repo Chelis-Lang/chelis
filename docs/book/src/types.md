@@ -92,6 +92,16 @@ as_float = convert(to_tensor([1, 2, 3]), 0.0f64)
 as_integer = convert(to_tensor([1, 2, 3]), 0i64)
 ```
 
+A separate signature supplies the same dtype evidence when the function builds a List
+internally, including an empty List:
+
+```chelis-surf
+sig empty_like[p: Numeric]: p -> tensor[n, p]
+def empty_like(x) = to_tensor(drop([x], 1i64))
+empty_f64 = empty_like(0.0f64)
+empty_int64 = empty_like(0i64)
+```
+
 An unbounded `[p]` is not a dtype guarantee and cannot be a cast target.
 
 ## Where to go next

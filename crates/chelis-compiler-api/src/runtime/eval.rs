@@ -995,6 +995,9 @@ impl<'a> EvalContext<'a> {
             params,
             param_types,
             return_type,
+            checked_signature: get_meta(list)
+                .and_then(|meta| meta.ty())
+                .map(|ty| ty.expression().clone()),
             body,
             env: self
                 .bindings
@@ -1417,6 +1420,7 @@ impl<'a> EvalContext<'a> {
                 params,
                 param_types,
                 return_type,
+                checked_signature,
                 body,
                 env,
                 precision_env,
@@ -1503,6 +1507,34 @@ impl<'a> EvalContext<'a> {
                             &caller_precisions,
                             &mut call_precisions,
                         )?;
+                    }
+                    // A separately declared signature and the checked body can
+                    // name the same precision with different binders. Actualize
+                    // both from the same checked call-site evidence; body-local
+                    // collectors must not infer a dtype from their payload.
+                    if let Some((checked_result, checked_params)) = checked_signature
+                        .as_ref()
+                        .and_then(checked_function_children)
+                        .and_then(|children| children.split_last())
+                    {
+                        for (checked, actual) in checked_params.iter().zip(arg_type_exprs) {
+                            if let Some(actual) = actual {
+                                collect_checked_precision_bindings(
+                                    checked,
+                                    actual,
+                                    &caller_precisions,
+                                    &mut call_precisions,
+                                )?;
+                            }
+                        }
+                        if let Some(actual) = result_type_expr {
+                            collect_checked_precision_bindings(
+                                checked_result,
+                                actual,
+                                &caller_precisions,
+                                &mut call_precisions,
+                            )?;
+                        }
                     }
                     // The call-site instantiation is fresh (spec/04 §5.8):
                     // callee-owned binders shadow a same-spelled lexical

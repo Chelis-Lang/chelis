@@ -3278,6 +3278,7 @@ fn fo_diag_bools_strings_and_nonnumeric_controls() {
             params: vec!["x".to_string()],
             param_types: vec![None],
             return_type: None,
+            checked_signature: None,
             body: chelis_deep::ast::Expr::Atom(
                 chelis_deep::ast::Atom::Bool(false),
                 chelis_deep::Span::new(0, 0)
