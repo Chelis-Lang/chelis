@@ -62,7 +62,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "1a073cf8e98626175ed0294676a30e061e4509f6415c61c0c92b1aea8dd2f013"
+FREEZE_SHA256 = "b2205e8d5160c9fe6f7760fca9e448b0b4c755981a881fe9954ebcb85dcf7f5e"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -1696,6 +1696,20 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
             ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "parity",
              "--test", "issue_1294_standard_lowerings", "-E",
              "test(parity_count_bool_axes) | test(canonical_sum_) | test(scalar_and_fused_sums_) | test(hosted_matmul_preserves_the_canonical_reduction_tree) | test(hosted_matmul_empty_reductions_)"),
+        ),
+        OracleLeg(
+            "checked C JSON ordering scratch delegation and lifetime controls",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_json_scratch"),
+        ),
+        OracleLeg(
+            "checked C JSON ordering scratch recursive and empty execution",
+            ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "issue_1314_json_bigint",
+             "-E", "test(=json_object_serialization_is_recursive_canonical_unicode_order_in_eval_and_c)"),
+        ),
+        OracleLeg(
+            "checked C JSON scratch ownership ledger and skipped-cleanup mutations",
+            ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "issue_1314_json_bigint",
+             "-E", "test(=json_scratch_execution_detects_skipped_cleanup)"),
         ),
         OracleLeg(
             "checked C window delegation and bypass mutations",

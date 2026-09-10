@@ -748,6 +748,29 @@ active debt from 295 to 294 without adding an owner exception. The complete Phas
 remain separate obligations.
 
 
+#### Generated C JSON ordering scratch (#889)
+
+Canonical JSON object ordering allocates its int64 index scratch through the
+runtime tensor owner, retains one write guard during ordering, and ends/releases
+it after building the ordered list. The ordering algorithm is unchanged. The
+scratch count comes from the validated list length, and allocation checks its
+int64 product, byte count and target capacity before the first scratch access.
+Empty objects allocate a zero-count owner without entering the ordering loops.
+
+The bounded acceptance surface is `checked_c_json_scratch` for delegation and
+cleanup-tail spelling, plus `issue_1314_json_bigint`'s recursive canonical Unicode,
+reordered and empty object case through Eval/C. Its separate
+`json_scratch_execution_detects_skipped_cleanup` test links the exact Cargo archive
+built with the private ownership ledger and executes the emitted ordering helper
+with an explicitly released caller. Empty and two-entry objects leave zero live
+owners/bytes. Output-preserving last-iteration return and omitted-owner-release
+mutations must leave live ownership; omitted guard exit must fail with the active
+write-guard error. The source check alone does not prove control-flow cleanup.
+These execution registrations move the frozen Phase 0 contract under B1; its
+immutable foundation and active identities stay unchanged. Literal ingress,
+movement coordinate scratch and source diagnostic identity, the complete Phase 1
+consumer audit/receipt oracle, and Phase 2 remain separate obligations.
+
 ## C3. One generated host/device descriptor schema
 
 A new leaf crate, `chelis-abi`, depends only on `chelis-vocab` outside the
