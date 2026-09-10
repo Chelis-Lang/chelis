@@ -25,6 +25,7 @@ hipError_t hipMemcpy(void *destination, const void *source, size_t bytes, hipMem
 const char *hipGetErrorString(hipError_t error);
 hipError_t hipGetDevice(int *device);
 hipError_t hipGetDeviceProperties(hipDeviceProp_t *properties, int device);
+hipError_t hipModuleUnload(hipModule_t module);
 hipError_t hipModuleLoadData(hipModule_t *module, const void *code);
 hipError_t hipModuleGetFunction(hipFunction_t *function, hipModule_t module, const char *name);
 hipError_t hipModuleLaunchKernel(hipFunction_t function, unsigned int gx, unsigned int gy,

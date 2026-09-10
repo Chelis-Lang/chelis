@@ -1637,7 +1637,7 @@ fn sparse_scatter_add_i32_emits_atomic_add_kernel() {
     assert!(
         result
             .c_source
-            .contains("atomicAdd(&out[dst], updates[i]);")
+            .contains("atomicAdd(&out[dst], updates[chelis_logical_offset(i, updates_sh, updates_s, updates_ndim)]);")
     );
     assert!(result.c_source.contains("hipMemcpyDeviceToDevice"));
 }

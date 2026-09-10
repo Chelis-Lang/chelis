@@ -139,3 +139,26 @@ fn movement_views_are_complete_before_publication_and_released_before_slots() {
         .unwrap();
     assert!(view_release < slot_release);
 }
+
+#[test]
+fn input_device_preflight_precedes_projection_and_modules_belong_to_the_invocation() {
+    let mut dag = Dag::new();
+    let ty = TensorType {
+        dims: vec![DimInfo::Lit(1)],
+        precision: Prim::F32,
+    };
+    let input = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+    let output = dag.add_node(RiscOp::Neg, vec![input], ty, None);
+    dag.add_root(output);
+    let source = support::codegen_hip(&dag, "context_entry")
+        .unwrap()
+        .c_source;
+    let device = source.split_once("void context_entry_device(").unwrap().1;
+    let preflight = device
+        .find("chelis_device_tensor_device(inputs[slot])")
+        .unwrap();
+    assert!(preflight < device.find("chelis_device_tensor_view(inputs[").unwrap());
+    assert!(preflight < device.find("chelis_compile_kernel(").unwrap());
+    assert!(device.contains("hipModuleUnload("));
+    assert!(!source.contains("static hipModule_t"));
+}

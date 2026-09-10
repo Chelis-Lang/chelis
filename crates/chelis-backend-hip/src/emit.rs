@@ -402,12 +402,11 @@ impl HipEmitter {
         e.emit_reshape_count_preflight(dag);
         e.line("");
 
-        // Emit static kernel module caches
+        // Each invocation owns modules in its current device context
         let kernel_names: Vec<String> = ks.iter().map(|(n, _)| n.clone()).collect();
         for name in &kernel_names {
-            e.line(&format!("static hipModule_t mod_{name} = NULL;"));
             e.line(&format!(
-                "if (!mod_{name}) mod_{name} = chelis_compile_kernel({name}_src, \"{name}\");"
+                "hipModule_t mod_{name} = chelis_compile_kernel({name}_src, \"{name}\");"
             ));
         }
         if !kernel_names.is_empty() {
@@ -486,6 +485,9 @@ impl HipEmitter {
                 _ => None,
             })
             .collect::<Vec<_>>();
+        for name in &kernel_names {
+            e.line(&format!("CHELIS_HIP_CHECK(hipModuleUnload(mod_{name}));"));
+        }
         let cleanup = e.plan.emit_cleanup_with_drops(&dropped_sources);
         for line in cleanup {
             e.lines.push(line);
@@ -555,14 +557,17 @@ impl HipEmitter {
         self.line("}");
         self.line("");
 
+        self.line("if ((n_in > 0 && inputs == NULL) || (n_out > 0 && outputs == NULL)) chelis_numeric_trap(\"numeric trap: domain in entry at int64\");");
+        self.line("int current_device = 0;");
+        self.line("CHELIS_HIP_CHECK(hipGetDevice(&current_device));");
+        self.line("for (int32_t slot = 0; slot < n_in; ++slot) if (chelis_device_tensor_device(inputs[slot]) != current_device) chelis_numeric_trap(\"numeric trap: domain in device_entry at int64\");");
         self.emit_input_shape_preamble_device(dag, input_slots, func_name);
         self.emit_reshape_count_preflight(dag);
         self.line("");
 
         for name in kernel_names {
-            self.line(&format!("static hipModule_t mod_{name} = NULL;"));
             self.line(&format!(
-                "if (!mod_{name}) mod_{name} = chelis_compile_kernel({name}_src, \"{name}\");"
+                "hipModule_t mod_{name} = chelis_compile_kernel({name}_src, \"{name}\");"
             ));
         }
         if !kernel_names.is_empty() {
@@ -614,6 +619,9 @@ impl HipEmitter {
                 _ => None,
             })
             .collect::<Vec<_>>();
+        for name in kernel_names {
+            self.line(&format!("CHELIS_HIP_CHECK(hipModuleUnload(mod_{name}));"));
+        }
         let cleanup = self.plan.emit_cleanup_with_drops(&dropped_sources);
         for line in cleanup {
             self.lines.push(line);
@@ -4822,7 +4830,7 @@ mod tests {
 
         assert!(hip.contains("kernel_scatter_add_i64"));
         assert!(hip.contains("const long long *indices"));
-        assert!(hip.contains("atomicAdd(&out[dst], updates[i]);"));
+        assert!(hip.contains("atomicAdd(&out[dst], updates[chelis_logical_offset(i, updates_sh, updates_s, updates_ndim)]);"));
     }
 
     /// A program-owned `Copy` with a terminal fused use receives the shared

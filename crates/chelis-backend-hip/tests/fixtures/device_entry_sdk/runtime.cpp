@@ -71,6 +71,7 @@ extern "C" hipError_t hipDeviceSynchronize() { return hipSuccess; }
 
 // The actual source was compiled alongside this fixture. Module lookup only
 // selects that compiled function; it does not interpret or replace its work.
+extern "C" hipError_t hipModuleUnload(hipModule_t) { return hipSuccess; }
 extern "C" hipError_t hipModuleLoadData(hipModule_t *module, const void *code) {
     *module = (void *)fixture_kernel((const char *)code);
     REQUIRE(*module != nullptr);
