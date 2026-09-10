@@ -11,7 +11,7 @@ use chelis_types::{
     types::Prim,
 };
 
-use crate::schema::{DictEntryValue, ExecutionValue, TensorElements, TensorValue};
+use crate::schema::{DictEntryValue, ExecutionValue, TensorValue};
 
 mod csv;
 mod eval;
@@ -792,53 +792,23 @@ fn collect_top_level_items<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
 pub(crate) fn runtime_value_to_schema(value: &RuntimeValue) -> Result<ExecutionValue, String> {
     Ok(match value {
         RuntimeValue::Tensor(tensor) => {
-            // Exact per-dtype egress (execution wire v2, chelis#729
-            // section C3): the storage view carries every element at its
-            // own width, so int64 crosses the wire exactly and every
-            // dtype keeps its tag.
-            let data = match tensor.value.storage().view() {
-                chelis_types::StorageView::F64(v) => TensorElements::F64(v.to_vec()),
-                chelis_types::StorageView::F32(v) => TensorElements::F32(v.to_vec()),
-                chelis_types::StorageView::F16(v) => {
-                    TensorElements::F16(v.iter().map(|&x| f64::from(x)).collect())
-                }
-                chelis_types::StorageView::Bf16(v) => {
-                    TensorElements::Bf16(v.iter().map(|&x| f64::from(x)).collect())
-                }
-                chelis_types::StorageView::I64(v) => TensorElements::Int64(v.to_vec()),
-                chelis_types::StorageView::I32(v) => TensorElements::Int32(v.to_vec()),
-                chelis_types::StorageView::I16(v) => TensorElements::Int16(v.to_vec()),
-                chelis_types::StorageView::I8(v) => TensorElements::Int8(v.to_vec()),
-                chelis_types::StorageView::Bool(v) => {
-                    TensorElements::Bool(v.iter().map(|&x| x != 0).collect())
-                }
+            let value = TensorValue {
+                shape: tensor
+                    .value
+                    .shape
+                    .iter()
+                    .map(|extent| {
+                        i64::try_from(*extent)
+                            .map_err(|_| "runtime extent exceeds wire int64".to_string())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                data: tensor.value.storage().clone(),
             };
-            ExecutionValue::Tensor {
-                value: TensorValue {
-                    shape: tensor.value.shape.clone(),
-                    data,
-                },
-            }
+            value.validate()?;
+            ExecutionValue::Tensor { value }
         }
-        RuntimeValue::Scalar(payload) => match payload.value().element_ref() {
-            chelis_types::ElementRef::I8(value) => ExecutionValue::Int8 { value },
-            chelis_types::ElementRef::I16(value) => ExecutionValue::Int16 { value },
-            chelis_types::ElementRef::I32(value) => ExecutionValue::Int32 { value },
-            chelis_types::ElementRef::I64(value) => ExecutionValue::Int64 { value },
-            chelis_types::ElementRef::F16(value) => ExecutionValue::Float16 {
-                value: f64::from(value),
-            },
-            chelis_types::ElementRef::Bf16(value) => ExecutionValue::Bfloat16 {
-                value: f64::from(value),
-            },
-            chelis_types::ElementRef::F32(value) => ExecutionValue::Float32 { value },
-            chelis_types::ElementRef::F64(value) => ExecutionValue::Float64 { value },
-            chelis_types::ElementRef::Bool(_) => {
-                return Err(
-                    "bool ScalarValue unexpectedly reached the numeric RuntimeValue::Scalar wire path"
-                        .to_string(),
-                );
-            }
+        RuntimeValue::Scalar(payload) => ExecutionValue::Scalar {
+            value: payload.value().try_into()?,
         },
         RuntimeValue::Bool(value) => ExecutionValue::Bool { value: *value },
         RuntimeValue::String(value) => ExecutionValue::String {

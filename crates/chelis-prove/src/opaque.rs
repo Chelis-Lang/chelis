@@ -1275,43 +1275,13 @@ pub fn any_non_finite(values: impl IntoIterator<Item = ScalarValue>) -> bool {
         .any(|value| value.prim().is_float() && !value.as_f64_lossy().is_finite())
 }
 
-/// Preserve the execution wire dtype while crossing into the concrete prover.
-/// Exhaustive matching makes a future wire dtype fail to compile here instead
-/// of silently joining a lossy fallback.
+/// Read an already sealed element without numeric conversion or finalization.
+/// The storage carrier owns exhaustive dtype handling and preserves every bit.
 pub(crate) fn tensor_element_scalar(
     elements: &chelis_compiler_api::schema::TensorElements,
     index: usize,
 ) -> Option<ScalarValue> {
-    use chelis_compiler_api::schema::TensorElements;
-    match elements {
-        TensorElements::F64(values) => {
-            scalar_from_f64("prove-wire", Prim::F64, *values.get(index)?).ok()
-        }
-        TensorElements::F32(values) => {
-            scalar_from_f64("prove-wire", Prim::F32, f64::from(*values.get(index)?)).ok()
-        }
-        TensorElements::F16(values) => {
-            scalar_from_f64("prove-wire", Prim::F16, *values.get(index)?).ok()
-        }
-        TensorElements::Bf16(values) => {
-            scalar_from_f64("prove-wire", Prim::Bf16, *values.get(index)?).ok()
-        }
-        TensorElements::Int64(values) => {
-            scalar_from_i64("prove-wire", Prim::Int64, *values.get(index)?).ok()
-        }
-        TensorElements::Int32(values) => {
-            scalar_from_i64("prove-wire", Prim::Int32, i64::from(*values.get(index)?)).ok()
-        }
-        TensorElements::Int16(values) => {
-            scalar_from_i64("prove-wire", Prim::Int16, i64::from(*values.get(index)?)).ok()
-        }
-        TensorElements::Int8(values) => {
-            scalar_from_i64("prove-wire", Prim::Int8, i64::from(*values.get(index)?)).ok()
-        }
-        TensorElements::Bool(values) => {
-            scalar_from_i64("prove-wire", Prim::Bool, i64::from(*values.get(index)?)).ok()
-        }
-    }
+    (index < elements.len()).then(|| elements.scalar_at(index))
 }
 
 fn scalar_json(value: ScalarValue) -> serde_json::Value {
@@ -1640,37 +1610,13 @@ fn read_produced_field(
             // counts as a producer failure.
             let prim = Prim::parse_name(prim_name)?;
             let value = match &root.value {
-                ExecutionValue::Float16 { value } if prim == Prim::F16 => {
-                    scalar_from_f64("prove-produced-field", prim, *value).ok()?
-                }
-                ExecutionValue::Bfloat16 { value } if prim == Prim::Bf16 => {
-                    scalar_from_f64("prove-produced-field", prim, *value).ok()?
-                }
-                ExecutionValue::Float32 { value } if prim == Prim::F32 => {
-                    scalar_from_f64("prove-produced-field", prim, f64::from(*value)).ok()?
-                }
-                ExecutionValue::Float64 { value } if prim == Prim::F64 => {
-                    scalar_from_f64("prove-produced-field", prim, *value).ok()?
-                }
-                ExecutionValue::Int8 { value } if prim == Prim::Int8 => {
-                    scalar_from_i64("prove-produced-field", prim, i64::from(*value)).ok()?
-                }
-                ExecutionValue::Int16 { value } if prim == Prim::Int16 => {
-                    scalar_from_i64("prove-produced-field", prim, i64::from(*value)).ok()?
-                }
-                ExecutionValue::Int32 { value } if prim == Prim::Int32 => {
-                    scalar_from_i64("prove-produced-field", prim, i64::from(*value)).ok()?
-                }
-                ExecutionValue::Int64 { value } if prim == Prim::Int64 => {
-                    scalar_from_i64("prove-produced-field", prim, *value).ok()?
-                }
+                ExecutionValue::Scalar { value } if value.get().prim() == prim => value.get(),
                 ExecutionValue::Bool { value } if prim == Prim::Bool => {
                     scalar_from_i64("prove-produced-field", Prim::Bool, i64::from(*value)).ok()?
                 }
                 // A rank-0/single-element tensor scalar, defensively.
                 ExecutionValue::Tensor { value }
-                    if value.shape.iter().product::<usize>().max(1) == 1
-                        && !value.data.is_empty() =>
+                    if value.validate().is_ok() && value.data.len() == 1 =>
                 {
                     let value = tensor_element_scalar(&value.data, 0)?;
                     if value.prim() != prim {

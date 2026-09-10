@@ -144,7 +144,7 @@ fn issue_1205_corpus_is_canonical_and_checks_clean() {
     for (name, source) in [("nested_check", &nested), ("flat_check", &flat)] {
         let (success, report) = check_report(source, name, false);
         assert!(success, "{name} must check successfully: {report}");
-        assert_eq!(report["score"], 1, "{name} must earn a perfect score");
+        assert_eq!(report["score"], 1.0, "{name} must earn a perfect score");
         assert!(
             report["errors"]
                 .as_array()

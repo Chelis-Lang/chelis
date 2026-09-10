@@ -43,11 +43,11 @@ NOT be published as a frozen low-level guarantee while the implementation evolve
 - **WHEN** documenting `.chb`
 - **THEN** the project does not publish a frozen low-level layout guarantee while the format is still expected to evolve
 
-### Requirement: Exact WireDag schema version 8
+### Requirement: Exact WireDag schema version 9
 
-The compiler-API JSON WireDag surface SHALL carry explicit schema version 8,
-and version 8 SHALL be the only accepted version. Missing, versionless,
-versions 1 through 7, future, unknown-variant, and best-effort payloads SHALL
+The compiler-API JSON WireDag surface SHALL carry explicit schema version 9,
+and version 9 SHALL be the only accepted version. Missing, versionless,
+versions 1 through 8, future, unknown-variant, and best-effort payloads SHALL
 fail before IR construction. `Count.axes` SHALL already be the complete
 non-empty unique normalized original-axis vector in strictly descending order;
 encoder and decoder both reject a noncanonical vector. `Pad.fill` SHALL be a
@@ -55,11 +55,14 @@ tagged `ScalarValue` whose dtype and bits exactly match the padded tensor.
 Runtime movement and reshape metadata SHALL use the structural `WireRtDim`
 carrier. [05-OP-43]'s `Relu` and `ReluAdjoint` SHALL cross the wire as distinct
 identities with one and two inputs respectively; every input SHALL have the
-output's exact float dtype and dimensions.
+output's exact float dtype and dimensions. `ExtentWitness` SHALL retain its
+ordered fixed-int64 requirements and provenance, while `shape_deps` SHALL be
+u64 references to earlier nodes. All three provenance/dependency node fields
+SHALL be explicit, including empty lists and a null span identity.
 
 #### Scenario: Unknown or older schema fails before IR construction
 
-- **WHEN** a consumer receives a versionless, v1-v7, future-version, or unknown-variant WireDag payload
+- **WHEN** a consumer receives a versionless, v1-v8, future-version, or unknown-variant WireDag payload
 - **THEN** decoding fails before any IR node is materialized
 
 #### Scenario: Noncanonical Count axes are not rewritten
@@ -100,6 +103,16 @@ use the chapter's exact fixed-dtype adapters over sealed numeric carriers.
 
 - **WHEN** a report value or source numeric literal shares a container with a source coordinate
 - **THEN** each leaf retains its own numeric or source-syntax contract and normal admission
+
+#### Scenario: Inferred parameter references retain their scope
+
+- **WHEN** a check report carries an inferred function signature's ordered parameters
+- **THEN** every parameter index is a u64 equal to its zero-based position in that list, independent of its name
+
+#### Scenario: Observed extents retain their exact numeric domain
+
+- **WHEN** a compiled-artifact dimension or inferred literal dimension carries an observed extent
+- **THEN** it carries a nonnegative exact int64; negative values, alternate dtypes, and int64 overflow are rejected, while an absent named extent remains unresolved
 
 ### Requirement: Decode-boundary invariant revalidation
 

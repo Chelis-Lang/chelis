@@ -22,8 +22,9 @@
 //!    (`spec/design/remediation_roadmap.md` anti-churn invariant 7).
 //!
 //! This file and the baseline are guard artifacts: editing either to make a
-//! change pass is never the fix. Deferred legs (wire-schema numeric fields,
-//! binding-side raw-dtype parameters) remain typed, fixed manifest entries;
+//! change pass is never the fix. Wire-schema numeric fields and binding-side
+//! raw-dtype parameters have typed, fixed executable manifest entries.
+//! The wire aggregate requires final authority and execution receipts;
 //! relabeling JSON cannot claim an enumerator or mutation oracle exists.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -2105,9 +2106,11 @@ fn coverage_manifest() -> CoverageManifest {
             },
             CoveredLeg {
                 leg: "wire-schema-numeric-fields".to_string(),
-                artifact: "crates/chelis-compiler-api/src/schema.rs public serialized type graph"
+                artifact: "compiler/Python serialization publication roots and their reachable \
+                           rustdoc JSON type graph"
                     .to_string(),
-                enumerator: "rustdoc JSON public schema type graph -> wire-schema numeric fields"
+                enumerator: "capacity_census_typed.py wire -> private wire verifier: \
+                             publication graph inventory, final authority, and execution receipts"
                     .to_string(),
                 command: "cargo nextest run -p chelis-compiler-api --test capacity_census_wire"
                     .to_string(),
@@ -2116,6 +2119,10 @@ fn coverage_manifest() -> CoverageManifest {
                 mutations: vec![
                     "adding_or_removing_a_public_serialized_f64_field_changes_the_census"
                         .to_string(),
+                    "verified_wire_authority_cannot_be_replaced_by_a_descriptor_or_baseline"
+                        .to_string(),
+                    "wire_baseline_rejects_exception_fields_and_nonfinal_classes".to_string(),
+                    "wire_rows_cannot_erase_capacity_or_duplicate_an_identity".to_string(),
                 ],
             },
             CoveredLeg {
@@ -4663,6 +4670,84 @@ fn shared_header_cannot_have_multiple_public_macro_contexts() {
         message.contains("CONTEXT-VARYING PUBLIC ABI"),
         "the rejection must name the context-invariance policy: {message}"
     );
+}
+
+#[test]
+fn wire_coverage_manifest_names_graph_and_execution_authority() {
+    let manifest = coverage_manifest();
+    let wire = manifest
+        .covered
+        .iter()
+        .find(|leg| leg.leg == "wire-schema-numeric-fields")
+        .expect("the wire leg has an executable aggregate");
+    assert!(wire.artifact.contains("publication roots"));
+    assert!(wire.enumerator.contains("final authority"));
+    assert!(wire.enumerator.contains("execution receipts"));
+    assert_eq!(
+        wire.command,
+        "cargo nextest run -p chelis-compiler-api --test capacity_census_wire"
+    );
+    assert!(wire.mutations.iter().any(|test| {
+        test == "verified_wire_authority_cannot_be_replaced_by_a_descriptor_or_baseline"
+    }));
+    assert!(
+        wire.mutations
+            .iter()
+            .any(|test| { test == "wire_baseline_rejects_exception_fields_and_nonfinal_classes" })
+    );
+    assert!(
+        wire.mutations
+            .iter()
+            .any(|test| { test == "wire_rows_cannot_erase_capacity_or_duplicate_an_identity" })
+    );
+    let baseline = Baseline {
+        version: 3,
+        legs: manifest,
+        rows: vec![],
+    };
+    check_against_baseline(&[], &baseline).expect("the executable manifest is accepted");
+}
+
+#[test]
+fn wire_coverage_cannot_drop_execution_or_restore_schema_only_inventory() {
+    for change in ["artifact", "enumerator", "mutations"] {
+        let mut manifest = coverage_manifest();
+        let wire = manifest
+            .covered
+            .iter_mut()
+            .find(|leg| leg.leg == "wire-schema-numeric-fields")
+            .unwrap();
+        match change {
+            "artifact" => {
+                wire.artifact =
+                    "crates/chelis-compiler-api/src/schema.rs public serialized type graph"
+                        .to_string();
+            }
+            "enumerator" => {
+                wire.enumerator =
+                    "rustdoc JSON public schema type graph -> wire-schema numeric fields"
+                        .to_string();
+            }
+            "mutations" => {
+                wire.mutations = vec![
+                    "adding_or_removing_a_public_serialized_f64_field_changes_the_census"
+                        .to_string(),
+                ];
+            }
+            _ => unreachable!(),
+        }
+        let baseline = Baseline {
+            version: 3,
+            legs: manifest,
+            rows: vec![],
+        };
+        let error = check_against_baseline(&[], &baseline)
+            .expect_err("an obsolete wire manifest must fail");
+        assert!(
+            error.contains("INVALID COVERAGE MANIFEST"),
+            "{change}: {error}"
+        );
+    }
 }
 
 #[test]

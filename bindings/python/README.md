@@ -9,8 +9,19 @@ Current guarantees:
 - `chelis.check(...)`, `compile(...)`, `desugar(...)`, `decompile(...)`, `validate(...)`
   share the same compiler implementation as Tide through `chelis-compiler-api`
 - `chelis.from_dlpack(...)` is CPU-only; unsupported GPU tensors fail as `ValueError`
-- `chelis.eval(...)` may copy inputs into the evaluator's internal `Vec<f64>`
-  representation in `3b`
+- `chelis.eval(...)` copies inputs through execution wire v3's exact dtype
+  carriers. Float payloads use fixed-width lowercase IEEE bit strings, preserving
+  signed zero and every NaN payload. Scalars return their declared NumPy integer
+  or float type; `bf16` uses `ml_dtypes.bfloat16`. Tensor results carry the dtype
+  in `TensorValue.dtype`, with exact integer values or own-width float scalars in
+  `TensorValue.data`. Calling `float(value)` explicitly converts a result.
+- NumPy `uint8`, `uint16`, and `uint32` inputs widen exactly to `int16`, `int32`,
+  and `int64`; unsupported widths such as `uint64` require an explicit caller
+  conversion. Native and nonnative byte order, strided arrays, and rank-zero
+  arrays preserve their stored bits.
+- Execution results require schema version 3 before any value is decoded.
+  Missing or other versions, malformed dtype carriers, invalid shapes, and
+  mismatched element counts raise `ValueError`.
 - `chelis.compile_and_load(...)` is the product path for compiled execution;
   `chelis.load(...)` is the advanced path for existing artifacts
 - compiled execution currently supports fully concrete `float32` tensors

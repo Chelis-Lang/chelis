@@ -532,6 +532,15 @@ fn lex_number(source: &str, i: &mut usize) -> Result<Token, LexError> {
             text: text.to_string(),
             offset: start,
         })?;
+        // spec/03 §6.4 and spec/10 §3.3 admit finite source floats only.
+        // Rust's parser returns infinity for exponent overflow; rejecting it
+        // here keeps every source consumer behind the same lexical boundary.
+        if !val.is_finite() {
+            return Err(LexError::InvalidNumber {
+                text: text.to_string(),
+                offset: start,
+            });
+        }
         if let Some(s) = suffix {
             if s.is_integer() {
                 return Err(LexError::IntegerSuffixOnFloat {
@@ -790,6 +799,37 @@ mod tests {
                 TokenKind::Float(2.0e-3),
             ]
         );
+    }
+
+    #[test]
+    fn source_float_finiteness_includes_exponent_overflow_and_signed_zero() {
+        for text in ["1e999", "-1e999", "1e999f16", "-1e999f64"] {
+            let source = format!("  {text}");
+            assert!(
+                matches!(lex(&source), Err(LexError::InvalidNumber { offset: 2, .. })),
+                "{text}"
+            );
+        }
+        for (text, bits) in [
+            ("1.7976931348623157e308", f64::MAX.to_bits()),
+            ("-1.7976931348623157e308", (-f64::MAX).to_bits()),
+            ("-0.0", (-0.0_f64).to_bits()),
+            ("5e-324", 1),
+        ] {
+            for suffix in ["", "f64"] {
+                let tokens = lex(&format!("{text}{suffix}")).unwrap();
+                let [
+                    Token {
+                        kind: TokenKind::Float(value) | TokenKind::TypedFloat(value, _),
+                        ..
+                    },
+                ] = tokens.as_slice()
+                else {
+                    panic!("expected one float token");
+                };
+                assert_eq!(value.to_bits(), bits);
+            }
+        }
     }
 
     #[test]

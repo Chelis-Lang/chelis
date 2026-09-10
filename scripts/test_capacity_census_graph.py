@@ -650,9 +650,9 @@ class CarrierRecognition(unittest.TestCase):
                 del a.doc["paths"]["900"]
             else:
                 impl_id = a.doc["index"]["1"]["inner"]["enum"]["impls"][0]
-                a.doc["index"][str(impl_id)]["inner"]["impl"]["trait"][
-                    "path"
-                ] = "RenamedSerialize"
+                a.doc["index"][str(impl_id)]["inner"]["impl"]["trait"]["path"] = (
+                    "RenamedSerialize"
+                )
             found = graph(a)
             if mutation == "renamed":
                 verify_transport(found, found.numeric_leaves[0], [span_contract(found)])
@@ -661,6 +661,22 @@ class CarrierRecognition(unittest.TestCase):
                     verify_transport(
                         found, found.numeric_leaves[0], [span_contract(found)]
                     )
+
+    def test_one_sided_derived_codec_identity_is_preserved(self):
+        identities = []
+        for traits, expected in (
+            ((), "unproven"),
+            ((0,), "serde-derived-serialize"),
+            ((1,), "serde-derived-deserialize"),
+            ((0, 1), "serde-derived"),
+        ):
+            a = Artifact("chelis_compiler_api").span()
+            body = a.doc["index"]["1"]["inner"]["enum"]
+            body["impls"] = [body["impls"][i] for i in traits]
+            found = graph(a)
+            self.assertEqual(found.definitions[0].codec, expected)
+            identities.append(found.identity)
+        self.assertEqual(len(set(identities)), 4)
 
     def test_missing_serde_proof_and_stale_leaf_are_rejected(self):
         a = Artifact("chelis_compiler_api").span()
@@ -672,6 +688,81 @@ class CarrierRecognition(unittest.TestCase):
         b.struct(1, "Other", [b.field("value", primitive("i64"))])
         with self.assertRaisesRegex(GraphError, "leaf"):
             verify_transport(found, graph(b).numeric_leaves[0], [span_contract(found)])
+
+
+class SerializedCandidates(unittest.TestCase):
+    def test_outside_schema_export_and_unknown_custom_codec_remain_candidates(self):
+        a = Artifact()
+        a.struct(
+            1,
+            "Schema",
+            [a.field("value", primitive("u32"))],
+            public=False,
+            path=["fixture", "schema", "Schema"],
+        )
+        a.struct(
+            2,
+            "ExecutionMetadata",
+            [a.field("extent", primitive("i64"))],
+            public=False,
+            path=["fixture", "compiler", "ExecutionMetadata"],
+        )
+        a.add(
+            10,
+            "schema",
+            {"module": {"items": [1], "is_stripped": False}},
+            path=["fixture", "schema"],
+        )
+        a.add(
+            11,
+            "compiler",
+            {"module": {"items": [2], "is_stripped": False}},
+            path=["fixture", "compiler"],
+        )
+        a.doc["index"]["0"]["inner"]["module"]["items"] = [10, 11]
+        for custom in (False, True):
+            changed = copy.deepcopy(a.doc)
+            if custom:
+                impl = changed["index"]["2"]["inner"]["struct"]["impls"][0]
+                changed["index"][str(impl)]["attrs"] = []
+            engine = RustdocGraph([changed])
+            candidates = engine.serialization_candidates("fixture")
+            self.assertEqual(
+                set(candidates),
+                {"fixture::schema::Schema", "fixture::compiler::ExecutionMetadata"},
+            )
+            if custom:
+                with self.assertRaisesRegex(GraphError, "custom.*adapter"):
+                    engine.discover(
+                        "fixture", candidates["fixture::compiler::ExecutionMetadata"]
+                    )
+            else:
+                self.assertEqual(
+                    engine.discover(
+                        "fixture", candidates["fixture::compiler::ExecutionMetadata"]
+                    )
+                    .numeric_leaves[0]
+                    .primitive,
+                    "i64",
+                )
+        del a.doc["paths"]["900"]
+        with self.assertRaisesRegex(GraphError, "serde.*identity"):
+            RustdocGraph([a.doc]).serialization_candidates("fixture")
+
+    def test_non_type_import_is_not_a_root_but_unresolved_type_import_rejects(self):
+        a = Artifact()
+        a.struct(1, "Root", [a.field("value", primitive("u32"))])
+        a.external(70, "external::some_function")
+        a.doc["paths"]["70"]["kind"] = "function"
+        a.add(71, "import", {"use": {"id": 70, "name": "imported", "is_glob": False}})
+        a.doc["index"]["0"]["inner"]["module"]["items"].append(71)
+        self.assertEqual(
+            set(RustdocGraph([a.doc]).serialization_candidates("fixture")),
+            {"fixture::Root"},
+        )
+        a.doc["paths"]["70"]["kind"] = "struct"
+        with self.assertRaisesRegex(GraphError, "missing defining artifact"):
+            RustdocGraph([a.doc]).serialization_candidates("fixture")
 
 
 class FixtureOwnership(unittest.TestCase):
@@ -742,6 +833,33 @@ class ActualRustdoc(unittest.TestCase):
         self.assertEqual(dict(span.serde), {"tag": "span", "rename_all": "snake_case"})
         wrapper = next(d for d in found.definitions if d.identity.endswith("::Wrapped"))
         self.assertEqual(dict(wrapper.edges[0].serde), {"rename": "where"})
+        from capacity_census_wire_schema import _SchemaShapeGraph
+
+        def common(doc):
+            schema = _SchemaShapeGraph([doc], [])
+            return schema.discover(
+                "serde_graph_fixture", exports["serde_graph_fixture::CommonEnvelope"]
+            )
+
+        actual = common(document)
+        self.assertEqual(
+            {leaf.primitive for leaf in actual.numeric_leaves}, {"f64", "i32"}
+        )
+        self.assertTrue(
+            any(leaf.path.endswith("WrappedFloat.$0") for leaf in actual.numeric_leaves)
+        )
+        for replacement in (
+            "#[serde(skip)]",
+            '#[serde(skip_serializing_if = "Vec::is_empty")]',
+            '#[serde(skip_serializing_if = "custom::is_empty")]',
+        ):
+            changed = copy.deepcopy(document)
+            field = next(
+                i for i in changed["index"].values() if i.get("name") == "values"
+            )
+            field["attrs"] = [{"other": replacement}]
+            with self.assertRaises(GraphError):
+                common(changed)
         with self.assertRaisesRegex(GraphError, "custom.*adapter"):
             engine.discover(
                 "serde_graph_fixture", exports["serde_graph_fixture::Manual"]

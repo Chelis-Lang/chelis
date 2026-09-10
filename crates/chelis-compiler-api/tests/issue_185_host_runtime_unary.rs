@@ -62,7 +62,7 @@ out = abs(&make)
     let expected = [3.0, 1.5, 0.0, 1.5, 3.0];
     for (i, &want) in expected.iter().enumerate() {
         assert_close(
-            out.data.element_as_f64_lossy(i),
+            out.data.element_f64_lossy(i),
             want,
             1e-6,
             &format!("abs[{i}]"),
@@ -89,7 +89,7 @@ out = cos(&make)
     ];
     for (i, &want) in expected.iter().enumerate() {
         assert_close(
-            out.data.element_as_f64_lossy(i),
+            out.data.element_f64_lossy(i),
             want,
             1e-6,
             &format!("cos[{i}]"),
@@ -113,7 +113,7 @@ out = tan(&make)
     ];
     for (i, &want) in expected.iter().enumerate() {
         assert_close(
-            out.data.element_as_f64_lossy(i),
+            out.data.element_f64_lossy(i),
             want,
             1e-5,
             &format!("tan[{i}]"),
@@ -133,7 +133,7 @@ out = floor(&make)
     let expected = [-2.0, -1.0, 0.0, 1.0, 2.0];
     for (i, &want) in expected.iter().enumerate() {
         assert_close(
-            out.data.element_as_f64_lossy(i),
+            out.data.element_f64_lossy(i),
             want,
             1e-6,
             &format!("floor[{i}]"),
@@ -153,7 +153,7 @@ out = ceil(&make)
     let expected = [-1.0, 0.0, 1.0, 2.0, 2.0];
     for (i, &want) in expected.iter().enumerate() {
         assert_close(
-            out.data.element_as_f64_lossy(i),
+            out.data.element_f64_lossy(i),
             want,
             1e-6,
             &format!("ceil[{i}]"),
@@ -177,7 +177,7 @@ out = atan(&make)
     ];
     for (i, &want) in expected.iter().enumerate() {
         assert_close(
-            out.data.element_as_f64_lossy(i),
+            out.data.element_f64_lossy(i),
             want,
             1e-6,
             &format!("atan[{i}]"),

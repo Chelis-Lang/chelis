@@ -112,7 +112,7 @@ fn type_only_import_then_construct_is_unknown_constructor() {
     let combo = file_entry(&json, "consumer.ch");
     let msgs = error_messages(combo);
     assert_ne!(
-        combo["report"]["score"], 1,
+        combo["report"]["score"], 1.0,
         "type-only import then construct must NOT be a perfect score: {combo}"
     );
     assert!(
@@ -142,7 +142,7 @@ fn type_only_import_then_match_pattern_is_unknown_constructor() {
     let combo = file_entry(&json, "consumer.ch");
     let msgs = error_messages(combo);
     assert_ne!(
-        combo["report"]["score"], 1,
+        combo["report"]["score"], 1.0,
         "type-only import then match must NOT be a perfect score: {combo}"
     );
     assert!(
@@ -176,7 +176,7 @@ fn import_by_name_construct_and_match_checks_clean() {
     let combo = file_entry(&json, "consumer.ch");
     let msgs = error_messages(combo);
     assert_eq!(
-        combo["report"]["score"], 1,
+        combo["report"]["score"], 1.0,
         "imported-by-name constructors must resolve and check clean: {combo}"
     );
     assert!(
@@ -206,7 +206,7 @@ fn local_constructor_construct_and_match_checks_clean() {
     let combo = file_entry(&json, "local.ch");
     let msgs = error_messages(combo);
     assert_eq!(
-        combo["report"]["score"], 1,
+        combo["report"]["score"], 1.0,
         "local constructors must resolve and check clean: {combo}"
     );
     assert!(
@@ -236,7 +236,7 @@ fn module_qualified_constructor_checks_clean() {
     let combo = file_entry(&json, "consumer.ch");
     let msgs = error_messages(combo);
     assert_eq!(
-        combo["report"]["score"], 1,
+        combo["report"]["score"], 1.0,
         "module-qualified constructor must resolve and check clean: {combo}"
     );
     assert!(
@@ -266,7 +266,7 @@ fn builtin_option_constructors_check_clean() {
     let combo = file_entry(&json, "opt.ch");
     let msgs = error_messages(combo);
     assert_eq!(
-        combo["report"]["score"], 1,
+        combo["report"]["score"], 1.0,
         "builtin Option constructors must resolve and check clean: {combo}"
     );
     assert!(
@@ -294,7 +294,7 @@ fn builtin_list_constructors_check_clean() {
     let combo = file_entry(&json, "lst.ch");
     let msgs = error_messages(combo);
     assert_eq!(
-        combo["report"]["score"], 1,
+        combo["report"]["score"], 1.0,
         "builtin List Cons/Nil constructors must resolve and check clean: {combo}"
     );
     assert!(
@@ -339,7 +339,7 @@ fn type_only_import_then_record_construct_is_unknown_constructor() {
     let combo = file_entry(&json, "consumer.ch");
     let msgs = error_messages(combo);
     assert_ne!(
-        combo["report"]["score"], 1,
+        combo["report"]["score"], 1.0,
         "type-only import then record construct must NOT be a perfect score: {combo}"
     );
     assert!(
@@ -370,7 +370,7 @@ fn import_record_constructor_by_name_checks_clean() {
     let combo = file_entry(&json, "consumer.ch");
     let msgs = error_messages(combo);
     assert_eq!(
-        combo["report"]["score"], 1,
+        combo["report"]["score"], 1.0,
         "imported-by-name record constructor must resolve and check clean: {combo}"
     );
     assert!(
@@ -419,7 +419,7 @@ fn ambiguous_foreign_constructor_pattern_under_wildcard_is_rejected() {
     let combo = file_entry(&json, "consumer.ch");
     let msgs = error_messages(combo);
     assert_ne!(
-        combo["report"]["score"], 1,
+        combo["report"]["score"], 1.0,
         "ambiguous foreign constructor pattern under a wildcard must NOT score perfect: {combo}"
     );
     assert!(
@@ -453,7 +453,7 @@ fn module_qualified_constructor_pattern_checks_clean() {
     let combo = file_entry(&json, "consumer.ch");
     let msgs = error_messages(combo);
     assert_eq!(
-        combo["report"]["score"], 1,
+        combo["report"]["score"], 1.0,
         "module-qualified constructor pattern must resolve and check clean: {combo}"
     );
     assert!(
@@ -483,7 +483,7 @@ fn nested_out_of_scope_constructor_pattern_is_unknown_constructor() {
     let combo = file_entry(&json, "consumer.ch");
     let msgs = error_messages(combo);
     assert_ne!(
-        combo["report"]["score"], 1,
+        combo["report"]["score"], 1.0,
         "nested out-of-scope constructor pattern must NOT score perfect: {combo}"
     );
     assert!(

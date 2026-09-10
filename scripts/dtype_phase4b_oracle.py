@@ -481,19 +481,19 @@ FROZEN_REGION_DIGESTS = {
         'spec/11-ffi.md',
         '## 1. Python Interop',
         '## 2. C Interop',
-        '4ab5f5f0b8cd948648b4afa4ade5950b8686b1e10e2809ab5c78e26450ae7ee7',
+        '837dbd997cbe338382f349f51629a61cf326df75070ee86028cb542c2dfffdae',
     ),
     'numeric wire codecs and roles': (
         'spec/10-serialization.md',
         '### 3.2 Exact Numeric Value Codec',
         '## 4. Invariant Revalidation At Decode Boundaries',
-        '1703f7335244efd2d1189e74ab33cbecb8a57bbe615027fd1fa20cdbd83d42b4',
+        '273568d1ffaf227ad5d67ba2cba960de0c9a1121187d973c831b201947798caa',
     ),
     "agent numeric surface discipline": (
         "AGENTS.md",
         "### Numeric Surface Discipline",
         "### Public-Surface Change Rule",
-        "0be875e998a6052fae32a0fda037ae397ebf5710c5e5c2365541c4ed0b859b41",
+        "1e0620ff04db0988f44b04171e596344616fecb1448945c7d77a1cac633c9ac2",
     ),
     "numeric value semantics": (
         "spec/04-type-system.md",
@@ -1225,10 +1225,22 @@ def validate_normative_contract(
     require_all(
         spec10,
         (
-            ("Schema version 8 is explicitly\npresent", "wire v8 presence"),
+            ("Schema version 9 is explicitly\npresent", "wire v9 presence"),
             ("the only accepted version", "wire current-version exactness"),
             ("There is no versionless default", "wire versionless rejection"),
             ("versionless default, legacy migration", "wire migration rejection"),
+            (
+                "Every requirement uses the exact\n`NonnegativeExtent` adapter over a nonnegative `int64`",
+                "wire literal-witness requirement carrier",
+            ),
+            (
+                "`WireDagNode.shape_deps` contains exact u64 node\nreferences to strictly earlier nodes",
+                "wire shape-dependency references",
+            ),
+            (
+                "`shape_deps`, `span_id` (explicitly null when absent), and `merged_spans` are\nmandatory fields",
+                "wire mandatory invocation fields",
+            ),
             ("WireRiscOp::Count { axes }", "wire count variant"),
             (
                 "complete\nnon-empty vector of unique normalized original-axis "
@@ -1294,7 +1306,7 @@ def validate_normative_contract(
     )
     require_all(
         docs["spec/design/dtype_semantics.md"],
-        (("No partial WireDag v8 is published.", "wire atomic cutover"),),
+        (("No partial WireDag v9 is published.", "wire atomic cutover"),),
         violations,
     )
     require_all(

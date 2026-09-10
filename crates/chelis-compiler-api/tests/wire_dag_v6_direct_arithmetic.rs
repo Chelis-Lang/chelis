@@ -35,9 +35,9 @@ fn direct_sub_payload(version: Option<u32>) -> String {
     payload.to_string()
 }
 
-fn count_payload(axes: &[usize]) -> String {
+fn count_payload(axes: &[i32]) -> String {
     serde_json::json!({
-        "schema_version": 8,
+        "schema_version": 9,
         "nodes": [
             {
                 "id": 0,
@@ -99,13 +99,13 @@ fn assert_version_rejected_before_node_decode(payload: &str, expected: &str) {
 
 #[test]
 fn current_exact_wire_round_trips_direct_sub_identity() {
-    assert_eq!(WIRE_DAG_SCHEMA_VERSION, 8);
-    let payload = direct_sub_payload(Some(8));
+    assert_eq!(WIRE_DAG_SCHEMA_VERSION, 9);
+    let payload = direct_sub_payload(Some(9));
     let decoded = WireDag::from_validated_json(&payload).expect("exact current Sub must decode");
     assert!(matches!(decoded.nodes[2].op, WireRiscOp::Sub));
 
     let encoded = serde_json::to_value(&decoded).expect("exact current Sub must re-encode");
-    assert_eq!(encoded["schema_version"], 8);
+    assert_eq!(encoded["schema_version"], 9);
     assert_eq!(encoded["nodes"][2]["op"]["kind"], "sub");
 }
 
@@ -128,13 +128,13 @@ fn missing_older_and_future_versions_fail_before_node_decode() {
     };
 
     assert_version_rejected_before_node_decode(&unknown_op(None), "missing");
-    for version in 1..=7 {
+    for version in 1..=8 {
         assert_version_rejected_before_node_decode(
             &unknown_op(Some(version)),
             &version.to_string(),
         );
     }
-    assert_version_rejected_before_node_decode(&unknown_op(Some(9)), "9");
+    assert_version_rejected_before_node_decode(&unknown_op(Some(10)), "10");
 }
 
 #[test]
@@ -154,8 +154,14 @@ fn current_wire_includes_the_canonical_count_form_owned_by_issue_1287() {
         let error = WireDag::from_validated_json(&count_payload(&axes))
             .expect_err("noncanonical or out-of-range Count axes must reject");
         let message = error.to_string();
+        let names_axis_failure = message.contains("axis") || message.contains("axes");
         assert!(
-            message.contains("Count") && (message.contains("axis") || message.contains("axes")),
+            names_axis_failure
+                && if axes == [3] {
+                    message.contains("input rank")
+                } else {
+                    message.contains("Count")
+                },
             "Count axes {axes:?} produced the wrong rejection: {error}"
         );
     }
@@ -176,7 +182,7 @@ fn current_wire_has_no_legacy_pad_migration_or_raw_fill_spelling() {
     assert_version_rejected_before_node_decode(legacy, "4");
 
     let mut raw_current: serde_json::Value = serde_json::from_str(legacy).unwrap();
-    raw_current["schema_version"] = 8.into();
+    raw_current["schema_version"] = 9.into();
     raw_current["nodes"][0]["shape_deps"] = serde_json::json!([]);
     raw_current["nodes"][0]["span_id"] = serde_json::Value::Null;
     raw_current["nodes"][0]["merged_spans"] = serde_json::json!([]);

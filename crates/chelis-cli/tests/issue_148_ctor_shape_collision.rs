@@ -87,7 +87,7 @@ fn positional_ctor_call_resolves_to_positional_variant_when_record_collides() {
 
     let json = run_check(&fixture);
     let msgs = error_messages(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         msgs.is_empty(),
         "positional dispatch on mixed-shape collision must produce no errors; got {msgs:?}"
@@ -116,7 +116,7 @@ fn record_ctor_call_resolves_to_record_variant_when_positional_collides() {
 
     let json = run_check(&fixture);
     let msgs = error_messages(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         msgs.is_empty(),
         "record dispatch on mixed-shape collision must produce no errors; got {msgs:?}"

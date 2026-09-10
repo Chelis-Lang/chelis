@@ -1,20 +1,23 @@
+use chelis_compiler_api::schema::numbers::NonnegativeExtent;
 use chelis_compiler_api::schema::{
     WIRE_DAG_SCHEMA_VERSION, WireDag, WireDagDecodeError, WireDagNode, WireDagSchemaError,
     WireDimInfo, WireRiscOp, WireRtAxis, WireRtDim, WireTensorType,
 };
 
-fn ty(dims: &[usize], precision: &str) -> WireTensorType {
+fn ty(dims: &[i64], precision: &str) -> WireTensorType {
     WireTensorType {
         dims: dims
             .iter()
             .copied()
-            .map(|size| WireDimInfo::Lit { size })
+            .map(|size| WireDimInfo::Lit {
+                size: NonnegativeExtent::new(size).unwrap(),
+            })
             .collect(),
         precision: precision.to_string(),
     }
 }
 
-fn load(id: usize, name: &str, dims: &[usize], precision: &str) -> WireDagNode {
+fn load(id: u64, name: &str, dims: &[i64], precision: &str) -> WireDagNode {
     WireDagNode {
         shape_deps: vec![],
         span_id: None,
@@ -32,7 +35,7 @@ fn expand_dag(size: WireRtDim, bound: WireDagNode) -> WireDag {
     WireDag {
         schema_version: WIRE_DAG_SCHEMA_VERSION,
         nodes: vec![
-            load(0, "value", &[], "f32"),
+            load(0, "value", &[1], "f32"),
             bound,
             WireDagNode {
                 shape_deps: vec![],
@@ -66,7 +69,7 @@ fn assert_contract_rejects(dag: &WireDag, expected: &str) {
 
 #[test]
 fn v7_input_axis_round_trips_as_typed_structure() {
-    assert_eq!(WIRE_DAG_SCHEMA_VERSION, 8);
+    assert_eq!(WIRE_DAG_SCHEMA_VERSION, 9);
     let dag = expand_dag(
         WireRtDim::InputAxis {
             tensor: 1,
@@ -76,7 +79,7 @@ fn v7_input_axis_round_trips_as_typed_structure() {
     );
 
     let json = serde_json::to_string(&dag).expect("valid InputAxis must encode");
-    assert!(json.contains(r#""schema_version":8"#), "{json}");
+    assert!(json.contains(r#""schema_version":9"#), "{json}");
     assert!(
         json.contains(
             r#""size":{"bound":"input_axis","tensor":1,"axis":{"axis":"lit","value":0}}"#
@@ -216,7 +219,9 @@ fn v7_input_axis_rejects_negative_or_out_of_range_axes_and_forbidden_owners() {
                             tensor: 1,
                             axis: WireRtAxis::Lit { value: 0 },
                         },
-                        WireRtDim::Lit { value: 0 },
+                        WireRtDim::Lit {
+                            value: NonnegativeExtent::new(0).unwrap(),
+                        },
                     )],
                     fill: chelis_types::scalar_from_f64(
                         "wire_runtime_extent_test",
@@ -236,7 +241,7 @@ fn v7_input_axis_rejects_negative_or_out_of_range_axes_and_forbidden_owners() {
 
 #[test]
 fn v6_display_string_expand_payload_is_rejected_before_op_decode() {
-    let old = r#"{"schema_version":6,"nodes":[{"id":0,"op":{"kind":"expand","axis":0,"size":"4"},"inputs":[],"output_type":{"dims":[],"precision":"f32"}}],"roots":[0]}"#;
+    let old = r#"{"schema_version":6,"nodes":[{"shape_deps":[],"span_id":null,"merged_spans":[],"id":0,"op":{"kind":"expand","axis":0,"size":"4"},"inputs":[],"output_type":{"dims":[],"precision":"f32"}}],"roots":[0]}"#;
     assert!(matches!(
         WireDag::from_validated_json(old),
         Err(WireDagDecodeError::Schema(
@@ -247,7 +252,7 @@ fn v6_display_string_expand_payload_is_rejected_before_op_decode() {
         ))
     ));
 
-    let stale_spelling = old.replace("\"schema_version\":6", "\"schema_version\":8");
+    let stale_spelling = old.replace("\"schema_version\":6", "\"schema_version\":9");
     assert!(matches!(
         WireDag::from_validated_json(&stale_spelling),
         Err(WireDagDecodeError::Parse(_))
@@ -281,13 +286,17 @@ fn v7_shrink_rejects_a_to_end_end_over_a_non_zero_start() {
     };
 
     // The one well-formed spelling still round trips.
-    let valid = shrink_dag(WireRtDim::Lit { value: 0 });
+    let valid = shrink_dag(WireRtDim::Lit {
+        value: NonnegativeExtent::new(0).unwrap(),
+    });
     let raw = serde_json::to_string(&valid).expect("the identity slice encodes");
     let decoded = WireDag::from_validated_json(&raw).expect("the identity slice decodes");
     assert_eq!(decoded.nodes.len(), 2);
 
     assert_contract_rejects(
-        &shrink_dag(WireRtDim::Lit { value: 1 }),
+        &shrink_dag(WireRtDim::Lit {
+            value: NonnegativeExtent::new(1).unwrap(),
+        }),
         "pairs the to_end carrier with a start that is not literal 0",
     );
 
@@ -303,7 +312,12 @@ fn v7_shrink_rejects_a_to_end_end_over_a_non_zero_start() {
                     merged_spans: vec![],
                     id: 1,
                     op: WireRiscOp::Shrink {
-                        bounds: vec![(WireRtDim::ToEnd, WireRtDim::Lit { value: 4 })],
+                        bounds: vec![(
+                            WireRtDim::ToEnd,
+                            WireRtDim::Lit {
+                                value: NonnegativeExtent::new(4).unwrap(),
+                            },
+                        )],
                     },
                     inputs: vec![0],
                     output_type: ty(&[4], "f32"),

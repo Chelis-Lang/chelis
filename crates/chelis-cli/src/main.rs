@@ -2185,26 +2185,23 @@ fn synthetic_check_report_with_error(message: &str) -> Result<String, Box<dyn st
         span_id: None,
         suggestions: Vec::new(),
     };
-    let result = CheckResult {
+    let report = chelis_types::FitnessReport {
         score: 0.0,
-        components: chelis_compiler_api::schema::FitnessComponents {
+        components: chelis_types::fitness::FitnessComponents {
             parse: 0.0,
             structure: 0.0,
             names: 0.0,
             types: 0.0,
         },
+        errors: vec![error],
         typed_nodes: 0,
         untyped_nodes: 0,
         total_nodes: 0,
-        unresolved_names: Vec::new(),
-        inferred_signatures: None,
-        errors: vec![Diagnostic::from_check_error(&error)],
+        unresolved_names: vec![],
     };
-    // Propagated rather than absorbed into a fallback string. A fallback
-    // would be a second producer of the document -- the exact thing
-    // [04-FIT-11] forbids -- reintroduced to handle a failure this report's
-    // owned `String`s, `f64`s and `Value`s cannot have.
-    Ok(result.to_report_json()?)
+    let wire = CheckResult::try_from_fitness(&report)
+        .expect("fixed synthetic report has valid numeric fields");
+    Ok(wire.to_report_json()?)
 }
 
 /// Exit-code contract (issue #207, supersedes RT-205 F7):
@@ -2463,7 +2460,11 @@ fn cmd_check_one_on_grown_stack(
                     fitness,
                     typed_program,
                 } => {
-                    let inferred = show_inferred.then(|| inferred_signatures_value(&typed_program));
+                    let inferred = if show_inferred {
+                        Some(inferred_signatures_value(&typed_program)?)
+                    } else {
+                        None
+                    };
                     (fitness, Vec::new(), Vec::new(), inferred)
                 }
                 chelis_compiler_api::LayeredCheck::EffectRejected {
@@ -2471,7 +2472,11 @@ fn cmd_check_one_on_grown_stack(
                     effect_errors,
                     typed_program,
                 } => {
-                    let inferred = show_inferred.then(|| inferred_signatures_value(&typed_program));
+                    let inferred = if show_inferred {
+                        Some(inferred_signatures_value(&typed_program)?)
+                    } else {
+                        None
+                    };
                     (fitness, effect_errors, Vec::new(), inferred)
                 }
                 chelis_compiler_api::LayeredCheck::LinearityRejected {
@@ -2479,7 +2484,11 @@ fn cmd_check_one_on_grown_stack(
                     linearity_errors,
                     typed_program,
                 } => {
-                    let inferred = show_inferred.then(|| inferred_signatures_value(&typed_program));
+                    let inferred = if show_inferred {
+                        Some(inferred_signatures_value(&typed_program)?)
+                    } else {
+                        None
+                    };
                     (fitness, Vec::new(), linearity_errors, inferred)
                 }
             }
@@ -2516,7 +2525,7 @@ fn cmd_check_one_on_grown_stack(
             }
             let prepared = chelis_compiler_api::pipeline::prepare_surf_decls(&decls, None)
                 .map_err(|error| boxed_string_error(error.to_string()))?;
-            check_prepared_for_cli(prepared, show_inferred)
+            check_prepared_for_cli(prepared, show_inferred)?
         };
     assemble_check_json(
         report,
@@ -2526,47 +2535,52 @@ fn cmd_check_one_on_grown_stack(
     )
 }
 
-fn check_prepared_for_cli(
-    prepared: chelis_compiler_api::pipeline::PreparedProgram,
-    show_inferred: bool,
-) -> (
+type PreparedCliReport = (
     chelis_types::FitnessReport,
     Vec<chelis_effects::EffectError>,
     Vec<chelis_types::errors::CheckError>,
-    Option<Vec<serde_json::Value>>,
-) {
+    Option<Vec<chelis_compiler_api::schema::WireInferredSignature>>,
+);
+
+fn check_prepared_for_cli(
+    prepared: chelis_compiler_api::pipeline::PreparedProgram,
+    show_inferred: bool,
+) -> Result<PreparedCliReport, Box<dyn std::error::Error>> {
     let analysis = match chelis_compiler_api::pipeline::analyze_prepared(prepared) {
         chelis_compiler_api::pipeline::PreparedTypeAnalysisOutcome::Rejected { fitness } => {
-            // A rejected program has no inferred signatures to report, but
-            // the caller asked for the member, so it is present and empty --
-            // distinct from absent, which means "not requested".
-            return (
+            return Ok((
                 fitness,
                 Vec::new(),
                 Vec::new(),
                 show_inferred.then(Vec::new),
-            );
+            ));
         }
         chelis_compiler_api::pipeline::PreparedTypeAnalysisOutcome::Accepted(analysis) => *analysis,
     };
 
     let fitness = analysis.fitness().clone();
-    let inferred = show_inferred.then(|| inferred_signatures_value(analysis.program()));
-    match chelis_compiler_api::pipeline::complete_checks(
-        analysis,
-        chelis_compiler_api::pipeline::SemanticContext::Isolated,
-    ) {
-        Ok(_) => (fitness, Vec::new(), Vec::new(), inferred),
-        Err(chelis_compiler_api::pipeline::SemanticRejection::Effects { errors }) => {
-            (fitness, errors, Vec::new(), inferred)
-        }
-        Err(chelis_compiler_api::pipeline::SemanticRejection::Linearity { errors }) => {
-            (fitness, Vec::new(), errors, inferred)
-        }
-    }
+    let inferred = if show_inferred {
+        Some(inferred_signatures_value(analysis.program())?)
+    } else {
+        None
+    };
+    Ok(
+        match chelis_compiler_api::pipeline::complete_checks(
+            analysis,
+            chelis_compiler_api::pipeline::SemanticContext::Isolated,
+        ) {
+            Ok(_) => (fitness, Vec::new(), Vec::new(), inferred),
+            Err(chelis_compiler_api::pipeline::SemanticRejection::Effects { errors }) => {
+                (fitness, errors, Vec::new(), inferred)
+            }
+            Err(chelis_compiler_api::pipeline::SemanticRejection::Linearity { errors }) => {
+                (fitness, Vec::new(), errors, inferred)
+            }
+        },
+    )
 }
 
-/// Assemble the hand-built `chelis check` JSON report and the issue
+/// Assemble the typed `chelis check` JSON report and the issue
 /// #207 non-empty-errors flag from the post-pipeline analysis outputs.
 ///
 /// Shared verbatim between the `.ch` monolithic / layered arm of
@@ -2583,67 +2597,35 @@ fn assemble_check_json(
     mut report: chelis_types::FitnessReport,
     effect_errors: &[chelis_effects::EffectError],
     linearity_errors: &[chelis_types::errors::CheckError],
-    inferred_signatures: Option<Vec<serde_json::Value>>,
+    inferred_signatures: Option<Vec<chelis_compiler_api::schema::WireInferredSignature>>,
 ) -> Result<(String, bool), Box<dyn std::error::Error>> {
+    use chelis_compiler_api::schema::numbers::UnitInterval;
+    // Validate the measured report before applying the specified penalties;
+    // otherwise max(0) could turn an invalid NaN score into a plausible zero.
+    let mut wire = CheckResult::try_from_fitness(&report).map_err(boxed_string_error)?;
     if !effect_errors.is_empty() {
         report.score = (report.score - 0.2 * effect_errors.len() as f64).max(0.0);
     }
     if !linearity_errors.is_empty() {
         report.score = (report.score - 0.2 * linearity_errors.len() as f64).max(0.0);
     }
-    // chelis#886: one typed producer per diagnostic list. These were three
-    // hand-written `format!` templates spelling the kind with `{:?}`, which
-    // left no place for a structured payload and coupled a published wire
-    // spelling to a Rust variant name with nothing asserting the mapping.
-    //
-    // The carrier is `schema::Diagnostic`, not the checker's own error
-    // types. Serializing `CheckError` directly would make a `chelis-types`
-    // struct a numeric wire root outside the §C6 census, and would spell the
-    // kind from a Rust identifier; projecting onto the schema type keeps the
-    // census rooted where it is and takes the spelling from the sealed
-    // `DiagnosticKind` vocabulary.
-    let mut errors: Vec<Diagnostic> = Vec::new();
-    for error in &report.errors {
-        errors.push(Diagnostic::from_check_error(error));
-    }
-    for error in effect_errors {
-        // `EffectError` carries no severity of its own; 0.8 was a constant
-        // in the template this replaces.
-        errors.push(Diagnostic::from_effect_error(error, 0.8));
-    }
-    for error in linearity_errors {
-        errors.push(Diagnostic::from_check_error(error));
-    }
-
-    // chelis#886 [04-FIT-11]: one typed value, serialized once. The
-    // document used to be a `format!` template that spelled every key by
-    // hand, so `CheckResult` described a shape nothing produced. Adding a
-    // report field now changes this struct and the wire together, and
-    // cannot change one without the other.
-    let result = CheckResult {
-        score: report.score,
-        components: chelis_compiler_api::schema::FitnessComponents {
-            parse: report.components.parse,
-            structure: report.components.structure,
-            names: report.components.names,
-            types: report.components.types,
-        },
-        typed_nodes: report.typed_nodes,
-        untyped_nodes: report.untyped_nodes,
-        total_nodes: report.total_nodes,
-        unresolved_names: report.unresolved_names.clone(),
-        // [04-FIT-13]: a member of the report's type, absent by omission
-        // when the caller did not ask for it. It used to be a JSON string
-        // spliced between two literal keys of the template.
-        inferred_signatures,
-        errors,
-    };
-    // Issue #207: surface the non-empty-errors flag so the caller can
-    // map it to the process exit code. The fitness JSON shape is
-    // unchanged; this is purely an out-of-band signal.
-    let errors_in_report = !result.errors.is_empty();
-    let json = result.to_report_json()?;
-    Ok((json, errors_in_report))
+    wire.score = UnitInterval::new(report.score).map_err(boxed_string_error)?;
+    wire.errors.extend(effect_errors.iter().map(|error| {
+        Diagnostic::from_effect_error(
+            error,
+            UnitInterval::new(0.8).expect("constant effect severity"),
+        )
+    }));
+    wire.errors.extend(
+        linearity_errors
+            .iter()
+            .map(Diagnostic::try_from_check_error)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(boxed_string_error)?,
+    );
+    wire.inferred_signatures = inferred_signatures;
+    let errors_in_report = !wire.errors.is_empty();
+    Ok((wire.to_report_json()?, errors_in_report))
 }
 
 /// `chelis check` ingestion for a standalone Deep (`.dp`) file.
@@ -2685,7 +2667,7 @@ fn cmd_check_one_deep(
     }
     let prepared = chelis_compiler_api::pipeline::prepare_deep(deep_exprs, None);
     let (report, effect_errors, linearity_errors, inferred) =
-        check_prepared_for_cli(prepared, show_inferred);
+        check_prepared_for_cli(prepared, show_inferred)?;
     assemble_check_json(report, &effect_errors, &linearity_errors, inferred)
 }
 
@@ -2762,124 +2744,171 @@ mod advisory_lint_scope_tests {
     }
 }
 
-/// The structured inferred-signature rows, as a JSON value.
-///
-/// chelis#886 [04-FIT-13]: these used to be rendered to a string here and
-/// spliced into the document template. They are now a value carried in
-/// `CheckResult`, so the report's type covers them like every other member.
-fn inferred_signatures_value(checked: &chelis_types::CheckedProgram) -> Vec<serde_json::Value> {
-    // Per-def inferred effect rows, keyed by def name. Computed from the
-    // same `CheckedProgram` so the structured effect-row a consumer
-    // (Hull) reads is the exact row `chelis check` infers. Functions
-    // with no effects map to an empty row (`[]`), which is distinct from
-    // "effects unknown".
+fn inferred_signatures_value(
+    checked: &chelis_types::CheckedProgram,
+) -> Result<Vec<chelis_compiler_api::schema::WireInferredSignature>, Box<dyn std::error::Error>> {
+    use chelis_compiler_api::schema::{WireInferredParameter, WireInferredSignature};
     let effect_rows = chelis_effects::def_effect_rows(checked);
-    let entries: Vec<serde_json::Value> = checked
+    let entries = checked
         .signature_inference()
         .functions
         .values()
         .map(|func| {
-            let params: Vec<serde_json::Value> = func
+            let params = func
                 .params
                 .iter()
                 .map(|param| {
-                    serde_json::json!({
-                        "index": param.index,
-                        "name": param.name,
-                        "written": param.written,
-                        "inferred_read_only": param.inferred_read_only,
-                        // Human-facing display strings (unchanged).
-                        "checked_type": format_cli_type(&param.checked_type),
-                        "display_type": format_cli_type(&param.display_type),
-                        // Structured, lossless type trees (new).
-                        "checked_type_structured": wire_inferred_type(&param.checked_type),
-                        "display_type_structured": wire_inferred_type(&param.display_type),
+                    Ok(WireInferredParameter {
+                        index: u64::try_from(param.index).map_err(|_| {
+                            boxed_string_error("parameter index exceeds uint64".into())
+                        })?,
+                        name: param.name.clone(),
+                        written: param.written,
+                        inferred_read_only: param.inferred_read_only,
+                        checked_type: format_cli_type(&param.checked_type),
+                        display_type: format_cli_type(&param.display_type),
+                        checked_type_structured: wire_inferred_type(&param.checked_type)?,
+                        display_type_structured: wire_inferred_type(&param.display_type)?,
                     })
                 })
-                .collect();
+                .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
             let effect_row = effect_rows.get(&func.name);
-            serde_json::json!({
-                "function": func.name,
-                "recursive_cycle": func.recursive_cycle,
-                // Human-facing display strings (unchanged).
-                "checked_signature": format_cli_type(&func.checked_signature),
-                "display_signature": format_cli_type(&func.display_signature),
-                // Structured, lossless signature type trees (new).
-                "checked_signature_structured": wire_inferred_type(&func.checked_signature),
-                "display_signature_structured": wire_inferred_type(&func.display_signature),
-                // Structured effect row (new). Always present; empty for
-                // a pure function. Also expose the human Display spelling
-                // (`Random`/`Accum`/`IO`/`Test`/`Resource("dev")`) for
-                // parity with stderr diagnostics.
-                "effect_row": wire_effect_row(effect_row),
-                "effect_row_display": effect_row_display(effect_row),
-                "params": params,
+            Ok(WireInferredSignature {
+                function: func.name.clone(),
+                recursive_cycle: func.recursive_cycle,
+                checked_signature: format_cli_type(&func.checked_signature),
+                display_signature: format_cli_type(&func.display_signature),
+                checked_signature_structured: wire_inferred_type(&func.checked_signature)?,
+                display_signature_structured: wire_inferred_type(&func.display_signature)?,
+                effect_row: wire_effect_row(effect_row),
+                effect_row_display: effect_row_display(effect_row),
+                params: params.try_into().map_err(boxed_string_error)?,
             })
         })
-        .collect();
-    entries
+        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+    Ok(entries)
 }
 
 /// Convert a checker [`Type`] into the lossless, serde-friendly
 /// [`WireInferredType`] tree emitted by `chelis check --show-inferred
 /// --json`. This is the structured counterpart to [`format_cli_type`];
 /// the two must stay in lockstep on every `Type` variant.
-fn wire_inferred_type(ty: &Type) -> WireInferredType {
-    match ty {
+fn wire_inferred_type(ty: &Type) -> Result<WireInferredType, String> {
+    Ok(match ty {
         Type::Prim(prim) => WireInferredType::Prim {
             name: prim.name().to_string(),
         },
         Type::Fn(args, ret) => WireInferredType::Fn {
-            args: args.iter().map(wire_inferred_type).collect(),
-            ret: Box::new(wire_inferred_type(ret)),
+            args: args
+                .iter()
+                .map(wire_inferred_type)
+                .collect::<Result<_, _>>()?,
+            ret: Box::new(wire_inferred_type(ret)?),
         },
         Type::Ref(inner) => WireInferredType::Ref {
-            inner: Box::new(wire_inferred_type(inner)),
+            inner: Box::new(wire_inferred_type(inner)?),
         },
         Type::Tensor(dims, prec) => WireInferredType::Tensor {
-            dims: dims.iter().map(wire_inferred_dim).collect(),
+            dims: dims
+                .iter()
+                .map(wire_inferred_dim)
+                .collect::<Result<_, _>>()?,
             precision: wire_inferred_precision(prec),
         },
         Type::Adt(name, args) => WireInferredType::Adt {
             name: name.clone(),
             args: args
                 .iter()
-                .map(|ty| WireInferredAdtArg::Type(wire_inferred_type(ty)))
-                .collect(),
+                .map(|ty| wire_inferred_type(ty).map(WireInferredAdtArg::Type))
+                .collect::<Result<_, _>>()?,
         },
         Type::KindedAdt(name, args) => WireInferredType::Adt {
             name: name.clone(),
             args: args
                 .iter()
-                .map(|argument| match argument {
-                    NominalArg::Type(ty) => WireInferredAdtArg::Type(wire_inferred_type(ty)),
-                    NominalArg::Dimension(dim) => {
-                        WireInferredAdtArg::Dimension(WireInferredDimensionArg::Dimension {
-                            dim: wire_inferred_dim(dim),
-                        })
-                    }
+                .map(|argument| {
+                    Ok(match argument {
+                        NominalArg::Type(ty) => WireInferredAdtArg::Type(wire_inferred_type(ty)?),
+                        NominalArg::Dimension(dim) => {
+                            WireInferredAdtArg::Dimension(WireInferredDimensionArg::Dimension {
+                                dim: wire_inferred_dim(dim)?,
+                            })
+                        }
+                    })
                 })
-                .collect(),
+                .collect::<Result<_, String>>()?,
         },
         Type::Var(var) => WireInferredType::Var { id: var.0 },
         Type::Tuple(types) => WireInferredType::Tuple {
-            items: types.iter().map(wire_inferred_type).collect(),
+            items: types
+                .iter()
+                .map(wire_inferred_type)
+                .collect::<Result<_, _>>()?,
         },
         Type::Unit => WireInferredType::Unit,
         Type::Error(_) => WireInferredType::Error,
+    })
+}
+
+#[cfg(test)]
+mod inferred_wire_extent_tests {
+    use super::*;
+    use chelis_types::types::Prim;
+
+    #[test]
+    fn inferred_metadata_keeps_exact_nonnegative_extents() {
+        let ty = Type::Tensor(
+            vec![Dim::Lit(0), Dim::Lit(i64::MAX)],
+            TensorPrec::Concrete(Prim::F32),
+        );
+        let wire = wire_inferred_type(&ty).expect("valid metadata extents");
+        let json = serde_json::to_value(wire).unwrap();
+        assert_eq!(json["dims"][0]["size"], 0);
+        assert_eq!(json["dims"][1]["size"], i64::MAX);
+    }
+
+    #[test]
+    fn extents_are_checked_through_every_recursive_type_container() {
+        for extent in [0, -1] {
+            let invalid = Type::Tensor(vec![Dim::Lit(extent)], TensorPrec::Concrete(Prim::F32));
+            for ty in [
+                invalid.clone(),
+                Type::Ref(Box::new(invalid.clone())),
+                Type::Fn(vec![invalid.clone()], Box::new(Type::Unit)),
+                Type::Fn(vec![], Box::new(invalid.clone())),
+                Type::Tuple(vec![invalid.clone()]),
+                Type::Adt("Holder".into(), vec![invalid.clone()]),
+                Type::KindedAdt("Holder".into(), vec![NominalArg::Type(invalid)]),
+                Type::KindedAdt(
+                    "Sized".into(),
+                    vec![NominalArg::Dimension(Dim::Lit(extent))],
+                ),
+            ] {
+                let result = wire_inferred_type(&ty);
+                if extent == 0 {
+                    result.expect("zero extent survives every container");
+                } else {
+                    let error = result.expect_err("negative metadata extent");
+                    assert!(error.contains("nonnegative int64"), "{error}");
+                }
+            }
+        }
     }
 }
 
 /// Convert a checker [`Dim`] into a [`WireInferredDim`]. Structured
 /// counterpart to [`format_cli_dim`].
-fn wire_inferred_dim(dim: &Dim) -> WireInferredDim {
-    match dim {
+fn wire_inferred_dim(dim: &Dim) -> Result<WireInferredDim, String> {
+    use chelis_compiler_api::schema::numbers::NonnegativeExtent;
+    Ok(match dim {
         Dim::Name(name) => WireInferredDim::Name { name: name.clone() },
         Dim::Var(var) => WireInferredDim::Var { id: var.0 },
-        Dim::Lit(value) => WireInferredDim::Lit { size: *value },
+        Dim::Lit(value) => WireInferredDim::Lit {
+            size: NonnegativeExtent::new(*value)?,
+        },
         Dim::Wildcard => WireInferredDim::Wildcard,
         Dim::Rank(rank) => WireInferredDim::Rank { id: rank.0 },
-    }
+    })
 }
 
 /// Convert a checker [`TensorPrec`] into a [`WireInferredPrecision`].

@@ -16,3 +16,22 @@ impl Serialize for Manual {
         serializer.serialize_f64(self.0)
     }
 }
+
+#[derive(Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct WrappedFloat(f64);
+#[derive(Serialize, Deserialize)]
+pub struct CommonSerde {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    values: Option<Vec<WrappedFloat>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    direct: Vec<i32>,
+    #[serde(skip)]
+    display: Option<String>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CommonEnvelope {
+    Values(CommonSerde),
+    Empty { marker: String },
+}

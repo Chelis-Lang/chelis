@@ -43,6 +43,9 @@
 //! `compile_reef_context` + `eval_in_context` reef pipeline for the true
 //! cross-module-boundary shape), so they reproduce the failure directly.
 
+#[path = "../../../tests/support/wire_values.rs"]
+mod wire_values;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -421,9 +424,7 @@ fn issue_319_reshape_precision_poly_verb_lowers() {
         &out,
         &TensorValue {
             shape: vec![6],
-            data: chelis_compiler_api::schema::TensorElements::from_f64_vec(vec![
-                1.0, 4.0, 2.0, 5.0, 3.0, 6.0,
-            ]),
+            data: wire_values::storage_f64(vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]),
         },
         1e-6,
         "issue #319 reshape values",
@@ -447,9 +448,7 @@ fn issue_319_expand_precision_poly_verb_lowers() {
         &out,
         &TensorValue {
             shape: vec![2, 2],
-            data: chelis_compiler_api::schema::TensorElements::from_f64_vec(vec![
-                1.0, 1.0, 2.0, 2.0,
-            ]),
+            data: wire_values::storage_f64(vec![1.0, 1.0, 2.0, 2.0]),
         },
         1e-6,
         "issue #319 expand values",
@@ -542,7 +541,7 @@ fn issue_319_one_precision_var_still_grads_at_a_monomorphic_call_site() {
         &grad,
         &TensorValue {
             shape: vec![2, 3],
-            data: chelis_compiler_api::schema::TensorElements::from_f64_vec(vec![1.0; 6]),
+            data: wire_values::storage_f64(vec![1.0; 6]),
         },
         1e-6,
         "issue #319 monomorphic grad = ones",
@@ -605,10 +604,15 @@ fn issue_319_distinct_precisions_not_force_merged() {
                 .find(|r| r.name.as_deref() == Some("out"))
                 .expect("out root");
             match &root.value {
-                ExecutionValue::Float32 { value } => assert!(
-                    (*value - 21.0).abs() < f32::EPSILON,
-                    "issue #319 distinct-precision: f32 result must be exact (21.0), got {value}",
-                ),
+                ExecutionValue::Scalar { value } => {
+                    let chelis_types::ElementRef::F32(value) = value.get().element_ref() else {
+                        panic!("expected exact f32 scalar, got {value:?}");
+                    };
+                    assert!(
+                        (value - 21.0).abs() < f32::EPSILON,
+                        "issue #319: expected 21.0, got {value}"
+                    );
+                }
                 ExecutionValue::Tensor { value } => {
                     let s: f64 = value.data.to_f64_lossy_vec().iter().sum();
                     assert!(

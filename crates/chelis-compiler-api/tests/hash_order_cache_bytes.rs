@@ -409,9 +409,9 @@ fn cache_roots_are_exact_bytes_across_24_fresh_processes() {
         .expect("compiled saved bytes are part of the artifact set")
         .1
         .clone();
-    assert!(saved.starts_with(b"CHELIS_CTX_V17\n"));
-    let mut preceding = b"CHELIS_CTX_V16\n".to_vec();
-    preceding.extend_from_slice(&saved[b"CHELIS_CTX_V17\n".len()..]);
+    assert!(saved.starts_with(b"CHELIS_CTX_V18\n"));
+    let mut preceding = b"CHELIS_CTX_V17\n".to_vec();
+    preceding.extend_from_slice(&saved[b"CHELIS_CTX_V18\n".len()..]);
     let preceding_path = scratch.path().join("compiled-context-v16.ctx");
     fs::write(&preceding_path, preceding).expect("write preceding-format fixture");
     assert!(matches!(

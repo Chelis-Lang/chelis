@@ -12,11 +12,14 @@
 //! a `shape`-reading def a named root. Both facts are locked below so the
 //! routing change is measured against them rather than inferred.
 
+#[path = "../../../tests/support/wire_values.rs"]
+mod wire_values;
+
 use std::collections::BTreeMap;
 
 use chelis_compiler_api::compiler::{eval, eval_selected};
 use chelis_compiler_api::schema::{
-    EvalRequest, EvalResult, ExecutionValue, SourceKind, TensorElements, TensorValue,
+    EvalRequest, EvalResult, ExecutionValue, SourceKind, TensorValue,
 };
 use chelis_types::types::Lane;
 
@@ -33,12 +36,15 @@ const HOST_APPLIED_1376: &str = "def f(x: tensor[n, f32], y: tensor[m, f32]) -> 
 
 fn f32_tensor(shape: &[usize], data: &[f32]) -> TensorValue {
     TensorValue {
-        shape: shape.to_vec(),
-        data: TensorElements::F32(data.to_vec()),
+        shape: shape
+            .iter()
+            .map(|value| i64::try_from(*value).unwrap())
+            .collect(),
+        data: wire_values::storage_f32(data.to_vec()),
     }
 }
 
-fn root_shape(result: &EvalResult, name: &str) -> Vec<usize> {
+fn root_shape(result: &EvalResult, name: &str) -> Vec<i64> {
     let root = result
         .roots
         .iter()

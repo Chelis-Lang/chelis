@@ -13,55 +13,17 @@ from capacity_census_typed import (
     binding_rows,
     build_parser,
     resolve_target_dir,
-    wire_rows,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CENSUS_CALL_SITES = (
-    REPO_ROOT / "crates/chelis-compiler-api/tests/capacity_census_wire.rs",
+    REPO_ROOT / "tests/support/capacity_census_wire_verifier.rs",
     REPO_ROOT / "crates/chelis-python/tests/capacity_census_bindings.rs",
 )
 # Flags that let a call site decide what gets built or censused. Both exist
 # for ad-hoc local runs; neither belongs in a test that guards a frozen
 # baseline.
 FORBIDDEN_CALL_SITE_FLAGS = ("--target-dir", "--rustdoc-json")
-
-
-def serialized_struct_document(field_type: dict | None) -> dict:
-    fields = [3] if field_type is not None else []
-    index = {
-        "1": {
-            "id": 1,
-            "name": "ReviewerWireNumericProbe",
-            "span": {"filename": "crates/chelis-compiler-api/src/schema.rs"},
-            "visibility": "public",
-            "inner": {
-                "struct": {
-                    "kind": {"plain": {"fields": fields, "has_stripped_fields": False}},
-                    "impls": [2],
-                }
-            },
-        },
-        "2": {"inner": {"impl": {"trait": {"path": "Serialize"}}}},
-    }
-    if field_type is not None:
-        index["3"] = {
-            "name": "value",
-            "inner": {"struct_field": field_type},
-        }
-    return {
-        "index": index,
-        "paths": {
-            "1": {
-                "path": [
-                    "chelis_compiler_api",
-                    "schema",
-                    "ReviewerWireNumericProbe",
-                ],
-                "kind": "struct",
-            }
-        },
-    }
 
 
 def binding_document(input_type: dict) -> dict:
@@ -86,22 +48,6 @@ def binding_document(input_type: dict) -> dict:
             }
         },
     }
-
-
-class WireEnumerator(unittest.TestCase):
-    def test_public_serialized_f64_addition_and_removal_change_rows(self) -> None:
-        before = wire_rows(serialized_struct_document(None))
-        after = wire_rows(serialized_struct_document({"primitive": "f64"}))
-        self.assertEqual(before, [])
-        self.assertEqual(len(after), 1)
-        self.assertEqual(after[0]["flags"], ["float-carrier"])
-        self.assertIn("ReviewerWireNumericProbe.value: f64", after[0]["id"])
-        self.assertEqual(wire_rows(serialized_struct_document(None)), before)
-
-    def test_nonserialized_public_type_is_not_a_wire_carrier(self) -> None:
-        document = serialized_struct_document({"primitive": "f64"})
-        document["index"]["1"]["inner"]["struct"]["impls"] = []
-        self.assertEqual(wire_rows(document), [])
 
 
 class BindingEnumerator(unittest.TestCase):
@@ -193,6 +139,12 @@ class SharedRustdocTargetDir(unittest.TestCase):
             parser.parse_args(["wire", "--target-dir", "/tmp/explicit"]).target_dir,
             Path("/tmp/explicit"),
         )
+
+    def test_live_wire_guard_uses_the_private_verification_bridge(self) -> None:
+        path = REPO_ROOT / "crates/chelis-compiler-api/tests/capacity_census_wire.rs"
+        source = path.read_text()
+        self.assertIn('tests/support/capacity_census_wire_verifier.rs', source)
+        self.assertIn('capacity_census_wire_verifier::discover()', source)
 
     def test_call_site_guard_reads_the_real_files(self) -> None:
         # Guard the guard: a renamed or moved census test must fail loudly

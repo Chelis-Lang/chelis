@@ -12,7 +12,7 @@
       "id": "chelis_python::compile_and_load(py: Python<'_>, source_path: &str, target: &str, source_kind: &str, entry_name: Option<String>, artifact_dir: Option<&str>, project_root: Option<&str>, force_bare: bool) -> PyResult<NativeCompiledModel>",
       "kind": "binding-pyfunction",
       "authority": "nonnumeric",
-      "graph_identity": "df928e8b5c3604275604db9fac267565ee476f26d4e020c9c10ea4d41474e8ae"
+      "graph_identity": "7e1772e2120ef628df71d646bbc0630dd3bdc563b0c73ac19a812f4da8268e60"
     },
     {
       "flags": [],
@@ -25,7 +25,7 @@
       "id": "chelis_python::decompile_json(py: Python<'_>, source: &str) -> PyResult<source_json::SourceJson<chelis_compiler_api::schema::DecompileResult>>",
       "kind": "binding-pyfunction",
       "authority": "nonnumeric",
-      "graph_identity": "82f032eca6a0d8da95898ed820cd3b648ba81598594bde571f531b2750669343"
+      "graph_identity": "659fdc5cd423b04c6faf2c72ea538daba7c035d4eb31183863b9aa49428572de"
     },
     {
       "flags": [],
@@ -44,14 +44,14 @@
       "id": "chelis_python::load(py: Python<'_>, path: &str) -> PyResult<NativeCompiledModel>",
       "kind": "binding-pyfunction",
       "authority": "nonnumeric",
-      "graph_identity": "8073f288a629acd2339397f75ef6075c74baf734e523427d3371c2224f593cce"
+      "graph_identity": "cde14d7bbc6ec1e89b1594fa4486d088a4005c8f9e11ac94dd16a9114043c0e2"
     },
     {
       "flags": [],
       "id": "chelis_python::validate_json(py: Python<'_>, source: &str, mode: &str) -> PyResult<source_json::SourceJson<chelis_compiler_api::schema::ValidateResult>>",
       "kind": "binding-pyfunction",
       "authority": "nonnumeric",
-      "graph_identity": "2c7c03f17c41c544f38f271caa57aa4af1546642863491ab25cefe807e3e4cd3"
+      "graph_identity": "d6bc56a89bb4c194fdebdc468b3ef348893f5cb19ba28fe6713cbcc33334338b"
     },
     {
       "flags": [],
@@ -64,28 +64,28 @@
       "id": "chelis_python::CompiledModel::input_names(self: &Self) -> Vec<String>",
       "kind": "binding-pymethod",
       "authority": "nonnumeric",
-      "graph_identity": "884a2825de18684e40c77c61207d083d023d2240372fc4e26da4fcba8613a630"
+      "graph_identity": "109fe4cf989e25364f863f820ce1d26a4941b12306ef6deefec3bf5aceefd936"
     },
     {
       "flags": [],
       "id": "chelis_python::CompiledModel::output_names(self: &Self) -> Vec<String>",
       "kind": "binding-pymethod",
       "authority": "nonnumeric",
-      "graph_identity": "85dbf94400a902ae51fb00df6b114c396769029d793be520121c6c2173d03917"
+      "graph_identity": "5a8c54723296398ba0fccaa3a6cb29783f5781140f8f84f267d08d7169e9edf5"
     },
     {
       "flags": [],
       "id": "chelis_python::CompiledModel::path(self: &Self) -> String",
       "kind": "binding-pymethod",
       "authority": "nonnumeric",
-      "graph_identity": "5e31d749c65e242ece86ef8fa1b120eaf1671b40a1d19dc4d04187b5cc685c89"
+      "graph_identity": "2305bf9ee8a06f53f7cefd2a327172ca57b0a198c1932b68fff738f1cb0c7716"
     },
     {
       "flags": [],
       "id": "chelis_python::CompiledModel::target(self: &Self) -> String",
       "kind": "binding-pymethod",
       "authority": "nonnumeric",
-      "graph_identity": "5692bd72e20cc5564aaf44c4b3c5b68f8196e9cac723b570eca79a3e0200ced5"
+      "graph_identity": "03ac2af394de3d633996dfbdb0a3f12d03ff4d7866371fda039b2058d8ce2de4"
     },
     {
       "flags": [
@@ -106,7 +106,7 @@
       "id": "chelis_python::NativeTensor::dtype(self: &Self) -> PyResult<&'static str>",
       "kind": "binding-pymethod",
       "authority": "nonnumeric",
-      "graph_identity": "13208b8b8b6f9f29a2f393a1cf187d6a7fd53ae6d38026a96076ce078e1fe431"
+      "graph_identity": "a31df88091cfc743e688a90918951a042b8990b85e931113b50e4059654f0d4f"
     },
     {
       "flags": [],

@@ -85,7 +85,7 @@ fn alias_literal_adoption_preserves_exact_values_at_both_ingresses() {
             for (source, expected) in [
                 (
                     format!("out = cast({value}, {spelling})\n"),
-                    serde_json::json!({"type": long, "value": value}),
+                    serde_json::json!({"type": "scalar", "value": {"dtype": long, "value": value}}),
                 ),
                 (
                     format!("out: tensor[2, {spelling}] = [{value}, 1]\n"),

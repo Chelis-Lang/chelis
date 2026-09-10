@@ -2643,10 +2643,10 @@ fn execution_wire_nested_numeric_scalars_keep_their_dtype_tags() {
         (Prim::Int16, "int16"),
         (Prim::Int32, "int32"),
         (Prim::Int64, "int64"),
-        (Prim::F16, "float16"),
-        (Prim::Bf16, "bfloat16"),
-        (Prim::F32, "float32"),
-        (Prim::F64, "float64"),
+        (Prim::F16, "f16"),
+        (Prim::Bf16, "bf16"),
+        (Prim::F32, "f32"),
+        (Prim::F64, "f64"),
     ];
 
     for (prim, expected_tag) in cases {
@@ -2685,7 +2685,10 @@ fn execution_wire_nested_numeric_scalars_keep_their_dtype_tags() {
                 })
                 .expect("container has one nested scalar");
             assert_eq!(
-                nested.get("type").and_then(|value| value.as_str()),
+                nested
+                    .get("value")
+                    .and_then(|value| value.get("dtype"))
+                    .and_then(|value| value.as_str()),
                 Some(expected_tag),
                 "nested numeric scalar must keep its own wire tag: {json}"
             );

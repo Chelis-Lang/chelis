@@ -696,6 +696,25 @@ every form, which makes the canonical broadcast idiom
 | `shrink` | `pad(g, inverse_bounds)` — pad gradient back to original size |
 | `stride` | [05-MOV-1]'s exact zero-filled inverse sampling map at the original shape; runtime steps have zero cotangent |
 
+> **[05-OP-65]** `axis_movement(arguments...) -> result` governs exactly
+> `permute`, `expand`, and `insert`, with the signatures, dimension mapping,
+> and adjoints in §2.4. Their positional axes and permutation entries are
+> `int32`; sizes are `int64`, under [05-DIM-1..3]. `permute` requires a
+> permutation of the operand's axes. `expand` preserves rank and requires an
+> extent-1 operand axis; `insert` adds one axis, including at the trailing
+> position. Named-axis forms retain spec/04 §4.5.3's distinct contract.
+> Runtime extents and their claims obey §2.4.1 and [05-MOV-1].
+>
+> Each operation preserves every admitted operand dtype and its stored element
+> representations, with no numeric conversion or forward element arithmetic.
+> Axis and size parameters are discrete zero-cotangent boundaries. Float
+> cotangents follow the movement adjoints above; any adjoint reduction uses
+> [05-OP-30]'s exact accumulator and finalization rules. Integer and bool
+> payloads are forward-only. The forward operations have no accumulator
+> parameter. The shared `Expand` wire representation preserves the two source
+> operations' rank and axis contracts under spec/10 §3.4; sharing that
+> representation does not merge their source signatures.
+
 **Extent-domain and axis-domain arguments:**
 
 > **[05-DIM-1]** Every movement and shape argument is exactly one of two
@@ -1366,6 +1385,28 @@ AdError::NotSupported {
 The tensor-lane Surf builtin
 `scatter_elements(data, indices, updates, axis)` lowers directly to
 `RiscOp::ScatterElements`.
+
+> **[05-OP-66]** `indexed_tensor(arguments...) -> result` governs exactly
+> `Gather`, `ScatterAdd`, `Scatter`, and `ScatterElements`, with §3.5's
+> hyperplane or element-wise signatures, output dimensions, bounds, duplicate
+> handling, and adjoint rules. Every positional axis is `int32` under
+> [05-DIM-3]. Indices retain any active signed-integer dtype at its exact
+> stored width under [05-SPARSE-1]; they are never silently widened or narrowed.
+> Gathering and replacement admit every active tensor element dtype, including
+> bool, and copy selected stored payload representations without conversion.
+> `ScatterAdd` admits active signed-integer and float payloads; bool is a type
+> error under [04-NUM-4]. Each result preserves the admitted payload dtype.
+> Every `ScatterAdd` addition executes at [04-NUM-8]'s declared arithmetic
+> width and finalizes to that payload's storage dtype; integer overflow follows
+> [04-NUM-3/12]. It has no user-selected or implicit wider accumulator.
+>
+> On float payloads, gathering routes cotangents through `ScatterAdd` into
+> an input-shaped zero base. `ScatterAdd` passes the cotangent to its base and
+> routes update cotangents through `Gather`. Index and axis arguments have
+> zero cotangent. Integer and bool payloads are forward-only; `Scatter` and
+> `ScatterElements` retain §3.5's structural AD rejection. Wire axis parameters
+> preserve these exact operation identities; serialization supplies no
+> alternative operation, dtype, or accumulator rule.
 
 ### 3.6 Host-Runtime Operations
 

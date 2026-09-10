@@ -142,14 +142,10 @@ fn uppercase_reference_resolves_to_value_not_constructor() {
         .find(|r| r.get("name").and_then(Value::as_str) == Some("T"))
         .unwrap_or_else(|| panic!("expected a root named T; json={json}"));
     // T resolved to S's scalar value, not an ADT constructor.
-    let datum = t
-        .get("value")
-        .and_then(|v| v.get("value"))
-        .and_then(Value::as_f64)
-        .unwrap_or_else(|| panic!("T must be S's bare scalar value, not an ADT; json={json}"));
     assert_eq!(
-        datum, 2.0,
-        "T = S must evaluate to S's value 2.0; json={json}"
+        t["value"],
+        serde_json::json!({"type": "scalar", "value": {"dtype": "f32", "bits": "40000000"}}),
+        "T = S must evaluate to S's exact f32 value 2.0; json={json}"
     );
     assert!(
         t.get("value").and_then(|v| v.get("ctor")).is_none(),
