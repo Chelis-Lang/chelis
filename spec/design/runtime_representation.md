@@ -918,10 +918,14 @@ behavior remain distinct from the host owner graph. Sharing field domains
 does not require identical internal objects.
 
 The schema macro/renderers expand inside each owning private module. Generated
-Rust fields are private to that module; ordinary consumers receive opaque
-handles or typed views. The checked-in C fragments are generated artifacts with
-byte-for-byte freshness tests. Every published header remains reachable from
-`chelis_runtime.h`; the public-header census sees the same canonical declarations
+raw device descriptor fields and checked metadata/storage-owner fields are
+private to their owning modules; ordinary consumers receive opaque handles or
+typed views. The exact public OP31 read/write transport views retain their
+existing public Rust fields; a view is not a validated owner and cannot mint
+descriptor authority. The checked-in C fragments are generated artifacts with
+byte-for-byte freshness tests. Every published host runtime header remains reachable from
+`chelis_runtime.h`; backend headers remain reachable from their declared HIP or
+Metal support root. The public-header census sees the same canonical declarations
 in every preprocessing context.
 
 `cargo run -p chelis-abi --example generate_headers -- --write` regenerates the
@@ -945,10 +949,46 @@ or strided metadata variant from `chelis-abi`. Tagged rank/extent/stride and
 exemplar inputs follow the existing shape-reduction-plan ingress convention.
 Its immutable projections supply the generated device packet; packet helpers
 never compute a second product or repair strides after construction. The device
-owner retains the plan and library, proves the supplied allocation capacity,
-and releases both metadata and device storage through that library's finalizer.
+owner retains the plan and proves the supplied allocation capacity. Its caller
+retains the library until that library's finalizer has released the metadata and
+owned device storage.
 The metadata plan allocates no tensor payload and cannot prove a foreign
 allocation's physical bounds merely from its declared capacity.
+
+The device owner is defined only in the separately compiled
+`crates/chelis-backend-hip/runtime/chelis_device_owner.cpp`; the published
+`chelis_device_owner.h` declares its opaque handle and [05-OP-33]'s eight exact
+operations. The support root includes that header and the generated packet
+fragment. No implementation source is included into a published header, and the
+header census receives no C++ privacy exemption. The opaque handle directly
+owns its plan and contains the packet it observes; a packet pointer is never
+cast back to an owner. Python retains the loaded library through owner release.
+
+Storage-slot lifetime remains the proof for temporary views: each view owns its
+metadata while borrowing an input or slot retained until its last use. Cleanup
+releases views before slots. Every escaping output calls the independent clone
+operation, which creates a contiguous plan and materializes logical order before
+any source release. This design adds no shared-storage refcount. The checked
+`byte_offset` projection keeps coordinate/stride/width arithmetic in the shared
+metadata authority; companion copying derives a nonempty element width from
+checked logical bytes/count and never introduces a dtype-width table. Empty
+transfers do not divide by count or access data.
+
+Both HIP artifact paths stage `chelis_device_owner.cpp`, its public header and
+the generated descriptor alongside existing runtime headers. The companion is a
+separate compiler input, linked with the same artifact's metadata-plan runtime
+archive. Python's all-C/C++ artifact build includes it exactly once. CLI builds,
+test staging, installed packages, source closure, runtime representation inventory
+and compiler input/cache identity include its bytes and generated dependencies.
+Missing companion/header/runtime symbols are prerequisite failures. ABI2 admission
+rejects ABI1 before these files or a library are consumed; DLPack and unrelated
+wire/cache versions keep their own format contracts. Tests separately exercise
+CPU SDK-fixture copy/lifetime behavior, whole-root HIP and Metal header discovery,
+actual materialization/compile/link, and the unresolved real HIP hardware gate.
+Metal retains its host tensor ABI and private Objective-C buffer ownership rather
+than adopting a ROCm pointer packet. Its support root and complete local include
+closure remain mandatory census inputs, with the generated OP31 host views
+coming from the same runtime header and authority as HIP host transfers.
 
 Python deletes `CHELIS_MAX_DIM`, `[i32; 8]`, int32 `size`/`storage_size`, and
 `*mut f32` from its device carrier. The HIP support header deletes its matching
@@ -956,9 +996,12 @@ fixed arrays, `int` products, scalar special case that rewrites zero count to
 one, and `float *` view parameter. Rank, shape, count, and capacity cross both
 boundaries at the numbered-spec domains.
 
-This consolidation creates no new public numeric channel. If implementation
-requires a new public callable or field, that is a scope change: author its
-[05-OP-N] rule and capacity registration before modifying this plan.
+The public metadata-callable additions are exactly the eleven
+`chelis_metadata_plan` identities in [05-OP-33]'s normative registry. Their
+executable capacity registrations and positive/negative controls are required
+in the same cutover; neither the generated packet nor this plan grants numeric
+authority. Any further public callable or field requires its owning [05-OP-N]
+rule and exact registration before implementation.
 
 ## C4. Validated typed tensor access
 

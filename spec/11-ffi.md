@@ -118,6 +118,19 @@ conversion, option-node, entry-borrow, and guarded-access identities are the one
 governed by [05-OP-44]. (The compiled ownership requirement is not
 fully implemented; see chelis#1286.)
 
+A callable device entry has the exact C signature
+`void entry(const chelis_device_tensor_owner *const *inputs, int32_t input_count, chelis_device_tensor_owner **outputs, int32_t output_count)`.
+Both counts equal the selected manifest's arities before arrays are read or
+written; positive arity requires a complete non-null array. Inputs are live
+borrowed handles for the entire invocation. The caller retains their storage and
+the loaded artifact library. Temporary views own checked metadata and borrow a
+provably live input or storage slot; the callee releases those views before their
+slots. Each escaping output is an independent owned contiguous clone in logical
+strided order, including an output equal to an input or another output. Output
+adoption validates every actual descriptor before exposing a language result.
+The caller finalizes each output through `chelis_device_tensor_release` from the
+same retained library. Raw packet addresses are observations, never owner handles.
+
 The compiler-api pipeline behind this surface serves two products with different
 entry contracts:
 

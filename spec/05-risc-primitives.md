@@ -1944,8 +1944,9 @@ exact ADT identity by [05-OP-34].
 > incorporates by reference. These
 > signatures are canonical: unboxed axes and rank are `int32_t`; extents, sizes,
 > offsets, counts, and element counts are `int64_t`; dtype arguments are
-> `chelis_dtype`; tensor arguments and results are [05-OP-44]'s opaque
-> `chelis_tensor` handles, and every tensor result is a new owner; and an
+> `chelis_dtype`; host tensor arguments and results are [05-OP-44]'s opaque
+> `chelis_tensor` handles, and every host tensor result is a new owner. Device
+> operations use the distinct opaque owner and observation types specified below; an
 > untyped, string-mode, or dtype-named successor has no authority from this
 > atom.
 >
@@ -1992,9 +1993,10 @@ exact ADT identity by [05-OP-34].
 >
 > Allocation returns owned, contiguous, row-major, zero-filled storage at the
 > requested representation. A zero extent means zero elements, never one
-> synthetic element. Foreign storage enters only through [05-OP-44]'s entry
-> borrow; no callable in this family constructs a non-owning view, adopts
-> caller bytes, or frees storage. `contiguous` preserves every element's
+> synthetic element. Foreign host tensor storage enters only through
+> [05-OP-44]'s entry borrow; host tensor callables in this family do not
+> construct a non-owning host tensor view, adopt caller bytes, or free storage.
+> The separate opaque device-owner operations below govern device storage. `contiguous` preserves every element's
 > exact stored bits in row-major order. Tensor ingress accepts a rectangular
 > nested list whose scalar leaves all have exactly the requested dtype; it
 > neither infers nor converts that dtype. `chelis_tensor_elements` boxes every
@@ -2134,6 +2136,16 @@ exact ADT identity by [05-OP-34].
 > target projection. The caller separately proves the actual allocation and
 > rejects disagreement between its owner and a transported capacity. A plan
 > neither adopts tensor storage nor proves an arbitrary foreign capacity claim.
+> `chelis_metadata_plan_byte_offset` takes a canonical tagged int64 logical
+> row-major index and returns its exact int64 byte offset in the plan's storage.
+> The index must satisfy `0 <= index < count`; an empty plan admits no index,
+> and rank zero admits exactly index zero with offset zero. Supplied strides
+> determine the offset after checked logical coordinate decoding; zero strides
+> repeat the same storage location. The result remains inside the previously
+> checked reachable span. It neither reads payload nor changes plan ownership.
+> Invalid indices or carriers trap `Domain`; arithmetic or target projection
+> overflow traps `Overflow`, with operation `metadata_plan` at int64.
+>
 > `chelis_metadata_plan_release` consumes the live plan exactly once; all
 > observations require a live plan of the correct kind. These operations have
 > no cotangent or accumulator and change no tensor payload or ownership.
@@ -2141,6 +2153,66 @@ exact ADT identity by [05-OP-34].
 > target projections trap `Overflow`, using [04-NUM-9]'s canonical int64 failure
 > line with operation `metadata_plan`. Failure precedes payload allocation or
 > access and never returns a repaired or partial plan.
+>
+> The opaque `chelis_device_tensor_owner` is distinct from its generated
+> `chelis_gpu_tensor` observation. `chelis_device_tensor_alloc` consumes one
+> live metadata plan and allocates zero-filled device storage of its checked
+> logical byte count, after checking that this capacity contains its reachable
+> span. It retains that plan and owns the allocation. Empty allocation requires
+> no payload allocation; it retains zero count and capacity. A gapped plan whose
+> reachable span exceeds its logical bytes is rejected before allocation.
+>
+> `chelis_device_tensor_borrow` consumes one live metadata plan, validates its
+> reachable span against a canonical tagged int64 byte capacity, and retains
+> metadata while borrowing the supplied device storage. A nonempty plan requires
+> a non-null, representation-aligned data pointer. The caller proves the real
+> allocation capacity, device, and storage lifetime through the final borrow use;
+> a numeric capacity claim cannot establish those facts. A view cannot outlive
+> its slot or input owner and may not escape as an owned result.
+>
+> `chelis_device_tensor_import` validates every field of a generated raw packet
+> before constructing a borrowed owner: nonnegative int32 rank, complete aligned
+> rank-many int64 shape and stride arrays, closed dtype, zero reserved bytes,
+> borrowed ownership value zero, exact count, nonnegative byte capacity and the
+> shared checked reachable span. It checks rank-many array byte projections
+> before array reads. It snapshots metadata and retains no packet or
+> metadata-array pointers. Rank zero permits null metadata arrays; nonempty data
+> follows the same alignment and caller-proven allocation/lifetime rule as borrow.
+> Owned ownership value one cannot be imported as a borrowed packet.
+>
+> `chelis_device_tensor_view` returns a const generated packet observation tied
+> to the live opaque owner. Its fields derive from that owner's single checked
+> plan, actual data allocation and capacity, with ownership zero for borrowed
+> storage or one for owned storage, and zero reserved bytes. The observation
+> grants no right to mutate metadata or release an owner through a packet address.
+>
+> `chelis_device_tensor_clone` returns a distinct owner with a new contiguous
+> metadata plan and independent owned device storage. It copies exact stored
+> bits in logical row-major order at every active [04-NUM-8] representation,
+> using the source plan's checked byte offsets. Gapped, broadcast and permuted
+> sources therefore materialize their logical values without retaining source
+> storage. Neither source metadata nor source payload is changed.
+>
+> `chelis_device_tensor_copy_from_host` and `chelis_device_tensor_copy_to_host`
+> copy exact stored bits between a live host read view or exclusive host write
+> guard and a live device owner in logical row-major order. Dtype and logical
+> count must match before any write; there is no implicit conversion. Device
+> destinations must be owned and contiguous, so a transfer cannot mutate borrowed
+> input storage or assign conflicting values through a broadcast view. Device
+> sources may use any admitted strides. Empty transfers access no payload.
+> Transfers and clones complete their memory accesses before returning; no
+> asynchronous access survives a released input, guard, slot, or metadata plan.
+>
+> `chelis_device_tensor_release` consumes one live opaque owner exactly once,
+> releases its metadata plan exactly once, and releases device storage exactly
+> once only for an owned allocation. Releasing a borrow never frees its source
+> storage. Every call requires a live handle of the correct kind from the same
+> loaded artifact library; the caller retains that library through finalization.
+> No packet-to-owner cast or independently invoked allocator substitutes for this
+> finalizer. Invalid field, count, dtype, capacity, or ownership domains trap
+> `Domain`; unrepresentable metadata or offsets trap `Overflow`, before payload
+> allocation or access, using `metadata_plan` at int64. These device operations
+> have no cotangent or accumulator and perform no numeric dtype conversion.
 >
 > `chelis_tensor_reduction_plan` snapshots checked tensor metadata;
 > `chelis_shape_reduction_plan` constructs the corresponding metadata-only virtual
