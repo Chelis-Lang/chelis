@@ -4,6 +4,7 @@ These are compiler-flow obligations, not authority for a Python registration.
 """
 
 from dataclasses import replace
+import copy
 import unittest
 
 from capacity_census_native_flow import (
@@ -78,6 +79,13 @@ class NativeReceiverCompiledControls(unittest.TestCase):
         self.assertEqual(native_flow_problems(raw, spec), [])
         problems = native_flow_problems(raw, replace(spec, receiver=None))
         self.assertTrue(any("unaccounted native-bearing entry input" in p for p in problems), problems)
+        for malformed in (None, "receiver", {"shape": None}, {"shape": {"inner": None}}):
+            changed = copy.deepcopy(raw)
+            body = next(row for row in changed["bodies"]
+                        if flows.DefinitionIdentity.from_record(row["definition"]) == spec.entry)
+            body["formal_inputs"][0]["type"] = malformed
+            problems = native_flow_problems(changed, spec)
+            self.assertTrue(any("malformed native flow evidence" in p for p in problems), problems)
 
     def test_receiver_is_neither_mutable_owned_nor_a_same_named_foreign_type(self):
         for declaration in ("receiver: &mut Receiver", "receiver: Receiver"):

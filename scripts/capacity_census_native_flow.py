@@ -384,8 +384,14 @@ def _implementation_problems(
         seen_inputs.add(local)
         if obligation.receiver is not None and local == obligation.receiver.local:
             ty = item.get("type", {})
+            if not isinstance(ty, dict):
+                raise NativeFlowEvidenceError("native receiver has malformed type")
             shape = ty.get("shape", {})
+            if not isinstance(shape, dict):
+                raise NativeFlowEvidenceError("native receiver has malformed shape")
             inner = shape.get("inner", {})
+            if not isinstance(inner, dict):
+                raise NativeFlowEvidenceError("native receiver has malformed referent")
             if (
                 ty.get("open") is not False
                 or shape.get("tag") != "reference"
