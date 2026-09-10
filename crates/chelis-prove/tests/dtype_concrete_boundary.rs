@@ -1,5 +1,7 @@
 //! Structural guards for the chelis#729 exact-typed prover boundary.
 
+mod support;
+
 fn function_slice<'a>(source: &'a str, start: &str, next: &str) -> &'a str {
     let start = source.find(start).expect("guarded function exists");
     let tail = &source[start..];
@@ -9,6 +11,7 @@ fn function_slice<'a>(source: &'a str, start: &str, next: &str) -> &'a str {
 
 #[test]
 fn concrete_evaluator_and_tier_c_have_no_bare_f64_environment() {
+    crate::support::isolate();
     let concrete = include_str!("../src/concrete_eval.rs");
     assert!(
         concrete.contains("pub type ConcreteEnv = UnordMap<String, ScalarValue>"),
@@ -33,6 +36,7 @@ fn concrete_evaluator_and_tier_c_have_no_bare_f64_environment() {
 
 #[test]
 fn produced_value_flatteners_have_no_lossy_numeric_fallback() {
+    crate::support::isolate();
     let obligation = include_str!("../src/obligation_engine.rs");
     let flatten = function_slice(
         obligation,
@@ -107,6 +111,7 @@ fn produced_value_flatteners_have_no_lossy_numeric_fallback() {
 
 #[test]
 fn every_prover_fuzz_tensor_builder_uses_typed_values() {
+    crate::support::isolate();
     let obligation = include_str!("../src/obligation_engine.rs");
     let tensor_arg = function_slice(
         obligation,

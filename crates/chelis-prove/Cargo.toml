@@ -132,6 +132,7 @@ clarabel = { version = "0.11", optional = true, features = ["sdp-openblas"] }
 clarabel = { version = "0.11", optional = true, features = ["sdp-accelerate"] }
 
 [dev-dependencies]
+syn.workspace = true
 
 # A compiled mock `chelis-beacon` binary for the shim integration tests: it reads
 # a request and emits a canned CheckReport JSON selected by an env var, so every

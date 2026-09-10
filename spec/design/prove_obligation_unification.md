@@ -298,12 +298,28 @@ stdin, returning a result over stdout). ANY way the child can fail -- a
 cvc5 C++ abort, a cvc5-internal assertion on a well-formed formula, a stack
 overflow, an OOM kill, a panic, a hang past the deadline -- becomes a clean
 `TierBResult::Error`/`Unknown` in the parent (routed to Tier C); the
-`chelis` process is never taken down by a solve. Isolation is opt-in: only
-a host that calls `enable_isolation` spawns workers, so tests solve
-in-process (no spawn) and exercise the Layer-1 lowering directly, while the
-end-to-end isolated path -- including recovery from a worker that
-aborts/panics/overflows on every solve -- is locked by the
+`chelis` process is never taken down by a solve. Production hosts opt in with
+`enable_isolation`. The crate's unit tests default to a dedicated libtest
+worker, and every `chelis-prove` integration test installs its binary's shared
+`support::solver_worker` entry before test work. This explicit registration
+also applies when `chelis-prove` is an ordinary dependency without
+`cfg(test)`. Engine-mediated calls use the same registered route. Each child
+re-execs only that exact worker test, returns its binary frame on stderr to
+avoid libtest's stdout, and must exit successfully before its result is
+accepted. No feature changes production startup. Direct lowering tests still
+exercise the Layer-1 guards. The end-to-end production path, including recovery
+from a worker that aborts/panics/overflows on every solve, is locked by the
 `prove_isolation` integration test running the real `chelis` binary.
+
+The integration containment oracle is `cargo test -p chelis-prove --features
+smt --test integration_solver_isolation`: real proof/disproof, observed worker
+spawns, parallel engine calls, abnormal exits (including death after a result
+frame), and a killed hung worker followed by a healthy solve. Its structural
+control rejects integration tests missing their worker setup. Without `smt`,
+the same target checks that no worker is spawned and no proof is fabricated.
+The required SMT smoke runs this target; the nightly's complete SMT suite runs
+all integration binaries, including `issue_1475_sqrt_domain`, with normal
+parallel test scheduling.
 
 ## Acceptance oracle
 

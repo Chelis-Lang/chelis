@@ -18,6 +18,8 @@
 //!
 //! The p18 projection block is engine-independent; the p20 block needs cvc5.
 
+mod support;
+
 use chelis_prove::composition::{base_verdict_from_discharge, composed_qualifier_strings};
 use chelis_prove::discharge::{Qualifier, QualifierSet, Soundness};
 
@@ -28,6 +30,7 @@ use chelis_prove::discharge::{Qualifier, QualifierSet, Soundness};
 /// It NEVER reads as plain `proven` / `proven_modulo_real_arithmetic`.
 #[test]
 fn p18_special_function_certified_projects_to_certified_envelope_tier() {
+    crate::support::isolate();
     let quals = QualifierSet::from_iter_kinds([Qualifier::SpecialFunctionCertified]);
     let verdict = base_verdict_from_discharge(Soundness::SoundApproximate, &quals);
     let token = serde_json::to_value(verdict).unwrap();
@@ -45,6 +48,7 @@ fn p18_special_function_certified_projects_to_certified_envelope_tier() {
 /// BOTH caveats remain in the disclosed qualifier array.
 #[test]
 fn p18_special_function_certified_plus_real_arith_projects_to_certified_envelope_tier() {
+    crate::support::isolate();
     let quals =
         QualifierSet::from_iter_kinds([Qualifier::SpecialFunctionCertified, Qualifier::RealArith]);
     let verdict = base_verdict_from_discharge(Soundness::SoundApproximate, &quals);
@@ -111,6 +115,7 @@ mod p20 {
     /// `__log_abs_0 < 1`. cvc5 must PROVE it (the whole band is < 1).
     #[test]
     fn residual_log_envelope_var_is_proved() {
+        crate::support::isolate();
         let v = var("__log_abs_0");
         let prop = SmtProperty {
             variables: vec![("__log_abs_0".into(), SmtSort::Real)],
@@ -134,6 +139,7 @@ mod p20 {
     /// fragment after abstraction.
     #[test]
     fn residual_nonlinear_with_envelope_var_is_proved() {
+        crate::support::isolate();
         let s = var("s");
         let e = var("__exp_abs_0");
         let prop = SmtProperty {
@@ -161,6 +167,7 @@ mod p20 {
     /// `exp_abs in [0.9, 1.1]`, residual `exp_abs < 1.0` is FALSE at 1.1.
     #[test]
     fn residual_unentailed_envelope_var_is_disproved() {
+        crate::support::isolate();
         let e = var("__exp_abs_0");
         let prop = SmtProperty {
             variables: vec![("__exp_abs_0".into(), SmtSort::Real)],

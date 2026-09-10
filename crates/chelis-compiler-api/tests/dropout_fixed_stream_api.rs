@@ -354,6 +354,55 @@ fn actual_input_gradient_uses_forward_mask_without_advancing_next_draw() {
 }
 
 #[test]
+fn scalar_cotangent_repacking_keeps_dropout_replay_and_next_draw() {
+    for dtype in ["f32", "f64"] {
+        let ones = std::iter::repeat_n(format!("1.0{dtype}"), 32)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let source = format!(
+            "def loss(x: {dtype}) -> {dtype} = tensor_to_scalar(dropout(scalar_to_tensor(x), 0.5{dtype}))\ndef main() = with seed(42i64) {{\n derivative = grad(loss)(1.0{dtype})\n next = dropout(to_tensor([{ones}]), 0.5{dtype})\n (derivative, next)\n}}\n"
+        );
+        let result = eval_selected(request(&source), &["main".into()]).unwrap();
+        let derivative = result
+            .roots
+            .iter()
+            .find(|root| root.name.as_deref() == Some("main.0"))
+            .unwrap();
+        let ExecutionValue::Scalar { value } = derivative.value else {
+            panic!("{derivative:?}")
+        };
+        assert_eq!(value.get().prim().name(), dtype);
+        assert_eq!(value.get().as_f64_lossy(), mask(0)[0]);
+        assert_eq!(tensor(&result, "main.1"), mask(1));
+    }
+}
+
+#[test]
+fn empty_cotangent_repacking_still_executes_retained_dropout() {
+    let ones = std::iter::repeat_n("1.0f32", 32)
+        .collect::<Vec<_>>()
+        .join(", ");
+    for rate in ["0.0f32", "1.0f32"] {
+        let source = format!(
+            "def loss(xs: List[f32]) -> f32 = {{\n dead = dropout(to_tensor([{ones}]), {rate})\n _ = drop(dead)\n 0.0f32\n}}\ndef main() = with seed(42i64) {{\n _ = grad(loss)([])\n dropout(to_tensor([{ones}]), 0.5f32)\n}}\n"
+        );
+        let result = eval_selected(request(&source), &["main".into()]);
+        if rate == "0.0f32" {
+            assert_eq!(tensor(&result.unwrap(), "main"), mask(1));
+        } else {
+            let error = result.unwrap_err();
+            assert!(
+                error
+                    .errors
+                    .iter()
+                    .any(|error| error.message == "numeric trap: domain in dropout at f32"),
+                "{error:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn checked_library_context_and_prepared_context_preserve_raw_stream_binding() {
     use chelis_compiler_api::compiler::{eval_in_context, prepare_eval_in_context};
     use chelis_compiler_api::{COMPILER_VERSION, compile_reef_context};

@@ -148,6 +148,14 @@ Use this loop for project files and generated shell output. `fmt` makes the sour
 canonical, `lint --check` catches naming/style drift, and the later commands re-run the
 same gate before doing semantic work.
 
+C builds keep the source stem in output filenames, including names such as
+`simple-shape.ch`. C symbols use ASCII identifier spelling: a stem that starts with
+an ASCII letter and contains only ASCII letters, digits and underscores keeps its
+spelling, except C keywords, `main`, and the reserved `chelis_file_` prefix.
+Other stems become `chelis_file_` followed by the hexadecimal filename bytes.
+For external calls, use the generated header's declaration. This encoding keeps
+`a-b.ch`, `a_b.ch`, and a literal `chelis_file_612d62.ch` distinct.
+
 When the compiled C program hits a runtime arithmetic trap, output from
 preceding effects is retained even when redirected to a pipe or file. The
 program still fails, and effects after the trap do not run.
@@ -348,6 +356,13 @@ overflow, and unsupported differentiated operations return a specific
 unsupported reason under `--tier smt-only`; `auto` may fuzz-validate them
 instead. Conditional scalar gradients and differentiated casts remain outside
 the prover subset until the compiler can build them.
+
+Scalar gradients remain scalars when consumed by another expression. For
+example, `grad(fn (x: f32) -> exp(x), wrt=x)(1.0f32) > 0.0f32` evaluates to
+`true`; an equivalent property can be checked with `--tier fuzz-only` or
+`--tier auto`. This does not permit implicit scalar/tensor comparisons:
+the gradient of a rank-zero tensor remains a tensor and needs an explicit
+`tensor_to_scalar` before a scalar comparison.
 
 Contract-backed Reef proofs resolve their implementation through the linker.
 For example, a property importing `Nautilus.Stats.quantile_vec` can request

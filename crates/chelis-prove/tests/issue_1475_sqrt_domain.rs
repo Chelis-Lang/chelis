@@ -4,6 +4,8 @@
 
 #![cfg(feature = "smt")]
 
+mod support;
+
 use chelis_prove::solver::{ArithOp, BoolOp, CmpOp, SmtExpr, SmtSort};
 use chelis_prove::tier_b::{SmtProperty, TierBResult, lower_to_cvc5, solve_property};
 use chelis_prove::{
@@ -72,6 +74,7 @@ fn run_one(source: &str, tier: &str, samples: usize) -> PropertyOutcome {
 
 #[test]
 fn reported_negative_argument_counterexample_is_refused() {
+    crate::support::isolate();
     let property = real_property(
         vec![
             cmp(CmpOp::Gt, sqrt(var("x")), real(1.5)),
@@ -85,6 +88,7 @@ fn reported_negative_argument_counterexample_is_refused() {
 
 #[test]
 fn reported_property_proves_when_user_supplies_the_domain() {
+    crate::support::isolate();
     let property = real_property(
         vec![
             cmp(CmpOp::Gt, sqrt(var("x")), real(1.5)),
@@ -99,6 +103,7 @@ fn reported_property_proves_when_user_supplies_the_domain() {
 
 #[test]
 fn arithmetic_negative_argument_counterexample_is_refused() {
+    crate::support::isolate();
     let argument = arith(
         ArithOp::Sub,
         arith(ArithOp::Mul, var("x"), var("x")),
@@ -117,6 +122,7 @@ fn arithmetic_negative_argument_counterexample_is_refused() {
 
 #[test]
 fn user_nonnegative_guard_keeps_sqrt_in_tier_b() {
+    crate::support::isolate();
     let property = real_property(
         vec![cmp(CmpOp::Ge, var("x"), real(0.0))],
         cmp(CmpOp::Ge, sqrt(var("x")), real(0.0)),
@@ -127,6 +133,7 @@ fn user_nonnegative_guard_keeps_sqrt_in_tier_b() {
 
 #[test]
 fn tiny_request_timeout_refuses_a_zero_sqrt_sub_budget() {
+    crate::support::isolate();
     let property = real_property(
         vec![cmp(CmpOp::Ge, var("x"), real(0.0))],
         cmp(CmpOp::Ge, sqrt(var("x")), real(0.0)),
@@ -140,6 +147,7 @@ fn tiny_request_timeout_refuses_a_zero_sqrt_sub_budget() {
 
 #[test]
 fn algebraically_nonnegative_argument_keeps_sqrt_in_tier_b() {
+    crate::support::isolate();
     let square = arith(ArithOp::Mul, var("x"), var("x"));
     let property = real_property(vec![], cmp(CmpOp::Ge, sqrt(square), real(0.0)));
 
@@ -148,6 +156,7 @@ fn algebraically_nonnegative_argument_keeps_sqrt_in_tier_b() {
 
 #[test]
 fn genuinely_false_in_domain_property_still_disproves() {
+    crate::support::isolate();
     let property = real_property(
         vec![cmp(CmpOp::Ge, var("x"), real(0.0))],
         cmp(CmpOp::Lt, sqrt(var("x")), real(0.0)),
@@ -161,6 +170,7 @@ fn genuinely_false_in_domain_property_still_disproves() {
 
 #[test]
 fn unproved_sqrt_domain_is_not_silently_assumed() {
+    crate::support::isolate();
     // Over concrete reals-as-floats this is false at every negative x because
     // sqrt(x) is NaN and the comparison is false. Adding x >= 0 to the query
     // would hide those witnesses and forge a proof, so Tier B must refuse.
@@ -171,6 +181,7 @@ fn unproved_sqrt_domain_is_not_silently_assumed() {
 
 #[test]
 fn every_distinct_sqrt_argument_needs_its_own_proof() {
+    crate::support::isolate();
     let sum = arith(ArithOp::Add, sqrt(var("x")), sqrt(var("y")));
     let property = real_property(
         vec![cmp(CmpOp::Ge, var("x"), real(0.0))],
@@ -182,6 +193,7 @@ fn every_distinct_sqrt_argument_needs_its_own_proof() {
 
 #[test]
 fn proving_every_distinct_sqrt_argument_preserves_tier_b_reach() {
+    crate::support::isolate();
     let sum = arith(ArithOp::Add, sqrt(var("x")), sqrt(var("y")));
     let property = real_property(
         vec![
@@ -196,6 +208,7 @@ fn proving_every_distinct_sqrt_argument_preserves_tier_b_reach() {
 
 #[test]
 fn top_level_conjunctions_supply_domain_evidence() {
+    crate::support::isolate();
     let property = real_property(
         vec![SmtExpr::Bool(
             BoolOp::And,
@@ -212,6 +225,7 @@ fn top_level_conjunctions_supply_domain_evidence() {
 
 #[test]
 fn nested_sqrt_and_partial_domain_evidence_fail_closed() {
+    crate::support::isolate();
     let nested = real_property(
         vec![cmp(CmpOp::Ge, var("x"), real(0.0))],
         cmp(CmpOp::Ge, sqrt(sqrt(var("x"))), real(0.0)),
@@ -228,6 +242,7 @@ fn nested_sqrt_and_partial_domain_evidence_fail_closed() {
 
 #[test]
 fn quantified_domain_evidence_fails_closed() {
+    crate::support::isolate();
     let property = real_property(
         vec![SmtExpr::Forall(
             vec![("x".to_string(), SmtSort::Real)],
@@ -250,6 +265,7 @@ fn quantified_domain_evidence_fails_closed() {
 
 #[test]
 fn exp_and_abs_controls_keep_their_existing_results() {
+    crate::support::isolate();
     let exp_property = real_property(
         vec![],
         cmp(
@@ -279,6 +295,7 @@ fn exp_and_abs_controls_keep_their_existing_results() {
 
 #[test]
 fn unguarded_public_lowering_refuses_sqrt() {
+    crate::support::isolate();
     let term_manager = cvc5_rs::TermManager::new();
     let real_sort = term_manager.real_sort();
     let mut variables = std::collections::BTreeMap::new();
@@ -297,6 +314,7 @@ fn unguarded_public_lowering_refuses_sqrt() {
 
 #[test]
 fn surf_smt_only_reports_the_domain_boundary_as_unsupported() {
+    crate::support::isolate();
     let source = r#"module M
 @property unsafe_sqrt forall(x: f32) where sqrt(x) > 1.5, x < 100.0:
   (x > 0.0)
@@ -315,6 +333,7 @@ fn surf_smt_only_reports_the_domain_boundary_as_unsupported() {
 
 #[test]
 fn surf_auto_falls_through_without_claiming_an_smt_verdict() {
+    crate::support::isolate();
     let source = r#"module M
 @property unsafe_sqrt forall(x: f32) where sqrt(x) > 1.5, x < 100.0:
   (x > 0.0)

@@ -3,6 +3,8 @@
 //! Verifies that bs_call_vec is a WireDag root, round-trips through the
 //! content-addressed byte seam, and produces a deterministic hash.
 
+mod support;
+
 use chelis_compiler_api::schema::{SourceKind, WIRE_DAG_SCHEMA_VERSION};
 use chelis_prove::WireDagByteStore;
 use chelis_prove::discharge::{IntervalBox, IrHandle, OutputRange};
@@ -61,6 +63,7 @@ fn make_output() -> OutputRange {
 /// bs_call_vec must lower to a WireDag root via entry-scoped lowering.
 #[test]
 fn bs_call_vec_is_wire_dag_root() {
+    crate::support::isolate();
     let extracted = box_range_goal_from_source_entry(
         BS_VEC_SOURCE,
         SourceKind::Surf,
@@ -96,6 +99,7 @@ fn bs_call_vec_is_wire_dag_root() {
 /// The WireDag bytes round-trip: sha256 matches, store+retrieve works.
 #[test]
 fn bs_call_vec_byte_seam_round_trip() {
+    crate::support::isolate();
     let extracted = box_range_goal_from_source_entry(
         BS_VEC_SOURCE,
         SourceKind::Surf,
@@ -147,6 +151,7 @@ fn bs_call_vec_byte_seam_round_trip() {
 /// Lowering is deterministic: two runs produce the same hash.
 #[test]
 fn bs_call_vec_deterministic_hash() {
+    crate::support::isolate();
     let r1 = box_range_goal_from_source_entry(
         BS_VEC_SOURCE,
         SourceKind::Surf,
@@ -175,6 +180,7 @@ fn bs_call_vec_deterministic_hash() {
 /// No non-finite floats in the WireDag (content-address precondition).
 #[test]
 fn bs_call_vec_no_non_finite_floats() {
+    crate::support::isolate();
     let extracted = box_range_goal_from_source_entry(
         BS_VEC_SOURCE,
         SourceKind::Surf,

@@ -1,0 +1,2 @@
+C builds encode source stems such as `simple-shape` into distinct valid C module symbols, consistently in generated source and headers, while retaining the source spelling in artifact filenames.
+Generated symbols also change for stems that are C keywords, `main`, start with an underscore, or start with the reserved `chelis_file_` escape prefix; external callers should use the generated header. Other ASCII identifier stems keep their symbols.

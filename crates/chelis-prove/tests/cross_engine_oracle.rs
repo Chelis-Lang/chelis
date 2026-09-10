@@ -18,6 +18,8 @@
 //! cfg'd out (there is no second engine to cross-check against).
 #![cfg(all(feature = "smt", feature = "z3"))]
 
+mod support;
+
 use chelis_prove::solver::{ArithOp, CmpOp, SmtExpr, SmtSort};
 use chelis_prove::tier_b::TierBResult;
 use chelis_prove::{Cvc5Engine, DischargeEngine, DischargeRegistry, Goal, SmtProperty, Z3Engine};
@@ -117,6 +119,7 @@ fn assert_engines_agree(prop: SmtProperty, expected: Category) {
 
 #[test]
 fn oracle_x_squared_non_negative_both_prove() {
+    crate::support::isolate();
     // forall x: x*x >= 0
     assert_engines_agree(
         real_prop(
@@ -134,6 +137,7 @@ fn oracle_x_squared_non_negative_both_prove() {
 
 #[test]
 fn oracle_x_always_positive_both_disprove() {
+    crate::support::isolate();
     // forall x: x > 0 -- false (x = 0).
     assert_engines_agree(
         real_prop(
@@ -147,6 +151,7 @@ fn oracle_x_always_positive_both_disprove() {
 
 #[test]
 fn oracle_precondition_implies_both_prove() {
+    crate::support::isolate();
     // forall x where x > 0: x >= 0
     assert_engines_agree(
         real_prop(
@@ -160,6 +165,7 @@ fn oracle_precondition_implies_both_prove() {
 
 #[test]
 fn oracle_intrinsic_value_non_negative_both_prove() {
+    crate::support::isolate();
     // if S > K then S - K else 0  >=  0
     let post = cmp(
         CmpOp::Ge,
@@ -175,6 +181,7 @@ fn oracle_intrinsic_value_non_negative_both_prove() {
 
 #[test]
 fn oracle_max_with_zero_non_negative_both_prove() {
+    crate::support::isolate();
     assert_engines_agree(
         real_prop(
             &["x"],
@@ -191,6 +198,7 @@ fn oracle_max_with_zero_non_negative_both_prove() {
 
 #[test]
 fn oracle_abs_non_negative_both_prove() {
+    crate::support::isolate();
     assert_engines_agree(
         real_prop(
             &["x"],
@@ -207,6 +215,7 @@ fn oracle_abs_non_negative_both_prove() {
 
 #[test]
 fn oracle_min_le_left_both_prove() {
+    crate::support::isolate();
     // min(x, y) <= x
     assert_engines_agree(
         real_prop(
@@ -224,6 +233,7 @@ fn oracle_min_le_left_both_prove() {
 
 #[test]
 fn oracle_exact_f64_decimal_goal_both_disprove() {
+    crate::support::isolate();
     // THE exact-f64 parity oracle: 0.1 + 0.2 == 0.3 is FALSE at runtime f64.
     // Both engines lower the literals to the SAME exact rationals, so BOTH must
     // DISPROVE -- proving the two lowerings produce identical numbers. A
@@ -245,6 +255,7 @@ fn oracle_exact_f64_decimal_goal_both_disprove() {
 
 #[test]
 fn oracle_exact_f64_dyadic_goal_both_prove() {
+    crate::support::isolate();
     // Negative parity: 0.5 + 0.25 == 0.75 is exact in f64, so BOTH prove.
     assert_engines_agree(
         real_prop(
@@ -262,6 +273,7 @@ fn oracle_exact_f64_dyadic_goal_both_prove() {
 
 #[test]
 fn oracle_nonlinear_false_goal_both_disprove() {
+    crate::support::isolate();
     // forall x: x*x > x -- false (x = 0 and x = 1 are counterexamples).
     assert_engines_agree(
         real_prop(
@@ -275,6 +287,7 @@ fn oracle_nonlinear_false_goal_both_disprove() {
 
 #[test]
 fn oracle_disproof_carries_real_arith_on_both() {
+    crate::support::isolate();
     // A disproof over the reals carries the SAME RealArith qualifier on both
     // engines (the hedged disproved_modulo_real_arithmetic, symmetric to the
     // proof side). Pin it explicitly: both engines' disproof discharges expose
@@ -296,6 +309,7 @@ fn oracle_disproof_carries_real_arith_on_both() {
 
 #[test]
 fn oracle_capability_split_transcendental_z3_unsupported_cvc5_attempts() {
+    crate::support::isolate();
     // The capability split the try-until-discharge dispatcher exploits: a
     // transcendental goal Z3 has no kind for is a NON-VERDICT (Unsupported)
     // here, while cvc5 attempts QF_NRAT. exp(x) >= 0 is true, so cvc5 PROVES
@@ -327,6 +341,7 @@ fn oracle_capability_split_transcendental_z3_unsupported_cvc5_attempts() {
 
 #[test]
 fn dispatcher_falls_through_z3_unsupported_to_cvc5_proved() {
+    crate::support::isolate();
     // END-TO-END fall-through through the REAL registry with the REAL engines:
     // register Z3 FIRST, cvc5 SECOND. A transcendental goal (exp(x) >= 0) is a
     // NON-VERDICT for Z3 (no transcendental kind -> Unsupported Error), so the
@@ -365,6 +380,7 @@ fn dispatcher_falls_through_z3_unsupported_to_cvc5_proved() {
 
 #[test]
 fn dispatcher_z3_first_proves_a_polynomial_goal_without_consulting_cvc5() {
+    crate::support::isolate();
     // Negative parity to the fall-through: when the FIRST engine (Z3) DOES
     // discharge a definite verdict (a polynomial goal it decides), the
     // dispatcher returns Z3's verdict and never consults cvc5 -- it does not

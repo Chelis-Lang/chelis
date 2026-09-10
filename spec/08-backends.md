@@ -46,6 +46,12 @@ trap rules, and [04-NUM-11]'s exactness guarantee - and where a lane and those a
 disagree, the lane has the bug. The C backend is the oracle because it is the most
 complete conforming lane, not because conformance is defined as agreeing with it.
 
+C compilation derives identifiers from source filenames without treating filesystem
+spelling as C syntax. Distinct filename stems SHALL have distinct generated module
+symbols, including a stem that literally spells another stem's escaped symbol.
+The generated header and source SHALL use the same symbol. Default artifact filenames
+retain the source stem; an explicit output filename does not change the module symbol.
+
 Current design points:
 
 - emit loops for elementwise, reduction, and movement operations

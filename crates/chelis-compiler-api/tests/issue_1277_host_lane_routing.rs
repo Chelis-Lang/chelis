@@ -129,7 +129,7 @@ fn host_applied_mismatch_preserves_the_current_local_failure() {
         .join("\n");
     assert!(messages.contains("claimed = 3, node "), "{messages}");
     assert!(
-        messages.ends_with("axis 1 = 2\nnumeric trap: domain in expand at int64"),
+        messages.ends_with("axis 1 = 2\nnumeric trap: domain in insert at int64"),
         "{messages}"
     );
 }

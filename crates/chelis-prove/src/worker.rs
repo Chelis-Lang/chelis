@@ -14,8 +14,10 @@
 //! Production-host isolation is OPT-IN: a host whose `main` calls
 //! [`enable_isolation`] (and [`run_worker_if_requested`] first) spawns workers.
 //! The `chelis-prove` unit-test build enables the same process boundary by
-//! default and re-execs one dedicated worker-entry test. That keeps libtest's
-//! parallel threads from entering cvc5/LibPoly/GMP concurrently while still
+//! default and re-execs one dedicated worker-entry test. Integration binaries
+//! register their dedicated entry through [`test_support`] before test work;
+//! this also works in ordinary dependency builds without `cfg(test)`. That keeps
+//! libtest's parallel threads from entering cvc5/LibPoly/GMP concurrently while still
 //! exercising the real solver and the same fail-closed parent mapping. The
 //! end-to-end production path is covered by an integration test that runs the
 //! real `chelis` binary.
@@ -29,7 +31,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "smt")]
 const WORKER_ENV: &str = "CHELIS_PROVE_WORKER";
 
-#[cfg(all(feature = "smt", test))]
+#[cfg(feature = "smt")]
 const TEST_WORKER_ENV: &str = "CHELIS_PROVE_TEST_WORKER";
 
 #[cfg(all(feature = "smt", test))]
@@ -39,6 +41,23 @@ const TEST_WORKER_ENTRY: &str = "worker::imp::tests::issue_1333_worker_process_e
 // hosts remain explicitly opt-in because their main must dispatch the worker
 // marker before normal argument parsing.
 static ISOLATION_ENABLED: AtomicBool = AtomicBool::new(cfg!(test));
+
+#[cfg(feature = "smt")]
+static LIBTEST_WORKER_ENTRY: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
+#[cfg(feature = "smt")]
+fn libtest_worker_entry() -> Option<&'static str> {
+    LIBTEST_WORKER_ENTRY.get().copied().or({
+        #[cfg(test)]
+        {
+            Some(TEST_WORKER_ENTRY)
+        }
+        #[cfg(not(test))]
+        {
+            None
+        }
+    })
+}
 
 /// Enable Tier B subprocess isolation for this process. Call once at startup
 /// in a production binary whose `main` ALSO calls [`run_worker_if_requested`]
@@ -68,7 +87,7 @@ pub fn run_worker_if_requested() {
         // mistake -- do NOT hijack their command into the worker loop (which
         // would block reading the terminal forever). Proceed normally instead.
         if std::env::var_os(WORKER_ENV).is_some() && !std::io::stdin().is_terminal() {
-            imp::run_worker_loop();
+            imp::run_worker_loop(imp::OutputChannel::Stdout);
         }
     }
 }
@@ -76,24 +95,104 @@ pub fn run_worker_if_requested() {
 #[cfg(feature = "smt")]
 pub(crate) use imp::solve_property_isolated;
 
+/// Explicit libtest integration support. Merely linking this module changes
+/// neither production startup nor the default ordinary-dependency solve route.
+/// Each test binary registers one entry and calls it only under `--exact`.
+#[doc(hidden)]
+pub mod test_support {
+    /// Register the binary's exact worker test before any solver work. Parallel
+    /// callers may repeat the same registration; a second entry is an error.
+    pub fn enable_isolation(entry: &'static str) {
+        #[cfg(feature = "smt")]
+        {
+            assert!(!entry.is_empty(), "libtest worker entry must be explicit");
+            assert_eq!(
+                *super::LIBTEST_WORKER_ENTRY.get_or_init(|| entry),
+                entry,
+                "one libtest worker entry per executable"
+            );
+            super::enable_isolation();
+        }
+        #[cfg(not(feature = "smt"))]
+        let _ = entry;
+    }
+
+    /// Body of the registered worker test. During normal suite execution this
+    /// is a no-op. A child must carry both markers and the exact entry identity.
+    pub fn run_worker_if_requested(entry: &str) {
+        #[cfg(feature = "smt")]
+        {
+            use std::io::IsTerminal;
+            if std::env::var_os(super::WORKER_ENV).is_some()
+                && std::env::var_os(super::TEST_WORKER_ENV).as_deref()
+                    == Some(std::ffi::OsStr::new(entry))
+                && !std::io::stdin().is_terminal()
+            {
+                super::imp::run_worker_loop(super::imp::OutputChannel::Stderr);
+            }
+        }
+        #[cfg(not(feature = "smt"))]
+        let _ = entry;
+    }
+
+    /// Observe whether this thread actually spawned a solver child during `f`.
+    /// Configuration alone does not count; nested observation restores its caller.
+    pub fn observe_worker<T>(f: impl FnOnce() -> T) -> (T, bool) {
+        #[cfg(feature = "smt")]
+        {
+            super::imp::observe_worker(f)
+        }
+        #[cfg(not(feature = "smt"))]
+        {
+            (f(), false)
+        }
+    }
+
+    /// Closed failure controls, applied to child commands on this thread only.
+    #[derive(Clone, Copy, Debug)]
+    pub enum WorkerFault {
+        Abort,
+        Panic,
+        Hang,
+        AbortAfterResult,
+    }
+
+    /// Run a fault control without mutating process-global environment or
+    /// affecting unrelated test threads. The previous scope is restored on panic.
+    pub fn with_worker_fault<T>(fault: WorkerFault, f: impl FnOnce() -> T) -> T {
+        #[cfg(feature = "smt")]
+        {
+            let mode = match fault {
+                WorkerFault::Abort => "abort",
+                WorkerFault::Panic => "panic",
+                WorkerFault::Hang => "hang",
+                WorkerFault::AbortAfterResult => "abort-after-result",
+            };
+            super::imp::with_test_worker_crash(mode, f)
+        }
+        #[cfg(not(feature = "smt"))]
+        {
+            let _ = fault;
+            f()
+        }
+    }
+}
+
 #[cfg(feature = "smt")]
 mod imp {
-    use super::WORKER_ENV;
-    #[cfg(test)]
-    use super::{TEST_WORKER_ENTRY, TEST_WORKER_ENV};
+    use super::{TEST_WORKER_ENV, WORKER_ENV};
     use crate::tier_b::{SmtProperty, TierBResult, solve_property_cvc5};
     use serde::{Deserialize, Serialize};
 
-    #[cfg(test)]
     thread_local! {
         /// Per-test-thread crash injection. Keeping this thread-local prevents
         /// the negative control from poisoning unrelated parallel solver tests.
         static TEST_WORKER_CRASH: std::cell::Cell<Option<&'static str>> =
             const { std::cell::Cell::new(None) };
+        static WORKER_SPAWNED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
 
-    #[cfg(test)]
-    fn with_test_worker_crash<T>(mode: &'static str, f: impl FnOnce() -> T) -> T {
+    pub(super) fn with_test_worker_crash<T>(mode: &'static str, f: impl FnOnce() -> T) -> T {
         struct Reset(Option<&'static str>);
 
         impl Drop for Reset {
@@ -106,6 +205,26 @@ mod imp {
         let result = f();
         drop(reset);
         result
+    }
+
+    pub(super) fn observe_worker<T>(f: impl FnOnce() -> T) -> (T, bool) {
+        struct Reset(bool);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                WORKER_SPAWNED.set(self.0);
+            }
+        }
+        let reset = Reset(WORKER_SPAWNED.replace(false));
+        let result = f();
+        let spawned = WORKER_SPAWNED.get();
+        drop(reset);
+        (result, spawned)
+    }
+
+    #[derive(Clone, Copy)]
+    pub(super) enum OutputChannel {
+        Stdout,
+        Stderr,
     }
 
     /// The request sent (bincode) to a worker over stdin. bincode is used
@@ -162,7 +281,7 @@ mod imp {
     /// IN-PROCESS, write a [`WireResult`] to stdout, exit. Never returns. A
     /// non-zero exit / signal death here is exactly what the parent maps to a
     /// clean Tier C result, so every failure path simply exits non-zero.
-    pub(super) fn run_worker_loop() -> ! {
+    pub(super) fn run_worker_loop(channel: OutputChannel) -> ! {
         use std::io::{Read, Write};
 
         // Deterministic crash hook for the isolation self-test ONLY: a real
@@ -207,8 +326,7 @@ mod imp {
         // A re-executed libtest process writes harness status to stdout. Its
         // dedicated worker entry therefore returns the binary frame on stderr;
         // production workers retain the original stdout transport.
-        #[cfg(test)]
-        if std::env::var_os(TEST_WORKER_ENV).is_some() {
+        if matches!(channel, OutputChannel::Stderr) {
             let stderr = std::io::stderr();
             let mut lock = stderr.lock();
             if lock.write_all(&bytes).is_err() || lock.flush().is_err() {
@@ -274,15 +392,15 @@ mod imp {
         let mut command = Command::new(&exe);
         command.env(WORKER_ENV, "1").stdin(Stdio::piped());
 
-        #[cfg(test)]
-        {
+        let libtest_entry = super::libtest_worker_entry();
+        if let Some(entry) = libtest_entry {
             // Re-enter only the worker test, never the full suite. `--nocapture`
             // lets its binary stderr frame reach the parent unchanged.
             command
                 .arg("--exact")
-                .arg(TEST_WORKER_ENTRY)
+                .arg(entry)
                 .arg("--nocapture")
-                .env(TEST_WORKER_ENV, "1")
+                .env(TEST_WORKER_ENV, entry)
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped());
             TEST_WORKER_CRASH.with(|mode| {
@@ -290,10 +408,9 @@ mod imp {
                     command.env("CHELIS_PROVE_WORKER_CRASH", mode);
                 }
             });
+        } else {
+            command.stdout(Stdio::piped()).stderr(Stdio::null());
         }
-
-        #[cfg(not(test))]
-        command.stdout(Stdio::piped()).stderr(Stdio::null());
 
         let mut child = match command.spawn() {
             Ok(c) => c,
@@ -303,6 +420,7 @@ mod imp {
                 ));
             }
         };
+        WORKER_SPAWNED.set(true);
 
         // Feed the request and close stdin (drop) so the worker sees EOF.
         if let Some(mut stdin) = child.stdin.take() {
@@ -318,10 +436,17 @@ mod imp {
         // parent can never hang regardless of what the worker does with its
         // stdout (RT-isolation F1).
         let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
-        #[cfg(test)]
-        let worker_output = child.stderr.take();
-        #[cfg(not(test))]
-        let worker_output = child.stdout.take();
+        let worker_output: Option<Box<dyn Read + Send>> = if libtest_entry.is_some() {
+            child
+                .stderr
+                .take()
+                .map(|stream| Box::new(stream) as Box<dyn Read + Send>)
+        } else {
+            child
+                .stdout
+                .take()
+                .map(|stream| Box::new(stream) as Box<dyn Read + Send>)
+        };
         if let Some(mut out) = worker_output {
             std::thread::spawn(move || {
                 let mut buf = Vec::new();
@@ -415,7 +540,7 @@ mod imp {
         /// A normal test run has no worker marker, so this returns immediately.
         #[test]
         fn issue_1333_worker_process_entry() {
-            crate::worker::run_worker_if_requested();
+            crate::worker::test_support::run_worker_if_requested(super::super::TEST_WORKER_ENTRY);
         }
 
         /// Positive control: the unit-test build must select the same process
