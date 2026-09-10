@@ -2341,8 +2341,9 @@ fn cmd_check(
         println!("{{\"files\":[{}]}}", entries.join(","));
         // Issue #207 invariant: any file with a non-empty errors array
         // in its report triggers the same exit code as the single-file
-        // path. Per-file processing failures (Err arm above) keep the
-        // legacy "tooling broken" exit-1 path through `Err`.
+        // path. There is no per-file exit-1 path any more: `cmd_check_one`
+        // is total, so a file that fails to be read, formatted or checked
+        // contributes a report with errors like any other (chelis#886).
         return Ok(if any_errors_in_report {
             CHECK_ERRORS_EXIT_CODE
         } else {
@@ -2439,11 +2440,11 @@ fn cmd_check_one_on_grown_stack(
     // the terminal message to be taken away, and `spec/01` §Style Gate makes
     // that stderr line part of the gate's own contract.
     //
-    // Exit status moves 1 -> 2 on these paths as a consequence, because the
-    // status is derived from this function's `Ok`/`Err` discriminant. §
-    // Gating pins only "`0` iff empty, non-zero otherwise", so both values
-    // conform; 2 is chosen to converge on the Deep arm below, which already
-    // reported an unreadable file this way.
+    // These paths exit 2, like every non-empty errors array: the status is a
+    // function of the report, and this function always returns one (it is
+    // total). § Gating pins only "`0` iff empty, non-zero otherwise", so
+    // exit 1 would also conform; 2 converged the Surf arm on the Deep arm,
+    // which already reported an unreadable file this way.
     let source = match fs::read_to_string(file) {
         Ok(source) => source,
         Err(error) => {
@@ -2657,11 +2658,10 @@ fn cmd_check_one_on_grown_stack(
                     return (json, true);
                 }
             };
-            // The `?` here is chelis#1664's, not this change's:
-            // `check_prepared_for_cli` became fallible when inferred
-            // signatures gained a typed carrier. It is a [04-FIT-12] bypass
-            // that arrived on `main` during this PR's review, so this change
-            // does not claim to have closed it -- see the PR body.
+            // chelis#1664 made this call fallible when inferred signatures
+            // gained a typed carrier, and for a while it was a [04-FIT-12]
+            // bypass with a `?`. It is total now: a failure to build the
+            // rows becomes a diagnostic inside `check_prepared_for_cli`.
             check_prepared_for_cli(prepared, show_inferred)
         };
     assemble_check_json(
@@ -2922,9 +2922,46 @@ mod check_path_totality_tests {
     //! type cannot.
 
     use super::{
-        EMPTY_PROGRAM_MESSAGE, synthetic_check_report_with_error,
-        synthetic_check_report_with_errors,
+        EMPTY_PROGRAM_MESSAGE, PreparedCliReport, assemble_check_json, check_prepared_for_cli,
+        cmd_check_one, cmd_check_one_deep, cmd_check_one_on_grown_stack,
+        synthetic_check_report_with_error, synthetic_check_report_with_errors,
     };
+    use std::path::Path;
+
+    /// Every function on the per-file check path, pinned at its signature.
+    ///
+    /// This is the test that actually carries the guarantee. A function
+    /// pointer of an explicit type only accepts a function of exactly that
+    /// type, so if any of these six regains a `Result`, THIS BINDING stops
+    /// compiling -- whether or not anything calls it with `?` yet.
+    ///
+    /// An earlier revision of this module bound only the report producer. A
+    /// red-team mutation re-widened `cmd_check_one`,
+    /// `cmd_check_one_on_grown_stack` and `cmd_check_one_deep` back to
+    /// `Result`, put the original `?` back on the layered arms, and the
+    /// module stayed green: the five functions that had held all 21 `?`
+    /// sites were not pinned at all. The type system enforces nothing about a
+    /// signature that no binding names.
+    /// `assemble_check_json`'s signature, named so the pin below stays
+    /// readable. Any change to its return type breaks the pin.
+    type AssembleCheckJson = fn(
+        chelis_types::FitnessReport,
+        &[chelis_effects::EffectError],
+        &[chelis_types::errors::CheckError],
+        Option<Vec<chelis_compiler_api::schema::WireInferredSignature>>,
+    ) -> (String, bool);
+
+    #[test]
+    fn every_check_path_signature_is_total() {
+        let _: fn(&Path, bool, bool) -> (String, bool) = cmd_check_one;
+        let _: fn(&Path, bool, bool) -> (String, bool) = cmd_check_one_on_grown_stack;
+        let _: fn(&str, bool) -> (String, bool) = cmd_check_one_deep;
+        let _: fn(chelis_compiler_api::pipeline::PreparedProgram, bool) -> PreparedCliReport =
+            check_prepared_for_cli;
+        let _: AssembleCheckJson = assemble_check_json;
+        let _: fn(&[String]) -> String = synthetic_check_report_with_errors;
+        let _: fn(&str) -> String = synthetic_check_report_with_error;
+    }
 
     /// The keystone. If this binding ever needs `?` or `.unwrap()`, the
     /// report producer has regained a failure mode and every caller can
