@@ -63,6 +63,10 @@ context respectively. Missing or unknown sites SHALL fail decoding.
 `shape_deps` SHALL be u64 references to earlier nodes. All three provenance/dependency node fields
 SHALL be explicit, including empty lists and a null span identity.
 
+`Mod` SHALL retain [05-OP-64]'s exact signed-remainder identity with two
+earlier input nodes, each with its output's integer dtype and dimension list.
+Other arities, dtypes or shapes SHALL fail encoding and decoding.
+
 `CheckedReshapeExtent` SHALL preserve separate scalar-int64 input edges for
 the actual computed extent and each required extent, plus a nonempty ordered
 list of corresponding diagnostic labels and a normalized result-axis position.

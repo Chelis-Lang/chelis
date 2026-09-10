@@ -446,3 +446,50 @@ fn masked_gradients_keep_unit_and_computed_primal_checks() {
         }
     }
 }
+
+#[test]
+fn remainder_rebuild_retains_exact_values_and_rejects_invalid_types() {
+    let mut dag = Dag::new();
+    let a = scalar(&mut dag, -7);
+    let b = scalar(&mut dag, 2);
+    let root = dag.add_node(RiscOp::Mod, vec![a, b], scalar_type(), None);
+    dag.add_root(root);
+    assert!(chelis_ir::verify::verify(&dag).is_empty());
+    assert!(chelis_ir::grad::grad_dag_checked(&dag, root, &[a]).is_err());
+    for mut rebuilt in [
+        dag.clone(),
+        common_subexpr_eliminate(&dag),
+        dead_code_eliminate(&dag),
+        chelis_ir::fuse::fuse(&dag),
+    ] {
+        constant_fold(&mut rebuilt);
+        assert!(chelis_ir::verify::verify(&rebuilt).is_empty());
+        let values = eval_tensor_with(&rebuilt, |_| None).unwrap();
+        assert_eq!(
+            values[&rebuilt.roots()[0]]
+                .storage()
+                .scalar_at(0)
+                .as_i64_exact(),
+            Some(-1)
+        );
+    }
+    let mapped = chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
+    assert!(chelis_ir::verify::verify(&mapped).is_empty());
+    let values = eval_tensor_with(&mapped, |_| None).unwrap();
+    assert_eq!(values[&mapped.roots()[0]].shape, vec![2]);
+    assert_eq!(
+        values[&mapped.roots()[0]].to_f64_lossy_vec(),
+        vec![-1.0, -1.0]
+    );
+    for mutation in 0..3 {
+        let mut bad = dag.clone();
+        let node = bad.node_mut(root).unwrap();
+        match mutation {
+            0 => node.output_type.precision = Prim::F32,
+            1 => node.inputs.pop().map(|_| ()).unwrap(),
+            2 => node.output_type.dims.push(DimInfo::Lit(2)),
+            _ => unreachable!(),
+        }
+        assert!(!chelis_ir::verify::verify(&bad).is_empty());
+    }
+}

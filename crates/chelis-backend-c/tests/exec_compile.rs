@@ -2434,6 +2434,70 @@ int main() {{
     );
 }
 
+// [05-OP-64]: exact signed remainder, including the full-width trap boundary.
+#[test]
+fn checked_remainder_executes_and_traps_at_every_signed_width() {
+    for (prim, c_type, c_dtype, minimum) in [
+        (Prim::Int8, "int8_t", "CHELIS_DTYPE_I8", "INT8_MIN"),
+        (Prim::Int16, "int16_t", "CHELIS_DTYPE_I16", "INT16_MIN"),
+        (Prim::Int32, "int32_t", "CHELIS_DTYPE_I32", "INT32_MIN"),
+        (Prim::Int64, "int64_t", "CHELIS_DTYPE_I64", "INT64_MIN"),
+    ] {
+        run_int_div_op_exec(
+            RiscOp::Mod,
+            "checked_remainder",
+            prim.name(),
+            [1, 1, -1, -1],
+            prim,
+        );
+        let adjacent = format!("{minimum} + 1");
+        for (case, lhs, rhs, message) in [
+            ("zero", "7", "0", "division by zero"),
+            ("minimum", minimum, "-1", ""),
+            ("minimum_odd", adjacent.as_str(), "2", ""),
+        ] {
+            let mut dag = Dag::new();
+            let ty = vec_prim(1, prim);
+            let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
+            let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
+            dag.add_node(RiscOp::Mod, vec![a, b], ty, None);
+            let function = format!("checked_remainder_{}_{case}", prim.name());
+            let src = codegen(&fuse(&dag), &function).unwrap().c_source;
+            let expected = if case == "minimum_odd" { -1 } else { 0 };
+            let harness = format!(
+                r#"{HARNESS_HEADER}
+#include <limits.h>
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    {c_type} av[1] = {{ {lhs} }}; {c_type} bv[1] = {{ {rhs} }};
+    chelis_tensor *inputs[2] = {{ make_view_typed_1d(av, 1, {c_dtype}), make_view_typed_1d(bv, 1, {c_dtype}) }};
+    chelis_tensor *outputs[1] = {{ NULL }};
+    {function}(inputs, 2, outputs, 1);
+    return (({c_type} *)chelis_tensor_read_view(outputs[0]).data)[0] == {expected} ? 0 : 1;
+}}
+"#
+            );
+            let run = compile_and_capture_run(&function, &src, &harness);
+            let stderr = String::from_utf8_lossy(&run.stderr);
+            if message.is_empty() {
+                assert!(
+                    run.status.success(),
+                    "{function}: exact remainder must be {expected}: {stderr}"
+                );
+                continue;
+            }
+            assert!(!run.status.success(), "{function}: unexpected success");
+            assert!(
+                stderr.contains(&format!(
+                    "numeric trap: {message} in mod at {}",
+                    prim.name()
+                )),
+                "{function}: {stderr}"
+            );
+        }
+    }
+}
+
 // spec/05-risc-primitives.md §2.1: `trunc_div` uses C/Rust truncating
 // semantics (round toward zero). This is what chelis-std's
 // `Std.Decimal::normalize` / `decimal_div_nonzero` rely on for scale

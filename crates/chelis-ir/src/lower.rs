@@ -2887,7 +2887,6 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
                         | "to_string"
                         | "to_int"
                         | "to_float"
-                        | "mod"
                         | "bitand"
                         | "bitor"
                         | "bitxor"
@@ -2973,6 +2972,7 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
                         | "div"
                         | "floor_div"
                         | "trunc_div"
+                        | "mod"
                         | "max_elem"
                         | "min_elem"
                         | "neg"
@@ -8973,6 +8973,18 @@ impl LowerCtx {
                     tier2::lower_floor_div(&mut self.dag, a, b, &out_ty, parent_span.as_deref());
                 self.attach_reuse_hint(node, app_span, &[a, b])
             }
+            "mod" if args.len() == 2 => {
+                let a = self.lower_expr_node(&args[0], "mod lhs");
+                let b = self.lower_expr_node(&args[1], "mod rhs");
+                let out_ty = Self::elementwise_out_ty(&self.dag, a, ty, None);
+                let node = self.dag.add_node(
+                    RiscOp::Mod,
+                    vec![a, b],
+                    out_ty,
+                    self.current_span_id.clone(),
+                );
+                self.attach_reuse_hint(node, app_span, &[a, b])
+            }
             "trunc_div" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "trunc_div lhs");
                 let b = self.lower_expr_node(&args[1], "trunc_div rhs");
@@ -11776,6 +11788,7 @@ impl LowerCtx {
                     Some(IntBinOp::FloorDiv),
                     Some(FloatBinOp::FloorDiv),
                 )?,
+                RiscOp::Mod => numeric_binop(input0?, input1?, Some(IntBinOp::Rem), None)?,
                 RiscOp::TruncDiv => {
                     numeric_binop(input0?, input1?, Some(IntBinOp::TruncDiv), None)?
                 }
@@ -11984,11 +11997,9 @@ impl LowerCtx {
     /// from an input axis, SILENTLY accepting a program whose written target
     /// expression is never evaluated (it may not even be shape-consistent).
     /// The C build lane ICEs on the same anon dim in `symbolic_occurrences`.
-    /// Refusing at lowering replaces both with one located diagnostic. The
-    /// host lane is unaffected: a forward (non-`grad`) use of this form
-    /// still evaluates with true runtime semantics via the host fallback,
-    /// which computes the target expression honestly and rejects a
-    /// shape-inconsistent reshape at runtime.
+    /// Refusing at lowering replaces both with one located diagnostic.
+    /// Admitted runtime arithmetic is lowered before this legacy fallback;
+    /// it retains the computed target and its independent result claims.
     ///
     /// Returns true only when `expr` (cast-stripped) is an arithmetic app of
     /// the fold's exact vocabulary (`neg`/`add`/`sub`/`mul`/`floor_div`/

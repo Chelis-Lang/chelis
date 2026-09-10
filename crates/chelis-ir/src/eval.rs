@@ -433,6 +433,7 @@ enum ElementwiseBinOp {
     Div,
     FloorDiv,
     TruncDiv,
+    Mod,
     Max,
     Min,
 }
@@ -446,6 +447,7 @@ impl ElementwiseBinOp {
             Self::Div => "div",
             Self::FloorDiv => "floor_div",
             Self::TruncDiv => "trunc_div",
+            Self::Mod => "mod",
             Self::Max => "max_elem",
             Self::Min => "min_elem",
         }
@@ -458,6 +460,7 @@ impl ElementwiseBinOp {
             Self::Mul => Some(IntBinOp::Mul),
             Self::FloorDiv => Some(IntBinOp::FloorDiv),
             Self::TruncDiv => Some(IntBinOp::TruncDiv),
+            Self::Mod => Some(IntBinOp::Rem),
             Self::Max => Some(IntBinOp::Max),
             Self::Min => Some(IntBinOp::Min),
             Self::Div => None,
@@ -473,7 +476,7 @@ impl ElementwiseBinOp {
             Self::FloorDiv => Some(FloatBinOp::FloorDiv),
             Self::Max => Some(FloatBinOp::Max),
             Self::Min => Some(FloatBinOp::Min),
-            Self::TruncDiv => None,
+            Self::TruncDiv | Self::Mod => None,
         }
     }
 }
@@ -2384,6 +2387,11 @@ where
             // float operands), so a zero divisor always traps with the shared
             // diagnostic — matching `host_ops::eval_trunc_div` and the C
             // backend guard.
+            RiscOp::Mod => {
+                let lhs = &values[&node.inputs[0]];
+                let rhs = &values[&node.inputs[1]];
+                binary_elementwise(ElementwiseBinOp::Mod, lhs, rhs)?
+            }
             RiscOp::TruncDiv => {
                 let lhs = &values[&node.inputs[0]];
                 let rhs = &values[&node.inputs[1]];
@@ -4668,6 +4676,46 @@ mod tests {
         inputs.insert("a".into(), TensorValue::from_vec(vec![2], vec![10.0, 7.0]));
         inputs.insert("b".into(), TensorValue::from_vec(vec![2], b));
         inputs
+    }
+
+    #[test]
+    fn checked_remainder_preserves_signed_values_and_traps() {
+        for prim in [Prim::Int8, Prim::Int16, Prim::Int32, Prim::Int64] {
+            let minimum = match prim {
+                Prim::Int8 => i8::MIN as i64,
+                Prim::Int16 => i16::MIN as i64,
+                Prim::Int32 => i32::MIN as i64,
+                Prim::Int64 => i64::MIN,
+                _ => unreachable!(),
+            };
+            let dag = int_div_dag(RiscOp::Mod, prim);
+            let mut inputs = UnordMap::new();
+            inputs.insert("a".into(), TensorValue::from_vec(vec![2], vec![-7.0, 7.0]));
+            inputs.insert("b".into(), TensorValue::from_vec(vec![2], vec![2.0, -2.0]));
+            let values = eval_tensor(&dag, &inputs).unwrap();
+            assert_eq!(values[&dag.roots()[0]].to_f64_lossy_vec(), vec![-1.0, 1.0]);
+            let exact = |values: &[i64]| {
+                TensorValue::from_storage(
+                    vec![2],
+                    tensor_from_scalars(
+                        prim,
+                        &values
+                            .iter()
+                            .map(|&n| chelis_types::scalar_from_i64("mod", prim, n).unwrap())
+                            .collect::<Vec<_>>(),
+                    ),
+                )
+            };
+            inputs.insert("a".into(), exact(&[minimum, minimum + 1]));
+            inputs.insert("b".into(), exact(&[-1, 2]));
+            let values = eval_tensor(&dag, &inputs).unwrap();
+            assert_eq!(values[&dag.roots()[0]].to_f64_lossy_vec(), vec![0.0, -1.0]);
+            let error = eval_tensor(&dag, &divisor_inputs(vec![0.0, 2.0])).unwrap_err();
+            assert_eq!(
+                error,
+                format!("numeric trap: division by zero in mod at {}", prim.name())
+            );
+        }
     }
 
     #[test]

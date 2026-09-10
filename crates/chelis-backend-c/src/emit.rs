@@ -790,6 +790,7 @@ impl CEmitter {
                 | RiscOp::Mul
                 | RiscOp::Div
                 | RiscOp::TruncDiv
+                | RiscOp::Mod
                 | RiscOp::FloorDiv
                 | RiscOp::MaxElem
                 | RiscOp::MinElem
@@ -864,6 +865,7 @@ impl CEmitter {
             // portable zero-divisor guard for integer dtypes. `trunc_div`
             // is integer-only, so this is exactly C truncating division.
             RiscOp::TruncDiv => self.emit_binary(id, "/", &node.inputs, &node.output_type),
+            RiscOp::Mod => self.emit_binary(id, "%", &node.inputs, &node.output_type),
             // chelis#178: `floor_div` rounds the quotient toward -inf.
             // Integer operands use native `/` plus a remainder-sign
             // correction; float operands use `floorf(a / b)`.
@@ -2315,7 +2317,7 @@ impl CEmitter {
         // `chelis_int_div_guard`, which aborts with the same clean diagnostic
         // the evaluator emits. Float `/` is IEEE-754 (`1.0/0.0 == inf`) and
         // is never guarded; `+`/`*`/`fmaxf` never divide.
-        let checked_int = ty.precision.is_integer() && matches!(op, "+" | "-" | "*" | "/");
+        let checked_int = ty.precision.is_integer() && matches!(op, "+" | "-" | "*" | "/" | "%");
         let elem_expr = |lhs: String, rhs: String| -> String {
             if is_relu_adjoint {
                 // [05-OP-43]: select g only for +0 < x. Selection preserves
@@ -2332,6 +2334,7 @@ impl CEmitter {
                 "-" => "sub",
                 "*" => "mul",
                 "/" => "trunc_div",
+                "%" => "mod",
                 _ => unreachable!(),
             };
             let overflow = NumericTrap::Overflow {
@@ -2349,15 +2352,22 @@ impl CEmitter {
                 "*" => format!(
                     "({et})chelis_int_checked_mul((int64_t)({lhs}), (int64_t)({rhs}), {bits}, {overflow:?})"
                 ),
-                "/" => {
+                "/" | "%" => {
                     let zero = NumericTrap::DivZero {
                         op: op_name,
                         prim: ty.precision,
                     }
                     .to_string();
-                    format!(
-                        "({lhs} / ({et})chelis_int_checked_divisor((int64_t)({lhs}), (int64_t)({rhs}), {bits}, {zero:?}, {overflow:?}))"
-                    )
+                    let expression = format!(
+                        "({lhs} {op} ({et})chelis_int_checked_divisor((int64_t)({lhs}), (int64_t)({rhs}), {bits}, {zero:?}, {overflow:?}))"
+                    );
+                    if op == "%" {
+                        // The exact remainder is zero even when MIN / -1 has
+                        // no representable quotient. Do not evaluate that C %.
+                        format!("(({rhs}) == -1 ? ({et})0 : {expression})")
+                    } else {
+                        expression
+                    }
                 }
                 _ => unreachable!(),
             }

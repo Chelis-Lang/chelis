@@ -274,6 +274,12 @@ pub fn grad_dag_checked(
                     reason: AdRejectionReason::PiecewiseConstant,
                 });
             }
+            RiscOp::Mod => {
+                return Err(AdError::NotSupported {
+                    op: "mod",
+                    reason: AdRejectionReason::PiecewiseConstant,
+                });
+            }
             RiscOp::TruncDiv => {
                 return Err(AdError::NotSupported {
                     op: "trunc_div",
@@ -338,6 +344,7 @@ pub fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::Div => "div",
         RiscOp::FloorDiv => "floor_div",
         RiscOp::TruncDiv => "trunc_div",
+        RiscOp::Mod => "mod",
         RiscOp::CmpLt => "cmplt",
         RiscOp::MaxElem => "max_elem",
         RiscOp::MinElem => "min_elem",
@@ -996,7 +1003,7 @@ fn compute_adjoints(
             let zero = dag.add_node(RiscOp::synth_const(ty.precision, 0.0), vec![], ty, None);
             Some(vec![(x, zero)])
         }
-        RiscOp::FloorDiv | RiscOp::TruncDiv => {
+        RiscOp::FloorDiv | RiscOp::TruncDiv | RiscOp::Mod => {
             // chelis#178: floor / truncating integer division are
             // non-differentiable (piecewise constant) — grad_dag_checked
             // will have already rejected these; this arm is a safety net

@@ -419,6 +419,10 @@ fn observe(case: &Case) -> Value {
 }
 
 fn observe_with_dependency(case: &Case, library: Option<&str>) -> Value {
+    observe_host_lane(case, library, "c", false)
+}
+
+fn observe_host_lane(case: &Case, library: Option<&str>, target: &str, api: bool) -> Value {
     let dir = tempdir().expect("fixture directory");
     if let Some(library) = library {
         let version = chelis_compiler_api::COMPILER_VERSION;
@@ -496,7 +500,7 @@ fn observe_with_dependency(case: &Case, library: Option<&str>) -> Value {
             "build",
             path.to_str().unwrap(),
             "--target",
-            "c",
+            if api { "c" } else { target },
             "-o",
             out.to_str().unwrap(),
         ],
@@ -505,13 +509,69 @@ fn observe_with_dependency(case: &Case, library: Option<&str>) -> Value {
     let compiled = if !build.status.success() {
         receipt("build", &build)
     } else {
+        let generated = if api {
+            use chelis_compiler_api::schema::{CompileRequest, CompileTarget, SourceKind};
+            // The CLI invocation above supplies runtime headers/archive only.
+            // Every compiled source byte below comes from the API artifact.
+            match chelis_compiler_api::compiler::compile(CompileRequest {
+                source_kind: SourceKind::Surf,
+                source: case.source.clone(),
+                target: CompileTarget::Hip,
+                entry_name: None,
+            }) {
+                Ok(artifact) => {
+                    let source = artifact
+                        .files
+                        .iter()
+                        .find(|f| f.path.ends_with("_hip.cpp"))
+                        .expect("HIP source")
+                        .contents
+                        .clone();
+                    let header = artifact
+                        .files
+                        .iter()
+                        .find(|f| f.path.ends_with("_hip.h"))
+                        .expect("HIP header")
+                        .contents
+                        .clone();
+                    for file in artifact.files {
+                        fs::write(out.join(file.path), file.contents).unwrap();
+                    }
+                    Ok((source, header))
+                }
+                Err(error) => Err(format!("{error:?}")),
+            }
+        } else {
+            let (source, header) = if target == "hip" {
+                ("fixture_hip.cpp", "fixture_hip.h")
+            } else {
+                ("fixture.c", "fixture.h")
+            };
+            Ok((
+                fs::read_to_string(out.join(source)).expect("generated source"),
+                fs::read_to_string(out.join(header)).expect("generated header"),
+            ))
+        };
+        let (mut source, header) = match generated {
+            Ok(files) => files,
+            Err(error) => {
+                return json!({"issue":case.issue, "check":checker, "eval":eval,
+                "c":{"stage":"build", "success":false, "stdout":"", "stderr":error}});
+            }
+        };
+        if target == "hip" {
+            assert!(
+                !source.contains("__global__") && !source.contains("hipLaunchKernelGGL"),
+                "{} must retain host C",
+                case.id
+            );
+        }
         let c_path = out.join("fixture.c");
-        let mut source = fs::read_to_string(&c_path).expect("generated C");
+        fs::write(&c_path, &source).expect("write selected host source");
         let args = if let Some(inputs) = &case.exported {
             // A nullary helper also creates an observation entry. Exercise
             // f through the independent exported caller below.
             source = source.replacen("int main(", "int fixture_generated_main(", 1);
-            let header = fs::read_to_string(out.join("fixture.h")).expect("exported header");
             let (driver, args) = driver(inputs, &header);
             source.push_str(&driver);
             fs::write(&c_path, &source).expect("append exported runtime caller");
@@ -1288,6 +1348,15 @@ fn helper_signature_guard_order_contract() {
 /// Each call route checks the declared type independently of either runtime.
 #[test]
 fn static_reshape_folding_accepts_producing_source_expressions() {
+    producing_source_expression_contract("floor_div", 1);
+}
+
+#[test]
+fn remainder_reshape_claims_preserve_producing_source_expressions() {
+    producing_source_expression_contract("mod", 4);
+}
+
+fn producing_source_expression_contract(op: &str, divisor: i64) {
     assert!(gcc_available(), "C toolchain required; no lane may skip");
     let mut cases = Vec::new();
     for n in [2, 3] {
@@ -1308,9 +1377,9 @@ fn static_reshape_folding_accepts_producing_source_expressions() {
         ] {
             call_matrix(
                 &mut cases,
-                &format!("static_reshape_expression.{kind}.x{n}"),
+                &format!("static_reshape_expression.{op}.{kind}.x{n}"),
                 1686,
-                &format!("{helper}def f(x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [floor_div(shape({operand}, 0i32), 1i64), 2i64])"),
+                &format!("{helper}def f(x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [{op}(shape({operand}, 0i32), {divisor}i64), 2i64])"),
                 "(tensor[d0, f32]) -> tensor[2, 2, f32]",
                 vec![vector(4)],
                 if n == 2 { Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]) }
@@ -1328,6 +1397,69 @@ fn static_reshape_folding_accepts_producing_source_expressions() {
             && observed["check"]["signatures"]["main"] != "() -> tensor[2, 2, f32]"
         {
             failures.push(format!("{}: declared main shape changed", case.id));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn remainder_reshape_claims_preserve_dynamic_target() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut cases = Vec::new();
+    for n in [2, 3] {
+        call_matrix(
+            &mut cases,
+            &format!("remainder_reshape_dynamic.x{n}"),
+            1686,
+            "def f(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [mod(shape(source, 0i32), 4i64), 2i64])",
+            "(tensor[d0, f32], tensor[d1, f32]) -> tensor[2, 2, f32]",
+            vec![vector(n), vector(n * 2)],
+            if n == 2 {
+                Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])
+            } else {
+                Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"])
+            },
+        );
+    }
+    assert_eq!(cases.len(), 6);
+    let mut failures = Vec::new();
+    for case in cases {
+        let observed = observe(&case);
+        println!("{}: {}", case.id, observed);
+        failures.extend(contract_failures(&case, &observed));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn remainder_claims_preserve_hip_host_cli_and_api_execution() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut cases = Vec::new();
+    for n in [2, 3] {
+        call_matrix(
+            &mut cases,
+            &format!("remainder_hip_host.x{n}"),
+            1686,
+            "def f(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [mod(shape(source, 0i32), 4i64), 2i64])",
+            "(tensor[d0, f32], tensor[d1, f32]) -> tensor[2, 2, f32]",
+            vec![vector(n), vector(n * 2)],
+            if n == 2 {
+                Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])
+            } else {
+                Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"])
+            },
+        );
+    }
+    let mut failures = Vec::new();
+    for case in cases {
+        for api in [false, true] {
+            let observed = observe_host_lane(&case, None, "hip", api);
+            println!("{} api={api}: {}", case.id, observed);
+            failures.extend(
+                contract_failures(&case, &observed)
+                    .into_iter()
+                    .map(|f| format!("api={api}: {f}")),
+            );
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));

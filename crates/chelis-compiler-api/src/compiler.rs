@@ -2164,16 +2164,31 @@ fn execution_artifact_from_compiled_observed(
                 .as_ref()
                 .map(chelis_ir::host::host_program_requires_host_backend)
                 .unwrap_or(false);
-            let preferred_entry_dag = host_compiled
+            let preferred_entry = host_compiled
                 .host
                 .as_ref()
-                .and_then(chelis_ir::host::preferred_tensor_entry_name)
-                .and_then(|name| {
-                    chelis_ir::host::lower_named_tensor_entry_dag(compiled.checked(), name)
-                });
-            if compiled.dag.roots().is_empty()
-                && preferred_entry_dag.is_none()
-                && host_requires_host_backend
+                .and_then(chelis_ir::host::preferred_tensor_entry_name);
+            let preferred_entry_is_host = match preferred_entry {
+                Some(name) => {
+                    crate::target_capability::hip_entry_lane(compiled.checked(), name, Target::Hip)
+                        .map_err(unsupported_stage_error)?
+                        == chelis_types::types::Lane::Host
+                }
+                None => false,
+            };
+            let preferred_entry_dag = preferred_entry.and_then(|name| {
+                chelis_ir::host::lower_named_tensor_entry_dag(compiled.checked(), name)
+            });
+            let has_host_roots = compiled
+                .manifest()
+                .entries
+                .iter()
+                .any(|entry| entry.lane == chelis_types::types::Lane::Host);
+            if (has_host_roots
+                || preferred_entry_is_host
+                || (compiled.dag.roots().is_empty()
+                    && preferred_entry_dag.is_none()
+                    && host_requires_host_backend))
                 && let Some(host_program) = host_compiled.host.as_ref()
             {
                 reject_unsupported_effect_ops_in_host_program(host_program, BuildTarget::Hip)?;
@@ -6063,6 +6078,7 @@ fn wire_op(op: &RiscOp, precision: Prim) -> WireResult<WireRiscOp> {
         RiscOp::Div => WireRiscOp::Div,
         RiscOp::FloorDiv => WireRiscOp::FloorDiv,
         RiscOp::TruncDiv => WireRiscOp::TruncDiv,
+        RiscOp::Mod => WireRiscOp::Mod,
         RiscOp::CmpLt => WireRiscOp::CmpLt,
         RiscOp::MaxElem => WireRiscOp::MaxElem,
         RiscOp::MinElem => WireRiscOp::MinElem,

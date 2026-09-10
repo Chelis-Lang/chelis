@@ -238,6 +238,7 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
         | RiscOp::Div
         | RiscOp::FloorDiv
         | RiscOp::TruncDiv
+        | RiscOp::Mod
         | RiscOp::CmpLt
         | RiscOp::MaxElem
         | RiscOp::MinElem

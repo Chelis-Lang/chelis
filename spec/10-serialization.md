@@ -47,6 +47,11 @@ references to strictly earlier nodes. It does not carry shape numbers.
 `shape_deps`, `span_id` (explicitly null when absent), and `merged_spans` are
 mandatory fields, including when their lists are empty.
 
+`WireRiscOp::Mod` preserves the exact signed-remainder identity of [05-OP-64].
+It has exactly two earlier input nodes, each with its output's integer dtype
+and dimension list. Other arities, dtypes or shapes are encoding and decoding
+errors.
+
 `WireRiscOp::CheckedReshapeExtent { claims, axis }` has an earlier rank-zero
 `int64` input for the independently computed target extent, followed by one
 earlier scalar `int64` input per requirement. The nonempty `claims` list contains

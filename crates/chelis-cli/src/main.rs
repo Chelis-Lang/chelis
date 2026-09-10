@@ -3354,16 +3354,25 @@ fn cmd_build(
             // back to the last fn and silently drops the others. This is a
             // known HIP backend limitation — the backend is single-entry
             // by design. Tracked as a residual issue.
-            let preferred_entry_dag = compiled_program
+            let preferred_entry = compiled_program
                 .host
                 .as_ref()
-                .and_then(chelis_ir::host::preferred_tensor_entry_name)
+                .and_then(chelis_ir::host::preferred_tensor_entry_name);
+            let preferred_entry_is_host = match preferred_entry {
+                Some(name) => {
+                    chelis_compiler_api::target_capability::hip_entry_lane(checked, name)?
+                        == chelis_types::types::Lane::Host
+                }
+                None => false,
+            };
+            let preferred_entry_dag = preferred_entry
                 .and_then(|name| chelis_ir::host::lower_named_tensor_entry_dag(checked, name));
             let has_host_roots = root_manifest
                 .entries
                 .iter()
                 .any(|entry| entry.lane == chelis_types::types::Lane::Host);
             if (has_host_roots
+                || preferred_entry_is_host
                 || (dag.roots().is_empty()
                     && preferred_entry_dag.is_none()
                     && host_requires_host_backend))
@@ -3689,16 +3698,25 @@ fn cmd_build_deep(
                 .as_ref()
                 .map(chelis_ir::host::host_program_requires_host_backend)
                 .unwrap_or(false);
-            let preferred_entry_dag = compiled_program
+            let preferred_entry = compiled_program
                 .host
                 .as_ref()
-                .and_then(chelis_ir::host::preferred_tensor_entry_name)
+                .and_then(chelis_ir::host::preferred_tensor_entry_name);
+            let preferred_entry_is_host = match preferred_entry {
+                Some(name) => {
+                    chelis_compiler_api::target_capability::hip_entry_lane(checked, name)?
+                        == chelis_types::types::Lane::Host
+                }
+                None => false,
+            };
+            let preferred_entry_dag = preferred_entry
                 .and_then(|name| chelis_ir::host::lower_named_tensor_entry_dag(checked, name));
             let has_host_roots = root_manifest
                 .entries
                 .iter()
                 .any(|entry| entry.lane == chelis_types::types::Lane::Host);
             if (has_host_roots
+                || preferred_entry_is_host
                 || (dag.roots().is_empty()
                     && preferred_entry_dag.is_none()
                     && host_requires_host_backend))

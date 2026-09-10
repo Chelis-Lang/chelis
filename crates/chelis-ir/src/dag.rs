@@ -480,6 +480,9 @@ pub enum RiscOp {
     /// `Std.Decimal` arithmetic relies on. Non-differentiable;
     /// `grad` rejects it. See `spec/05-risc-primitives.md` §2.1.
     TruncDiv,
+    /// Exact signed remainder, with DivZero traps at the stored width
+    /// and dividend-sign semantics under [05-OP-64].
+    Mod,
     CmpLt,
     MaxElem,
     /// Direct element-wise minimum selection. This identity preserves the
@@ -877,6 +880,7 @@ pub enum RiscAtomIdentity {
     Div,
     FloorDiv,
     TruncDiv,
+    Mod,
     CmpLt,
     MaxElem,
     Neg,
@@ -934,6 +938,7 @@ impl RiscAtomIdentity {
         Self::Div,
         Self::FloorDiv,
         Self::TruncDiv,
+        Self::Mod,
         Self::CmpLt,
         Self::MaxElem,
         Self::Neg,
@@ -991,6 +996,7 @@ impl RiscAtomIdentity {
             Self::Div => "div",
             Self::FloorDiv => "floor_div",
             Self::TruncDiv => "trunc_div",
+            Self::Mod => "mod",
             Self::CmpLt => "cmplt",
             Self::MaxElem => "max_elem",
             Self::Neg => "neg",
@@ -1064,6 +1070,7 @@ impl RiscOp {
             Self::Div => Semantic(Id::Div),
             Self::FloorDiv => Semantic(Id::FloorDiv),
             Self::TruncDiv => Semantic(Id::TruncDiv),
+            Self::Mod => Semantic(Id::Mod),
             Self::CmpLt => Semantic(Id::CmpLt),
             Self::MaxElem => Semantic(Id::MaxElem),
             Self::Neg => Semantic(Id::Neg),
@@ -1437,7 +1444,7 @@ impl RiscOp {
             // `Floor`/`Ceil`/`Round` they have a step-function envelope,
             // but the integer-quotient semantics are not part of the
             // pinned real-valued forward-bound surface today.
-            RiscOp::FloorDiv | RiscOp::TruncDiv => false,
+            RiscOp::FloorDiv | RiscOp::TruncDiv | RiscOp::Mod => false,
 
             // [05-OP-6] `cast_trunc` is the same shape as the integer
             // quotients above: piecewise constant with an integer output,
@@ -3367,6 +3374,7 @@ mod tests {
             RiscOp::Div,
             RiscOp::FloorDiv,
             RiscOp::TruncDiv,
+            RiscOp::Mod,
             RiscOp::CmpLt,
             RiscOp::MaxElem,
             RiscOp::Neg,

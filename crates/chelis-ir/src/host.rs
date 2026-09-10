@@ -3434,7 +3434,6 @@ const HOST_ONLY_BUILTINS: &[&str] = &[
     "to_string",
     "to_int",
     "to_float",
-    "mod",
     "bitand",
     "bitor",
     "bitxor",

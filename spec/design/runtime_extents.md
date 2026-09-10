@@ -405,7 +405,17 @@ its checked witness, so a known non-unit actual cannot make backward graph
 validation preempt the primal Domain failure. Vmap shares scalar checks and shifts tensor-axis
 witnesses and unit refinements together. The verifier and exact wire decoder
 reject missing claims, wrong arity or scalar types, and unsupported refinements.
-WireDag v10 carries both checked operations. Stdlib/library/context cache
+The admitted extent arithmetic includes signed remainder. `RiscOp::Mod` uses
+the existing `Numeric:mod:TableA` registration under [05-OP-64] and exact tagged
+integer kernels. It stays materialized through fusion, preserves its inputs
+through rebuilding, and uses checked C arithmetic. Integer zero-divisors retain DivZero; remainder
+by -1 is exactly zero without forming an unrepresentable quotient. This closes the host-route
+claim bypass for remainder targets: selecting `mod` cannot discard the authored
+reshape obligation. HIP entry selection retains the checked realizability lane
+through helper extraction on both CLI and API paths. The host C artifact is
+executed independently in the oracle; genuine tensor roots still select device
+emission. HIP device execution remains with the platform owners.
+WireDag v10 carries both checked operations and integer remainder. Stdlib/library/context cache
 versions 17/13/19 require the authored signature ledger and revalidate it
 against fresh lowering. Missing fields and a forged ledger with a valid
 checksum and unchanged proof identity reject at admission.
@@ -413,16 +423,18 @@ checksum and unchanged proof identity reject at admission.
 The completion oracle for these two host obligations is:
 
 ```sh
-cargo nextest run -p chelis-cli -p chelis-ir -p chelis-compiler-api --lib \
+cargo nextest run -p chelis-cli -p chelis-ir -p chelis-compiler-api -p chelis-backend-c --lib \
   --test runtime_extent_claim_preparation --test runtime_extent_checked_transport \
   --test wire_extent_witness --test disk_cache \
-  --test issue_513_symbolic_axis_adjoints \
-  -E 'binary(runtime_extent_claim_preparation) | binary(runtime_extent_checked_transport) | binary(wire_extent_witness) | test(=cached_imports_preserve_computed_claims_and_unit_preconditions) | test(=previous_checked_extent_cache_is_rejected_before_payload_decode) | test(context_decode_rejects_missing_or_forged_authored_signatures) | binary(issue_513_symbolic_axis_adjoints) | test(static_reshape_folding_requires_independent_axis_sources)'
+  --test issue_513_symbolic_axis_adjoints --test exec_compile \
+  --test runtime_extent_slice_b --test issue_912_root_boundary \
+  -E 'binary(runtime_extent_claim_preparation) | binary(runtime_extent_checked_transport) | binary(wire_extent_witness) | test(=cached_imports_preserve_computed_claims_and_unit_preconditions) | test(=previous_checked_extent_cache_is_rejected_before_payload_decode) | test(context_decode_rejects_missing_or_forged_authored_signatures) | binary(issue_513_symbolic_axis_adjoints) | test(static_reshape_folding_requires_independent_axis_sources) | test(checked_remainder) | test(=a_local_unit_extent_claim_is_guarded_on_the_hip_host_lowering) | test(=hip_tensor_root_uses_the_manifest_to_emit_a_gpu_executable)'
 ```
 
 The new public matrix has 117 initial exported/binding/main fixtures, 69
 result-graph fixtures, 48 complete-shape-list scheduling fixtures,
-six folded-source caller-contract fixtures and 24 producing-source expression fixtures,
+six folded-source caller-contract fixtures, 48 producing-source expression fixtures
+six dynamic remainder fixtures and 12 HIP host CLI/API executions,
 three executable example controls, 24 grad/vmap controls
 and 12 imported-call controls. Every
 case checks declarations independently of actual shape/value or required

@@ -1998,7 +1998,8 @@ pub struct WireRecordPatternField {
 ///   Shape dependencies are exact u64 node identities and literal-witness
 ///   requirements use the fixed int64 extent carrier.
 /// - `10`: checked reshape scalars and checked unit-axis refinements retain
-///   independent actual/required values through graph transport.
+///   independent actual/required values through graph transport; integer remainder
+///   targets use the explicit `Mod` operation.
 pub const WIRE_DAG_SCHEMA_VERSION: u32 = 10;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
@@ -2158,6 +2159,35 @@ impl WireDag {
         dag_domains::validate(self)?;
         for (index, node) in self.nodes.iter().enumerate() {
             match &node.op {
+                WireRiscOp::Mod => {
+                    if node.inputs.len() != 2
+                        || !Prim::parse_name(&node.output_type.precision)
+                            .is_some_and(|prim| prim.is_integer())
+                        || node.inputs.iter().any(|id| {
+                            self.nodes[..index]
+                                .iter()
+                                .find(|input| input.id == *id)
+                                .is_none_or(|input| {
+                                    input.output_type.precision != node.output_type.precision
+                                        || input.output_type.dims.len()
+                                            != node.output_type.dims.len()
+                                        || input
+                                            .output_type
+                                            .dims
+                                            .iter()
+                                            .zip(&node.output_type.dims)
+                                            .any(|(actual, expected)| {
+                                                !wire_dim_info_equal(actual, expected)
+                                            })
+                                })
+                        })
+                    {
+                        return Err(WireDagContractError::new(format!(
+                            "WireDag Mod node {} requires two earlier inputs with its integer dtype and shape",
+                            node.id
+                        )));
+                    }
+                }
                 WireRiscOp::CheckedReshapeExtent {
                     axis: WireRtAxis::Lit { value: axis },
                     claims,
@@ -2851,6 +2881,7 @@ pub enum WireRiscOp {
     Div,
     FloorDiv,
     TruncDiv,
+    Mod,
     CmpLt,
     MaxElem,
     MinElem,

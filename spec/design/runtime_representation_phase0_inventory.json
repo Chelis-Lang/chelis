@@ -2346,7 +2346,7 @@
     },
     {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx::fold_shape_derived_static_size",
-      "sample": "self . fold_shape_derived_static_size (& operands [0]) ? . checked_mul (self . fold_shape_derived..."
+      "sample": "self . fold_shape_derived_static_size (& operands [0] , sources) ? . checked_mul (self . fold_sha..."
     },
     {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx::gather_values_rank",

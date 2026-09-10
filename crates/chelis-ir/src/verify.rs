@@ -83,6 +83,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             | RiscOp::Div
             | RiscOp::FloorDiv
             | RiscOp::TruncDiv
+            | RiscOp::Mod
             | RiscOp::CmpLt
             | RiscOp::MaxElem
             | RiscOp::MinElem => {
@@ -90,6 +91,13 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     errors.push(format!(
                         "binary op at node {} has {} inputs (expected 2)",
                         node.id.0, arity
+                    ));
+                }
+
+                if matches!(node.op, RiscOp::Mod) && !node.output_type.precision.is_integer() {
+                    errors.push(format!(
+                        "mod at node {} requires an integer dtype",
+                        node.id.0
                     ));
                 }
 
@@ -102,6 +110,22 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                         errors.push(format!(
                             "binary op at node {} has mismatched precisions: {:?} vs {:?}",
                             node.id.0, lhs.output_type.precision, rhs.output_type.precision
+                        ));
+                    }
+
+                    if matches!(node.op, RiscOp::Mod)
+                        && (node.output_type.precision != lhs.output_type.precision
+                            || node.output_type.dims.len() != lhs.output_type.dims.len()
+                            || node
+                                .output_type
+                                .dims
+                                .iter()
+                                .zip(&lhs.output_type.dims)
+                                .any(|(out, input)| !dims_compatible(out, input)))
+                    {
+                        errors.push(format!(
+                            "mod at node {} output must match its input shape and dtype",
+                            node.id.0
                         ));
                     }
 

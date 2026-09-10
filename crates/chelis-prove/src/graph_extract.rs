@@ -177,6 +177,7 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             | WireRiscOp::Div
             | WireRiscOp::FloorDiv
             | WireRiscOp::TruncDiv
+            | WireRiscOp::Mod
             | WireRiscOp::CmpLt
             | WireRiscOp::MaxElem
             | WireRiscOp::MinElem

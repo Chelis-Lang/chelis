@@ -292,3 +292,50 @@ fn checked_extent_wire_never_accepts_an_unproved_refinement() {
         );
     }
 }
+
+#[test]
+fn remainder_wire_roundtrip_requires_exact_integer_operands() {
+    for prim in ["int8", "int16", "int32", "int64"] {
+        let mut dag = fixture();
+        for (index, node) in dag.nodes.iter_mut().enumerate() {
+            node.op = if index == 2 {
+                WireRiscOp::Mod
+            } else {
+                WireRiscOp::Load {
+                    name: format!("x{index}"),
+                }
+            };
+            node.inputs = if index == 2 { vec![0, 1] } else { vec![] };
+            node.shape_deps.clear();
+            node.output_type = WireTensorType {
+                dims: vec![],
+                precision: prim.into(),
+            };
+        }
+        let json = serde_json::to_value(&dag).unwrap();
+        let decoded = WireDag::from_validated_json(&json.to_string()).unwrap();
+        assert!(matches!(decoded.nodes[2].op, WireRiscOp::Mod));
+        assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+        let mut invalid = dag.clone();
+        invalid.nodes[2].output_type.precision = "f32".into();
+        assert!(serde_json::to_value(invalid).is_err());
+        for mutation in 0..5 {
+            let mut bad = json.clone();
+            match mutation {
+                0 => bad["nodes"][2]["inputs"] = serde_json::json!([0]),
+                1 => bad["nodes"][2]["output_type"]["precision"] = "f32".into(),
+                2 => bad["nodes"][0]["output_type"]["precision"] = "bool".into(),
+                3 => {
+                    bad["nodes"][1]["output_type"]["dims"] =
+                        serde_json::json!([{"kind":"lit", "size":2}])
+                }
+                4 => bad["nodes"][2]["inputs"] = serde_json::json!([0, 2]),
+                _ => unreachable!(),
+            }
+            assert!(
+                WireDag::from_validated_json(&bad.to_string()).is_err(),
+                "{bad}"
+            );
+        }
+    }
+}
