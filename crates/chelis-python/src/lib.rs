@@ -2055,6 +2055,10 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 #[cfg(test)]
+#[path = "../tests/support/native_dlpack_owner.rs"]
+mod native_dlpack_owner_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use pyo3::types::{IntoPyDict, PyModule};

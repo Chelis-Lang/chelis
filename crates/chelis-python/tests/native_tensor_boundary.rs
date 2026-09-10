@@ -100,6 +100,27 @@ rejects(lambda: model(np.ones((1, 3), dtype=np.float32)), (ValueError,))
     );
 }
 
+// OP45 observes every int64 extent even when the element domain is empty.
+#[test]
+fn empty_large_extent_shape_is_exact_without_payload_allocation() {
+    run_case(
+        r#"
+extent = 1 << 33
+model = model_for((0, extent))
+source = np.empty((0, extent), dtype=np.float32)
+assert source.size == 0 and source.nbytes == 0
+output = model(source)
+assert output.shape == [0, extent]
+assert all(type(value) is int for value in output.shape)
+observed = np.from_dlpack(output)
+assert observed.shape == (0, extent)
+assert observed.size == 0 and observed.nbytes == 0
+# A truncated extent is still an empty tensor, but violates this manifest.
+rejects(lambda: model(np.empty((0, 0), dtype=np.float32)), (ValueError,))
+"#,
+    );
+}
+
 #[test]
 fn f64_copy_preserves_stored_bits_and_rejects_f32_input() {
     run_case(
