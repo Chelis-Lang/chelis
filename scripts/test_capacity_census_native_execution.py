@@ -7,6 +7,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -16,6 +18,17 @@ import capacity_census_native_execution as execution
 
 
 class MatrixContractTests(unittest.TestCase):
+    def test_fixed_worker_imports_current_helpers_with_safe_path_enabled(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            environment = execution._worker_environment(root / "runtime", root / "capture", execution.GROUPS[0])
+            self.assertEqual(environment["PYTHONSAFEPATH"], "1")
+            result = subprocess.run([sys.executable, str(Path(execution.__file__).resolve())],
+                                    cwd=root, env=environment, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn(b"native execution is invoked by its fixed collection API", result.stderr)
+            self.assertNotIn(b"ModuleNotFoundError", result.stderr)
+
     def test_fixed_matrix_preserves_every_exact_spec_case_and_all_fixture_instances(self):
         actual = tuple((group.name, group.kind, name, count, group.fixture_kind)
                        for group in execution.GROUPS
