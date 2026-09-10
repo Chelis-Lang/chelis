@@ -1035,9 +1035,9 @@ class ListOutputTests(unittest.TestCase):
         )
         self.assertIn(command, [gate.render(entry) for entry in gate.full_command_list()])
 
-    def test_runtime_representation_phase0_oracle_is_continuous_and_local(self):
+    def test_runtime_representation_phase1_oracle_is_continuous_and_local(self):
         command = (
-            "<managed-python> scripts/runtime_representation_oracle.py --phase 0"
+            "<managed-python> scripts/runtime_representation_oracle.py --phase 1"
         )
         # The oracle is a stage of its own so hosted CI can give it a runner of
         # its own; it must not also ride on the integration support slice.
@@ -2198,7 +2198,7 @@ class CiParityTests(unittest.TestCase):
         self.assertNotIn("compiled-value-ownership-phase0-oracle", aggregate_block)
         self.assertIn("compiled-value-ownership-phase0-oracle", _workflow_job_block(CI_YML.with_name("heavy-e2e.yml"), "report"))
 
-    def test_runtime_representation_phase0_oracle_is_a_dedicated_gate_job(self):
+    def test_runtime_representation_phase1_oracle_is_a_dedicated_gate_job(self):
         workspace_block = _ci_job_block("ci-fast")
         ownership_block = _ci_job_block("compiled-value-ownership-phase0-oracle")
         oracle_block = _ci_job_block("runtime-representation-phase0-oracle")
@@ -2206,11 +2206,19 @@ class CiParityTests(unittest.TestCase):
         command = "python3 scripts/gate.py runtime-representation"
 
         self.assertIn(
-            "name: Runtime Representation Phase 0 Oracle",
+            "name: Runtime Representation Phase 1 Oracle",
             oracle_block,
         )
         self.assertNotIn("    needs:", oracle_block)
         self.assertIn("contents: read", oracle_block)
+        self.assertIn(
+            "name: runtime-representation-phase1-receipts",
+            oracle_block,
+        )
+        self.assertIn(
+            "path: target/runtime-representation-phase1/",
+            oracle_block,
+        )
         self.assertIn("dtolnay/rust-toolchain@stable", oracle_block)
         self.assertIn("python3 scripts/ci_setup_uv_python.py", oracle_block)
         self.assertIn("taiki-e/install-action@nextest", oracle_block)

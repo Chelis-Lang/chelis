@@ -446,7 +446,7 @@ UNREPRESENTABLE_DOMAIN_ORACLE: list[str] = [
     "scripts/unrepresentable_domain_oracle.py",
 ]
 
-# chelis#893 Phase 0. Its acceptance surface deliberately runs release-profile
+# chelis#893 Phase 1, retaining the Phase 0 inventory and mutations. It runs release-profile
 # Rust reproducers and re-scans the seam inventory once per controlled
 # mutation, so on a hosted runner the oracle costs about eleven minutes: the
 # release builds of chelis-ir, chelis-backend-c, chelis-backend-hip, and
@@ -460,7 +460,7 @@ RUNTIME_REPRESENTATION_ORACLE: list[str] = [
     MANAGED_PYTHON,
     "scripts/runtime_representation_oracle.py",
     "--phase",
-    "0",
+    "1",
 ]
 
 # chelis#1205's authoritative front-end complexity and parity oracle. It

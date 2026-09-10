@@ -99,7 +99,7 @@ fn c_fused_codegen_compiles() {
             panic!("Fused C codegen does NOT compile:\n{stderr}");
         }
         Err(e) => {
-            eprintln!("gcc not available ({e}), skipping compile check");
+            panic!("C compiler is required for the fused contract: {e}");
         }
     }
 }
@@ -286,7 +286,7 @@ fn c_fused_reduce_compiles() {
             );
         }
         Err(e) => {
-            eprintln!("gcc not available ({e}), skipping compile check");
+            panic!("C compiler is required for the fused contract: {e}");
         }
     }
 }

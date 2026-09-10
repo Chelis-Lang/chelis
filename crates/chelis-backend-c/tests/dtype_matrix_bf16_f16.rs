@@ -16,6 +16,9 @@
 //!
 //! Acceptance oracle: `cargo test -p chelis-backend-c --test dtype_matrix_bf16_f16`.
 
+#[path = "../../../tests/support/runtime_archive.rs"]
+mod runtime_archive;
+
 mod support;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_ir::eval::eval_tensor;
@@ -124,6 +127,9 @@ fn find_newest_runtime_archive(deps_dir: &Path) -> std::io::Result<Option<PathBu
 }
 
 fn runtime_lib_path() -> PathBuf {
+    if let Some(archive) = runtime_archive::explicit() {
+        return archive;
+    }
     static PATH: OnceLock<PathBuf> = OnceLock::new();
     PATH.get_or_init(|| {
         let canonical = target_debug_dir().join("libchelis_runtime.a");
@@ -137,43 +143,6 @@ fn runtime_lib_path() -> PathBuf {
         canonical
     })
     .clone()
-}
-
-fn gcc_available() -> bool {
-    Command::new("gcc")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn cblas_available() -> bool {
-    // Probe by linking a trivial program that references `cblas_sgemm`.
-    // If the OS does not ship libcblas the matmul tests early-return
-    // gracefully (the agreement tests still cover this via the e2e
-    // suite under a unified cblas guard).
-    let probe = common::probe_dir("bf16_cblas_probe");
-    let dir = probe.path().to_path_buf();
-    let probe_source = dir.join("probe.c");
-    fs::write(
-        &probe_source,
-        r#"
-extern void cblas_sgemm();
-int main(void) { (void)cblas_sgemm; return 0; }
-"#,
-    )
-    .unwrap();
-    let out = dir.join("probe_bin");
-    Command::new("gcc")
-        .args([
-            probe_source.to_str().unwrap(),
-            "-lcblas",
-            "-o",
-            out.to_str().unwrap(),
-        ])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
 }
 
 /// Build a C source + main harness, gcc-compile, run, return stdout.
@@ -214,13 +183,15 @@ fn compile_and_run_kernel(
         bin.to_str().unwrap().into(),
         runtime_lib.to_str().unwrap().into(),
     ];
-    if needs_cblas {
-        args.push("-lcblas".into());
-    }
-    args.push("-lm".into());
-    args.push("-lpthread".into());
-    args.push("-ldl".into());
-    let compile = Command::new("gcc")
+    let toolchain = chelis_backend_c::toolchain::test_toolchain(
+        chelis_backend_c::toolchain::CodegenRequirements {
+            wants_openmp: false,
+            needs_blas: needs_cblas,
+        },
+    );
+    args.extend(toolchain.compile_flags);
+    args.extend(toolchain.link_flags);
+    let compile = Command::new(toolchain.compiler)
         .args(&args)
         .output()
         .expect("failed to invoke gcc");
@@ -324,10 +295,6 @@ fn mat_ty(rows: usize, cols: usize, prec: Prim) -> TensorType {
 
 #[test]
 fn bf16_const_fill_produces_exact_bit_pattern() {
-    if !gcc_available() {
-        eprintln!("skipping: gcc not available");
-        return;
-    }
     // Each (value, expected bf16 bit pattern) pair the plan pins for
     // the Const-fill emit path.
     let cases: &[(f32, u16)] = &[
@@ -377,10 +344,6 @@ int main(void) {{
 
 #[test]
 fn f16_const_fill_produces_exact_bit_pattern() {
-    if !gcc_available() {
-        eprintln!("skipping: gcc not available");
-        return;
-    }
     let cases: &[(f32, u16)] = &[
         (1.5_f32, 0x3E00),
         (2.5_f32, 0x4100),
@@ -442,10 +405,6 @@ fn eval_scalar(dag: &Dag) -> f64 {
 
 #[test]
 fn bf16_add_agrees_with_evaluator() {
-    if !gcc_available() {
-        eprintln!("skipping: gcc not available");
-        return;
-    }
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::synth_const(scalar_ty(Prim::Bf16).precision, 1.5),
@@ -486,10 +445,6 @@ int main(void) {{
 
 #[test]
 fn f16_add_agrees_with_evaluator() {
-    if !gcc_available() {
-        eprintln!("skipping: gcc not available");
-        return;
-    }
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::synth_const(scalar_ty(Prim::F16).precision, 1.5),
@@ -530,10 +485,6 @@ int main(void) {{
 
 #[test]
 fn bf16_mul_agrees_with_evaluator() {
-    if !gcc_available() {
-        eprintln!("skipping: gcc not available");
-        return;
-    }
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::synth_const(scalar_ty(Prim::Bf16).precision, 3.0),
@@ -573,10 +524,6 @@ int main(void) {{
 
 #[test]
 fn f16_mul_agrees_with_evaluator() {
-    if !gcc_available() {
-        eprintln!("skipping: gcc not available");
-        return;
-    }
     let mut dag = Dag::new();
     let a = dag.add_node(
         RiscOp::synth_const(scalar_ty(Prim::F16).precision, 3.0),
@@ -625,10 +572,6 @@ int main(void) {{
 ///     (not coincidentally producing the right answer).
 #[test]
 fn bf16_reduce_sum_uses_f32_accumulator_per_spec_5_7_1() {
-    if !gcc_available() {
-        eprintln!("skipping: gcc not available");
-        return;
-    }
     let n = 1024;
     let mut dag = Dag::new();
     let load = dag.add_node(
@@ -686,10 +629,6 @@ int main(void) {{
 
 #[test]
 fn f16_reduce_sum_uses_f32_accumulator_per_spec_5_7_1() {
-    if !gcc_available() {
-        eprintln!("skipping: gcc not available");
-        return;
-    }
     let n = 1024;
     let mut dag = Dag::new();
     let load = dag.add_node(
@@ -746,10 +685,6 @@ int main(void) {{
 
 #[test]
 fn bf16_reduce_max_agrees_with_evaluator() {
-    if !gcc_available() {
-        eprintln!("skipping: gcc not available");
-        return;
-    }
     let n = 4;
     let mut dag = Dag::new();
     let load = dag.add_node(
@@ -793,10 +728,6 @@ int main(void) {{
 
 #[test]
 fn f16_reduce_max_agrees_with_evaluator() {
-    if !gcc_available() {
-        eprintln!("skipping: gcc not available");
-        return;
-    }
     let n = 4;
     let mut dag = Dag::new();
     let load = dag.add_node(
@@ -945,14 +876,6 @@ fn f16_matmul_routes_through_convert_then_sgemm() {
 
 #[test]
 fn bf16_matmul_agrees_with_evaluator() {
-    if !gcc_available() {
-        eprintln!("skipping: gcc not available");
-        return;
-    }
-    if !cblas_available() {
-        eprintln!("skipping: libcblas not available");
-        return;
-    }
     let dag = build_bf16_matmul_dag();
     let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
     let result = codegen(&specialized, "bf16_matmul_exec").unwrap();
@@ -1013,14 +936,6 @@ int main(void) {{
 
 #[test]
 fn f16_matmul_agrees_with_evaluator() {
-    if !gcc_available() {
-        eprintln!("skipping: gcc not available");
-        return;
-    }
-    if !cblas_available() {
-        eprintln!("skipping: libcblas not available");
-        return;
-    }
     let dag = build_f16_matmul_dag();
     let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
     let result = codegen(&specialized, "f16_matmul_exec").unwrap();

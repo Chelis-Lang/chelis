@@ -1,0 +1,1 @@
+Make the runtime representation Phase 1 gate require frozen test selection and current framework execution receipts for checked host/C metadata and exact storage capacity, with mandatory production mutations and explicit manual-test exclusions.

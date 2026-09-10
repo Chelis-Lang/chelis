@@ -24,6 +24,19 @@ def assert_extended(test, pr, nightly):
         test.assertNotIn("if", job)
         test.assertFalse(job.get("continue-on-error", False))
         test.assertEqual(job["timeout-minutes"], 60 if name.startswith(("generalize", "dtype")) else 45)
+        if name == "runtime-representation-phase0-oracle":
+            test.assertEqual(job["name"], "Runtime Representation Phase 1 Oracle")
+            artifacts = [
+                step
+                for step in job["steps"]
+                if step.get("name")
+                == "Upload runtime representation execution receipts"
+            ]
+            test.assertEqual(len(artifacts), 1)
+            test.assertEqual(
+                artifacts[0]["with"]["path"],
+                "target/runtime-representation-phase1/",
+            )
         steps = [s for s in job["steps"] if s.get("run", "").startswith(command)]
         test.assertEqual(len(steps), 1, command)
         test.assertNotIn("if", steps[0])

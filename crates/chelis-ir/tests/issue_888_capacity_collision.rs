@@ -42,3 +42,62 @@ fn distinct_large_products_do_not_reuse_storage() {
 fn equivalent_large_factorizations_still_reuse_storage() {
     assert_eq!(slots_for(shape(1 << 39, 1 << 41)), 2);
 }
+
+/// [04-SHAPE-1]: an expired owned slot needs both exact capacity and exact
+/// representation. Unlike a destructive Drop, ordinary last use permits reuse,
+/// so removing the representation check must change this plan.
+#[test]
+fn expired_owned_slots_require_exact_representation_in_both_lanes() {
+    use chelis_ir::ownership::plan_hip_storage;
+    let dtypes = [
+        Prim::F64,
+        Prim::F32,
+        Prim::F16,
+        Prim::Bf16,
+        Prim::Int64,
+        Prim::Int32,
+        Prim::Int16,
+        Prim::Int8,
+        Prim::Bool,
+    ];
+    for source in dtypes {
+        for target in dtypes {
+            let ty = |precision| TensorType {
+                dims: vec![DimInfo::Lit(4)],
+                precision,
+            };
+            let mut dag = Dag::new();
+            let a = dag.add_node(RiscOp::synth_const(source, 1.0), vec![], ty(source), None);
+            let middle = if source == Prim::Bool {
+                RiscOp::Copy
+            } else {
+                RiscOp::Neg
+            };
+            let b = dag.add_node(middle, vec![a], ty(source), None);
+            let c = dag.add_node(
+                RiscOp::Cast {
+                    new_precision: target,
+                },
+                vec![b],
+                ty(target),
+                None,
+            );
+            dag.add_root(c);
+            for hip in [false, true] {
+                let verified = verify_ownership(lower_dag_ownership(dag.clone()).unwrap()).unwrap();
+                let shared = if hip {
+                    let plan = plan_hip_storage(verified).unwrap();
+                    plan.slot_for_node(a) == plan.slot_for_node(c)
+                } else {
+                    let plan = plan_c_storage(verified).unwrap();
+                    plan.slot_for_node(a) == plan.slot_for_node(c)
+                };
+                assert_eq!(
+                    shared,
+                    source == target,
+                    "source={source:?} target={target:?} hip={hip}"
+                );
+            }
+        }
+    }
+}

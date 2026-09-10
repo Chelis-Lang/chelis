@@ -6,6 +6,9 @@ mod emitted_expr;
 mod host_abi;
 mod host_emit;
 pub mod memory;
+#[cfg(test)]
+#[path = "../../../tests/support/runtime_archive.rs"]
+mod test_runtime_archive;
 pub mod toolchain;
 
 /// Primitive types the C backend's tensor-DAG path can realize.
@@ -377,6 +380,9 @@ mod tests {
     }
 
     fn runtime_library_path() -> PathBuf {
+        if let Some(archive) = crate::test_runtime_archive::explicit() {
+            return archive;
+        }
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let workspace_root = manifest_dir.join("../..");
         let configured_target = env::var_os("CARGO_TARGET_DIR")
@@ -972,14 +978,6 @@ mod tests {
         path
     }
 
-    fn gcc_available() -> bool {
-        Command::new(crate::toolchain::c_compiler())
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    }
-
     fn c_test_extra_flags() -> Vec<String> {
         std::env::var("CHELIS_C_TEST_EXTRA_FLAGS")
             .ok()
@@ -1025,81 +1023,8 @@ mod tests {
         crate::toolchain::test_toolchain(requirements)
     }
 
-    fn gcc_can_link(extra_args: &[&str], source: &str) -> bool {
-        if !gcc_available() {
-            return false;
-        }
-        let tmp = tempfile::tempdir().unwrap();
-        let src_path = write_temp_file(tmp.path(), "probe.c", source);
-        let mut cmd = Command::new(crate::toolchain::c_compiler());
-        apply_c_test_flags(&mut cmd);
-        cmd.arg(src_path.to_str().unwrap())
-            .args(extra_args)
-            .arg("-o")
-            .arg(tmp.path().join("probe").to_str().unwrap());
-        cmd.output().map(|o| o.status.success()).unwrap_or(false)
-    }
-
-    fn openmp_available() -> bool {
-        let toolchain = test_toolchain(crate::toolchain::CodegenRequirements {
-            wants_openmp: true,
-            needs_blas: false,
-        });
-        if !toolchain.openmp_enabled {
-            return false;
-        }
-        gcc_can_link(
-            &toolchain
-                .compile_flags
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            r#"
-#include <omp.h>
-int main(void) {
-    int n = 0;
-    #pragma omp parallel reduction(+:n)
-    n += 1;
-    return 0;
-}
-"#,
-        )
-    }
-
-    fn openblas_available() -> bool {
-        let toolchain = test_toolchain(crate::toolchain::CodegenRequirements {
-            wants_openmp: false,
-            needs_blas: true,
-        });
-        gcc_can_link(
-            &toolchain
-                .link_flags
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            r#"
-#ifdef __APPLE__
-#include <Accelerate/Accelerate.h>
-#else
-#include <cblas.h>
-#endif
-int main(void) {
-    float a[1] = {1.0f};
-    float b[1] = {2.0f};
-    float c[1] = {0.0f};
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, 1, 1, 1, 1.0f, a, 1, b, 1, 0.0f, c, 1);
-    return c[0] == 2.0f ? 0 : 1;
-}
-"#,
-        )
-    }
-
     #[test]
     fn runtime_compiles_standalone() {
-        if !gcc_available() {
-            eprintln!("skipping: gcc not available");
-            return;
-        }
         let tmp = tempfile::tempdir().unwrap();
         copy_runtime_artifacts(tmp.path());
         write_temp_file(
@@ -1126,10 +1051,6 @@ int main(void) {
 
     #[test]
     fn runtime_view_free_is_safe() {
-        if !gcc_available() {
-            eprintln!("skipping: gcc not available");
-            return;
-        }
         let tmp = tempfile::tempdir().unwrap();
         copy_runtime_artifacts(tmp.path());
         let main_c = r#"
@@ -1172,10 +1093,6 @@ int main(void) {
 
     #[test]
     fn simple_add_compiles() {
-        if !gcc_available() {
-            eprintln!("skipping: gcc not available");
-            return;
-        }
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(scalar_f32().precision, 1.0),
@@ -1243,9 +1160,6 @@ int main() {
         options: CodegenOptions,
         extra_args: &[&str],
     ) -> String {
-        if !gcc_available() {
-            panic!("gcc not available");
-        }
         let result = codegen_with_options(dag, func_name, options).unwrap();
 
         let tmp = tempfile::tempdir().unwrap();
@@ -1410,9 +1324,6 @@ int main() {{
         options: CodegenOptions,
         cases: &[Vec<TestInput>],
     ) -> Vec<String> {
-        if !gcc_available() {
-            panic!("gcc not available");
-        }
         let result = codegen_with_options(dag, func_name, options).unwrap();
         let n_out = result.output_labels.len();
 
@@ -1577,9 +1488,6 @@ int main(void) {{
 
     #[test]
     fn numerical_tensor_add_is_elementwise_with_runtime_inputs() {
-        if !gcc_available() {
-            return;
-        }
         let mut dag = Dag::new();
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
         let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(4), None);
@@ -1600,9 +1508,6 @@ int main(void) {{
 
     #[test]
     fn numerical_tensor_mul_is_elementwise_with_runtime_inputs() {
-        if !gcc_available() {
-            return;
-        }
         let mut dag = Dag::new();
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
         let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(4), None);
@@ -1623,9 +1528,6 @@ int main(void) {{
 
     #[test]
     fn numerical_add_const() {
-        if !gcc_available() {
-            return;
-        }
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(scalar_f32().precision, 1.0),
@@ -1646,9 +1548,6 @@ int main(void) {{
 
     #[test]
     fn numerical_neg() {
-        if !gcc_available() {
-            return;
-        }
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(scalar_f32().precision, 5.0),
@@ -1663,9 +1562,6 @@ int main(void) {{
 
     #[test]
     fn numerical_mul() {
-        if !gcc_available() {
-            return;
-        }
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(scalar_f32().precision, 3.0),
@@ -1686,9 +1582,6 @@ int main(void) {{
 
     #[test]
     fn numerical_exp_zero() {
-        if !gcc_available() {
-            return;
-        }
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(scalar_f32().precision, 0.0),
@@ -1703,9 +1596,6 @@ int main(void) {{
 
     #[test]
     fn numerical_sqrt() {
-        if !gcc_available() {
-            return;
-        }
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(scalar_f32().precision, 9.0),
@@ -1720,9 +1610,6 @@ int main(void) {{
 
     #[test]
     fn numerical_log_e() {
-        if !gcc_available() {
-            return;
-        }
         // log(e) = 1.0
         let mut dag = Dag::new();
         let a = dag.add_node(
@@ -1738,9 +1625,6 @@ int main(void) {{
 
     #[test]
     fn numerical_sin_zero() {
-        if !gcc_available() {
-            return;
-        }
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(scalar_f32().precision, 0.0),
@@ -1755,9 +1639,6 @@ int main(void) {{
 
     #[test]
     fn numerical_cmplt_true() {
-        if !gcc_available() {
-            return;
-        }
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(scalar_f32().precision, 1.0),
@@ -1786,9 +1667,6 @@ int main(void) {{
 
     #[test]
     fn numerical_cmplt_false() {
-        if !gcc_available() {
-            return;
-        }
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(scalar_f32().precision, 5.0),
@@ -1817,9 +1695,6 @@ int main(void) {{
 
     #[test]
     fn numerical_sum_vector() {
-        if !gcc_available() {
-            return;
-        }
         // sum([2, 2, 2]) = 6
         let mut dag = Dag::new();
         let a = dag.add_node(
@@ -1843,9 +1718,6 @@ int main(void) {{
 
     #[test]
     fn numerical_add_then_mul() {
-        if !gcc_available() {
-            return;
-        }
         // (1 + 2) * 4 = 12
         let mut dag = Dag::new();
         let a = dag.add_node(
@@ -1874,9 +1746,6 @@ int main(void) {{
 
     #[test]
     fn numerical_max_elem() {
-        if !gcc_available() {
-            return;
-        }
         // max(3, 7) = 7
         let mut dag = Dag::new();
         let a = dag.add_node(
@@ -1898,9 +1767,6 @@ int main(void) {{
 
     #[test]
     fn numerical_relu() {
-        if !gcc_available() {
-            return;
-        }
         let mut dag = Dag::new();
         let x = dag.add_node(
             RiscOp::synth_const(scalar_f32().precision, -3.0),
@@ -1916,9 +1782,6 @@ int main(void) {{
 
     #[test]
     fn numerical_sigmoid_zero() {
-        if !gcc_available() {
-            return;
-        }
         let mut dag = Dag::new();
         let x = dag.add_node(
             RiscOp::synth_const(scalar_f32().precision, 0.0),
@@ -1933,9 +1796,6 @@ int main(void) {{
 
     #[test]
     fn numerical_max_reduce() {
-        if !gcc_available() {
-            return;
-        }
         // max_reduce([5, 5, 5]) over axis 0 = 5
         let mut dag = Dag::new();
         let a = dag.add_node(
@@ -1951,9 +1811,6 @@ int main(void) {{
 
     #[test]
     fn numerical_cast_identity() {
-        if !gcc_available() {
-            return;
-        }
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(scalar_f32().precision, 42.0),
@@ -1975,9 +1832,6 @@ int main(void) {{
 
     #[test]
     fn numerical_add_then_mul_then_sum() {
-        if !gcc_available() {
-            return;
-        }
         // vec of 3 ones + vec of 3 twos = [3,3,3], * vec of 3 threes = [9,9,9], sum = 27
         let mut dag = Dag::new();
         let a = dag.add_node(
@@ -2197,9 +2051,6 @@ int main(int argc, char **argv) {{
 
     #[test]
     fn numerical_reshape_preserves_values() {
-        if !gcc_available() {
-            return;
-        }
         // Create a 1D tensor [1,1,1,1,1,1] (const fills all), reshape to 2x3
         // We use const value 1.0 for a vec of 6, reshape to 2x3 -> still 6 ones
         let mut dag = Dag::new();
@@ -2223,9 +2074,6 @@ int main(int argc, char **argv) {{
 
     #[test]
     fn numerical_reshape_then_add() {
-        if !gcc_available() {
-            return;
-        }
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(vec_f32(6).precision, 1.0),
@@ -2254,9 +2102,6 @@ int main(int argc, char **argv) {{
 
     #[test]
     fn numerical_expand_add_broadcast() {
-        if !gcc_available() {
-            return;
-        }
         // Create 1D tensor [3.0] (size 1), expand to size 3 (stride 0 broadcast),
         // add with a 1D tensor [1.0, 1.0, 1.0] -> [4.0, 4.0, 4.0]
         let mut dag = Dag::new();
@@ -2288,9 +2133,6 @@ int main(int argc, char **argv) {{
 
     #[test]
     fn numerical_permute_transpose() {
-        if !gcc_available() {
-            return;
-        }
         // Create a 2x3 matrix (all 2.0), permute to 3x2 -> still all 2.0 but shape changes
         // Since const fills all elements with same value, we verify shape via size
         let mut dag = Dag::new();
@@ -2322,10 +2164,6 @@ int main(int argc, char **argv) {{
 
     #[test]
     fn checked_cast_identity_materializes_a_noncontiguous_source() {
-        if !gcc_available() {
-            return;
-        }
-
         let mut dag = Dag::new();
         let input = dag.add_node(
             RiscOp::Load {
@@ -2369,9 +2207,6 @@ int main(int argc, char **argv) {{
 
     #[test]
     fn numerical_sparse_gather_and_scatter_add_with_duplicate_indices() {
-        if !gcc_available() {
-            return;
-        }
         let mut dag = Dag::new();
         let values = dag.add_node(
             RiscOp::Load {
@@ -2544,9 +2379,6 @@ int main(void) {{
 
     #[test]
     fn numerical_pad_with_runtime_input() {
-        if !gcc_available() {
-            return;
-        }
         let mut dag = Dag::new();
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
         dag.add_node(
@@ -2572,9 +2404,6 @@ int main(void) {{
 
     #[test]
     fn numerical_shrink_with_runtime_input() {
-        if !gcc_available() {
-            return;
-        }
         let mut dag = Dag::new();
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(5), None);
         dag.add_node(
@@ -2596,9 +2425,6 @@ int main(void) {{
 
     #[test]
     fn numerical_stride_with_runtime_input() {
-        if !gcc_available() {
-            return;
-        }
         let mut dag = Dag::new();
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(5), None);
         dag.add_node(
@@ -2620,9 +2446,6 @@ int main(void) {{
 
     #[test]
     fn numerical_large_vector_add_then_sum() {
-        if !gcc_available() {
-            return;
-        }
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(vec_f32(1024).precision, 1.0),
@@ -2652,9 +2475,6 @@ int main(void) {{
 
     #[test]
     fn parameterized_input_helper_supports_multiple_cases() {
-        if !gcc_available() {
-            return;
-        }
         let mut dag = Dag::new();
         let x = dag.add_node(
             RiscOp::Load { name: "x".into() },
@@ -2683,9 +2503,6 @@ int main(void) {{
 
     #[test]
     fn symbolic_batch_codegen_reuses_one_artifact_for_multiple_input_shapes() {
-        if !gcc_available() {
-            return;
-        }
         let mut dag = Dag::new();
         let batch_vec = TensorType {
             dims: vec![DimInfo::Named("batch".to_string(), None)],
@@ -2741,9 +2558,6 @@ int main(void) {{
 
     #[test]
     fn symbolic_matmul_codegen_reuses_one_artifact_for_multiple_batch_sizes() {
-        if !gcc_available() {
-            return;
-        }
         let mut dag = Dag::new();
         let a_ty = TensorType {
             dims: vec![DimInfo::Named("batch".to_string(), None), DimInfo::Lit(3)],
@@ -2986,9 +2800,6 @@ int main(void) {{
 
     #[test]
     fn multiple_roots_return_multiple_outputs() {
-        if !gcc_available() {
-            return;
-        }
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(scalar_f32().precision, 1.0),
@@ -3045,9 +2856,6 @@ int main(void) {
 
     #[test]
     fn output_from_load_is_materialized_not_borrowed() {
-        if !gcc_available() {
-            return;
-        }
         let mut dag = Dag::new();
         dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(2), None);
         let result = codegen(&dag, "test_load_copy").unwrap();
@@ -3104,11 +2912,7 @@ int main(void) {
     }
 
     #[test]
-    fn generated_code_compiles_with_openmp() {
-        if !openmp_available() {
-            eprintln!("skipping: OpenMP toolchain not available");
-            return;
-        }
+    fn generated_code_compiles_with_platform_parallelism() {
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(scalar_f32().precision, 1.0),
@@ -3123,7 +2927,7 @@ int main(void) {
             None,
         );
         dag.add_node(RiscOp::Add, vec![a, b], scalar_f32(), None);
-        let out = compile_and_run_with_flags(&dag, "test_openmp", &["-fopenmp"]);
+        let out = compile_and_run_with_flags(&dag, "test_platform_parallelism", &[]);
         assert_float_eq(&out, 3.0);
     }
 
@@ -3235,9 +3039,6 @@ int main(void) {
 
     #[test]
     fn numerical_matmul_fallback() {
-        if !gcc_available() {
-            return;
-        }
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(mat_f32(2, 3).precision, 2.0),
@@ -3303,11 +3104,7 @@ int main(void) {
     }
 
     #[test]
-    fn numerical_matmul_blas_when_available() {
-        if !openblas_available() {
-            eprintln!("skipping: OpenBLAS toolchain not available");
-            return;
-        }
+    fn canonical_matmul_numerics_ignore_blas_hint() {
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(mat_f32(2, 3).precision, 2.0),
@@ -3365,7 +3162,7 @@ int main(void) {
         );
         let out = compile_and_run_with_codegen_options(
             &dag,
-            "test_matmul_blas_num",
+            "test_matmul_blas_hint",
             CodegenOptions {
                 use_blas: true,
                 ..CodegenOptions::default()
@@ -3519,10 +3316,6 @@ int main(void) {
     fn simd_math_fused_kernel_compiles_and_runs() {
         // Compile the Sleef-path C without -DCHELIS_HAS_SLEEF (so the #else Level-1
         // scalar path is compiled).  Run at n=7 (partial 8-wide block) and n=1024.
-        if !gcc_available() {
-            eprintln!("skipping: gcc not available");
-            return;
-        }
         for &n in &[7usize, 1024] {
             let dag = build_fused_exp_add_dag(n);
             // Generate C with Sleef path enabled so the generated source has the SIMD
@@ -3612,11 +3405,6 @@ int main(void) {{
     /// a pure scalar reference implementation within 1 ULP (< 2e-7 relative error).
     #[test]
     fn simd_math_fused_kernel_matches_scalar_output() {
-        if !gcc_available() {
-            eprintln!("skipping: gcc not available");
-            return;
-        }
-
         // Reference: compute exp(a+b) entirely in Rust.
         let n = 33usize; // Not a multiple of 8; exercises both the main block and the tail.
         let a_data: Vec<f32> = (0..n).map(|i| (i as f32) * 0.1f32 - 1.5f32).collect();
@@ -3773,10 +3561,6 @@ int main(void) {{
 
     #[test]
     fn simd_single_math_op_sleef_compiles_and_runs() {
-        if !gcc_available() {
-            eprintln!("skipping: gcc not available");
-            return;
-        }
         let n: usize = 9; // exercises both 8-wide SIMD block and 1-element scalar tail
         let mut dag = Dag::new();
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(n), None);
@@ -3958,10 +3742,6 @@ int main(void) {{
     /// This confirms that `static` linkage on helpers doesn't break shared-library builds.
     #[test]
     fn adv_host_program_compiles_as_shared_library_with_fpic() {
-        if !gcc_available() {
-            eprintln!("skipping: gcc not available");
-            return;
-        }
         use chelis_ir::ConcreteHostType as HostType;
         use chelis_ir::host::{
             ConcreteHostExpr as HostExpr, ConcreteHostExprKind as HostExprKind,
@@ -4087,9 +3867,6 @@ int main(void) {{
     /// B (adversarial): Numerically check cos at a non-trivial point: cos(π/4) ≈ 0.7071.
     #[test]
     fn adv_numerical_cos_at_pi_over_4() {
-        if !gcc_available() {
-            return;
-        }
         let mut dag = Dag::new();
         let x = dag.add_node(
             RiscOp::synth_const(scalar_f32().precision, std::f64::consts::FRAC_PI_4),
@@ -4110,9 +3887,6 @@ int main(void) {{
     /// B (adversarial): atan(1.0) should be π/4 ≈ 0.7854.
     #[test]
     fn adv_numerical_atan_at_1() {
-        if !gcc_available() {
-            return;
-        }
         let mut dag = Dag::new();
         let x = dag.add_node(
             RiscOp::synth_const(scalar_f32().precision, 1.0),
@@ -4133,9 +3907,6 @@ int main(void) {{
     /// B (adversarial): floor(-1.3) should be -2.0.
     #[test]
     fn adv_numerical_floor_negative() {
-        if !gcc_available() {
-            return;
-        }
         let mut dag = Dag::new();
         let x = dag.add_node(
             RiscOp::synth_const(scalar_f32().precision, -1.3),
@@ -4155,9 +3926,6 @@ int main(void) {{
     /// B (adversarial): ceil(-1.7) should be -1.0.
     #[test]
     fn adv_numerical_ceil_negative() {
-        if !gcc_available() {
-            return;
-        }
         let mut dag = Dag::new();
         let x = dag.add_node(
             RiscOp::synth_const(scalar_f32().precision, -1.7),
@@ -4177,9 +3945,6 @@ int main(void) {{
     /// B (adversarial): abs(-3.14) should be 3.14.
     #[test]
     fn adv_numerical_abs_negative_pi() {
-        if !gcc_available() {
-            return;
-        }
         let mut dag = Dag::new();
         let x = dag.add_node(
             RiscOp::synth_const(scalar_f32().precision, -std::f64::consts::PI),
@@ -4223,9 +3988,6 @@ int main(void) {{
     /// that reads the output view as `double*`, and return the printed
     /// line-separated values with 17 significant digits each.
     fn compile_and_run_f64(dag: &Dag, func_name: &str, expected_size: usize) -> Vec<f64> {
-        if !gcc_available() {
-            panic!("gcc not available");
-        }
         let result = codegen(dag, func_name).unwrap();
 
         let tmp = tempfile::tempdir().unwrap();
@@ -4302,9 +4064,6 @@ int main(void) {{
     /// at ~1e-8, which `diff < 1e-14` detects.
     #[test]
     fn f64_tensor_const_and_add_produces_correct_output() {
-        if !gcc_available() {
-            return;
-        }
         let mut dag = Dag::new();
         // Emit four individual consts because RiscOp::Const fills the whole
         // tensor with one scalar; we build the vectors element-by-element via
@@ -4345,9 +4104,6 @@ int main(void) {{
     /// of 1e-14 distinguishes the two backends.
     #[test]
     fn f64_tensor_sin_at_pi_over_4() {
-        if !gcc_available() {
-            return;
-        }
         let mut dag = Dag::new();
         let x = dag.add_node(
             RiscOp::synth_const(scalar_f64().precision, std::f64::consts::FRAC_PI_4),
