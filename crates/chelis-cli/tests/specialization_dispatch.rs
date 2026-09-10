@@ -66,10 +66,11 @@ fn build_and_classify(name: &'static str, source: &str) -> Dispatch {
         || c.contains("chelis_tensor_where(")
         || c.contains("chelis_tensor_cumsum(")
         || c.contains("chelis_tensor_sort(");
-    let sparse_gather_loop = c.contains("indices_data")
-        && c.contains("values_data")
-        && c.contains("_out_data")
-        && c.contains("_g =")
+    let sparse_gather_loop = c.contains("chelis_tensor_sparse_plan(")
+        && c.contains("chelis_sparse_index_slot(")
+        && c.contains("chelis_sparse_data_index(")
+        && c.contains("chelis_sparse_check_target(")
+        && c.contains("chelis_sparse_plan_release(")
         && c.contains("CHELIS_DTYPE_I64");
     let fused_kernels = c.matches("parallel for simd").count();
     // Generic non-SIMD parallel-for loops (used for reductions etc.).
