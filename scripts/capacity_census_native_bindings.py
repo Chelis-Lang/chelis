@@ -123,9 +123,8 @@ def require_private_owner(graph, identity, source):
     module_body = module.get("inner", {}).get("module", {})
     _require(not module_body.get("is_stripped") and item["id"] in module_body.get("items", []),
              "native owner is outside its defining module")
-    private = {"restricted": {
-        "parent": module["id"], "path": "::" + module_identity.split("::", 1)[1],
-    }}
+    module_path = module_identity.partition("::")[2]
+    private = {"restricted": {"parent": module["id"], "path": "::" + module_path}}
     result = []
     for field_id in fields:
         field = graph._item(location[0], field_id)
