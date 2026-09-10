@@ -81,6 +81,7 @@ class NativeBoundaryObligations(unittest.TestCase):
                              path=["chelis_python", module], visibility="crate")
             else:
                 artifact.doc["index"]["0"]["inner"]["module"]["items"].append(20)
+                artifact.doc["index"]["0"]["inner"]["module"]["is_crate"] = True
             for item_id, identity in {
                 30: "chelis_python::native_tensor::ValidatedTensor", 31: "alloc::sync::Arc",
                 32: "chelis_python::native_tensor::ValidatedTensorInner",
@@ -92,7 +93,7 @@ class NativeBoundaryObligations(unittest.TestCase):
                 field = artifact.field(label, ty)
                 artifact.doc["index"][str(field)]["visibility"] = {
                     "restricted": {"parent": parent, "path": "::" + module},
-                }
+                } if module else "crate"
                 fields.append(field)
             artifact.struct(20, name, fields, public=False)
             artifact.doc["paths"]["20"]["path"] = ["chelis_python", *([module] if module else []), name]
@@ -193,19 +194,24 @@ class NativeBoundaryObligations(unittest.TestCase):
         artifact.doc["index"]["20"]["span"]["filename"] = "crates/chelis-python/src/lib.rs"
         artifact.doc["index"]["2"]["inner"]["module"]["items"] = []
         artifact.doc["index"]["0"]["inner"]["module"]["items"].append(20)
-        artifact.doc["index"][str(field)]["visibility"] = {
-            "restricted": {"parent": 0, "path": "::"},
-        }
+        artifact.doc["index"]["0"]["inner"]["module"]["is_crate"] = True
+        # Actual rustdoc represents root-private fields as crate visibility.
+        artifact.doc["index"][str(field)]["visibility"] = "crate"
         identity = "chelis_python::NativeTensor"
         source = "crates/chelis-python/src/lib.rs"
         self.assertEqual(require_private_owner(RustdocGraph([artifact.doc]), identity, source),
                          (("metadata", reference(30)),))
-        for visibility in ("public", "crate", {"restricted": {"parent": 2, "path": "::"}},
+        for visibility in ("public", {"restricted": {"parent": 0, "path": "::"}},
+                           {"restricted": {"parent": 2, "path": "::"}},
                            {"restricted": {"parent": 0, "path": "::native_tensor"}}):
             changed = copy.deepcopy(artifact.doc)
             changed["index"][str(field)]["visibility"] = visibility
             with self.subTest(visibility=visibility), self.assertRaises(GraphError):
                 require_private_owner(RustdocGraph([changed]), identity, source)
+        changed = copy.deepcopy(artifact.doc)
+        changed["index"]["0"]["inner"]["module"]["is_crate"] = False
+        with self.assertRaises(GraphError):
+            require_private_owner(RustdocGraph([changed]), identity, source)
 
     def test_dynamic_input_authority_is_scoped_to_the_registered_payload_slot(self):
         artifact, types = input_fixture()
