@@ -1,0 +1,71 @@
+# Reviewed PR integration targets. All default-feature lib/bin units are automatic.
+# New integration targets run in the unfiltered nightly unless added here.
+version = 1
+
+[[target]]
+package = "chelis-deep"
+name = "roundtrip"
+
+[[target]]
+package = "chelis-surf"
+name = "issue_486_parser_diagnostics"
+
+[[target]]
+package = "chelis-types"
+name = "infer_module_parity"
+
+[[target]]
+package = "chelis-types"
+name = "issue_1107_stamped_node_ingress_parity"
+
+[[target]]
+package = "chelis-compiler-api"
+name = "pipeline_contract"
+
+[[target]]
+package = "chelis-compiler-api"
+name = "diagnostic_kind_pipeline"
+
+[[target]]
+package = "chelis-compiler-api"
+name = "fragment_parity"
+
+[[target]]
+package = "chelis-cli"
+name = "dp_check_ingest"
+
+[[target]]
+package = "chelis-cli"
+name = "check_exits_zero_with_errors_contract"
+
+[[target]]
+package = "chelis-cli"
+name = "issue_207_check_exit_code_invariant"
+
+[[target]]
+package = "chelis-cli"
+name = "issue_394_f64_literal_eval_roundtrip"
+
+[[target]]
+package = "chelis-cli"
+name = "test_command_smoke"
+
+[[target]]
+package = "chelis-cli"
+name = "parity"
+
+[[target]]
+package = "chelis-e2e"
+name = "pipeline"
+
+[[target]]
+package = "chelis-e2e"
+name = "eval_agreement"
+
+[[target]]
+package = "chelis-reef"
+name = "pipeline_parity"
+
+[[target]]
+package = "chelis-conformance"
+name = "audit_negative_parity"

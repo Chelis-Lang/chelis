@@ -108,6 +108,7 @@ jobs:
   diagnostic-kind-oracle:
     name: Diagnostic Kind Mutation Oracle
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [changes]
     if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.diagnostic_kind_changed != 'false') }}
     permissions:
@@ -145,6 +146,7 @@ jobs:
   lint-rust:
     name: Rust Policy (Linux)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [changes]
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     # Strip debuginfo from the dev/test build. Debuginfo is the dominant
@@ -221,6 +223,7 @@ jobs:
   script-unit:
     name: Script and Python Unit Tests (Linux)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [changes]
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     permissions:
@@ -239,7 +242,7 @@ jobs:
         run: python3 scripts/ci_setup_uv_python.py
 
       # cargo-nextest is intentionally absent, so the expensive structural
-      # profile oracle self-skips here and runs once on workspace shard 1.
+      # profile oracle self-skips here and runs on the full nightly worker.
       - name: Install shared-skill validator dependency
         run: uv pip install --python .venv/bin/python PyYAML==6.0.3
 
@@ -439,6 +442,7 @@ jobs:
   smt-build-glibc231:
     name: SMT Feature Build (Linux, glibc 2.31)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [changes]
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     # The immutable digest supplies Python, git, curl, and CA certificates
@@ -536,40 +540,27 @@ jobs:
       - name: Verify cvc5 discharge path (smt feature live)
         run: python3 .github/scripts/verify_release_smt.py ./target/release/chelis
 
-  workspace-tests-shard:
-    name: Workspace Tests (Linux, shard ${{ matrix.shard }}/2)
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2]
+  ci-fast:
+    name: Fast Tests (Linux)
+    timeout-minutes: 20
     runs-on: ubuntu-latest
-    # Skip on docs-only PRs (chelis#419). A skipped required job reports
-    # success, so branch protection stays satisfied; on push docs_only is
-    # always false. `needs: [changes]` is what makes the output readable.
     needs: [changes]
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
-    # Strip debuginfo; see lint-rust for the chelis#392 rationale.
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v6
 
-      # Free ~25-30 GB before the cargo build; see
-      # .github/actions/free-disk-space (scripts/ci_free_disk.py).
       - name: Free disk space (Ubuntu)
         uses: ./.github/actions/free-disk-space
 
-      # apt-get under retry (scripts/ci_apt_get.py); see the lint-rust
-      # job for the transient-mirror-reset rationale.
       - name: Install C dependencies
         run: python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # See lint-rust for why this runs before the cargo cache
-      # and why the version is pinned to v8.1.0 rather than @v8.
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
 
@@ -580,9 +571,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: linux-workspace
-          # Both shards restore the same warm workspace cache. Only shard 1
-          # publishes a new entry, avoiding a same-key save race.
-          save-if: ${{ matrix.shard == 1 }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install Python binding dependencies
         run: uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml
@@ -590,108 +579,44 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
-      # The workspace has ~200 integration test binaries. `cargo test
-      # --workspace --tests` runs them one binary at a time, serializing
-      # the heavyweight binaries (each test compiles/checks/builds
-      # chelis-std). `cargo nextest` schedules tests from all binaries in
-      # a single global thread pool, overlapping the heavyweight work.
-      # See docs/investigations/ci_integration_test_runtime_diagnosis.md.
-      #
-      # The integration nextest command is defined once in scripts/gate.py.
-      # Each worker selects one of two deterministic, disjoint hash
-      # partitions. The `ci` nextest profile writes per-test JUnit
-      # timing XML to target/nextest/ci/junit.xml; the aggregate job downloads
-      # both artifacts and reports their combined timings. Do not hand-inline
-      # cargo commands into this job (see scripts/test_gate.py parity lock).
-      - name: Gate (workspace test shard)
+      - name: Gate (units and reviewed integrations)
         env:
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
-        run: python3 scripts/gate.py integration --tests-only --partition hash:${{ matrix.shard }}/2
+        run: python3 scripts/gate.py ci-fast
 
-      - name: Upload workspace JUnit shard
+      - name: Upload fast JUnit
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: junit-linux-workspace-${{ matrix.shard }}
-          path: target/nextest/ci/junit.xml
+          name: junit-linux-fast
+          path: target/nextest/ci-fast/junit.xml
           if-no-files-found: error
           retention-days: 14
 
-  workspace-tests:
-    name: Workspace Tests (Linux)
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    needs: [changes, workspace-tests-shard]
-    if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Require every workspace test worker
-        run: python3 scripts/ci_require_success.py workspace-tests-shard=${{ needs.workspace-tests-shard.result }}
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-
-      - name: Download workspace JUnit shard 1
-        uses: actions/download-artifact@v7
-        with:
-          name: junit-linux-workspace-1
-          path: target/test-telemetry/input/workspace-1
-
-      - name: Download workspace JUnit shard 2
-        uses: actions/download-artifact@v7
-        with:
-          name: junit-linux-workspace-2
-          path: target/test-telemetry/input/workspace-2
-
-      - name: Merge disjoint workspace timing reports
-        run: >-
-          uv run --managed-python --python 3.11 --no-project python
-          scripts/ci_test_telemetry.py
-          --shard workspace-1=target/test-telemetry/input/workspace-1/junit.xml
-          --shard workspace-2=target/test-telemetry/input/workspace-2/junit.xml
-          --require-disjoint
-          --merged-junit target/test-telemetry/workspace-junit.xml
-          --json target/test-telemetry/workspace-report.json
-          --summary target/test-telemetry/workspace-summary.md
-          --github-summary "${GITHUB_STEP_SUMMARY}"
-
-      # The baseline comes from the exact two-shard hosted runner. A later
-      # unchanged-code run produced scheduler-sensitive relative and absolute
-      # outliers, so both stay visible without false-redding the required gate.
-      # Missing, malformed, empty, or invalid telemetry remains blocking.
-      - name: Validate and report test timing
-        run: >-
-          uv run --managed-python --python 3.11 --no-project python
-          scripts/test_timing_check.py
-          --junit target/test-telemetry/workspace-junit.xml
-          --informational
-
-      - name: Upload merged workspace telemetry
+      - name: Upload selection and build timing receipts
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: test-telemetry-linux-workspace
+          name: ci-fast-receipts
           path: |
-            target/test-telemetry/workspace-junit.xml
-            target/test-telemetry/workspace-report.json
-            target/test-telemetry/workspace-summary.md
+            target/ci-fast
+            target/gate-reports
           if-no-files-found: error
           retention-days: 14
+
 
   integration:
     name: Integration Tests (Linux)
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    needs: [changes, workspace-tests]
+    needs: [changes, ci-fast]
     if: ${{ always() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     steps:
       - uses: actions/checkout@v6
 
       - name: Require all integration legs
-        run: python3 scripts/ci_require_success.py workspace-tests=${{ needs.workspace-tests.result }}
+        run: python3 scripts/ci_require_success.py ci-fast=${{ needs.ci-fast.result }}
 
   # NOTE: the LOC report moved to its own weekly workflow
   # (.github/workflows/loc-report.yml) so it no longer commits a bot
@@ -702,32 +627,25 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    needs: [changes, workspace-tests-shard]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') && needs.workspace-tests-shard.result == 'success' }}
+    needs: [changes, ci-fast]
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') && needs.ci-fast.result == 'success' }}
     steps:
       - uses: actions/checkout@v6
 
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
 
-      - name: Download Linux workspace JUnit shard 1
+      - name: Download fast Linux JUnit
         uses: actions/download-artifact@v7
         with:
-          name: junit-linux-workspace-1
-          path: target/test-telemetry/input/linux-workspace-1
-
-      - name: Download Linux workspace JUnit shard 2
-        uses: actions/download-artifact@v7
-        with:
-          name: junit-linux-workspace-2
-          path: target/test-telemetry/input/linux-workspace-2
+          name: junit-linux-fast
+          path: target/test-telemetry/input/linux-fast
 
       - name: Build cross-lane timing report
         run: >-
           uv run --managed-python --python 3.11 --no-project python
           scripts/ci_test_telemetry.py
-          --shard linux-workspace-1=target/test-telemetry/input/linux-workspace-1/junit.xml
-          --shard linux-workspace-2=target/test-telemetry/input/linux-workspace-2/junit.xml
+          --shard linux-fast=target/test-telemetry/input/linux-fast/junit.xml
           --json target/test-telemetry/full/report.json
           --summary target/test-telemetry/full/summary.md
           --github-summary "${GITHUB_STEP_SUMMARY}"
@@ -743,6 +661,7 @@ jobs:
   backend-sanitizers:
     name: Backend Sanitizers
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     # Skip on docs-only PRs (chelis#419); a skipped required job reports
     # success. Runs on every code PR and push.
     needs: [changes]
@@ -779,7 +698,10 @@ jobs:
       # transitively pull pyo3 (verified by `cargo tree -p chelis-backend-c`),
       # so pyo3-build-config never runs in this job.
       - name: Backend tests under ASan/UBSan
-        run: cargo test -p chelis-backend-c
+        run: cargo test -p chelis-backend-c --lib
+
+      - name: Backend doctests
+        run: cargo test -p chelis-backend-c --doc
 
   no-ai-authorship:
     name: No AI authorship markers

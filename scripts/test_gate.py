@@ -594,15 +594,14 @@ GATE_WORKER_RUN_COMMANDS = {
         "python3 scripts/ci_setup_uv_python.py",
         "python3 scripts/gate.py lint-and-unit",
     ),
-    "workspace-tests-shard": (
+    "ci-fast": (
         # `clang` is the chelis#893 Phase 0 oracle's C/Objective-C front end
         # and the census's `cc` is gcc here; the image ships clang, but the
         # gate asserts it rather than assuming it.
         "python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1",
         "python3 scripts/ci_setup_uv_python.py",
         "uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml",
-        "python3 scripts/gate.py integration --tests-only "
-        "--partition hash:${{ matrix.shard }}/2",
+        "python3 scripts/gate.py ci-fast",
     ),
     # Rule-id: GATE-STAGE-RUNTIME-REPRESENTATION -- chelis#893 Phase 0's oracle
     # is its own gate stage because its release-profile reproducers and serial
@@ -621,11 +620,11 @@ NON_GATE_JOBS = {
     "script-unit",
     # Stable branch-protection aggregates, not command-producing workers.
     "lint-and-unit",
-    "workspace-tests",
+    "integration",
     # Rule-id: GATE-SCOPE-WORKSPACE-AGGREGATE -- the stable aggregate merges
     # shard JUnit, checks timing, and publishes telemetry with Python. The
-    # workspace-tests-shard workers own the gate.py commands.
-    "workspace-tests",
+    # ci-fast workers own the gate.py commands.
+    "integration",
     "backend-sanitizers",
     "no-ai-authorship",
     "docs",
@@ -793,8 +792,8 @@ class StageUnionTests(unittest.TestCase):
     def test_stage_order_covers_every_stage(self):
         self.assertEqual(
             set(gate.STAGE_ORDER),
-            set(gate.STAGES.keys()),
-            "STAGE_ORDER must list every stage in STAGES exactly once",
+            set(gate.STAGES) - {"ci-fast"},
+            "STAGE_ORDER lists full/manual stages, excluding the hosted fast subset",
         )
         self.assertEqual(
             len(gate.STAGE_ORDER),
@@ -1100,7 +1099,7 @@ class ListOutputTests(unittest.TestCase):
             "the oracle must live in exactly one stage, and it must be a "
             "nextest-installing one",
         )
-        workflow = CI_YML.read_text()
+        workflow = CI_YML.with_name("heavy-e2e.yml").read_text()
         blocks = _workflow_job_blocks(workflow)
         owning_jobs = [
             name
@@ -1951,8 +1950,8 @@ def _assert_shared_rust_cache_writer_contract(workflow: str, *, macos: bool = Fa
 
     expected = {
         "linux-workspace": (
-            "workspace-tests-shard",
-            "${{ matrix.shard == 1 }}",
+            "ci-fast",
+            "${{ github.ref == 'refs/heads/main' }}",
         ),
         "macos-workspace": (
             "macos-workspace-shard",
@@ -2055,8 +2054,7 @@ class CiParityTests(unittest.TestCase):
         text = CI_YML.read_text()
         self.assertIn("scripts/gate.py lint-and-unit", text)
         self.assertIn(
-            "scripts/gate.py integration --tests-only "
-            "--partition hash:${{ matrix.shard }}/2",
+            "scripts/gate.py ci-fast",
             text,
         )
         self.assertIn("scripts/gate.py integration --support-only", CI_YML.with_name("heavy-e2e.yml").read_text())
@@ -2102,7 +2100,7 @@ class CiParityTests(unittest.TestCase):
                 self.test_python_binding_ingress_suite_is_continuous()
 
     def test_dtype_phase3_oracle_runs_beside_the_workspace_suite(self):
-        workspace_block = _ci_job_block("workspace-tests")
+        workspace_block = _ci_job_block("integration")
         oracle_block = _ci_job_block("dtype-phase3-oracle")
         aggregate_block = _ci_job_block("integration")
         workflow = CI_YML.read_text()
@@ -2130,16 +2128,16 @@ class CiParityTests(unittest.TestCase):
             oracle_block.index(oracle_command),
         )
         self.assertIn(
-            "needs: [changes, workspace-tests-shard]",
+            "needs: [changes, ci-fast]",
             workspace_block,
         )
         self.assertNotIn("    needs:", oracle_block)
         self.assertEqual(oracle_block.count("    needs:"), 0)
-        self.assertNotIn("needs.workspace-tests", oracle_block)
+        self.assertNotIn("needs.integration", oracle_block)
         self.assertNotIn("dtype-phase3-oracle", workspace_block)
         self.assertIn("name: Integration Tests (Linux)", aggregate_block)
         self.assertIn(
-            "needs: [changes, workspace-tests]",
+            "needs: [changes, ci-fast]",
             aggregate_block,
         )
         self.assertIn("always()", aggregate_block)
@@ -2147,7 +2145,7 @@ class CiParityTests(unittest.TestCase):
         self.assertIn("scripts/ci_require_success.py", aggregate_block)
 
     def test_faithful_observation_phase2_oracle_is_a_dedicated_blocking_job(self):
-        workspace_block = _ci_job_block("workspace-tests")
+        workspace_block = _ci_job_block("integration")
         dtype_block = _ci_job_block("dtype-phase3-oracle")
         oracle_block = _ci_job_block("faithful-observation-phase2-oracle")
         aggregate_block = _ci_job_block("integration")
@@ -2170,7 +2168,7 @@ class CiParityTests(unittest.TestCase):
         self.assertIn("faithful-observation-phase2-oracle", _workflow_job_block(CI_YML.with_name("heavy-e2e.yml"), "report"))
 
     def test_compiled_value_ownership_stable_job_invokes_phase2_and_launch_oracles(self):
-        workspace_block = _ci_job_block("workspace-tests")
+        workspace_block = _ci_job_block("integration")
         dtype_block = _ci_job_block("dtype-phase3-oracle")
         faithful_block = _ci_job_block("faithful-observation-phase2-oracle")
         oracle_block = _ci_job_block("compiled-value-ownership-phase0-oracle")
@@ -2201,7 +2199,7 @@ class CiParityTests(unittest.TestCase):
         self.assertIn("compiled-value-ownership-phase0-oracle", _workflow_job_block(CI_YML.with_name("heavy-e2e.yml"), "report"))
 
     def test_runtime_representation_phase0_oracle_is_a_dedicated_gate_job(self):
-        workspace_block = _ci_job_block("workspace-tests-shard")
+        workspace_block = _ci_job_block("ci-fast")
         ownership_block = _ci_job_block("compiled-value-ownership-phase0-oracle")
         oracle_block = _ci_job_block("runtime-representation-phase0-oracle")
         aggregate_block = _ci_job_block("integration")
@@ -2291,14 +2289,14 @@ class CiParityTests(unittest.TestCase):
         ):
             _assert_generalize_sweep_partition_contract(mutated)
 
-    def test_workspace_partitions_and_nightly_support_have_separate_owners(self):
-        shard = _ci_job_block("workspace-tests-shard")
-        _assert_hash_partition_contract(shard, expected_count=2)
-        self.assertIn("scripts/gate.py integration --tests-only", shard)
-        self.assertNotIn("--support-only", shard)
-        self.assertNotIn("ProfilePartitionTests", shard)
+    def test_fast_worker_and_nightly_support_have_separate_owners(self):
+        worker = _ci_job_block("ci-fast")
+        self.assertNotIn("    strategy:", worker)
+        self.assertIn("scripts/gate.py ci-fast", worker)
+        self.assertNotIn("--support-only", worker)
+        self.assertNotIn("ProfilePartitionTests", worker)
         _assert_support_slice_contract(_ci_job_block("integration-support"))
-        self.assertIn("needs: [changes, workspace-tests-shard]", _ci_job_block("workspace-tests"))
+        self.assertIn("needs: [changes, ci-fast]", _ci_job_block("integration"))
 
     def test_support_slice_contract_rejects_missing_repeated_or_skipped_work(self):
         block = _ci_job_block("integration-support")
@@ -2312,32 +2310,20 @@ class CiParityTests(unittest.TestCase):
             with self.subTest(workflow=changed), self.assertRaises(AssertionError):
                 _assert_support_slice_contract(changed)
 
-    def test_workspace_junit_shards_merge_before_one_validated_timing_report(self):
-        shard_block = _ci_job_block("workspace-tests-shard")
-        aggregate_block = _ci_job_block("workspace-tests")
-        self.assertEqual(shard_block.count("uses: actions/upload-artifact@v7"), 1)
-        self.assertIn(
-            "name: junit-linux-workspace-${{ matrix.shard }}", shard_block
-        )
-        self.assertIn("path: target/nextest/ci/junit.xml", shard_block)
-        self.assertIn("if-no-files-found: error", shard_block)
-        self.assertNotIn("scripts/test_timing_check.py", shard_block)
-        self.assertEqual(aggregate_block.count("uses: actions/download-artifact@v7"), 2)
-        self.assertIn("name: junit-linux-workspace-1", aggregate_block)
-        self.assertIn("name: junit-linux-workspace-2", aggregate_block)
-        self.assertIn("scripts/ci_test_telemetry.py", aggregate_block)
-        self.assertIn("--require-disjoint", aggregate_block)
-        self.assertIn("scripts/test_timing_check.py", aggregate_block)
-        self.assertRegex(aggregate_block, r"(?m)^\s+--informational\s*$")
-        self.assertNotIn("--informational-relative", aggregate_block)
-        self.assertIn("name: Validate and report test timing", aggregate_block)
-        self.assertNotIn("continue-on-error: true", aggregate_block)
+    def test_fast_worker_publishes_junit_and_selection_receipts(self):
+        worker = _ci_job_block("ci-fast")
+        self.assertIn("name: junit-linux-fast", worker)
+        self.assertIn("path: target/nextest/ci-fast/junit.xml", worker)
+        self.assertIn("name: ci-fast-receipts", worker)
+        self.assertIn("target/ci-fast", worker)
+        self.assertIn("target/gate-reports", worker)
+        self.assertNotIn("continue-on-error: true", worker)
 
     def test_every_partitioned_test_lane_publishes_named_junit(self):
         expectations = {
-            "workspace-tests-shard": (
-                "junit-linux-workspace-${{ matrix.shard }}",
-                "target/nextest/ci/junit.xml",
+            "ci-fast": (
+                "junit-linux-fast",
+                "target/nextest/ci-fast/junit.xml",
             ),
             "dtype-phase3-oracle": (
                 "junit-linux-dtype",
@@ -2355,7 +2341,7 @@ class CiParityTests(unittest.TestCase):
         for job, (artifact, path) in expectations.items():
             with self.subTest(job=job):
                 block = _ci_job_block(job)
-                self.assertEqual(block.count("uses: actions/upload-artifact@v7"), 1)
+                self.assertEqual(block.count("uses: actions/upload-artifact@v7"), 2 if job == "ci-fast" else 1)
                 self.assertIn(f"name: {artifact}", block)
                 self.assertIn(f"path: {path}", block)
                 self.assertIn("if-no-files-found: error", block)
@@ -2384,13 +2370,12 @@ class CiParityTests(unittest.TestCase):
         block = _ci_job_block("test-telemetry")
         self.assertIn("name: CI Test Telemetry", block)
         self.assertIn(
-            "needs: [changes, workspace-tests-shard]",
+            "needs: [changes, ci-fast]",
             block,
         )
-        self.assertEqual(block.count("uses: actions/download-artifact@v7"), 2)
+        self.assertEqual(block.count("uses: actions/download-artifact@v7"), 1)
         for artifact in (
-            "junit-linux-workspace-1",
-            "junit-linux-workspace-2",
+            "junit-linux-fast",
         ):
             self.assertIn(f"name: {artifact}", block)
         self.assertIn("scripts/ci_test_telemetry.py", block)
@@ -2411,113 +2396,20 @@ class CiParityTests(unittest.TestCase):
         self.assertIn("scripts/ci_require_success.py", aggregate_block)
 
     def test_topology_docs_name_current_shard_owners(self):
-        agent_contract = (REPO_ROOT / "AGENTS.md").read_text()
-        phase_oracles = (REPO_ROOT / "docs" / "phase_oracles.md").read_text()
-        macos_runbook = (
-            REPO_ROOT / "docs" / "local_macos_environment.md"
-        ).read_text()
-        runtime_diagnosis = (
-            REPO_ROOT
-            / "docs"
-            / "investigations"
-            / "ci_integration_test_runtime_diagnosis.md"
-        ).read_text()
-        metal_plan = (
-            REPO_ROOT / "spec" / "design" / "chelis_metal_backend_plan.md"
-        ).read_text()
-        checker_totality = (
-            REPO_ROOT / "spec" / "design" / "checker_totality.md"
-        ).read_text()
-        unrepresentable_domain = (
-            REPO_ROOT / "spec" / "design" / "unrepresentable_ast_domain.md"
-        ).read_text()
-        reef_distribution = (
-            REPO_ROOT / "spec" / "design" / "reef_distribution.md"
-        ).read_text()
-        remediation_status = (
-            REPO_ROOT
-            / "docs"
-            / "investigations"
-            / "remediation_status_2026_08_04.md"
-        ).read_text()
-        toolchain_design = (
-            REPO_ROOT
-            / "docs"
-            / "investigations"
-            / "test_toolchain_guards_design.md"
-        ).read_text()
-        generalization_plan = (
-            REPO_ROOT
-            / "spec"
-            / "design"
-            / "typecheck_levels_generalization_plan.md"
-        ).read_text()
-        # AGENTS.md no longer describes which CI shard owns which stage: that
-        # topology belongs to the docs asserted below, and the contract keeps
-        # only what an agent runs. The remaining assertion is the one contract
-        # claim about this test's own subject.
-        self.assertIn(
-            "pins the complete ordered set of\nsingle-line `run:` commands",
-            agent_contract,
-        )
-        self.assertIn(
-            "`macos-workspace-shard` job runs "
-            "`python3 .github/scripts/smoke_macos_metal.py` on shard 2",
-            phase_oracles,
-        )
-        self.assertIn(
-            "`macos-workspace-shard` matrix runs the full workspace test suite",
-            macos_runbook,
-        )
-        self.assertIn(
-            "nextest hash partitions `1/4` through `4/4` run concurrently",
-            runtime_diagnosis,
-        )
-        self.assertIn("all four shards succeed", runtime_diagnosis)
-        self.assertIn(
-            "`workspace-tests-shard`\n> matrix, and only shard 1 saves",
-            runtime_diagnosis,
-        )
-        self.assertIn(
-            "append metal compile/link step to macos-workspace-shard "
-            "job (shard 2)",
-            metal_plan,
-        )
-        self.assertIn(
-            "hosted CI's `workspace-tests-shard` matrix",
-            checker_totality,
-        )
-        self.assertIn(
-            "hosted CI's `workspace-tests-shard` matrix",
-            unrepresentable_domain,
-        )
-        self.assertIn("CI's `lint-rust` worker", checker_totality)
-        self.assertIn(
-            "`lint-rust` worker deliberately does not install",
-            unrepresentable_domain,
-        )
-        self.assertIn("hosted `lint-rust` worker", reef_distribution)
-        self.assertIn(
-            "`workspace-tests-shard` matrix on every non-docs-only PR",
-            remediation_status,
-        )
-        self.assertIn(
-            "Two `workspace-tests-shard` workers invoke disjoint partitions",
-            toolchain_design,
-        )
-        self.assertIn(
-            "parity guard pins the complete ordered set of single-line "
-            "`run:` scalars",
-            toolchain_design,
-        )
-        self.assertIn(
-            "CI executes the same selection as four deterministic, disjoint "
-            "nextest hash\npartitions:",
-            generalization_plan,
-        )
+        doc = (REPO_ROOT / "docs/ci_validation.md").read_text()
+        for owner in ("ci-fast", ".config/ci-test-targets.toml", "heavy-e2e.yml", "macos-nightly.yml"):
+            self.assertIn(owner, doc)
+        self.assertIn("not a phase acceptance result", doc)
+        self.assertIn("--ignore-default-filter", doc)
+
 
     def test_topology_docs_guard_runs_in_docs_job(self):
         docs_block = _ci_job_block("docs")
+        step = _ci_step_block(docs_block, "Validate CI topology documentation")
+        entrypoint = re.search(r"-m unittest (\S+)", step).group(1)
+        loader = unittest.TestLoader()
+        loader.loadTestsFromName(entrypoint)
+        self.assertEqual(loader.errors, [], "the hosted topology guard must resolve")
         self.assertIn("uses: astral-sh/setup-uv@v8.1.0", docs_block)
         self.assertIn(
             "uv run --managed-python --python 3.11 --no-project python "
@@ -2622,7 +2514,7 @@ class CiParityTests(unittest.TestCase):
         _assert_shared_rust_cache_writer_contract(CI_YML.read_text())
         _assert_shared_rust_cache_writer_contract(CI_YML.with_name("macos-nightly.yml").read_text(), macos=True)
         workspace_inputs = _rust_cache_inputs(
-            _ci_job_block("workspace-tests-shard")
+            _ci_job_block("ci-fast")
         )
         read_only_jobs = (
             "dtype-phase3-oracle",
@@ -2633,7 +2525,7 @@ class CiParityTests(unittest.TestCase):
         )
         self.assertEqual(workspace_inputs.get("shared-key"), "linux-workspace")
         self.assertEqual(
-            workspace_inputs.get("save-if"), "${{ matrix.shard == 1 }}"
+            workspace_inputs.get("save-if"), "${{ github.ref == 'refs/heads/main' }}"
         )
         macos_inputs = _rust_cache_inputs(
             _ci_job_block("macos-workspace-shard")
@@ -2676,7 +2568,7 @@ class CiParityTests(unittest.TestCase):
             "${{ runner.temp }}/chelis-test-shared-reef"
         )
         execution_steps = {
-            "workspace-tests-shard": "Gate (workspace test shard)",
+            "ci-fast": "Gate (units and reviewed integrations)",
             "dtype-phase3-oracle": "Dtype Phase 0-3 oracle",
             "faithful-observation-phase2-oracle": (
                 "Faithful observation Phase 2 oracle"
@@ -2707,8 +2599,8 @@ class CiParityTests(unittest.TestCase):
             "          save-if: true\n"
         )
         mutated = workflow.replace(
-            "\n  workspace-tests-shard:",
-            competing_step + "\n  workspace-tests-shard:",
+            "\n  ci-fast:",
+            competing_step + "\n  ci-fast:",
             1,
         )
         self.assertNotEqual(mutated, workflow, "mutation did not apply")
@@ -2780,8 +2672,8 @@ class CiParityTests(unittest.TestCase):
                     + with_map
                 )
                 mutated = workflow.replace(
-                    "\n  workspace-tests-shard:",
-                    step + "\n  workspace-tests-shard:",
+                    "\n  ci-fast:",
+                    step + "\n  ci-fast:",
                     1,
                 )
                 with self.assertRaisesRegex(AssertionError, error):
@@ -3940,7 +3832,7 @@ class DocsOnlySkipTests(unittest.TestCase):
     HEAVY_GATED_JOBS = {
         "lint-rust",
         "script-unit",
-        "workspace-tests-shard",
+        "ci-fast",
                             "backend-sanitizers",
         "smt-build",
         "smt-build-glibc231",
@@ -3949,7 +3841,6 @@ class DocsOnlySkipTests(unittest.TestCase):
     # so it needs their results as well as the docs-only classification.
     HEAVY_AGGREGATOR_JOBS = {
         "lint-and-unit",
-        "workspace-tests",
             "integration",
     }
     # Best-effort reporting aggregates run after failed dependencies but may
@@ -4029,7 +3920,7 @@ class DocsOnlySkipTests(unittest.TestCase):
         integration = attrs["integration"]
         self.assertEqual(
             integration.get("needs"),
-            "[changes, workspace-tests]",
+            "[changes, ci-fast]",
         )
         cond = integration.get("if", "")
         self.assertIn("always()", cond)
@@ -4037,7 +3928,7 @@ class DocsOnlySkipTests(unittest.TestCase):
         self.assertIn("needs.changes.result != 'success'", cond)
         self.assertIn("needs.changes.outputs.docs_only != 'true'", cond)
         block = _ci_job_block("integration")
-        self.assertIn("needs.workspace-tests.result", block)
+        self.assertIn("needs.ci-fast.result", block)
         self.assertIn("scripts/ci_require_success.py", block)
 
     def test_generalize_sweep_aggregator_is_fail_closed_nightly(self):
@@ -4079,7 +3970,7 @@ class DocsOnlySkipTests(unittest.TestCase):
         self.assertEqual(
             _telemetry_junit_producers(attrs),
             (
-                "workspace-tests-shard",
+                "ci-fast",
                     ),
         )
 
@@ -4098,11 +3989,11 @@ class DocsOnlySkipTests(unittest.TestCase):
         attrs = _parse_job_attrs()
         mutated = {job: dict(values) for job, values in attrs.items()}
         mutated[TELEMETRY_JOB]["if"] = mutated[TELEMETRY_JOB]["if"].replace(
-            "needs.workspace-tests-shard.result == 'success'",
-            "needs.workspace-tests-shard.result != 'cancelled'",
+            "needs.ci-fast.result == 'success'",
+            "needs.ci-fast.result != 'cancelled'",
             1,
         )
-        with self.assertRaisesRegex(AssertionError, "workspace-tests-shard"):
+        with self.assertRaisesRegex(AssertionError, "ci-fast"):
             _assert_telemetry_skips_without_every_junit(mutated)
 
     def test_unreadable_telemetry_needs_list_fails_loudly(self):

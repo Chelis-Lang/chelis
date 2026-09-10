@@ -874,7 +874,10 @@ way to reproduce checks on the developer's machine; no per-PR run is required.
 The full workspace and broad phase oracles run in `heavy-e2e.yml` daily at
 03:17 UTC and on manual dispatch. Passing PR checks does not certify those
 phase acceptance oracles; dispatch them on the candidate when claiming completion.
-CI calls `python3 scripts/gate.py <stage>` for each split job.
+The PR test worker calls `python3 scripts/gate.py ci-fast`: every default-feature
+lib/bin unit target plus the reviewed integrations in `.config/ci-test-targets.toml`.
+The legacy/full/manual gate selections remain available. See
+[`docs/ci_validation.md`](docs/ci_validation.md) for cadence and artifacts.
 `scripts/test_gate.py` pins the complete ordered set of
 single-line `run:` commands permitted in those gate-owned jobs, so shell syntax
 cannot hide an unreviewed command. To see the canonical full list and the
@@ -929,7 +932,8 @@ execute doctests, and the gate deliberately does not use `--workspace --doc`.
 **Doctests only run where something invokes them.** The canonical gate
 invokes doctests for `chelis-types`, `chelis-compiler-api`, and
 `chelis-pipeline-core`. The `backend-sanitizers` job also runs
-`cargo test -p chelis-backend-c` without a filter. A `compile_fail` oracle in
+`cargo test -p chelis-backend-c --lib` and an explicit `--doc` invocation.
+Full backend sanitizer integrations run nightly in `heavy-e2e.yml`. A `compile_fail` oracle in
 another crate runs nowhere until that crate gains an equivalent invocation in
 the same change set.
 

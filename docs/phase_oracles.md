@@ -7,7 +7,9 @@ identified a completion oracle and should be treated as a gap, not an implicit p
 
 Status legend:
 
-- **default gate** — runs as part of `cargo test --workspace` (the inner-loop suite)
+- **default gate** — runs in the default-feature full workspace nightly. PRs run
+  all lib/bin unit targets and only the integrations in `.config/ci-test-targets.toml`.
+  A default-gate phase claim requires its full oracle on the candidate.
 - **continuous gate** — runs through `scripts/gate.py` in hosted CI and the
   documented local pre-push subset, but is not a workspace test binary
 - **nightly gate** — runs in **Linux Extended Validation** (`heavy-e2e.yml`),

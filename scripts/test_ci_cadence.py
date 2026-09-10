@@ -56,7 +56,7 @@ def assert_extended(test, pr, nightly):
     test.assertNotIn("--support-only", str(pr))
     test.assertNotIn("ProfilePartitionTests", str(pr))
     test.assertIn("ProfilePartitionTests", str(full))
-    test.assertEqual(pr["jobs"]["integration"]["needs"], ["changes", "workspace-tests"])
+    test.assertEqual(pr["jobs"]["integration"]["needs"], ["changes", "ci-fast"])
     report = jobs["report"]
     test.assertEqual(set(report["needs"]), set(MOVED) | {"full-workspace", "integration-support", "backend-sanitizers-full"})
     test.assertIn("always()", report["if"])
