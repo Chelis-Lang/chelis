@@ -1,6 +1,8 @@
 """Live registration packets select obligations; they cannot issue authority."""
 import copy
+from dataclasses import fields
 import hashlib
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -73,6 +75,41 @@ class NativeRegistrationControls(unittest.TestCase):
             else: changed["source_sha256"] = "0" * 64
             with self.subTest(mutation=mutation), self.assertRaises(GraphError):
                 validate_native_registration(self.root, changed)
+
+
+class NativeRegistrationExecution(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from capacity_census_native_registration import collect_native_registration
+        root = Path(__file__).resolve().parent.parent
+        requested = os.environ.get("CARGO_TARGET_DIR")
+        target = Path(requested) if requested else root / "target/agents/native-registration-controls"
+        cls.registration = collect_native_registration(root, target)
+
+    def test_current_probe_binds_all_four_actual_registered_implementations(self):
+        roots = self.registration.validate()
+        self.assertEqual(len(roots), 4)
+        self.assertEqual(len(self.registration.processes), 2)
+        self.assertTrue(all(process["returncode"] == 0 for process in self.registration.processes))
+
+    def test_changed_artifact_or_incomplete_process_evidence_is_rejected(self):
+        for mutation in ("source", "packet", "binary", "stdout", "stderr", "missing-process",
+                         "duplicate-process", "failed-build", "failed-execution", "build-command", "execution-command"):
+            changed = object.__new__(CheckedNativeRegistrations)
+            for field in fields(CheckedNativeRegistrations):
+                object.__setattr__(changed, field.name, copy.deepcopy(getattr(self.registration, field.name)))
+            if mutation == "source": object.__setattr__(changed, "source_sha256", "0" * 64)
+            elif mutation == "packet": changed.packet["registrations"][0]["column"] += 1
+            elif mutation == "binary": object.__setattr__(changed, "binary", (changed.binary[0], "0" * 64))
+            elif mutation in {"stdout", "stderr"}: changed.processes[1][mutation]["sha256"] = "0" * 64
+            elif mutation == "missing-process": object.__setattr__(changed, "processes", ())
+            elif mutation == "duplicate-process": object.__setattr__(changed, "processes", (changed.processes[0],) * 2)
+            elif mutation == "failed-build": changed.processes[0]["returncode"] = 1
+            elif mutation == "failed-execution": changed.processes[1]["returncode"] = 1
+            elif mutation == "build-command": changed.processes[0]["command"] = ["true"]
+            else: changed.processes[1]["command"] = ["unrelated-probe"]
+            with self.subTest(mutation=mutation), self.assertRaises(GraphError):
+                changed.validate()
 
     def test_changed_current_source_invalidates_registration(self):
         validate_native_registration(self.root, self.packet)
