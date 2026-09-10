@@ -569,7 +569,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/05-risc-primitives.md",
         "### 3.8 Named Lossy Cast Forms",
         "## 4. Standard Lowerings",
-        "cd150af8941f2702efae3c86290ae7755b7011ff357dd4b841ab9d514c83232c",
+        "0cbc42c557573fbcbf9662ca579e74dc001ef548ce242ffa26fbac872ab66cd8",
     ),
     "capability schema": (
         "spec/design/capability_table.md",

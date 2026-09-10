@@ -6059,26 +6059,97 @@ impl<'program> LowerCtx<'program> {
         self.lower_expr_with_claim(expr, None)
     }
 
-    fn host_stage_scope(&self) -> UnordMap<String, crate::host_type_state::HostTypeTerm> {
+    fn host_value_type(
+        &self,
+        value: &LoweredValue,
+    ) -> Option<crate::host_type_state::HostTypeTerm> {
         use crate::host_type_state::HostTypeTerm;
+        match value {
+            LoweredValue::Node(id) => self.host_value_types.get(id).cloned().or_else(|| {
+                self.dag
+                    .get(*id)
+                    .map(|node| HostTypeTerm::Tensor(node.output_type.clone()))
+            }),
+            LoweredValue::Host { ty, .. } => Some(ty.clone()),
+            LoweredValue::Tuple(items) => items
+                .iter()
+                .map(|item| self.host_value_type(item))
+                .collect::<Option<Vec<_>>>()
+                .map(HostTypeTerm::Tuple),
+            LoweredValue::Adt { .. } => None,
+        }
+    }
+
+    fn host_stage_scope(&self) -> UnordMap<String, crate::host_type_state::HostTypeTerm> {
         self.bindings
             .to_sorted()
             .into_iter()
-            .filter_map(|(name, value)| {
-                let ty = match value {
-                    LoweredValue::Node(id) => {
-                        self.host_value_types.get(id).cloned().or_else(|| {
-                            self.dag
-                                .get(*id)
-                                .map(|node| HostTypeTerm::Tensor(node.output_type.clone()))
-                        })?
-                    }
-                    LoweredValue::Host { ty, .. } => ty.clone(),
-                    _ => return None,
-                };
-                Some((name.clone(), ty))
-            })
+            .filter_map(|(name, value)| self.host_value_type(value).map(|ty| (name.clone(), ty)))
             .collect()
+    }
+
+    /// A native tuple keeps its leaf nodes for tensor consumers. A host
+    /// consumer gets a pure tuple construction over those already evaluated
+    /// leaves, never a replay of the tuple's original computations or effects.
+    fn stage_host_tuple_capture(
+        &mut self,
+        value: &LoweredValue,
+        at: &Expr,
+    ) -> crate::host::staged::StageValue {
+        use crate::host::staged::{HostSource, HostValueId, StageValue};
+        use crate::host_type_state::HostTypeTerm;
+        fn expression(
+            ctx: &LowerCtx<'_>,
+            value: &LoweredValue,
+            captures: &mut Vec<(String, StageValue, HostTypeTerm)>,
+            span: Span,
+        ) -> Expr {
+            let mut elements = vec![
+                Expr::Atom(Atom::Tag(DeepTag::Tuple), span),
+                Expr::Map(Metadata::default(), span),
+            ];
+            if let LoweredValue::Tuple(items) = value {
+                elements.extend(
+                    items
+                        .iter()
+                        .map(|item| expression(ctx, item, captures, span)),
+                );
+            } else {
+                let stage_value = match value {
+                    LoweredValue::Node(id) => StageValue::Tensor(*id),
+                    LoweredValue::Host { id, .. } => StageValue::Host(*id),
+                    _ => unreachable!("validated tuple leaf"),
+                };
+                let name = format!("__tuple_capture_{}", captures.len());
+                captures.push((
+                    name.clone(),
+                    stage_value,
+                    ctx.host_value_type(value).expect("typed tuple leaf"),
+                ));
+                elements[0] = Expr::Atom(Atom::Tag(DeepTag::Var), span);
+                elements.push(Expr::Atom(Atom::Name(name), span));
+            }
+            Expr::List(List { elements }, span)
+        }
+        let ty = self.host_value_type(value).unwrap_or_else(|| {
+            raise_lowering_error(
+                "a staged tuple capture has an untyped leaf",
+                Some(at.span()),
+                at.span_id().map(str::to_owned),
+            )
+        });
+        let mut captures = Vec::new();
+        let expression = expression(self, value, &mut captures, at.span());
+        let id = HostValueId(self.next_host_value);
+        self.next_host_value += 1;
+        self.host_sources.push(HostSource {
+            before: self.dag.nodes().len(),
+            value: StageValue::Host(id),
+            ty,
+            expression,
+            captures,
+        });
+        StageValue::Host(id)
     }
 
     fn stage_host_value(&mut self, expr: &Expr, target: bool) -> Option<LoweredValue> {
@@ -6143,10 +6214,11 @@ impl<'program> LowerCtx<'program> {
         }
         let mut captures = Vec::new();
         for name in referenced.into_sorted() {
-            if let Some(value) = self.bindings.get(&name) {
-                let captured = match value {
+            if let Some(value) = self.bindings.get(&name).cloned() {
+                let captured = match &value {
                     LoweredValue::Node(id) => StageValue::Tensor(*id),
                     LoweredValue::Host { id, .. } => StageValue::Host(*id),
+                    LoweredValue::Tuple(_) => self.stage_host_tuple_capture(&value, expr),
                     _ => raise_lowering_error(
                         "a staged aggregate capture needs an explicit host value",
                         Some(expr.span()),
@@ -9723,11 +9795,25 @@ impl<'program> LowerCtx<'program> {
                 }
                 sum_id
             }
-            "tensor_to_scalar" if args.len() == 1 => {
-                self.lower_expr_node(&args[0], "tensor_to_scalar input")
-            }
-            "scalar_to_tensor" if args.len() == 1 => {
-                self.lower_expr_node(&args[0], "scalar_to_tensor input")
+            "tensor_to_scalar" | "scalar_to_tensor" if args.len() == 1 => {
+                let input = self.lower_expr_node(&args[0], "scalar/tensor conversion input");
+                if self.host_program.is_some() {
+                    // The rank-zero DAG type is unchanged, but the host value
+                    // surface changes. Give the view its own identity so both
+                    // aliases retain their types when captured by later stages.
+                    self.dag.add_node(
+                        RiscOp::Copy,
+                        vec![input],
+                        self.dag
+                            .get(input)
+                            .expect("conversion input")
+                            .output_type
+                            .clone(),
+                        self.current_span_id.clone(),
+                    )
+                } else {
+                    input
+                }
             }
             "max_reduce" if args.len() == 2 => {
                 let x = self.lower_expr_node(&args[0], "max_reduce input");

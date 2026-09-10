@@ -1645,9 +1645,18 @@ fn staged_sources_preserve_tuple_captures() {
     let mut cases = Vec::new();
     for n in [4, 6] {
         for (kind, body) in [
-            ("tuple", "{\n  sizes = (floor_div(numel(x), 2i64), 2i64)\n  reshape(x, [sizes.0, sizes.1])\n}"),
-            ("nested_tuple", "{\n  sizes = ((floor_div(numel(x), 2i64), 2i64), x)\n  reshape(sizes.1, [sizes.0.0, sizes.0.1])\n}"),
-            ("tuple_host_consumer", "{\n  sizes = (floor_div(numel(x), 2i64), 2i64)\n  reshape(x, [bitand(sizes.0, 3i64), sizes.1])\n}"),
+            (
+                "tuple",
+                "{\n  sizes = (floor_div(numel(x), 2i64), 2i64)\n  reshape(x, [sizes.0, sizes.1])\n}",
+            ),
+            (
+                "nested_tuple",
+                "{\n  sizes = ((floor_div(numel(x), 2i64), 2i64), x)\n  dims = sizes.0\n  reshape(sizes.1, [dims.0, dims.1])\n}",
+            ),
+            (
+                "tuple_host_consumer",
+                "{\n  sizes = (floor_div(numel(x), 2i64), 2i64)\n  reshape(x, [bitand(sizes.0, 3i64), sizes.1])\n}",
+            ),
         ] {
             call_matrix(
                 &mut cases,
@@ -1656,8 +1665,11 @@ fn staged_sources_preserve_tuple_captures() {
                 &format!("def f(x: tensor[n, f32]) -> tensor[2, 2, f32] = {body}"),
                 "(tensor[d0, f32]) -> tensor[2, 2, f32]",
                 vec![vector(n)],
-                if n == 4 { Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]) }
-                else { Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"]) },
+                if n == 4 {
+                    Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])
+                } else {
+                    Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"])
+                },
             );
         }
     }
@@ -1667,6 +1679,11 @@ fn staged_sources_preserve_tuple_captures() {
         let observed = observe(&case);
         println!("{}: {}", case.id, observed);
         failures.extend(contract_failures(&case, &observed));
+        if case.source.contains("def main()")
+            && observed["check"]["signatures"]["main"] != "() -> tensor[2, 2, f32]"
+        {
+            failures.push(format!("{}: declared main shape changed", case.id));
+        }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
@@ -1681,8 +1698,14 @@ fn staged_sources_preserve_scalar_and_tensor_views() {
             input.values[5] = 8.0; // sum 23; 23 & 3 is the incompatible extent 3.
         }
         for (kind, body) in [
-            ("scalar_view", "{\n  total = tensor_to_scalar(sum(x, 0i32))\n  size = bitand(cast(total, int64), 3i64)\n  reshape(x, [size, 2i64])\n}"),
-            ("retained_views", "{\n  tensor_total = sum(x, 0i32)\n  total = tensor_to_scalar(tensor_total)\n  tensor_again = scalar_to_tensor(total)\n  size = mul(bitand(cast(total, int64), 3i64), mul(numel(tensor_total), numel(tensor_again)))\n  reshape(x, [size, 2i64])\n}"),
+            (
+                "scalar_view",
+                "{\n  total = tensor_to_scalar(sum(x, 0i32))\n  size = bitand(cast(total, int64), 3i64)\n  reshape(x, [size, 2i64])\n}",
+            ),
+            (
+                "retained_views",
+                "{\n  tensor_total = sum(x, 0i32)\n  total = tensor_to_scalar(tensor_total)\n  tensor_again = scalar_to_tensor(total)\n  size = mul(bitand(cast(total, int64), 3i64), mul(numel(tensor_total), numel(tensor_again)))\n  reshape(x, [size, 2i64])\n}",
+            ),
         ] {
             call_matrix(
                 &mut cases,
@@ -1691,8 +1714,11 @@ fn staged_sources_preserve_scalar_and_tensor_views() {
                 &format!("def f(x: tensor[n, f32]) -> tensor[2, 2, f32] = {body}"),
                 "(tensor[d0, f32]) -> tensor[2, 2, f32]",
                 vec![input.clone()],
-                if n == 4 { Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]) }
-                else { Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"]) },
+                if n == 4 {
+                    Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])
+                } else {
+                    Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"])
+                },
             );
         }
     }
@@ -1702,6 +1728,11 @@ fn staged_sources_preserve_scalar_and_tensor_views() {
         let observed = observe(&case);
         println!("{}: {}", case.id, observed);
         failures.extend(contract_failures(&case, &observed));
+        if case.source.contains("def main()")
+            && observed["check"]["signatures"]["main"] != "() -> tensor[2, 2, f32]"
+        {
+            failures.push(format!("{}: declared main shape changed", case.id));
+        }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
@@ -1770,12 +1801,19 @@ fn staged_sources_preserve_handled_random_progress() {
     let mut cases = Vec::new();
     for seed in [42u64, 43] {
         for n in [2, 3] {
-            for (kind, target, draw) in [
-                ("native", "bitand(numel(source), 3i64)", 1u64),
+            for (kind, bindings, target, draw) in [
+                ("native", "", "bitand(numel(source), 3i64)", 1u64),
                 (
                     "mixed",
+                    "",
                     "if eq(numel(source), 2i64) then floor_div(numel(uniform_like(x, 2.0f32, 5.0f32)), 2i64) else 3i64",
                     2u64,
+                ),
+                (
+                    "tuple_capture",
+                    "  sizes = (numel(source), first)\n",
+                    "bitand(sizes.0, 3i64)",
+                    1u64,
                 ),
             ] {
                 let expected = if n == 2 {
@@ -1807,7 +1845,7 @@ fn staged_sources_preserve_handled_random_progress() {
                     &format!("staged_source.random.{kind}.seed{seed}.x{n}"),
                     1686,
                     &format!(
-                        "def g(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] ! {{ Random }} = {{\n  first = uniform_like(x, 2.0f32, 5.0f32)\n  size = {target}\n  second = uniform_like(x, 2.0f32, 5.0f32)\n  reshape(second, [size, 2i64])\n}}\ndef f(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = with seed({seed}i64) {{ g(source, x) }}"
+                        "def g(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] ! {{ Random }} = {{\n  first = uniform_like(x, 2.0f32, 5.0f32)\n{bindings}  size = {target}\n  second = uniform_like(x, 2.0f32, 5.0f32)\n  reshape(second, [size, 2i64])\n}}\ndef f(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = with seed({seed}i64) {{ g(source, x) }}"
                     ),
                     "(tensor[d0, f32], tensor[d1, f32]) -> tensor[2, 2, f32]",
                     vec![vector(n), vector(n * 2)],

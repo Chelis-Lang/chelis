@@ -6,5 +6,6 @@ before shape-dependent allocation or element access.
 Computed remainder targets retain result claims on Eval and C, including HIP host-C entry selection. Signed remainder preserves exact minimum-integer behavior and DivZero diagnostics.
 
 Host scalar reshape targets retain checked claims through a shared staged plan,
-including list-derived sizes, scalar conditionals and aliased helper calls. Stages
+including list-derived sizes, scalar conditionals, tuple captures, scalar/tensor
+views and aliased helper calls. Stages
 preserve eager evaluation, handled Random streams and imported definitions.
