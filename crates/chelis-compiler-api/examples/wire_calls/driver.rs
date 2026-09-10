@@ -403,6 +403,631 @@ fn typ<'tcx>(tcx: TyCtxt<'tcx>, value: Ty<'tcx>, identities: &Identities) -> Str
     ])
 }
 
+// Native-binding collection is intentionally independent of serde.  Its type
+// records keep the same compiler-derived shape and identity vocabulary while
+// omitting the wire-only dynamic-carrier classification.
+fn native_typ<'tcx>(tcx: TyCtxt<'tcx>, value: Ty<'tcx>) -> String {
+    let nominal = if let ty::Adt(def, _) = value.kind() {
+        definition(tcx, def.did())
+    } else {
+        "null".into()
+    };
+    let nodes = value.walk().filter_map(|arg| arg.as_type()).map(|t| {
+        let definition = match t.kind() {
+            ty::Adt(def, _) => definition(tcx, def.did()),
+            ty::Alias(_, alias) => definition(
+                tcx,
+                match alias.kind {
+                    ty::AliasTyKind::Projection { def_id }
+                    | ty::AliasTyKind::Inherent { def_id }
+                    | ty::AliasTyKind::Opaque { def_id }
+                    | ty::AliasTyKind::Free { def_id } => def_id,
+                },
+            ),
+            ty::FnDef(def, _) | ty::Closure(def, _) | ty::Coroutine(def, _) => {
+                definition(tcx, *def)
+            }
+            _ => "null".into(),
+        };
+        object(&[
+            ("text", quoted(t.to_string())),
+            ("kind", quoted(format!("{:?}", t.kind()))),
+            ("definition", definition),
+        ])
+    });
+    object(&[
+        ("shape", shape(tcx, value, 0)),
+        ("text", quoted(value.to_string())),
+        ("nominal", nominal),
+        ("nodes", array(nodes)),
+        ("open", value.has_non_region_param().to_string()),
+    ])
+}
+
+fn native_generic_arg<'tcx>(tcx: TyCtxt<'tcx>, arg: ty::GenericArg<'tcx>) -> String {
+    match arg.kind() {
+        ty::GenericArgKind::Type(value) => {
+            object(&[("kind", quoted("type")), ("type", native_typ(tcx, value))])
+        }
+        ty::GenericArgKind::Lifetime(value) => object(&[
+            ("kind", quoted("lifetime")),
+            ("text", quoted(format!("{value:?}"))),
+        ]),
+        ty::GenericArgKind::Const(value) => object(&[
+            ("kind", quoted("const")),
+            ("text", quoted(format!("{value:?}"))),
+        ]),
+    }
+}
+
+fn native_implementation<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    owner: DefId,
+    substitutions: GenericArgsRef<'tcx>,
+) -> String {
+    // An anonymous const in an impl's trait arguments has the impl as its
+    // syntactic parent but does not inherit its generic arguments. Only real
+    // associated bodies carry an implementation owner and its substitutions.
+    if !matches!(
+        tcx.def_kind(owner),
+        DefKind::AssocFn | DefKind::AssocConst { .. }
+    ) {
+        return "null".into();
+    }
+    let Some(id) = tcx.opt_parent(owner) else {
+        return "null".into();
+    };
+    if !matches!(tcx.def_kind(id), DefKind::Impl { .. }) {
+        return "null".into();
+    }
+    if let Some(trait_ref) = tcx.impl_opt_trait_ref(id) {
+        let trait_ref = trait_ref
+            .instantiate(tcx, substitutions)
+            .skip_normalization();
+        object(&[
+            ("definition", definition(tcx, id)),
+            ("trait", definition(tcx, trait_ref.def_id)),
+            ("self_type", native_typ(tcx, trait_ref.self_ty())),
+        ])
+    } else {
+        let self_type = tcx
+            .type_of(id)
+            .instantiate(tcx, substitutions)
+            .skip_normalization();
+        object(&[
+            ("definition", definition(tcx, id)),
+            ("trait", "null".into()),
+            ("self_type", native_typ(tcx, self_type)),
+        ])
+    }
+}
+
+fn native_caller<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    owner: DefId,
+    substitutions: GenericArgsRef<'tcx>,
+) -> String {
+    object(&[
+        ("definition", definition(tcx, owner)),
+        ("kind", quoted(format!("{:?}", tcx.def_kind(owner)))),
+        ("ancestors", native_ancestors(tcx, owner)),
+        (
+            "implementation",
+            native_implementation(tcx, owner, substitutions),
+        ),
+        (
+            "substitutions",
+            array(substitutions.iter().map(|arg| native_generic_arg(tcx, arg))),
+        ),
+        (
+            "open_type_or_const",
+            substitutions.has_non_region_param().to_string(),
+        ),
+    ])
+}
+
+fn native_ancestors(tcx: TyCtxt<'_>, owner: DefId) -> String {
+    let mut ancestors = Vec::new();
+    let mut parent = tcx.opt_parent(owner);
+    while let Some(id) = parent {
+        ancestors.push(definition(tcx, id));
+        parent = tcx.opt_parent(id);
+    }
+    array(ancestors)
+}
+
+fn native_place<'tcx>(tcx: TyCtxt<'tcx>, place: mir::Place<'tcx>, value: Ty<'tcx>) -> String {
+    object(&[
+        ("id", quoted(format!("{place:?}"))),
+        ("local", place.local.as_usize().to_string()),
+        (
+            "projection",
+            array(
+                place
+                    .projection
+                    .iter()
+                    .map(|part| quoted(format!("{part:?}"))),
+            ),
+        ),
+        ("type", native_typ(tcx, value)),
+    ])
+}
+
+fn native_operand<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    operand: &mir::Operand<'tcx>,
+    value: Ty<'tcx>,
+) -> String {
+    let (kind, place) = match operand {
+        mir::Operand::Copy(place) => ("copy", native_place(tcx, *place, value)),
+        mir::Operand::Move(place) => ("move", native_place(tcx, *place, value)),
+        mir::Operand::Constant(_) => ("constant", "null".into()),
+        mir::Operand::RuntimeChecks(_) => ("runtime-checks", "null".into()),
+    };
+    object(&[
+        ("kind", quoted(kind)),
+        ("place", place),
+        ("type", native_typ(tcx, value)),
+    ])
+}
+
+fn native_terminator_kind(kind: &mir::TerminatorKind<'_>) -> &'static str {
+    match kind {
+        mir::TerminatorKind::Goto { .. } => "Goto",
+        mir::TerminatorKind::SwitchInt { .. } => "SwitchInt",
+        mir::TerminatorKind::UnwindResume => "UnwindResume",
+        mir::TerminatorKind::UnwindTerminate(_) => "UnwindTerminate",
+        mir::TerminatorKind::Return => "Return",
+        mir::TerminatorKind::Unreachable => "Unreachable",
+        mir::TerminatorKind::Drop { .. } => "Drop",
+        mir::TerminatorKind::Call { .. } => "Call",
+        mir::TerminatorKind::TailCall { .. } => "TailCall",
+        mir::TerminatorKind::Assert { .. } => "Assert",
+        mir::TerminatorKind::Yield { .. } => "Yield",
+        mir::TerminatorKind::CoroutineDrop => "CoroutineDrop",
+        mir::TerminatorKind::FalseEdge { .. } => "FalseEdge",
+        mir::TerminatorKind::FalseUnwind { .. } => "FalseUnwind",
+        mir::TerminatorKind::InlineAsm { .. } => "InlineAsm",
+    }
+}
+
+fn native_rvalue_kind(value: &mir::Rvalue<'_>) -> &'static str {
+    match value {
+        mir::Rvalue::Use(..) => "Use",
+        mir::Rvalue::Repeat(..) => "Repeat",
+        mir::Rvalue::Ref(..) => "Ref",
+        mir::Rvalue::ThreadLocalRef(..) => "ThreadLocalRef",
+        mir::Rvalue::RawPtr(..) => "RawPtr",
+        mir::Rvalue::Cast(..) => "Cast",
+        mir::Rvalue::BinaryOp(..) => "BinaryOp",
+        mir::Rvalue::UnaryOp(..) => "UnaryOp",
+        mir::Rvalue::Discriminant(..) => "Discriminant",
+        mir::Rvalue::Aggregate(..) => "Aggregate",
+        mir::Rvalue::CopyForDeref(..) => "CopyForDeref",
+        mir::Rvalue::WrapUnsafeBinder(..) => "WrapUnsafeBinder",
+        mir::Rvalue::Reborrow(..) => "Reborrow",
+    }
+}
+
+struct NativeRvaluePlaces<'tcx> {
+    places: Vec<mir::Place<'tcx>>,
+}
+impl<'tcx> Visitor<'tcx> for NativeRvaluePlaces<'tcx> {
+    fn visit_place(
+        &mut self,
+        place: &mir::Place<'tcx>,
+        context: mir::visit::PlaceContext,
+        location: mir::Location,
+    ) {
+        self.places.push(*place);
+        self.super_place(place, context, location);
+    }
+}
+
+struct NativeDiscovery<'tcx> {
+    tcx: TyCtxt<'tcx>,
+    bodies: BTreeSet<String>,
+    calls: BTreeSet<String>,
+    aggregates: BTreeSet<String>,
+    flows: BTreeSet<String>,
+    errors: BTreeSet<String>,
+    queue: VecDeque<(DefId, GenericArgsRef<'tcx>)>,
+    seen: Vec<(DefId, GenericArgsRef<'tcx>)>,
+    owners: DefSet,
+}
+impl<'tcx> NativeDiscovery<'tcx> {
+    fn normalize(&mut self, owner: DefId, args: GenericArgsRef<'tcx>, value: Ty<'tcx>) -> Ty<'tcx> {
+        let env = if args.has_non_region_param() {
+            ty::TypingEnv::post_analysis(self.tcx, owner)
+        } else {
+            ty::TypingEnv::fully_monomorphized()
+        };
+        match self.tcx.try_instantiate_and_normalize_erasing_regions(
+            args,
+            env,
+            ty::EarlyBinder::bind(self.tcx, value),
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                self.errors.insert(format!(
+                    "unresolved native type in {}: {error:?}",
+                    self.tcx.def_path_str(owner)
+                ));
+                value
+            }
+        }
+    }
+
+    fn enqueue(&mut self, def: DefId, args: GenericArgsRef<'tcx>) {
+        if def.is_local() && self.tcx.is_mir_available(def) && !args.has_non_region_param() {
+            self.queue.push_back((def, args));
+        }
+    }
+
+    fn body(&mut self, owner: DefId, substitutions: GenericArgsRef<'tcx>) {
+        let tcx = self.tcx;
+        let body = match tcx.def_kind(owner) {
+            DefKind::Const { .. }
+            | DefKind::AssocConst { .. }
+            | DefKind::AnonConst
+            | DefKind::InlineConst
+            | DefKind::Static { .. } => tcx.mir_for_ctfe(owner),
+            DefKind::Fn | DefKind::AssocFn | DefKind::Closure | DefKind::SyntheticCoroutineBody => {
+                tcx.optimized_mir(owner)
+            }
+            kind => {
+                self.errors.insert(format!(
+                    "unsupported native body kind {kind:?}: {}",
+                    tcx.def_path_str(owner)
+                ));
+                return;
+            }
+        };
+        let caller = native_caller(tcx, owner, substitutions);
+        let formal_inputs: Vec<_> = (1..=body.arg_count)
+            .map(|index| {
+                let local = mir::Local::from_usize(index);
+                let ty = self.normalize(owner, substitutions, body.local_decls[local].ty);
+                object(&[("local", index.to_string()), ("type", native_typ(tcx, ty))])
+            })
+            .collect();
+        let result = self.normalize(owner, substitutions, body.return_ty());
+        let blocks = body.basic_blocks.iter_enumerated().map(|(block, data)| {
+            let term = data.terminator();
+            object(&[
+                ("block", block.as_usize().to_string()),
+                ("cleanup", data.is_cleanup.to_string()),
+                ("statements", data.statements.len().to_string()),
+                ("terminator", quoted(native_terminator_kind(&term.kind))),
+                (
+                    "successors",
+                    array(term.successors().map(|next| next.as_usize().to_string())),
+                ),
+                ("source", location(tcx, term.source_info.span)),
+            ])
+        });
+        self.bodies.insert(object(&[
+            ("definition", definition(tcx, owner)),
+            ("kind", quoted(format!("{:?}", tcx.def_kind(owner)))),
+            ("ancestors", native_ancestors(tcx, owner)),
+            (
+                "implementation",
+                native_implementation(tcx, owner, substitutions),
+            ),
+            (
+                "substitutions",
+                array(substitutions.iter().map(|arg| native_generic_arg(tcx, arg))),
+            ),
+            (
+                "open_type_or_const",
+                substitutions.has_non_region_param().to_string(),
+            ),
+            ("formal_inputs", array(formal_inputs)),
+            ("formal_result", native_typ(tcx, result)),
+            ("source", location(tcx, body.span)),
+            ("blocks", array(blocks)),
+        ]));
+
+        for (block, data) in body.basic_blocks.iter_enumerated() {
+            for (statement_index, statement) in data.statements.iter().enumerate() {
+                let mir::StatementKind::Assign(assignment) = &statement.kind else {
+                    continue;
+                };
+                let (destination, value) = &**assignment;
+                let mir_location = mir::Location {
+                    block,
+                    statement_index,
+                };
+                let mut source_places = NativeRvaluePlaces { places: Vec::new() };
+                source_places.visit_rvalue(value, mir_location);
+                let mut sources = BTreeSet::new();
+                for place in source_places.places {
+                    let value =
+                        self.normalize(owner, substitutions, place.ty(&body.local_decls, tcx).ty);
+                    sources.insert(native_place(tcx, place, value));
+                }
+                let destination_type = self.normalize(
+                    owner,
+                    substitutions,
+                    destination.ty(&body.local_decls, tcx).ty,
+                );
+                self.flows.insert(object(&[
+                    ("caller", caller.clone()),
+                    ("block", block.as_usize().to_string()),
+                    ("statement", statement_index.to_string()),
+                    ("source", location(tcx, statement.source_info.span)),
+                    (
+                        "destination",
+                        native_place(tcx, *destination, destination_type),
+                    ),
+                    ("rvalue", quoted(native_rvalue_kind(value))),
+                    ("sources", array(sources)),
+                ]));
+                if let mir::Rvalue::Aggregate(kind, operands) = value
+                    && let mir::AggregateKind::Adt(def, variant, args, _, active_field) = &**kind
+                {
+                    let adt = tcx.adt_def(*def);
+                    if variant.as_usize() >= adt.variants().len() {
+                        self.errors.insert(format!(
+                            "invalid native ADT aggregate variant in {} at bb{}[{}]",
+                            tcx.def_path_str(owner),
+                            block.as_usize(),
+                            statement_index,
+                        ));
+                        continue;
+                    }
+                    let variant_fields = &adt.variant(*variant).fields;
+                    let field_operands: Vec<_> = match active_field {
+                        Some(field) => {
+                            if !adt.is_union()
+                                || operands.len() != 1
+                                || field.as_usize() >= variant_fields.len()
+                            {
+                                self.errors.insert(format!(
+                                    "invalid native union aggregate shape in {} at bb{}[{}]",
+                                    tcx.def_path_str(owner),
+                                    block.as_usize(),
+                                    statement_index,
+                                ));
+                                continue;
+                            }
+                            let Some(operand) = operands.iter().next() else {
+                                self.errors.insert(format!(
+                                    "missing native union aggregate operand in {} at bb{}[{}]",
+                                    tcx.def_path_str(owner),
+                                    block.as_usize(),
+                                    statement_index,
+                                ));
+                                continue;
+                            };
+                            vec![(&variant_fields[*field], operand)]
+                        }
+                        None => {
+                            if adt.is_union() || variant_fields.len() != operands.len() {
+                                self.errors.insert(format!(
+                                    "invalid native ADT aggregate shape in {} at bb{}[{}]",
+                                    tcx.def_path_str(owner),
+                                    block.as_usize(),
+                                    statement_index,
+                                ));
+                                continue;
+                            }
+                            variant_fields.iter().zip(operands.iter()).collect()
+                        }
+                    };
+                    let mut fields = Vec::new();
+                    for (field, operand) in field_operands {
+                        let value = self.normalize(
+                            owner,
+                            substitutions,
+                            operand.ty(&body.local_decls, tcx),
+                        );
+                        fields.push(object(&[
+                            ("definition", definition(tcx, field.did)),
+                            ("operand", native_operand(tcx, operand, value)),
+                        ]));
+                    }
+                    let mut aggregate_args = Vec::new();
+                    for arg in args.iter() {
+                        let instantiated = ty::EarlyBinder::bind(tcx, arg)
+                            .instantiate(tcx, substitutions)
+                            .skip_normalization();
+                        aggregate_args.push(native_generic_arg(tcx, instantiated));
+                    }
+                    self.aggregates.insert(object(&[
+                        ("caller", caller.clone()),
+                        ("definition", definition(tcx, *def)),
+                        ("variant", quoted(adt.variant(*variant).name.as_str())),
+                        (
+                            "variant_definition",
+                            definition(tcx, adt.variant(*variant).def_id),
+                        ),
+                        ("arguments", array(aggregate_args)),
+                        (
+                            "destination",
+                            native_place(tcx, *destination, destination_type),
+                        ),
+                        ("fields", array(fields)),
+                        ("block", block.as_usize().to_string()),
+                        ("statement", statement_index.to_string()),
+                        ("source", location(tcx, statement.source_info.span)),
+                    ]));
+                }
+            }
+            let term = data.terminator();
+            let mir::TerminatorKind::Call {
+                func,
+                args,
+                destination,
+                target,
+                unwind,
+                ..
+            } = &term.kind
+            else {
+                continue;
+            };
+            let function = self.normalize(owner, substitutions, func.ty(&body.local_decls, tcx));
+            let mut callee = "null".into();
+            let mut formal_inputs = "null".into();
+            let mut formal_result = "null".into();
+            let mut kind = "indirect";
+            if function.is_fn() {
+                let signature = function.fn_sig(tcx).skip_binder();
+                formal_inputs =
+                    array(signature.inputs().iter().map(|value| {
+                        native_typ(tcx, self.normalize(owner, substitutions, *value))
+                    }));
+                formal_result = native_typ(
+                    tcx,
+                    self.normalize(owner, substitutions, signature.output()),
+                );
+            }
+            if let ty::FnDef(def, call_args) = function.kind() {
+                self.enqueue(*def, call_args);
+                let env = if substitutions.has_non_region_param() {
+                    ty::TypingEnv::post_analysis(tcx, owner)
+                } else {
+                    ty::TypingEnv::fully_monomorphized()
+                };
+                let resolution = match ty::Instance::try_resolve(tcx, env, *def, call_args) {
+                    Ok(Some(instance)) => {
+                        self.enqueue(instance.def_id(), instance.args);
+                        let instance_kind = match instance.def {
+                            ty::InstanceKind::Virtual(..) => "virtual",
+                            ty::InstanceKind::Shim(ty::ShimKind::FnPtr(..)) => "fn-pointer-shim",
+                            _ => "resolved",
+                        };
+                        kind = instance_kind;
+                        object(&[
+                            ("definition", definition(tcx, instance.def_id())),
+                            (
+                                "substitutions",
+                                array(instance.args.iter().map(|arg| native_generic_arg(tcx, arg))),
+                            ),
+                        ])
+                    }
+                    Ok(None) => {
+                        kind = "unresolved";
+                        "null".into()
+                    }
+                    Err(error) => {
+                        kind = "unresolved";
+                        self.errors.insert(format!(
+                            "native call resolution failed in {}: {error:?}",
+                            tcx.def_path_str(owner)
+                        ));
+                        "null".into()
+                    }
+                };
+                callee = object(&[
+                    ("definition", definition(tcx, *def)),
+                    (
+                        "substitutions",
+                        array(call_args.iter().map(|arg| native_generic_arg(tcx, arg))),
+                    ),
+                    ("resolved", resolution),
+                ]);
+            }
+            let mut arguments = Vec::new();
+            for arg in args {
+                let value =
+                    self.normalize(owner, substitutions, arg.node.ty(&body.local_decls, tcx));
+                arguments.push(native_operand(tcx, &arg.node, value));
+            }
+            let destination_type = self.normalize(
+                owner,
+                substitutions,
+                destination.ty(&body.local_decls, tcx).ty,
+            );
+            let mut call_sources = BTreeSet::new();
+            for arg in args {
+                let place = match &arg.node {
+                    mir::Operand::Copy(place) | mir::Operand::Move(place) => Some(*place),
+                    mir::Operand::Constant(_) | mir::Operand::RuntimeChecks(_) => None,
+                };
+                if let Some(place) = place {
+                    let value =
+                        self.normalize(owner, substitutions, place.ty(&body.local_decls, tcx).ty);
+                    call_sources.insert(native_place(tcx, place, value));
+                }
+            }
+            self.flows.insert(object(&[
+                ("caller", caller.clone()),
+                ("block", block.as_usize().to_string()),
+                ("statement", data.statements.len().to_string()),
+                ("source", location(tcx, term.source_info.span)),
+                (
+                    "destination",
+                    native_place(tcx, *destination, destination_type),
+                ),
+                ("rvalue", quoted("call-result")),
+                ("sources", array(call_sources)),
+            ]));
+            self.calls.insert(object(&[
+                ("caller", caller.clone()),
+                ("kind", quoted(kind)),
+                ("callee", callee),
+                ("callable_type", native_typ(tcx, function)),
+                ("arguments", array(arguments)),
+                ("formal_inputs", formal_inputs),
+                ("formal_result", formal_result),
+                (
+                    "destination",
+                    native_place(tcx, *destination, destination_type),
+                ),
+                (
+                    "target",
+                    target
+                        .map(|block| block.as_usize().to_string())
+                        .unwrap_or_else(|| "null".into()),
+                ),
+                ("unwind", quoted(format!("{unwind:?}"))),
+                ("block", block.as_usize().to_string()),
+                ("statement", data.statements.len().to_string()),
+                ("source", location(tcx, term.source_info.span)),
+            ]));
+        }
+    }
+
+    fn run(mut self) -> String {
+        let tcx = self.tcx;
+        let owners: Vec<_> = self.owners.iter().copied().collect();
+        for owner in &owners {
+            let args = ty::GenericArgs::identity_for_item(tcx, *owner);
+            self.body(*owner, args);
+            if !args.has_non_region_param() {
+                self.seen.push((*owner, args));
+            }
+        }
+        while let Some((owner, args)) = self.queue.pop_front() {
+            if self.seen.contains(&(owner, args)) {
+                continue;
+            }
+            self.seen.push((owner, args));
+            if self.seen.len() > 100_000 {
+                self.errors
+                    .insert("native local instance expansion limit exceeded".into());
+                break;
+            }
+            self.body(owner, args);
+        }
+        object(&[
+            ("format", "3".into()),
+            ("scope", quoted("native-bindings")),
+            ("compiler", quoted(env!("WIRE_DRIVER_COMPILER"))),
+            (
+                "crate",
+                definition(tcx, rustc_span::def_id::CRATE_DEF_ID.to_def_id()),
+            ),
+            ("bodies", array(self.bodies)),
+            ("calls", array(self.calls)),
+            ("aggregates", array(self.aggregates)),
+            ("flows", array(self.flows)),
+            ("errors", array(self.errors.iter().map(quoted))),
+        ])
+    }
+}
+
 struct FunctionValues<'tcx> {
     values: Vec<Ty<'tcx>>,
     erased: Vec<(Ty<'tcx>, Span)>,
@@ -955,49 +1580,69 @@ struct Probe {
 }
 impl Callbacks for Probe {
     fn after_analysis<'tcx>(&mut self, _: &interface::Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
-        let identities =
-            Identities::read(tcx).unwrap_or_else(|error| panic!("wire call identity: {error}"));
-        let compiler_json = identities.deserialize.is_some();
-        let discovery = Discovery {
-            tcx,
-            identities,
-            calls: BTreeSet::new(),
-            returns: BTreeSet::new(),
-            codecs: BTreeSet::new(),
-            schemas: BTreeSet::new(),
-            errors: BTreeSet::new(),
-            queue: VecDeque::new(),
-            seen: Vec::new(),
-            relevant: DefSet::new(),
-            concrete: DefSet::new(),
-            unresolved: DefSet::new(),
-            readers: BTreeSet::new(),
-            owners: tcx
-                .hir_body_owners()
-                .map(|owner| owner.to_def_id())
-                .filter(|owner| {
-                    if !compiler_json {
-                        return true;
-                    }
-                    let mut current = tcx.opt_parent(*owner);
-                    while let Some(id) = current {
-                        if tcx.def_kind(id) == DefKind::Mod
-                            && tcx.opt_parent(id)
-                                == Some(rustc_span::def_id::CRATE_DEF_ID.to_def_id())
-                            && tcx
-                                .opt_item_name(id)
-                                .is_some_and(|name| name.as_str() == "compiler_json")
-                        {
+        let native = std::env::var("WIRE_CALL_SCOPE").as_deref() == Ok("native-bindings");
+        let mut result = if native {
+            NativeDiscovery {
+                tcx,
+                bodies: BTreeSet::new(),
+                calls: BTreeSet::new(),
+                aggregates: BTreeSet::new(),
+                flows: BTreeSet::new(),
+                errors: BTreeSet::new(),
+                queue: VecDeque::new(),
+                seen: Vec::new(),
+                owners: tcx
+                    .hir_body_owners()
+                    .map(|owner| owner.to_def_id())
+                    .filter(|owner| tcx.is_mir_available(*owner))
+                    .collect(),
+            }
+            .run()
+        } else {
+            let identities =
+                Identities::read(tcx).unwrap_or_else(|error| panic!("wire call identity: {error}"));
+            let compiler_json = identities.deserialize.is_some();
+            Discovery {
+                tcx,
+                identities,
+                calls: BTreeSet::new(),
+                returns: BTreeSet::new(),
+                codecs: BTreeSet::new(),
+                schemas: BTreeSet::new(),
+                errors: BTreeSet::new(),
+                queue: VecDeque::new(),
+                seen: Vec::new(),
+                relevant: DefSet::new(),
+                concrete: DefSet::new(),
+                unresolved: DefSet::new(),
+                readers: BTreeSet::new(),
+                owners: tcx
+                    .hir_body_owners()
+                    .map(|owner| owner.to_def_id())
+                    .filter(|owner| {
+                        if !compiler_json {
                             return true;
                         }
-                        current = tcx.opt_parent(id);
-                    }
-                    false
-                })
-                .collect(),
+                        let mut current = tcx.opt_parent(*owner);
+                        while let Some(id) = current {
+                            if tcx.def_kind(id) == DefKind::Mod
+                                && tcx.opt_parent(id)
+                                    == Some(rustc_span::def_id::CRATE_DEF_ID.to_def_id())
+                                && tcx
+                                    .opt_item_name(id)
+                                    .is_some_and(|name| name.as_str() == "compiler_json")
+                            {
+                                return true;
+                            }
+                            current = tcx.opt_parent(id);
+                        }
+                        false
+                    })
+                    .collect(),
+            }
+            .run()
         };
         let path = std::env::var_os("WIRE_CALL_REPORT").expect("WIRE_CALL_REPORT is required");
-        let mut result = discovery.run();
         assert_eq!(result.pop(), Some('}'));
         result.push_str(&format!(
             ",\"rustc_command\":{},\"inputs\":{}}}",
