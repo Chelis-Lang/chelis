@@ -51,6 +51,14 @@ jobs:
           shared-key: linux-workspace
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      # The unfiltered suite executes the same nested census builds as the
+      # dtype oracle. Reuse its existing cache rather than compiling it cold.
+      - name: Restore capacity rustdoc build
+        uses: actions/cache/restore@v4
+        with:
+          path: target/agents/729-capacity-rustdoc
+          key: ${{ runner.os }}-${{ runner.arch }}-capacity-rustdoc-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'scripts/capacity_census_typed.py', 'crates/chelis-compiler-api/**', 'crates/chelis-python/**') }}
+
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 

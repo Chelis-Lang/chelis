@@ -41,6 +41,9 @@ def assert_extended(test, pr, nightly):
                     test.assertNotIn("if", step)
     full = jobs["full-workspace"]
     test.assertEqual(full["timeout-minutes"], 60)
+    capacity = lambda job: [s for s in job["steps"] if s.get("name") == "Restore capacity rustdoc build"]
+    test.assertEqual(len(capacity(full)), 1)
+    test.assertEqual(capacity(full), capacity(jobs["dtype-phase3-oracle"]))
     test.assertNotIn("strategy", full)
     commands = [s.get("run") for s in full["steps"]]
     test.assertIn("cargo build --workspace --lib --bins", commands)
@@ -102,6 +105,18 @@ class ExtendedCadenceTests(unittest.TestCase):
                     if step.get("run", "").startswith("cargo nextest run"):
                         step["run"] = step["run"].replace(" --ignore-default-filter", "")
             with self.assertRaises(AssertionError):
+                assert_extended(self, self.pr, nightly)
+
+    def test_missing_or_divergent_full_capacity_cache_is_rejected(self):
+        for mutation in ("remove", "key"):
+            nightly = copy.deepcopy(self.nightly)
+            steps = nightly["jobs"]["full-workspace"]["steps"]
+            cache = next(s for s in steps if s.get("name") == "Restore capacity rustdoc build")
+            if mutation == "remove":
+                steps.remove(cache)
+            else:
+                cache["with"]["key"] += "-wrong"
+            with self.subTest(mutation=mutation), self.assertRaises(AssertionError):
                 assert_extended(self, self.pr, nightly)
 
 
