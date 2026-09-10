@@ -333,6 +333,21 @@ void chelis_tensor_pad_shape(const chelis_tensor *tensor, chelis_scalar rank, co
 void chelis_tensor_shrink_shape(const chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *start, const chelis_scalar *end, chelis_scalar *shape);
 void chelis_tensor_stride_shape(const chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *steps, chelis_scalar *shape);
 int64_t chelis_tensor_affine_index(const chelis_tensor *tensor, const chelis_scalar *coordinates, const chelis_scalar *offsets, const chelis_scalar *steps);
+
+typedef enum {
+    CHELIS_REDUCE_SUM = 0, CHELIS_REDUCE_COUNT = 1, CHELIS_REDUCE_MAX = 2,
+    CHELIS_REDUCE_MIN = 3, CHELIS_REDUCE_PROD = 4, CHELIS_REDUCE_ARGMAX = 5,
+    CHELIS_REDUCE_ARGMIN = 6
+} chelis_reduction_op;
+typedef struct chelis_reduction_plan chelis_reduction_plan;
+chelis_reduction_plan *chelis_tensor_reduction_plan(const chelis_tensor *tensor, chelis_scalar axis_count, const chelis_scalar *axes, chelis_scalar exemplar, chelis_reduction_op operation);
+chelis_reduction_plan *chelis_shape_reduction_plan(chelis_scalar rank, const chelis_scalar *shape, chelis_scalar axis_count, const chelis_scalar *axes, chelis_scalar exemplar, chelis_reduction_op operation);
+int64_t chelis_reduction_count(const chelis_reduction_plan *plan);
+int64_t chelis_reduction_extent(const chelis_reduction_plan *plan, chelis_scalar axis);
+int64_t chelis_reduction_index(const chelis_reduction_plan *plan, chelis_scalar outer, chelis_scalar leaf);
+void chelis_reduction_check_target(const chelis_reduction_plan *plan, chelis_scalar rank, const chelis_scalar *shape);
+void chelis_reduction_check_scratch(const chelis_reduction_plan *plan, chelis_scalar exemplar);
+void chelis_reduction_plan_release(chelis_reduction_plan *plan);
 void chelis_tensor_check_reshape(const chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *shape);
 chelis_tensor *chelis_tensor_reshape(const chelis_tensor *tensor, const chelis_list *shape);
 

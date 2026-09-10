@@ -613,12 +613,44 @@ from 324 to 321. Checked-add/multiply and bounds mutations execute against the
 private metadata owner. No new inventory identity or owner exception is admitted.
 The complete Phase 1 oracle remains a separate deliverable.
 
-Generated C adoption still requires reduction
-indexing, sparse/BLAS loop domains, and Count/window scratch allocation. The
+After the reduction/Count delivery below, generated C adoption still requires
+sparse/BLAS loop domains and window metadata/scratch allocation. The
 complete Phase 1 execution receipt/mutation oracle remains outstanding. Host-only results do not establish
 device execution or close #889/#893. Generated host/device descriptors and
 validated Python/DLPack wrappers remain under #893/#1345; #1288 consumes those
 interfaces and owns their exact discovery and authority registrations.
+
+#### Generated C reductions and Count (#889)
+
+Seven reduction emitter paths obtain a checked `ReductionMetadata` plan before
+allocation or repurpose: materialized Sum, Count, Max (including its reduced-float
+arm), Min/Prod, Argmax/Argmin, and fused Sum/Max. The opaque C plan snapshots the
+input domain, selected axes, checked result metadata, and row-major leaf count.
+A fused domain owns no tensor payload or unused storage strides. Empty results
+have no reachable groups; empty selected domains retain their operation's identity.
+Exact result shapes are checked after the existing ordered extent claims and before
+submission. The plan survives input repurpose or release without retaining storage.
+
+Sum and Count allocate tree scratch through checked runtime tensors, at the actual
+accumulator representation. Scratch bytes and target projection are checked before
+result allocation; each worker owns its scratch tensor and write guard. Sum keeps
+#1299's adjacent-pair tree and integer finalization; Count keeps its original
+row-major leaves, checked int64 pairs, and odd tails. Existing dtype rejection,
+non-Sum arithmetic, and vendor-selection obligations remain separately owned.
+Kernel scratch remains outside the shared planner's distinct DAG-slot bound;
+using checked runtime allocation does not make scratch a planned tensor slot.
+
+This is one shippable adoption slice because result validation, loop bounds, source
+indices, and scratch capacity must agree for the same grouping. Its oracle combines
+`checked_c_reduction` and the private `checked_metadata`/`metadata_compile` controls
+in debug and release, generated native and sanitizer executions, existing fused,
+integer-promotion and exact-tree regressions, and `count_bool_axes.ch` parity.
+The Phase 0 freeze adds these commands and the grouping/index bypass mutations.
+The 358 foundation identities remain unchanged; no new owner exception is admitted.
+The retired Sum raw-index template leaves active debt (314 to 313). This supports
+the reduction slice only: sparse/BLAS/window consumers and the complete Phase 1
+execution-receipt oracle remain open. It does not close #889 or #893.
+
 
 ## C3. One generated host/device descriptor schema
 

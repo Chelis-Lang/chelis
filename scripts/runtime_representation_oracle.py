@@ -62,7 +62,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "1060ce0d5942665350b47d60b0141a2abf00dfc9773bd6abe22946f59b8fdad0"
+FREEZE_SHA256 = "5701a8a16b191e83dd6fb052b8f6fee91ff169744e7f70b38a01eb7bf4e76627"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -1670,6 +1670,7 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
                 "--test", "checked_metadata", "--test", "metadata_compile",
                 "--test", "checked_metadata_padding", "--test", "checked_c_metadata",
                 "--test", "checked_c_indexing", "--test", "checked_c_movement", "--test", "checked_c_affine",
+                "--test", "checked_c_reduction",
                 "--test", "exact_tagged_c_abi",
                 "--test", "op33_empty_tensor_axis_decomposition",
                 "--test", "op33_tensor_validation",
@@ -1680,6 +1681,21 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
         OracleLeg(
             "checked C snapshot delegation and restoration mutations",
             ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_metadata"),
+        ),
+        OracleLeg(
+            "checked C reduction delegation and bypass mutations",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_reduction"),
+        ),
+        OracleLeg(
+            "checked C reductions and Count optimized sanitizer execution",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "exec_compile",
+             "--test", "fused_compile", "-E", "binary(fused_compile) | test(checked_c_reduction_) | test(exec_count_) | test(exec_reduce_sum_) | test(ws_a1_exec_f64_reduce_sum) | test(ws_a1_exec_i32_reduce_sum) | test(exec_i8_reduce_sum) | test(exec_i16_reduce_sum) | test(direct_fused_sum_runtime_shape) | test(direct_fused_max_reduce_runtime_shape)"),
+        ),
+        OracleLeg(
+            "checked C reduction example parity",
+            ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "parity",
+             "--test", "issue_1294_standard_lowerings", "-E",
+             "test(parity_count_bool_axes) | test(canonical_sum_) | test(scalar_and_fused_sums_) | test(hosted_matmul_preserves_the_canonical_reduction_tree) | test(hosted_matmul_empty_reductions_)"),
         ),
         OracleLeg(
             "checked C shared indexing cohort and restoration mutations",

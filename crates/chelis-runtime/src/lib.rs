@@ -22,7 +22,7 @@ mod ieee_narrow;
 mod metadata;
 use metadata::{
     AllocationBytes, AxisDecomposition, ByteCount, ElementCount, IterationSpace, MetadataError,
-    ShapeMetadata,
+    ReductionMetadata, ShapeMetadata,
 };
 mod ownership_ledger;
 
@@ -1630,15 +1630,20 @@ unsafe fn validate_dict_key(key: chelis_value, context: &str) {
     validate_value(key, context);
     match key.tag {
         chelis_value_tag::CHELIS_VALUE_STRING => {}
-        chelis_value_tag::CHELIS_VALUE_SCALAR => match validate_scalar(key.payload.scalar, context) {
+        chelis_value_tag::CHELIS_VALUE_SCALAR => match validate_scalar(key.payload.scalar, context)
+        {
             RuntimeDType::Bool
             | RuntimeDType::I8
             | RuntimeDType::I16
             | RuntimeDType::I32
             | RuntimeDType::I64 => {}
-            _ => runtime_fail!("Domain: {context}: dictionary keys must be string, bool, or signed integer scalars"),
+            _ => runtime_fail!(
+                "Domain: {context}: dictionary keys must be string, bool, or signed integer scalars"
+            ),
         },
-        _ => runtime_fail!("Domain: {context}: dictionary keys must be string, bool, or signed integer scalars"),
+        _ => runtime_fail!(
+            "Domain: {context}: dictionary keys must be string, bool, or signed integer scalars"
+        ),
     }
 }
 
@@ -2440,6 +2445,206 @@ fn affine_result<T>(result: Result<T, MetadataError>, op: &str) -> T {
         eprintln!("{error}");
         runtime_fail!("numeric trap: {class} in {op} at int64")
     })
+}
+
+#[allow(non_camel_case_types)]
+pub type chelis_reduction_op = c_int;
+pub const CHELIS_REDUCE_SUM: chelis_reduction_op = 0;
+pub const CHELIS_REDUCE_COUNT: chelis_reduction_op = 1;
+pub const CHELIS_REDUCE_MAX: chelis_reduction_op = 2;
+pub const CHELIS_REDUCE_MIN: chelis_reduction_op = 3;
+pub const CHELIS_REDUCE_PROD: chelis_reduction_op = 4;
+pub const CHELIS_REDUCE_ARGMAX: chelis_reduction_op = 5;
+pub const CHELIS_REDUCE_ARGMIN: chelis_reduction_op = 6;
+
+#[allow(non_camel_case_types)]
+pub struct chelis_reduction_plan {
+    metadata: ReductionMetadata,
+    op: &'static str,
+}
+
+fn reduction_operation(op: chelis_reduction_op) -> &'static str {
+    match op {
+        CHELIS_REDUCE_SUM => "sum",
+        CHELIS_REDUCE_COUNT => "count",
+        CHELIS_REDUCE_MAX => "max_reduce",
+        CHELIS_REDUCE_MIN => "min_reduce",
+        CHELIS_REDUCE_PROD => "prod_reduce",
+        CHELIS_REDUCE_ARGMAX => "argmax_reduce",
+        CHELIS_REDUCE_ARGMIN => "argmin_reduce",
+        _ => runtime_fail!("Domain: unknown reduction operation"),
+    }
+}
+
+unsafe fn reduction_array(rank: chelis_scalar, values: *const chelis_scalar, op: &str) -> Vec<i64> {
+    let rank = affine_scalar(rank, op);
+    if rank < 0 {
+        affine_result::<()>(
+            Err(MetadataError::Domain("negative metadata array rank".into())),
+            op,
+        );
+    }
+    let rank = affine_result(
+        i32::try_from(rank)
+            .map_err(|_| MetadataError::Overflow("metadata array rank exceeds int32")),
+        op,
+    );
+    affine_array(values, rank as usize, op)
+}
+
+unsafe fn reduction_axes(
+    count: chelis_scalar,
+    axes: *const chelis_scalar,
+    rank: usize,
+    op: &str,
+) -> Vec<i64> {
+    let count = affine_scalar(count, op);
+    if count < 1 || count > rank as i64 {
+        affine_result::<()>(
+            Err(MetadataError::Domain(
+                "reduction axis count outside input rank".into(),
+            )),
+            op,
+        );
+    }
+    affine_array(axes, count as usize, op)
+}
+
+fn reduction_exemplar(value: chelis_scalar, op: &str) -> RuntimeDType {
+    let dtype = affine_result(
+        decode_runtime_dtype(value.dtype)
+            .map_err(|_| MetadataError::Domain("unknown scalar dtype".into())),
+        op,
+    );
+    let width = scalar_used_bits(dtype);
+    if value.reserved != [0; 7]
+        || (width < 64 && value.bits >> width != 0)
+        || (dtype == RuntimeDType::Bool && value.bits > 1)
+    {
+        affine_result::<()>(
+            Err(MetadataError::Domain(
+                "noncanonical reduction exemplar".into(),
+            )),
+            op,
+        );
+    }
+    dtype
+}
+
+fn new_reduction_plan(
+    shape: &[i64],
+    axes: &[i64],
+    exemplar: chelis_scalar,
+    op: &'static str,
+) -> *mut chelis_reduction_plan {
+    let dtype = reduction_exemplar(exemplar, op);
+    let metadata = affine_result(ReductionMetadata::new(shape, axes, dtype), op);
+    Box::into_raw(Box::new(chelis_reduction_plan { metadata, op }))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_reduction_plan(
+    tensor: *const chelis_tensor,
+    axis_count: chelis_scalar,
+    axes: *const chelis_scalar,
+    exemplar: chelis_scalar,
+    operation: chelis_reduction_op,
+) -> *mut chelis_reduction_plan {
+    let op = reduction_operation(operation);
+    tensor_metadata_dtype(tensor, op);
+    let axes = reduction_axes(axis_count, axes, (*tensor).shape().len(), op);
+    new_reduction_plan((*tensor).shape(), &axes, exemplar, op)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_shape_reduction_plan(
+    rank: chelis_scalar,
+    shape: *const chelis_scalar,
+    axis_count: chelis_scalar,
+    axes: *const chelis_scalar,
+    exemplar: chelis_scalar,
+    operation: chelis_reduction_op,
+) -> *mut chelis_reduction_plan {
+    let op = reduction_operation(operation);
+    let shape = reduction_array(rank, shape, op);
+    let axes = reduction_axes(axis_count, axes, shape.len(), op);
+    new_reduction_plan(&shape, &axes, exemplar, op)
+}
+
+unsafe fn reduction_plan<'a>(plan: *const chelis_reduction_plan) -> &'a chelis_reduction_plan {
+    if plan.is_null() {
+        runtime_fail!("Domain: null reduction plan");
+    }
+    &*plan
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_reduction_count(plan: *const chelis_reduction_plan) -> i64 {
+    reduction_plan(plan).metadata.leaves().get()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_reduction_extent(
+    plan: *const chelis_reduction_plan,
+    axis: chelis_scalar,
+) -> i64 {
+    let plan = reduction_plan(plan);
+    let axis = affine_scalar(axis, plan.op);
+    affine_result(plan.metadata.extent(axis), plan.op)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_reduction_index(
+    plan: *const chelis_reduction_plan,
+    outer: chelis_scalar,
+    leaf: chelis_scalar,
+) -> i64 {
+    let plan = reduction_plan(plan);
+    affine_result(
+        plan.metadata
+            .index(affine_scalar(outer, plan.op), affine_scalar(leaf, plan.op)),
+        plan.op,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_reduction_check_target(
+    plan: *const chelis_reduction_plan,
+    rank: chelis_scalar,
+    shape: *const chelis_scalar,
+) {
+    let plan = reduction_plan(plan);
+    let shape = reduction_array(rank, shape, plan.op);
+    if shape != plan.metadata.result().shape() {
+        affine_result::<()>(
+            Err(MetadataError::Domain(
+                "reduction target shape mismatch".into(),
+            )),
+            plan.op,
+        );
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_reduction_check_scratch(
+    plan: *const chelis_reduction_plan,
+    exemplar: chelis_scalar,
+) {
+    let plan = reduction_plan(plan);
+    let dtype = reduction_exemplar(exemplar, plan.op);
+    affine_result(
+        plan.metadata
+            .leaves()
+            .bytes(dtype)
+            .and_then(ByteCount::allocation),
+        plan.op,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_reduction_plan_release(plan: *mut chelis_reduction_plan) {
+    reduction_plan(plan);
+    drop(Box::from_raw(plan));
 }
 
 fn affine_scalar(value: chelis_scalar, op: &str) -> i64 {

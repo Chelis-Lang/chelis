@@ -4815,6 +4815,54 @@ impl CEmitter {
         self.emit_reduce_sum_general(id, axis, inputs, ty, dag);
     }
 
+    /// Snapshot one checked grouping before output shape claims or storage reuse.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_reduction_plan(
+        &mut self,
+        id: usize,
+        input: Option<usize>,
+        input_ty: &TensorType,
+        axes: &[usize],
+        output_ty: &TensorType,
+        operation: &str,
+        scratch: bool,
+    ) {
+        let axes_name = format!("t{id}_reduction_axes");
+        self.emit_affine_bounds(
+            &axes_name,
+            &axes.iter().map(usize::to_string).collect::<Vec<_>>(),
+        );
+        let count = axes.len();
+        let dtype = Self::dtype_macro(output_ty);
+        let exemplar = format!("chelis_scalar_from_bits({dtype}, UINT64_C(0))");
+        if let Some(input) = input {
+            self.line(&format!("chelis_reduction_plan *t{id}_reduction = chelis_tensor_reduction_plan(t{input}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {count}), {axes_name}, {exemplar}, {operation});"));
+        } else {
+            let rank = input_ty.dims.len();
+            let shape = Self::tagged_shape_literal(input_ty);
+            self.line(&format!("chelis_reduction_plan *t{id}_reduction = chelis_shape_reduction_plan(chelis_scalar_from_bits(CHELIS_DTYPE_I64, {rank}), {shape}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {count}), {axes_name}, {exemplar}, {operation});"));
+        }
+        let extents = (0..output_ty.dims.len()).map(|axis|
+            (axis, format!("chelis_reduction_extent(t{id}_reduction, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {axis}))"))
+        ).collect::<Vec<_>>();
+        self.emit_runtime_dim_sites(id, &extents);
+        let rank = output_ty.dims.len();
+        let shape = Self::tagged_shape_literal(output_ty);
+        self.line(&format!("chelis_reduction_check_target(t{id}_reduction, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {rank}), {shape});"));
+        let index_type = Self::elem_type(&TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        });
+        self.line(&format!(
+            "{index_type} t{id}_leaf_count = chelis_reduction_count(t{id}_reduction);"
+        ));
+        if scratch {
+            self.line(&format!(
+                "chelis_reduction_check_scratch(t{id}_reduction, {exemplar});"
+            ));
+        }
+    }
+
     /// [05-OP-29] dedicated multi-axis bool count. The input is visited in
     /// original row-major order within each result group, then folded through
     /// an adjacent-pair balanced checked-int64 tree. No cast+sum lowering is
@@ -4838,6 +4886,7 @@ impl CEmitter {
             "verified count axes are strictly descending"
         );
 
+        self.emit_reduction_plan(id, Some(a), input_ty, axes, ty, "CHELIS_REDUCE_COUNT", true);
         self.emit_slot_wrapper(id, ty);
         self.line(&format!("if (t{a}_dtype != CHELIS_DTYPE_BOOL) {{"));
         self.indent += 1;
@@ -4853,53 +4902,22 @@ impl CEmitter {
         self.line(&format!(
             "int64_t* restrict __count_out_{id} = (int64_t*)t{id}_data;"
         ));
-        self.line(&format!("int64_t __count_n_{id} = 1;"));
-        for axis in axes.iter().rev() {
-            self.line(&format!(
-                "if (t{a}_shape[{axis}] != 0 && __count_n_{id} > INT64_MAX / t{a}_shape[{axis}]) {{ fprintf(stderr, \"count reduction extent overflow\\n\"); abort(); }}"
-            ));
-            self.line(&format!("__count_n_{id} *= t{a}_shape[{axis}];"));
-        }
+        self.line(&format!("int64_t __count_n_{id} = t{id}_leaf_count;"));
         self.line("#pragma omp parallel for");
         self.line(&format!(
             "for (int64_t outer = 0; outer < t{id}_size; outer++) {{"
         ));
         self.indent += 1;
+        self.line(&format!("chelis_tensor *__count_scratch_{id} = chelis_alloc(1, &__count_n_{id}, CHELIS_DTYPE_I64);"));
+        self.line(&format!("chelis_tensor_write *__count_guard_{id} = chelis_tensor_begin_write(__count_scratch_{id});"));
         self.line(&format!(
-            "int64_t* __level_{id} = __count_n_{id} == 0 ? NULL : (int64_t*)malloc((size_t)__count_n_{id} * sizeof(int64_t));"
-        ));
-        self.line(&format!(
-            "if (__count_n_{id} != 0 && __level_{id} == NULL) {{ fprintf(stderr, \"count allocation failed\\n\"); abort(); }}"
-        ));
-        self.line(&format!("int64_t __out_indices[{}];", ty.dims.len().max(1)));
-        self.line(&format!(
-            "chelis_flat_to_indices(outer, t{id}_shape, t{id}_rank, __out_indices);"
+            "int64_t *__level_{id} = (int64_t*)chelis_tensor_write_view(__count_guard_{id}).data;"
         ));
         self.line(&format!(
             "for (int64_t __r_{id} = 0; __r_{id} < __count_n_{id}; __r_{id}++) {{"
         ));
         self.indent += 1;
-        self.line(&format!("int64_t __full_indices[{}];", input_ty.dims.len()));
-        self.line("int __out_d = 0;");
-        for axis in 0..input_ty.dims.len() {
-            if !axes.contains(&axis) {
-                self.line(&format!(
-                    "__full_indices[{axis}] = __out_indices[__out_d++];"
-                ));
-            }
-        }
-        self.line(&format!("int64_t __rem_{id} = __r_{id};"));
-        for axis in (0..input_ty.dims.len()).rev() {
-            if axes.contains(&axis) {
-                self.line(&format!(
-                    "__full_indices[{axis}] = __rem_{id} % t{a}_shape[{axis}];"
-                ));
-                self.line(&format!("__rem_{id} /= t{a}_shape[{axis}];"));
-            }
-        }
-        self.line(&format!(
-            "int64_t __src_{id} = chelis_indices_to_flat(__full_indices, t{a}_strides, t{a}_rank);"
-        ));
+        self.line(&format!("int64_t __src_{id} = chelis_reduction_index(t{id}_reduction, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)__r_{id}));"));
         self.line(&format!(
             "uint8_t __bit_{id} = __count_in_{id}[__src_{id}];"
         ));
@@ -4915,7 +4933,7 @@ impl CEmitter {
         self.line(&format!("while (__level_n_{id} > 1) {{"));
         self.indent += 1;
         self.line(&format!(
-            "int64_t __next_n_{id} = (__level_n_{id} + 1) / 2;"
+            "int64_t __next_n_{id} = __level_n_{id} / 2 + __level_n_{id} % 2;"
         ));
         self.line(&format!(
             "for (int64_t __j_{id} = 0; __j_{id} < __next_n_{id}; __j_{id}++) {{"
@@ -4939,9 +4957,11 @@ impl CEmitter {
         self.line(&format!(
             "__count_out_{id}[outer] = (__count_n_{id} == 0) ? 0 : __level_{id}[0];"
         ));
-        self.line(&format!("free(__level_{id});"));
+        self.line(&format!("chelis_tensor_end_write(__count_guard_{id});"));
+        self.line(&format!("chelis_tensor_release(__count_scratch_{id});"));
         self.indent -= 1;
         self.line("}");
+        self.line(&format!("chelis_reduction_plan_release(t{id}_reduction);"));
     }
 
     /// Allocate the leaves of [05-OP-30]'s adjacent-pair tree. An empty
@@ -4956,14 +4976,19 @@ impl CEmitter {
             precision: Prim::Int64,
         });
         self.line(&format!("{index_et} __sum_n_{id} = {axis_size};"));
-        // After the signed-domain check, the usual C integer conversions
-        // compare the full count with the target's allocation limit without
-        // narrowing it to size_t before the check.
+        let dtype = Self::dtype_macro(&TensorType {
+            dims: vec![],
+            precision,
+        });
         self.line(&format!(
-            "if (__sum_n_{id} < 0 || __sum_n_{id} > SIZE_MAX / sizeof({et})) abort();"
+            "chelis_tensor *__sum_scratch_{id} = chelis_alloc(1, &__sum_n_{id}, {dtype});"
         ));
-        self.line(&format!("{et} *__sum_level_{id} = __sum_n_{id} ? ({et}*)malloc((size_t)__sum_n_{id} * sizeof({et})) : NULL;"));
-        self.line(&format!("if (__sum_n_{id} && !__sum_level_{id}) abort();"));
+        self.line(&format!(
+            "chelis_tensor_write *__sum_guard_{id} = chelis_tensor_begin_write(__sum_scratch_{id});"
+        ));
+        self.line(&format!(
+            "{et} *__sum_level_{id} = ({et}*)chelis_tensor_write_view(__sum_guard_{id}).data;"
+        ));
     }
 
     /// Pair in positional order, round/check each actual addition at the
@@ -5016,7 +5041,8 @@ impl CEmitter {
         self.line(&format!(
             "(({et}*)t{id}_data)[outer] = __sum_n_{id} ? __sum_level_{id}[0] : {zero};"
         ));
-        self.line(&format!("free(__sum_level_{id});"));
+        self.line(&format!("chelis_tensor_end_write(__sum_guard_{id});"));
+        self.line(&format!("chelis_tensor_release(__sum_scratch_{id});"));
     }
 
     /// Sum loads each source at its storage width, then finalizes every
@@ -5031,9 +5057,18 @@ impl CEmitter {
     ) {
         let a = inputs[0].0;
         let input_ty = &dag.get(inputs[0]).unwrap().output_type;
-        let axis_size = Self::emit_dim_info(&input_ty.dims[axis]);
+        let axis_size = format!("t{id}_leaf_count");
         let acc_et = Self::elem_type(ty);
         let operand_et = Self::elem_type(input_ty);
+        self.emit_reduction_plan(
+            id,
+            Some(a),
+            input_ty,
+            &[axis],
+            ty,
+            "CHELIS_REDUCE_SUM",
+            true,
+        );
         self.emit_slot_wrapper(id, ty);
         self.line("#pragma omp parallel for");
         self.line(&format!(
@@ -5042,29 +5077,10 @@ impl CEmitter {
         self.indent += 1;
         self.emit_sum_level(id, &axis_size, ty.precision);
         self.line(&format!(
-            "int64_t out_indices[t{id}_rank > 0 ? t{id}_rank : 1];"
-        ));
-        self.line(&format!(
-            "chelis_flat_to_indices(outer, t{id}_shape, t{id}_rank, out_indices);"
-        ));
-        self.line(&format!(
             "for (int64_t __reduce_i = 0; __reduce_i < __sum_n_{id}; __reduce_i++) {{"
         ));
         self.indent += 1;
-        self.line(&format!(
-            "int64_t full_indices[t{a}_rank > 0 ? t{a}_rank : 1];"
-        ));
-        self.line("int out_d = 0;");
-        self.line(&format!("for (int d = 0; d < t{a}_rank; d++) {{"));
-        self.indent += 1;
-        self.line(&format!(
-            "full_indices[d] = (d == {axis}) ? __reduce_i : out_indices[out_d++];"
-        ));
-        self.indent -= 1;
-        self.line("}");
-        self.line(&format!(
-            "int64_t src_idx = chelis_indices_to_flat(full_indices, t{a}_strides, t{a}_rank);"
-        ));
+        self.line(&format!("int64_t src_idx = chelis_reduction_index(t{id}_reduction, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)__reduce_i));"));
         let native = format!("((const {operand_et}*)t{a}_data)[src_idx]");
         let load = if matches!(input_ty.precision, Prim::Bf16 | Prim::F16) {
             format!("{}({native})", Self::reduced_to_f32_fn(input_ty.precision))
@@ -5079,6 +5095,7 @@ impl CEmitter {
         self.emit_sum_fold(id, ty.precision);
         self.indent -= 1;
         self.line("}");
+        self.line(&format!("chelis_reduction_plan_release(t{id}_reduction);"));
     }
 
     /// C zero-literal for a Chelis precision used as an accumulator
@@ -5130,7 +5147,7 @@ impl CEmitter {
     ) -> Result<(), Unsupported> {
         let a = inputs[0].0;
         let input_node = dag.get(inputs[0]).unwrap();
-        let axis_size = Self::emit_dim_info(&input_node.output_type.dims[axis]);
+        let axis_size = format!("t{id}_leaf_count");
         // WS-A1 guard: reduce_max codegen is f32-hardcoded
         // (`chelis_max_f32` SIMD helper, `float acc = -INFINITY`,
         // `fmaxf` reduction operator). Per spec §2.3 max_reduce
@@ -5167,6 +5184,15 @@ impl CEmitter {
                 ),
             ));
         }
+        self.emit_reduction_plan(
+            id,
+            Some(a),
+            &input_node.output_type,
+            &[axis],
+            ty,
+            "CHELIS_REDUCE_MAX",
+            false,
+        );
         self.emit_slot_wrapper(id, ty);
         let output_is_scalar = ty.dims.is_empty();
         if output_is_scalar {
@@ -5186,36 +5212,10 @@ impl CEmitter {
         self.indent += 1;
         self.line("float acc = -INFINITY;");
         self.line(&format!(
-            "int64_t out_indices[t{id}_rank > 0 ? t{id}_rank : 1];"
-        ));
-        self.line(&format!(
-            "chelis_flat_to_indices(outer, t{id}_shape, t{id}_rank, out_indices);"
-        ));
-        self.line(&format!(
             "for (int64_t __reduce_i = 0; __reduce_i < {axis_size}; __reduce_i++) {{"
         ));
         self.indent += 1;
-        self.line(&format!(
-            "int64_t full_indices[t{a}_rank > 0 ? t{a}_rank : 1];"
-        ));
-        self.line("int out_d = 0;");
-        self.line(&format!("for (int d = 0; d < t{a}_rank; d++) {{"));
-        self.indent += 1;
-        self.line(&format!("if (d == {axis}) {{"));
-        self.indent += 1;
-        self.line("full_indices[d] = __reduce_i;");
-        self.indent -= 1;
-        self.line("} else {");
-        self.indent += 1;
-        self.line("full_indices[d] = out_indices[out_d];");
-        self.line("out_d++;");
-        self.indent -= 1;
-        self.line("}");
-        self.indent -= 1;
-        self.line("}");
-        self.line(&format!(
-            "int64_t src_idx = chelis_indices_to_flat(full_indices, t{a}_strides, t{a}_rank);"
-        ));
+        self.line(&format!("int64_t src_idx = chelis_reduction_index(t{id}_reduction, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)__reduce_i));"));
         // #172: propagate NaN (torch parity), matching `chelis_max_f32`.
         self.line(&format!(
             "acc = chelis_fmax_propnan_f32(acc, ((const float*)t{a}_data)[src_idx]);"
@@ -5229,6 +5229,7 @@ impl CEmitter {
             self.indent -= 1;
             self.line("}");
         }
+        self.line(&format!("chelis_reduction_plan_release(t{id}_reduction);"));
         Ok(())
     }
 
@@ -5249,9 +5250,18 @@ impl CEmitter {
     ) {
         let a = inputs[0].0;
         let input_node = dag.get(inputs[0]).unwrap();
-        let axis_size = Self::emit_dim_info(&input_node.output_type.dims[axis]);
+        let axis_size = format!("t{id}_leaf_count");
         let load = Self::reduced_to_f32_fn(ty.precision);
         let store = Self::f32_to_reduced_fn(ty.precision);
+        self.emit_reduction_plan(
+            id,
+            Some(a),
+            &input_node.output_type,
+            &[axis],
+            ty,
+            "CHELIS_REDUCE_MAX",
+            false,
+        );
         self.emit_slot_wrapper(id, ty);
         self.line("#pragma omp parallel for");
         self.line(&format!(
@@ -5260,36 +5270,10 @@ impl CEmitter {
         self.indent += 1;
         self.line("float acc = -INFINITY;");
         self.line(&format!(
-            "int64_t out_indices[t{id}_rank > 0 ? t{id}_rank : 1];"
-        ));
-        self.line(&format!(
-            "chelis_flat_to_indices(outer, t{id}_shape, t{id}_rank, out_indices);"
-        ));
-        self.line(&format!(
             "for (int64_t __reduce_i = 0; __reduce_i < {axis_size}; __reduce_i++) {{"
         ));
         self.indent += 1;
-        self.line(&format!(
-            "int64_t full_indices[t{a}_rank > 0 ? t{a}_rank : 1];"
-        ));
-        self.line("int out_d = 0;");
-        self.line(&format!("for (int d = 0; d < t{a}_rank; d++) {{"));
-        self.indent += 1;
-        self.line(&format!("if (d == {axis}) {{"));
-        self.indent += 1;
-        self.line("full_indices[d] = __reduce_i;");
-        self.indent -= 1;
-        self.line("} else {");
-        self.indent += 1;
-        self.line("full_indices[d] = out_indices[out_d];");
-        self.line("out_d++;");
-        self.indent -= 1;
-        self.line("}");
-        self.indent -= 1;
-        self.line("}");
-        self.line(&format!(
-            "int64_t src_idx = chelis_indices_to_flat(full_indices, t{a}_strides, t{a}_rank);"
-        ));
+        self.line(&format!("int64_t src_idx = chelis_reduction_index(t{id}_reduction, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)__reduce_i));"));
         // #172: propagate NaN (torch parity), matching `chelis_max_f32`.
         self.line(&format!(
             "acc = chelis_fmax_propnan_f32(acc, {load}(((uint16_t*)t{a}_data)[src_idx]));"
@@ -5299,6 +5283,7 @@ impl CEmitter {
         self.line(&format!("((uint16_t*)t{id}_data)[outer] = {store}(acc);"));
         self.indent -= 1;
         self.line("}");
+        self.line(&format!("chelis_reduction_plan_release(t{id}_reduction);"));
     }
 
     // ---- Generic scalar reduction (min / prod) ----
@@ -5324,7 +5309,7 @@ impl CEmitter {
     ) -> Result<(), Unsupported> {
         let a = inputs[0].0;
         let input_node = dag.get(inputs[0]).unwrap();
-        let axis_size = Self::emit_dim_info(&input_node.output_type.dims[axis]);
+        let axis_size = format!("t{id}_leaf_count");
         // WS-A1 guard: emit_reduce_simple is f32-hardcoded (`float acc`
         // declarator, scalar `INFINITY`/`-INFINITY` literals, `fmaxf`/
         // `fminf` operators in the update template). Used by
@@ -5350,6 +5335,19 @@ impl CEmitter {
                 ),
             ));
         }
+        self.emit_reduction_plan(
+            id,
+            Some(a),
+            &input_node.output_type,
+            &[axis],
+            ty,
+            if simd_fn == Some("chelis_min_f32") {
+                "CHELIS_REDUCE_MIN"
+            } else {
+                "CHELIS_REDUCE_PROD"
+            },
+            false,
+        );
         self.emit_slot_wrapper(id, ty);
         let output_is_scalar = ty.dims.is_empty();
         let use_simd = output_is_scalar && simd_fn.is_some();
@@ -5371,36 +5369,10 @@ impl CEmitter {
         self.indent += 1;
         self.line(&format!("float acc = {init};"));
         self.line(&format!(
-            "int64_t out_indices[t{id}_rank > 0 ? t{id}_rank : 1];"
-        ));
-        self.line(&format!(
-            "chelis_flat_to_indices(outer, t{id}_shape, t{id}_rank, out_indices);"
-        ));
-        self.line(&format!(
             "for (int64_t __reduce_i = 0; __reduce_i < {axis_size}; __reduce_i++) {{"
         ));
         self.indent += 1;
-        self.line(&format!(
-            "int64_t full_indices[t{a}_rank > 0 ? t{a}_rank : 1];"
-        ));
-        self.line("int out_d = 0;");
-        self.line(&format!("for (int d = 0; d < t{a}_rank; d++) {{"));
-        self.indent += 1;
-        self.line(&format!("if (d == {axis}) {{"));
-        self.indent += 1;
-        self.line("full_indices[d] = __reduce_i;");
-        self.indent -= 1;
-        self.line("} else {");
-        self.indent += 1;
-        self.line("full_indices[d] = out_indices[out_d];");
-        self.line("out_d++;");
-        self.indent -= 1;
-        self.line("}");
-        self.indent -= 1;
-        self.line("}");
-        self.line(&format!(
-            "int64_t src_idx = chelis_indices_to_flat(full_indices, t{a}_strides, t{a}_rank);"
-        ));
+        self.line(&format!("int64_t src_idx = chelis_reduction_index(t{id}_reduction, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)__reduce_i));"));
         let update = update_tmpl.replace("{a}", &a.to_string());
         self.line(&update);
         self.indent -= 1;
@@ -5412,6 +5384,7 @@ impl CEmitter {
             self.indent -= 1;
             self.line("}");
         }
+        self.line(&format!("chelis_reduction_plan_release(t{id}_reduction);"));
         Ok(())
     }
 
@@ -5778,7 +5751,7 @@ impl CEmitter {
     ) -> Result<(), Unsupported> {
         let a = inputs[0].0;
         let input_node = dag.get(inputs[0]).unwrap();
-        let axis_size = Self::emit_dim_info(&input_node.output_type.dims[axis]);
+        let axis_size = format!("t{id}_leaf_count");
         // WS-A1 guard: argmax/argmin codegen is f32-hardcoded
         // (`chelis_argmax_f32`/`chelis_argmin_f32` SIMD helpers,
         // `float best_val` declarator). Per the doc comment above,
@@ -5816,6 +5789,19 @@ impl CEmitter {
         } else {
             "chelis_argmin_f32"
         };
+        self.emit_reduction_plan(
+            id,
+            Some(a),
+            &input_node.output_type,
+            &[axis],
+            ty,
+            if is_argmax {
+                "CHELIS_REDUCE_ARGMAX"
+            } else {
+                "CHELIS_REDUCE_ARGMIN"
+            },
+            false,
+        );
         self.emit_slot_wrapper(id, ty);
         // #347: argmax/argmin produce integer INDEX outputs (the result
         // tensor is allocated at the declared integer dtype, e.g.
@@ -5846,36 +5832,10 @@ impl CEmitter {
         self.line(&format!("float best_val = {init};"));
         self.line("int64_t best_idx = -1;");
         self.line(&format!(
-            "int64_t out_indices[t{id}_rank > 0 ? t{id}_rank : 1];"
-        ));
-        self.line(&format!(
-            "chelis_flat_to_indices(outer, t{id}_shape, t{id}_rank, out_indices);"
-        ));
-        self.line(&format!(
             "for (int64_t __reduce_i = 0; __reduce_i < {axis_size}; __reduce_i++) {{"
         ));
         self.indent += 1;
-        self.line(&format!(
-            "int64_t full_indices[t{a}_rank > 0 ? t{a}_rank : 1];"
-        ));
-        self.line("int out_d = 0;");
-        self.line(&format!("for (int d = 0; d < t{a}_rank; d++) {{"));
-        self.indent += 1;
-        self.line(&format!("if (d == {axis}) {{"));
-        self.indent += 1;
-        self.line("full_indices[d] = __reduce_i;");
-        self.indent -= 1;
-        self.line("} else {");
-        self.indent += 1;
-        self.line("full_indices[d] = out_indices[out_d];");
-        self.line("out_d++;");
-        self.indent -= 1;
-        self.line("}");
-        self.indent -= 1;
-        self.line("}");
-        self.line(&format!(
-            "int64_t src_idx = chelis_indices_to_flat(full_indices, t{a}_strides, t{a}_rank);"
-        ));
+        self.line(&format!("int64_t src_idx = chelis_reduction_index(t{id}_reduction, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)__reduce_i));"));
         self.line(&format!("float v = ((const float*)t{a}_data)[src_idx];"));
         self.line(&format!("if (best_idx < 0 || v {cmp} best_val) {{"));
         self.indent += 1;
@@ -5894,6 +5854,7 @@ impl CEmitter {
             self.indent -= 1;
             self.line("}");
         }
+        self.line(&format!("chelis_reduction_plan_release(t{id}_reduction);"));
         Ok(())
     }
 
@@ -5954,10 +5915,23 @@ impl CEmitter {
                 ),
             ));
         }
-        let axis_size = Self::emit_dim_info(&fused_input_type.dims[axis]);
+        let axis_size = format!("t{id}_leaf_count");
         // ndim of the fused input (pre-reduction shape)
-        let fused_ndim = fused_input_type.dims.len();
 
+        self.emit_elementwise_index_steps(id, ext_inputs, fused_input_type);
+        self.emit_reduction_plan(
+            id,
+            None,
+            fused_input_type,
+            &[axis],
+            out_ty,
+            if reduce_kind == "sum" {
+                "CHELIS_REDUCE_SUM"
+            } else {
+                "CHELIS_REDUCE_MAX"
+            },
+            reduce_kind == "sum",
+        );
         self.emit_slot_wrapper(id, out_ty);
         if reduce_kind == "sum" {
             self.line(&Self::fill_zero_call(out_ty, &format!("t{id}_write_guard")));
@@ -5978,37 +5952,14 @@ impl CEmitter {
             self.line(&format!("float acc = {init};"));
         }
         self.line(&format!(
-            "int64_t out_indices[t{id}_rank > 0 ? t{id}_rank : 1];"
-        ));
-        self.line(&format!(
-            "chelis_flat_to_indices(outer, t{id}_shape, t{id}_rank, out_indices);"
-        ));
-        self.line(&format!(
             "for (int64_t __reduce_i = 0; __reduce_i < {axis_size}; __reduce_i++) {{"
         ));
         self.indent += 1;
-        self.line(&format!("int64_t full_indices[{}];", fused_ndim.max(1)));
-        self.line("int out_d = 0;");
-        self.line(&format!("for (int d = 0; d < {fused_ndim}; d++) {{"));
-        self.indent += 1;
-        self.line(&format!("if (d == {axis}) {{"));
-        self.indent += 1;
-        self.line("full_indices[d] = __reduce_i;");
-        self.indent -= 1;
-        self.line("} else {");
-        self.indent += 1;
-        self.line("full_indices[d] = out_indices[out_d];");
-        self.line("out_d++;");
-        self.indent -= 1;
-        self.line("}");
-        self.indent -= 1;
-        self.line("}");
-
-        // Compute strided index for each external input using full_indices
+        self.line(&format!("int64_t source_index = chelis_reduction_index(t{id}_reduction, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)__reduce_i));"));
         for (ext_idx, ext_node) in ext_inputs.iter().enumerate() {
             let ext_id = ext_node.0;
             self.line(&format!(
-                "int64_t idx_ext{ext_idx} = chelis_indices_to_flat(full_indices, t{ext_id}_strides, t{ext_id}_rank);"
+                "int64_t idx_ext{ext_idx} = source_index * t{id}_input{ext_id}_step;"
             ));
         }
 
@@ -6147,6 +6098,7 @@ impl CEmitter {
         }
         self.indent -= 1;
         self.line("}");
+        self.line(&format!("chelis_reduction_plan_release(t{id}_reduction);"));
         Ok(())
     }
 
@@ -8299,8 +8251,9 @@ mod tests {
         assert!(!c.contains("cblas_sgemm("));
         assert!(
             c.lines()
-                .any(|line| line.contains("__sum_n_") && line.ends_with(" = 3;"))
+                .any(|line| line.contains("__sum_n_") && line.ends_with("_leaf_count;"))
         );
+        assert!(c.contains("chelis_reduction_count("));
         assert!(c.contains("__sum_level_"));
     }
 

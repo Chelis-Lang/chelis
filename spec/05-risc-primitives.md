@@ -2087,6 +2087,35 @@ exact ADT identity by [05-OP-34].
 > Numeric failures use [04-NUM-9]'s canonical line at `int64`, with operation `pad`,
 > `shrink`, `stride`, or `affine_index`, respectively.
 >
+> `chelis_tensor_reduction_plan` snapshots checked tensor metadata;
+> `chelis_shape_reduction_plan` constructs the corresponding metadata-only virtual
+> domain from exact tagged int64 rank and extents. Both take a nonempty list of
+> distinct original axes in strictly descending order after one-step negative
+> normalization, an exact tagged scalar whose
+> dtype selects the result representation, and a closed `chelis_reduction_op`
+> diagnostic identity (`SUM`, `COUNT`, `MAX`, `MIN`, `PROD`, `ARGMAX`, or `ARGMIN`).
+> The result shape removes the selected axes and checks count, suffix strides,
+> representation bytes, and target allocation projection before returning an opaque
+> independently owned plan. Virtual input domains owe checked counts but no storage
+> bytes or unused storage strides. Positive array lengths require complete non-null
+> arrays; scalar carriers must be canonical. `chelis_reduction_extent` observes a
+> result axis and `chelis_reduction_count` observes the selected row-major leaf count.
+> An empty result has no reachable group and returns leaf count zero without
+> evaluating an irrelevant selected-axis product. An empty selected domain with a
+> nonempty result has zero leaves. `chelis_reduction_index` maps checked result-group
+> and leaf positions to the original row-major input index; either empty domain
+> admits no index. `chelis_reduction_check_target` requires exact result shape,
+> including every axis of an empty result. `chelis_reduction_check_scratch` checks
+> leaf-count bytes and target projection at its exact tagged exemplar's dtype before
+> scratch or result allocation. `chelis_reduction_plan_release` consumes the plan.
+> The caller supplies a live plan of the correct kind, releases it exactly once,
+> and permits concurrent observations only while it remains live. Plans borrow no
+> tensor storage and perform no payload or ownership action on their input tensor;
+> construction and observation remain valid during tensor write guards. Invalid
+> domains trap `Domain`, unrepresentable arithmetic traps `Overflow`, and failures
+> retain [04-NUM-9]'s canonical primitive identity at int64. These metadata operations
+> have no cotangent or arithmetic accumulator and do not select a reduction algorithm.
+>
 > `chelis_tensor_reshape` accepts a live, flat `List<int64>` of target extents
 > and an idle tensor of any active element dtype. It applies the same checked
 > reshape validation before allocating result storage, returns an independent
