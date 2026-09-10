@@ -1018,7 +1018,8 @@ fn collect_manifest_entries(
             )
         });
 
-    // Parameterized functions are declarations rather than observations.
+    // Function-typed entries, including aliases, are callable rather than
+    // observations. Only an actual nullary function declaration is applied.
     // A nullary arrow-form def is an owed root: evaluation applies its thunk
     // and surfaces the return value (chelis#947), so unwrap its sole return
     // type for dotted expansion.
@@ -1034,7 +1035,7 @@ fn collect_manifest_entries(
             }
             (return_ty, true)
         }
-        Some((DeepTag::TFn, _)) if is_declaration => return,
+        Some((DeepTag::TFn, _)) => return,
         _ => (&ty, false),
     };
     // [05-OBS-7]'s "value result" is concrete. A nullary generic helper

@@ -1,4 +1,4 @@
-//! [05-OBS-7,11]: function-valued bindings remain owed, selected calls run.
+//! #1493: aliases remain callable; concrete values keep distinct observation roots.
 use chelis_compiler_api::compiler::{check, eval, eval_selected};
 use chelis_compiler_api::schema::{CheckRequest, EvalRequest, SourceKind};
 
@@ -46,28 +46,18 @@ fn selected_call_through_function_alias_has_its_own_root() {
 }
 
 #[test]
-fn observing_function_alias_rejects_without_dropping_the_root() {
+fn function_aliases_remain_callable_entries_without_display_roots() {
     for module in [false, true] {
         for annotated in [false, true] {
-            let source = source(module, annotated, false);
-            for selected in [false, true] {
-                let result = if selected {
-                    eval_selected(request(source.clone()), &["alias".into()])
-                } else {
-                    eval(request(source.clone()))
-                };
-                let error = result.expect_err("a function value has no observation representation");
-                let message = error
-                    .errors
-                    .iter()
-                    .map(|item| item.message.as_str())
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                for required in ["[05-UNS-1]", "alias", "Host", "function"] {
-                    assert!(message.contains(required), "{message}");
-                }
-                assert!(!message.contains("root count mismatch"), "{message}");
-            }
+            let source = source(module, annotated, true);
+            let result = eval(request(source.clone())).unwrap();
+            assert_eq!(result.roots.len(), 1);
+            assert_eq!(result.roots[0].name.as_deref(), Some("user"));
+            assert_eq!(result.roots[0].display.as_deref(), Some("1"));
+            // Selecting a callable without supplying a concrete call does
+            // not invent a display value for its closure.
+            let selected = eval_selected(request(source), &["alias".into()]).unwrap();
+            assert!(selected.roots.is_empty(), "{selected:?}");
         }
     }
 }
@@ -90,7 +80,7 @@ fn ordinary_aliases_and_callable_declarations_remain_observable() {
 }
 
 #[test]
-fn deep_function_alias_preserves_selection_and_rejection() {
+fn deep_function_alias_preserves_only_concrete_observations() {
     let deep =
         chelis_compiler_api::compiler::desugar(chelis_compiler_api::schema::DesugarRequest {
             source: source(true, true, true),
@@ -101,13 +91,10 @@ fn deep_function_alias_preserves_selection_and_rejection() {
     req.source_kind = SourceKind::Deep;
     let result = eval_selected(req.clone(), &["user".into()]).unwrap();
     assert_eq!(result.roots[0].display.as_deref(), Some("1"));
-    let error = eval(req).unwrap_err();
-    assert!(
-        error
-            .errors
-            .iter()
-            .any(|error| error.message.contains("unavailable root `alias`"))
-    );
+    let all = eval(req).unwrap();
+    assert_eq!(all.roots.len(), 1);
+    assert_eq!(all.roots[0].name.as_deref(), Some("user"));
+    assert_eq!(all.roots[0].display.as_deref(), Some("1"));
 }
 
 #[test]
@@ -115,13 +102,8 @@ fn nullary_alias_is_a_value_not_an_implicitly_applied_declaration() {
     let source = "def anchor() -> int32 = 7\nalias = anchor\ndef user() -> int32 = alias()";
     let result = eval_selected(request(source.into()), &["user".into()]).unwrap();
     assert_eq!(result.roots[0].display.as_deref(), Some("7"));
-    let error = eval_selected(request(source.into()), &["alias".into()]).unwrap_err();
-    assert!(
-        error
-            .errors
-            .iter()
-            .any(|error| error.message.contains("unavailable root `alias`"))
-    );
+    let selected = eval_selected(request(source.into()), &["alias".into()]).unwrap();
+    assert!(selected.roots.is_empty(), "{selected:?}");
 }
 
 #[test]
@@ -132,13 +114,8 @@ fn tensor_function_alias_preserves_concrete_call_result() {
         result.roots[0].display.as_deref(),
         Some("tensor(shape=[2], data=[1, 2])")
     );
-    let error = eval_selected(request(source.into()), &["alias".into()]).unwrap_err();
-    assert!(
-        error
-            .errors
-            .iter()
-            .any(|error| error.message.contains("unavailable root `alias`"))
-    );
+    let selected = eval_selected(request(source.into()), &["alias".into()]).unwrap();
+    assert!(selected.roots.is_empty(), "{selected:?}");
 }
 
 #[test]
@@ -155,12 +132,7 @@ fn nullary_alias_remains_callable_as_an_argument_or_local_value() {
         assert!(checked.errors.is_empty(), "{:?}", checked.errors);
         let result = eval_selected(request(source.clone()), &["user".into()]).unwrap();
         assert_eq!(result.roots[0].display.as_deref(), Some("7"));
-        let error = eval_selected(request(source), &["alias".into()]).unwrap_err();
-        assert!(
-            error
-                .errors
-                .iter()
-                .any(|error| error.message.contains("unavailable root `alias`"))
-        );
+        let selected = eval_selected(request(source), &["alias".into()]).unwrap();
+        assert!(selected.roots.is_empty(), "{selected:?}");
     }
 }

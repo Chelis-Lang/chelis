@@ -2688,14 +2688,6 @@ fn eval_compiled(
             })
         })
         .collect::<Vec<_>>();
-    for entry in &observed_entries {
-        if entry.ty.tag() == Some(DeepTag::TFn) {
-            return Err(unavailable_root_error(
-                entry,
-                "function values have no observation representation; select a concrete call result",
-            ));
-        }
-    }
     let required_inputs = observed_entries
         .iter()
         .flat_map(|entry| entry.required_inputs.iter().cloned())

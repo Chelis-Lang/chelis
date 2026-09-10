@@ -18,7 +18,7 @@ fn fixture(dir: &TempDir, source: &str) -> std::path::PathBuf {
 }
 
 #[test]
-fn check_accepts_function_alias_but_observation_names_unavailable_root() {
+fn function_alias_program_checks_evaluates_and_builds_its_concrete_result() {
     for annotated in [false, true] {
         let dir = TempDir::new().unwrap();
         let source = format!(
@@ -36,26 +36,22 @@ fn check_accepts_function_alias_but_observation_names_unavailable_root() {
             .output()
             .unwrap();
         assert!(checked.status.success(), "{:?}", checked);
-        for command in ["eval", "build"] {
-            let mut process = Command::new(env!("CARGO_BIN_EXE_chelis"));
-            process.arg(command);
-            if command == "eval" {
-                process.arg("--file");
-            }
-            process.arg(&file);
-            let destination = dir.path().join("output");
-            if command == "build" {
-                process.args(["--target", "c", "-o"]).arg(&destination);
-            }
-            let result = process.output().unwrap();
-            assert!(!result.status.success(), "{result:?}");
-            let message = String::from_utf8_lossy(&result.stderr);
-            for required in ["[05-UNS-1]", "alias", "Host", "function"] {
-                assert!(message.contains(required), "{message}");
-            }
-            assert!(!destination.exists(), "failed build left an artifact");
-            assert!(result.stdout.is_empty(), "partial output: {result:?}");
-        }
+        let evaluated = Command::new(env!("CARGO_BIN_EXE_chelis"))
+            .args(["eval", "--file"])
+            .arg(&file)
+            .output()
+            .unwrap();
+        assert!(evaluated.status.success(), "{evaluated:?}");
+        assert_eq!(String::from_utf8(evaluated.stdout).unwrap(), "user = 1\n");
+        let built = Command::new(env!("CARGO_BIN_EXE_chelis"))
+            .arg("build")
+            .arg(&file)
+            .args(["--target", "c", "-o"])
+            .arg(dir.path())
+            .output()
+            .unwrap();
+        assert!(built.status.success(), "{built:?}");
+        assert_eq!(run_generated(&dir), "user = 1\n");
     }
 }
 
@@ -88,21 +84,25 @@ fn ordinary_aliases_have_distinct_roots_on_eval_and_c() {
             .output()
             .unwrap();
         assert!(built.status.success(), "{built:?}");
-        let c_file = fs::read_dir(dir.path())
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .find(|file| file.extension().is_some_and(|ext| ext == "c"))
-            .unwrap();
-        assert!(
-            common::link_generated(
-                dir.path(),
-                c_file.file_name().unwrap().to_str().unwrap(),
-                "program"
-            )
-            .success()
-        );
-        let run = Command::new(dir.path().join("program")).output().unwrap();
-        assert!(run.status.success(), "{run:?}");
-        assert_eq!(String::from_utf8(run.stdout).unwrap(), expected);
+        assert_eq!(run_generated(&dir), expected);
     }
+}
+
+fn run_generated(dir: &TempDir) -> String {
+    let c_file = fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|file| file.extension().is_some_and(|ext| ext == "c"))
+        .unwrap();
+    assert!(
+        common::link_generated(
+            dir.path(),
+            c_file.file_name().unwrap().to_str().unwrap(),
+            "program"
+        )
+        .success()
+    );
+    let run = Command::new(dir.path().join("program")).output().unwrap();
+    assert!(run.status.success(), "{run:?}");
+    String::from_utf8(run.stdout).unwrap()
 }

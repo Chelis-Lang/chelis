@@ -77,7 +77,7 @@ fn library_fixture() -> (TempDir, PathBuf) {
 }
 
 #[test]
-fn issue1493_cached_context_keeps_function_alias_root_identity() {
+fn issue1493_cached_context_keeps_aliases_callable_and_observes_results() {
     let (_dir, root) = library_fixture();
     let context = compile_reef_context(Path::new("/tmp/x"), &root).unwrap();
     let restored = CompiledContext::decode(&context.encode().unwrap()).unwrap();
@@ -88,21 +88,12 @@ fn issue1493_cached_context_keeps_function_alias_root_identity() {
         assert_eq!(value.roots.len(), 1);
         assert_eq!(value.roots[0].name.as_deref(), Some("user"));
         assert_eq!(value.roots[0].display.as_deref(), Some("9"));
-        let error = results[1].1.as_ref().unwrap_err();
-        assert!(
-            error
-                .errors
-                .iter()
-                .any(|error| error.message.contains("unavailable root `alias`")),
-            "{error:?}"
-        );
-        let all = eval_in_context(ctx, snippet).unwrap_err();
-        assert!(
-            all.errors
-                .iter()
-                .any(|error| error.message.contains("Host lane")),
-            "{all:?}"
-        );
+        let alias = results[1].1.as_ref().unwrap();
+        assert!(alias.roots.is_empty(), "{alias:?}");
+        let all = eval_in_context(ctx, snippet).unwrap();
+        assert_eq!(all.roots.len(), 1);
+        assert_eq!(all.roots[0].name.as_deref(), Some("user"));
+        assert_eq!(all.roots[0].display.as_deref(), Some("9"));
     }
 }
 

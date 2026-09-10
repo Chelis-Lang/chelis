@@ -154,10 +154,10 @@ itself lives outside `src/` and does not declare a top-level `module`.
 
 ### Targeted evaluation and root manifests
 
-Function-valued bindings may be used by callers, but a function value has no
-observation representation. Evaluating or building a manifest that requests
-one reports the unavailable root and its lane; select a concrete call result
-to observe its value.
+Function aliases remain callable entries, without display roots of their own.
+Calls through them produce ordinary observable results. A nullary function
+alias remains callable when passed as an argument or stored in a local binding;
+only an actual effect-free nullary definition is automatically observed.
 
 `chelis eval --target eval|c|hip|metal` computes the root manifest against the
 selected backend's capabilities. The default is `eval`. This is useful when a
