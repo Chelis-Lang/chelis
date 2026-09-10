@@ -398,7 +398,9 @@ ratified at spec/04 §5.2 in the same change set:
 - Bounded tensor targets (#1564) retain the declaration's precision variable
   through checking and pass the actualized `Prim` to the host tensor cast.
   Lowering binds original and checker-renamed formal variables independently
-  from aligned actual types, including scalar dtype witnesses.
+  from aligned actual types, including scalar dtype witnesses, and from checked
+  result constraints when no argument carries the target. Checked cast-result
+  identities take precedence over unrelated outer binders with the same spelling.
   The acceptance oracle is `cargo test -p chelis-cli --test
   issue_1564_bounded_tensor_cast`: eval/generated-C agreement at all eight active
   numeric target dtypes, truncating-cast parity, and invalid-target rejection.

@@ -5446,6 +5446,22 @@ impl LowerCtx {
         Self::default_type()
     }
 
+    /// Read a checked scalar/tensor precision without inventing a default.
+    /// Result constraints may actualize a binder absent from every parameter.
+    fn resolved_type_precision(&self, expr: &Expr) -> Option<Prim> {
+        let (tag, _, kids) = stamped_parts(expr)?;
+        match tag {
+            DeepTag::TRef => self.resolved_type_precision(kids.first()?),
+            DeepTag::TTensor => self.resolved_type_precision(kids.last()?),
+            DeepTag::TPrim => Self::try_extract_prim(expr),
+            DeepTag::TVar => self
+                .prec_substitutions
+                .get(&Self::scalar_precision_var_name(expr)?)
+                .copied(),
+            _ => None,
+        }
+    }
+
     fn scalar_precision_var_name(expr: &Expr) -> Option<String> {
         extract_scalar_precision_var_name(expr)
     }
@@ -6600,7 +6616,19 @@ impl LowerCtx {
             ));
         }
 
-        if let Some(lowered) = self.try_lower_callable_app(&elems[2], &elems[3..], &ty, app_span) {
+        let checked_result_precision = match &elems[1] {
+            Expr::Map(meta, _) => meta
+                .ty()
+                .and_then(|ty| self.resolved_type_precision(ty.expression())),
+            _ => None,
+        };
+        if let Some(lowered) = self.try_lower_callable_app(
+            &elems[2],
+            &elems[3..],
+            &ty,
+            checked_result_precision,
+            app_span,
+        ) {
             return lowered;
         }
 
@@ -6617,6 +6645,7 @@ impl LowerCtx {
         func: &Expr,
         args: &[Expr],
         ty: &TensorType,
+        checked_result_precision: Option<Prim>,
         app_span: Span,
     ) -> Option<LoweredValue> {
         let callable = self.resolve_callable_expr(func)?;
@@ -6638,9 +6667,14 @@ impl LowerCtx {
             self.local_callables.contains_key(name) || self.program_defs.contains_key(name)
         });
         match callable {
-            CallableExpr::Plain(fn_expr) => {
-                Some(self.lower_plain_callable_app(&fn_expr, args, ty, app_span, inlining_name))
-            }
+            CallableExpr::Plain(fn_expr) => Some(self.lower_plain_callable_app(
+                &fn_expr,
+                args,
+                ty,
+                checked_result_precision,
+                app_span,
+                inlining_name,
+            )),
             CallableExpr::Vmap { fn_expr, axis } => {
                 Some(self.lower_vmap_callable_app(&fn_expr, axis, args, ty, app_span))
             }
@@ -7498,6 +7532,7 @@ impl LowerCtx {
         fn_expr: &Expr,
         args: &[Expr],
         expected_return_ty: &TensorType,
+        checked_result_precision: Option<Prim>,
         _app_span: Span,
         inlining_name: Option<String>,
     ) -> LoweredValue {
@@ -7627,6 +7662,16 @@ impl LowerCtx {
         // primitives at lowering time).
         self.prec_substitutions
             .merge(tensor_prec_substitutions(&formal_type_exprs, &actual_types));
+        // [04-DTYPE-2] / §5.8.1: an expected result can be the only
+        // witness for a bounded precision. Bind its checked identity before
+        // the shared-argument fallback, which must not overwrite it. The
+        // optional precision comes from checked metadata, never default_type.
+        if let Some(prim) = checked_result_precision
+            && let Some(result) = extract_fn_return_type(fn_expr)
+            && let Some(name) = formal_param_type_var_name(result)
+        {
+            self.prec_substitutions.insert(name, prim);
+        }
         // Body metadata uses checker-renamed variables (e.g. t304), while
         // casts may still name the source binder (p). Resolve both from the
         // same aligned actual arguments, preserving distinct source/target
@@ -13142,6 +13187,18 @@ impl LowerCtx {
         let new_precision = if let Some(prim) = Self::try_extract_prim(&elems[3]) {
             // Handle (t-prim {} name) form.
             prim
+        } else if Self::scalar_precision_var_name(&elems[3]).is_some()
+            && let Expr::Map(meta, _) = &elems[1]
+            && let Some(prim) = meta
+                .ty()
+                .and_then(|ty| self.resolved_type_precision(ty.expression()))
+        {
+            // The target's source name need not occur in any parameter.
+            // The checker stamped this cast's result with that same target
+            // identity; a checked call-result constraint can resolve it.
+            // Prefer this identity to the source spelling: an outer caller
+            // can have an unrelated binder with the same name.
+            prim
         } else if let Some(var_name) = Self::scalar_precision_var_name(&elems[3])
             && let Some(prim) = self.prec_substitutions.get(&var_name).copied()
         {
@@ -16555,6 +16612,23 @@ mod tests {
     }
 
     // ── Tier-2 rank monomorphization (spec/design/rank_polymorphism.md) ──
+
+    #[test]
+    fn result_precision_requires_a_checked_numeric_type() {
+        let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+        let tensor = parse_type_expr("(t-tensor {} (d-lit {} 2) (t-var {} p))");
+        assert_eq!(ctx.resolved_type_precision(&tensor), None);
+        ctx.prec_substitutions.insert("p".into(), Prim::F64);
+        assert_eq!(ctx.resolved_type_precision(&tensor), Some(Prim::F64));
+        assert_eq!(
+            ctx.resolved_type_precision(&parse_type_expr("(t-prim {} int64)")),
+            Some(Prim::Int64)
+        );
+        assert_eq!(
+            ctx.resolved_type_precision(&parse_type_expr("(t-tuple {} (t-prim {} f32))")),
+            None
+        );
+    }
 
     fn parse_type_expr(src: &str) -> Expr {
         chelis_deep::parser::parse_str(src)

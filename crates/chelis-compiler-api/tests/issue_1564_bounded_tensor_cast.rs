@@ -104,3 +104,23 @@ fn checked_cast_does_not_become_a_truncating_cast() {
     assert_eq!(value.shape, vec![2]);
     assert_eq!(value.data.to_f64_lossy_vec(), vec![1.0, -2.0]);
 }
+
+#[test]
+fn result_only_constraints_keep_independent_precisions() {
+    let result = evaluate(
+        "def convert[p: Float](x: tensor[2, int32]) -> tensor[2, p] = cast(x, p)\na: tensor[2, f32] = convert(to_tensor([16777217, -12]))\nb: tensor[2, f64] = convert(to_tensor([16777217, -12]))\n",
+    );
+    for (name, dtype, expected) in [("a", "f32", 16777216.0), ("b", "f64", 16777217.0)] {
+        let root = result
+            .roots
+            .iter()
+            .find(|r| r.name.as_deref() == Some(name))
+            .unwrap();
+        let ExecutionValue::Tensor { value } = &root.value else {
+            panic!("{root:?}")
+        };
+        assert_eq!(value.shape, vec![2]);
+        assert_eq!(value.data.prim().name(), dtype);
+        assert_eq!(value.data.to_f64_lossy_vec(), vec![expected, -12.0]);
+    }
+}

@@ -95,3 +95,18 @@ fn truncating_bounded_tensor_cast_requires_float_to_integer() {
         Some("05-OP-6"),
     );
 }
+
+#[test]
+fn result_constraints_obey_bounded_target_family() {
+    let declaration = "def convert[p: Float](x: tensor[2, int32]) -> tensor[2, p] = cast(x, p)\n";
+    check(
+        &format!(
+            "{declaration}a: tensor[2, f32] = convert(to_tensor([1, 2]))\nb: tensor[2, f64] = convert(to_tensor([1, 2]))\n"
+        ),
+        None,
+    );
+    check(
+        &format!("{declaration}a: tensor[2, int64] = convert(to_tensor([1, 2]))\n"),
+        Some("TypeMismatch"),
+    );
+}
