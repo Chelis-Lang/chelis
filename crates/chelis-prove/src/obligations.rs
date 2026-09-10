@@ -342,7 +342,7 @@ fn collect_one<'a>(
 ) -> Result<(), TraversalError> {
     let type_name = &inv.type_name;
     let root = graph.project(Source::Checked(ty))?;
-    let function = graph.function(root);
+    let function = graph.function(root)?;
     let is_constant = function.is_none();
     let result_root = if let Some((params, ret)) = function {
         for (idx, param) in params.iter().enumerate() {
@@ -367,7 +367,7 @@ fn collect_one<'a>(
         && let Some(declared) = declared
     {
         let declared = graph.project(Source::Deep(declared))?;
-        if let Some((_, ret)) = graph.function(declared) {
+        if let Some((_, ret)) = graph.function(declared)? {
             resolved = graph.decompose(ret, type_name);
         }
     }

@@ -3,6 +3,38 @@ use crate::opaque::collect_opaque_invariants;
 use chelis_types::types::Type;
 use std::collections::BTreeMap;
 
+#[test]
+fn issue_872_declared_function_alias_retains_erased_opaque_return() {
+    for carries_opaque in [true, false] {
+        let result = if carries_opaque { "T" } else { "f32" };
+        let source = format!(
+            "module M\nexport (make)\n@opaque\n@invariant(p) p.value >= 0.0\n\
+             type T = | T {{ value: f32 }}\ntype F = f32 -> Option[{result}]\n\
+             type Alias = F\nsig make: Alias\ndef make(x: f32) = None\n"
+        );
+        let exprs = deep_of(&source);
+        let invs = collect_opaque_invariants(&exprs);
+        // Inference can erase the nominal return of a None-only producer;
+        // its aliased declaration remains authoritative in that case.
+        let sigs = BTreeMap::from([(
+            "make".to_string(),
+            Type::Fn(
+                vec![Type::Prim(chelis_types::types::Prim::F32)],
+                Box::new(Type::Adt(
+                    "Option".into(),
+                    vec![Type::Var(chelis_types::types::TypeVar(0))],
+                )),
+            ),
+        )]);
+        let col = collect_obligations(&exprs, &invs, &sigs);
+        assert!(col.errors.is_empty(), "{col:?}");
+        assert_eq!(
+            col.obligations.len(),
+            usize::from(carries_opaque),
+            "{col:?}"
+        );
+    }
+}
 /// Desugar a Surf module string to Deep.
 fn deep_of(surf: &str) -> Vec<Expr> {
     let decls = chelis_surf::parser::parse_str(surf).expect("parse surf");
@@ -140,6 +172,25 @@ fn proof_name(name: &str) -> Expr {
 
 fn proof_adt(name: &str) -> Expr {
     proof_node(DeepTag::TAdt, vec![proof_name(name)])
+}
+
+#[test]
+fn issue_872_function_alias_cycle_converges_and_exhaustion_is_explicit() {
+    let cycle = proof_adt("Cycle");
+    let ty = adt("Cycle");
+    let mut graph = ProofTypes::new(
+        BTreeMap::from([("Cycle", &cycle)]),
+        BTreeMap::new(),
+        Budget::default(),
+    );
+    let root = graph.project(Source::Checked(&ty)).unwrap();
+    assert!(graph.function(root).unwrap().is_none());
+    assert!(!graph.contains(root, "T").unwrap());
+    graph.budget = Budget::new(0);
+    assert!(matches!(
+        graph.function(root),
+        Err(TraversalError::Exhausted { limit: 0 })
+    ));
 }
 
 // No parser or checker participates: this is collect_obligations' actual

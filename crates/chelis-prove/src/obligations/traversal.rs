@@ -271,11 +271,17 @@ impl<'a> ProofTypes<'a> {
         Ok(false)
     }
 
-    pub(super) fn function(&self, id: Id) -> Option<(Vec<Id>, Id)> {
-        match &self.nodes[id] {
-            Node::Function(args, ret) => Some((args.clone(), *ret)),
-            _ => None,
+    pub(super) fn function(&mut self, mut id: Id) -> Result<Option<(Vec<Id>, Id)>, TraversalError> {
+        let mut visited = BTreeSet::new();
+        while visited.insert(id) {
+            self.budget.step()?;
+            match &self.nodes[id] {
+                Node::Function(args, ret) => return Ok(Some((args.clone(), *ret))),
+                Node::Link(inner) => id = *inner,
+                _ => return Ok(None),
+            }
         }
+        Ok(None)
     }
 
     pub(super) fn decompose(
