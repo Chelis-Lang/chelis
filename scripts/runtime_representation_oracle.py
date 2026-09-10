@@ -62,7 +62,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "2ba2bf4df0496897862d9868ca3ad4091488e0b7df3475f051adf1ea7da41711"
+FREEZE_SHA256 = "cd6df6e3821f800b648c849e34719d8c7cc385741b8c5fb3c996c6e03c20b69f"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -1669,7 +1669,7 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
                 "--features", "ownership-ledger",
                 "--test", "checked_metadata", "--test", "metadata_compile",
                 "--test", "checked_metadata_padding", "--test", "checked_c_metadata",
-                "--test", "checked_c_indexing", "--test", "checked_c_movement", "--test", "checked_c_affine",
+                "--test", "checked_c_indexing", "--test", "checked_c_movement", "--test", "checked_c_movement_plans", "--test", "checked_c_affine",
                 "--test", "checked_c_reduction", "--test", "checked_c_sparse", "--test", "checked_c_matmul", "--test", "checked_c_window", "--test", "checked_c_literal",
                 "--test", "exact_tagged_c_abi",
                 "--test", "op33_empty_tensor_axis_decomposition",
@@ -1768,12 +1768,24 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
         ),
         OracleLeg(
             "checked C movement delegation and restoration mutations",
-            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_movement"),
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_movement", "--test", "checked_c_movement_plans"),
+        ),
+        OracleLeg(
+            "movement local extent CLI parity and primitive diagnostics",
+            ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "issue_616_runtime_movement_c_parity"),
+        ),
+        OracleLeg(
+            "verified expansion primitive identity and local guards",
+            ("cargo", "nextest", "run", "-p", "chelis-ir", "--test", "movement_expansion_kind"),
+        ),
+        OracleLeg(
+            "verified expansion primitive identity and local guards in release",
+            ("cargo", "nextest", "run", "--release", "-p", "chelis-ir", "--test", "movement_expansion_kind"),
         ),
         OracleLeg(
             "checked C movement optimized sanitizer execution",
             ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "exec_compile",
-             "-E", "test(checked_c_movement_)"),
+             "-E", "test(checked_c_movement_) | test(a_local_class_guards) | test(a_literal_claim_on_a_symbolic_input) | test(numeric_local_extent_claims)"),
         ),
         OracleLeg(
             "checked C shared indexing dtype dispatch and storage reuse",

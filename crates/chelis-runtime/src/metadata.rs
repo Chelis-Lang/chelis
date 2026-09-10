@@ -47,6 +47,189 @@ pub(crate) struct IterationSpace {
     elements: ElementCount,
 }
 
+/// One checked row-major axis projection; no tensor data or per-index scratch.
+struct AxisProjection {
+    divisor: i64,
+    modulus: i64,
+    offset: i64,
+    step: i64,
+    stride: i64,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum MovementOp {
+    Pad,
+    Shrink,
+    Stride,
+}
+
+pub(crate) struct MovementMetadata {
+    input: ShapeMetadata,
+    result: ShapeMetadata,
+    projection: Box<[AxisProjection]>,
+    source_domain: bool,
+}
+impl MovementMetadata {
+    fn build(
+        input: &ShapeMetadata,
+        result: ShapeMetadata,
+        source_domain: bool,
+        axes: impl IntoIterator<Item = (usize, usize, i64, i64)>,
+    ) -> Result<Self, MetadataError> {
+        result.bytes().allocation()?;
+        let (domain, target) = if source_domain {
+            (input, &result)
+        } else {
+            (&result, input)
+        };
+        let count = ElementCount::scratch_entries(domain.shape.len(), 0)?;
+        let mut projection = Vec::with_capacity(count.scratch_len::<AxisProjection>()?);
+        for (domain_axis, target_axis, offset, step) in axes {
+            if projection.len() >= domain.shape.len()
+                || domain_axis >= domain.shape.len()
+                || target_axis >= target.shape.len()
+            {
+                return Err(MetadataError::Domain(
+                    "movement projection rank mismatch".into(),
+                ));
+            }
+            // The checked capacity cannot grow through this construction path.
+            projection.push(AxisProjection {
+                divisor: domain.strides[domain_axis],
+                modulus: domain.shape[domain_axis],
+                offset,
+                step,
+                stride: target.strides[target_axis],
+            });
+        }
+        Ok(Self {
+            input: input.clone(),
+            result,
+            projection: projection.into(),
+            source_domain,
+        })
+    }
+    pub(crate) fn permuted(input: &ShapeMetadata, axes: &[i64]) -> Result<Self, MetadataError> {
+        if axes.len() != input.shape.len() {
+            return Err(MetadataError::Domain("permutation rank mismatch".into()));
+        }
+        let count = ElementCount::scratch_entries(axes.len(), 0)?;
+        let mut shape = Vec::with_capacity(count.scratch_len::<i64>()?);
+        let mut normalized = Vec::with_capacity(count.scratch_len::<usize>()?);
+        for &axis in axes {
+            let axis = input.normalize_axis(axis)?;
+            normalized.push(axis);
+            shape.push(input.shape[axis]);
+        }
+        let result = ShapeMetadata::contiguous(&shape, input.dtype)?;
+        input.require_permutation(&result, axes)?;
+        Self::build(
+            input,
+            result,
+            false,
+            normalized
+                .into_iter()
+                .enumerate()
+                .map(|(out, source)| (out, source, 0, 1)),
+        )
+    }
+    pub(crate) fn expanded(
+        input: &ShapeMetadata,
+        axis: i64,
+        size: i64,
+        insert: bool,
+    ) -> Result<Self, MetadataError> {
+        let rank = input
+            .shape
+            .len()
+            .checked_add(usize::from(insert))
+            .ok_or(MetadataError::Overflow("expanded rank exceeds usize"))?;
+        let rank_i32 = ShapeMetadata::checked_rank(rank)?;
+        let axis = if axis < 0 {
+            axis + i64::from(rank_i32)
+        } else {
+            axis
+        };
+        if axis < 0 || axis >= i64::from(rank_i32) || size < 0 {
+            return Err(MetadataError::Domain(
+                "expansion axis or extent outside domain".into(),
+            ));
+        }
+        let axis = usize::try_from(axis)
+            .map_err(|_| MetadataError::Overflow("expansion axis exceeds usize"))?;
+        let count = ElementCount::scratch_entries(rank, 0)?;
+        let mut shape = Vec::with_capacity(count.scratch_len::<i64>()?);
+        shape.extend_from_slice(input.shape());
+        if insert {
+            shape.insert(axis, size);
+        } else {
+            shape[axis] = size;
+        }
+        let result = ShapeMetadata::contiguous(&shape, input.dtype)?;
+        input.require_expansion(&result, axis as i32)?;
+        let axes = (0..input.shape.len()).filter_map(|source| {
+            if !insert && source == axis {
+                None
+            } else {
+                Some((source + usize::from(insert && source >= axis), source, 0, 1))
+            }
+        });
+        Self::build(input, result, false, axes)
+    }
+    pub(crate) fn affine(
+        input: &ShapeMetadata,
+        first: &[i64],
+        second: &[i64],
+        op: MovementOp,
+    ) -> Result<Self, MetadataError> {
+        let result = match op {
+            MovementOp::Pad => input.padded(first, second)?,
+            MovementOp::Shrink => input.shrunk(first, second)?,
+            MovementOp::Stride => input.strided(first)?,
+        };
+        let axes = (0..input.shape.len()).map(|axis| match op {
+            MovementOp::Pad | MovementOp::Shrink => (axis, axis, first[axis], 1),
+            MovementOp::Stride => (axis, axis, 0, first[axis]),
+        });
+        Self::build(input, result, matches!(op, MovementOp::Pad), axes)
+    }
+    pub(crate) fn input(&self) -> &ShapeMetadata {
+        &self.input
+    }
+    pub(crate) fn result(&self) -> &ShapeMetadata {
+        &self.result
+    }
+    pub(crate) fn count(&self) -> ElementCount {
+        if self.source_domain {
+            self.input.elements
+        } else {
+            self.result.elements
+        }
+    }
+    pub(crate) fn index(&self, linear: i64) -> Result<i64, MetadataError> {
+        let (domain, target) = if self.source_domain {
+            (&self.input, &self.result)
+        } else {
+            (&self.result, &self.input)
+        };
+        domain.require_index(linear)?;
+        let mut flat = 0_i64;
+        for axis in &self.projection {
+            let coordinate = linear
+                .checked_div(axis.divisor)
+                .and_then(|n| n.checked_rem(axis.modulus))
+                .and_then(|n| n.checked_mul(axis.step))
+                .and_then(|n| n.checked_add(axis.offset))
+                .and_then(|n| n.checked_mul(axis.stride))
+                .and_then(|n| flat.checked_add(n))
+                .ok_or(MetadataError::Overflow("movement projection exceeds int64"))?;
+            flat = coordinate;
+        }
+        target.require_index(flat)?;
+        Ok(flat)
+    }
+}
+
 /// Valid-padding window geometry independent of source storage and arithmetic.
 pub(crate) struct WindowMetadata {
     input: ShapeMetadata,

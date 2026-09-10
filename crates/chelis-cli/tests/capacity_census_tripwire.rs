@@ -147,6 +147,19 @@ const FINAL_NONNUMERIC_ROWS: &[StaticSurfaceDescriptor] = &[
         "chelis_runtime.h: typedef enum { CHELIS_SPARSE_GATHER = 0 , CHELIS_SPARSE_ADD = 1 , CHELIS_SPARSE_REPLACE = 2 , CHELIS_SPARSE_ELEMENTS = 3 } chelis_sparse_op",
         &[],
     ),
+    // Closed movement operation/side identities contain no numeric payload.
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-struct",
+        "chelis_runtime.h: typedef enum { CHELIS_MOVEMENT_EXPAND = 0 , CHELIS_MOVEMENT_INSERT = 1 , CHELIS_MOVEMENT_PAD = 2 , CHELIS_MOVEMENT_SHRINK = 3 , CHELIS_MOVEMENT_STRIDE = 4 } chelis_movement_op",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-struct",
+        "chelis_runtime.h: typedef enum { CHELIS_MOVEMENT_SOURCE = 0 , CHELIS_MOVEMENT_RESULT = 1 } chelis_movement_side",
+        &[],
+    ),
     // Closed window operation/side identities select a contract, not a number.
     StaticSurfaceDescriptor::new(
         PRIMARY_CENSUS_FAMILY,
@@ -2033,6 +2046,86 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         ),
         atom: "[05-OP-33]",
         authority_anchor: "`chelis_tensor_write_literal` takes a live tensor write guard, an exact tagged",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_movement_plan * chelis_tensor_permute_plan ( const chelis_tensor * input , chelis_scalar rank , const chelis_scalar * axes ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_permute_plan`, `chelis_tensor_expand_plan`, and",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_movement_plan * chelis_tensor_expand_plan ( const chelis_tensor * input , chelis_scalar axis , chelis_scalar size , chelis_movement_op operation ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_permute_plan`, `chelis_tensor_expand_plan`, and",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_movement_plan * chelis_tensor_affine_plan ( const chelis_tensor * input , chelis_scalar rank , const chelis_scalar * first , const chelis_scalar * second , chelis_movement_op operation ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_permute_plan`, `chelis_tensor_expand_plan`, and",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_movement_extent ( const chelis_movement_plan * plan , chelis_movement_side side , chelis_scalar axis ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_permute_plan`, `chelis_tensor_expand_plan`, and",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_movement_count ( const chelis_movement_plan * plan ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_permute_plan`, `chelis_tensor_expand_plan`, and",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_movement_index ( const chelis_movement_plan * plan , chelis_scalar linear ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_permute_plan`, `chelis_tensor_expand_plan`, and",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_movement_check_target ( const chelis_movement_plan * plan , chelis_scalar rank , const chelis_scalar * shape ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_permute_plan`, `chelis_tensor_expand_plan`, and",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_movement_plan_release ( chelis_movement_plan * plan ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_permute_plan`, `chelis_tensor_expand_plan`, and",
     },
     FinalNumericOperationRegistration {
         surface: StaticSurfaceDescriptor::new(

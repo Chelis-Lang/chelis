@@ -7,8 +7,116 @@ mod metadata;
 use chelis_vocab::RuntimeDType;
 use metadata::{
     ByteCount, ElementCount, IterationSpace, MatmulDimension, MatmulMetadata, MatmulPart,
-    MetadataError, ReductionMetadata, ShapeMetadata, SparseMetadata, WindowMetadata,
+    MetadataError, MovementMetadata, MovementOp, ReductionMetadata, ShapeMetadata, SparseMetadata,
+    WindowMetadata,
 };
+
+#[test]
+fn movement_plans_project_checked_domains_without_coordinate_scratch() {
+    let shape = |s: &[i64], dtype| ShapeMetadata::contiguous(s, dtype).unwrap();
+    for dtype in RuntimeDType::ALL {
+        let source = shape(&[2, 3], dtype);
+        let permute = MovementMetadata::permuted(&source, &[-1, 0]).unwrap();
+        assert_eq!(permute.result().shape(), &[3, 2]);
+        for i in 0..6 {
+            assert_eq!(permute.index(i).unwrap(), (i % 2) * 3 + i / 2);
+        }
+        let insert = MovementMetadata::expanded(&source, 1, 4, true).unwrap();
+        let expand = MovementMetadata::expanded(&shape(&[2, 1, 3], dtype), 1, 4, false).unwrap();
+        for plan in [&insert, &expand] {
+            assert_eq!(plan.result().shape(), &[2, 4, 3]);
+            assert_eq!(plan.count().get(), 24);
+            for i in 0..24 {
+                assert_eq!(plan.index(i).unwrap(), i / 12 * 3 + i % 3);
+            }
+        }
+        let pad = MovementMetadata::affine(&source, &[1, 2], &[0, 1], MovementOp::Pad).unwrap();
+        assert_eq!(pad.result().shape(), &[3, 6]);
+        assert_eq!(pad.count().get(), 6);
+        for i in 0..6 {
+            assert_eq!(pad.index(i).unwrap(), (i / 3 + 1) * 6 + i % 3 + 2);
+        }
+        let larger = shape(&[3, 5], dtype);
+        let shrink =
+            MovementMetadata::affine(&larger, &[1, 2], &[3, 5], MovementOp::Shrink).unwrap();
+        let stride = MovementMetadata::affine(&larger, &[2, 2], &[], MovementOp::Stride).unwrap();
+        for plan in [&shrink, &stride] {
+            assert_eq!(plan.result().shape(), &[2, 3]);
+        }
+        for i in 0..6 {
+            assert_eq!(shrink.index(i).unwrap(), (i / 3 + 1) * 5 + i % 3 + 2);
+            assert_eq!(stride.index(i).unwrap(), i / 3 * 2 * 5 + i % 3 * 2);
+        }
+        for plan in [permute, insert, expand, pad, shrink, stride] {
+            assert_eq!(plan.input().dtype(), dtype);
+            assert_eq!(plan.result().dtype(), dtype);
+            for i in [-1, plan.count().get()] {
+                assert!(matches!(plan.index(i), Err(MetadataError::Domain(_))));
+            }
+        }
+    }
+}
+
+#[test]
+fn movement_plans_reject_bad_geometry_and_preserve_rank_zero_empty_and_int64() {
+    let shape = |s: &[i64]| ShapeMetadata::contiguous(s, RuntimeDType::I8).unwrap();
+    let input = shape(&[2, 3]);
+    for axes in [vec![0], vec![0, 0], vec![0, 2], vec![-3, 1]] {
+        assert!(MovementMetadata::permuted(&input, &axes).is_err());
+    }
+    for (axis, size, insert) in [(0, 3, false), (2, 3, false), (3, 3, true), (0, -1, true)] {
+        assert!(MovementMetadata::expanded(&input, axis, size, insert).is_err());
+    }
+    for (first, second, op) in [
+        (vec![-1, 0], vec![0, 0], MovementOp::Pad),
+        (vec![0], vec![0], MovementOp::Pad),
+        (vec![i64::MAX, 0], vec![0, 0], MovementOp::Pad),
+        (vec![0, 0], vec![3, 3], MovementOp::Shrink),
+        (vec![0, 0], vec![1, -1], MovementOp::Shrink),
+        (vec![0, 1], vec![], MovementOp::Stride),
+        (vec![1], vec![], MovementOp::Stride),
+    ] {
+        assert!(MovementMetadata::affine(&input, &first, &second, op).is_err());
+    }
+    let scalar = shape(&[]);
+    assert_eq!(
+        MovementMetadata::permuted(&scalar, &[])
+            .unwrap()
+            .index(0)
+            .unwrap(),
+        0
+    );
+    for op in [MovementOp::Pad, MovementOp::Shrink, MovementOp::Stride] {
+        assert_eq!(
+            MovementMetadata::affine(&scalar, &[], &[], op)
+                .unwrap()
+                .index(0)
+                .unwrap(),
+            0
+        );
+    }
+    let inserted = MovementMetadata::expanded(&scalar, 0, 2, true).unwrap();
+    assert_eq!(inserted.index(1).unwrap(), 0);
+    let high_rank = shape(&[1; 9]);
+    assert_eq!(
+        MovementMetadata::permuted(&high_rank, &[8, 7, 6, 5, 4, 3, 2, 1, 0])
+            .unwrap()
+            .index(0)
+            .unwrap(),
+        0
+    );
+    let empty = MovementMetadata::affine(&shape(&[0]), &[1], &[1], MovementOp::Pad).unwrap();
+    assert_eq!(empty.result().shape(), &[2]);
+    assert_eq!(empty.count().get(), 0);
+    assert!(empty.index(0).is_err());
+    let huge = shape(&[i64::MAX]);
+    let stride = MovementMetadata::affine(&huge, &[2], &[], MovementOp::Stride).unwrap();
+    assert_eq!(
+        stride.index(stride.count().get() - 1).unwrap(),
+        i64::MAX - 1
+    );
+    assert!(MovementMetadata::expanded(&shape(&[2]), 0, i64::MAX, true).is_err());
+}
 
 #[test]
 fn window_metadata_binds_valid_padding_and_row_major_source_indices() {

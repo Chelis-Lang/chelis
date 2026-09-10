@@ -215,6 +215,13 @@ impl<'a> VerifiedDagView<'a> {
         crate::axis_sources::member_load_axis(self.dag, member)
     }
 
+    /// Closed primitive form from the verified IR rank relation. Backends and
+    /// local extent diagnostics consume the same derivation.
+    pub fn expansion_kind(self, id: NodeId) -> crate::axis_sources::ExpansionKind {
+        crate::axis_sources::expansion_kind(self.dag, id)
+            .expect("verified expansion node has a rank-preserving or inserting form")
+    }
+
     /// C1.3's local guard sites for this verified payload.
     ///
     /// The derivation is [`crate::axis_sources::local_dim_guard_sites`], which

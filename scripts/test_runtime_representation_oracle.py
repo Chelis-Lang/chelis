@@ -425,7 +425,17 @@ class ManifestTests(unittest.TestCase):
     def test_checked_c_movement_has_delegation_mutations_and_native_execution(self) -> None:
         commands = [leg.argv for leg in oracle.phase0_legs()]
         self.assertTrue(any("chelis-backend-c" in command and "checked_c_movement" in command for command in commands))
-        self.assertTrue(any("exec_compile" in command and "test(checked_c_movement_)" in command for command in commands))
+        for selector in (
+            "test(checked_c_movement_)",
+            "test(a_local_class_guards)",
+            "test(a_literal_claim_on_a_symbolic_input)",
+            "test(numeric_local_extent_claims)",
+        ):
+            self.assertTrue(any("exec_compile" in command and any(selector in arg.split(" | ") for arg in command) for command in commands))
+        self.assertTrue(any("chelis-backend-c" in command and "checked_c_movement_plans" in command for command in commands))
+        self.assertTrue(any("chelis-runtime" in command and "checked_c_movement_plans" in command for command in commands))
+        self.assertTrue(any("chelis-ir" in command and "movement_expansion_kind" in command for command in commands))
+        self.assertTrue(any("chelis-cli" in command and "issue_616_runtime_movement_c_parity" in command for command in commands))
 
     def test_checked_json_scratch_requires_lifetime_controls_and_native_execution(self) -> None:
         commands = [leg.argv for leg in oracle.phase0_legs()]

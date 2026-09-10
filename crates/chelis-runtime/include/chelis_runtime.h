@@ -350,6 +350,17 @@ void chelis_tensor_write_literal(chelis_tensor_write *guard, chelis_scalar count
 // Checked valid-padding geometry; plans retain no tensor storage.
 typedef enum { CHELIS_WINDOW_SUM = 0, CHELIS_WINDOW_MEAN = 1, CHELIS_WINDOW_MAX = 2, CHELIS_WINDOW_MIN = 3, CHELIS_WINDOW_GRAD = 4 } chelis_window_op;
 typedef enum { CHELIS_WINDOW_SOURCE = 0, CHELIS_WINDOW_RESULT = 1 } chelis_window_side;
+typedef struct chelis_movement_plan chelis_movement_plan;
+typedef enum { CHELIS_MOVEMENT_EXPAND = 0, CHELIS_MOVEMENT_INSERT = 1, CHELIS_MOVEMENT_PAD = 2, CHELIS_MOVEMENT_SHRINK = 3, CHELIS_MOVEMENT_STRIDE = 4 } chelis_movement_op;
+typedef enum { CHELIS_MOVEMENT_SOURCE = 0, CHELIS_MOVEMENT_RESULT = 1 } chelis_movement_side;
+chelis_movement_plan *chelis_tensor_permute_plan(const chelis_tensor *input, chelis_scalar rank, const chelis_scalar *axes);
+chelis_movement_plan *chelis_tensor_expand_plan(const chelis_tensor *input, chelis_scalar axis, chelis_scalar size, chelis_movement_op operation);
+chelis_movement_plan *chelis_tensor_affine_plan(const chelis_tensor *input, chelis_scalar rank, const chelis_scalar *first, const chelis_scalar *second, chelis_movement_op operation);
+int64_t chelis_movement_extent(const chelis_movement_plan *plan, chelis_movement_side side, chelis_scalar axis);
+int64_t chelis_movement_count(const chelis_movement_plan *plan);
+int64_t chelis_movement_index(const chelis_movement_plan *plan, chelis_scalar linear);
+void chelis_movement_check_target(const chelis_movement_plan *plan, chelis_scalar rank, const chelis_scalar *shape);
+void chelis_movement_plan_release(chelis_movement_plan *plan);
 typedef struct chelis_window_plan chelis_window_plan;
 chelis_window_plan *chelis_tensor_window_plan(const chelis_tensor *input, chelis_scalar count, const chelis_scalar *window, const chelis_scalar *steps, chelis_window_op operation);
 int64_t chelis_window_extent(const chelis_window_plan *plan, chelis_window_side side, chelis_scalar axis);
