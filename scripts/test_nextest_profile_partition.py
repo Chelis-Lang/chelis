@@ -129,6 +129,13 @@ CONTENDED_DEADLINE_RETRY_SELECTOR = (
     "binary_id(/^chelis-cli::test_suite_timeout$/) & "
     "test(/^normal_output_forwarding_is_part_of_whole_command_deadline$/)"
 )
+SHARED_RUSTDOC_GROUP = "capacity-rustdoc-verifiers"
+SHARED_RUSTDOC_OWNER_TESTS = (
+    "chelis-compiler-api::capacity_census_wire::"
+    "wire_schema_numeric_fields_match_the_reviewed_baseline",
+    "chelis-python::capacity_census_bindings::"
+    "registered_pyfunctions_match_the_reviewed_rustdoc_signatures",
+)
 
 
 def _cargo_environment(
@@ -390,6 +397,71 @@ def _list_generalization_pr() -> dict[str, tuple[str, bool]]:
     return out
 
 
+def _show_shared_rustdoc_group(
+    profile: str, *, audited_consumers_only: bool = False
+) -> str:
+    """Ask nextest which tests receive the inherited group, without a test filter."""
+    cmd = [
+        "cargo",
+        "nextest",
+        "show-config",
+        "test-groups",
+    ]
+    if audited_consumers_only:
+        cmd.extend(
+            [
+                "-p",
+                "chelis-compiler-api",
+                "-p",
+                "chelis-python",
+                "--test",
+                "capacity_census_wire",
+                "--test",
+                "capacity_census_bindings",
+            ]
+        )
+    else:
+        cmd.append("--workspace")
+    cmd.extend(
+        [
+            "--profile",
+            profile,
+            "--ignore-default-filter",
+            "--groups",
+            SHARED_RUSTDOC_GROUP,
+        ]
+    )
+    result = subprocess.run(
+        cmd,
+        cwd=REPO_ROOT,
+        env=_cargo_environment(),
+        capture_output=True,
+        text=True,
+        timeout=900,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"nextest group resolution failed for {profile!r} "
+            f"(exit {result.returncode}): {result.stderr[-2000:]}"
+        )
+    return result.stdout
+
+
+def _resolved_shared_rustdoc_members(output: str) -> set[str]:
+    """Parse nextest's resolved binary/test membership, excluding filter prose."""
+    members: set[str] = set()
+    binary = None
+    for line in output.splitlines():
+        binary_match = re.fullmatch(r"      ([^ ]+):", line)
+        if binary_match is not None:
+            binary = binary_match.group(1)
+            continue
+        test_match = re.fullmatch(r"          ([^ ]+)", line)
+        if test_match is not None and binary is not None:
+            members.add(f"{binary}::{test_match.group(1)}")
+    return members
+
+
 @unittest.skipUnless(
     _have_nextest(), "cargo nextest unavailable; skipping set-math oracle"
 )
@@ -538,6 +610,21 @@ class ProfilePartitionTests(unittest.TestCase):
             "selection, so flattening has no executable duplication to remove",
         )
 
+    def test_every_profile_serializes_exactly_the_shared_target_owners(self):
+        profiles = tuple(tomllib.loads(NEXTEST_TOML.read_text())["profile"])
+        self.assertIn("builtin-atom-closure", profiles)
+        for profile in profiles:
+            with self.subTest(profile=profile):
+                output = _show_shared_rustdoc_group(profile)
+                self.assertRegex(
+                    output,
+                    rf"(?m)^group: {SHARED_RUSTDOC_GROUP} "
+                    r"\(max threads = 1\)$",
+                )
+                self.assertEqual(
+                    _resolved_shared_rustdoc_members(output),
+                    set(SHARED_RUSTDOC_OWNER_TESTS),
+                )
 
 @unittest.skipUnless(
     _have_nextest(), "cargo nextest unavailable; skipping generalization census"

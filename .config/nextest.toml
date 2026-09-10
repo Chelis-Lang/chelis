@@ -38,6 +38,14 @@
 # Grep targets if this needs revisiting:
 #   - real chelis build + gcc + run / reef build / reef install
 
+# The wire and PyO3 binding authority tests both run nested Cargo sequences in
+# target/agents/729-capacity-rustdoc. The target's nonblocking lease must keep
+# rejecting unscheduled interleaving, so nextest gives the two actual owners one
+# shared execution slot. Every custom profile inherits this override from
+# `default`, including explicit-filter runs with `--ignore-default-filter`.
+[test-groups]
+capacity-rustdoc-verifiers = { max-threads = 1 }
+
 [profile.default]
 fail-fast = false
 default-filter = '''
@@ -53,6 +61,10 @@ default-filter = '''
         + (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/))
     )
 '''
+
+[[profile.default.overrides]]
+filter = '''(binary_id(/^chelis-compiler-api::capacity_census_wire$/) & test(/^wire_schema_numeric_fields_match_the_reviewed_baseline$/)) + (binary_id(/^chelis-python::capacity_census_bindings$/) & test(/^registered_pyfunctions_match_the_reviewed_rustdoc_signatures$/))'''
+test-group = "capacity-rustdoc-verifiers"
 
 [profile.ci]
 fail-fast = false
