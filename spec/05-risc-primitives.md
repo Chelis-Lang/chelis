@@ -1978,6 +1978,18 @@ exact ADT identity by [05-OP-34].
 > applies §2.3's one-step negative normalization; an axis still out of range
 > then traps `Domain`.
 >
+> `chelis_tensor_alloc_like` takes a validated input tensor and a canonical
+> all-zero tagged scalar exemplar selecting any admitted output representation.
+> It returns independent owned, contiguous, zero-filled storage with exactly the
+> input shape. It checks output bytes and target allocation projection at that
+> representation before allocation. It reads metadata only, so an active input
+> write guard is allowed; it neither copies payload nor changes input ownership.
+> Null input and malformed or nonzero exemplars trap `Domain`; unrepresentable
+> output metadata traps `Overflow`. Numeric metadata failures name `alloc_like`
+> at `int64` under [04-NUM-9]. Rank zero retains one element and any zero
+> extent retains zero elements. This allocation operation has no cotangent or
+> accumulator.
+>
 > Allocation returns owned, contiguous, row-major, zero-filled storage at the
 > requested representation. A zero extent means zero elements, never one
 > synthetic element. Foreign storage enters only through [05-OP-44]'s entry

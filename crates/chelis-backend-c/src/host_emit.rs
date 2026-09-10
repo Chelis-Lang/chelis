@@ -1298,13 +1298,10 @@ fn append_tensor_abi_helpers(out: &mut Vec<String>) {
         "static chelis_tensor *chelis_host_alloc_like(const chelis_tensor *input, chelis_dtype dtype) {"
             .to_string(),
     );
-    out.push("    int32_t rank = chelis_tensor_rank(input);".to_string());
-    out.push("    int64_t shape[rank > 0 ? rank : 1];".to_string());
     out.push(
-        "    for (int32_t axis = 0; axis < rank; ++axis) shape[axis] = chelis_tensor_shape(input, axis);"
+        "    return chelis_tensor_alloc_like(input, chelis_scalar_from_bits(dtype, UINT64_C(0)));"
             .to_string(),
     );
-    out.push("    return chelis_alloc(rank, rank > 0 ? shape : NULL, dtype);".to_string());
     out.push("}".to_string());
     out.push(
         "static void chelis_host_require_elementwise_agreement(const chelis_tensor *lhs, const chelis_tensor *rhs, const char *target_label, const char *lhs_label, const char *rhs_label) {"

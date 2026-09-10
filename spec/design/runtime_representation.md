@@ -839,6 +839,31 @@ copy coverage and its composite receipt oracle remain separate work, as do Phase
 descriptors and bindings. This is one geometry slice because the shared plan, all
 five consumers, semantic authority and executable controls must ship together.
 
+#### Checked C shape observation and allocation (#889)
+
+DAG metadata observation uses the existing checked extent API directly, removing
+per-tensor runtime-rank shape and unused stride arrays from the C stack. Shape
+operations capture their scalar extent before destination submission, so a storage
+transition cannot change the logical metadata being observed. Other extent
+consumers already capture their bounds before allocating or repurposing output.
+The host allocate-like adapter delegates to `chelis_tensor_alloc_like`: checked
+input shape and an explicit zero tagged exemplar determine independently owned,
+zero-filled output at the selected representation. It allocates no C shape scratch.
+No descriptor layout or Python binding changes in this slice.
+
+The bounded oracle includes all 81 input/output dtype pairs at ranks 0, 1, 8 and 9,
+empty shapes with extents above int32, active input guards, released-input
+independence, invalid exemplars and output-byte overflow, in debug and release.
+C execution covers an ordinary shape read and an explicit legal same-capacity
+resubmission fixture; moving the observation after repurpose must fail. The fixture
+does not claim that the current planner reuses a last-use input. Source controls
+reject restored metadata VLAs, raw stride construction and byte multiplication.
+The vmap CLI control preserves the mapped axis shift. Existing cast, movement,
+elementwise and physical-slot lifetime regressions remain required supporting
+coverage. The B1 manifest adds these named executions and negative controls while
+preserving the immutable foundation and admitting no new inventory owner.
+This slice does not implement the complete Phase 1 consumer/receipt oracle.
+
 ## C3. One generated host/device descriptor schema
 
 A new leaf crate, `chelis-abi`, depends only on `chelis-vocab` outside the

@@ -467,6 +467,11 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_alloc_like ( const chelis_tensor * input , chelis_scalar exemplar ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_clamp ( const chelis_tensor * tensor , const chelis_tensor * lower , const chelis_tensor * upper ) ;",
       "flags": []
     },
