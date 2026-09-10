@@ -172,9 +172,15 @@ fn copy_runtime_artifacts(
     fs::write(runtime_dir.join("chelis_math.h"), MATH_H)?;
     if extras.hip {
         fs::write(runtime_dir.join("chelis_hip_runtime.h"), HIP_RUNTIME_H)?;
-        fs::write(runtime_dir.join("chelis_device_owner.cpp"), DEVICE_OWNER_CPP)?;
+        fs::write(
+            runtime_dir.join("chelis_device_owner.cpp"),
+            DEVICE_OWNER_CPP,
+        )?;
         fs::write(runtime_dir.join("chelis_device_owner.h"), DEVICE_OWNER_H)?;
-        fs::write(runtime_dir.join("chelis_device_descriptor.h"), DEVICE_DESCRIPTOR_H)?;
+        fs::write(
+            runtime_dir.join("chelis_device_descriptor.h"),
+            DEVICE_DESCRIPTOR_H,
+        )?;
     }
     if extras.metal {
         fs::write(runtime_dir.join("chelis_metal_runtime.h"), METAL_RUNTIME_H)?;

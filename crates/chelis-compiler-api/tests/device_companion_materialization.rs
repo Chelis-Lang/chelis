@@ -43,8 +43,10 @@ fn hip_tensor_and_host_artifacts_materialize_exact_companion_inputs() {
 #[test]
 fn c_artifacts_do_not_gain_an_unlinked_device_companion() {
     let host = compile(request("message = \"hello\"\n", CompileTarget::C)).unwrap();
-    assert!(!host
-        .files
-        .iter()
-        .any(|file| file.path.starts_with("chelis_device_")));
+    assert!(
+        !host
+            .files
+            .iter()
+            .any(|file| file.path.starts_with("chelis_device_"))
+    );
 }

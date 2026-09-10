@@ -1,5 +1,7 @@
 //! Spec 11: registered HIP calls import checked storage and adopt opaque owners.
 //! The SDK/foreign artifact is simulated; this is not GPU execution evidence.
+mod support;
+
 use pyo3::{
     prelude::*,
     types::{PyDict, PyModule},
