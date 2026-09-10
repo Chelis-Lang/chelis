@@ -144,8 +144,7 @@ source = Tensor()
                 .map(|line| format!("    {line}\n"))
                 .collect::<String>()
         );
-        py.run(&CString::new(script).unwrap(), Some(&globals), None)
-            .expect("actual registered device call");
+        support::run_case(py, &CString::new(script).unwrap(), &globals);
     });
 }
 #[test]

@@ -31,6 +31,8 @@ fn selected_python_packages_load_with_clean_ambient_environment() {
     }
     let environment = support::initialize();
     Python::with_gil(|py| {
+        let globals = pyo3::types::PyDict::new(py);
+        support::run_case(py, c"pass", &globals);
         let numpy = py.import("numpy").expect("declared NumPy prerequisite");
         let file: String = numpy.getattr("__file__").unwrap().extract().unwrap();
         assert!(

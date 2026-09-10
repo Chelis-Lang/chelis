@@ -150,12 +150,11 @@ fixture.fixture_live.restype = ctypes.c_int
 model = native.load(library_path)
 source = np.array([10, 20], dtype=np.float32)
 "#;
-        py.run(
+        support::run_case(
+            py,
             &CString::new(format!("{setup}\n{body}")).unwrap(),
-            Some(&globals),
-            None,
-        )
-        .expect("registered native output adoption");
+            &globals,
+        );
     });
 }
 

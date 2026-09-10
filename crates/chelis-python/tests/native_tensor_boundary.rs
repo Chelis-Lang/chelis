@@ -62,8 +62,7 @@ def rank_roundtrip(shape):
     rejects(lambda: model(np.ones((*shape, 1), dtype=np.float32)), (ValueError,))
 "#;
         let source = CString::new(format!("{setup}\n{case}\n")).unwrap();
-        py.run(&source, Some(&globals), None)
-            .expect("native tensor boundary case");
+        support::run_case(py, &source, &globals);
     });
 }
 

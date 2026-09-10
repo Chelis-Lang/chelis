@@ -78,3 +78,19 @@ pub fn initialize() -> &'static Environment {
         environment
     })
 }
+
+/// Destroy fixture globals and Python cycles on the thread that created the
+/// unsendable registered model, even when the Python assertion failed.
+pub fn run_case<'py>(
+    py: Python<'py>,
+    source: &std::ffi::CStr,
+    globals: &Bound<'py, pyo3::types::PyDict>,
+) {
+    let outcome = py.run(source, Some(globals), None);
+    globals.clear();
+    py.import("gc")
+        .expect("Python gc")
+        .call_method0("collect")
+        .expect("collect fixture cycles on their owner thread");
+    outcome.expect("registered native boundary case");
+}
