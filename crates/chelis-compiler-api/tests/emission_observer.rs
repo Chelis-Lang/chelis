@@ -1,7 +1,9 @@
 //! Native emission observations, not compiler certification or numerical tests.
 #![cfg(feature = "emission-observer")]
 
-use chelis_compiler_api::compiler::{compile_for_execution, compile_for_execution_with_observer};
+use chelis_compiler_api::compiler::{
+    EntryLaneDecline, compile_for_execution, compile_for_execution_with_observer,
+};
 use chelis_compiler_api::emission_observer::SelectedEmission;
 use chelis_compiler_api::schema::{CompileRequest, CompileTarget, SourceKind};
 use chelis_ir::dag::RiscOp;
@@ -171,6 +173,86 @@ def dloss(x: tensor[2, f32], w: tensor[2, f32]) -> tensor[2, f32] = (grad(loss)(
         serde_json::to_value(ordinary).unwrap(),
         serde_json::to_value(observed).unwrap()
     );
+}
+
+#[test]
+fn tuple_gradient_retains_actual_lowering_without_retaining_dead_emitted_functions() {
+    for (body, has_product) in [
+        ("tensor_to_scalar(sum(mul(x, y), 0))", true),
+        ("tensor_to_scalar(sum(x, 0))", false),
+        ("3.0", false),
+    ] {
+        let source = format!(
+            "def loss(x: tensor[2, f32], y: tensor[2, f32]) -> f32 = {body}\n\
+             def derivative(x: tensor[2, f32], y: tensor[2, f32]) -> \
+             (tensor[2, f32], tensor[2, f32]) = grad(loss)(x, y)"
+        );
+        let ordinary =
+            compile_for_execution(request(&source, CompileTarget::C, Some("derivative"))).unwrap();
+        let mut count = 0;
+        let observed = compile_for_execution_with_observer(
+            request(&source, CompileTarget::C, Some("derivative")),
+            &mut |observation| {
+                count += 1;
+                assert_eq!(observation.program.checked().exprs().len(), 4);
+                let lowered = observation
+                    .lowered_host
+                    .expect("actual initial host lowering");
+                assert_eq!(
+                    lowered
+                        .functions
+                        .iter()
+                        .map(|f| f.name.as_str())
+                        .collect::<Vec<_>>(),
+                    ["loss", "derivative"]
+                );
+                let loss = &lowered.functions[0];
+                assert_eq!(loss.tensor_helpers.len(), usize::from(body != "3.0"));
+                assert_eq!(
+                    loss.params
+                        .iter()
+                        .map(|p| p.name.as_str())
+                        .collect::<Vec<_>>(),
+                    ["x", "y"]
+                );
+                assert_eq!(
+                    loss.tensor_helpers.iter().any(|helper| helper
+                        .dag
+                        .nodes()
+                        .iter()
+                        .any(|node| matches!(node.op, RiscOp::Mul))),
+                    has_product,
+                    "the snapshot must retain this source's primal, not a previous loss"
+                );
+                let SelectedEmission::Host(selected) = observation.selected else {
+                    panic!("tuple derivative selects the host lane");
+                };
+                assert_eq!(selected.function_count(), 1);
+                let derivative = selected.function(0).unwrap();
+                assert_eq!(derivative.name(), "derivative");
+                assert_eq!(derivative.tensor_helper_count(), 1);
+                assert_eq!(derivative.tensor_helper(0).unwrap().dag().roots().len(), 2);
+                // The unverified observation can be copied and inspected, but
+                // changing that copy cannot change the selected verified view.
+                let mut copy = lowered.clone();
+                copy.functions.clear();
+                assert!(copy.functions.is_empty());
+                assert_eq!(selected.function_count(), 1);
+                assert_eq!(lowered.functions.len(), 2);
+            },
+        )
+        .unwrap();
+        assert_eq!(count, 1);
+        assert!(matches!(
+            &observed.entry_lane_decline,
+            Some(EntryLaneDecline::NotTensorSignature { entry }) if entry == "derivative"
+        ));
+        assert_eq!(
+            serde_json::to_value(ordinary).unwrap(),
+            serde_json::to_value(observed).unwrap(),
+            "observation must not change entry selection, emitted files or metadata"
+        );
+    }
 }
 
 #[test]

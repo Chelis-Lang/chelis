@@ -1076,6 +1076,17 @@ the exact verified host payload (including its verified nested DAG cursors).
 Standalone DAG observations also retain the selected pre-specialization,
 pre-fusion DAG. A host observation makes no claim to have such a single graph.
 
+`EmissionObservation.lowered_host` additionally borrows a snapshot of the actual
+initial host lowering, when one exists, before entry projection and backend
+preparation. It is captured only when an observer is installed, without another
+lowering or ownership-verification pass. In particular, a tuple-gradient entry
+may emit only its derivative while this snapshot still contains its scalar loss.
+The snapshot is not ownership-verified, is not necessarily pre-AD, and does not
+make an unselected function part of the artifact. Consumers must establish their
+own source/snapshot/selected-payload correspondence and separately identify any
+primal compilation used for numerical comparison. Ordinary compilation, including
+feature-enabled calls without an observer, does not make this snapshot copy.
+
 This feature changes no default output, public wire schema, CLI, shell pin, or
 language behavior. Ordinary compilation does not invoke an observer, including
 in feature-enabled builds. Views borrow existing tagged compiler carriers; they
@@ -1090,7 +1101,9 @@ emission-observer --test emission_observer --test execution_artifact_metadata`.
 It must compare complete artifacts and diagnostics with ordinary compilation,
 check actual selected entry ownership actions rather than the library DAG,
 exercise standalone and host emission, and preserve rejection without treating
-an empty observation as successful certification. Feature-disabled compilation
+an empty observation as successful certification. Tuple-gradient cases must
+distinguish the full initial host lowering from the selected emitted functions,
+including partial and complete primal disconnection. Feature-disabled compilation
 is checked separately. This does not yet join the library AD trace to selected
 emission, check fusion or effect erasure, or implement an external certificate.
 
