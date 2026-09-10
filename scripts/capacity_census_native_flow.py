@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check bounded native adapter obligations in format-3 compiler evidence.
+"""Check bounded native adapter obligations in format-4 compiler evidence.
 
 This module consumes a provenance-bound compiler record. It verifies exact
 constructor ownership and one reviewed direct-call/place-flow chain. It does
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
+import json
 from typing import Any, Iterable
 
 
@@ -104,6 +105,100 @@ def _definition(value: Any) -> DefinitionIdentity:
     if not isinstance(value, dict):
         raise NativeFlowEvidenceError("missing containing definition")
     return _identity(value.get("definition"))
+
+
+def _native_body_identity(value: Any) -> tuple:
+    if not isinstance(value, dict):
+        raise NativeFlowEvidenceError("missing constructor body evidence")
+    identity = _identity(value.get("definition"))
+    kind, ancestors = value.get("kind"), value.get("ancestors")
+    substitutions, opened = value.get("substitutions"), value.get("open_type_or_const")
+    if (not isinstance(kind, str) or not kind or not isinstance(ancestors, list)
+            or not isinstance(substitutions, list) or type(opened) is not bool):
+        raise NativeFlowEvidenceError("incomplete constructor body identity")
+    parents = tuple(_identity(parent) for parent in ancestors)
+    if identity in parents or len(parents) != len(set(parents)):
+        raise NativeFlowEvidenceError("cyclic constructor body ancestry")
+    return identity, kind, parents, json.dumps(substitutions, sort_keys=True), opened
+
+
+def _native_constructor_evidence(raw: dict) -> tuple[set, dict, set]:
+    """Join the mandatory raw-constructor census to its actual body instances.
+
+    An exposed constructor is a capability, not proof that construction ran.
+    Callers reject exposures of guarded carriers. Other exposures remain data;
+    this helper grants no authority to their result types or numeric payloads.
+    """
+    if (not isinstance(raw, dict) or raw.get("format") != 4
+            or raw.get("scope") != "native-bindings" or raw.get("errors") != []
+            or not isinstance(raw.get("bodies"), list)
+            or not isinstance(raw.get("constructor_uses"), list)):
+        raise NativeFlowEvidenceError("native constructor_uses require complete format-4 evidence")
+    instances, definitions = set(), {}
+    for body in raw["bodies"]:
+        key = _native_body_identity(body)
+        identity, kind, parents, _, _ = key
+        if key in instances:
+            raise NativeFlowEvidenceError("duplicate constructor body instance")
+        instances.add(key)
+        lexical = kind, parents
+        if identity in definitions and definitions[identity] != lexical:
+            raise NativeFlowEvidenceError("conflicting constructor body ancestry")
+        definitions[identity] = lexical
+
+    required = {"definition", "carrier", "variant_definition", "kind", "arguments",
+                "formal_inputs", "formal_result", "fields", "caller", "block",
+                "statement", "operand_index", "context", "cast", "operand", "source"}
+    observed, exposed = set(), set()
+    for row in raw["constructor_uses"]:
+        if not isinstance(row, dict) or set(row) != required:
+            raise NativeFlowEvidenceError("incomplete native constructor use")
+        caller = _native_body_identity(row["caller"])
+        if caller not in instances:
+            raise NativeFlowEvidenceError("constructor caller differs from its actual body")
+        if (any(type(row[k]) is not int or row[k] < 0
+                for k in ("block", "statement", "operand_index"))
+                or row["context"] not in {"statement", "terminator"}):
+            raise NativeFlowEvidenceError("invalid native constructor use location")
+        occurrence = caller, row["block"], row["statement"], row["operand_index"]
+        if occurrence in observed:
+            raise NativeFlowEvidenceError("duplicate native constructor use occurrence")
+        observed.add(occurrence)
+        if row["kind"] not in {"Ctor(Struct, Fn)", "Ctor(Variant, Fn)"}:
+            raise NativeFlowEvidenceError("native use is not a raw function constructor")
+        _identity(row["definition"])
+        _identity(row["variant_definition"])
+        carrier = _identity(row["carrier"])
+        result = row["formal_result"]
+        if (not isinstance(result, dict) or not isinstance(result.get("shape"), dict)
+                or result["shape"].get("tag") != "nominal"
+                or _identity(result.get("nominal")) != carrier
+                or _identity(result["shape"].get("definition")) != carrier):
+            raise NativeFlowEvidenceError("constructor result differs from its carrier")
+        inputs, fields = row["formal_inputs"], row["fields"]
+        if (not isinstance(row["arguments"], list) or not isinstance(inputs, list)
+                or not isinstance(fields, list) or len(inputs) != len(fields)):
+            raise NativeFlowEvidenceError("constructor fields differ from its signature")
+        field_ids = set()
+        for item, formal in zip(fields, inputs):
+            if (not isinstance(item, dict) or set(item) != {"definition", "type"}
+                    or not isinstance(item["type"], dict) or not isinstance(formal, dict)
+                    or not isinstance(formal.get("shape"), dict)
+                    or item["type"].get("shape") != formal["shape"]):
+                raise NativeFlowEvidenceError("constructor field type differs from its signature")
+            field_id = _identity(item["definition"])
+            if field_id in field_ids:
+                raise NativeFlowEvidenceError("duplicate native constructor field")
+            field_ids.add(field_id)
+        cast = row["cast"]
+        if cast is not None and (not isinstance(cast, dict) or set(cast) != {"kind", "target"}
+                                 or not isinstance(cast["kind"], str)
+                                 or not isinstance(cast["target"], dict)):
+            raise NativeFlowEvidenceError("malformed native constructor cast")
+        if not isinstance(row["operand"], dict) or not isinstance(row["source"], dict):
+            raise NativeFlowEvidenceError("missing native constructor operand or source")
+        exposed.add(carrier)
+    return instances, definitions, exposed
 
 
 def _place(value: Any) -> _Place:
@@ -320,9 +415,9 @@ def _implementation_problems(
 ) -> list[str]:
     if not isinstance(raw, dict):
         raise NativeFlowEvidenceError("native flow evidence is not an object")
-    if raw.get("format") != 3 or raw.get("scope") != "native-bindings":
-        raise NativeFlowEvidenceError("native flow needs format-3 native-bindings evidence")
-    for key in ("bodies", "calls", "aggregates", "flows", "errors"):
+    if raw.get("format") != 4 or raw.get("scope") != "native-bindings":
+        raise NativeFlowEvidenceError("native flow needs format-4 native-bindings evidence")
+    for key in ("bodies", "calls", "aggregates", "constructor_uses", "flows", "errors"):
         if not isinstance(raw.get(key), list):
             raise NativeFlowEvidenceError(f"native flow evidence has invalid {key}")
     if raw["errors"]:
@@ -330,6 +425,9 @@ def _implementation_problems(
 
     problems = []
     rules = {rule.carrier: rule for rule in obligation.constructors}
+    instances, _, exposed = _native_constructor_evidence(raw)
+    for carrier in sorted(exposed & rules.keys()):
+        problems.append(f"guarded constructor function value is exposed: {carrier.def_path_hash}")
     observed_owners: dict[DefinitionIdentity, set[DefinitionIdentity]] = defaultdict(set)
     allowed_aggregate_destinations = []
     for aggregate in raw["aggregates"]:
@@ -342,9 +440,14 @@ def _implementation_problems(
         rule = rules.get(carrier)
         if rule is None:
             continue
-        owner = _definition(aggregate.get("caller"))
+        caller = _native_body_identity(aggregate.get("caller"))
+        if caller not in instances:
+            raise NativeFlowEvidenceError("constructor caller differs from its actual body")
+        owner, kind, _, _, _ = caller
         observed_owners[carrier].add(owner)
-        if owner not in rule.allowed_owners:
+        if kind not in {"Fn", "AssocFn"}:
+            problems.append("constructor must belong to a direct governing function body")
+        elif owner not in rule.allowed_owners:
             problems.append(
                 f"constructor owner is not allowed for {carrier.def_path_hash}: {owner.def_path_hash}"
             )

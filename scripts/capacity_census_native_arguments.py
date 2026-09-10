@@ -48,7 +48,8 @@ def _shape(value):
 
 
 def _verify(raw, entry, stage, slots):
-    _require(raw.get("format") == 3 and raw.get("scope") == "native-bindings",
+    _require(raw.get("format") == 4 and raw.get("scope") == "native-bindings"
+             and isinstance(raw.get("constructor_uses"), list),
              "argument forwarding needs native compiler evidence")
     _require(raw.get("errors") == [], "collector errors prevent argument forwarding")
     _require(isinstance(stage, CallStage) and slots, "missing argument forwarding obligations")
