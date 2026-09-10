@@ -166,7 +166,7 @@ In order of preference:
    ```
 
 3. **Avoid mass first-exec bursts.** Do not run full-workspace nextest
-   locally during heavy agent sessions on this machine; the macOS Smoke CI
+   locally during heavy agent sessions on this machine; the Mac nightly CI
    job is the workspace oracle (next section). Single-binary work
    (`chelis` CLI on an already-assessed build, clippy, fmt, lint) is
    unaffected.
@@ -236,7 +236,9 @@ When local exec is wedged, do not block on the local run. The
 `macos-workspace-shard` matrix runs the full workspace test suite on
 macOS across two disjoint hash partitions. Shard 2 also runs the Metal smoke
 probe. The stable `macos-smoke` aggregate requires both shards and serves as
-the macOS signal. Push the branch and let CI serve as the oracle, noting in
+the macOS signal in `.github/workflows/macos-nightly.yml` (daily 04:17 UTC and
+manual dispatch only). Push the branch and dispatch this workflow on that branch
+for a Mac validation result; ordinary PR CI does not run it. Note in
 the PR or phase docs that local validation was blocked by this failure mode.
 
 ## Gate Preflight
@@ -245,7 +247,7 @@ the PR or phase docs that local validation was blocked by this failure mode.
 probe below automatically on macOS, as a subprocess, before their first
 command. Probe exit 0 proceeds. Exit 1 (the wedge classification) stops the
 gate with exit 3 and the termination class `preflight-stop`, naming this
-runbook; push and let macOS Smoke serve as the oracle. Exit 3 (slow admission)
+runbook; push and manually dispatch `macos-nightly.yml` as the Mac oracle. Exit 3 (slow admission)
 and exit 2 (the probe could not run) print a warning and continue. The
 verdict, exit code, and first output line are recorded under `preflight.probe`
 in the run's summary JSON (`target/gate-reports/<timestamp>-<pid>-<mode>.json`),

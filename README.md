@@ -531,8 +531,9 @@ in FIFO ordering. Every run other than
 summary line. Push before the review round; the round reviews the pushed
 head while CI runs, and CI is watched by one background waiter, never a
 polling loop. The full workspace nextest stage is CI-owned: open a
-draft PR early and let CI (macOS Smoke is the authoritative workspace
-oracle) run the full suite; see
+draft PR early for Linux CI. Mac workspace validation runs daily at 04:17 UTC
+in `macos-nightly.yml`; dispatch it on the branch for Mac-specific validation.
+It is not a required PR check; see
 [`docs/local_macos_environment.md`](docs/local_macos_environment.md)
 for why that suite does not belong in the local loop on macOS.
 

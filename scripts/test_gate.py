@@ -630,8 +630,6 @@ NON_GATE_JOBS = {
     # Stable branch-protection aggregates, not command-producing workers.
     "lint-and-unit",
     "workspace-tests",
-    "macos-workspace-shard",
-    "macos-smoke",
     # Rule-id: GATE-SCOPE-WORKSPACE-AGGREGATE -- the stable aggregate merges
     # shard JUnit, checks timing, and publishes telemetry with Python. The
     # workspace-tests-shard workers own the gate.py commands.
@@ -689,7 +687,6 @@ NON_GATE_JOBS = {
     # toolchain and macOS-arm64. Same from-source cvc5 cost as smt-build,
     # so out of the per-PR gate scope by design.
     "smt-build-glibc231",
-    "smt-build-darwin-arm64",
 }
 
 
@@ -738,6 +735,8 @@ class DiagnosticKindOracleJobTests(unittest.TestCase):
 # quartet + lint developer gate (see tests/conformance/hull/run_conformance.py
 # and .github/workflows/conformance.yml).
 NON_GATE_WORKFLOWS = {
+    # Mac workspace, Clippy and SMT coverage is daily/manual, outside PR CI.
+    "macos-nightly.yml",
     "ci.yml",
     # Changelog policy uses Python only, including on docs PRs.
     "changelog.yml",
@@ -1782,7 +1781,9 @@ def _extract_ci_bash_array(name: str) -> list[str]:
 
 
 def _ci_job_block(job: str) -> str:
-    """Return the raw `.github/workflows/ci.yml` text block for one job."""
+    """Read a job from its explicitly registered workflow owner."""
+    if job in {"macos-workspace-shard", "macos-smoke", "smt-build-darwin-arm64"}:
+        return _workflow_job_block(CI_YML.with_name("macos-nightly.yml"), job)
     return _workflow_job_block(CI_YML, job)
 
 
@@ -1958,7 +1959,7 @@ def _rust_cache_inputs(job_block: str) -> dict[str, str]:
     return steps[0]
 
 
-def _assert_shared_rust_cache_writer_contract(workflow: str) -> None:
+def _assert_shared_rust_cache_writer_contract(workflow: str, *, macos: bool = False) -> None:
     """Require exactly one reviewed writer for each shared cache namespace."""
     census: list[tuple[str, dict[str, str]]] = []
     for job, block in _workflow_job_blocks(workflow).items():
@@ -1974,6 +1975,7 @@ def _assert_shared_rust_cache_writer_contract(workflow: str) -> None:
             "${{ matrix.shard == 1 }}",
         ),
     }
+    expected = {key: value for key, value in expected.items() if (key == "macos-workspace") == macos}
     for shared_key, expected_writer in expected.items():
         namespace = [
             (job, inputs)
@@ -2432,10 +2434,10 @@ class CiParityTests(unittest.TestCase):
         self.assertIn("name: CI Test Telemetry", block)
         self.assertIn(
             "needs: [changes, workspace-tests-shard, dtype-phase3-oracle, "
-            "generalize-sweep-oracle-shard, macos-workspace-shard]",
+            "generalize-sweep-oracle-shard]",
             block,
         )
-        self.assertEqual(block.count("uses: actions/download-artifact@v7"), 9)
+        self.assertEqual(block.count("uses: actions/download-artifact@v7"), 7)
         for artifact in (
             "junit-linux-workspace-1",
             "junit-linux-workspace-2",
@@ -2444,8 +2446,6 @@ class CiParityTests(unittest.TestCase):
             "junit-linux-generalization-2",
             "junit-linux-generalization-3",
             "junit-linux-generalization-4",
-            "junit-macos-workspace-1",
-            "junit-macos-workspace-2",
         ):
             self.assertIn(f"name: {artifact}", block)
         self.assertIn("scripts/ci_test_telemetry.py", block)
@@ -2461,7 +2461,7 @@ class CiParityTests(unittest.TestCase):
         self.assertIn("if: matrix.shard == 2", shard_block)
         self.assertIn("name: macOS Smoke", aggregate_block)
         self.assertIn(
-            "needs: [changes, macos-workspace-shard]", aggregate_block
+            "needs: [macos-workspace-shard]", aggregate_block
         )
         self.assertIn("scripts/ci_require_success.py", aggregate_block)
 
@@ -2675,6 +2675,7 @@ class CiParityTests(unittest.TestCase):
 
     def test_parallel_jobs_share_one_saved_rust_cache_namespace(self):
         _assert_shared_rust_cache_writer_contract(CI_YML.read_text())
+        _assert_shared_rust_cache_writer_contract(CI_YML.with_name("macos-nightly.yml").read_text(), macos=True)
         workspace_inputs = _rust_cache_inputs(
             _ci_job_block("workspace-tests-shard")
         )
@@ -4000,11 +4001,9 @@ class DocsOnlySkipTests(unittest.TestCase):
         "compiled-value-ownership-phase0-oracle",
         "runtime-representation-phase0-oracle",
         "generalize-sweep-oracle-shard",
-        "macos-workspace-shard",
         "backend-sanitizers",
         "smt-build",
         "smt-build-glibc231",
-        "smt-build-darwin-arm64",
     }
     # The stable required context aggregates the parallel integration legs,
     # so it needs their results as well as the docs-only classification.
@@ -4013,7 +4012,6 @@ class DocsOnlySkipTests(unittest.TestCase):
         "workspace-tests",
         "generalize-sweep-oracle",
         "integration",
-        "macos-smoke",
     }
     # Best-effort reporting aggregates run after failed dependencies but may
     # skip on cancellation because they are not required status contexts.
@@ -4161,8 +4159,7 @@ class DocsOnlySkipTests(unittest.TestCase):
                 "workspace-tests-shard",
                 "dtype-phase3-oracle",
                 "generalize-sweep-oracle-shard",
-                "macos-workspace-shard",
-            ),
+                    ),
         )
 
     def test_dropping_one_producer_clause_fails_the_telemetry_gate(self):
@@ -4180,11 +4177,11 @@ class DocsOnlySkipTests(unittest.TestCase):
         attrs = _parse_job_attrs()
         mutated = {job: dict(values) for job, values in attrs.items()}
         mutated[TELEMETRY_JOB]["if"] = mutated[TELEMETRY_JOB]["if"].replace(
-            "needs.macos-workspace-shard.result == 'success'",
-            "needs.macos-workspace-shard.result != 'cancelled'",
+            "needs.workspace-tests-shard.result == 'success'",
+            "needs.workspace-tests-shard.result != 'cancelled'",
             1,
         )
-        with self.assertRaisesRegex(AssertionError, "macos-workspace-shard"):
+        with self.assertRaisesRegex(AssertionError, "workspace-tests-shard"):
             _assert_telemetry_skips_without_every_junit(mutated)
 
     def test_unreadable_telemetry_needs_list_fails_loudly(self):
