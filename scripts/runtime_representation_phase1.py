@@ -27,7 +27,7 @@ ROOT = phase0.REPO_ROOT
 OracleFailure = phase0.OracleFailure
 PROFILE = 'runtime-representation'
 MANIFEST = ROOT / 'spec/design/runtime_representation_phase1_tests.json'
-MANIFEST_SHA256 = '4eba2dd89631fb92ac34df5ad5b91f6cb581508394071ad8ae9a5aa8a01e9263'
+MANIFEST_SHA256 = 'e9d5f3453fe8c7485f90b2de23dda7e9ab5413469ffd49bdbf3ac42cc53c1f22'
 MANUAL_TEST = 'an_allocation_above_int32_elements_reports_its_true_extent'
 
 
@@ -255,12 +255,20 @@ def nextest_command(action, args):
             '--ignore-default-filter', *args]
 
 
+def junit_path(root: Path | None = None):
+    """Return nextest's workspace-owned profile receipt path.
+
+    `CARGO_TARGET_DIR` relocates Cargo artifacts, but nextest keeps profile
+    reports under the checkout's `target/nextest` directory.
+    """
+    return (ROOT if root is None else root) / 'target' / 'nextest' / PROFILE / 'junit.xml'
+
+
 def execute_leg(name, args, expected, directory):
     print(f'+ {name}: list and execute {len(expected)} frozen tests', flush=True)
     listed = command([*nextest_command('list', args), '--message-format', 'json'], ROOT, directory, 'list')
     selected, artifacts = selection(load_json(listed), ROOT, expected)
-    target = Path(os.environ.get('CARGO_TARGET_DIR', ROOT / 'target'))
-    junit = target / 'nextest' / PROFILE / 'junit.xml'
+    junit = junit_path()
     junit.unlink(missing_ok=True)
     command([*nextest_command('run', args), '--no-fail-fast', '--retries', '0'], ROOT, directory, 'run')
     if not junit.is_file():
@@ -316,8 +324,7 @@ def execute_native_controls(directory):
         variable = 'CHELIS_RUNTIME_DIR' if control['kind'] == 'empty-runtime-archive' else 'CHELIS_TEST_CC'
         previous = os.environ.get(variable)
         os.environ[variable] = str(bad if variable == 'CHELIS_RUNTIME_DIR' else directory / 'missing-compiler')
-        target = Path(os.environ.get('CARGO_TARGET_DIR', ROOT / 'target'))
-        junit = target / 'nextest' / PROFILE / 'junit.xml'
+        junit = junit_path()
         junit.unlink(missing_ok=True)
         try:
             command([*nextest_command('run', args), '--retries', '0'], ROOT, evidence, 'run', expected_exit=100)
@@ -362,8 +369,7 @@ def execute_planner_mutations(directory):
         with phase0.temporary_mutation(source, mutate):
             listed = command([*nextest_command('list', args), '--message-format', 'json'], ROOT, evidence, 'list')
             selected, artifacts = selection(load_json(listed), ROOT, expected)
-            target = Path(os.environ.get('CARGO_TARGET_DIR', ROOT / 'target'))
-            junit = target / 'nextest' / PROFILE / 'junit.xml'
+            junit = junit_path()
             junit.unlink(missing_ok=True)
             command([*nextest_command('run', args), '--retries', '0'], ROOT, evidence, 'run', expected_exit=100)
             xml = junit.read_text()

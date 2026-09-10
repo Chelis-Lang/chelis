@@ -105,6 +105,20 @@ class ReceiptTests(unittest.TestCase):
                     oracle.execute_leg('fixture', (), ['p::positive'], root / 'evidence')
             self.assertFalse(junit.exists())
 
+    def test_junit_receipt_is_workspace_owned_when_build_target_is_external(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / 'checkout'
+            external = Path(directory) / 'external-target'
+            foreign = external / 'nextest' / oracle.PROFILE / 'junit.xml'
+            foreign.parent.mkdir(parents=True)
+            foreign.write_bytes(b'foreign receipt')
+            workspace = root / 'target' / 'nextest' / oracle.PROFILE / 'junit.xml'
+            with mock.patch.object(oracle, 'ROOT', root), mock.patch.dict(
+                oracle.os.environ, {'CARGO_TARGET_DIR': str(external)}, clear=True
+            ):
+                self.assertEqual(oracle.junit_path(), workspace)
+            self.assertEqual(foreign.read_bytes(), b'foreign receipt')
+
     def test_selection_requires_current_binary_and_exact_nonempty_census(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
