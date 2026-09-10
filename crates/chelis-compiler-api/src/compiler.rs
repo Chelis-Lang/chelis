@@ -1551,6 +1551,8 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
 
 /// Opt-in observation of the same strict compilation as [`compile_for_execution`].
 /// The callback sees the actual immutable ownership-verified emission payload.
+/// The separate initial host snapshot is unverified and may contain functions
+/// pruned from that payload; see [`crate::emission_observer::EmissionObservation`].
 /// An observation is not success: later code generation or artifact construction
 /// may still fail. No observer is installed globally or used by ordinary calls.
 #[cfg(feature = "emission-observer")]
@@ -1814,6 +1816,10 @@ fn execution_artifact_from_compiled_observed(
                 deep_span_to_diagnostic(diagnostic.span),
             )
         })?;
+    // Preserve the actual lowering, not a second independently lowered program.
+    // Ordinary compilation does not clone it, even with the feature enabled.
+    #[cfg(feature = "emission-observer")]
+    let observed_host = observer.as_ref().and_then(|_| host_compiled.host.clone());
     let func_name = execution_c_symbol(entry_name);
 
     // Reject host-runtime-only builtins early for any compiled-backend
@@ -1953,6 +1959,7 @@ fn execution_artifact_from_compiled_observed(
                 crate::emission_observer::observe(
                     &mut observer,
                     &compiled.program,
+                    observed_host.as_ref(),
                     crate::emission_observer::SelectedEmission::Dag {
                         unfused: &entry_dag,
                         selected: verified.emission(),
@@ -2055,6 +2062,7 @@ fn execution_artifact_from_compiled_observed(
                 crate::emission_observer::observe(
                     &mut observer,
                     &compiled.program,
+                    observed_host.as_ref(),
                     crate::emission_observer::SelectedEmission::Host(verified.emission()),
                 );
                 let result = chelis_backend_c::codegen_host_program(&verified, &func_name)
@@ -2107,6 +2115,7 @@ fn execution_artifact_from_compiled_observed(
             crate::emission_observer::observe(
                 &mut observer,
                 &compiled.program,
+                observed_host.as_ref(),
                 crate::emission_observer::SelectedEmission::Dag {
                     unfused: &compiled.dag,
                     selected: verified.emission(),
@@ -2194,6 +2203,7 @@ fn execution_artifact_from_compiled_observed(
                 crate::emission_observer::observe(
                     &mut observer,
                     &compiled.program,
+                    observed_host.as_ref(),
                     crate::emission_observer::SelectedEmission::Host(verified.emission()),
                 );
                 let result = chelis_backend_c::codegen_host_program(&verified, &func_name)
@@ -2234,6 +2244,7 @@ fn execution_artifact_from_compiled_observed(
             crate::emission_observer::observe(
                 &mut observer,
                 &compiled.program,
+                observed_host.as_ref(),
                 crate::emission_observer::SelectedEmission::Dag {
                     unfused: &hip_dag,
                     selected: verified.emission(),
