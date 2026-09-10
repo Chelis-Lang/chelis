@@ -42,6 +42,14 @@ __device__ int64_t chelis_indices_to_flat(const int64_t *indices, const int64_t 
     }
     return flat;
 }
+__device__ int64_t chelis_logical_offset(int64_t linear, const int64_t *shape, const int64_t *strides, int64_t rank) {
+    int64_t offset = 0;
+    for (int64_t axis = rank - 1; axis >= 0; --axis) {
+        offset += (linear % shape[axis]) * strides[axis];
+        linear /= shape[axis];
+    }
+    return offset;
+}
 __device__ float chelis_uniform_sample_f32(unsigned long long seed, unsigned long long index, float low, float high) {
     unsigned long long x = seed ^ (index * 0x9E3779B97F4A7C15ULL);
     x ^= x >> 30;
@@ -1539,7 +1547,7 @@ extern \"C\" __global__ void {kernel_name}(
 }
 
 /// Generate sparse gather kernel for typed payload precision and typed integer indices.
-pub fn gather(_rank: usize, kernel_name: &str, index_ty: &str, kind: ElemKind) -> String {
+pub fn gather(rank: usize, kernel_name: &str, index_ty: &str, kind: ElemKind) -> String {
     let ty = kind.c_type();
     format!(
         "{DEVICE_HELPERS}\
@@ -1551,28 +1559,40 @@ extern \"C\" __global__ void {kernel_name}(
     int64_t axis_size,
     int64_t after,
     int64_t index_count,
-    int64_t total) {{
+    int64_t total, {values_shape}, {values_strides}, int64_t values_ndim, {idx_shape}, {idx_strides}, int64_t idx_ndim) {{
+{build_values_sh}
+{build_values_s}
+{build_idx_sh}
+{build_idx_s}
   int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= total) return;
   int64_t d = i % after;
   int64_t tmp = i / after;
   int64_t index_pos = tmp % index_count;
   int64_t b = tmp / index_count;
-  int64_t g = (int64_t)indices[index_pos];
+  int64_t g = (int64_t)indices[chelis_logical_offset(index_pos, idx_sh, idx_s, idx_ndim)];
   if (g < 0 || g >= axis_size || b >= before) {{
     CHELIS_GUARD_INDEX(g, axis_size, 2);
     return;
   }}
   int64_t src = ((b * axis_size + g) * after) + d;
-  out[i] = values[src];
+  out[i] = values[chelis_logical_offset(src, values_sh, values_s, values_ndim)];
 }}
-"
+",
+        values_shape = shape_params(rank, "values"),
+        values_strides = stride_params(rank, "values"),
+        build_values_sh = build_array(rank, "values_sh", "values", "sh"),
+        build_values_s = build_array(rank, "values_s", "values", "s"),
+        idx_shape = shape_params(rank, "idx"),
+        idx_strides = stride_params(rank, "idx"),
+        build_idx_sh = build_array(rank, "idx_sh", "idx", "sh"),
+        build_idx_s = build_array(rank, "idx_s", "idx", "s"),
     )
 }
 
 /// Generate sparse scatter-add kernel for typed payload precision and typed integer indices.
 /// HIP's `atomicAdd` is overloaded for `float` and `double` on supported devices.
-pub fn scatter_add(_rank: usize, kernel_name: &str, index_ty: &str, kind: ElemKind) -> String {
+pub fn scatter_add(rank: usize, kernel_name: &str, index_ty: &str, kind: ElemKind) -> String {
     let ty = kind.c_type();
     format!(
         "{DEVICE_HELPERS}\
@@ -1584,22 +1604,34 @@ extern \"C\" __global__ void {kernel_name}(
     int64_t axis_size,
     int64_t after,
     int64_t index_count,
-    int64_t total) {{
+    int64_t total, {idx_shape}, {idx_strides}, int64_t idx_ndim, {updates_shape}, {updates_strides}, int64_t updates_ndim) {{
+{build_idx_sh}
+{build_idx_s}
+{build_updates_sh}
+{build_updates_s}
   int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= total) return;
   int64_t d = i % after;
   int64_t tmp = i / after;
   int64_t index_pos = tmp % index_count;
   int64_t b = tmp / index_count;
-  int64_t g = (int64_t)indices[index_pos];
+  int64_t g = (int64_t)indices[chelis_logical_offset(index_pos, idx_sh, idx_s, idx_ndim)];
   if (g < 0 || g >= axis_size || b >= before) {{
     CHELIS_GUARD_INDEX(g, axis_size, 3);
     return;
   }}
   int64_t dst = ((b * axis_size + g) * after) + d;
-  atomicAdd(&out[dst], updates[i]);
+  atomicAdd(&out[dst], updates[chelis_logical_offset(i, updates_sh, updates_s, updates_ndim)]);
 }}
-"
+",
+        idx_shape = shape_params(rank, "idx"),
+        idx_strides = stride_params(rank, "idx"),
+        build_idx_sh = build_array(rank, "idx_sh", "idx", "sh"),
+        build_idx_s = build_array(rank, "idx_s", "idx", "s"),
+        updates_shape = shape_params(rank, "updates"),
+        updates_strides = stride_params(rank, "updates"),
+        build_updates_sh = build_array(rank, "updates_sh", "updates", "sh"),
+        build_updates_s = build_array(rank, "updates_s", "updates", "s"),
     )
 }
 
@@ -1617,7 +1649,7 @@ extern \"C\" __global__ void {kernel_name}(
 /// segmented scan) require a tie-breaker that picks the max flat
 /// index per target cell; they are a future optimization but must
 /// preserve this exact tie-breaking rule.
-pub fn scatter_replace(_rank: usize, kernel_name: &str, index_ty: &str) -> String {
+pub fn scatter_replace(rank: usize, kernel_name: &str, index_ty: &str) -> String {
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
@@ -1628,23 +1660,35 @@ extern \"C\" __global__ void {kernel_name}(
     int64_t axis_size,
     int64_t after,
     int64_t index_count,
-    int64_t total) {{
+    int64_t total, {idx_shape}, {idx_strides}, int64_t idx_ndim, {updates_shape}, {updates_strides}, int64_t updates_ndim) {{
+{build_idx_sh}
+{build_idx_s}
+{build_updates_sh}
+{build_updates_s}
   if (blockIdx.x != 0 || threadIdx.x != 0) return;
   for (int64_t i = 0; i < total; i++) {{
     int64_t d = i % after;
     int64_t tmp = i / after;
     int64_t index_pos = tmp % index_count;
     int64_t b = tmp / index_count;
-    int64_t g = (int64_t)indices[index_pos];
+    int64_t g = (int64_t)indices[chelis_logical_offset(index_pos, idx_sh, idx_s, idx_ndim)];
     if (g < 0 || g >= axis_size || b >= before) {{
       CHELIS_GUARD_INDEX(g, axis_size, 4);
       return;
     }}
     int64_t dst = ((b * axis_size + g) * after) + d;
-    out[dst] = updates[i];
+    out[dst] = updates[chelis_logical_offset(i, updates_sh, updates_s, updates_ndim)];
   }}
 }}
-"
+",
+        idx_shape = shape_params(rank, "idx"),
+        idx_strides = stride_params(rank, "idx"),
+        build_idx_sh = build_array(rank, "idx_sh", "idx", "sh"),
+        build_idx_s = build_array(rank, "idx_s", "idx", "s"),
+        updates_shape = shape_params(rank, "updates"),
+        updates_strides = stride_params(rank, "updates"),
+        build_updates_sh = build_array(rank, "updates_sh", "updates", "sh"),
+        build_updates_s = build_array(rank, "updates_s", "updates", "s"),
     )
 }
 
@@ -1670,29 +1714,35 @@ extern \"C\" __global__ void {kernel_name}(
     int64_t ndim,
     int64_t axis,
     int64_t axis_size,
-    int64_t total) {{
+    int64_t total, {idx_strides}, {updates_strides}, {out_strides}) {{
+{build_idx_s}
+{build_updates_s}
+{build_out_s}
 {build_idx_sh}
 {build_out_sh}
   if (blockIdx.x != 0 || threadIdx.x != 0) return;
   int64_t coord[{rank}];
   for (int64_t i = 0; i < total; i++) {{
-    int64_t g = (int64_t)indices[i];
+    chelis_flat_to_indices(i, idx_sh, ndim, coord);
+    int64_t index_offset = chelis_indices_to_flat(coord, idx_s, ndim);
+    int64_t update_offset = chelis_indices_to_flat(coord, updates_s, ndim);
+    int64_t g = (int64_t)indices[index_offset];
     if (g < 0 || g >= axis_size) {{
       CHELIS_GUARD_INDEX(g, axis_size, 4);
       return;
     }}
-    chelis_flat_to_indices(i, idx_sh, ndim, coord);
     coord[axis] = g;
-    int64_t dst = 0;
-    int64_t stride = 1;
-    for (int64_t d = ndim - 1; d >= 0; d--) {{
-      dst += coord[d] * stride;
-      stride *= out_sh[d];
-    }}
-    out[dst] = updates[i];
+    int64_t dst = chelis_indices_to_flat(coord, out_s, ndim);
+    out[dst] = updates[update_offset];
   }}
 }}
 ",
+        idx_strides = stride_params(rank, "idx"),
+        updates_strides = stride_params(rank, "updates"),
+        out_strides = stride_params(rank, "out"),
+        build_idx_s = build_array(rank, "idx_s", "idx", "s"),
+        build_updates_s = build_array(rank, "updates_s", "updates", "s"),
+        build_out_s = build_array(rank, "out_s", "out", "s"),
         idx_shape = shape_params(rank, "idx"),
         out_shape = shape_params(rank, "out"),
         build_idx_sh = build_array(rank, "idx_sh", "idx", "sh"),

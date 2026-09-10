@@ -682,6 +682,22 @@ impl HipEmitter {
                 }
                 _ => {}
             }
+            if matches!(
+                node.op,
+                RiscOp::ScatterAdd { .. } | RiscOp::Scatter { .. } | RiscOp::ScatterElements { .. }
+            ) {
+                let name = format!("kernel_materialize_{}", node.id.0);
+                let width = node
+                    .output_type
+                    .precision
+                    .runtime_dtype()
+                    .expect("verified representation")
+                    .byte_width();
+                self.kernel_sources.push((
+                    name.clone(),
+                    kernels::reshape_copy(self.kernel_rank, &name, width),
+                ));
+            }
             let name = self.kernel_name_for_op(&node.op, node, dag)?;
             if let Some(name) = name
                 && seen.insert(name.clone())
@@ -2684,6 +2700,37 @@ impl HipEmitter {
         Ok(())
     }
 
+    fn emit_logical_metadata_args(&mut self, id: usize, prefix: &str, source: usize) -> String {
+        self.emit_shape_vars(id, prefix, source);
+        self.emit_stride_vars(id, prefix, source);
+        self.line(&format!("int64_t t{id}_{prefix}_ndim = d_t{source}->rank;"));
+        format!(
+            "{}, {}, &t{id}_{prefix}_ndim",
+            self.shape_arg_refs(id, prefix),
+            self.stride_arg_refs(id, prefix)
+        )
+    }
+
+    fn emit_materialize_into_slot(&mut self, id: usize, source: usize) {
+        self.line("{");
+        self.indent += 1;
+        self.emit_stride_vars(id, "copy", source);
+        self.emit_shape_vars(id, "copy", source);
+        self.line(&format!("int64_t t{id}_copy_rank = d_t{source}->rank;"));
+        self.line(&format!("int64_t t{id}_copy_count = d_t{id}->count;"));
+        self.line(&format!("void *copy_args[] = {{ &p_t{source}, {}, {}, &t{id}_copy_rank, &p_t{id}, &t{id}_copy_count }};", self.stride_arg_refs(id, "copy"), self.shape_arg_refs(id, "copy")));
+        let name = format!("kernel_materialize_{id}");
+        self.emit_kernel_launch_expr(
+            &format!("mod_{name}"),
+            &name,
+            &format!("t{id}_copy_count / 256 + (t{id}_copy_count % 256 != 0)"),
+            "256",
+            "copy_args",
+        );
+        self.indent -= 1;
+        self.line("}");
+    }
+
     fn emit_gather_launch(
         &mut self,
         id: usize,
@@ -2730,13 +2777,15 @@ impl HipEmitter {
         self.line(&format!("int64_t t{id}_after = {after};"));
         self.line(&format!("int64_t t{id}_index_count = d_t{indices}->count;"));
         self.line(&format!("int64_t t{id}_total = d_t{id}->count;"));
+        let values_metadata = self.emit_logical_metadata_args(id, "values", values);
+        let indices_metadata = self.emit_logical_metadata_args(id, "idx", indices);
         self.line(&format!(
-            "void *args[] = {{ &p_t{values}, &p_t{indices}, &p_t{id}, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_total }};"
+            "void *args[] = {{ &p_t{values}, &p_t{indices}, &p_t{id}, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_total, {values_metadata}, {indices_metadata} }};"
         ));
         self.emit_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
             &kernel_name,
-            &format!("(t{id}_total + 255) / 256"),
+            &format!("t{id}_total / 256 + (t{id}_total % 256 != 0)"),
             "256",
             "args",
         );
@@ -2790,21 +2839,21 @@ impl HipEmitter {
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!(
-            "CHELIS_HIP_CHECK(hipMemcpy(d_t{id}->data, d_t{target}->data, d_t{id}->count * chelis_dtype_size(d_t{id}->dtype), hipMemcpyDeviceToDevice));"
-        ));
+        self.emit_materialize_into_slot(id, target);
         self.line(&format!("int64_t t{id}_before = {before};"));
         self.line(&format!("int64_t t{id}_axis_size = {axis_size};"));
         self.line(&format!("int64_t t{id}_after = {after};"));
         self.line(&format!("int64_t t{id}_index_count = d_t{indices}->count;"));
         self.line(&format!("int64_t t{id}_total = d_t{updates}->count;"));
+        let indices_metadata = self.emit_logical_metadata_args(id, "idx", indices);
+        let updates_metadata = self.emit_logical_metadata_args(id, "updates", updates);
         self.line(&format!(
-            "void *args[] = {{ &p_t{indices}, &p_t{updates}, &p_t{id}, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_total }};"
+            "void *args[] = {{ &p_t{indices}, &p_t{updates}, &p_t{id}, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_total, {indices_metadata}, {updates_metadata} }};"
         ));
         self.emit_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
             &kernel_name,
-            &format!("(t{id}_total + 255) / 256"),
+            &format!("t{id}_total / 256 + (t{id}_total % 256 != 0)"),
             "256",
             "args",
         );
@@ -2863,16 +2912,16 @@ impl HipEmitter {
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!(
-            "CHELIS_HIP_CHECK(hipMemcpy(d_t{id}->data, d_t{target}->data, d_t{id}->count * chelis_dtype_size(d_t{id}->dtype), hipMemcpyDeviceToDevice));"
-        ));
+        self.emit_materialize_into_slot(id, target);
         self.line(&format!("int64_t t{id}_before = {before};"));
         self.line(&format!("int64_t t{id}_axis_size = {axis_size};"));
         self.line(&format!("int64_t t{id}_after = {after};"));
         self.line(&format!("int64_t t{id}_index_count = d_t{indices}->count;"));
         self.line(&format!("int64_t t{id}_total = d_t{updates}->count;"));
+        let indices_metadata = self.emit_logical_metadata_args(id, "idx", indices);
+        let updates_metadata = self.emit_logical_metadata_args(id, "updates", updates);
         self.line(&format!(
-            "void *args[] = {{ &p_t{indices}, &p_t{updates}, &p_t{id}, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_total }};"
+            "void *args[] = {{ &p_t{indices}, &p_t{updates}, &p_t{id}, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_total, {indices_metadata}, {updates_metadata} }};"
         ));
         // Single-thread serial launch preserves last-write-wins order.
         self.emit_kernel_launch_expr(&format!("mod_{kernel_name}"), kernel_name, "1", "1", "args");
@@ -2923,9 +2972,7 @@ impl HipEmitter {
         self.indent += 1;
         // Initialize the output from `data`; the kernel overwrites only
         // the scattered cells, so the remainder must equal `data`.
-        self.line(&format!(
-            "CHELIS_HIP_CHECK(hipMemcpy(d_t{id}->data, d_t{data}->data, d_t{id}->count * chelis_dtype_size(d_t{id}->dtype), hipMemcpyDeviceToDevice));"
-        ));
+        self.emit_materialize_into_slot(id, data);
         self.emit_shape_vars(id, "idx", indices);
         self.emit_shape_vars(id, "out", id);
         self.line(&format!("int64_t t{id}_ndim = d_t{id}->rank;"));
@@ -2934,8 +2981,14 @@ impl HipEmitter {
         self.line(&format!("int64_t t{id}_total = d_t{updates}->count;"));
         let idx_sh_refs = self.shape_arg_refs(id, "idx");
         let out_sh_refs = self.shape_arg_refs(id, "out");
+        self.emit_stride_vars(id, "idx", indices);
+        self.emit_stride_vars(id, "updates", updates);
+        self.emit_stride_vars(id, "out", id);
+        let idx_stride_refs = self.stride_arg_refs(id, "idx");
+        let update_stride_refs = self.stride_arg_refs(id, "updates");
+        let out_stride_refs = self.stride_arg_refs(id, "out");
         self.line(&format!(
-            "void *args[] = {{ &p_t{indices}, &p_t{updates}, &p_t{id}, {idx_sh_refs}, {out_sh_refs}, &t{id}_ndim, &t{id}_axis, &t{id}_axis_size, &t{id}_total }};"
+            "void *args[] = {{ &p_t{indices}, &p_t{updates}, &p_t{id}, {idx_sh_refs}, {out_sh_refs}, &t{id}_ndim, &t{id}_axis, &t{id}_axis_size, &t{id}_total, {idx_stride_refs}, {update_stride_refs}, {out_stride_refs} }};"
         ));
         // Single-thread serial launch preserves last-write-wins order.
         self.emit_kernel_launch_expr(&format!("mod_{kernel_name}"), kernel_name, "1", "1", "args");
