@@ -4,6 +4,11 @@ Field visibility is one obligation, never evidence of valid numeric transport.
 """
 
 import copy
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
 import unittest
 
 from capacity_census_graph import GraphError, RustdocGraph
@@ -164,6 +169,61 @@ class NativeOwnerShapeControls(unittest.TestCase):
                 variant["inner"]["variant"]["discriminant"] = {"expr": "1", "value": "1"}
             with self.subTest(mutation=mutation), self.assertRaises(GraphError):
                 require_private_enum_owner(RustdocGraph([changed]), identity, source)
+
+
+class NativeOwnerRustdocControls(unittest.TestCase):
+    def test_compiler_private_fields_and_numeric_enum_successors(self):
+        from capacity_census_native_bindings import (
+            require_private_tuple_owner,
+            require_tensor_owner_choices,
+        )
+
+        root = Path(__file__).resolve().parent.parent
+        source = """
+use std::sync::Arc;
+struct CpuTensorHandle;
+struct GpuTensorHandle;
+enum TensorOwner { Cpu(Arc<CpuTensorHandle>), Gpu(Arc<GpuTensorHandle>) }
+mod native_tensor { struct ForeignDataPointer(*mut std::ffi::c_void); }
+"""
+        variants = {
+            "private": source,
+            "numeric-payload": source.replace("Arc<CpuTensorHandle>", "Arc<f64>"),
+            "public-enum": source.replace("enum TensorOwner", "pub enum TensorOwner"),
+            "public-field": source.replace("ForeignDataPointer(*mut", "ForeignDataPointer(pub *mut"),
+        }
+        for label, text in variants.items():
+            with self.subTest(variant=label), tempfile.TemporaryDirectory(
+                prefix="native-owner-rustdoc-", dir=root / "target",
+            ) as scratch:
+                directory = Path(scratch)
+                path = directory / "crates/chelis-python/src/lib.rs"
+                path.parent.mkdir(parents=True)
+                path.write_text(text)
+                command = [
+                    "rustdoc", "--edition=2024", "--crate-name", "chelis_python",
+                    "--output-format", "json", "-Z", "unstable-options",
+                    "--document-private-items", "crates/chelis-python/src/lib.rs",
+                    "-o", "doc",
+                ]
+                process = subprocess.run(command, cwd=directory,
+                    env={**os.environ, "RUSTC_BOOTSTRAP": "1"},
+                    text=True, capture_output=True, check=False)
+                self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+                graph = RustdocGraph([json.loads((directory / "doc/chelis_python.json").read_text())])
+                if label in {"numeric-payload", "public-enum"}:
+                    with self.assertRaises(GraphError):
+                        require_tensor_owner_choices(graph)
+                else:
+                    self.assertEqual(require_tensor_owner_choices(graph), ("Cpu", "Gpu"))
+                identity = "chelis_python::native_tensor::ForeignDataPointer"
+                if label == "public-field":
+                    with self.assertRaises(GraphError):
+                        require_private_tuple_owner(graph, identity, "crates/chelis-python/src/lib.rs")
+                else:
+                    fields = require_private_tuple_owner(graph, identity, "crates/chelis-python/src/lib.rs")
+                    self.assertEqual(len(fields), 1)
+                    self.assertTrue(fields[0]["raw_pointer"]["is_mutable"])
 
 
 if __name__ == "__main__":
