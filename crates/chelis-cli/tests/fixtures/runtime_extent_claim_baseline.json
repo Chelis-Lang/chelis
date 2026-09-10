@@ -568,7 +568,7 @@
   "polymorphic.foreign.root.mismatch": {
     "c": {
       "stage": "execute",
-      "stderr": "extent `3`: claimed = 3, node 2 axis 1 = 2\nnumeric trap: domain in expand at int64",
+      "stderr": "extent `3`: claimed = 3, node 2 axis 1 = 2\nnumeric trap: domain in insert at int64",
       "stdout": "",
       "success": false
     },
@@ -583,7 +583,7 @@
     },
     "eval": {
       "stage": "execute",
-      "stderr": "error: extent `3`: claimed = 3, node 2 axis 1 = 2\nnumeric trap: domain in expand at int64",
+      "stderr": "error: extent `3`: claimed = 3, node 2 axis 1 = 2\nnumeric trap: domain in insert at int64",
       "stdout": "",
       "success": false
     },
@@ -698,7 +698,7 @@
   "polymorphic.named.root.mismatch": {
     "c": {
       "stage": "execute",
-      "stderr": "extent `2`: claimed = 2, node 3 axis 0 = 3\nnumeric trap: domain in expand at int64",
+      "stderr": "extent `2`: claimed = 2, node 3 axis 0 = 3\nnumeric trap: domain in insert at int64",
       "stdout": "",
       "success": false
     },
@@ -713,7 +713,7 @@
     },
     "eval": {
       "stage": "execute",
-      "stderr": "error: extent `2`: claimed = 2, node 3 axis 0 = 3\nnumeric trap: domain in expand at int64",
+      "stderr": "error: extent `2`: claimed = 2, node 3 axis 0 = 3\nnumeric trap: domain in insert at int64",
       "stdout": "",
       "success": false
     },
