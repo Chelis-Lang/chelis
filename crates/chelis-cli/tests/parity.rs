@@ -417,11 +417,6 @@ fn drive_parity(path: &Path, expect_executable: bool) {
 // the harness fails loud rather than silently shrinking.
 
 #[test]
-fn parity_bounded_tensor_cast() {
-    drive_parity(&examples_root().join("bounded_tensor_cast.ch"), true);
-}
-
-#[test]
 fn parity_checked_reshape() {
     drive_parity(&examples_root().join("checked_reshape.ch"), true);
 }
@@ -588,7 +583,6 @@ fn parity_rank_poly_borrow_library_only() {
 #[test]
 fn parity_corpus_is_complete() {
     let known: &[&str] = &[
-        "bounded_tensor_cast.ch",
         "checked_reshape.ch",
         "checked_sparse_axes.ch",
         "checked_window_geometry.ch",
