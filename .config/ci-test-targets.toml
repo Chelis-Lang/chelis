@@ -69,3 +69,7 @@ name = "pipeline_parity"
 [[target]]
 package = "chelis-conformance"
 name = "audit_negative_parity"
+
+[[target]]
+package = "chelis-cli"
+name = "issue_1710_c_source_names"
