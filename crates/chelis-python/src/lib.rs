@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::ptr::NonNull;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -76,7 +76,6 @@ const MATH_H: &str = include_str!(concat!(
 
 const CHELIS_DTYPE_F32: i32 = RuntimeDType::F32.id();
 const CHELIS_DTYPE_F64: i32 = RuntimeDType::F64.id();
-const CHELIS_MAX_DIM: usize = 8;
 const DLPACK_CPU_DEVICE_TYPE: i32 = 1;
 const DLPACK_ROCM_DEVICE_TYPE: i32 = 10;
 
@@ -98,16 +97,11 @@ struct ChelisReadView {
     reserved: [u8; 7],
 }
 
+chelis_abi::define_device_descriptor!(ChelisGpuTensor);
+
 #[repr(C)]
-#[derive(Clone, Copy)]
-struct ChelisGpuTensor {
-    data: *mut f32,
-    shape: [i32; CHELIS_MAX_DIM],
-    strides: [i32; CHELIS_MAX_DIM],
-    ndim: i32,
-    dtype: i32,
-    size: i32,
-    storage_size: i32,
+struct DeviceTensorOwner {
+    _private: [u8; 0],
 }
 
 type HostEntry = unsafe extern "C" fn(*mut *mut ChelisTensor, c_int, *mut *mut ChelisTensor, c_int);
@@ -126,9 +120,34 @@ struct HostRuntimeApi {
     rank: HostRankFn,
     shape: HostShapeFn,
 }
-type DeviceEntry =
-    unsafe extern "C" fn(*mut *mut ChelisGpuTensor, c_int, *mut *mut ChelisGpuTensor, c_int);
-type HipFreeFn = unsafe extern "C" fn(*mut c_void) -> i32;
+type DeviceEntry = unsafe extern "C" fn(
+    *const *const DeviceTensorOwner,
+    c_int,
+    *mut *mut DeviceTensorOwner,
+    c_int,
+);
+type DeviceImportFn = unsafe extern "C" fn(*const ChelisGpuTensor) -> *mut DeviceTensorOwner;
+type DeviceViewFn = unsafe extern "C" fn(*const DeviceTensorOwner) -> *const ChelisGpuTensor;
+type DeviceReleaseFn = unsafe extern "C" fn(*mut DeviceTensorOwner);
+type DeviceIdFn = unsafe extern "C" fn(*const DeviceTensorOwner) -> i32;
+type HipGetDeviceFn = unsafe extern "C" fn(*mut c_int) -> i32;
+#[derive(Clone, Copy)]
+struct DeviceRuntimeApi {
+    import: DeviceImportFn,
+    view: DeviceViewFn,
+    release: DeviceReleaseFn,
+    device: DeviceIdFn,
+    current_device: HipGetDeviceFn,
+}
+impl DeviceRuntimeApi {
+    fn current(self) -> PyResult<i32> {
+        let mut device = -1;
+        if unsafe { (self.current_device)(&mut device) } != 0 || device < 0 {
+            return Err(PyRuntimeError::new_err("HIP current device query failed"));
+        }
+        Ok(device)
+    }
+}
 
 #[repr(C)]
 struct DLDevice {
@@ -174,8 +193,8 @@ struct CpuTensorHandle {
 }
 
 struct GpuTensorHandle {
-    ptr: NonNull<ChelisGpuTensor>,
-    device_id: i32,
+    ptr: NonNull<DeviceTensorOwner>,
+    api: DeviceRuntimeApi,
     _library: Arc<Library>,
 }
 
@@ -185,9 +204,8 @@ struct GpuTensorHandle {
 unsafe impl Send for CpuTensorHandle {}
 unsafe impl Sync for CpuTensorHandle {}
 
-// Device data is likewise opaque host-side; HIP deallocation is a host API
-// operation. The dynamic descriptor adoption replaces this legacy packet's
-// teardown with its plan-owning, library-bound finalizer before it can land.
+// The artifact finalizer releases the opaque owner on its recorded device and
+// restores the calling thread context. Its library stays live through release.
 unsafe impl Send for GpuTensorHandle {}
 unsafe impl Sync for GpuTensorHandle {}
 
@@ -244,12 +262,12 @@ struct HostExecution {
 
 struct DeviceExecution {
     entry: DeviceEntry,
-    input_ptrs: Vec<*mut ChelisGpuTensor>,
-    output_ptrs: Vec<*mut ChelisGpuTensor>,
+    input_ptrs: Vec<*const DeviceTensorOwner>,
+    output_ptrs: Vec<*mut DeviceTensorOwner>,
 }
 
 struct HostExecutionOutput(Vec<*mut ChelisTensor>);
-struct DeviceExecutionOutput(Vec<*mut ChelisGpuTensor>);
+struct DeviceExecutionOutput(Vec<*mut DeviceTensorOwner>);
 
 unsafe impl Send for HostExecution {}
 unsafe impl Send for DeviceExecution {}
@@ -292,9 +310,9 @@ struct CpuInputTensor {
 }
 
 struct GpuInputTensor {
+    // Release imported metadata before its borrowed Python allocation.
+    handle: GpuTensorHandle,
     _owner: Py<PyAny>,
-    tensor: ChelisGpuTensor,
-    device_id: i32,
 }
 
 #[::pyo3::pyclass(name = "CompiledModel", unsendable)]
@@ -321,13 +339,7 @@ impl Drop for CpuInputTensor {
 
 impl Drop for GpuTensorHandle {
     fn drop(&mut self) {
-        unsafe {
-            let tensor = self.ptr.as_ptr();
-            if !(*tensor).data.is_null() {
-                let _ = hip_free((*tensor).data.cast());
-            }
-            libc::free(tensor.cast());
-        }
+        unsafe { (self.api.release)(self.ptr.as_ptr()) }
     }
 }
 
@@ -431,6 +443,23 @@ unsafe fn load_host_runtime_api(library: &Library) -> PyResult<HostRuntimeApi> {
         read_view: load!(HostReadViewFn, b"chelis_tensor_read_view\0"),
         rank: load!(HostRankFn, b"chelis_tensor_rank\0"),
         shape: load!(HostShapeFn, b"chelis_tensor_shape\0"),
+    })
+}
+
+unsafe fn load_device_runtime_api(library: &Library) -> PyResult<DeviceRuntimeApi> {
+    macro_rules! load {
+        ($ty:ty, $symbol:literal) => {
+            *unsafe { library.get::<$ty>($symbol) }.map_err(|error| {
+                ChelisError::new_err(format!("load device runtime symbol failed: {error}"))
+            })?
+        };
+    }
+    Ok(DeviceRuntimeApi {
+        import: load!(DeviceImportFn, b"chelis_device_tensor_import\0"),
+        view: load!(DeviceViewFn, b"chelis_device_tensor_view\0"),
+        release: load!(DeviceReleaseFn, b"chelis_device_tensor_release\0"),
+        device: load!(DeviceIdFn, b"chelis_device_tensor_device\0"),
+        current_device: load!(HipGetDeviceFn, b"hipGetDevice\0"),
     })
 }
 
@@ -1133,13 +1162,6 @@ fn ensure_supported_execution_artifact_inner(
                 spec.dtype
             ));
         }
-        if target == CompileTarget::Hip && spec.dims.len() > CHELIS_MAX_DIM {
-            return Err(format!(
-                "HIP compiled execution currently supports rank <= {CHELIS_MAX_DIM}; `{}` has rank {}",
-                spec.name,
-                spec.dims.len()
-            ));
-        }
         if spec.dims.iter().any(|dim| dim.size.is_none()) {
             return Err(format!(
                 "compiled execution requires fully concrete dimensions; `{}` still has unresolved symbolic axes",
@@ -1655,74 +1677,115 @@ fn gpu_input_tensor(
     py: Python<'_>,
     value: &Bound<'_, PyAny>,
     spec: &ExecutionTensorSpec,
+    api: DeviceRuntimeApi,
+    library: &Arc<Library>,
 ) -> PyResult<GpuInputTensor> {
+    use chelis_abi::metadata::{ByteCount, ElementCount, StridedMetadata};
+    use native_tensor::metadata_error;
     let owner = owner_object(value)?;
     let torch = PyModule::import(py, "torch").map_err(|_| {
         PyValueError::new_err(
             "GPU compiled execution requires torch to bridge Python-managed device tensors",
         )
     })?;
-    let tensor =
-        if owner.hasattr("data_ptr")? && owner.hasattr("stride")? && owner.hasattr("device")? {
-            owner
-        } else if owner.hasattr("__dlpack__")? {
-            torch.getattr("from_dlpack")?.call1((owner.clone(),))?
-        } else {
-            return Err(PyValueError::new_err(
-                "expected a torch tensor or DLPack-capable GPU tensor",
-            ));
-        };
-
-    if device_kind(&tensor)? != DeviceKind::Gpu {
+    let tensor_class = torch.getattr("Tensor")?;
+    let tensor = if owner.is_instance(&tensor_class)? {
+        owner
+    } else if owner.hasattr("__dlpack__")? {
+        torch.getattr("from_dlpack")?.call1((owner,))?
+    } else {
         return Err(PyValueError::new_err(
-            "GPU compiled execution requires GPU tensor inputs",
+            "expected a torch tensor or DLPack-capable GPU tensor",
+        ));
+    };
+    if !tensor.is_instance(&tensor_class)? || device_kind(&tensor)? != DeviceKind::Gpu {
+        return Err(PyValueError::new_err(
+            "GPU bridge did not produce a device torch.Tensor owner",
         ));
     }
-    // chelis#920: the device lane stays f32-only. `supported_execution_dtypes`
-    // admits only f32 for the HIP target, so `spec.dtype` is already f32 here;
-    // re-check it rather than silently tagging whatever arrives as CHELIS_DTYPE_F32,
-    // so widening the HIP gate without widening this marshalling path is a
-    // loud error instead of a reinterpreted buffer.
-    if spec.dtype != "f32" {
-        return Err(PyValueError::new_err(format!(
-            "device compiled execution supports only f32 tensors; `{}` uses `{}`. \
-             The torch/GPU marshalling path is f32-hardcoded (chelis#920)",
-            spec.name, spec.dtype
-        )));
-    }
-    let dtype = tensor.getattr("dtype")?.str()?.extract::<String>()?;
-    if !dtype.ends_with("float32") {
-        return Err(PyValueError::new_err(format!(
-            "input `{}` expected dtype torch.float32, got {dtype}",
-            spec.name
-        )));
+    // The explicit native backend gate remains separate from descriptor dtype support.
+    if spec.dtype != "f32"
+        || tensor.getattr("dtype")?.str()?.extract::<String>()? != "torch.float32"
+    {
+        return Err(PyValueError::new_err(
+            "HIP compiled input requires the declared torch.float32 dtype",
+        ));
     }
     let shape = tensor.getattr("shape")?.extract::<Vec<usize>>()?;
     validate_shape(spec, &shape)?;
-    let strides = tensor.call_method0("stride")?.extract::<Vec<usize>>()?;
-    let data_ptr = tensor.call_method0("data_ptr")?.extract::<usize>()? as *mut f32;
-    let device = tensor.getattr("device")?;
-    let device_id = device
+    let shape = host_dims(&shape)?;
+    let strides = tensor.call_method0("stride")?.extract::<Vec<i64>>()?;
+    let device = tensor
+        .getattr("device")?
         .getattr("index")?
         .extract::<Option<i32>>()?
-        .unwrap_or(0);
-
+        .ok_or_else(|| PyValueError::new_err("GPU input has no concrete device index"))?;
+    if device < 0 || device != api.current()? {
+        return Err(PyValueError::new_err(
+            "GPU input device disagrees with the actual HIP current device",
+        ));
+    }
+    let storage = tensor.call_method0("untyped_storage")?;
+    let base = storage.call_method0("data_ptr")?.extract::<usize>()?;
+    let capacity = ByteCount::from_declared(storage.call_method0("nbytes")?.extract::<i64>()?)
+        .map_err(metadata_error)?;
+    capacity.allocation().map_err(metadata_error)?;
+    let offset = tensor.call_method0("storage_offset")?.extract::<i64>()?;
+    let offset = ElementCount::from_extents(&[offset])
+        .and_then(|count| count.bytes(RuntimeDType::F32))
+        .map_err(metadata_error)?;
+    let remaining = capacity
+        .get()
+        .checked_sub(offset.get())
+        .filter(|n| *n >= 0)
+        .ok_or_else(|| PyValueError::new_err("GPU storage offset exceeds owned byte capacity"))?;
+    let expected = base
+        .checked_add(offset.allocation().map_err(metadata_error)?.get())
+        .ok_or_else(|| PyValueError::new_err("GPU storage pointer offset overflow"))?;
+    let data = tensor.call_method0("data_ptr")?.extract::<usize>()?;
+    let metadata = StridedMetadata::new(
+        &shape,
+        &strides,
+        RuntimeDType::F32,
+        ByteCount::from_declared(remaining).map_err(metadata_error)?,
+    )
+    .map_err(metadata_error)?;
+    if data != expected && !(metadata.elements().get() == 0 && data == 0) {
+        return Err(PyValueError::new_err(
+            "GPU tensor pointer disagrees with its retained storage offset",
+        ));
+    }
+    if metadata.elements().get() != 0 && (data == 0 || data % RuntimeDType::F32.byte_width() != 0) {
+        return Err(PyValueError::new_err(
+            "GPU tensor has null or misaligned nonempty storage",
+        ));
+    }
+    let packet = ChelisGpuTensor {
+        data: data as *mut c_void,
+        shape: metadata.shape().as_ptr(),
+        strides: metadata.strides().as_ptr(),
+        count: metadata.elements().get(),
+        byte_capacity: remaining,
+        rank: metadata.rank(),
+        dtype: RuntimeDType::F32.id() as u8,
+        ownership: 0,
+        reserved: [0; 2],
+    };
+    let ptr = NonNull::new(unsafe { (api.import)(&packet) })
+        .ok_or_else(|| PyRuntimeError::new_err("device import returned a NULL owner"))?;
+    let handle = GpuTensorHandle {
+        ptr,
+        api,
+        _library: Arc::clone(library),
+    };
+    if unsafe { (api.device)(ptr.as_ptr()) } != device {
+        return Err(PyValueError::new_err(
+            "imported owner device disagrees with admitted input",
+        ));
+    }
     Ok(GpuInputTensor {
+        handle,
         _owner: tensor.unbind(),
-        tensor: ChelisGpuTensor {
-            data: data_ptr,
-            shape: dims_array(&shape)?,
-            strides: dims_array(&strides)?,
-            ndim: shape.len() as i32,
-            dtype: CHELIS_DTYPE_F32,
-            // `as i32` truncated silently: a device tensor with more than
-            // `i32::MAX` elements published a wrong (often negative) count to
-            // the GPU carrier. Narrowing to that carrier's declared width is a
-            // decision, so it reports rather than wraps.
-            size: gpu_element_count(&shape)?,
-            storage_size: gpu_element_count(&shape)?,
-        },
-        device_id,
     })
 }
 
@@ -1788,29 +1851,6 @@ fn validate_canonical_host_strides(shape: &[usize], strides: &[usize]) -> PyResu
              element strides {strides:?}, expected {expected:?}"
         )))
     }
-}
-
-/// Element count narrowed to the GPU carrier's declared `int32_t` width.
-///
-/// The GPU tensor still uses the fixed-rank int32 metadata carrier that the
-/// host ABI replaced with dynamic-rank int64 shape and stride carriers; until
-/// it moves, the narrowing is at least loud. Tracked by chelis#1345.
-fn gpu_element_count(shape: &[usize]) -> PyResult<i32> {
-    let count = element_count(shape)?;
-    i32::try_from(count).map_err(|_| {
-        PyValueError::new_err(format!(
-            "device tensor element count {count} exceeds the GPU carrier's int32 width"
-        ))
-    })
-}
-
-fn dims_array(dims: &[usize]) -> PyResult<[i32; CHELIS_MAX_DIM]> {
-    let mut out = [0; CHELIS_MAX_DIM];
-    for (index, dim) in dims.iter().enumerate() {
-        out[index] = i32::try_from(*dim)
-            .map_err(|_| PyValueError::new_err(format!("dimension too large for ABI: {dim}")))?;
-    }
-    Ok(out)
 }
 
 /// Element count for a host input shape, folded in the canonical int64 extent
@@ -1966,39 +2006,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     format!("{:x}", hasher.finalize())
-}
-
-fn hip_free(ptr: *mut c_void) -> Result<(), String> {
-    static HIP_FREE: OnceLock<Result<HipFreeFn, String>> = OnceLock::new();
-    if ptr.is_null() {
-        return Ok(());
-    }
-    let hip_free = HIP_FREE.get_or_init(|| {
-        let candidates = ["libamdhip64.so", "libamdhip64.so.6"];
-        for candidate in candidates {
-            let library = unsafe { Library::new(candidate) };
-            let Ok(library) = library else {
-                continue;
-            };
-            let symbol = unsafe { library.get::<HipFreeFn>(b"hipFree\0") };
-            let Ok(symbol) = symbol else {
-                continue;
-            };
-            let func = *symbol;
-            std::mem::forget(library);
-            return Ok(func);
-        }
-        Err("failed to load hipFree from libamdhip64".to_string())
-    });
-    match hip_free {
-        Ok(func) => {
-            unsafe {
-                let _ = func(ptr);
-            }
-            Ok(())
-        }
-        Err(err) => Err(err.clone()),
-    }
 }
 
 /// Exact PyO3 class identities for the registered-surface census.
@@ -2184,18 +2191,6 @@ loss = (mean(x, 0) : tensor[f32])
         // it as a successful count.
         let band = 1_usize << 32;
         assert!(element_count(&[band, band]).is_err());
-    }
-
-    #[test]
-    fn gpu_element_count_reports_instead_of_truncating_to_the_carrier_width() {
-        assert_eq!(gpu_element_count(&[2, 3]).expect("legal count"), 6);
-        assert_eq!(
-            gpu_element_count(&[i32::MAX as usize]).expect("boundary count"),
-            i32::MAX
-        );
-        // One element past the carrier's declared width. `as i32` published
-        // `i32::MIN` here.
-        assert!(gpu_element_count(&[(i32::MAX as usize) + 1]).is_err());
     }
 
     struct HostTensorFixture {

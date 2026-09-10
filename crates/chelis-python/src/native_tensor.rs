@@ -13,7 +13,7 @@ enum AdmittedLane {
     Device {
         entry: DeviceEntry,
         inputs: Vec<GpuInputTensor>,
-        device_id: i32,
+        api: DeviceRuntimeApi,
     },
 }
 
@@ -93,26 +93,16 @@ impl CompiledInputs {
             }
             .map(|symbol| *symbol)
             .map_err(|error| ChelisError::new_err(format!("load symbol failed: {error}")))?;
+            let api = unsafe { load_device_runtime_api(&loaded.library)? };
             let inputs = manifest
                 .inputs
                 .iter()
                 .zip(values)
-                .map(|(spec, value)| gpu_input_tensor(py, value.bind(py), spec))
+                .map(|(spec, value)| {
+                    gpu_input_tensor(py, value.bind(py), spec, api, &loaded.library)
+                })
                 .collect::<PyResult<Vec<_>>>()?;
-            let device_id = inputs
-                .first()
-                .expect("a GPU input selected this lane")
-                .device_id;
-            if inputs.iter().any(|input| input.device_id != device_id) {
-                return Err(PyValueError::new_err(
-                    "all GPU inputs must live on the same device",
-                ));
-            }
-            AdmittedLane::Device {
-                entry,
-                inputs,
-                device_id,
-            }
+            AdmittedLane::Device { entry, inputs, api }
         } else {
             let api = unsafe { load_host_runtime_api(&loaded.library)? };
             let entry = unsafe {
@@ -170,18 +160,14 @@ pub(super) fn execute_checked(py: Python<'_>, admitted: &CompiledInputs) -> RawO
                 })
                 .collect()
         }
-        AdmittedLane::Device {
-            entry,
-            inputs,
-            device_id,
-        } => {
+        AdmittedLane::Device { entry, inputs, api } => {
             let execution = DeviceExecution {
                 entry: *entry,
                 // The device entry borrows caller packets and never mutates
                 // their metadata, as required by the compiled ownership ABI.
                 input_ptrs: inputs
                     .iter()
-                    .map(|input| std::ptr::from_ref(&input.tensor).cast_mut())
+                    .map(|input| input.handle.ptr.as_ptr().cast_const())
                     .collect(),
                 output_ptrs: vec![std::ptr::null_mut(); admitted.output_count],
             };
@@ -192,7 +178,7 @@ pub(super) fn execute_checked(py: Python<'_>, admitted: &CompiledInputs) -> RawO
                     NonNull::new(pointer).map(|ptr| {
                         TensorOwner::Gpu(Arc::new(GpuTensorHandle {
                             ptr,
-                            device_id: *device_id,
+                            api: *api,
                             _library: Arc::clone(&admitted.library),
                         }))
                     })
@@ -295,42 +281,53 @@ impl ValidatedTensor {
                 )
             },
             TensorOwner::Gpu(handle) => unsafe {
-                let packet = handle.ptr.as_ptr();
-                // This adapter is removed with the still-pending dynamic HIP
-                // packet adoption. Never index its current fixed arrays first.
-                let rank = usize::try_from((*packet).ndim)
+                let device = (handle.api.device)(handle.ptr.as_ptr());
+                if device < 0 || device != handle.api.current()? {
+                    return Err(PyValueError::new_err(
+                        "output owner device disagrees with actual HIP current device",
+                    ));
+                }
+                let packet = (handle.api.view)(handle.ptr.as_ptr());
+                if packet.is_null() || packet.addr() % std::mem::align_of::<ChelisGpuTensor>() != 0
+                {
+                    return Err(PyValueError::new_err(
+                        "null or misaligned device output packet",
+                    ));
+                }
+                let packet = &*packet;
+                let rank = usize::try_from(packet.rank)
                     .map_err(|_| PyValueError::new_err("negative device output rank"))?;
-                if rank > CHELIS_MAX_DIM || handle.device_id < 0 {
-                    return Err(PyValueError::new_err("invalid device output descriptor"));
+                if rank != spec.dims.len() || packet.ownership != 1 || packet.reserved != [0; 2] {
+                    return Err(PyValueError::new_err(
+                        "invalid device output rank, ownership, or reserved bytes",
+                    ));
+                }
+                ElementCount::scratch_entries(rank, 0)
+                    .and_then(|n| n.scratch_len::<i64>())
+                    .map_err(metadata_error)?;
+                let mut shape = Vec::with_capacity(rank);
+                let mut strides = Vec::with_capacity(rank);
+                if rank != 0 {
+                    if packet.shape.is_null()
+                        || packet.strides.is_null()
+                        || packet.shape.addr() % std::mem::align_of::<i64>() != 0
+                        || packet.strides.addr() % std::mem::align_of::<i64>() != 0
+                    {
+                        return Err(PyValueError::new_err(
+                            "null or misaligned device output shape/strides",
+                        ));
+                    }
+                    shape.extend_from_slice(std::slice::from_raw_parts(packet.shape, rank));
+                    strides.extend_from_slice(std::slice::from_raw_parts(packet.strides, rank));
                 }
                 (
-                    (0..rank)
-                        .map(|axis| {
-                            i64::from(
-                                std::ptr::addr_of!((*packet).shape)
-                                    .cast::<i32>()
-                                    .add(axis)
-                                    .read(),
-                            )
-                        })
-                        .collect(),
-                    (*packet).dtype,
-                    i64::from((*packet).size),
-                    Some(i64::from((*packet).storage_size)),
-                    (*packet).data.cast(),
-                    (DLPACK_ROCM_DEVICE_TYPE, handle.device_id),
-                    Some(
-                        (0..rank)
-                            .map(|axis| {
-                                i64::from(
-                                    std::ptr::addr_of!((*packet).strides)
-                                        .cast::<i32>()
-                                        .add(axis)
-                                        .read(),
-                                )
-                            })
-                            .collect::<Vec<_>>(),
-                    ),
+                    shape,
+                    i32::from(packet.dtype),
+                    packet.count,
+                    Some(packet.byte_capacity),
+                    packet.data,
+                    (DLPACK_ROCM_DEVICE_TYPE, device),
+                    Some(strides),
                 )
             },
         };
@@ -344,9 +341,10 @@ impl ValidatedTensor {
             ));
         }
         if let Some(capacity) = capacity {
-            let count = ElementCount::from_extents(&[capacity]).map_err(metadata_error)?;
+            let capacity =
+                chelis_abi::metadata::ByteCount::from_declared(capacity).map_err(metadata_error)?;
             metadata
-                .require_capacity(count.bytes(dtype).map_err(metadata_error)?)
+                .require_capacity(capacity)
                 .map_err(metadata_error)?;
         }
         if strides
