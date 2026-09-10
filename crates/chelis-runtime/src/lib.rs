@@ -2448,6 +2448,76 @@ fn affine_result<T>(result: Result<T, MetadataError>, op: &str) -> T {
     })
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_check_literal(
+    rank: chelis_scalar,
+    shape: *const chelis_scalar,
+    exemplar: chelis_scalar,
+    count: chelis_scalar,
+) {
+    let op = "const";
+    let dtype = reduction_exemplar(exemplar, op);
+    let count = affine_scalar(count, op);
+    if exemplar.bits != 0 || count < 0 {
+        affine_result::<()>(
+            Err(MetadataError::Domain(
+                "literal requires a zero exemplar and nonnegative count".into(),
+            )),
+            op,
+        );
+    }
+    let shape = reduction_array(rank, shape, op);
+    let metadata = affine_result(ShapeMetadata::contiguous(&shape, dtype), op);
+    if metadata.elements().get() != count {
+        affine_result::<()>(
+            Err(MetadataError::Domain(
+                "literal count differs from result shape".into(),
+            )),
+            op,
+        );
+    }
+    affine_result(metadata.bytes().allocation(), op);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_write_literal(
+    guard: *mut chelis_tensor_write,
+    count: chelis_scalar,
+    values: *const chelis_scalar,
+) {
+    let op = "const";
+    let tensor = lock_live_write_guard(guard, op);
+    let count = affine_scalar(count, op);
+    if count != tensor.metadata.elements().get() || (count > 0 && values.is_null()) {
+        affine_result::<()>(
+            Err(MetadataError::Domain(
+                "literal count or source pointer differs from destination".into(),
+            )),
+            op,
+        );
+    }
+    let length = affine_result(
+        tensor.metadata.elements().scratch_len::<chelis_scalar>(),
+        op,
+    );
+    // Preflight every carrier before the first store. The caller keeps the
+    // complete literal array stable and separate from the destination.
+    for index in 0..length {
+        if reduction_exemplar(values.add(index).read(), op) != tensor.metadata.dtype() {
+            affine_result::<()>(
+                Err(MetadataError::Domain(
+                    "literal element dtype mismatch".into(),
+                )),
+                op,
+            );
+        }
+    }
+    for index in 0..length {
+        write_scalar_bits((*guard).tensor, index, values.add(index).read());
+    }
+    unlock_tensor(tensor, TENSOR_ACCESS_WRITING);
+}
+
 pub type chelis_window_op = c_int;
 pub const CHELIS_WINDOW_SUM: chelis_window_op = 0;
 pub const CHELIS_WINDOW_MEAN: chelis_window_op = 1;

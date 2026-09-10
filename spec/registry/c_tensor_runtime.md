@@ -76,3 +76,5 @@ identity; row order is not semantic and no ordinal is part of any identity.
 | checked window window_check_tensor | `void chelis_window_check_tensor(const chelis_window_plan *plan, const chelis_tensor *tensor, chelis_window_side side)` |
 | checked window window_check_target | `void chelis_window_check_target(const chelis_window_plan *plan, chelis_window_side side, chelis_scalar rank, const chelis_scalar *shape)` |
 | checked window window_plan_release | `void chelis_window_plan_release(chelis_window_plan *plan)` |
+| checked literal tensor_check_literal | `void chelis_tensor_check_literal(chelis_scalar rank, const chelis_scalar *shape, chelis_scalar exemplar, chelis_scalar count)` |
+| checked literal tensor_write_literal | `void chelis_tensor_write_literal(chelis_tensor_write *guard, chelis_scalar count, const chelis_scalar *values)` |
