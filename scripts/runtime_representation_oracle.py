@@ -62,7 +62,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "0232be717ff4e935acdc312fc3bc9707147dd44f043d26372c1aa43ba5734637"
+FREEZE_SHA256 = "4453e210ba79f48903813230c46be57905a8d10fb2064a468fee356124254756"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -1671,7 +1671,7 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
                 "--test", "checked_metadata", "--test", "metadata_compile",
                 "--test", "checked_metadata_padding", "--test", "checked_c_metadata",
                 "--test", "checked_c_indexing", "--test", "checked_c_movement", "--test", "checked_c_movement_plans", "--test", "checked_c_affine",
-                "--test", "checked_c_reduction", "--test", "checked_c_sparse", "--test", "checked_c_matmul", "--test", "checked_c_window", "--test", "checked_c_literal",
+                "--test", "checked_c_reduction", "--test", "checked_c_sparse", "--test", "checked_c_matmul", "--test", "checked_c_window", "--test", "checked_c_literal", "--test", "checked_c_alloc_like",
                 "--test", "exact_tagged_c_abi",
                 "--test", "op33_empty_tensor_axis_decomposition",
                 "--test", "op33_tensor_validation",
@@ -1681,7 +1681,15 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
         ) for profile, flags in (("debug", ()), ("release", ("--release",)))),
         OracleLeg(
             "checked C snapshot delegation and restoration mutations",
-            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_metadata"),
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_metadata", "--test", "checked_c_snapshot_metadata"),
+        ),
+        OracleLeg(
+            "checked shape observation before storage submission execution",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "exec_compile", "-E", "test(checked_snapshot_)"),
+        ),
+        OracleLeg(
+            "checked vmap shape observation on its shifted axis",
+            ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "runtime_extent_slice_a", "-E", "test(vmap_shape_bound_with_concrete_batch_emits_c_without_to_end_ice)"),
         ),
         OracleLeg(
             "checked C reduction delegation and bypass mutations",

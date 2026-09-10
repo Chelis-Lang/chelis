@@ -38,6 +38,7 @@ extern "C" {
 #endif
 
 chelis_tensor *chelis_alloc(int32_t rank, const int64_t *shape, chelis_dtype dtype);
+chelis_tensor *chelis_tensor_alloc_like(const chelis_tensor *input, chelis_scalar exemplar);
 chelis_tensor *chelis_tensor_entry_borrow(int32_t rank, const int64_t *shape, chelis_dtype dtype, const void *data, int64_t byte_capacity);
 void chelis_tensor_retain(const chelis_tensor *tensor);
 void chelis_tensor_release(const chelis_tensor *tensor);

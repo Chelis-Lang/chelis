@@ -7785,3 +7785,87 @@ puts("EXACT"); return 0; }}"#
         }
     }
 }
+
+#[test]
+fn checked_snapshot_shape_capture_survives_submission_repurpose() {
+    let mut dag = Dag::new();
+    let ty = TensorType {
+        dims: vec![DimInfo::Lit(1)],
+        precision: Prim::Int64,
+    };
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+    let owned = dag.add_node(RiscOp::Copy, vec![x], ty, None);
+    let out = dag.add_node(
+        RiscOp::Shape { axis: 0 },
+        vec![owned],
+        TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        },
+        None,
+    );
+    dag.add_root(out);
+    let generated = codegen_with_options(
+        &dag,
+        "snapshot_shape",
+        CodegenOptions {
+            use_blas: false,
+            math_lib_override: Some(MathLib::None),
+            static_entry: false,
+        },
+    )
+    .unwrap();
+    let source = &generated.c_source;
+    let capture = "const int64_t t2_shape_extent = chelis_tensor_shape(t1, 0);";
+    assert!(source.contains(capture), "{source}");
+    let harness = r#"
+#include "chelis_runtime.h"
+#include <stdio.h>
+extern void snapshot_shape(chelis_tensor**, int, chelis_tensor**, int);
+int main(void) {
+    int64_t data = 91, shape = 1;
+    chelis_tensor *input = chelis_tensor_entry_borrow(1, &shape, CHELIS_DTYPE_I64, &data, sizeof(data));
+    chelis_tensor *outputs[1] = {NULL};
+    snapshot_shape(&input, 1, outputs, 1);
+    chelis_read_view view = chelis_tensor_read_view(outputs[0]);
+    if (chelis_tensor_rank(outputs[0]) != 0 || view.dtype != CHELIS_DTYPE_I64 || view.count != 1 || ((const int64_t*)view.data)[0] != 1) return 43;
+    chelis_tensor_release(outputs[0]); chelis_tensor_release(input);
+    puts("EXTENT BEFORE REUSE"); return 0;
+}
+"#;
+    let valid = checked_indexing_run(source, harness);
+    assert!(valid.status.success(), "{valid:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&valid.stdout),
+        "EXTENT BEFORE REUSE\n"
+    );
+    // The current planner keeps a last-use input live through submission. Also
+    // exercise the emitter's capture order with a legal same-capacity submitter
+    // that repurposes this owned source; this is an explicit fixture variant.
+    let allocation = "chelis_tensor *t2 = chelis_alloc(0, NULL, CHELIS_DTYPE_I64);";
+    assert_eq!(source.matches(allocation).count(), 1);
+    let resubmitted = source
+        .replace("chelis_tensor_end_write(t1_write_guard);", "")
+        .replace("chelis_tensor_release(t1);", "")
+        .replace(allocation, "chelis_tensor_end_write(t1_write_guard); chelis_tensor_repurpose(t1, chelis_scalar_from_bits(CHELIS_DTYPE_I64, 0), NULL); chelis_tensor *t2 = t1;");
+    let reused = checked_indexing_run(&resubmitted, harness);
+    assert!(reused.status.success(), "{reused:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&reused.stdout),
+        "EXTENT BEFORE REUSE\n"
+    );
+    let removed = resubmitted.replace(capture, "");
+    let marker = "chelis_fill_scalar(t2_write_guard,";
+    assert_eq!(removed.matches(marker).count(), 1);
+    let mutated = removed.replacen(marker, &format!("{capture}\n    {marker}"), 1);
+    let invalid = checked_indexing_run(&mutated, harness);
+    assert_eq!(
+        invalid.status.code(),
+        Some(1),
+        "late shape observation must fail after rank-zero repurpose: {invalid:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&invalid.stderr).contains("axis"),
+        "{invalid:?}"
+    );
+}

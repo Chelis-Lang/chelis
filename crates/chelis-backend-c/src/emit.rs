@@ -532,18 +532,6 @@ impl CEmitter {
 
     fn emit_tensor_snapshot(&mut self, id: usize, writable: bool) {
         self.line(&format!("int32_t t{id}_rank = chelis_tensor_rank(t{id});"));
-        self.line(&format!(
-            "int64_t t{id}_shape[t{id}_rank > 0 ? t{id}_rank : 1];"
-        ));
-        self.line(&format!(
-            "int64_t t{id}_strides[t{id}_rank > 0 ? t{id}_rank : 1];"
-        ));
-        self.line(&format!(
-            "for (int32_t __axis = 0; __axis < t{id}_rank; ++__axis) t{id}_shape[__axis] = chelis_tensor_shape(t{id}, __axis);"
-        ));
-        self.line(&format!(
-            "for (int32_t __axis = 0; __axis < t{id}_rank; ++__axis) t{id}_strides[__axis] = chelis_tensor_stride(t{id}, __axis);"
-        ));
         self.line(&format!("int64_t t{id}_size = chelis_tensor_numel(t{id});"));
         if writable {
             self.line(&format!(
@@ -770,7 +758,7 @@ impl CEmitter {
                      fprintf(stderr, \"chelis: elementwise operand rank mismatch at node {id}: %d vs %d\\n\", \
                      t{a}_rank, t{b}_rank); abort(); }} \
                      if (t{a}_rank == t{b}_rank) {{ for (int __d = 0; __d < t{a}_rank; __d++) {{ \
-                     if (t{a}_shape[__d] != t{b}_shape[__d]) {{ fprintf(stderr, \"chelis: \
+                     if (chelis_tensor_shape(t{a}, __d) != chelis_tensor_shape(t{b}, __d)) {{ fprintf(stderr, \"chelis: \
                      elementwise operand shape mismatch at node {id} axis %d\\n\", __d); abort(); \
                      }} }} }}"
                 ));
@@ -814,9 +802,11 @@ impl CEmitter {
                     chelis_ir::span_sanitize::sanitize_for_format_string(parameter).to_string();
                 for required in requirements {
                     let required = required.as_i64_exact().expect("verified int64 requirement");
-                    self.line(&format!("if (t{input}_shape[{axis}] != {required}) {{"));
+                    self.line(&format!(
+                        "if (chelis_tensor_shape(t{input}, {axis}) != {required}) {{"
+                    ));
                     self.indent += 1;
-                    self.line(&format!("fprintf(stderr, \"extent `{required}`: claimed = {required}, {parameter} axis {axis} = %lld\\n\", (long long)t{input}_shape[{axis}]);"));
+                    self.line(&format!("fprintf(stderr, \"extent `{required}`: claimed = {required}, {parameter} axis {axis} = %lld\\n\", (long long)chelis_tensor_shape(t{input}, {axis}));"));
                     self.line("chelis_numeric_trap(\"numeric trap: domain in load at int64\");");
                     self.indent -= 1;
                     self.line("}");
@@ -2106,16 +2096,21 @@ impl CEmitter {
 
     /// Emit a `shape(input, axis)` read (chelis#513/#558): a rank-0
     /// integer scalar holding the input tensor's runtime extent along
-    /// `axis`, read from `t{input}_shape[axis]` (the runtime `int`
-    /// field). The extent is stored into the scalar buffer using the
+    /// `axis`, read from checked metadata before storage submission.
+    /// The extent is stored into the scalar buffer using the
     /// node's integer precision. This is the C realization of the runtime
     /// dim read; the emitted expression reads the shape at execution time,
     /// so a symbolic input axis is resolved from the actual input tensor
     /// rather than baked at codegen time.
     fn emit_shape(&mut self, id: usize, axis: usize, inputs: &[NodeId], ty: &TensorType) {
         let a = inputs[0].0;
+        // The destination may repurpose the last-use source at the same capacity.
+        // Capture its logical extent while the source metadata still names it.
+        let extent = format!("t{id}_shape_extent");
+        self.line(&format!(
+            "const int64_t {extent} = chelis_tensor_shape(t{a}, {axis});"
+        ));
         self.emit_slot_wrapper(id, ty);
-        let extent = format!("t{a}_shape[{axis}]");
         match ty.precision {
             Prim::Int64 => {
                 self.line(&format!(
@@ -5783,7 +5778,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     // ---- Pad ----
     /// chelis#616: the C integer expression for a movement [`RtDim`] at run
     /// time. `Lit` is a literal; `ToEnd` reads the input tensor's runtime axis
-    /// extent (`t{a}_shape[axis]`); `Node(i)` reads the rank-0 integer bound
+    /// checked runtime extent; `Node(i)` reads the rank-0 integer bound
     /// scalar `t{inputs[i]}->data[0]` with its declared element type, cast to
     /// `int` for use as a C index.
     fn bound_c_expr(
@@ -5795,7 +5790,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     ) -> String {
         match bound {
             RtDim::Lit(n) => n.to_string(),
-            RtDim::ToEnd => format!("t{a}_shape[{axis}]"),
+            RtDim::ToEnd => format!("chelis_tensor_shape(t{a}, {axis})"),
             RtDim::Node(i) => {
                 let n = inputs[*i].0;
                 debug_assert_eq!(
@@ -5809,7 +5804,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 axis: RtAxis::Lit(source_axis),
             } => {
                 let source = inputs[*tensor].0;
-                format!("t{source}_shape[{source_axis}]")
+                format!("chelis_tensor_shape(t{source}, {source_axis})")
             }
             // A symbolic dim (reshape targets only; verify rejects it in
             // movement bounds) is a declared C variable, exactly as
