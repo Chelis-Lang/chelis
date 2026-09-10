@@ -953,8 +953,9 @@ resolved from each member's `Cargo.toml`, not the directory name). The derived c
 list is always printed; "no crate changes detected" means the per-crate stage was
 skipped, not silently empty. The workspace nextest stage is CI-owned: run `--fast`
 before every push, push before the review round so the reviewer and CI see the same
-head, and require CI on the candidate before ready-for-review. CI runs the full suite
-(macOS Smoke is the authoritative workspace oracle). See [`docs/local_macos_environment.md`](docs/local_macos_environment.md)
+head, and require CI on the candidate before ready-for-review. Mac workspace
+validation runs daily at 04:17 UTC in `macos-nightly.yml` and on manual dispatch.
+It is not a required PR check; dispatch it on the branch for Mac-specific changes. See [`docs/local_macos_environment.md`](docs/local_macos_environment.md)
 for why the workspace suite does not belong in the local loop on macOS.
 
 If a cold `--local` run is useful, launch it with
@@ -1107,7 +1108,7 @@ default workspace run.
   Probe with `python3 scripts/preflight_exec_probe.py` (exit 1 wedged, exit 3
   slow). Inside Devenv, use `chelis-exec-preflight`. Run the probe before the
   local workspace nextest stage. If the probe reports degradation, use the
-  macOS Smoke CI stage per
+  manually dispatched `macos-nightly.yml` workflow per
   [`docs/local_macos_environment.md`](docs/local_macos_environment.md).
 
 ### Post-Merge Cleanup
