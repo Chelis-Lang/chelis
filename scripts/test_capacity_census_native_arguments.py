@@ -66,6 +66,16 @@ class ArgumentForwardingCompiledControls(unittest.TestCase):
                 raw = self.observe(SOURCE.replace(old, new))
                 self.assertTrue(argument_forwarding_problems(raw, *obligation(raw)))
 
+    def test_mutable_reference_escape_cannot_certify_unchanged_forwarding(self):
+        source = SOURCE.replace(
+            "pub fn entry(stream: Option<i64>", "pub fn entry(mut stream: Option<i64>"
+        ).replace(
+            "let forwarded = stream;", "replace(&mut stream); let forwarded = stream;"
+        ) + "\nfn replace(value: &mut Option<i64>) { *value = Some(4); }\n"
+        raw = self.observe(source)
+        problems = argument_forwarding_problems(raw, *obligation(raw))
+        self.assertTrue(any("escapes" in problem for problem in problems), problems)
+
     def test_missing_ambiguous_or_indirect_validator_is_rejected(self):
         raw = self.observe(SOURCE)
         spec = obligation(raw)
