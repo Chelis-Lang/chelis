@@ -1716,6 +1716,18 @@ validation follows the external protocol, including version/device/stream/copy
 semantics; a supported current-device zero-copy path does not authorize ignored
 keywords or promise every optional move/copy path.
 
+Guarded native owner aggregates are constructed in exact private function
+bodies. Per-output owner wrapping and device-handle interning use explicit loops
+without constructing those aggregates inside foreign callbacks. The construction
+verifier joins the aggregate census with a mandatory compiler-derived census of raw constructor uses across MIR operands,
+including casts and const/static initializers. It rejects guarded constructors
+exposed as function values, even inside an otherwise approved function; lexical
+ownership alone does not prove callback execution or validation. Raw aggregate
+construction inside an escaping closure likewise requires an explicit execution
+contract and is rejected by the native wrapper verifier. Missing constructor-use
+evidence cannot be interpreted as an empty census. These are implementation constraints
+for the validated wrappers, not additional authority for a tagged payload.
+
 **Retained owners.** The wire slice does not complete #1295's RNG arithmetic,
 ordinal-consumption or adjoint behavior. #888 retains capacity proofs with
 program scope, exact products, partial-expression validity and exact Repr at
