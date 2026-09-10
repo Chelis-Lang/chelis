@@ -2395,7 +2395,7 @@ class CiParityTests(unittest.TestCase):
         )
         self.assertIn("scripts/ci_require_success.py", aggregate_block)
 
-    def test_current_validation_docs_name_fast_and_nightly_owners(self):
+    def test_topology_docs_name_current_shard_owners(self):
         doc = (REPO_ROOT / "docs/ci_validation.md").read_text()
         for owner in ("ci-fast", ".config/ci-test-targets.toml", "heavy-e2e.yml", "macos-nightly.yml"):
             self.assertIn(owner, doc)
@@ -2405,6 +2405,11 @@ class CiParityTests(unittest.TestCase):
 
     def test_topology_docs_guard_runs_in_docs_job(self):
         docs_block = _ci_job_block("docs")
+        step = _ci_step_block(docs_block, "Validate CI topology documentation")
+        entrypoint = re.search(r"-m unittest (\S+)", step).group(1)
+        loader = unittest.TestLoader()
+        loader.loadTestsFromName(entrypoint)
+        self.assertEqual(loader.errors, [], "the hosted topology guard must resolve")
         self.assertIn("uses: astral-sh/setup-uv@v8.1.0", docs_block)
         self.assertIn(
             "uv run --managed-python --python 3.11 --no-project python "
