@@ -1738,6 +1738,45 @@ fn staged_sources_preserve_scalar_and_tensor_views() {
 }
 
 #[test]
+fn staged_sources_preserve_native_lists_and_host_literals() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut cases = Vec::new();
+    for n in [4, 6] {
+        for (kind, body, axis) in [
+            ("tuple_list", "{\n  sizes = ([1i64, 2i64], numel(x))\n  reshape(x, [len(sizes.0), floor_div(sizes.1, 2i64)])\n}".to_owned(), 1),
+            ("list_capture", "{\n  sizes = [1i64, 2i64]\n  reshape(x, [len(sizes), floor_div(numel(x), 2i64)])\n}".to_owned(), 1),
+            ("nested_list", "{\n  sizes = ([[1i64], [2i64]], numel(x))\n  reshape(x, [len(sizes.0), floor_div(sizes.1, 2i64)])\n}".to_owned(), 1),
+            ("string_literal", format!("{{\n  text = \"{}\"\n  reshape(x, [string_len(text), 2i64])\n}}", if n == 4 { "aa" } else { "aaa" }), 0),
+        ] {
+            call_matrix(
+                &mut cases,
+                &format!("staged_source.{kind}.x{n}"),
+                1686,
+                &format!("def f(x: tensor[n, f32]) -> tensor[2, 2, f32] = {body}"),
+                "(tensor[d0, f32]) -> tensor[2, 2, f32]",
+                vec![vector(n)],
+                if n == 4 { Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]) }
+                else if axis == 0 { Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"]) }
+                else { Expected::Domain("reshape", &["claimed = 2", "reshape axis 1 = 3"]) },
+            );
+        }
+    }
+    assert_eq!(cases.len(), 24);
+    let mut failures = Vec::new();
+    for case in cases {
+        let observed = observe(&case);
+        println!("{}: {}", case.id, observed);
+        failures.extend(contract_failures(&case, &observed));
+        if case.source.contains("def main()")
+            && observed["check"]["signatures"]["main"] != "() -> tensor[2, 2, f32]"
+        {
+            failures.push(format!("{}: declared main shape changed", case.id));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
 fn staged_graph_segments_preserve_eager_sources() {
     assert!(gcc_available(), "C toolchain required; no lane may skip");
     let mut cases = Vec::new();
