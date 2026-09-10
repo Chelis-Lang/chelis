@@ -509,6 +509,8 @@ fn native_caller<'tcx>(
 ) -> String {
     object(&[
         ("definition", definition(tcx, owner)),
+        ("kind", quoted(format!("{:?}", tcx.def_kind(owner)))),
+        ("ancestors", native_ancestors(tcx, owner)),
         (
             "implementation",
             native_implementation(tcx, owner, substitutions),
@@ -522,6 +524,16 @@ fn native_caller<'tcx>(
             substitutions.has_non_region_param().to_string(),
         ),
     ])
+}
+
+fn native_ancestors(tcx: TyCtxt<'_>, owner: DefId) -> String {
+    let mut ancestors = Vec::new();
+    let mut parent = tcx.opt_parent(owner);
+    while let Some(id) = parent {
+        ancestors.push(definition(tcx, id));
+        parent = tcx.opt_parent(id);
+    }
+    array(ancestors)
 }
 
 fn native_place<'tcx>(tcx: TyCtxt<'tcx>, place: mir::Place<'tcx>, value: Ty<'tcx>) -> String {
@@ -696,6 +708,8 @@ impl<'tcx> NativeDiscovery<'tcx> {
         });
         self.bodies.insert(object(&[
             ("definition", definition(tcx, owner)),
+            ("kind", quoted(format!("{:?}", tcx.def_kind(owner)))),
+            ("ancestors", native_ancestors(tcx, owner)),
             (
                 "implementation",
                 native_implementation(tcx, owner, substitutions),
