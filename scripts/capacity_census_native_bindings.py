@@ -144,6 +144,11 @@ def require_native_fields(graph, identity):
 
     tensor = nominal("chelis_python::native_tensor::ValidatedTensor")
     contracts = {
+        "chelis_python::NativeTensor": ("lib", (("tensor", tensor),)),
+        "chelis_python::native_tensor::ValidatedTensor": (
+            "native_tensor", (("inner", nominal("alloc::sync::Arc",
+                nominal("chelis_python::native_tensor::ValidatedTensorInner"))),),
+        ),
         "chelis_python::native_tensor::CompiledTensorResults": (
             "native_tensor", (("tensors", nominal("alloc::vec::Vec",
                 ("tuple", (nominal("alloc::string::String"), tensor)))),),
@@ -151,6 +156,10 @@ def require_native_fields(graph, identity):
         "chelis_python::dlpack::DLPackDevice": ("dlpack", (("tensor", tensor),)),
         "chelis_python::dlpack::DLPackCapsule": (
             "dlpack", (("request", nominal("chelis_python::dlpack::DLPackRequest")),),
+        ),
+        "chelis_python::dlpack::DLPackRequest": (
+            "dlpack", (("tensor", tensor),
+                       ("abi", nominal("chelis_python::dlpack::ExportAbi"))),
         ),
     }
     _require(identity in contracts, "unowned native adapter field contract")
@@ -169,4 +178,31 @@ def require_native_fields(graph, identity):
 
 
 def require_export_abi_choices(graph):
-    raise NotImplementedError("verify the exact payload-free DLPack ABI choice")
+    """Check the private request's closed protocol choice, never numeric authority."""
+    identity = "chelis_python::dlpack::ExportAbi"
+    location = graph.locations.get(identity)
+    module_location = graph.locations.get("chelis_python::dlpack")
+    _require(location is not None and module_location is not None
+             and location[0] == module_location[0], "missing defining DLPack ABI enum")
+    item = graph._item(*location)
+    module = graph._item(*module_location).get("inner", {}).get("module", {})
+    _require(not module.get("is_stripped") and item["id"] in module.get("items", []),
+             "DLPack ABI enum is outside its defining module")
+    _require(item.get("span", {}).get("filename") == "crates/chelis-python/src/dlpack.rs",
+             "DLPack ABI enum moved from its compiled source")
+    body = item.get("inner", {}).get("enum")
+    _require(isinstance(body, dict) and not body.get("has_stripped_variants")
+             and not body.get("generics", {}).get("params"),
+             "DLPack ABI requires its complete concrete enum")
+    variant_ids = body.get("variants", [])
+    _require(len(variant_ids) == 2 and len(set(map(str, variant_ids))) == 2,
+             "DLPack ABI choices changed or duplicated")
+    names = []
+    for variant_id in variant_ids:
+        variant = graph._item(location[0], variant_id)
+        _require(set(variant.get("inner", {})) == {"variant"}
+                 and variant["inner"]["variant"].get("kind") == "plain",
+                 "DLPack ABI choice cannot carry an arbitrary payload")
+        names.append(variant.get("name"))
+    _require(names == ["Legacy", "Versioned"], "DLPack ABI choices changed")
+    return tuple(names)
