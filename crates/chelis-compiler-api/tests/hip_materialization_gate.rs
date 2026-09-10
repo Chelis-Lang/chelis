@@ -1,8 +1,8 @@
 //! Spec08 materialization barrier and spec04 exact dtype preservation.
 //! Planned Realize transports stored bits; admitting it does not admit new arithmetic.
 use chelis_compiler_api::compiler::reject_unsupported_hip_ops;
-use chelis_ir::dag::{Dag, RiscOp};
-use chelis_types::types::{DimInfo, Prim, TensorType};
+use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+use chelis_types::types::Prim;
 fn dag(precision: Prim, materialization: bool) -> Dag {
     let mut dag = Dag::new();
     let ty = TensorType {
@@ -39,8 +39,8 @@ fn hip_materialization_does_not_authorize_unimplemented_narrow_float_arithmetic(
         let error = reject_unsupported_hip_ops(&dag(precision, false))
             .expect_err("Realize support must not admit unimplemented arithmetic");
         assert!(
-            error.to_string().contains("narrow-float compute"),
-            "{error}"
+            error.errors.iter().any(|diagnostic| diagnostic.message.contains("narrow-float compute")),
+            "{error:?}"
         );
     }
 }
