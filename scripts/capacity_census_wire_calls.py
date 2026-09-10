@@ -394,6 +394,79 @@ def read_evidence(raw: dict) -> InvocationEvidence:
         for key in ("bodies", "calls", "aggregates", "constructor_uses", "flows", "errors"):
             if not isinstance(raw[key], list):
                 raise ValueError(f"invalid compiler {key} evidence")
+        constructor_keys = {
+            "definition",
+            "carrier",
+            "variant_definition",
+            "kind",
+            "arguments",
+            "formal_inputs",
+            "formal_result",
+            "fields",
+            "caller",
+            "promoted",
+            "block",
+            "statement",
+            "operand_index",
+            "context",
+            "cast",
+            "operand",
+            "source",
+        }
+        for occurrence in raw["constructor_uses"]:
+            if (
+                not isinstance(occurrence, dict)
+                or set(occurrence) != constructor_keys
+                or not all(
+                    isinstance(occurrence[key], dict)
+                    for key in (
+                        "definition",
+                        "carrier",
+                        "variant_definition",
+                        "formal_result",
+                        "caller",
+                        "operand",
+                        "source",
+                    )
+                )
+                or not isinstance(occurrence["kind"], str)
+                or occurrence["context"] not in {"statement", "terminator"}
+                or not all(
+                    isinstance(occurrence[key], list)
+                    for key in ("arguments", "formal_inputs", "fields")
+                )
+                or len(occurrence["fields"]) != len(occurrence["formal_inputs"])
+                or not all(isinstance(value, dict) for value in occurrence["arguments"])
+                or not all(isinstance(value, dict) for value in occurrence["formal_inputs"])
+                or not all(
+                    isinstance(field, dict)
+                    and set(field) == {"definition", "type"}
+                    and isinstance(field["definition"], dict)
+                    and isinstance(field["type"], dict)
+                    for field in occurrence["fields"]
+                )
+                or any(
+                    type(occurrence[key]) is not int or occurrence[key] < 0
+                    for key in ("block", "statement", "operand_index")
+                )
+                or (
+                    occurrence["promoted"] is not None
+                    and (
+                        type(occurrence["promoted"]) is not int
+                        or occurrence["promoted"] < 0
+                    )
+                )
+                or (
+                    occurrence["cast"] is not None
+                    and (
+                        not isinstance(occurrence["cast"], dict)
+                        or set(occurrence["cast"]) != {"kind", "target"}
+                        or not isinstance(occurrence["cast"]["kind"], str)
+                        or not isinstance(occurrence["cast"]["target"], dict)
+                    )
+                )
+            ):
+                raise ValueError("invalid compiler constructor occurrence evidence")
     if compiler_json and (
         raw["scope"] != "compiler-json"
         or raw["deserialize_trait"].get("crate") != "serde_core"

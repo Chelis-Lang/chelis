@@ -248,6 +248,51 @@ pub fn foreign_pointer(pointer: fn(i64) -> Tensor) -> fn(i64) -> Tensor { pointe
             self.assertIn("fn(", row["cast"]["target"]["text"])
             self.assertEqual(row["context"], "statement")
 
+    def test_promoted_constructor_values_are_collected(self):
+        evidence = self.observe("""
+pub struct Tensor(i64);
+pub fn table() -> &'static [fn(i64) -> Tensor] { &[Tensor] }
+pub fn borrowed() -> &'static fn(i64) -> Tensor {
+    &(Tensor as fn(i64) -> Tensor)
+}
+""")
+        self.assertEqual(evidence.raw["errors"], [])
+        uses = constructor_uses_named(evidence, "Tensor")
+        self.assertEqual(
+            {row["caller"]["definition"]["item_name"] for row in uses},
+            {"table", "borrowed"},
+        )
+        self.assertEqual(len(uses), 2)
+        self.assertTrue(all(row["promoted"] is not None for row in uses))
+
+    def test_constructor_occurrence_rows_have_an_exact_fail_closed_shape(self):
+        from capacity_census_wire_calls import read_evidence
+
+        evidence = self.observe("""
+pub struct Tensor(i64);
+pub fn callback() -> fn(i64) -> Tensor { Tensor }
+""")
+        self.assertEqual(evidence.raw["errors"], [])
+        row = constructor_uses_named(evidence, "Tensor")[0]
+        for key in row:
+            changed = copy.deepcopy(evidence.raw)
+            del changed["constructor_uses"][0][key]
+            with self.subTest(mutation=f"missing-{key}"), self.assertRaises(ValueError):
+                read_evidence(changed)
+        for mutation in ("extra", "wrong-fields", "wrong-promoted", "wrong-cast"):
+            changed = copy.deepcopy(evidence.raw)
+            occurrence = changed["constructor_uses"][0]
+            if mutation == "extra":
+                occurrence["authority"] = "TaggedTransport"
+            elif mutation == "wrong-fields":
+                occurrence["fields"] = {}
+            elif mutation == "wrong-promoted":
+                occurrence["promoted"] = "0"
+            else:
+                occurrence["cast"] = {}
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                read_evidence(changed)
+
     def test_const_and_static_constructor_pointer_origins_are_collected(self):
         evidence = self.observe("""
 pub struct Tensor(i64);

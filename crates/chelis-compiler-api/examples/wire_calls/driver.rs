@@ -730,6 +730,7 @@ impl<'tcx> NativeDiscovery<'tcx> {
         substitutions: GenericArgsRef<'tcx>,
         body: &mir::Body<'tcx>,
         caller: &str,
+        promoted: Option<mir::Promoted>,
     ) {
         let tcx = self.tcx;
         let mut visitor = NativeConstructorOperands {
@@ -829,6 +830,12 @@ impl<'tcx> NativeDiscovery<'tcx> {
                 ("formal_result", native_typ(tcx, formal_result)),
                 ("fields", array(fields)),
                 ("caller", caller.to_owned()),
+                (
+                    "promoted",
+                    promoted
+                        .map(|index| index.as_usize().to_string())
+                        .unwrap_or_else(|| "null".into()),
+                ),
                 ("block", occurrence.location.block.as_usize().to_string()),
                 ("statement", occurrence.location.statement_index.to_string()),
                 ("operand_index", occurrence.operand_index.to_string()),
@@ -903,7 +910,16 @@ impl<'tcx> NativeDiscovery<'tcx> {
             ("source", location(tcx, body.span)),
             ("blocks", array(blocks)),
         ]));
-        self.collect_constructor_uses(owner, substitutions, body, &caller);
+        self.collect_constructor_uses(owner, substitutions, body, &caller, None);
+        for (promoted, promoted_body) in tcx.promoted_mir(owner).iter_enumerated() {
+            self.collect_constructor_uses(
+                owner,
+                substitutions,
+                promoted_body,
+                &caller,
+                Some(promoted),
+            );
+        }
 
         for (block, data) in body.basic_blocks.iter_enumerated() {
             for (statement_index, statement) in data.statements.iter().enumerate() {
