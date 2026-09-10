@@ -23,7 +23,7 @@ mod metadata;
 use metadata::{
     axis_decomposition, AllocationBytes, AxisDecomposition, ByteCount, ElementCount,
     IterationSpace, MatmulDimension, MatmulMetadata, MatmulPart, MetadataError, MovementMetadata,
-    MovementOp, ReductionMetadata, ShapeMetadata, SparseMetadata, WindowMetadata,
+    MovementOp, ReductionMetadata, ShapeMetadata, SparseMetadata, StridedMetadata, WindowMetadata,
 };
 mod ownership_ledger;
 
