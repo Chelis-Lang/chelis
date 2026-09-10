@@ -3009,6 +3009,17 @@ where
     .map(|(values, _)| values)
 }
 
+pub(crate) fn eval_tensor_segment_with_strict<F>(
+    dag: &Dag,
+    frame: &mut crate::evaluation::ExecutionFrame<'_>,
+    load_input: F,
+) -> Result<UnordMap<NodeId, TensorValue>, String>
+where
+    F: FnMut(&str) -> Option<TensorValue>,
+{
+    eval_tensor_internal(dag, None, true, 0, Some(frame), load_input).map(|(values, _)| values)
+}
+
 pub fn eval_tensor_with<F>(
     dag: &Dag,
     load_input: F,

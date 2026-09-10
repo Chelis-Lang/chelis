@@ -1799,6 +1799,7 @@ pub(crate) fn try_lower_staged_host_region(
     context: &SubexprLoweringContext,
     result_claim: &TensorType,
     random: Option<crate::host::RandomLoweringState>,
+    mut execution_out: Option<&mut Option<crate::evaluation::StagedEvaluationPlan>>,
 ) -> Result<
     crate::host::staged::StagingAttempt<(Dag, crate::host::staged::HostStagedPlan)>,
     LowerDiagnostic,
@@ -1815,6 +1816,9 @@ pub(crate) fn try_lower_staged_host_region(
         ctx.host_program = Some(program);
         ctx.host_stage_status = status.clone();
         ctx.random_seed = random.and_then(|state| state.seed);
+        if execution_out.is_some() {
+            ctx.execution = Some(crate::evaluation::ExecutionMetadata::new(ctx.random_seed));
+        }
         // A source may itself draw from Random. Each executed tensor segment
         // must continue the live handled stream, rather than baking the draw
         // count inferred before those source expressions have executed.
@@ -1869,16 +1873,25 @@ pub(crate) fn try_lower_staged_host_region(
         }
         let root = result.expect_node("staged host tensor region");
         ctx.dag.add_root(root);
+        let mut evaluation = ctx.execution.take().map(|mut metadata| {
+            metadata.order = ctx.dag.nodes().iter().map(|node| node.id).collect();
+            crate::evaluation::StagedEvaluationPlan::new(ctx.dag.clone(), metadata)
+                .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None))
+        });
         let plan = crate::host::staged::partition(
             &ctx.dag,
             &ctx.host_sources,
             params,
             &ctx.host_external_inputs,
             &ctx.host_parameters,
+            evaluation.as_mut(),
         )
         .unwrap_or_else(|error| {
             raise_lowering_error(error, Some(expr.span()), expr.span_id().map(str::to_owned))
         });
+        if let Some(output) = execution_out.as_mut() {
+            **output = evaluation;
+        }
         Some((ctx.dag, plan))
     }));
     match (result, status.get()) {
@@ -10033,11 +10046,10 @@ impl<'program> LowerCtx<'program> {
                     .get(x)
                     .map(|node| node.output_type.clone())
                     .unwrap_or_else(|| ty.clone());
-                let resolved_ty = if ty == &Self::default_type() && !inferred_ty.dims.is_empty() {
-                    inferred_ty
-                } else {
-                    ty.clone()
-                };
+                // Dropout preserves its operand's shape. Inlined AD metadata
+                // can still name the callee's formal axes after a runtime
+                // reshape; those names are not independent extent sources.
+                let resolved_ty = inferred_ty;
                 let (rate, seed) = if self.execution.is_some() {
                     let rate = self.resolve_static_scalar_arg(
                         &args[1],

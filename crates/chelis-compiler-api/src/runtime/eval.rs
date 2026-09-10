@@ -396,9 +396,10 @@ impl<'a> EvalContext<'a> {
         args: Vec<RuntimeValue>,
     ) -> Result<RuntimeValue, String> {
         let execution_plan = kernel.plan();
+        let staged_execution = kernel.staged_plan();
         let kernel = kernel.kernel_for_inspection();
         if let Some(plan) = &kernel.staged {
-            return self.apply_staged_host_plan(name, plan, params, args);
+            return self.apply_staged_host_plan(name, plan, staged_execution, params, args);
         }
         if params.len() != args.len() {
             return Err(format!(
@@ -511,6 +512,7 @@ impl<'a> EvalContext<'a> {
         &mut self,
         name: &str,
         plan: &chelis_ir::host::staged::HostStagedPlan,
+        execution: Option<&chelis_ir::evaluation::StagedEvaluationPlan>,
         params: &[String],
         args: Vec<RuntimeValue>,
     ) -> Result<RuntimeValue, String> {
@@ -520,6 +522,11 @@ impl<'a> EvalContext<'a> {
             return Err(format!("staged kernel `{name}` argument arity mismatch"));
         }
         let mut values: UnordMap<String, RuntimeValue> = params.iter().cloned().zip(args).collect();
+        let mut context = RandomExecutionContext::new(RandomLoweringState {
+            seed: self.random_seed,
+            counter: self.random_counter,
+        });
+        let mut execution = execution.map(|plan| plan.frame(&mut context)).transpose()?;
         for stage in plan.stages() {
             match stage {
                 HostStage::Source {
@@ -529,6 +536,7 @@ impl<'a> EvalContext<'a> {
                     ty,
                 } => {
                     let saved = std::mem::take(&mut self.bindings);
+                    let saved_types = std::mem::take(&mut self.binding_types);
                     for capture in captures {
                         let value = values
                             .get(&capture.value)
@@ -540,10 +548,33 @@ impl<'a> EvalContext<'a> {
                             }
                             (_, value) => value,
                         };
+                        // A staged tensor capture retains the checked type
+                        // needed by host primitive/transform routing. An
+                        // untyped capture masks any same-named outer type.
+                        let declared = match &capture.ty {
+                            HostTypeTerm::Tensor(ty) => self.static_type_expr_of(
+                                &make_var_with_type(&capture.binding, ty, expression.span()),
+                            ),
+                            _ => None,
+                        };
+                        self.binding_types.insert(capture.binding.clone(), declared);
                         self.bindings.insert(capture.binding.clone(), value);
                     }
-                    let result = self.eval_expr(expression);
+                    let result = if let Some(frame) = &mut execution {
+                        frame.with_context(|context| {
+                            self.random_counter = context.state().counter;
+                            let result = self.eval_expr(expression);
+                            *context = RandomExecutionContext::new(RandomLoweringState {
+                                seed: self.random_seed,
+                                counter: self.random_counter,
+                            });
+                            result
+                        })
+                    } else {
+                        self.eval_expr(expression)
+                    };
                     self.bindings = saved;
+                    self.binding_types = saved_types;
                     let value = result?;
                     if matches!(
                         ty,
@@ -575,14 +606,29 @@ impl<'a> EvalContext<'a> {
                             );
                         }
                     }
-                    let (computed, counter) =
-                        chelis_ir::eval::eval_tensor_roots_with_strict_random_progress(
-                            dag,
-                            dag.roots(),
-                            self.random_counter,
-                            |input| inputs.get(input).cloned(),
-                        )?;
-                    self.random_counter = counter;
+                    let computed = if let Some(frame) = &mut execution {
+                        // Resolving a captured top-level input can itself
+                        // advance the host stream before this kernel starts.
+                        frame.with_context(|context| {
+                            *context = RandomExecutionContext::new(RandomLoweringState {
+                                seed: self.random_seed,
+                                counter: self.random_counter,
+                            });
+                        });
+                        let result = frame.eval_next_kernel(|input| inputs.get(input).cloned());
+                        frame.with_context(|context| self.random_counter = context.state().counter);
+                        result?
+                    } else {
+                        let (computed, counter) =
+                            chelis_ir::eval::eval_tensor_roots_with_strict_random_progress(
+                                dag,
+                                dag.roots(),
+                                self.random_counter,
+                                |input| inputs.get(input).cloned(),
+                            )?;
+                        self.random_counter = counter;
+                        computed
+                    };
                     for (output, root) in outputs.iter().zip(dag.roots()) {
                         let value = computed
                             .get(root)

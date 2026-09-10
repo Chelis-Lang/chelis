@@ -9,6 +9,108 @@ use chelis_compiler_api::schema::{
 };
 use std::collections::BTreeMap;
 
+#[test]
+fn fixed_dropout_composes_with_host_produced_checked_reshape_targets() {
+    use chelis_compiler_api::compiler::{eval_in_context, prepare_eval_in_context};
+    use chelis_compiler_api::{COMPILER_VERSION, compile_reef_context};
+    let mut failures = Vec::new();
+    for (target, source_draws) in [
+        ("numel(source)", 0),
+        ("len(to_list(source))", 0),
+        ("bitand(shape(source, 0i32), 3i64)", 0),
+        ("numel(dropout(source, 0.0f32))", 1),
+    ] {
+        for dropout in [false, true] {
+            let body = if dropout {
+                format!(
+                    "{{\n dead = dropout(x, 0.0f32)\n _ = drop(dead)\n dropout(reshape(x, [{target}, 2i64]), 0.5f32)\n}}"
+                )
+            } else {
+                format!("reshape(x, [{target}, 2i64])")
+            };
+            let definition = format!(
+                "def loss(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = {body}\n"
+            );
+            let directory = tempfile::tempdir().unwrap();
+            std::fs::create_dir(directory.path().join("src")).unwrap();
+            std::fs::write(directory.path().join("reef.toml"), format!("[package]\nname = \"review_three_guard\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Probe\"\n")).unwrap();
+            std::fs::write(
+                directory.path().join("src/draw.ch"),
+                format!("module Probe.Draw\nexport (loss)\n{definition}"),
+            )
+            .unwrap();
+            let context = compile_reef_context(directory.path(), directory.path()).unwrap();
+            let bytes = context.encode().unwrap();
+            let decoded = chelis_compiler_api::context::CompiledContext::decode(&bytes).unwrap();
+            for count in [2, 3] {
+                let source_values = std::iter::repeat_n("1.0f32", count)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let x_values = std::iter::repeat_n("1.0f32", count * 2)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let main = format!(
+                    "def main() = with seed(42i64) {{ loss(to_tensor([{source_values}]), to_tensor([{x_values}])) }}"
+                );
+                let source = format!("{definition}\n{main}");
+                let request = EvalRequest {
+                    source_kind: SourceKind::Surf,
+                    source: source.clone(),
+                    bindings: BTreeMap::new(),
+                };
+                let prepared = prepare_eval(request.clone()).unwrap();
+                let mut results = vec![
+                    ("ordinary", eval_selected(request, &["main".into()])),
+                    ("prepared", prepared.eval_root(BTreeMap::new(), "main")),
+                ];
+                let client = format!("module Probe.Eval\nimport Probe.Draw (loss)\n{main}");
+                for (label, context) in [("context", &context), ("decoded", &decoded)] {
+                    results.push((label, eval_in_context(context, &client)));
+                    let prepared = prepare_eval_in_context(context, &client).unwrap();
+                    results.push((label, prepared.eval_root(BTreeMap::new(), "main")));
+                }
+                for (lane, result) in results {
+                    if count == 2 {
+                        let result = result.unwrap_or_else(|error| {
+                            panic!("{target} dropout={dropout} {lane}: {error:?}")
+                        });
+                        let ExecutionValue::Tensor { value } = &result.roots[0].value else {
+                            panic!("{result:?}")
+                        };
+                        assert_eq!(value.shape, vec![2, 2]);
+                        assert_eq!(
+                            value.data.to_f64_lossy_vec(),
+                            if dropout {
+                                mask(1 + source_draws)[..4].to_vec()
+                            } else {
+                                vec![1.0; 4]
+                            }
+                        );
+                    } else {
+                        match result {
+                            Err(error)
+                                if error.errors.iter().any(|error| {
+                                    error.message.contains("claimed = 2")
+                                        && error.message.contains("reshape axis 0 = 3")
+                                        && error
+                                            .message
+                                            .contains("numeric trap: domain in reshape at int64")
+                                }) =>
+                            {
+                                eprintln!("PASS negative {target} dropout={dropout} {lane}");
+                            }
+                            other => failures
+                                .push(format!("{target} dropout={dropout} {lane}: {other:?}")),
+                        }
+                    }
+                }
+                assert_eq!(context.encode().unwrap(), bytes);
+                assert_eq!(decoded.encode().unwrap(), bytes);
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
 fn bindings() -> BTreeMap<String, TensorValue> {
     BTreeMap::from([(
         "x".into(),
@@ -17,6 +119,70 @@ fn bindings() -> BTreeMap<String, TensorValue> {
             data: wire_values::storage_f32(vec![1.0; 32]),
         },
     )])
+}
+
+#[test]
+fn staged_host_sources_interleave_input_ad_and_the_next_draw() {
+    let source = "def loss(x: tensor[a, b, f32]) -> tensor[f32] = sum(sum(dropout(x, 0.5f32), 0i32), 0i32)\ndef checked(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = {\n first = dropout(source, 0.0f32)\n shaped = reshape(x, [numel(first), 2i64])\n gradient = grad(loss)(shaped)\n dropout(reshape(gradient, [len(to_list(source)), 2i64]), 0.5f32)\n}\ndef sample(source: tensor[m, f32], x: tensor[n, f32]) = with seed(42i64) {\n result = checked(source, copy(x))\n (result, dropout(x, 0.5f32))\n}";
+    let prepared = prepare_eval(EvalRequest {
+        source_kind: SourceKind::Surf,
+        source: source.into(),
+        bindings: BTreeMap::new(),
+    })
+    .unwrap();
+    for count in [2, 3, 2] {
+        let bindings = BTreeMap::from([
+            (
+                "source".into(),
+                TensorValue {
+                    shape: vec![count],
+                    data: wire_values::storage_f32(vec![1.0; count as usize]),
+                },
+            ),
+            (
+                "x".into(),
+                TensorValue {
+                    shape: vec![count * 2],
+                    data: wire_values::storage_f32(vec![1.0; count as usize * 2]),
+                },
+            ),
+        ]);
+        for result in [
+            eval_selected(
+                EvalRequest {
+                    source_kind: SourceKind::Surf,
+                    source: source.into(),
+                    bindings: bindings.clone(),
+                },
+                &["sample".into()],
+            ),
+            prepared.eval_root(bindings, "sample"),
+        ] {
+            if count == 3 {
+                let error = result.unwrap_err();
+                assert!(
+                    error
+                        .errors
+                        .iter()
+                        .any(|error| error.message.contains("claimed = 2")
+                            && error.message.contains("reshape axis 0 = 3")),
+                    "{error:?}"
+                );
+            } else {
+                let result = result.unwrap();
+                assert_eq!(
+                    tensor(&result, "sample.0"),
+                    mask(1)
+                        .iter()
+                        .zip(mask(2))
+                        .take(4)
+                        .map(|(a, b)| a * b)
+                        .collect::<Vec<_>>()
+                );
+                assert_eq!(tensor(&result, "sample.1"), mask(3)[..4]);
+            }
+        }
+    }
 }
 
 fn request(source: &str) -> EvalRequest {

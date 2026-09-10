@@ -1040,6 +1040,12 @@ impl DefEvaluationKernel {
             Self::Planned(plan) => plan.plan(),
         }
     }
+    fn staged_plan(&self) -> Option<&chelis_ir::evaluation::StagedEvaluationPlan> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Planned(plan) => plan.staged_plan(),
+        }
+    }
 }
 
 fn tag(list: &List) -> Option<DeepTag> {

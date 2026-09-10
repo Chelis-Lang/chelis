@@ -1222,6 +1222,12 @@ classifier rules and mutation implementations. The existing
 `unregistered-inventory-source` mutation covers the additional source; no
 numbered representation semantics change.
 
+The staged fixed-control evaluator composes those existing owners without a
+new numeric carrier. Its opaque companion retains exact partition mappings
+and one invocation's Random keys/counters; host sources and checked numeric
+segments execute in their original order. The companion is not serialized,
+and does not change the public legacy stage, kernel, or wire structures.
+
 ## B2. Invariants at every phase boundary
 
 1. The public C ABI remains [05-OP-31]/[05-OP-44]-exact and

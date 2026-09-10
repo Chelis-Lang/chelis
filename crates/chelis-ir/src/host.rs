@@ -3079,6 +3079,7 @@ pub struct HostDefEvaluationPlan {
     kernel: HostDefKernel,
     plan: Option<crate::evaluation::EvaluationPlan>,
     profile: crate::evaluation::EvaluationProfile,
+    staged_plan: Option<crate::evaluation::StagedEvaluationPlan>,
 }
 
 impl HostDefEvaluationPlan {
@@ -3090,6 +3091,9 @@ impl HostDefEvaluationPlan {
     }
     pub fn profile(&self) -> crate::evaluation::EvaluationProfile {
         self.profile
+    }
+    pub fn staged_plan(&self) -> Option<&crate::evaluation::StagedEvaluationPlan> {
+        self.staged_plan.as_ref()
     }
 }
 
@@ -3170,15 +3174,19 @@ fn host_def_kernel_product(
             crate::evaluation::LegacyEvaluationReason::LegacyApi,
         ),
     };
-    // Staged host regions retain their existing execution contract. A fixed
-    // Random source plan must keep its complete graph and replay metadata.
-    if profile != crate::evaluation::EvaluationProfile::FixedControl {
-        match staged_def_kernel(program, &signature, random)? {
+    // Claims are constructed before partitioning, while the evaluator keeps
+    // the source-owned Random associations across those same stage cuts.
+    let mut staged_plan = None;
+    {
+        let execution_out = (profile == crate::evaluation::EvaluationProfile::FixedControl)
+            .then_some(&mut staged_plan);
+        match staged_def_kernel_product(program, &signature, random, execution_out)? {
             staged::StagingAttempt::Ready(kernel) => {
                 return Ok(Some(HostDefEvaluationPlan {
                     kernel,
                     plan: None,
                     profile,
+                    staged_plan,
                 }));
             }
             staged::StagingAttempt::HostControlBoundary => return Ok(None),
@@ -3253,6 +3261,7 @@ fn host_def_kernel_product(
         },
         plan,
         profile,
+        staged_plan: None,
     }))
 }
 
@@ -3260,6 +3269,15 @@ fn staged_def_kernel(
     program: &CheckedProgram,
     signature: &HostDefSignature,
     random: Option<RandomLoweringState>,
+) -> Result<staged::StagingAttempt<HostDefKernel>, crate::lower::LowerDiagnostic> {
+    staged_def_kernel_product(program, signature, random, None)
+}
+
+fn staged_def_kernel_product(
+    program: &CheckedProgram,
+    signature: &HostDefSignature,
+    random: Option<RandomLoweringState>,
+    execution_out: Option<&mut Option<crate::evaluation::StagedEvaluationPlan>>,
 ) -> Result<staged::StagingAttempt<HostDefKernel>, crate::lower::LowerDiagnostic> {
     use staged::StagingAttempt;
     let HostTypeTerm::Tensor(expected) = &signature.ret_ty else {
@@ -3319,6 +3337,7 @@ fn staged_def_kernel(
         &context,
         expected,
         random,
+        execution_out,
     );
     let lowered = match lowered {
         Ok(lowered) => lowered,

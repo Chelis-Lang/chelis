@@ -1732,6 +1732,18 @@ liveness. Scope identities distinguish equal-seed handlers; invocation-local
 forward keys authorize backward replay without another ambient draw. The host
 counter remains wrapping u64, not an unbounded proof event count.
 
+Checked tensor helpers with host-produced reshape sizes construct the complete
+checked logical graph before partitioning. The evaluator retains an opaque
+companion with the partitioner's exact local-node mappings; imported values
+become Loads and never duplicate their producers' Random sites. One invocation
+frame carries realized forward keys and scope counters through every numeric
+segment, while host sources execute at their original cuts and synchronize the
+inherited stream. This preserves a preceding accepted draw when a later local
+extent guard fails, and preserves replay keys across cuts. Host-source bindings
+retain their checked tensor types for primitive and transform routing. The public legacy
+`HostDefKernel`, `HostStagedPlan`, and wire layouts do not change. Existing
+Random-handler host boundaries still dispatch through host control.
+
 This is not completion of #1295 or #1297. Explicitly excluded runtime rates,
 rate cotangents, higher-order AD, random vmap, resource scopes, dynamic/recursive control, and
 general UniformLike numerics keep their compatibility boundary. Legacy Dag-only
