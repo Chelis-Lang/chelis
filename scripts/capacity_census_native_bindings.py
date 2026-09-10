@@ -135,3 +135,8 @@ def require_private_owner(graph, identity, source):
         result.append((field["name"], field["inner"]["struct_field"]))
     _require(len({name for name, _ in result}) == len(result), "duplicate native field name")
     return tuple(result)
+
+
+def require_native_fields(graph, identity):
+    """Validate an exact adapter's private field edges, without issuing authority."""
+    raise NotImplementedError("native adapter field contract")

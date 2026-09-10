@@ -14,6 +14,7 @@ from capacity_census_native_bindings import (
     native_output_adapter,
     require_private_owner,
     native_input_role,
+    require_native_fields,
 )
 from test_capacity_census_graph import Artifact, primitive, reference
 
@@ -66,6 +67,50 @@ def private_owner_fixture():
 
 
 class NativeBoundaryObligations(unittest.TestCase):
+    def test_adapters_retain_exact_owners_without_numeric_sibling_fields(self):
+        examples = (
+            ("CompiledTensorResults", "native_tensor", "tensors", "result-vector"),
+            ("DLPackDevice", "dlpack", "tensor", "validated-tensor"),
+            ("DLPackCapsule", "dlpack", "request", "validated-request"),
+        )
+        for name, module, label, role in examples:
+            artifact, field = private_owner_fixture()
+            artifact.doc["paths"]["2"]["path"][-1] = module
+            artifact.doc["index"]["2"]["name"] = module
+            artifact.doc["paths"]["20"]["path"] = ["chelis_python", module, name]
+            artifact.doc["index"]["20"]["name"] = name
+            artifact.doc["index"]["20"]["span"]["filename"] = f"crates/chelis-python/src/{module}.rs"
+            artifact.external(30, "chelis_python::native_tensor::ValidatedTensor")
+            artifact.external(31, "alloc::vec::Vec")
+            artifact.external(32, "alloc::string::String")
+            artifact.external(33, "chelis_python::dlpack::DLPackRequest")
+            payload = {"validated-tensor": reference(30), "validated-request": reference(33),
+                       "result-vector": reference(31, {"tuple": [reference(32), reference(30)]})}[role]
+            actual = artifact.doc["index"][str(field)]
+            actual["name"] = label
+            actual["inner"]["struct_field"] = payload
+            actual["visibility"] = {"restricted": {"parent": 2, "path": "::" + module}}
+            identity = f"chelis_python::{module}::{name}"
+            require_native_fields(RustdocGraph([artifact.doc]), identity)
+            for mutation in ("raw-number", "numeric-sibling", "wrong-container", "foreign-owner"):
+                changed = copy.deepcopy(artifact.doc)
+                if mutation == "raw-number":
+                    changed["index"][str(field)]["inner"]["struct_field"] = primitive("f64")
+                elif mutation == "numeric-sibling":
+                    sibling = copy.deepcopy(actual)
+                    sibling.update(id=200, name="extra_number")
+                    sibling["inner"]["struct_field"] = primitive("i64")
+                    changed["index"]["200"] = sibling
+                    changed["index"]["20"]["inner"]["struct"]["kind"]["plain"]["fields"].append(200)
+                elif mutation == "wrong-container":
+                    changed["index"][str(field)]["inner"]["struct_field"] = {"tuple": [payload]}
+                else:
+                    changed["paths"]["33" if role == "validated-request" else "30"]["path"][0] = "impostor"
+                with self.subTest(owner=identity, mutation=mutation), self.assertRaises(GraphError):
+                    require_native_fields(RustdocGraph([changed]), identity)
+            with self.assertRaises(GraphError):
+                require_native_fields(RustdocGraph([artifact.doc]), "chelis_python::ArbitraryTaggedNumber")
+
     def test_registered_receiver_fields_are_private_to_the_actual_crate_root(self):
         artifact, field = private_owner_fixture()
         artifact.doc["paths"]["20"]["path"] = ["chelis_python", "NativeTensor"]
