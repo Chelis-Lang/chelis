@@ -11,10 +11,13 @@ const SOURCE: &str = r#"
 #include <string.h>
 #include "chelis_device_descriptor.h"
 typedef struct { chelis_gpu_tensor packet; int32_t device; int64_t shape[64], strides[64]; float payload[2]; } Owner;
-static int live, imports, calls, mode, current = 1;
+static int live, imports, calls, syncs, mode, current = 1;
 int fixture_live(void) { return live; }
 int fixture_imports(void) { return imports; }
 int fixture_calls(void) { return calls; }
+int fixture_syncs(void) { return syncs; }
+void fixture_device(int value) { current = value; }
+int hipDeviceSynchronize(void) { ++syncs; return mode == 10 ? 1 : 0; }
 void fixture_mode(int value) { mode = value; }
 int hipGetDevice(int *device) { *device = current; return 0; }
 Owner *chelis_device_tensor_import(const chelis_gpu_tensor *packet) {
@@ -221,6 +224,45 @@ try:
 except ValueError:
     pass
 assert fixture.fixture_imports() == 1 and fixture.fixture_calls() == 1
+"#,
+    );
+}
+
+#[test]
+fn device_dlpack_export_synchronizes_and_rejects_invalid_requests_without_a_capsule() {
+    run_case(
+        1,
+        r#"
+output = model(source)
+for stream in [None, 0, 4]:
+    capsule = output.__dlpack__(stream=stream, max_version=(1, 0), copy=False)
+    del capsule
+assert fixture.fixture_syncs() == 3
+capsule = output.__dlpack__(stream=-1)
+del capsule
+assert fixture.fixture_syncs() == 3
+for stream in [1, 2]:
+    try:
+        output.__dlpack__(stream=stream)
+        raise AssertionError('invalid ROCm stream accepted')
+    except ValueError:
+        pass
+fixture.fixture_mode(10)
+try:
+    output.__dlpack__()
+    raise AssertionError('failed synchronization exported a capsule')
+except BufferError:
+    pass
+fixture.fixture_mode(0)
+fixture.fixture_device(2)
+try:
+    output.__dlpack__()
+    raise AssertionError('wrong current context exported a synchronized capsule')
+except BufferError:
+    pass
+fixture.fixture_device(1)
+del output; gc.collect()
+assert fixture.fixture_live() == 0
 "#,
     );
 }
