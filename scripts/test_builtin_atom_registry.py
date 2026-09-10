@@ -130,6 +130,18 @@ class SemanticAuthorityTests(unittest.TestCase):
             ):
                 semantics.validate_semantics(wrong, self.spec)
 
+    def test_integer_remainder_boundary_contract_cannot_drift(self):
+        for before, after in (
+            ("Integer zero divisors trap DivZero", "Integer zero divisors trap Domain"),
+            ("by -1 is zero", "by -1 traps Overflow"),
+        ):
+            changed = self.spec.replace(before, after)
+            self.assertNotEqual(changed, self.spec)
+            with self.subTest(clause=before), self.assertRaisesRegex(
+                registry.RegistryError, "lost semantic obligation"
+            ):
+                semantics.validate_semantics(self.rows, changed)
+
     def test_actual_contract_does_not_require_field_labels(self):
         import re
         changed = re.sub(r"\b(?:Signature|Domain|Result|Failure|Adjoint|Accumulator):", "", self.spec)
