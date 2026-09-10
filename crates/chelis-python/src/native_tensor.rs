@@ -17,8 +17,130 @@ enum AdmittedLane {
     },
 }
 
+// Extent equality is invocation-scoped. A wildcard is never a map key.
+// Only admitted manifest literals and already checked input views populate it.
+struct ShapeBindings {
+    values: std::collections::BTreeMap<String, i64>,
+}
+impl ShapeBindings {
+    fn admit(manifest: &ArtifactManifest, lane: &AdmittedLane) -> PyResult<Self> {
+        let mut bindings = Self {
+            values: std::collections::BTreeMap::new(),
+        };
+        for spec in manifest.inputs.iter().chain(&manifest.outputs) {
+            for dim in &spec.dims {
+                if dim.name.as_deref() == Some("") || (dim.name.is_none() && dim.size.is_none()) {
+                    return Err(PyValueError::new_err(
+                        "malformed unspecified manifest dimension",
+                    ));
+                }
+                if let (Some(name), Some(size)) = (&dim.name, dim.size) {
+                    bindings.bind(name, size.get())?;
+                }
+            }
+        }
+        match lane {
+            AdmittedLane::Host { inputs, .. } => {
+                for (spec, input) in manifest.inputs.iter().zip(inputs) {
+                    bindings.observe(spec, input._metadata.shape())?;
+                }
+            }
+            AdmittedLane::Device { inputs, .. } => {
+                for (spec, input) in manifest.inputs.iter().zip(inputs) {
+                    // The imported owner retains the shared checked immutable
+                    // plan. Preflight its observation before borrowing the array.
+                    let raw = unsafe { (input.handle.api.view)(input.handle.ptr.as_ptr()) };
+                    if raw.is_null() || raw.addr() % std::mem::align_of::<ChelisGpuTensor>() != 0 {
+                        return Err(PyValueError::new_err(
+                            "invalid imported device metadata view",
+                        ));
+                    }
+                    let view = unsafe { &*raw };
+                    let rank = usize::try_from(view.rank)
+                        .map_err(|_| PyValueError::new_err("negative imported rank"))?;
+                    if rank != spec.dims.len() {
+                        return Err(PyValueError::new_err(
+                            "imported device rank disagrees with manifest",
+                        ));
+                    }
+                    ElementCount::scratch_entries(rank, 0)
+                        .and_then(|count| count.scratch_len::<i64>())
+                        .map_err(metadata_error)?;
+                    let shape = if rank == 0 {
+                        &[]
+                    } else {
+                        if view.shape.is_null()
+                            || view.shape.addr() % std::mem::align_of::<i64>() != 0
+                        {
+                            return Err(PyValueError::new_err(
+                                "invalid imported device shape pointer",
+                            ));
+                        }
+                        unsafe { std::slice::from_raw_parts(view.shape, rank) }
+                    };
+                    bindings.observe(spec, shape)?;
+                }
+            }
+        }
+        for spec in &manifest.outputs {
+            for dim in &spec.dims {
+                if let Some(name) = &dim.name {
+                    if name != "*" && !bindings.values.contains_key(name) {
+                        return Err(PyValueError::new_err(format!(
+                            "output dimension `{name}` has no admitted extent binding"
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(bindings)
+    }
+    fn bind(&mut self, name: &str, extent: i64) -> PyResult<()> {
+        if name == "*" {
+            return Ok(());
+        }
+        if self
+            .values
+            .get(name)
+            .is_some_and(|previous| *previous != extent)
+        {
+            return Err(PyValueError::new_err(format!(
+                "named dimension `{name}` has inconsistent extents"
+            )));
+        }
+        self.values.insert(name.to_owned(), extent);
+        Ok(())
+    }
+    fn observe(&mut self, spec: &ExecutionTensorSpec, shape: &[i64]) -> PyResult<()> {
+        for (dim, &extent) in spec.dims.iter().zip(shape) {
+            if dim.size.is_some_and(|size| size.get() != extent) {
+                return Err(PyValueError::new_err(
+                    "input extent disagrees with its manifest",
+                ));
+            }
+            if let Some(name) = &dim.name {
+                self.bind(name, extent)?;
+            }
+        }
+        Ok(())
+    }
+    fn require(&self, spec: &ExecutionTensorSpec, shape: &[i64]) -> PyResult<()> {
+        for (dim, &extent) in spec.dims.iter().zip(shape) {
+            if let Some(name) = &dim.name {
+                if name != "*" && self.values.get(name) != Some(&extent) {
+                    return Err(PyValueError::new_err(format!(
+                        "returned dimension `{name}` disagrees with its admitted extent"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 pub(super) struct CompiledInputs {
     lane: AdmittedLane,
+    bindings: Arc<ShapeBindings>,
     output_count: usize,
     library: Arc<Library>,
 }
@@ -28,6 +150,7 @@ pub(super) struct RawOutputs {
     // in the first output must also release all later outputs.
     owners: Vec<Option<TensorOwner>>,
     input_owners: Arc<Vec<Py<PyAny>>>,
+    bindings: Arc<ShapeBindings>,
 }
 
 pub(super) struct CompiledTensorResults {
@@ -120,8 +243,10 @@ impl CompiledInputs {
                 .collect::<PyResult<Vec<_>>>()?;
             AdmittedLane::Host { entry, api, inputs }
         };
+        let bindings = Arc::new(ShapeBindings::admit(manifest, &lane)?);
         Ok(Self {
             lane,
+            bindings,
             output_count: manifest.outputs.len(),
             library: Arc::clone(&loaded.library),
         })
@@ -189,6 +314,7 @@ pub(super) fn execute_checked(py: Python<'_>, admitted: &CompiledInputs) -> RawO
     RawOutputs {
         owners,
         input_owners,
+        bindings: Arc::clone(&admitted.bindings),
     }
 }
 
@@ -212,7 +338,12 @@ impl CompiledTensorResults {
                 })?;
                 Ok((
                     spec.name.clone(),
-                    ValidatedTensor::adopt(owner, spec, Arc::clone(&outputs.input_owners))?,
+                    ValidatedTensor::adopt(
+                        owner,
+                        spec,
+                        Arc::clone(&outputs.input_owners),
+                        &outputs.bindings,
+                    )?,
                 ))
             })
             .collect::<PyResult<Vec<_>>>()?;
@@ -249,6 +380,7 @@ impl ValidatedTensor {
         owner: TensorOwner,
         spec: &ExecutionTensorSpec,
         input_owners: Arc<Vec<Py<PyAny>>>,
+        bindings: &ShapeBindings,
     ) -> PyResult<Self> {
         let (shape, dtype, count, capacity, data, device, strides) = match &owner {
             TensorOwner::Cpu(handle) => unsafe {
@@ -335,6 +467,7 @@ impl ValidatedTensor {
         let metadata = ShapeMetadata::contiguous(&shape, dtype).map_err(metadata_error)?;
         metadata.bytes().allocation().map_err(metadata_error)?;
         validate_manifest_metadata(spec, &metadata)?;
+        bindings.require(spec, metadata.shape())?;
         if count != metadata.elements().get() {
             return Err(PyValueError::new_err(
                 "compiled output element count disagrees with its shape",
