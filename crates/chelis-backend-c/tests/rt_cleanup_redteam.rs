@@ -721,6 +721,35 @@ fn f16_matmul_with_f32_output_still_routes_through_convert_wrapper() {
 /// scratch buffer it allocates. A mismatched count would leak per call.
 /// Lock by counting `malloc(... * sizeof(float))` vs `free(t...)` lines
 /// in the emitted source for both output-precision cases.
+fn assert_matmul_scratch_lifetime(src: &str, names: &[&str]) {
+    assert!(!src.contains("malloc("), "{src}");
+    assert_eq!(
+        src.matches("_scratch = chelis_alloc(").count(),
+        names.len(),
+        "{src}"
+    );
+    let batch = src.find("for (int64_t t2_batch").expect("batch loop");
+    let gemm = src.find("cblas_sgemm(").expect("BLAS call");
+    for name in names {
+        let steps = [
+            format!("chelis_tensor *t2_{name}_scratch = chelis_alloc("),
+            format!("chelis_tensor_begin_write(t2_{name}_scratch)"),
+            format!("chelis_tensor_write_view(t2_{name}_guard)"),
+            format!("chelis_tensor_end_write(t2_{name}_guard)"),
+            format!("chelis_tensor_release(t2_{name}_scratch)"),
+        ];
+        let positions: Vec<_> = steps
+            .iter()
+            .map(|step| {
+                assert_eq!(src.matches(step).count(), 1, "{step}: {src}");
+                src.find(step).unwrap()
+            })
+            .collect();
+        assert!(positions.windows(2).all(|p| p[0] < p[1]), "{name}: {src}");
+        assert!(positions[2] < batch && gemm < positions[3], "{name}: {src}");
+    }
+}
+
 #[test]
 fn bf16_matmul_wrapper_balances_scratch_alloc_and_free_when_output_is_bf16() {
     use chelis_ir::dag::DimExpr;
@@ -747,29 +776,7 @@ fn bf16_matmul_wrapper_balances_scratch_alloc_and_free_when_output_is_bf16() {
     dag.add_node(mm, vec![a, b], mat_ty(2, 4, Prim::Bf16), None);
     let result = codegen(&dag, "bf16_mm_alloc_free").unwrap();
     let src = &result.c_source;
-    let mallocs = src.matches("malloc((size_t)").count();
-    let frees_in_wrapper = src.matches("free(t").filter(|_| true).count();
-    // The wrapper should allocate 3 scratch buffers (af, bf, cf) and
-    // free 3. If the count diverges, the emitter has a leak.
-    assert_eq!(
-        mallocs, 3,
-        "bf16 matmul wrapper must allocate exactly 3 scratch buffers (af, bf, cf):\n{src}"
-    );
-    // free(t{id}_af), free(t{id}_bf), free(t{id}_cf) plus the contiguity
-    // descriptor releases (`if (t{id}_a != t{a})
-    // chelis_tensor_release(t{id}_a);` and similar for _b). Match the bare
-    // `free(t` calls used only for the wrapper's scratch buffers.
-    let af_free = src.contains("free(t") && src.contains("_af);");
-    let bf_free = src.contains("free(t") && src.contains("_bf);");
-    let cf_free = src.contains("free(t") && src.contains("_cf);");
-    assert!(
-        af_free && bf_free && cf_free,
-        "all three scratch buffers (af, bf, cf) must be freed:\n{src}"
-    );
-    assert!(
-        frees_in_wrapper >= 3,
-        "expected at least 3 `free(t` calls (af/bf/cf), got {frees_in_wrapper}:\n{src}"
-    );
+    assert_matmul_scratch_lifetime(src, &["af", "bf", "cf"]);
 }
 
 #[test]
@@ -798,17 +805,9 @@ fn bf16_matmul_wrapper_balances_scratch_alloc_and_free_when_output_is_f32() {
     dag.add_node(mm, vec![a, b], mat_ty(2, 4, Prim::F32), None);
     let result = codegen(&dag, "bf16_mm_alloc_free_f32_out").unwrap();
     let src = &result.c_source;
-    let mallocs = src.matches("malloc((size_t)").count();
-    // When output is f32, only af and bf are scratch; cf is the result tensor itself.
-    assert_eq!(
-        mallocs, 2,
-        "bf16 matmul wrapper with f32 output must allocate exactly 2 scratch buffers \
-         (af, bf; cf=destination):\n{src}"
-    );
-    assert!(
-        !src.contains("_cf"),
-        "no cf scratch buffer should be allocated when output is f32:\n{src}"
-    );
+    // f32 results are written directly to the result tensor.
+    assert_matmul_scratch_lifetime(src, &["af", "bf"]);
+    assert!(!src.contains("t2_cf_scratch"), "{src}");
 }
 
 // =====================================================================
