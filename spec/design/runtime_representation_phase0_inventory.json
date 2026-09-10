@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "freeze_sha256": "2ba2bf4df0496897862d9868ca3ad4091488e0b7df3475f051adf1ea7da41711",
+  "freeze_sha256": "cd6df6e3821f800b648c849e34719d8c7cc385741b8c5fb3c996c6e03c20b69f",
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -1474,7 +1474,7 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_expand",
-      "sample": "for (int64_t i = 0; i < t{id}_size; i++) {{"
+      "sample": "for (int64_t i = 0; i < chelis_movement_count(t{id}_movement); i++) {{"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_extrema_adjoint",
@@ -1506,7 +1506,7 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_permute",
-      "sample": "for (int64_t i = 0; i < t{id}_size; i++) {{"
+      "sample": "for (int64_t i = 0; i < chelis_movement_count(t{id}_movement); i++) {{"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_preplanned",
@@ -1562,11 +1562,11 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_shrink",
-      "sample": "for (int64_t i = 0; i < t{id}_size; i++) {{"
+      "sample": "for (int64_t i = 0; i < chelis_movement_count(t{id}_movement); i++) {{"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_stride",
-      "sample": "for (int64_t i = 0; i < t{id}_size; i++) {{"
+      "sample": "for (int64_t i = 0; i < chelis_movement_count(t{id}_movement); i++) {{"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_tensor_snapshot",
@@ -3366,11 +3366,11 @@
     "release_reproducers": [
       {
         "name": "checked host metadata debug contract",
-        "command": "cargo nextest run -p chelis-runtime --features ownership-ledger --test checked_metadata --test metadata_compile --test checked_metadata_padding --test checked_c_metadata --test checked_c_indexing --test checked_c_movement --test checked_c_affine --test checked_c_reduction --test checked_c_sparse --test checked_c_matmul --test checked_c_window --test checked_c_literal --test exact_tagged_c_abi --test op33_empty_tensor_axis_decomposition --test op33_tensor_validation --test op33_legal_domain_matrix --test dim_carrier_int64 --test tensor_repurpose --test tensor_write_guard"
+        "command": "cargo nextest run -p chelis-runtime --features ownership-ledger --test checked_metadata --test metadata_compile --test checked_metadata_padding --test checked_c_metadata --test checked_c_indexing --test checked_c_movement --test checked_c_movement_plans --test checked_c_affine --test checked_c_reduction --test checked_c_sparse --test checked_c_matmul --test checked_c_window --test checked_c_literal --test exact_tagged_c_abi --test op33_empty_tensor_axis_decomposition --test op33_tensor_validation --test op33_legal_domain_matrix --test dim_carrier_int64 --test tensor_repurpose --test tensor_write_guard"
       },
       {
         "name": "checked host metadata release contract",
-        "command": "cargo nextest run --release -p chelis-runtime --features ownership-ledger --test checked_metadata --test metadata_compile --test checked_metadata_padding --test checked_c_metadata --test checked_c_indexing --test checked_c_movement --test checked_c_affine --test checked_c_reduction --test checked_c_sparse --test checked_c_matmul --test checked_c_window --test checked_c_literal --test exact_tagged_c_abi --test op33_empty_tensor_axis_decomposition --test op33_tensor_validation --test op33_legal_domain_matrix --test dim_carrier_int64 --test tensor_repurpose --test tensor_write_guard"
+        "command": "cargo nextest run --release -p chelis-runtime --features ownership-ledger --test checked_metadata --test metadata_compile --test checked_metadata_padding --test checked_c_metadata --test checked_c_indexing --test checked_c_movement --test checked_c_movement_plans --test checked_c_affine --test checked_c_reduction --test checked_c_sparse --test checked_c_matmul --test checked_c_window --test checked_c_literal --test exact_tagged_c_abi --test op33_empty_tensor_axis_decomposition --test op33_tensor_validation --test op33_legal_domain_matrix --test dim_carrier_int64 --test tensor_repurpose --test tensor_write_guard"
       },
       {
         "name": "checked C snapshot delegation and restoration mutations",
@@ -3450,11 +3450,23 @@
       },
       {
         "name": "checked C movement delegation and restoration mutations",
-        "command": "cargo nextest run -p chelis-backend-c --test checked_c_movement"
+        "command": "cargo nextest run -p chelis-backend-c --test checked_c_movement --test checked_c_movement_plans"
+      },
+      {
+        "name": "movement local extent CLI parity and primitive diagnostics",
+        "command": "cargo nextest run -p chelis-cli --test issue_616_runtime_movement_c_parity"
+      },
+      {
+        "name": "verified expansion primitive identity and local guards",
+        "command": "cargo nextest run -p chelis-ir --test movement_expansion_kind"
+      },
+      {
+        "name": "verified expansion primitive identity and local guards in release",
+        "command": "cargo nextest run --release -p chelis-ir --test movement_expansion_kind"
       },
       {
         "name": "checked C movement optimized sanitizer execution",
-        "command": "cargo nextest run -p chelis-backend-c --test exec_compile -E test(checked_c_movement_)"
+        "command": "cargo nextest run -p chelis-backend-c --test exec_compile -E test(checked_c_movement_) | test(a_local_class_guards) | test(a_literal_claim_on_a_symbolic_input) | test(numeric_local_extent_claims)"
       },
       {
         "name": "checked C shared indexing dtype dispatch and storage reuse",

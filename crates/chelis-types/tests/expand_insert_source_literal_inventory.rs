@@ -139,9 +139,9 @@ const ALLOWED: &[(&str, usize, usize, &str)] = &[
     ),
     (
         "crates/chelis-ir/src/axis_sources.rs",
+        2,
         1,
-        0,
-        "one `expand`, in `UnitExtentClaim::trap_op`: the `<op>` slot section 4.7 gives a locally placed unit-extent claim. It is the rendered operation name, not a dispatch key, and there is no `insert` counterpart because `insert` makes no such claim",
+        "ExpansionKind renders both source primitives for local guards. The extra expand is UnitExtentClaim::trap_op, which guards the pre-existing unit axis; insert makes no such claim",
     ),
     (
         "crates/chelis-ir/src/dag.rs",
@@ -197,6 +197,12 @@ const ALLOWED: &[(&str, usize, usize, &str)] = &[
         8,
         0,
         "`desugar+expand ok`, the English word for macro expansion, in eight sibling tests",
+    ),
+    (
+        "crates/chelis-runtime/src/lib.rs",
+        1,
+        1,
+        "the checked expansion plan renders its validated source primitive in the domain diagnostic",
     ),
     (
         "crates/chelis-surf/src/desugar.rs",

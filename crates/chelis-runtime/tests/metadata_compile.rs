@@ -95,6 +95,21 @@ fn weakened_metadata_construction_fails_the_executable_contract() {
     ));
     for (from, to, witness) in [
         (
+            ".checked_mul(axis.step)",
+            ".checked_mul(0)",
+            "movement_plans_project_checked_domains_without_coordinate_scratch",
+        ),
+        (
+            ".checked_add(axis.offset)",
+            ".checked_add(0)",
+            "movement_plans_project_checked_domains_without_coordinate_scratch",
+        ),
+        (
+            "input.require_permutation(&result, axes)?;",
+            "",
+            "movement_plans_reject_bad_geometry_and_preserve_rank_zero_empty_and_int64",
+        ),
+        (
             ".checked_mul(self.steps[window_axis])",
             ".checked_mul(0)",
             "window_metadata_binds_valid_padding_and_row_major_source_indices",
@@ -301,7 +316,7 @@ fn internal_callers_cannot_forge_counts_or_restore_independent_tensor_fields() {
     );
     let context = format!(
         "#![allow(dead_code, non_camel_case_types)]\nmod metadata;\n\
-         use metadata::{{ShapeMetadata, ElementCount, ByteCount, AllocationBytes, ReductionMetadata, SparseMetadata, MatmulMetadata, WindowMetadata}};\n\
+         use metadata::{{ShapeMetadata, ElementCount, ByteCount, AllocationBytes, ReductionMetadata, SparseMetadata, MatmulMetadata, WindowMetadata, MovementMetadata}};\n\
          use chelis_vocab::RuntimeDType;\nuse std::sync::atomic::AtomicU8;\n\
          struct HeapHeader;\nstruct TensorStorageProvenance;\nstruct chelis_tensor_write;\n\
          {declarations}\n"
@@ -324,6 +339,9 @@ fn internal_callers_cannot_forge_counts_or_restore_independent_tensor_fields() {
         }
     "#;
     let mut negatives = vec![
+        ("fn bad(m: &mut MovementMetadata) { m.result = ShapeMetadata::contiguous(&[99], RuntimeDType::I64).unwrap(); }".to_owned(), "E0616", "result"),
+        ("fn bad(m: &mut MovementMetadata) { m.projection = Box::new([]); }".to_owned(), "E0616", "projection"),
+        ("fn bad(m: &mut MovementMetadata) { m.source_domain = false; }".to_owned(), "E0616", "source_domain"),
         ("fn bad(m: &mut WindowMetadata) { m.result = ShapeMetadata::contiguous(&[99], RuntimeDType::I64).unwrap(); }".to_owned(), "E0616", "result"),
         ("fn bad(m: &mut WindowMetadata) { m.count = ElementCount::from_extents(&[99]).unwrap(); }".to_owned(), "E0616", "count"),
         (

@@ -2205,6 +2205,39 @@ exact ADT identity by [05-OP-34].
 > destination throughout; the operation neither ends it nor retains the source.
 > This constant-storage ingress has no cotangent.
 >
+> `chelis_tensor_permute_plan`, `chelis_tensor_expand_plan`, and
+> `chelis_tensor_affine_plan` snapshot complete source and result metadata for
+> the exact row-major movements in [05-MOV-1], independently of tensor payload.
+> Permutation takes a tagged int64 rank and complete array of tagged int64 axes;
+> it requires a bijection after one-step negative axis normalization. Expansion
+> takes a tagged int64 axis and extent plus the closed `EXPAND` or `INSERT` form:
+> `EXPAND` replaces a unit axis without changing rank, and `INSERT` adds an axis.
+> Negative axes normalize once against the result rank. Affine movement takes a
+> tagged int64 rank and complete tagged int64 bound arrays with the closed `PAD`,
+> `SHRINK`, or `STRIDE` form. Padding's arrays are before/after; shrinking's are
+> start/end; stride's first array is positive steps and its second pointer is
+> unused. Rank must equal source rank. All positive array lengths require complete
+> non-null arrays. The same checked shape, bound, dtype, count, stride, byte, and
+> target projection rules apply as the corresponding movement checks above.
+> The opaque plan validates its own projection storage before allocation.
+>
+> `chelis_movement_extent` observes the closed `SOURCE` or `RESULT` shape at a
+> tagged int64 axis with one-step negative normalization. `chelis_movement_count`
+> returns the source count for padding and result count for other forms.
+> `chelis_movement_index` maps an in-range tagged int64 position in that domain
+> to the padded destination index or other forms' source index. Each projection
+> uses checked exact coordinate/stride arithmetic without per-index scratch;
+> empty domains admit no index. `chelis_movement_check_target` requires a complete
+> tagged result rank and shape to match the plan before allocation or reuse.
+> `chelis_movement_plan_release` consumes the live plan exactly once. The plan
+> retains no tensor payload or ownership, remains valid during source writes and
+> after source release or repurpose, and admits concurrent observations while live.
+> Malformed carriers, selectors or domains trap `Domain`; unrepresentable metadata
+> or projections trap `Overflow`, retaining the selected canonical `permute`,
+> `expand`, `insert`, `pad`, `shrink`, or `stride` identity at int64. Invalid
+> operation selectors and null plans use `movement`. These metadata operations have no
+> cotangent or arithmetic accumulator and do not alter payload arithmetic.
+>
 > `chelis_tensor_window_plan` snapshots the complete input and valid-padding
 > result metadata from [05-RWIN-1]'s positive trailing window and stride lists,
 > transported as equal-length arrays of exact tagged int64 values. The tagged

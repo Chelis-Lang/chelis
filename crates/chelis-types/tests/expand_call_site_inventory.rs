@@ -30,21 +30,6 @@ const ALLOWED: &[(&str, usize, &str)] = &[
     // These spell the checked C metadata API, not a Chelis program call.
     // Keep exact counts so additions still require classification.
     (
-        "crates/chelis-backend-c/src/emit.rs",
-        1,
-        "the generated C target-validation call supports the verified same-rank and inserted-axis IR forms",
-    ),
-    (
-        "crates/chelis-backend-c/tests/checked_c_movement.rs",
-        2,
-        "the adoption guard and removed-validation mutant name that exact C API",
-    ),
-    (
-        "crates/chelis-backend-c/tests/exec_compile.rs",
-        1,
-        "the native allocation-order control locates that exact C API call",
-    ),
-    (
         "scripts/dtype_phase4b_oracle.py",
         1,
         "the frozen normative registry reproduces that exact public C declaration",
