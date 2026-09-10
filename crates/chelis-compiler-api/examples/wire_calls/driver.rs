@@ -465,6 +465,15 @@ fn native_implementation<'tcx>(
     owner: DefId,
     substitutions: GenericArgsRef<'tcx>,
 ) -> String {
+    // An anonymous const in an impl's trait arguments has the impl as its
+    // syntactic parent but does not inherit its generic arguments. Only real
+    // associated bodies carry an implementation owner and its substitutions.
+    if !matches!(
+        tcx.def_kind(owner),
+        DefKind::AssocFn | DefKind::AssocConst { .. }
+    ) {
+        return "null".into();
+    }
     let Some(id) = tcx.opt_parent(owner) else {
         return "null".into();
     };
