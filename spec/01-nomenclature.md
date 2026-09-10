@@ -1240,6 +1240,8 @@ producer set is covered-or-rejected: an exported producer whose result
 reaches the type through an unsupported container, or whose signature
 hands caller-supplied code an unobligated value, is a declaration error,
 so the discipline has no silent gaps.
+If producer-set analysis cannot complete, the proof request SHALL report an
+error; traversal exhaustion SHALL NOT mean that a type carries no obligation.
 
 Advisory (non-blocking) lint rules support the invariant workflow:
 

@@ -69,6 +69,17 @@ the dtypes it may be instantiated at:
 def double_ints[p: Int](x: p) -> p = add(x, x)
 ```
 
+A bounded dtype can also be a tensor cast target. The cast preserves the shape;
+each call supplies its own concrete target dtype:
+
+```chelis-surf
+def convert[p: Numeric](values: tensor[3, int32], witness: p) -> tensor[3, p] = cast(values, p)
+as_float = convert(to_tensor([1, 2, 3]), 0.0f64)
+as_integer = convert(to_tensor([1, 2, 3]), 0i64)
+```
+
+An unbounded `[p]` is not a dtype guarantee and cannot be a cast target.
+
 ## Where to go next
 
 - Named dimensions, rank polymorphism, and the no-broadcasting rule:
