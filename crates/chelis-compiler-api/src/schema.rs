@@ -1979,6 +1979,12 @@ pub struct WireRecordPatternField {
 ///   and decoding finalizes through the dtype_semantics module
 ///   (finalize-on-decode; corrupt reduced-float images are a loud
 ///   decode error).
+///   Historical correction (chelis#1269): chelis#759 / PR #1144 subsequently
+///   added `WireRiscOp::CastTrunc` (`kind: "cast_trunc"`, with
+///   `new_precision`) while producers still stamped version 4. That addition
+///   missed its required bump; consumers migrating from before #1144 must
+///   also handle this operation. This records the omission, not an exception
+///   to the version-bump rule.
 /// - `5`: chelis#878 — `WireRiscOp::Pad::fill` changed from a bare f64
 ///   capacity seam to the sealed dtype-tagged scalar payload.
 /// - `6`: chelis#1287 — added the dedicated multi-axis
