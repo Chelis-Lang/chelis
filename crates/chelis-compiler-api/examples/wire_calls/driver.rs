@@ -624,11 +624,71 @@ impl<'tcx> Visitor<'tcx> for NativeRvaluePlaces<'tcx> {
     }
 }
 
+struct NativeConstructorOperand<'tcx> {
+    operand: mir::Operand<'tcx>,
+    location: mir::Location,
+    operand_index: usize,
+    context: &'static str,
+    cast: Option<(String, Ty<'tcx>)>,
+    source: Span,
+}
+
+// Observe operands before function-item reification erases their DefId. The
+// index counts every operand, not just constructors, within one MIR location.
+// Visiting complete statements/terminators also covers casts and CTFE bodies.
+struct NativeConstructorOperands<'tcx> {
+    operands: Vec<NativeConstructorOperand<'tcx>>,
+    operand_index: usize,
+    context: &'static str,
+    cast: Option<(String, Ty<'tcx>)>,
+    source: Span,
+}
+impl<'tcx> Visitor<'tcx> for NativeConstructorOperands<'tcx> {
+    fn visit_statement(&mut self, statement: &mir::Statement<'tcx>, location: mir::Location) {
+        self.operand_index = 0;
+        self.context = "statement";
+        self.cast = None;
+        self.source = statement.source_info.span;
+        self.super_statement(statement, location);
+    }
+
+    fn visit_terminator(&mut self, terminator: &mir::Terminator<'tcx>, location: mir::Location) {
+        self.operand_index = 0;
+        self.context = "terminator";
+        self.cast = None;
+        self.source = terminator.source_info.span;
+        self.super_terminator(terminator, location);
+    }
+
+    fn visit_rvalue(&mut self, value: &mir::Rvalue<'tcx>, location: mir::Location) {
+        let previous = self.cast.take();
+        if let mir::Rvalue::Cast(kind, _, target) = value {
+            self.cast = Some((format!("{kind:?}"), *target));
+        }
+        self.super_rvalue(value, location);
+        self.cast = previous;
+    }
+
+    fn visit_operand(&mut self, operand: &mir::Operand<'tcx>, location: mir::Location) {
+        self.operands.push(NativeConstructorOperand {
+            operand: operand.clone(),
+            location,
+            operand_index: self.operand_index,
+            context: self.context,
+            cast: self.cast.clone(),
+            source: self.source,
+        });
+        self.operand_index += 1;
+        self.super_operand(operand, location);
+    }
+}
+
 struct NativeDiscovery<'tcx> {
     tcx: TyCtxt<'tcx>,
     bodies: BTreeSet<String>,
     calls: BTreeSet<String>,
     aggregates: BTreeSet<String>,
+    constructor_uses: BTreeSet<String>,
     flows: BTreeSet<String>,
     errors: BTreeSet<String>,
     queue: VecDeque<(DefId, GenericArgsRef<'tcx>)>,
@@ -661,6 +721,122 @@ impl<'tcx> NativeDiscovery<'tcx> {
     fn enqueue(&mut self, def: DefId, args: GenericArgsRef<'tcx>) {
         if def.is_local() && self.tcx.is_mir_available(def) && !args.has_non_region_param() {
             self.queue.push_back((def, args));
+        }
+    }
+
+    fn collect_constructor_uses(
+        &mut self,
+        owner: DefId,
+        substitutions: GenericArgsRef<'tcx>,
+        body: &mir::Body<'tcx>,
+        caller: &str,
+    ) {
+        let tcx = self.tcx;
+        let mut visitor = NativeConstructorOperands {
+            operands: Vec::new(),
+            operand_index: 0,
+            context: "statement",
+            cast: None,
+            source: body.span,
+        };
+        visitor.visit_body(body);
+        for occurrence in visitor.operands {
+            let function = self.normalize(
+                owner,
+                substitutions,
+                occurrence.operand.ty(&body.local_decls, tcx),
+            );
+            let ty::FnDef(def, arguments) = function.kind() else {
+                continue;
+            };
+            let kind = tcx.def_kind(*def);
+            if !matches!(kind, DefKind::Ctor(..)) {
+                continue;
+            }
+            // Unit/constant constructors are not FnDef capabilities. This
+            // census does not establish arbitrary constant or unsafe provenance.
+            let signature = tcx.fn_sig(*def).instantiate(tcx, arguments).skip_binder();
+            let formal_inputs: Vec<_> = signature
+                .inputs()
+                .iter()
+                .map(|value| self.normalize(owner, substitutions, *value))
+                .collect();
+            let formal_result = self.normalize(owner, substitutions, signature.output());
+            let ty::Adt(adt, result_arguments) = formal_result.kind() else {
+                self.errors.insert(format!(
+                    "native constructor has no normalized ADT result: {}",
+                    tcx.def_path_str(*def)
+                ));
+                continue;
+            };
+            let parent = tcx.opt_parent(*def);
+            let variants: Vec<_> = adt
+                .variants()
+                .iter()
+                .filter(|variant| Some(variant.def_id) == parent)
+                .collect();
+            if variants.len() != 1 || variants[0].fields.len() != formal_inputs.len() {
+                self.errors.insert(format!(
+                    "native constructor result/parent/fields mismatch: {}",
+                    tcx.def_path_str(*def)
+                ));
+                continue;
+            }
+            let variant = variants[0];
+            let mut fields = Vec::new();
+            let mut fields_match = true;
+            for (field, formal) in variant.fields.iter().zip(&formal_inputs) {
+                let value = tcx
+                    .type_of(field.did)
+                    .instantiate(tcx, result_arguments)
+                    .skip_normalization();
+                let value = self.normalize(owner, substitutions, value);
+                if value != *formal {
+                    fields_match = false;
+                }
+                fields.push(object(&[
+                    ("definition", definition(tcx, field.did)),
+                    ("type", native_typ(tcx, value)),
+                ]));
+            }
+            if !fields_match {
+                self.errors.insert(format!(
+                    "native constructor field/formal type mismatch: {}",
+                    tcx.def_path_str(*def)
+                ));
+                continue;
+            }
+            let cast = match occurrence.cast {
+                Some((kind, target)) => {
+                    let target = self.normalize(owner, substitutions, target);
+                    object(&[("kind", quoted(kind)), ("target", native_typ(tcx, target))])
+                }
+                None => "null".into(),
+            };
+            self.constructor_uses.insert(object(&[
+                ("definition", definition(tcx, *def)),
+                ("carrier", definition(tcx, adt.did())),
+                ("variant_definition", definition(tcx, variant.def_id)),
+                ("kind", quoted(format!("{kind:?}"))),
+                (
+                    "arguments",
+                    array(arguments.iter().map(|arg| native_generic_arg(tcx, arg))),
+                ),
+                (
+                    "formal_inputs",
+                    array(formal_inputs.iter().map(|value| native_typ(tcx, *value))),
+                ),
+                ("formal_result", native_typ(tcx, formal_result)),
+                ("fields", array(fields)),
+                ("caller", caller.to_owned()),
+                ("block", occurrence.location.block.as_usize().to_string()),
+                ("statement", occurrence.location.statement_index.to_string()),
+                ("operand_index", occurrence.operand_index.to_string()),
+                ("context", quoted(occurrence.context)),
+                ("cast", cast),
+                ("operand", native_operand(tcx, &occurrence.operand, function)),
+                ("source", location(tcx, occurrence.source)),
+            ]));
         }
     }
 
@@ -727,6 +903,7 @@ impl<'tcx> NativeDiscovery<'tcx> {
             ("source", location(tcx, body.span)),
             ("blocks", array(blocks)),
         ]));
+        self.collect_constructor_uses(owner, substitutions, body, &caller);
 
         for (block, data) in body.basic_blocks.iter_enumerated() {
             for (statement_index, statement) in data.statements.iter().enumerate() {
@@ -1012,7 +1189,7 @@ impl<'tcx> NativeDiscovery<'tcx> {
             self.body(owner, args);
         }
         object(&[
-            ("format", "3".into()),
+            ("format", "4".into()),
             ("scope", quoted("native-bindings")),
             ("compiler", quoted(env!("WIRE_DRIVER_COMPILER"))),
             (
@@ -1022,6 +1199,7 @@ impl<'tcx> NativeDiscovery<'tcx> {
             ("bodies", array(self.bodies)),
             ("calls", array(self.calls)),
             ("aggregates", array(self.aggregates)),
+            ("constructor_uses", array(self.constructor_uses)),
             ("flows", array(self.flows)),
             ("errors", array(self.errors.iter().map(quoted))),
         ])
@@ -1587,6 +1765,7 @@ impl Callbacks for Probe {
                 bodies: BTreeSet::new(),
                 calls: BTreeSet::new(),
                 aggregates: BTreeSet::new(),
+                constructor_uses: BTreeSet::new(),
                 flows: BTreeSet::new(),
                 errors: BTreeSet::new(),
                 queue: VecDeque::new(),

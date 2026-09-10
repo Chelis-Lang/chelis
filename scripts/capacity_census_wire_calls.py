@@ -14,8 +14,11 @@ The driver uses the exact pinned rustc-private ABI and requires matching
 rustc-dev. It is compiled directly, never as a normal Cargo example.
 
 The distinct ``native-bindings`` scope is a collector rather than an authority
-verifier. It records every local MIR body, ADT construction, call and assignment
-flow so the native binding oracle can later prove its exact admission and
+verifier. Format 4 records local MIR bodies, ADT aggregates, raw constructor
+function-value exposures, calls and assignment flows. Constructor exposures
+come from compiler FnDef/Ctor identities, including operands before reification
+casts; they do not establish execution, validation, unit/constant construction
+or unsafe provenance. The later native oracle must prove admission and
 conversion paths without trusting a helper name or parsing Rust a second time.
 """
 
@@ -359,7 +362,7 @@ def read_evidence(raw: dict) -> InvocationEvidence:
         "inputs",
     }
     compiler_json = isinstance(raw, dict) and raw.get("format") == 2
-    native = isinstance(raw, dict) and raw.get("format") == 3
+    native = isinstance(raw, dict) and raw.get("format") == 4
     if native:
         required = {
             "format",
@@ -369,6 +372,7 @@ def read_evidence(raw: dict) -> InvocationEvidence:
             "bodies",
             "calls",
             "aggregates",
+            "constructor_uses",
             "flows",
             "errors",
             "rustc_command",
@@ -381,13 +385,13 @@ def read_evidence(raw: dict) -> InvocationEvidence:
     if (
         not isinstance(raw, dict)
         or set(raw) != required
-        or raw["format"] not in (1, 2, 3)
+        or raw["format"] not in (1, 2, 4)
     ):
         raise ValueError("incomplete compiler invocation evidence")
     if native:
         if raw["scope"] != "native-bindings":
             raise ValueError("invalid native binding compiler evidence")
-        for key in ("bodies", "calls", "aggregates", "flows", "errors"):
+        for key in ("bodies", "calls", "aggregates", "constructor_uses", "flows", "errors"):
             if not isinstance(raw[key], list):
                 raise ValueError(f"invalid compiler {key} evidence")
     if compiler_json and (
@@ -478,7 +482,7 @@ def analyze_fixture(
         if not output_path.is_file():
             raise ValueError("compiler did not write invocation evidence")
         evidence = read_evidence(json.loads(output_path.read_text()))
-        expected_format = {None: 1, "compiler-json": 2, "native-bindings": 3}[scope]
+        expected_format = {None: 1, "compiler-json": 2, "native-bindings": 4}[scope]
         if evidence.raw["format"] != expected_format:
             raise ValueError("compiler evidence does not match the requested fixture scope")
         return evidence
@@ -675,7 +679,7 @@ def collect_library(root: Path, target: Path, driver: Path, *, rustc_args=(), sc
         if not output.is_file():
             raise ValueError("Cargo produced no fresh compiler invocation evidence")
         evidence = read_evidence(json.loads(output.read_text()))
-        expected_format = {None: 1, "compiler-json": 2, "native-bindings": 3}[scope]
+        expected_format = {None: 1, "compiler-json": 2, "native-bindings": 4}[scope]
         if evidence.raw["format"] != expected_format:
             raise ValueError("compiler evidence does not match the requested scope")
         for source in evidence.raw["inputs"]:

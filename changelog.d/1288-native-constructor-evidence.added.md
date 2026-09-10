@@ -1,0 +1,1 @@
+Native binding compiler evidence now records exact tuple-struct and enum constructor function exposures, including callback arguments, stored values, reification casts and constant initializers. Its versioned decoder requires this census and rejects older incomplete native evidence; collection alone grants no binding authority.
