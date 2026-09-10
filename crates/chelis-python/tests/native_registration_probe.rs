@@ -26,11 +26,25 @@ fn native_registration_binds_all_four_compiled_descriptors() {
         assert_eq!(report.source_path, "crates/chelis-python/src/lib.rs");
         assert_eq!(report.source_sha256.len(), 64);
         assert_eq!(
-            report.descriptors.iter().map(|row| (row.owner.as_str(), row.python_name.as_str(), row.kind.as_str(), row.descriptor.as_str())).collect::<Vec<_>>(),
+            report
+                .descriptors
+                .iter()
+                .map(|row| (
+                    row.owner.as_str(),
+                    row.python_name.as_str(),
+                    row.kind.as_str(),
+                    row.descriptor.as_str()
+                ))
+                .collect::<Vec<_>>(),
             vec![
                 ("CompiledModel", "__call__", "method", "wrapper_descriptor"),
                 ("NativeTensor", "__dlpack__", "method", "method_descriptor"),
-                ("NativeTensor", "__dlpack_device__", "method", "method_descriptor"),
+                (
+                    "NativeTensor",
+                    "__dlpack_device__",
+                    "method",
+                    "method_descriptor"
+                ),
                 ("NativeTensor", "shape", "getter", "getset_descriptor"),
             ]
         );
@@ -41,7 +55,11 @@ fn native_registration_binds_all_four_compiled_descriptors() {
 fn native_registration_rejects_a_same_named_foreign_class() {
     with_module(|module| {
         module.add_class::<ForeignTensor>().unwrap();
-        assert!(native_registration::probe(module).unwrap_err().contains("compiled class identity"));
+        assert!(
+            native_registration::probe(module)
+                .unwrap_err()
+                .contains("compiled class identity")
+        );
     });
 }
 
@@ -51,7 +69,9 @@ fn native_registration_rejects_missing_or_swapped_classes() {
         with_module(|module| {
             match changed {
                 "missing" => module.delattr("NativeTensor").unwrap(),
-                "swapped" => module.add("NativeTensor", module.getattr("CompiledModel").unwrap()).unwrap(),
+                "swapped" => module
+                    .add("NativeTensor", module.getattr("CompiledModel").unwrap())
+                    .unwrap(),
                 _ => module.add("NativeTensor", 17).unwrap(),
             }
             assert!(native_registration::probe(module).is_err(), "{changed}");
@@ -64,17 +84,29 @@ fn native_registration_rejects_incomplete_or_reclassified_provenance() {
     with_module(|module| {
         let report = native_registration::probe(module).unwrap();
         native_registration::check_registrations(&report.registrations).unwrap();
-        for changed in ["missing", "duplicate", "kind", "implementation", "owner", "position"] {
+        for changed in [
+            "missing",
+            "duplicate",
+            "kind",
+            "implementation",
+            "owner",
+            "position",
+        ] {
             let mut rows = report.registrations.clone();
             match changed {
-                "missing" => { rows.pop(); }
+                "missing" => {
+                    rows.pop();
+                }
                 "duplicate" => rows.push(rows[0].clone()),
                 "kind" => rows[0].kind = "staticmethod".into(),
                 "implementation" => rows[0].rust_name = "same_named_helper".into(),
                 "owner" => rows[0].owner = Some("ForeignTensor".into()),
                 _ => rows[0].line = 0,
             }
-            assert!(native_registration::check_registrations(&rows).is_err(), "{changed}");
+            assert!(
+                native_registration::check_registrations(&rows).is_err(),
+                "{changed}"
+            );
         }
     });
 }

@@ -2021,6 +2021,25 @@ pub fn capacity_census_classes() -> [(&'static str, &'static str, bool); 2] {
     ]
 }
 
+/// Compiled class objects for census identity checks on actual module exports.
+/// A matching Python class name or descriptor spelling does not identify a Rust owner.
+pub fn capacity_census_class_types(
+    py: Python<'_>,
+) -> [(&'static str, &'static str, Bound<'_, pyo3::types::PyType>); 2] {
+    [
+        (
+            <NativeCompiledModel as pyo3::PyTypeInfo>::NAME,
+            std::any::type_name::<NativeCompiledModel>(),
+            py.get_type::<NativeCompiledModel>(),
+        ),
+        (
+            <NativeTensor as pyo3::PyTypeInfo>::NAME,
+            std::any::type_name::<NativeTensor>(),
+            py.get_type::<NativeTensor>(),
+        ),
+    ]
+}
+
 fn capacity_census_class<T: pyo3::PyClass>() -> (&'static str, &'static str, bool) {
     // Read the slots emitted by #[::pyo3::pymethods], rather than assuming an absent
     // rustdoc method means PyO3's non-instantiable default constructor. Presence

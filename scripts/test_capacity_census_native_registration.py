@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 from capacity_census_graph import GraphError
-from capacity_census_native_registration import validate_native_registration
+from capacity_census_native_registration import CheckedNativeRegistrations, validate_native_registration
 
 
 def packet(source):
@@ -45,6 +45,11 @@ class NativeRegistrationControls(unittest.TestCase):
         self.assertEqual(roots["chelis_python::NativeTensor::shape"],
                          "chelis_python::NativeTensor::shape#getter")
 
+    def test_supplied_registration_packet_cannot_construct_compiled_evidence(self):
+        for arguments in ({}, {"packet": self.packet}, {"root": self.root, "source_sha256": "0" * 64}):
+            with self.assertRaises(TypeError):
+                CheckedNativeRegistrations(**arguments)
+
     def test_missing_extra_duplicate_or_changed_exposures_are_rejected(self):
         for mutation in ("missing", "extra", "duplicate", "foreign", "wrong-kind", "wrong-implementation",
                          "descriptor-kind", "descriptor-owner", "descriptor-missing", "descriptor-duplicate",
@@ -74,6 +79,13 @@ class NativeRegistrationControls(unittest.TestCase):
         self.source.write_bytes(b"changed registrar source\n")
         with self.assertRaisesRegex(GraphError, "source"):
             validate_native_registration(self.root, self.packet)
+
+    def test_malformed_packets_fail_as_obligation_errors(self):
+        for changed in (None, [], {}, {**self.packet, "registrations": None},
+                        {**self.packet, "descriptors": [None] * 4},
+                        {**self.packet, "registrations": [None] * 4}):
+            with self.subTest(packet=changed), self.assertRaises(GraphError):
+                validate_native_registration(self.root, changed)
 
 
 if __name__ == "__main__":
