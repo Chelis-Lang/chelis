@@ -51,6 +51,7 @@ import hashlib
 import inspect
 import json
 import subprocess
+import sys
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -2008,8 +2009,16 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = _parse_args()
+    if args.phase == 1:
+        sys.path.insert(0, str(REPO_ROOT))
+        from scripts.runtime_representation_phase1 import run
+        try:
+            run()
+        except (RuntimeError, OSError, ValueError, KeyError, TypeError) as error:
+            raise OracleFailure(str(error)) from error
+        return 0
     if args.phase != 0:
-        raise OracleFailure("only runtime-representation Phase 0 is implemented")
+        raise OracleFailure("only runtime-representation Phases 0 and 1 are implemented")
     if args.regenerate:
         regenerate()
         return 0
@@ -2021,4 +2030,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except OracleFailure as error:
-        raise SystemExit(f"RUNTIME REPRESENTATION PHASE 0: FAIL: {error}") from error
+        phase = sys.argv[sys.argv.index("--phase") + 1] if "--phase" in sys.argv else "?"
+        raise SystemExit(f"RUNTIME REPRESENTATION PHASE {phase}: FAIL: {error}") from error

@@ -168,3 +168,11 @@ default-filter = '''
 # the heavy tests rather than capping their concurrency (which would slow the
 # per-PR gate, the exact regression this change reverses).
 retries = 2
+
+# The runtime representation oracle compares its frozen selection to this
+# dedicated framework receipt. Nested CLI oracle tests cannot overwrite it.
+[profile.runtime-representation]
+fail-fast = false
+
+[profile.runtime-representation.junit]
+path = "junit.xml"

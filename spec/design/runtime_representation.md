@@ -1317,6 +1317,66 @@ uv run --managed-python --python 3.11 --no-project python \
 
 Final line: `RUNTIME REPRESENTATION PHASE 1: PASS`.
 
+
+### Phase 1 consumer and execution receipt contract
+
+The Phase 1 implementation is `scripts/runtime_representation_phase1.py`, invoked
+through the command above. `runtime_representation_phase1_tests.json` freezes
+exact test identities and commands; its reviewed digest is in the implementation.
+A changed test cohort requires a reviewed manifest amendment. Neither a previous
+receipt nor a regenerated selection is an acceptance input.
+
+The host/C consumer audit follows the representation owners and submissions:
+
+| Consumer mechanism | Checked authority | Executed boundary and negative controls |
+| --- | --- | --- |
+| Owned allocation, borrowed ingress, repurpose, read/write views | Private `ShapeMetadata`, `ElementCount`, `ByteCount`, `AllocationBytes`; immutable metadata replaced atomically | `checked_metadata`, `metadata_compile`, `exact_tagged_c_abi`, `op33_tensor_validation`, `tensor_repurpose`, `tensor_write_guard`, both profiles |
+| Host byte copy, fills, reshape and indexed tensor movement | `copy_bytes(AllocationBytes)`, validated tensor metadata/index ranges and checked iteration domains | Padding, empty-domain, dtype-domain, checked C metadata/indexing/affine and movement boundary suites, both profiles |
+| Generated C entry/elementwise/cast/gather/scatter/concat/stack/arange loops | Checked runtime counts and indices, validated read/write views; complete result checks before submission | Named C source-delegation controls, optimized native sanitizer matrices, dtype dispatch/reuse and CLI cast cases |
+| C reductions, Count, sparse, BLAS and windows | Private checked plan domains, physical scratch projections and vendor-width validation | Each registered runtime contract in both profiles; actual emitted native bypass/ownership controls and executable examples |
+| C literal, JSON ordering and snapshot/host shape scratch | Tagged literal preflight, checked tensor scratch owner, descriptor observations before submission, checked allocation-like API | All-dtype literal/shape native controls, JSON cleanup ledger mutation, shape-capture repurpose mutation and vmap axis case |
+| Shared C/HIP storage planning | Private exact `CapacityKey` plus exact `Repr`; opaque linear reuse proof | Key and adapter collision/equivalence/domain tests, all 81 source/result representations through eligible expired slots, private storage proofs, both profiles |
+| Metal storage planning | Typed no-reuse projection; no reusable capability is admitted | `never_reuse_boundary` in both profiles; this is planning evidence, not device execution |
+| Representation vocabulary and runtime element bindings | Closed `DTypeContract` and sealed storage/arithmetic registrations | Positive external consumers, all nine representations and compile-failure/production mutations, both profiles |
+
+Allocation and byte-copy submission signatures consume the private checked
+values; public metadata construction cannot opt out of their validation. The
+C codegen consumers receive validated counts, byte counts or metadata plans,
+and the frozen source inventory continues to reject new arithmetic owners and
+representation seams. The table names the acceptance mechanisms; it does not
+claim that a finite example matrix enumerates every tensor value or shape.
+Element-pointer privacy and backend element-spelling debt remain Phase 3/4,
+and generated descriptor/Python/DLPack adoption remains Phase 2.
+
+The oracle first checks clean committed source bytes/modes, executes its Python
+framework controls, validates the Phase 0 inventory and rejects all its live
+production seam mutations. Each Rust leg then builds and lists current tests,
+requires the frozen nonempty selection, hashes the listed executables, removes
+any earlier JUnit output, and executes with a dedicated nextest profile and zero
+retries. Missing, duplicate, ignored, skipped, failing or unselected results
+cannot satisfy the selection; changed executables fail. The isolated JUnit path
+prevents nested CLI tests from replacing the parent receipt. Current test results
+are written alongside their command, source identity and executable digests.
+
+Two additional optimized production mutations erase the shared planner's exact
+representation or exact capacity conjunct. Their named behavioral assertions
+must fail, the source is restored byte for byte, and the same cases must then
+pass after rebuilding. Existing private metadata mutations independently weaken
+extent/count/byte/stride/capacity/target/scratch checks. The complete oracle never
+accepts `--skip-mutations` or `--regenerate` as Phase 1 success.
+
+The greater-than-8-GiB allocation test remains the explicitly excluded #1112
+manual gate. It is recorded as unexecuted, while exact wide metadata and target
+projection are exercised without requesting that allocation. Capacity-key public
+compile-fail doctests remain a supporting obligation. No Phase 2 device or native
+Python boundary is admitted through this host/C receipt.
+
+Hosted `runtime-representation` and optional full/local gates invoke Phase 1;
+`--fast` remains the pre-push stage and does not run this composite. Phase 0 is
+still directly runnable. A clean local Phase 1 pass is supporting evidence until
+current-head hosted acceptance and a compliant fresh review pass. #888/#889
+closure requires those receipts; this change does not close #893 or Phases 2–5.
+
 ## Phase 2 — canonical ABI descriptors
 
 **Requires:** Phase 1.

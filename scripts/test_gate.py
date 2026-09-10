@@ -1035,9 +1035,9 @@ class ListOutputTests(unittest.TestCase):
         )
         self.assertIn(command, [gate.render(entry) for entry in gate.full_command_list()])
 
-    def test_runtime_representation_phase0_oracle_is_continuous_and_local(self):
+    def test_runtime_representation_phase1_oracle_is_continuous_and_local(self):
         command = (
-            "<managed-python> scripts/runtime_representation_oracle.py --phase 0"
+            "<managed-python> scripts/runtime_representation_oracle.py --phase 1"
         )
         # The oracle is a stage of its own so hosted CI can give it a runner of
         # its own; it must not also ride on the integration support slice.
@@ -2206,7 +2206,7 @@ class CiParityTests(unittest.TestCase):
         command = "python3 scripts/gate.py runtime-representation"
 
         self.assertIn(
-            "name: Runtime Representation Phase 0 Oracle",
+            "name: Runtime Representation Phase 1 Oracle",
             oracle_block,
         )
         self.assertNotIn("    needs:", oracle_block)

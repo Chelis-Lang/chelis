@@ -34,6 +34,14 @@ not drift.
 
 ### One Acceptance Oracle Per Phase
 
+The runtime representation host/C vocabulary and checked-metadata gate is
+`.venv/bin/python scripts/runtime_representation_oracle.py --phase 1`. It includes
+Phase 0 inventory/mutations and requires fresh frozen-selection/framework receipts.
+The hosted `runtime-representation` stage owns routine enforcement; `--fast` remains
+the pre-push gate and `--local` remains optional. Phase 1 does not validate the later
+generated ABI, native Python/DLPack or device execution obligations.
+
+
 - Every phase must name one authoritative completion oracle.
 - That oracle may be a single command, a named suite, or a documented manual runner, but
   it must be explicit.
