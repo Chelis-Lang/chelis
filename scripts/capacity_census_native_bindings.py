@@ -139,4 +139,30 @@ def require_private_owner(graph, identity, source):
 
 def require_native_fields(graph, identity):
     """Validate an exact adapter's private field edges, without issuing authority."""
-    raise NotImplementedError("native adapter field contract")
+    def nominal(name, *arguments):
+        return ("nominal", name, tuple(arguments))
+
+    tensor = nominal("chelis_python::native_tensor::ValidatedTensor")
+    contracts = {
+        "chelis_python::native_tensor::CompiledTensorResults": (
+            "native_tensor", (("tensors", nominal("alloc::vec::Vec",
+                ("tuple", (nominal("alloc::string::String"), tensor)))),),
+        ),
+        "chelis_python::dlpack::DLPackDevice": ("dlpack", (("tensor", tensor),)),
+        "chelis_python::dlpack::DLPackCapsule": (
+            "dlpack", (("request", nominal("chelis_python::dlpack::DLPackRequest")),),
+        ),
+    }
+    _require(identity in contracts, "unowned native adapter field contract")
+    module, expected = contracts[identity]
+    fields = require_private_owner(graph, identity, f"crates/chelis-python/src/{module}.rs")
+
+    def shape(ty):
+        if isinstance(ty, dict) and set(ty) == {"tuple"}:
+            return ("tuple", tuple(shape(element) for element in ty["tuple"]))
+        name, arguments = _path(graph, "chelis_python", ty)
+        return nominal(name, *(shape(argument) for argument in arguments))
+
+    actual = tuple((name, shape(ty)) for name, ty in fields)
+    _require(actual == expected, "native adapter private field edges changed")
+    return actual
