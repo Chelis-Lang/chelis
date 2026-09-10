@@ -38,6 +38,10 @@ void fixture_entry(const Owner *const *inputs, int32_t input_count, Owner **outp
     if (input_count != 1) abort();
     ++calls;
     for (int i = 0; i < output_count; ++i) {
+        if ((mode == 14 && i == 0) || (mode == 15 && i == 1)) {
+            outputs[i] = NULL;
+            continue;
+        }
         if (mode == 12) { outputs[i] = (Owner *)inputs[0]; continue; }
         if ((mode == 11 || mode == 13) && i > 0) { outputs[i] = outputs[0]; continue; }
         Owner *output = calloc(1, sizeof(Owner));
@@ -59,6 +63,7 @@ void fixture_entry(const Owner *const *inputs, int32_t input_count, Owner **outp
         if (mode == 8) output->device = 2;
         if (mode == 9) output->packet.strides = (const int64_t *)1;
         if (mode == 13) output->packet.count += 1;
+        if (mode == 16 && i == 1) output->packet.count += 1;
         outputs[i] = output; ++live;
     }
 }
@@ -197,8 +202,9 @@ fn invalid_storage_offset_capacity_and_context_never_reach_import_or_entry() {
 }
 #[test]
 fn malformed_dynamic_outputs_release_every_returned_owner() {
-    run_case(
-        1,
+    run_outputs(
+        vec![2],
+        2,
         r#"
 for mode in range(1, 10):
     fixture.fixture_mode(mode)
@@ -209,6 +215,25 @@ for mode in range(1, 10):
         pass
     gc.collect()
     assert fixture.fixture_live() == 0
+# A missing first output must release the later owner; a missing second output
+# must release the already-adopted first owner. Neither may collapse the slots.
+for mode in [14, 15]:
+    fixture.fixture_mode(mode)
+    try:
+        model(source)
+        raise AssertionError('NULL output admitted')
+    except RuntimeError as error:
+        assert 'returned a NULL output tensor' in str(error)
+    gc.collect()
+    assert fixture.fixture_live() == 0
+fixture.fixture_mode(16)
+try:
+    model(source)
+    raise AssertionError('bad second output admitted')
+except ValueError as error:
+    assert 'element count disagrees with its shape' in str(error)
+gc.collect()
+assert fixture.fixture_live() == 0
 "#,
     );
 }

@@ -24,6 +24,7 @@ typedef struct {
     const void *data;
     float payload[2];
     int output;
+    int refs;
 } Tensor;
 static int mode;
 static int live;
@@ -47,11 +48,12 @@ Tensor *chelis_tensor_entry_borrow(int32_t rank, const int64_t *shape,
     if (rank != 1 || shape[0] != 2 || dtype != 0 || bytes != 8) abort();
     Tensor *tensor = calloc(1, sizeof(Tensor));
     tensor->data = data;
+    tensor->refs = 1;
     ++live;
     return tensor;
 }
 void chelis_tensor_release(const Tensor *tensor) {
-    if (tensor) { --live; free((void *)tensor); }
+    if (tensor && --((Tensor *)tensor)->refs == 0) { --live; free((void *)tensor); }
 }
 int32_t chelis_tensor_rank(const Tensor *tensor) {
     if (tensor->output && mode == 11) return INT32_MAX;
@@ -64,7 +66,7 @@ int64_t chelis_tensor_shape(const Tensor *tensor, int32_t axis) {
 ReadView chelis_tensor_read_view(const Tensor *tensor) {
     ReadView view = {tensor->data, 2, 0, {0}};
     if (tensor->output) {
-        if (mode == 3) view.count = 3;
+        if (mode == 3 || mode == 13) view.count = 3;
         if (mode == 4) view.dtype = 255;
         if (mode == 5) view.dtype = 1;
         if (mode == 6) view.data = NULL;
@@ -77,8 +79,14 @@ void fixture_entry(Tensor **inputs, int input_count, Tensor **outputs, int outpu
     if (input_count != 1 || inputs[0] == NULL) abort();
     for (int i = 0; i < output_count; ++i) {
         if (mode == 9 && i == 0) { outputs[i] = NULL; continue; }
+        if ((mode == 12 || mode == 13) && i > 0) {
+            outputs[i] = outputs[0];
+            ++outputs[i]->refs;
+            continue;
+        }
         Tensor *tensor = calloc(1, sizeof(Tensor));
         tensor->output = 1;
+        tensor->refs = 1;
         tensor->payload[0] = (float)(i + 1);
         tensor->payload[1] = (float)(i + 2);
         tensor->data = tensor->payload;
@@ -190,6 +198,21 @@ assert fixture.fixture_live() == 2
 del outputs
 gc.collect()
 assert fixture.fixture_live() == 0
+# Repeated host pointers carry one retained reference per returned slot.
+fixture.fixture_mode(12)
+outputs = model(source)
+assert list(outputs) == ['left', 'right']
+left = np.from_dlpack(outputs['left'])
+right = np.from_dlpack(outputs['right'])
+assert left.tolist() == right.tolist() == [1, 2]
+assert fixture.fixture_live() == 1
+del outputs, left
+gc.collect()
+assert fixture.fixture_live() == 1
+assert right.tolist() == [1, 2]
+del right
+gc.collect()
+assert fixture.fixture_live() == 0, 'a returned host reference was not released'
 "#,
     );
 }
@@ -199,7 +222,7 @@ fn invalid_actual_descriptors_reject_and_release_all_returned_handles() {
     run_case(
         &["left", "right"],
         r#"
-for mode in [*range(1, 10), 11]:
+for mode in [*range(1, 10), 11, 13]:
     fixture.fixture_mode(mode)
     try:
         model(source)
