@@ -620,8 +620,8 @@ fn grad_dag_result(
             })
             .map(|(node, site)| (*node, *site))
             .collect();
-        execution.order = retained.clone();
         execution.remap(&remap)?;
+        execution.complete(&dag)?;
     }
 
     // Retained source computations are execution roots, not returned values.

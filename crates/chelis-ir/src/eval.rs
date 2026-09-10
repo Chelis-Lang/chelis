@@ -2179,10 +2179,24 @@ where
     let cancel = chelis_types::current_cancel_token();
 
     let order = match execution.as_ref() {
-        Some(frame) => frame.order().to_vec(),
-        None => bound_dag.nodes().iter().map(|node| node.id).collect(),
+        Some(frame) => frame.steps().to_vec(),
+        None => bound_dag
+            .nodes()
+            .iter()
+            .map(|node| crate::execution_spine::Step::Node(node.id))
+            .collect(),
     };
-    for id in order {
+    for step in order {
+        let id = match step {
+            crate::execution_spine::Step::Node(id) => id,
+            crate::execution_spine::Step::Control { control, .. } => {
+                execution
+                    .as_deref_mut()
+                    .expect("only source plans have controls")
+                    .control(control)?;
+                continue;
+            }
+        };
         let node = bound_dag
             .get(id)
             .ok_or("evaluation schedule references a missing node")?;
@@ -2994,10 +3008,9 @@ where
     let dag = plan.dag_for_inspection();
     let starting_counter = context.state().counter;
     let mut frame = plan.frame(context)?;
-    let mut live = vec![false; dag.len()];
-    for id in frame.order() {
-        live[id.0] = true;
-    }
+    // Plan validation requires the complete selected graph, including dead
+    // executed nodes. Value liveness must not prune this execution slice.
+    let live = vec![true; dag.len()];
     eval_tensor_internal(
         dag,
         Some(&live),
