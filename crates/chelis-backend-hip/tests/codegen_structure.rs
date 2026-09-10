@@ -991,6 +991,14 @@ fn s11_modules_are_created_and_released_in_the_invocation_context() {
         result.c_source.matches("hipModuleUnload(").count(),
         "Every invocation-owned module must be released"
     );
+    let source = &result.c_source;
+    assert!(
+        source
+            .find("CHELIS_HIP_CHECK(hipDeviceSynchronize());")
+            .unwrap()
+            < source.find("hipModuleUnload(").unwrap(),
+        "empty escapes also need kernel completion before module/slot teardown"
+    );
 }
 
 #[test]

@@ -19,6 +19,7 @@ extern "C" Launch fixture_kernel(const char *name);
 struct Allocation { size_t bytes; int device; };
 static std::map<void *, Allocation> allocations;
 static int current_device = 0;
+static bool pending_launch[2] = {};
 struct Module { Launch launch; int device; };
 static std::map<void *, Module> modules;
 static const unsigned char guard = 0xa7;
@@ -93,11 +94,12 @@ extern "C" hipError_t hipGetDeviceProperties(hipDeviceProp_t *properties, int) {
     *properties = {64, {INT_MAX, 65535, 65535}, {1024, 1024, 64}, 1024};
     return hipSuccess;
 }
-extern "C" hipError_t hipDeviceSynchronize() { return hipSuccess; }
+extern "C" hipError_t hipDeviceSynchronize() { pending_launch[current_device] = false; return hipSuccess; }
 
 // The actual source was compiled alongside this fixture. Module lookup only
 // selects that compiled function; it does not interpret or replace its work.
 extern "C" hipError_t hipModuleUnload(hipModule_t module) {
+    REQUIRE(!pending_launch[current_device]);
     auto found = modules.find(module);
     REQUIRE(found != modules.end() && found->second.device == current_device);
     modules.erase(found);
@@ -124,6 +126,7 @@ extern "C" hipError_t hipModuleLaunchKernel(hipFunction_t function,
     const auto &module = modules.at(function);
     REQUIRE(module.device == current_device);
     module.launch(gx, bx, arguments);
+    pending_launch[current_device] = true;
     return hipSuccess;
 }
 extern "C" hiprtcResult hiprtcCreateProgram(hiprtcProgram *program, const char *, const char *name,

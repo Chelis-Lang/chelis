@@ -5,6 +5,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#ifndef TEST_EMPTY_RESULT
+#define TEST_EMPTY_RESULT 0
+#endif
 
 #define REQUIRE(condition) do { if (!(condition)) { \
     fprintf(stderr, "device entry fixture violation at line %d: %s\n", __LINE__, #condition); abort(); \
@@ -47,10 +50,11 @@ static void execute(const char *mode) {
     // A malformed call returning normally must make the negative test fail.
     if (!strcmp(mode, "wrong-rank") || !strcmp(mode, "wrong-dtype") || !strcmp(mode, "wrong-device")) return;
     REQUIRE(outputs[0] != input && outputs[1] != input && outputs[0] != outputs[1]);
+    const int64_t output_count = TEST_EMPTY_RESULT ? 0 : count;
     for (auto output : outputs) {
         const chelis_gpu_tensor *view = chelis_device_tensor_view(output);
-        REQUIRE(view->ownership == 1 && view->count == count);
-        REQUIRE(!count || (view->data != data && view->byte_capacity == count * sizeof(float)));
+        REQUIRE(view->ownership == 1 && view->count == output_count);
+        REQUIRE(!output_count || (view->data != data && view->byte_capacity == output_count * sizeof(float)));
     }
     float unchanged[6] = {};
     REQUIRE(hipMemcpy(unchanged, data, storage_count * sizeof(float), hipMemcpyDeviceToHost) == hipSuccess);
@@ -66,7 +70,7 @@ static void execute(const char *mode) {
         chelis_device_tensor_copy_to_host(guard, output);
         chelis_tensor_end_write(guard);
         const float *values = (const float *)chelis_tensor_read_view(host_output).data;
-        for (int64_t i = 0; i < count; ++i) {
+        for (int64_t i = 0; i < output_count; ++i) {
 #if TEST_MATRIX
             const float expected = (float)(i + 1);
 #else

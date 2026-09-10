@@ -510,6 +510,7 @@ impl HipEmitter {
                 _ => None,
             })
             .collect::<Vec<_>>();
+        e.line("CHELIS_HIP_CHECK(hipDeviceSynchronize());");
         for name in &kernel_names {
             e.line(&format!("CHELIS_HIP_CHECK(hipModuleUnload(mod_{name}));"));
         }
@@ -644,6 +645,7 @@ impl HipEmitter {
                 _ => None,
             })
             .collect::<Vec<_>>();
+        self.line("CHELIS_HIP_CHECK(hipDeviceSynchronize());");
         for name in kernel_names {
             self.line(&format!("CHELIS_HIP_CHECK(hipModuleUnload(mod_{name}));"));
         }

@@ -139,6 +139,38 @@ fn blas_model() -> String {
     support::codegen_hip(&dag, "entry_probe").unwrap().c_source
 }
 
+fn empty_result_model() -> String {
+    let mut dag = Dag::new();
+    let vector = TensorType {
+        dims: vec![DimInfo::Lit(3)],
+        precision: Prim::F32,
+    };
+    let empty = TensorType {
+        dims: vec![DimInfo::Lit(0), DimInfo::Lit(3)],
+        precision: Prim::F32,
+    };
+    let input = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        vector.clone(),
+        None,
+    );
+    let work = dag.add_node(RiscOp::Neg, vec![input], vector, None);
+    let output = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::Lit(0),
+        },
+        vec![work],
+        empty.clone(),
+        None,
+    );
+    let realized = dag.add_node(RiscOp::Realize, vec![output], empty, None);
+    dag.add_root(output);
+    dag.add_root(realized);
+    support::codegen_hip(&dag, "entry_probe").unwrap().c_source
+}
+
 /// Decode the emitted C string literals, then compile those exact kernel bodies.
 /// Wrappers derive their parameter types from each kernel signature; the emitted
 /// host argument vector remains independent, so missing/wrong-width arguments
@@ -255,6 +287,11 @@ fn compile_source(
         let old = "chelis_flat_to_indices(int64_t flat";
         assert!(source.contains(old));
         source = source.replace(old, "chelis_flat_to_indices(int flat");
+    }
+    if mutation == Some("missing-final-completion") {
+        let old = "CHELIS_HIP_CHECK(hipDeviceSynchronize());";
+        assert!(source.contains(old));
+        source = source.replace(old, "/* completion removed */");
     }
     if mutation == Some("flat-sparse-indices") {
         let old = "indices[chelis_logical_offset(index_pos, idx_sh, idx_s, idx_ndim)]";
@@ -406,6 +443,30 @@ fn generated_blas_preparation_materializes_both_strided_operands_in_planned_stor
             "blas_main.cpp",
             &[],
             Some("flat-sparse-initialization"),
+        ),
+        "positive",
+        false,
+    );
+}
+
+#[test]
+fn empty_escapes_still_complete_nonempty_intermediate_work_before_teardown() {
+    let defines = [
+        "-DTEST_RANK=1".into(),
+        "-DTEST_MATRIX=0".into(),
+        "-DTEST_EMPTY_RESULT=1".into(),
+    ];
+    run(
+        &compile_source(empty_result_model(), "main.cpp", &defines, None),
+        "positive",
+        true,
+    );
+    run(
+        &compile_source(
+            empty_result_model(),
+            "main.cpp",
+            &defines,
+            Some("missing-final-completion"),
         ),
         "positive",
         false,
