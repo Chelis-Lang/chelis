@@ -95,6 +95,21 @@ class RuntimeArtifactTests(unittest.TestCase):
 
 
 class SourceIdentityTests(unittest.TestCase):
+    def test_symlinked_header_referent_bytes_are_bound_even_without_a_tracked_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            target = root / "external-header.h"
+            target.write_bytes(b"first declaration")
+            (root / "runtime.h").symlink_to("external-header.h")
+            def snapshot():
+                with mock.patch.object(execution.subprocess, "check_output",
+                                       side_effect=[b"current-head\n", b"runtime.h\0"]), \
+                     mock.patch.object(execution, "source_identity", return_value="common-source"):
+                    return execution._source_packet(root)
+            first = snapshot()
+            target.write_bytes(b"changed declaration")
+            self.assertNotEqual(snapshot(), first)
+
     def test_tracked_directory_symlink_and_actual_header_bytes_are_both_bound(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
