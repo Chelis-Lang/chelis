@@ -56,6 +56,13 @@ void fixture_entry(const Owner *const *inputs, int32_t input_count, Owner **outp
 }
 "#;
 fn run_case(rank: usize, body: &str) {
+    let mut shape = vec![1; rank];
+    if rank > 0 {
+        shape[rank - 1] = 2;
+    }
+    run_shape(shape, body);
+}
+fn run_shape(shape: Vec<i32>, body: &str) {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("device.c");
     let library = dir
@@ -89,10 +96,6 @@ fn run_case(rank: usize, body: &str) {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    let mut shape = vec![1; rank];
-    if rank > 0 {
-        shape[rank - 1] = 2;
-    }
     let spec = |name: &str| serde_json::json!({"name":name,"dtype":"f32","dims":shape.iter().map(|n|serde_json::json!({"size":n})).collect::<Vec<_>>()});
     let manifest = serde_json::json!({"abi_version":2,"target":"hip","host_entry_name":"unused_host","device_entry_name":"fixture_entry","inputs":[spec("x")],"outputs":[spec("result")],"source_path":dir.path().join("absent.ch"),"source_hash":"fixture"});
     std::fs::write(
@@ -121,18 +124,23 @@ class Tensor:
     def __init__(self):
         self.shape = shape; self.dtype = 'torch.float32'
         self.device = types.SimpleNamespace(type='cuda', index=1)
-        self.storage = Storage(); self.offset = 1; self.pointer_delta = 0
+        self.storage = Storage(); self.offset = 1; self.pointer_delta = 0; self.empty_pointer = False
         self.strides = [2] * len(shape)
     def stride(self): return self.strides
     def storage_offset(self): return self.offset
-    def data_ptr(self): return self.storage.data_ptr() + self.offset * 4 + self.pointer_delta
+    def data_ptr(self): return 0 if self.empty_pointer else self.storage.data_ptr() + self.offset * 4 + self.pointer_delta
     def untyped_storage(self): return self.storage
 saved_torch = sys.modules.get('torch')
 sys.modules['torch'] = types.SimpleNamespace(Tensor=Tensor)
 model = native.load(library_path)
 source = Tensor()
 "#;
-        let script = format!("{setup}\ntry:\n{}\nfinally:\n    if saved_torch is None: sys.modules.pop('torch', None)\n    else: sys.modules['torch'] = saved_torch\n", body.lines().map(|line|format!("    {line}\n")).collect::<String>());
+        let script = format!(
+            "{setup}\ntry:\n{}\nfinally:\n    if saved_torch is None: sys.modules.pop('torch', None)\n    else: sys.modules['torch'] = saved_torch\n",
+            body.lines()
+                .map(|line| format!("    {line}\n"))
+                .collect::<String>()
+        );
         py.run(&CString::new(script).unwrap(), Some(&globals), None)
             .expect("actual registered device call");
     });
@@ -169,7 +177,12 @@ fn invalid_storage_offset_capacity_and_context_never_reach_import_or_entry() {
         "source.device.index = 2",
         "source.device.index = None",
     ] {
-        run_case(1, &format!("{mutation}\ntry:\n    model(source)\n    raise AssertionError('invalid input admitted')\nexcept (ValueError, OverflowError):\n    pass\nassert fixture.fixture_imports() == 0 and fixture.fixture_calls() == 0\nassert fixture.fixture_live() == 0"));
+        run_case(
+            1,
+            &format!(
+                "{mutation}\ntry:\n    model(source)\n    raise AssertionError('invalid input admitted')\nexcept (ValueError, OverflowError):\n    pass\nassert fixture.fixture_imports() == 0 and fixture.fixture_calls() == 0\nassert fixture.fixture_live() == 0"
+            ),
+        );
     }
 }
 #[test]
@@ -186,6 +199,28 @@ for mode in range(1, 10):
         pass
     gc.collect()
     assert fixture.fixture_live() == 0
+"#,
+    );
+}
+
+#[test]
+fn empty_device_view_checks_storage_bounds_without_requiring_a_payload_pointer() {
+    run_shape(
+        vec![0, 2],
+        r#"
+source.offset = 8
+source.empty_pointer = True
+output = model(source)
+assert output.shape == [0, 2]
+del output; gc.collect()
+assert fixture.fixture_live() == 0
+source.offset = 9
+try:
+    model(source)
+    raise AssertionError('empty offset beyond allocation admitted')
+except ValueError:
+    pass
+assert fixture.fixture_imports() == 1 and fixture.fixture_calls() == 1
 "#,
     );
 }
