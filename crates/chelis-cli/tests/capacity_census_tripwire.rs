@@ -45,6 +45,9 @@ mod c_lexical;
 #[path = "../../../tests/support/c_preprocessor.rs"]
 mod c_preprocessor;
 
+#[path = "../../../tests/support/capacity_census_backend_headers.rs"]
+mod backend_headers;
+
 #[path = "../../../tests/support/capacity_census_authority.rs"]
 mod capacity_census_authority;
 use capacity_census_authority::{
