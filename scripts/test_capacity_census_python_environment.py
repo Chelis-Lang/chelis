@@ -18,7 +18,7 @@ class NativePythonEnvironment(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="native-python-env-") as directory:
             root = Path(directory)
             owned = root / "owned"
-            venv.EnvBuilder(with_pip=False).create(owned)
+            venv.EnvBuilder(with_pip=False, symlinks=os.name != "nt").create(owned)
             interpreter = owned / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
             paths = json.loads(subprocess.check_output([
                 str(interpreter), "-I", "-c",
@@ -61,8 +61,8 @@ class NativePythonEnvironment(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             packet = json.loads(result.stdout)
-            self.assertEqual(Path(packet["dependency"]), package)
-            self.assertEqual(Path(packet["prefix"]), owned)
+            self.assertEqual(Path(packet["dependency"]).resolve(), package.resolve())
+            self.assertEqual(Path(packet["prefix"]).resolve(), owned.resolve())
 
 
 if __name__ == "__main__":
