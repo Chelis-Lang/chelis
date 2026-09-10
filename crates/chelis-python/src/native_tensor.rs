@@ -271,21 +271,24 @@ pub(super) fn execute_checked(py: Python<'_>, admitted: &CompiledInputs) -> RawO
                 input_ptrs: inputs.iter().map(|input| input.ptr.as_ptr()).collect(),
                 output_ptrs: vec![std::ptr::null_mut(); admitted.output_count],
             };
-            py.allow_threads(move || execution.run())
-                .0
-                .into_iter()
-                .map(|pointer| {
-                    NonNull::new(pointer).map(|ptr| {
-                        TensorOwner::Cpu(Arc::new(CpuTensorHandle {
-                            ptr,
-                            api: *api,
-                            _library: Arc::clone(&admitted.library),
-                        }))
-                    })
-                })
-                .collect()
+            let pointers = py.allow_threads(move || execution.run()).0;
+            let mut owners = Vec::with_capacity(pointers.len());
+            for pointer in pointers {
+                let owner = match NonNull::new(pointer) {
+                    Some(ptr) => Some(TensorOwner::Cpu(Arc::new(CpuTensorHandle {
+                        ptr,
+                        api: *api,
+                        _library: Arc::clone(&admitted.library),
+                    }))),
+                    None => None,
+                };
+                owners.push(owner);
+            }
+            owners
         }
         AdmittedLane::Device { entry, inputs, api } => {
+            use std::collections::{BTreeMap, btree_map::Entry};
+
             let execution = DeviceExecution {
                 entry: *entry,
                 // The device entry borrows caller packets and never mutates
@@ -299,26 +302,30 @@ pub(super) fn execute_checked(py: Python<'_>, admitted: &CompiledInputs) -> RawO
             // Device owners are unique, unlike retainable host handles. Intern
             // foreign pointers once, including existing input borrows, so an
             // invalid repeated/input output can be rejected without double free.
-            let mut handles = inputs
-                .iter()
-                .map(|input| (input.handle.ptr.as_ptr().addr(), Arc::clone(&input.handle)))
-                .collect::<std::collections::BTreeMap<_, _>>();
-            py.allow_threads(move || execution.run())
-                .0
-                .into_iter()
-                .map(|pointer| {
-                    NonNull::new(pointer).map(|ptr| {
-                        let handle = handles.entry(ptr.as_ptr().addr()).or_insert_with(|| {
-                            Arc::new(GpuTensorHandle {
+            let mut handles = BTreeMap::new();
+            for input in inputs {
+                handles.insert(input.handle.ptr.as_ptr().addr(), Arc::clone(&input.handle));
+            }
+            let pointers = py.allow_threads(move || execution.run()).0;
+            let mut owners = Vec::with_capacity(pointers.len());
+            for pointer in pointers {
+                let owner = match NonNull::new(pointer) {
+                    Some(ptr) => {
+                        let handle = match handles.entry(ptr.as_ptr().addr()) {
+                            Entry::Occupied(entry) => entry.into_mut(),
+                            Entry::Vacant(entry) => entry.insert(Arc::new(GpuTensorHandle {
                                 ptr,
                                 api: *api,
                                 _library: Arc::clone(&admitted.library),
-                            })
-                        });
-                        TensorOwner::Gpu(Arc::clone(handle))
-                    })
-                })
-                .collect()
+                            })),
+                        };
+                        Some(TensorOwner::Gpu(Arc::clone(handle)))
+                    }
+                    None => None,
+                };
+                owners.push(owner);
+            }
+            owners
         }
     };
     RawOutputs {
