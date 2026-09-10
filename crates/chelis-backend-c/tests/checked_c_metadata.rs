@@ -29,10 +29,8 @@ fn main() {{
     for writable in [false, true] {{
         let mut emitter = Emitter::default();
         emitter.emit_tensor_snapshot(7, writable);
-        let strides: Vec<_> = emitter.lines.iter().filter(|line| line.contains("t7_strides[__axis] =")).collect();
-        assert_eq!(strides.len(), 1, "exactly one stride projection");
-        assert!(strides[0].ends_with("t7_strides[__axis] = chelis_tensor_stride(t7, __axis);"),
-                "stride authority must be the runtime owner");
+        assert!(emitter.lines.iter().all(|line| !line.contains("_shape[") && !line.contains("_strides[")),
+                "snapshot must not restore rank-sized metadata scratch");
         let bytes: Vec<_> = emitter.lines.iter().filter(|line| line.starts_with("int64_t t7_byte_capacity =")).collect();
         assert_eq!(bytes, ["int64_t t7_byte_capacity = chelis_tensor_byte_count(t7);"],
                    "byte authority must be the runtime owner");
@@ -75,9 +73,9 @@ fn snapshot_delegation_rejects_raw_stride_and_byte_reconstruction() {
             "byte authority must be the runtime owner",
         ),
         (
-            "for (int32_t __axis = 0; __axis < t{id}_rank; ++__axis) t{id}_strides[__axis] = chelis_tensor_stride(t{id}, __axis);",
-            "int64_t stride = 1; for (int32_t __axis = t{id}_rank; __axis-- > 0;) {{ t{id}_strides[__axis] = stride; stride *= t{id}_shape[__axis]; }}",
-            "stride authority must be the runtime owner",
+            "int32_t t{id}_rank = chelis_tensor_rank(t{id});",
+            "int32_t t{id}_rank = chelis_tensor_rank(t{id}); int64_t t{id}_shape[t{id}_rank > 0 ? t{id}_rank : 1], t{id}_strides[t{id}_rank > 0 ? t{id}_rank : 1]; for (int32_t d = 0; d < t{id}_rank; d++) t{id}_shape[d] = chelis_tensor_shape(t{id}, d); int64_t stride = 1; for (int32_t d = t{id}_rank; d-- > 0;) {{ t{id}_strides[d] = stride; stride *= t{id}_shape[d]; }}",
+            "snapshot must not restore rank-sized metadata scratch",
         ),
     ] {
         assert_eq!(

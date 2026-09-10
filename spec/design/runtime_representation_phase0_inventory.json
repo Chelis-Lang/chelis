@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "freeze_sha256": "c9a900533e8e0d90c0a6c7026c845e2c5ceb50a3e5ac5910375cf2c966ba3cf5",
+  "freeze_sha256": "b98c8b64a15af0e3d8395b86b98c1729af6b5253b7f7de8faea83cfd1746567f",
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -1558,7 +1558,7 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_shape",
-      "sample": "chelis_fill_scalar(t{id}_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)(int64_..."
+      "sample": "const int64_t {extent} = chelis_tensor_shape(t{a}, {axis});"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_shrink",
@@ -2165,10 +2165,6 @@
       "sample": "{{ int32_t *__p = (int32_t*)t{id}_data; __p[0] = (int32_t)({extent}); }}"
     },
     {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_tensor_snapshot",
-      "sample": "int64_t t{id}_shape[t{id}_rank > 0 ? t{id}_rank : 1];"
-    },
-    {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_unary_func_reduced_f",
       "sample": "float __av = {load}(__in_a_{id}[i]);"
     },
@@ -2191,10 +2187,6 @@
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_json_canonical_object_helpers",
       "sample": "int64_t swap = order[cursor - 1];"
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_tensor_abi_helpers",
-      "sample": "int64_t shape[rank > 0 ? rank : 1];"
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-hip/src/emit.rs|owner=HipEmitter::emit_const_tensor",
@@ -3366,15 +3358,23 @@
     "release_reproducers": [
       {
         "name": "checked host metadata debug contract",
-        "command": "cargo nextest run -p chelis-runtime --features ownership-ledger --test checked_metadata --test metadata_compile --test checked_metadata_padding --test checked_c_metadata --test checked_c_indexing --test checked_c_movement --test checked_c_movement_plans --test checked_c_affine --test checked_c_reduction --test checked_c_sparse --test checked_c_matmul --test checked_c_window --test checked_c_literal --test exact_tagged_c_abi --test op33_empty_tensor_axis_decomposition --test op33_tensor_validation --test op33_legal_domain_matrix --test dim_carrier_int64 --test tensor_repurpose --test tensor_write_guard"
+        "command": "cargo nextest run -p chelis-runtime --features ownership-ledger --test checked_metadata --test metadata_compile --test checked_metadata_padding --test checked_c_metadata --test checked_c_indexing --test checked_c_movement --test checked_c_movement_plans --test checked_c_affine --test checked_c_reduction --test checked_c_sparse --test checked_c_matmul --test checked_c_window --test checked_c_literal --test checked_c_alloc_like --test exact_tagged_c_abi --test op33_empty_tensor_axis_decomposition --test op33_tensor_validation --test op33_legal_domain_matrix --test dim_carrier_int64 --test tensor_repurpose --test tensor_write_guard"
       },
       {
         "name": "checked host metadata release contract",
-        "command": "cargo nextest run --release -p chelis-runtime --features ownership-ledger --test checked_metadata --test metadata_compile --test checked_metadata_padding --test checked_c_metadata --test checked_c_indexing --test checked_c_movement --test checked_c_movement_plans --test checked_c_affine --test checked_c_reduction --test checked_c_sparse --test checked_c_matmul --test checked_c_window --test checked_c_literal --test exact_tagged_c_abi --test op33_empty_tensor_axis_decomposition --test op33_tensor_validation --test op33_legal_domain_matrix --test dim_carrier_int64 --test tensor_repurpose --test tensor_write_guard"
+        "command": "cargo nextest run --release -p chelis-runtime --features ownership-ledger --test checked_metadata --test metadata_compile --test checked_metadata_padding --test checked_c_metadata --test checked_c_indexing --test checked_c_movement --test checked_c_movement_plans --test checked_c_affine --test checked_c_reduction --test checked_c_sparse --test checked_c_matmul --test checked_c_window --test checked_c_literal --test checked_c_alloc_like --test exact_tagged_c_abi --test op33_empty_tensor_axis_decomposition --test op33_tensor_validation --test op33_legal_domain_matrix --test dim_carrier_int64 --test tensor_repurpose --test tensor_write_guard"
       },
       {
         "name": "checked C snapshot delegation and restoration mutations",
-        "command": "cargo nextest run -p chelis-backend-c --test checked_c_metadata"
+        "command": "cargo nextest run -p chelis-backend-c --test checked_c_metadata --test checked_c_snapshot_metadata"
+      },
+      {
+        "name": "checked shape observation before storage submission execution",
+        "command": "cargo nextest run -p chelis-backend-c --test exec_compile -E test(checked_snapshot_)"
+      },
+      {
+        "name": "checked vmap shape observation on its shifted axis",
+        "command": "cargo nextest run -p chelis-cli --test runtime_extent_slice_a -E test(vmap_shape_bound_with_concrete_batch_emits_c_without_to_end_ice)"
       },
       {
         "name": "checked C reduction delegation and bypass mutations",

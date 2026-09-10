@@ -343,8 +343,7 @@ fn vmap_shape_bound_with_concrete_batch_emits_c_without_to_end_ice() {
     let emitted = fs::read_to_string(&emitted_path)
         .unwrap_or_else(|error| panic!("read {}: {error}", emitted_path.display()));
     assert!(
-        emitted.contains("t0_shape[__axis] = chelis_tensor_shape(t0, __axis)")
-            && emitted.contains("t0_shape[1]"),
+        emitted.contains("chelis_tensor_shape(t0, 1)"),
         "the shared shape extent must still read the unbatched function's axis 0, shifted behind the mapped batch axis:\n{emitted}"
     );
 }

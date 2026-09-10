@@ -1770,6 +1770,31 @@ pub unsafe extern "C" fn chelis_alloc(
     allocate_tensor(metadata, "chelis_alloc")
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_alloc_like(
+    input: *const chelis_tensor,
+    exemplar: chelis_scalar,
+) -> *mut chelis_tensor {
+    let context = "chelis_tensor_alloc_like";
+    let op = "alloc_like";
+    tensor_metadata_dtype(input, context);
+    let dtype = reduction_exemplar(exemplar, op);
+    if exemplar.bits != 0 {
+        affine_result::<()>(
+            Err(MetadataError::Domain(
+                "allocation requires an all-zero exemplar".into(),
+            )),
+            op,
+        );
+    }
+    let metadata = affine_result(
+        ShapeMetadata::contiguous((*input).metadata.shape(), dtype),
+        op,
+    );
+    affine_result(metadata.bytes().allocation(), op);
+    allocate_tensor(metadata, context)
+}
+
 unsafe fn allocate_tensor(metadata: ShapeMetadata, context: &str) -> *mut chelis_tensor {
     let byte_capacity = metadata.bytes();
     let allocation_bytes = metadata_or_fail(byte_capacity.allocation(), context);
