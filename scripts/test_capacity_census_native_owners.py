@@ -83,7 +83,14 @@ class NativeOwnerIntegration(unittest.TestCase):
         )
 
     def test_actual_registration_rustdoc_and_native4_form_one_bounded_report(self):
+        before = hashlib.sha256(
+            json.dumps(self.raw, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
         report = self.resolve()
+        after = hashlib.sha256(
+            json.dumps(self.raw, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        self.assertEqual(after, before)
         self.assertEqual(tuple(row.public for row in report.entries), PUBLIC)
         self.assertEqual(len({row.implementation for row in report.entries}), 4)
         self.assertEqual(tuple(name for name, _ in report.private_fields), (
