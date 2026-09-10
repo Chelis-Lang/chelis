@@ -36,6 +36,8 @@ void fixture_entry(const Owner *const *inputs, int32_t input_count, Owner **outp
     if (input_count != 1) abort();
     ++calls;
     for (int i = 0; i < output_count; ++i) {
+        if (mode == 12) { outputs[i] = (Owner *)inputs[0]; continue; }
+        if ((mode == 11 || mode == 13) && i > 0) { outputs[i] = outputs[0]; continue; }
         Owner *output = calloc(1, sizeof(Owner));
         *output = *inputs[0];
         output->packet.shape = output->shape; output->packet.strides = output->strides;
@@ -54,6 +56,7 @@ void fixture_entry(const Owner *const *inputs, int32_t input_count, Owner **outp
         if (mode == 7) output->packet.count += 1;
         if (mode == 8) output->device = 2;
         if (mode == 9) output->packet.strides = (const int64_t *)1;
+        if (mode == 13) output->packet.count += 1;
         outputs[i] = output; ++live;
     }
 }
@@ -66,6 +69,9 @@ fn run_case(rank: usize, body: &str) {
     run_shape(shape, body);
 }
 fn run_shape(shape: Vec<i32>, body: &str) {
+    run_outputs(shape, 1, body);
+}
+fn run_outputs(shape: Vec<i32>, output_count: usize, body: &str) {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("device.c");
     let library = dir
@@ -100,7 +106,7 @@ fn run_shape(shape: Vec<i32>, body: &str) {
         String::from_utf8_lossy(&result.stderr)
     );
     let spec = |name: &str| serde_json::json!({"name":name,"dtype":"f32","dims":shape.iter().map(|n|serde_json::json!({"size":n})).collect::<Vec<_>>()});
-    let manifest = serde_json::json!({"abi_version":2,"target":"hip","host_entry_name":"unused_host","device_entry_name":"fixture_entry","inputs":[spec("x")],"outputs":[spec("result")],"source_path":dir.path().join("absent.ch"),"source_hash":"fixture"});
+    let manifest = serde_json::json!({"abi_version":2,"target":"hip","host_entry_name":"unused_host","device_entry_name":"fixture_entry","inputs":[spec("x")],"outputs":(0..output_count).map(|index| spec(if output_count == 1 {"result"} else if index == 0 {"left"} else {"right"})).collect::<Vec<_>>(),"source_path":dir.path().join("absent.ch"),"source_hash":"fixture"});
     std::fs::write(
         library.with_extension("json"),
         serde_json::to_vec(&manifest).unwrap(),
@@ -261,6 +267,82 @@ except BufferError:
     pass
 fixture.fixture_device(1)
 del output; gc.collect()
+assert fixture.fixture_live() == 0
+"#,
+    );
+}
+
+fn owner_rejection_case(test: &str, mode: i32) {
+    const WORKER: &str = "CHELIS_DEVICE_OWNER_TEST_WORKER";
+    if std::env::var_os(WORKER).is_none() {
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--nocapture"])
+            .env(WORKER, "1")
+            .output()
+            .unwrap();
+        assert!(
+            child.status.success(),
+            "device owner rejection child failed: {}\n{}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
+        return;
+    }
+    run_outputs(
+        vec![2],
+        if mode == 12 { 1 } else { 2 },
+        &format!(
+            r#"
+fixture.fixture_mode({mode})
+try:
+    model(source)
+    raise AssertionError('invalid escaping device owner admitted')
+except ValueError:
+    pass
+gc.collect()
+assert fixture.fixture_calls() == 1
+assert fixture.fixture_live() == 0
+assert source.storage.nbytes() == 32
+"#
+        ),
+    );
+}
+#[test]
+fn device_owner_duplicate_outputs_reject_without_double_finalization() {
+    owner_rejection_case(
+        "device_owner_duplicate_outputs_reject_without_double_finalization",
+        11,
+    );
+}
+#[test]
+fn device_owner_returned_input_borrow_rejects_without_double_finalization() {
+    owner_rejection_case(
+        "device_owner_returned_input_borrow_rejects_without_double_finalization",
+        12,
+    );
+}
+#[test]
+fn device_owner_duplicate_bad_descriptor_cleanup_releases_once() {
+    owner_rejection_case(
+        "device_owner_duplicate_bad_descriptor_cleanup_releases_once",
+        13,
+    );
+}
+#[test]
+fn device_owner_distinct_named_outputs_keep_independent_lifetimes() {
+    run_outputs(
+        vec![2],
+        2,
+        r#"
+outputs = model(source)
+assert list(outputs) == ['left', 'right']
+assert outputs['left'].shape == [2] and outputs['right'].shape == [2]
+assert fixture.fixture_live() == 2
+left = outputs.pop('left')
+del outputs; gc.collect()
+assert fixture.fixture_live() == 1
+assert left.__dlpack_device__() == (10, 1)
+del left; gc.collect()
 assert fixture.fixture_live() == 0
 "#,
     );
