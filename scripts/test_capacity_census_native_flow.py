@@ -267,6 +267,20 @@ class NativeFlowCompiledControls(unittest.TestCase):
                            "fn callback() -> fn(Vec<i64>) -> Results { Results }")
         self.assert_problem(raw, "constructor function value")
 
+    def test_constructor_promoted_identity_is_required_and_typed(self):
+        raw = self.observe(
+            POSITIVE + "fn callback() -> fn(Vec<i64>) -> Results { Results }"
+        )
+        expected = obligation(raw)
+        self.assertTrue(all(row["promoted"] is None for row in raw["constructor_uses"]))
+        changed = copy.deepcopy(raw)
+        changed["constructor_uses"][0]["promoted"] = "0"
+        problems = native_flow_problems(changed, expected)
+        self.assertTrue(
+            any("invalid native constructor use location" in problem for problem in problems),
+            problems,
+        )
+
     def test_manual_constructor_rule_cannot_authorize_closure_body(self):
         raw = self.observe(POSITIVE.replace("Self(value.0)", "(|| Self(value.0))()"))
         expected = obligation(raw)

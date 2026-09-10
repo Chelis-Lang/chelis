@@ -147,7 +147,7 @@ def _native_constructor_evidence(raw: dict) -> tuple[set, dict, set]:
         definitions[identity] = lexical
 
     required = {"definition", "carrier", "variant_definition", "kind", "arguments",
-                "formal_inputs", "formal_result", "fields", "caller", "block",
+                "formal_inputs", "formal_result", "fields", "caller", "promoted", "block",
                 "statement", "operand_index", "context", "cast", "operand", "source"}
     observed, exposed = set(), set()
     for row in raw["constructor_uses"]:
@@ -158,9 +158,17 @@ def _native_constructor_evidence(raw: dict) -> tuple[set, dict, set]:
             raise NativeFlowEvidenceError("constructor caller differs from its actual body")
         if (any(type(row[k]) is not int or row[k] < 0
                 for k in ("block", "statement", "operand_index"))
+                or (row["promoted"] is not None
+                    and (type(row["promoted"]) is not int or row["promoted"] < 0))
                 or row["context"] not in {"statement", "terminator"}):
             raise NativeFlowEvidenceError("invalid native constructor use location")
-        occurrence = caller, row["block"], row["statement"], row["operand_index"]
+        occurrence = (
+            caller,
+            row["promoted"],
+            row["block"],
+            row["statement"],
+            row["operand_index"],
+        )
         if occurrence in observed:
             raise NativeFlowEvidenceError("duplicate native constructor use occurrence")
         observed.add(occurrence)
