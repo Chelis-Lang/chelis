@@ -1,3 +1,5 @@
+pub mod staged;
+
 use chelis_deep::DeepTag;
 use chelis_unord::{UnordMap, UnordSet};
 use std::borrow::Cow;
@@ -3116,8 +3118,10 @@ pub fn host_def_kernel(
         return Ok(None);
     };
     let _preflight_guard = TensorHelperPreflightGuard::begin(&signature.body_expr, program);
-    if let Some(staged) = staged_def_kernel(program, &signature)? {
-        return Ok(Some(staged));
+    match staged_def_kernel(program, &signature, random)? {
+        staged::StagingAttempt::Ready(kernel) => return Ok(Some(kernel)),
+        staged::StagingAttempt::HostControlBoundary => return Ok(None),
+        staged::StagingAttempt::NotApplicable => {}
     }
     let expected = match def_body_decision(program, &signature)? {
         DefBodyDecision::Kernel(expected) => expected,
@@ -3162,9 +3166,11 @@ pub fn host_def_kernel(
 fn staged_def_kernel(
     program: &CheckedProgram,
     signature: &HostDefSignature,
-) -> Result<Option<HostDefKernel>, crate::lower::LowerDiagnostic> {
+    random: Option<RandomLoweringState>,
+) -> Result<staged::StagingAttempt<HostDefKernel>, crate::lower::LowerDiagnostic> {
+    use staged::StagingAttempt;
     let HostTypeTerm::Tensor(expected) = &signature.ret_ty else {
-        return Ok(None);
+        return Ok(StagingAttempt::NotApplicable);
     };
     // This is only a cheap candidate scan. Admission below uses the checked
     // expression type in its lexical activation, never this spelling scan.
@@ -3202,7 +3208,7 @@ fn staged_def_kernel(
         host_source |= has_control(expression);
     }
     if !reshape || !host_source {
-        return Ok(None);
+        return Ok(StagingAttempt::NotApplicable);
     }
     if def_effect_row_forbids_kernel(program, &signature.name)
         || signature
@@ -3210,7 +3216,7 @@ fn staged_def_kernel(
             .iter()
             .any(|param| matches!(param.ty, HostTypeTerm::Fn(..)))
     {
-        return Ok(None);
+        return Ok(StagingAttempt::NotApplicable);
     }
     let context = cached_subexpr_lowering_context(program);
     let lowered = crate::lower::try_lower_staged_host_region(
@@ -3219,15 +3225,19 @@ fn staged_def_kernel(
         program,
         &context,
         expected,
+        random,
     );
-    let Some((dag, plan)) = (match lowered {
+    let lowered = match lowered {
         Ok(lowered) => lowered,
         Err(diagnostic) if diagnostic.fatal => return Err(diagnostic),
-        Err(_) => return Ok(None),
-    }) else {
-        return Ok(None);
+        Err(_) => return Ok(StagingAttempt::NotApplicable),
     };
-    Ok(Some(HostDefKernel {
+    let (dag, plan) = match lowered {
+        StagingAttempt::Ready(region) => region,
+        StagingAttempt::NotApplicable => return Ok(StagingAttempt::NotApplicable),
+        StagingAttempt::HostControlBoundary => return Ok(StagingAttempt::HostControlBoundary),
+    };
+    Ok(StagingAttempt::Ready(HostDefKernel {
         inputs: tensor_helper_inputs(&dag),
         output: dag
             .get(dag.roots()[0])
@@ -3791,14 +3801,18 @@ fn lower_def_body_kernel(
     signature: &HostDefSignature,
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> Result<Option<HostExpr>, crate::lower::LowerDiagnostic> {
-    if let Some(kernel) = staged_def_kernel(program, signature)? {
-        return lower_staged_host_plan(
-            kernel.staged.as_ref().expect("staged kernel"),
-            program,
-            &signature.scope,
-            tensor_helpers,
-        )
-        .map(Some);
+    match staged_def_kernel(program, signature, None)? {
+        staged::StagingAttempt::Ready(kernel) => {
+            return lower_staged_host_plan(
+                kernel.staged.as_ref().expect("staged kernel"),
+                program,
+                &signature.scope,
+                tensor_helpers,
+            )
+            .map(Some);
+        }
+        staged::StagingAttempt::HostControlBoundary => return Ok(None),
+        staged::StagingAttempt::NotApplicable => {}
     }
     let expected = match def_body_decision(program, signature)? {
         DefBodyDecision::Host => return Ok(None),
@@ -4358,6 +4372,24 @@ fn lower_staged_host_plan(
     helpers: &mut Vec<HostTensorHelper>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
     let mut scope = scope.clone();
+    let mut reserved = scope
+        .to_sorted()
+        .into_iter()
+        .map(|(name, _)| name.clone())
+        .collect::<BTreeSet<_>>();
+    for stage in plan.stages() {
+        match stage {
+            staged::HostStage::Source {
+                expression, output, ..
+            } => {
+                let mut names = UnordSet::new();
+                collect_deep_var_names(expression, &mut names);
+                reserved.extend(names.into_sorted());
+                reserved.insert(output.clone());
+            }
+            staged::HostStage::Kernel { outputs, .. } => reserved.extend(outputs.iter().cloned()),
+        }
+    }
     let mut bindings = Vec::new();
     for stage in plan.stages() {
         match stage {
@@ -4434,7 +4466,11 @@ fn lower_staged_host_plan(
                     });
                     scope.insert(outputs[0].clone(), ty);
                 } else {
-                    let tuple_name = format!("{}__tuple", outputs[0]);
+                    let mut tuple_name = format!("{}__tuple", outputs[0]);
+                    while reserved.contains(&tuple_name) {
+                        tuple_name.push('_');
+                    }
+                    reserved.insert(tuple_name.clone());
                     bindings.push(HostBinding {
                         name: tuple_name.clone(),
                         display_name: None,
@@ -6960,7 +6996,10 @@ fn should_keep_tensor_expr_in_host_lane(expr: &Expr) -> bool {
             None => true,
         };
     }
-    if matches!(tag(list), Some(DeepTag::TupleGet | DeepTag::Match)) {
+    if matches!(
+        tag(list),
+        Some(DeepTag::TupleGet | DeepTag::Match | DeepTag::HandleEffect)
+    ) {
         return true;
     }
     if tag(list) != Some(DeepTag::App) {
@@ -9151,9 +9190,26 @@ fn lower_app_host_expr(
         .as_ref()
         .is_some_and(|(params, _)| params.iter().any(|ty| matches!(ty, HostTypeTerm::Fn(..))));
     let helper_summary_rejects = top_level_fn_helper_summary_rejects(program, &name)?;
+    // A call into a staged function must retain that function's shared plan.
+    // Re-extracting a tensor-only summary here loses its host scalar producers
+    // and the claims attached before the original graph was partitioned.
+    let callee_has_stages = if !callee_is_local_callable
+        && !callee_is_polymorphic_precision
+        && !callee_is_polymorphic_rank
+        && let Some((canonical, body)) = find_top_level_def_named(program.exprs(), &name)
+        && let Some(signature) = host_def_signature(canonical, body, None, program)
+    {
+        !matches!(
+            staged_def_kernel(program, &signature, None)?,
+            staged::StagingAttempt::NotApplicable
+        )
+    } else {
+        false
+    };
     if let Some(tensor_ty) = helper_tensor_ty.clone()
         && !callee_is_local_callable
         && !has_callable_params
+        && !callee_has_stages
         && !top_level_fn_needs_host_lane_tensor_lowering(program, &name)
         && !helper_summary_rejects
         && !should_keep_tensor_expr_in_host_lane(app_expr)
@@ -9178,6 +9234,7 @@ fn lower_app_host_expr(
     if let Some(tensor_ty) = helper_tensor_ty
         && !callee_is_local_callable
         && !has_callable_params
+        && !callee_has_stages
         && !top_level_fn_needs_host_lane_tensor_lowering(program, &name)
         && !helper_summary_rejects
         && !should_keep_tensor_expr_in_host_lane(app_expr)
@@ -18699,4 +18756,3 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         );
     }
 }
-pub mod staged;

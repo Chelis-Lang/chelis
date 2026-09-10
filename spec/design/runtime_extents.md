@@ -385,9 +385,9 @@ introduced after a value was already produced executes at that call boundary.
 Literal-condition host functions use existing DAG branch pruning while retaining
 their full declaring signature; dynamic host control flow keeps its existing route.
 
-The remaining host-source claim gap in #1686 requires a shared staged function
-plan. A supported scalar `int64` expression that cannot execute in the tensor
-DAG keeps its checked source expression and captures the current activation's
+Host-sourced extents use a shared staged function plan. A supported scalar
+`int64` expression that cannot execute in the tensor DAG keeps its checked
+source expression and captures the current activation's
 values explicitly. Its result supplies a fresh typed scalar input in the logical
 DAG. Lowering attaches result claims through that complete graph before splitting
 it into executable helpers; a helper's result metadata cannot reconstruct the
@@ -395,8 +395,11 @@ lost provenance after a split. Existing native arithmetic lowering remains in
 place where it already carries the source correctly.
 
 Stages execute at their original source positions. The preceding graph segment
-materializes each capture once, the existing host evaluator or host C lowering
-evaluates the scalar expression once, and the following segment consumes its
+executes eager expressions even when their values are unused and exports only
+values required after the cut. A completion dependency retains that execution
+without exporting every intermediate tensor. It materializes each capture once;
+the existing host evaluator or host C lowering evaluates the scalar expression
+once, and the following segment consumes its
 tagged result. Complete shape-list evaluation precedes checked reshape carriers
 and allocation, including mixed host/DAG producers and discarded results. The
 same plan drives Eval and C; host C emitted for HIP follows it too. Scalar control
@@ -405,12 +408,19 @@ a source out of a tensor branch or make tensor control flow eager.
 
 Plan validation requires exactly one producer for each staged input, available
 captures, matching types, and no unresolved placeholders in executable helpers.
-The plan is regenerated from the checked program and mandatory authored-signature
-ledger at cache admission. Any admitted transform must preserve stage/value
-mapping and execution multiplicity. These obligations are not discharged by the
+After cache admission, the plan is regenerated from the checked program and
+mandatory authored-signature ledger before definition execution. Any admitted
+transform must preserve stage/value mapping and execution multiplicity. These
+obligations are not discharged by the
 native remainder path: the active `host_produced_reshape_targets_preserve_declared_claims`
-fixture records the remaining gap across bitwise, metadata, list, helper and
-scalar-conditional producers, with direct and bound/copied results.
+fixture covers bitwise, metadata, list, helper and scalar-conditional producers,
+with direct and bound/copied results. Non-tensor locals retain typed host values;
+capture identity is keyed by the producing node or host value, never the binder
+spelling. Calls into staged definitions retain the shared plan instead of
+re-extracting a tensor-only helper. Host control boundaries are an explicit
+planner result, so a fallback cannot silently retry whole-function DAG lowering.
+Random handlers retain host scope, each tensor segment consumes the live handled
+stream, and CSE preserves distinct activated draws.
 
 Each activation owns fresh witness nodes. The lowering environment maps the
 signature's binders to these exact nodes and restores that map on return;
@@ -455,7 +465,7 @@ cargo nextest run -p chelis-cli -p chelis-ir -p chelis-compiler-api -p chelis-ba
   --test wire_extent_witness --test disk_cache \
   --test issue_513_symbolic_axis_adjoints --test exec_compile \
   --test runtime_extent_slice_b --test issue_912_root_boundary \
-  -E 'binary(runtime_extent_claim_preparation) | binary(runtime_extent_checked_transport) | binary(wire_extent_witness) | test(=cached_imports_preserve_computed_claims_and_unit_preconditions) | test(=previous_checked_extent_cache_is_rejected_before_payload_decode) | test(context_decode_rejects_missing_or_forged_authored_signatures) | binary(issue_513_symbolic_axis_adjoints) | test(static_reshape_folding_requires_independent_axis_sources) | test(checked_remainder) | test(=a_local_unit_extent_claim_is_guarded_on_the_hip_host_lowering) | test(=hip_tensor_root_uses_the_manifest_to_emit_a_gpu_executable)'
+  -E 'binary(runtime_extent_claim_preparation) | binary(runtime_extent_checked_transport) | binary(wire_extent_witness) | test(=cached_imports_preserve_computed_claims_and_unit_preconditions) | test(=previous_checked_extent_cache_is_rejected_before_payload_decode) | test(context_decode_rejects_missing_or_forged_authored_signatures) | binary(issue_513_symbolic_axis_adjoints) | test(static_reshape_folding_requires_independent_axis_sources) | test(checked_remainder) | test(staged_plan_) | test(cse_preserves_executed_random_draws) | test(=a_local_unit_extent_claim_is_guarded_on_the_hip_host_lowering) | test(=hip_tensor_root_uses_the_manifest_to_emit_a_gpu_executable)'
 ```
 
 The new public matrix has 117 initial exported/binding/main fixtures, 69
@@ -463,9 +473,12 @@ result-graph fixtures, 48 complete-shape-list scheduling fixtures,
 six folded-source caller-contract fixtures, 48 producing-source expression fixtures,
 six dynamic remainder fixtures and 12 HIP host CLI/API executions,
 three executable example controls, 24 grad/vmap controls
-and 12 imported-call controls. Every
-case checks declarations independently of actual shape/value or required
-failure. Claim mismatches require Domain/reshape/int64. Scheduling fixtures
+and 16 imported-call controls. The staged-source coverage adds 60 producer
+fixtures, 48 capture/order fixtures, six eager-source fixtures, six scoped-witness
+fixtures, 12 HIP host CLI/API executions and 24 handled-Random fixtures. These
+505 public fixture variants check declarations independently of actual
+shape/value or required failure. Random values are checked at exact f32 bits.
+Claim mismatches require Domain/reshape/int64. Scheduling fixtures
 independently require Eval's division-by-zero/floor_div/int64 diagnostic and
 the C integer helper's existing division-by-zero failure; they do not certify
 that helper's diagnostic parity. The same command retains the earlier literal and helper-order

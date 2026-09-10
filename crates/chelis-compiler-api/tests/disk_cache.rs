@@ -140,6 +140,15 @@ fn cached_imports_preserve_computed_claims_and_unit_preconditions() {
     use chelis_compiler_api::schema::ExecutionValue;
     for (definition, good_argument, bad_argument, shape, values, operation, context) in [
         (
+            "def f(x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [bitand(floor_div(numel(x), 2i64), 3i64), 2i64])",
+            "to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32])",
+            "to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32])",
+            vec![2, 2],
+            vec![1.0, 2.0, 3.0, 4.0],
+            "reshape",
+            "reshape axis 0 = 3",
+        ),
+        (
             "def f(x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])",
             "to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32])",
             "to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32])",

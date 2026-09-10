@@ -17,6 +17,12 @@ pub(crate) enum StagingStatus {
     HostControlBoundary,
 }
 
+pub(crate) enum StagingAttempt<T> {
+    NotApplicable,
+    HostControlBoundary,
+    Ready(T),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum StageValue {
     Tensor(NodeId),
@@ -146,150 +152,162 @@ pub(crate) fn partition(
         }
     }
 
-    // Captures and all staged producers are execution roots even when their
-    // final tensor result is discarded. Ordinary graph dependencies retain
-    // every checked extent and the complete list of target producers.
-    let mut live = BTreeSet::new();
-    let mut pending = vec![*root];
-    for source in sources {
-        if let StageValue::Tensor(id) = source.value {
-            pending.push(id);
-        }
-        pending.extend(
-            source
-                .captures
-                .iter()
-                .filter_map(|(_, value, _)| match value {
-                    StageValue::Tensor(id) => Some(*id),
-                    StageValue::Host(_) => None,
-                }),
-        );
-    }
-    while let Some(id) = pending.pop() {
-        if live.insert(id) {
-            let node = logical
-                .get(id)
-                .ok_or("a staged dependency has no producer")?;
-            pending.extend(node.inputs.iter().copied());
-            pending.extend(node.shape_deps.iter().copied());
-        }
-    }
-    let mut stages = Vec::new();
-    let mut available = host_parameters
-        .keys()
-        .map(|id| StageValue::Host(*id))
-        .collect::<BTreeSet<_>>();
+    let mut partition = Partition {
+        logical,
+        sources,
+        names,
+        reserved,
+        available: host_parameters
+            .keys()
+            .map(|id| StageValue::Host(*id))
+            .collect(),
+        stages: Vec::new(),
+    };
     let mut start = 0;
     for source in sources {
         if source.before < start || source.before > logical.nodes().len() {
-            return Err("a staged scalar requires one ordered input producer".into());
+            return Err("a staged source requires one ordered producer".into());
         }
-        append_kernel(
-            logical,
-            start,
-            source.before,
-            &live,
-            &names,
-            &mut available,
-            &mut stages,
-        )?;
+        partition.append_kernel(start, source.before)?;
         let captures = source
             .captures
             .iter()
             .map(|(binding, value, ty)| {
-                if !available.contains(value) {
+                if !partition.available.contains(value) {
                     return Err(format!("staged capture `{binding}` precedes its producer"));
                 }
                 Ok(HostStageCapture {
                     binding: binding.clone(),
-                    value: names[value].clone(),
+                    value: partition.names[value].clone(),
                     ty: ty.clone(),
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
-        stages.push(HostStage::Source {
+        partition.stages.push(HostStage::Source {
             expression: source.expression.clone(),
             captures,
-            output: names[&source.value].clone(),
+            output: partition.names[&source.value].clone(),
             ty: source.ty.clone(),
         });
-        available.insert(source.value);
+        partition.available.insert(source.value);
         start = source.before + usize::from(matches!(source.value, StageValue::Tensor(_)));
     }
-    append_kernel(
-        logical,
-        start,
-        logical.nodes().len(),
-        &live,
-        &names,
-        &mut available,
-        &mut stages,
-    )?;
-    if !available.contains(&StageValue::Tensor(*root)) {
+    partition.append_kernel(start, logical.nodes().len())?;
+    if !partition.available.contains(&StageValue::Tensor(*root)) {
         return Err("a staged tensor result has no executed producer".into());
     }
     Ok(HostStagedPlan {
-        stages,
-        output: names[&StageValue::Tensor(*root)].clone(),
+        stages: partition.stages,
+        output: partition.names[&StageValue::Tensor(*root)].clone(),
     })
 }
 
-fn append_kernel(
-    logical: &Dag,
-    start: usize,
-    end: usize,
-    live: &BTreeSet<NodeId>,
-    names: &BTreeMap<StageValue, String>,
-    available: &mut BTreeSet<StageValue>,
-    stages: &mut Vec<HostStage>,
-) -> Result<(), String> {
-    let mut dag = Dag::new();
-    let mut remap = BTreeMap::new();
-    let mut outputs = Vec::new();
-    for node in &logical.nodes()[start..end] {
-        if !live.contains(&node.id) {
-            continue;
+struct Partition<'a> {
+    logical: &'a Dag,
+    sources: &'a [HostSource],
+    names: BTreeMap<StageValue, String>,
+    reserved: BTreeSet<String>,
+    available: BTreeSet<StageValue>,
+    stages: Vec<HostStage>,
+}
+
+impl Partition<'_> {
+    fn append_kernel(&mut self, start: usize, end: usize) -> Result<(), String> {
+        if start == end {
+            return Ok(());
         }
-        for &dependency in node.inputs.iter().chain(&node.shape_deps) {
-            if let std::collections::btree_map::Entry::Vacant(entry) = remap.entry(dependency) {
-                if !available.contains(&StageValue::Tensor(dependency)) {
-                    return Err("an executable staged helper contains an unresolved input".into());
+        // Only values read after this cut cross the ABI. In particular, an
+        // intermediate consumed inside this segment is not kept as an output.
+        let mut exports = self
+            .logical
+            .roots()
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        for node in &self.logical.nodes()[end..] {
+            exports.extend(node.inputs.iter().chain(&node.shape_deps).copied());
+        }
+        for source in self.sources.iter().filter(|source| source.before >= end) {
+            exports.extend(
+                source
+                    .captures
+                    .iter()
+                    .filter_map(|(_, value, _)| match value {
+                        StageValue::Tensor(id) => Some(*id),
+                        StageValue::Host(_) => None,
+                    }),
+            );
+        }
+        let mut dag = Dag::new();
+        let mut remap = BTreeMap::new();
+        let mut outputs = Vec::new();
+        for node in &self.logical.nodes()[start..end] {
+            for &dependency in node.inputs.iter().chain(&node.shape_deps) {
+                if let std::collections::btree_map::Entry::Vacant(entry) = remap.entry(dependency) {
+                    if !self.available.contains(&StageValue::Tensor(dependency)) {
+                        return Err(
+                            "an executable staged helper contains an unresolved input".into()
+                        );
+                    }
+                    let ty = self
+                        .logical
+                        .get(dependency)
+                        .ok_or("missing staged input")?
+                        .output_type
+                        .clone();
+                    entry.insert(dag.add_node(
+                        RiscOp::Load {
+                            name: self.names[&StageValue::Tensor(dependency)].as_str().into(),
+                        },
+                        Vec::new(),
+                        ty,
+                        None,
+                    ));
                 }
-                let ty = logical
-                    .get(dependency)
-                    .ok_or("missing staged input")?
-                    .output_type
-                    .clone();
-                entry.insert(dag.add_node(
-                    RiscOp::Load {
-                        name: names[&StageValue::Tensor(dependency)].as_str().into(),
-                    },
-                    Vec::new(),
-                    ty,
-                    None,
-                ));
+            }
+            let id = dag.add_node(
+                node.op.clone(),
+                node.inputs.iter().map(|i| remap[i]).collect(),
+                node.output_type.clone(),
+                node.span_id.clone(),
+            );
+            let copied = dag.node_mut(id).expect("new staged node");
+            copied.merged_spans = node.merged_spans.clone();
+            copied.shape_deps = node.shape_deps.iter().map(|i| remap[i]).collect();
+            copied.reusable_input = node
+                .reusable_input
+                .and_then(|input| remap.get(&input).copied());
+            remap.insert(node.id, id);
+            if exports.contains(&node.id) {
+                self.available.insert(StageValue::Tensor(node.id));
+                dag.add_root(id);
+                outputs.push(self.names[&StageValue::Tensor(node.id)].clone());
             }
         }
-        let id = dag.add_node(
-            node.op.clone(),
-            node.inputs.iter().map(|i| remap[i]).collect(),
-            node.output_type.clone(),
-            node.span_id.clone(),
+        // A host region evaluates each preceding expression even when its
+        // value is unused. A completion root retains that execution without
+        // exporting every intermediate tensor or replaying a growing prefix.
+        let dependencies = dag.nodes().iter().map(|node| node.id).collect();
+        let completed = dag.add_node(
+            RiscOp::Const {
+                value: chelis_types::scalar_from_i64("const", chelis_types::types::Prim::Int64, 0)
+                    .expect("exact completion value"),
+            },
+            Vec::new(),
+            scalar_type(),
+            None,
         );
-        let copied = dag.node_mut(id).expect("new staged node");
-        copied.merged_spans = node.merged_spans.clone();
-        copied.shape_deps = node.shape_deps.iter().map(|i| remap[i]).collect();
-        remap.insert(node.id, id);
-        available.insert(StageValue::Tensor(node.id));
-        // Export each live intermediate once. Later helpers consume its value,
-        // never replay a growing prefix of the original graph.
-        dag.add_root(id);
-        outputs.push(names[&StageValue::Tensor(node.id)].clone());
+        dag.node_mut(completed).expect("completion root").shape_deps = dependencies;
+        dag.add_root(completed);
+        let mut completion_name = format!("__checked_complete_{end}");
+        while self.reserved.contains(&completion_name) {
+            completion_name.push('_');
+        }
+        self.reserved.insert(completion_name.clone());
+        outputs.push(completion_name);
+        self.stages.push(HostStage::Kernel { dag, outputs });
+        Ok(())
     }
-    if !outputs.is_empty() {
-        stages.push(HostStage::Kernel { dag, outputs });
-    }
-    Ok(())
 }
 
 pub(crate) fn scalar_type() -> TensorType {

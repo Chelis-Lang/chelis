@@ -1424,8 +1424,12 @@ pub(crate) fn try_lower_staged_host_region(
     program: &CheckedProgram,
     context: &SubexprLoweringContext,
     result_claim: &TensorType,
-) -> Result<Option<(Dag, crate::host::staged::HostStagedPlan)>, LowerDiagnostic> {
-    use crate::host::staged::StagingStatus;
+    random: Option<crate::host::RandomLoweringState>,
+) -> Result<
+    crate::host::staged::StagingAttempt<(Dag, crate::host::staged::HostStagedPlan)>,
+    LowerDiagnostic,
+> {
+    use crate::host::staged::{StagingAttempt, StagingStatus};
     let status = std::rc::Rc::new(Cell::new(StagingStatus::Searching));
     let result = catch_lowering(std::panic::AssertUnwindSafe(|| {
         let mut ctx = LowerCtx::new(
@@ -1436,6 +1440,20 @@ pub(crate) fn try_lower_staged_host_region(
         );
         ctx.host_program = Some(program);
         ctx.host_stage_status = status.clone();
+        ctx.random_seed = random.and_then(|state| state.seed);
+        // A source may itself draw from Random. Each executed tensor segment
+        // must continue the live handled stream, rather than baking the draw
+        // count inferred before those source expressions have executed.
+        let active = ctx.dag.add_node(
+            RiscOp::synth_const(Prim::Bool, 1.0),
+            Vec::new(),
+            TensorType {
+                dims: Vec::new(),
+                precision: Prim::Bool,
+            },
+            None,
+        );
+        ctx.random_path_condition = Some(active);
         let mut names = Vec::new();
         let mut types = Vec::new();
         for param in params {
@@ -1490,9 +1508,12 @@ pub(crate) fn try_lower_staged_host_region(
         Some((ctx.dag, plan))
     }));
     match (result, status.get()) {
-        (Err(_), StagingStatus::HostControlBoundary) => Ok(None),
+        (Err(_), StagingStatus::HostControlBoundary) => Ok(StagingAttempt::HostControlBoundary),
         (Err(diagnostic), StagingStatus::HasSources) => Err(diagnostic.fatal()),
-        (result, _) => result,
+        (result, _) => result.map(|region| match region {
+            Some(region) => StagingAttempt::Ready(region),
+            None => StagingAttempt::NotApplicable,
+        }),
     }
 }
 
@@ -6064,6 +6085,15 @@ impl<'program> LowerCtx<'program> {
         use crate::host::staged::{HostSource, HostValueId, StageValue};
         use crate::host_type_state::{HostPrecisionTerm, HostTypeTerm};
         let program = self.host_program?;
+        // Lexical callable aliases belong to the existing inliner. Lower
+        // their arguments/body in that activation, then stage the scalar
+        // producer inside it; the alias is not a free runtime host name.
+        if let Some((DeepTag::App, _, kids)) = stamped_parts(expr)
+            && let Some(name) = kids.first().and_then(bare_var_name)
+            && self.local_callables.contains_key(&name)
+        {
+            return None;
+        }
         if !matches!(
             stamped_parts(expr),
             Some((
@@ -9154,11 +9184,7 @@ impl<'program> LowerCtx<'program> {
                     .get(template)
                     .map(|node| node.output_type.clone())
                     .unwrap_or_else(|| ty.clone());
-                let resolved_ty = if ty == &Self::default_type() && !inferred_ty.dims.is_empty() {
-                    inferred_ty
-                } else {
-                    ty.clone()
-                };
+                let resolved_ty = inferred_ty;
                 let node = self.dag.add_node(
                     RiscOp::UniformLike { low, high, seed },
                     activation.map_or_else(|| vec![template], |active| vec![template, active]),
@@ -12856,6 +12882,15 @@ impl<'program> LowerCtx<'program> {
         };
         match effect_kind {
             Ok(EffectKind::Random) if elems.len() >= 4 => {
+                if self.host_program.is_some() {
+                    self.host_stage_status
+                        .set(crate::host::staged::StagingStatus::HostControlBoundary);
+                    raise_lowering_error(
+                        "a Random handler retains its host control boundary around staged calls",
+                        Some(elems[3].span()),
+                        self.current_span_id.clone(),
+                    );
+                }
                 let saved_seed = self.random_seed;
                 let saved_counter = self.random_counter;
                 let seed = self.extract_u64_value(&elems[2]).unwrap_or_else(|| {

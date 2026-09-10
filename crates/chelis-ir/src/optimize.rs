@@ -361,7 +361,8 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
             RiscOp::ExtentWitness { .. }
                 | RiscOp::CheckedReshapeExtent { .. }
                 | RiscOp::CheckedUnitAxis { .. }
-        ) && let Some(&existing) = seen.get(&cse_key)
+        ) && !(matches!(node.op, RiscOp::UniformLike { .. }) && node.inputs.len() == 2)
+            && let Some(&existing) = seen.get(&cse_key)
         {
             // Duplicate: its full provenance (canonical + merged) folds
             // onto the survivor so the audit chain through the dropped
@@ -655,6 +656,54 @@ mod tests {
         let new_dag = dead_code_eliminate(&dag);
         // Store + its input const + second const + neg = 4 nodes all live.
         assert_eq!(new_dag.len(), 4);
+    }
+
+    #[test]
+    fn cse_preserves_executed_random_draws() {
+        use chelis_types::types::Prim;
+        let mut dag = Dag::new();
+        let template = dag.add_node(
+            RiscOp::synth_const(Prim::F32, 0.0),
+            vec![],
+            scalar_f32(),
+            None,
+        );
+        let active = dag.add_node(
+            RiscOp::synth_const(Prim::Bool, 1.0),
+            vec![],
+            TensorType {
+                dims: vec![],
+                precision: Prim::Bool,
+            },
+            None,
+        );
+        for _ in 0..2 {
+            let draw = dag.add_node(
+                RiscOp::UniformLike {
+                    low: 2.0,
+                    high: 5.0,
+                    seed: 42,
+                },
+                vec![template, active],
+                scalar_f32(),
+                None,
+            );
+            dag.add_root(draw);
+        }
+        let optimized = common_subexpr_eliminate(&dag);
+        let (values, counter) = crate::eval::eval_tensor_roots_with_strict_random_progress(
+            &optimized,
+            optimized.roots(),
+            0,
+            |_| None,
+        )
+        .unwrap();
+        assert_eq!(
+            counter, 2,
+            "equal source syntax must still consume two draws"
+        );
+        assert_eq!(optimized.roots().len(), 2);
+        assert_ne!(values[&optimized.roots()[0]], values[&optimized.roots()[1]]);
     }
 
     #[test]

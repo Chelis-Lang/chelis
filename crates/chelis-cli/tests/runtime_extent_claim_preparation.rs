@@ -31,6 +31,7 @@ struct Case {
 #[derive(Clone)]
 enum Expected {
     Tensor(Vec<usize>, Vec<f64>),
+    TensorF32Bits(Vec<usize>, Vec<u32>),
     Domain(&'static str, &'static [&'static str]),
     TargetDivisionByZero,
     ExactTargetDivisionByZero,
@@ -70,7 +71,7 @@ fn call_matrix(
     inputs: Vec<Input>,
     result: Expected,
 ) {
-    let good = matches!(result, Expected::Tensor(..));
+    let good = matches!(result, Expected::Tensor(..) | Expected::TensorF32Bits(..));
     let call = format!(
         "f({})",
         inputs.iter().map(literal).collect::<Vec<_>>().join(", ")
@@ -736,6 +737,26 @@ fn contract_failures(case: &Case, observation: &Value) -> Vec<String> {
                     && context
                         .iter()
                         .all(|record| context_has_record(stderr, record))
+            }
+            Expected::TensorF32Bits(shape, bits) => {
+                run["stage"] == "execute"
+                    && run["success"] == true
+                    && tensor(
+                        stdout,
+                        if case.source.contains("def main()") {
+                            "main"
+                        } else {
+                            "out"
+                        },
+                    )
+                    .is_some_and(|(actual_shape, data)| {
+                        actual_shape == *shape
+                            && data
+                                .iter()
+                                .map(|value| (*value as f32).to_bits())
+                                .collect::<Vec<_>>()
+                                == *bits
+                    })
             }
             Expected::TargetDivisionByZero => {
                 // The existing C integer helper uses its older diagnostic.
@@ -1521,6 +1542,11 @@ fn staged_reshape_sources_preserve_captures_and_order() {
                 "g(shape(source, 0i32), x)",
             ),
             (
+                "scalar_helper_alias",
+                "def extent(y: tensor[m, f32]) -> int64 = numel(y)\n",
+                "{\n  target = extent\n  reshape(x, [target(source), 2i64])\n}",
+            ),
+            (
                 "repeated_calls",
                 "def g(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [bitand(numel(source), 3i64), 2i64])\n",
                 "{\n  first = g(source, x)\n  second = g(source, x)\n  copy(first)\n}",
@@ -1591,7 +1617,126 @@ fn staged_reshape_sources_preserve_captures_and_order() {
             Expected::TargetDivisionByZero,
         );
     }
-    assert_eq!(cases.len(), 42);
+    assert_eq!(cases.len(), 48);
+    let mut failures = Vec::new();
+    for case in cases {
+        let observed = observe(&case);
+        println!("{}: {}", case.id, observed);
+        failures.extend(contract_failures(&case, &observed));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn staged_graph_segments_preserve_eager_sources() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut cases = Vec::new();
+    for n in [2, 3] {
+        call_matrix(
+            &mut cases,
+            &format!("staged_source.eager_unused.x{n}"),
+            1686,
+            "def f(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = {\n  unused = floor_div(shape(x, 0i32), sub(3i64, shape(source, 0i32)))\n  reshape(x, [bitand(numel(source), 3i64), 2i64])\n}",
+            "(tensor[d0, f32], tensor[d1, f32]) -> tensor[2, 2, f32]",
+            vec![vector(n), vector(n * 2)],
+            if n == 2 {
+                Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])
+            } else {
+                Expected::TargetDivisionByZero
+            },
+        );
+    }
+    let mut failures = Vec::new();
+    for case in cases {
+        let observed = observe(&case);
+        println!("{}: {}", case.id, observed);
+        failures.extend(contract_failures(&case, &observed));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn staged_reshape_sources_preserve_signature_witnesses() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut cases = Vec::new();
+    for n in [2, 3] {
+        call_matrix(
+            &mut cases,
+            &format!("staged_source.signature_scope.x{n}"),
+            1686,
+            "def g(source: tensor[rows, f32], x: tensor[n, f32]) -> tensor[rows, 2, f32] = reshape(x, [bitand(numel(source), 3i64), 2i64])\ndef f(unread: tensor[rows, f32], source: tensor[m, f32], x: tensor[n, f32]) -> tensor[rows, 2, f32] = copy(g(source, x))",
+            // The checked type expresses the equality required by the nested
+            // result. The original parameters must still supply two witnesses.
+            "(tensor[rows, f32], tensor[rows, f32], tensor[d0, f32]) -> tensor[rows, 2, f32]",
+            vec![vector(2), vector(n), vector(n * 2)],
+            if n == 2 {
+                Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])
+            } else {
+                Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"])
+            },
+        );
+    }
+    let mut failures = Vec::new();
+    for case in cases {
+        let observed = observe(&case);
+        println!("{}: {}", case.id, observed);
+        failures.extend(contract_failures(&case, &observed));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn staged_sources_preserve_handled_random_progress() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut cases = Vec::new();
+    for seed in [42u64, 43] {
+        for n in [2, 3] {
+            for (kind, target, draw) in [
+                ("native", "bitand(numel(source), 3i64)", 1u64),
+                (
+                    "mixed",
+                    "if eq(numel(source), 2i64) then floor_div(numel(uniform_like(x, 2.0f32, 5.0f32)), 2i64) else 3i64",
+                    2u64,
+                ),
+            ] {
+                let expected = if n == 2 {
+                    // Reference the numeric sampler directly, independently of
+                    // either compiler lane's staging, seed and draw scheduling.
+                    let effective_seed = seed ^ draw.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                    Expected::TensorF32Bits(
+                        vec![2, 2],
+                        (0..4)
+                            .map(|index| {
+                                (chelis_types::uniform_sample(
+                                    chelis_types::types::Prim::F32,
+                                    2.0,
+                                    5.0,
+                                    effective_seed,
+                                    index,
+                                )
+                                .unwrap()
+                                .as_f64_lossy() as f32)
+                                    .to_bits()
+                            })
+                            .collect(),
+                    )
+                } else {
+                    Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"])
+                };
+                call_matrix(
+                    &mut cases,
+                    &format!("staged_source.random.{kind}.seed{seed}.x{n}"),
+                    1686,
+                    &format!(
+                        "def g(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] ! {{ Random }} = {{\n  first = uniform_like(x, 2.0f32, 5.0f32)\n  size = {target}\n  second = uniform_like(x, 2.0f32, 5.0f32)\n  reshape(second, [size, 2i64])\n}}\ndef f(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = with seed({seed}i64) {{ g(source, x) }}"
+                    ),
+                    "(tensor[d0, f32], tensor[d1, f32]) -> tensor[2, 2, f32]",
+                    vec![vector(n), vector(n * 2)],
+                    expected,
+                );
+            }
+        }
+    }
     let mut failures = Vec::new();
     for case in cases {
         let observed = observe(&case);
@@ -1630,6 +1775,36 @@ fn remainder_claims_preserve_hip_host_cli_and_api_execution() {
                     .into_iter()
                     .map(|f| format!("api={api}: {f}")),
             );
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn staged_claims_preserve_hip_host_cli_and_api_execution() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut cases = Vec::new();
+    for n in [2, 3] {
+        call_matrix(
+            &mut cases,
+            &format!("staged_hip_host.x{n}"),
+            1686,
+            "def f(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [bitand(numel(source), 3i64), 2i64])",
+            "(tensor[d0, f32], tensor[d1, f32]) -> tensor[2, 2, f32]",
+            vec![vector(n), vector(n * 2)],
+            if n == 2 {
+                Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])
+            } else {
+                Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"])
+            },
+        );
+    }
+    let mut failures = Vec::new();
+    for case in cases {
+        for api in [false, true] {
+            let observed = observe_host_lane(&case, None, "hip", api);
+            println!("{} api={api}: {}", case.id, observed);
+            failures.extend(contract_failures(&case, &observed));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -2258,6 +2433,16 @@ fn imported_checked_extent_contract() {
     for good in [true, false] {
         for (family, library, arguments, expected) in [
             (
+                "staged",
+                "def f(x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [bitand(floor_div(numel(x), 2i64), 3i64), 2i64])",
+                literal(&vector(if good { 4 } else { 6 })),
+                if good {
+                    Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])
+                } else {
+                    Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"])
+                },
+            ),
+            (
                 "reshape",
                 "def f(x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])",
                 literal(&vector(if good { 4 } else { 6 })),
@@ -2307,7 +2492,7 @@ fn imported_checked_extent_contract() {
                 println!("{}: {}", case.id, observation);
                 failures.extend(contract_failures(&case, &observation));
                 let (signature, result) = match family {
-                    "reshape" => ("(tensor[d0, f32]) -> tensor[2, 2, f32]", "2, 2"),
+                    "reshape" | "staged" => ("(tensor[d0, f32]) -> tensor[2, 2, f32]", "2, 2"),
                     "unit" => ("(tensor[unit, f32]) -> tensor[3, f32]", "3"),
                     "literal" => ("(tensor[d0, f32]) -> tensor[4, f32]", "4"),
                     _ => unreachable!(),
