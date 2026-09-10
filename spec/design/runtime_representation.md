@@ -1,8 +1,8 @@
 # Runtime Representation and Tensor-Access Safety
 
-**Status:** ACTIVE. Phase 0 is implemented and continuously enforced by its
-authoritative oracle; Phases 1-5 remain planned. Tracking issue: [#893]. Code
-evidence was rechecked on `main` at `8190b6d8` unless a later receipt is named.
+**Status:** ACTIVE. Phases 0 and 1 are implemented and enforced by the Phase 1
+composite oracle; Phases 2-5 remain planned. Tracking issue: [#893]. Acceptance
+evidence is commit-bound by the oracle's execution receipts.
 **Owning specs:** `spec/04-type-system.md` [04-NUM-4], [04-NUM-8],
 [04-NUM-10], [04-NUM-11], and [04-SHAPE-1], plus
 `spec/05-risc-primitives.md` [05-DIM-1], [05-DIM-2], [05-OP-31], [05-OP-33],
@@ -15,10 +15,12 @@ mirror can make one buffer mean two incompatible things. The end state makes an
 in-repository mismatch unavailable through ordinary APIs and makes a malformed
 foreign carrier fail before data access.
 
-The Phase 0 oracle runs in the dedicated `runtime-representation-phase0-oracle`
-job in `heavy-e2e.yml`, daily at 03:17 UTC and on manual dispatch, with a
-45-minute timeout. Ordinary PR and main-push CI do not run this full oracle;
-its command and phase acceptance requirements remain unchanged.
+The Phase 1 composite runs in the dedicated
+`runtime-representation-phase0-oracle` job in `heavy-e2e.yml`, daily at 03:17
+UTC and on manual dispatch, with a 45-minute timeout. The stable job identity
+predates Phase 1; its display name and command identify the current inherited
+phase. Ordinary PR and main-push CI do not run this full oracle, so a completion
+claim requires a candidate-head dispatch or equivalent clean execution receipt.
 
 ## Summary
 
@@ -1378,11 +1380,12 @@ projection are exercised without requesting that allocation. Capacity-key public
 compile-fail doctests remain a supporting obligation. No Phase 2 device or native
 Python boundary is admitted through this host/C receipt.
 
-Hosted `runtime-representation` and optional full/local gates invoke Phase 1;
-`--fast` remains the pre-push stage and does not run this composite. Phase 0 is
-still directly runnable. A clean local Phase 1 pass is supporting evidence until
-current-head hosted acceptance and a compliant fresh review pass. #888/#889
-closure requires those receipts; this change does not close #893 or Phases 2–5.
+The hosted `runtime-representation` nightly/manual worker and optional full/local
+gates invoke Phase 1; `--fast` remains the pre-push stage and does not run this
+composite. Phase 0 is still directly runnable. A clean local Phase 1 pass is
+supporting evidence until candidate-head hosted acceptance and a compliant fresh
+review pass. #888/#889 closure requires those receipts; this change does not
+close #893 or Phases 2–5.
 
 ## Phase 2 — canonical ABI descriptors
 

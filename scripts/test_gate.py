@@ -2198,7 +2198,7 @@ class CiParityTests(unittest.TestCase):
         self.assertNotIn("compiled-value-ownership-phase0-oracle", aggregate_block)
         self.assertIn("compiled-value-ownership-phase0-oracle", _workflow_job_block(CI_YML.with_name("heavy-e2e.yml"), "report"))
 
-    def test_runtime_representation_phase0_oracle_is_a_dedicated_gate_job(self):
+    def test_runtime_representation_phase1_oracle_is_a_dedicated_gate_job(self):
         workspace_block = _ci_job_block("ci-fast")
         ownership_block = _ci_job_block("compiled-value-ownership-phase0-oracle")
         oracle_block = _ci_job_block("runtime-representation-phase0-oracle")
@@ -2211,6 +2211,14 @@ class CiParityTests(unittest.TestCase):
         )
         self.assertNotIn("    needs:", oracle_block)
         self.assertIn("contents: read", oracle_block)
+        self.assertIn(
+            "name: runtime-representation-phase1-receipts",
+            oracle_block,
+        )
+        self.assertIn(
+            "path: target/runtime-representation-phase1/",
+            oracle_block,
+        )
         self.assertIn("dtolnay/rust-toolchain@stable", oracle_block)
         self.assertIn("python3 scripts/ci_setup_uv_python.py", oracle_block)
         self.assertIn("taiki-e/install-action@nextest", oracle_block)

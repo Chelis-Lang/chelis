@@ -337,7 +337,7 @@ jobs:
         run: .venv/bin/python scripts/compiled_value_ownership_oracle.py --phase launch
 
   runtime-representation-phase0-oracle:
-    name: Runtime Representation Phase 0 Oracle
+    name: Runtime Representation Phase 1 Oracle
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -374,6 +374,15 @@ jobs:
 
       - name: Gate (runtime representation stage)
         run: python3 scripts/gate.py runtime-representation
+
+      - name: Upload runtime representation execution receipts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: runtime-representation-phase1-receipts
+          path: target/runtime-representation-phase1/
+          if-no-files-found: error
+          retention-days: 14
 
   generalize-sweep-oracle-shard:
     name: Typecheck Level Generalization Oracle (shard ${{ matrix.shard }}/4)

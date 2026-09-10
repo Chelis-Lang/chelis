@@ -37,9 +37,12 @@ not drift.
 The runtime representation host/C vocabulary and checked-metadata gate is
 `.venv/bin/python scripts/runtime_representation_oracle.py --phase 1`. It includes
 Phase 0 inventory/mutations and requires fresh frozen-selection/framework receipts.
-The hosted `runtime-representation` stage owns routine enforcement; `--fast` remains
-the pre-push gate and `--local` remains optional. Phase 1 does not validate the later
-generated ABI, native Python/DLPack or device execution obligations.
+The hosted `runtime-representation` stage in `heavy-e2e.yml` owns daily and
+manually dispatched enforcement; ordinary PR success does not certify it, so
+dispatch that workflow on the candidate when claiming Phase 1 completion.
+`--fast` remains the pre-push gate and `--local` remains optional. Phase 1 does
+not validate the later generated ABI, native Python/DLPack or device execution
+obligations.
 
 
 - Every phase must name one authoritative completion oracle.
