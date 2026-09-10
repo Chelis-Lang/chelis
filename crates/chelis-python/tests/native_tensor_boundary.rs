@@ -5,6 +5,8 @@
 //! install dependencies, invoke Cargo, or skip missing prerequisites.
 //! This is a partial suite, not the runtime-representation Phase 2 oracle.
 
+mod support;
+
 use std::ffi::CString;
 
 use pyo3::prelude::*;
@@ -12,6 +14,7 @@ use pyo3::types::{PyDict, PyModule};
 
 fn run_case(case: &str) {
     let directory = tempfile::tempdir().expect("test artifact directory");
+    support::initialize();
     Python::with_gil(|py| {
         let native = PyModule::new(py, "native_tensor_boundary").expect("module");
         chelis_python::register_module(&native).expect("native registration");

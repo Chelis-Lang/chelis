@@ -29,6 +29,7 @@ tempfile = "3"
 [dev-dependencies]
 assert_cmd = "2"
 proc-macro2 = { version = "1", features = ["span-locations"] }
+pyo3-build-config = { version = "0.24", features = ["resolve-config"] }
 quote.workspace = true
 syn.workspace = true
 
