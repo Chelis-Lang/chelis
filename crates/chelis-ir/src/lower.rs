@@ -1381,6 +1381,17 @@ fn lower_program_with_context_inner(
         ctx.execution = Some(metadata);
         ctx.evaluation_entries = program.entries.clone();
         for (owner, entry) in ctx.evaluation_entries.iter_mut().enumerate() {
+            // Explicit source drops also belong to an entry's retention
+            // list. Composition stripped these terminal markers above and
+            // will regenerate ownership drops after combining the graphs.
+            // Keep every other source node, including dead forward draws;
+            // a missing non-Drop mapping must still fail closed.
+            entry.nodes.retain(|node| {
+                !matches!(
+                    program.dag.get(*node).map(|node| &node.op),
+                    Some(RiscOp::Drop)
+                )
+            });
             for node in &mut entry.nodes {
                 *node = library_remap[node];
                 ctx.execution_node_owners.insert(*node, owner);

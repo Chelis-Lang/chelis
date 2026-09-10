@@ -195,6 +195,80 @@ fn checked_library_context_and_prepared_context_preserve_raw_stream_binding() {
     }
 }
 
+fn assert_explicit_drop_context_parity(
+    definition: &str,
+    body: &str,
+    expected: &[(&str, Vec<f64>)],
+) {
+    use chelis_compiler_api::compiler::{eval_in_context, prepare_eval_in_context};
+    use chelis_compiler_api::{COMPILER_VERSION, compile_reef_context};
+
+    let ones = std::iter::repeat_n("1.0f32", 32)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let main = format!("def main() = with seed(42i64) {{\n x = to_tensor([{ones}])\n {body}\n}}\n");
+    let check = |result: EvalResult| {
+        for (name, values) in expected {
+            assert_eq!(tensor(&result, name), *values, "{definition}\n{main}");
+        }
+    };
+    let monolithic = format!("{definition}\n{main}");
+    check(eval_selected(request(&monolithic), &["main".into()]).unwrap());
+    let prepared = prepare_eval(request(&monolithic)).unwrap();
+    check(prepared.eval_root(BTreeMap::new(), "main").unwrap());
+
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::create_dir(directory.path().join("src")).unwrap();
+    std::fs::write(directory.path().join("reef.toml"), format!(
+        "[package]\nname = \"dropout_drop_probe\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Probe\"\n"
+    )).unwrap();
+    std::fs::write(
+        directory.path().join("src/draw.ch"),
+        format!("module Probe.Draw\nexport (draw)\n{definition}\n"),
+    )
+    .unwrap();
+    let context = compile_reef_context(directory.path(), directory.path()).unwrap();
+    let wire = context.encode().unwrap();
+    let decoded = chelis_compiler_api::context::CompiledContext::decode(&wire).unwrap();
+    let client = format!("module Probe.Eval\nimport Probe.Draw (draw)\n{main}");
+    for context in [&context, &decoded] {
+        check(eval_in_context(context, &client).unwrap());
+        let prepared = prepare_eval_in_context(context, &client).unwrap();
+        for _ in 0..2 {
+            check(prepared.eval_root(BTreeMap::new(), "main").unwrap());
+        }
+        assert_eq!(context.encode().unwrap(), wire);
+    }
+}
+
+#[test]
+fn explicit_library_drop_preserves_dead_forward_and_context_entry_remapping() {
+    assert_explicit_drop_context_parity(
+        "def draw(x: tensor[32, f32]) -> tensor[32, f32] = with seed(42i64) {\n dropped = dropout(x, 0.0f32)\n _ = drop(dropped)\n dropout(x, 0.5f32)\n}",
+        "draw(x)",
+        &[("main", mask(1))],
+    );
+}
+
+#[test]
+fn explicit_library_drop_preserves_gradient_replay_and_caller_input() {
+    let definition = "def draw(x: tensor[32, f32]) -> tensor[f32] = {\n dropped = dropout(x, 0.0f32)\n _ = drop(dropped)\n sum(dropout(x, 0.5f32), 0)\n}";
+    assert_explicit_drop_context_parity(
+        definition,
+        "g = grad(draw)(x)\n (g, dropout(x, 0.5f32), x)",
+        &[
+            ("main.0", mask(1)),
+            ("main.1", mask(2)),
+            ("main.2", vec![1.0; 32]),
+        ],
+    );
+    assert_explicit_drop_context_parity(
+        definition,
+        "g = grad(draw)(x)\n _ = drop(g)\n dropout(x, 0.5f32)",
+        &[("main", mask(2))],
+    );
+}
+
 #[test]
 fn fixed_primitive_in_a_host_tuple_uses_the_same_plan_core() {
     let ones = std::iter::repeat_n("1.0f32", 32)

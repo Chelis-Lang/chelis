@@ -311,6 +311,64 @@ fn local_movement_failure_occurs_after_the_earlier_entered_draw() {
 }
 
 #[test]
+fn explicit_drop_in_gradient_retains_draws_and_verified_terminal_ownership() {
+    let source = "def loss(x: tensor[32, f32]) -> tensor[f32] = {\n dead = dropout(x, 0.0f32)\n _ = drop(dead)\n sum(dropout(x, 0.5f32), 0)\n}\ndef sample(x: tensor[32, f32]) -> tensor[32, f32] = grad(loss)(x)\n";
+    let declarations = chelis_surf::parser::parse_str(source).unwrap();
+    let expressions = chelis_surf::desugar::desugar_program(&declarations);
+    let checked = chelis_types::check_ir_program(&expressions).unwrap();
+    let mut context = RandomExecutionContext::new(RandomLoweringState {
+        seed: Some(42),
+        counter: 0,
+    });
+    let kernel = chelis_ir::host::host_def_evaluation_plan(&checked, "sample", &context)
+        .unwrap()
+        .unwrap();
+    let plan = kernel.plan().unwrap();
+    let dag = plan.dag_for_inspection();
+    assert_eq!(
+        dag.nodes()
+            .iter()
+            .filter(|node| matches!(node.op, RiscOp::Dropout { .. }))
+            .count(),
+        3,
+        "two actual forwards and one live backward replay"
+    );
+    assert!(
+        dag.nodes()
+            .iter()
+            .any(|node| matches!(node.op, RiscOp::Drop))
+    );
+    assert!(
+        dag.roots()
+            .iter()
+            .all(|id| !matches!(dag.get(*id).unwrap().op, RiscOp::Drop))
+    );
+    let ownership = chelis_ir::ownership::lower_dag_ownership(dag.clone()).unwrap();
+    let verified = chelis_ir::ownership::verify_ownership(ownership).unwrap();
+    assert!(verified.emission().actions().any(|action| matches!(
+        action,
+        chelis_ir::ownership::VerifiedDagAction::OwnedDrop { .. }
+    )));
+    let expected = (0..32)
+        .map(|index| {
+            let word =
+                splitmix64(42 ^ splitmix64(1).rotate_left(17) ^ splitmix64(index).rotate_left(41));
+            if (((word >> 11) as f64 / 9007199254740992.0) as f32) < 0.5 {
+                0.0
+            } else {
+                2.0
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(run(plan, 32, &mut context).unwrap(), expected);
+    assert_eq!(
+        context.state().counter,
+        2,
+        "Drop and replay consume no ordinal"
+    );
+}
+
+#[test]
 fn source_ad_replays_a_mask_with_no_extra_draw_and_preserves_dead_forward_calls() {
     for dead in [false, true] {
         let body = if dead {

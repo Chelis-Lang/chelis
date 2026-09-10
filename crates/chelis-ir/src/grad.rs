@@ -620,7 +620,12 @@ fn grad_dag_result(
     // check or changing the public GradResult's value-root interface.
     let mut verification_dag = dag.clone();
     for node in retained {
-        verification_dag.add_root(remap[&node]);
+        let mapped = remap[&node];
+        // A source Drop remains in the retained graph and is verified as
+        // a terminal instruction, never as an additional value root.
+        if !matches!(verification_dag.get(mapped).unwrap().op, RiscOp::Drop) {
+            verification_dag.add_root(mapped);
+        }
     }
     let verify_errors = crate::verify::verify(&verification_dag);
     if !verify_errors.is_empty() {
