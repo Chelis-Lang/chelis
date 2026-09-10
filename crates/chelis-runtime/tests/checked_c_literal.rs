@@ -134,7 +134,7 @@ fn literal_writes_preserve_width_and_leave_the_guard_live() {
                 );
                 let view = chelis_tensor_write_view(guard);
                 assert_eq!(view.count, count);
-                for index in 0..count as usize {
+                for (index, value) in values.iter().take(count as usize).enumerate() {
                     let bits = match chelis_dtype_size(dtype) {
                         8 => view.data.cast::<u64>().add(index).read(),
                         4 => u64::from(view.data.cast::<u32>().add(index).read()),
@@ -142,7 +142,7 @@ fn literal_writes_preserve_width_and_leave_the_guard_live() {
                         1 => u64::from(view.data.cast::<u8>().add(index).read()),
                         _ => panic!("unexpected representation"),
                     };
-                    assert_eq!(bits, values[index].bits);
+                    assert_eq!(bits, value.bits);
                 }
                 chelis_tensor_end_write(guard);
                 chelis_tensor_release(tensor);
