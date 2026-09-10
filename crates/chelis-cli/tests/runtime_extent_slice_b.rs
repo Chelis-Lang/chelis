@@ -796,19 +796,8 @@ fn effect_order_source(claim: u32, effect_first: bool) -> String {
     )
 }
 
-/// guard_order.effect_before.eval: an effect that precedes the call in source
-/// order is observed before the guard traps. NOT provable on eval today, and
-/// the row stays at its baseline: `chelis eval` emits a program's printed
-/// output only when the evaluation succeeds, so an effect that precedes any
-/// failure is discarded (`_ = print("hello")` followed by a division trap
-/// prints nothing, with no runtime-extent guard involved; chelis#1585), while
-/// the compiled program prints it and then traps. What this test locks is the half the
-/// eval lane can show: the guard fires from inside an `IO` body, which the
-/// shared kernel decision keeps in host code on both lanes.
-///
-/// EVIDENTIARY STATUS: regression test for the trap (silent `shape=[5]` on
-/// the tree without the evaluator's literal-extent check); the effect's
-/// order is unobservable on this lane and is not asserted.
+/// guard_order.effect_before.eval: assert the effect's actual output before
+/// the guard's failure, rather than only the trap (#1585).
 #[test]
 fn an_effect_before_the_guard_runs_when_the_guard_traps_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -818,6 +807,11 @@ fn an_effect_before_the_guard_runs_when_the_guard_traps_on_eval() {
         &effect_order_source(MISMATCHED, true),
     );
     assert!(!ok, "the program must fail: {out}");
+    assert_eq!(
+        out.lines().filter(|line| *line == "effect").count(),
+        1,
+        "{out}"
+    );
     assert!(out.contains(&domain_trap_line("load")), "{out}");
     assert!(
         out.contains("extent `4`: claimed = 4, x axis 0 = 5"),
@@ -825,15 +819,8 @@ fn an_effect_before_the_guard_runs_when_the_guard_traps_on_eval() {
     );
 }
 
-/// guard_order.effect_after.eval: an effect that follows the call is not
-/// observed when the guard traps. On eval the absence of "effect" cannot be
-/// read as ORDER (see the row above: nothing printed before a failure is
-/// emitted either, chelis#1585), so the row stays at its baseline and this test locks
-/// the trap alone.
-///
-/// EVIDENTIARY STATUS: regression test for the trap (on the tree without the
-/// evaluator's literal-extent check the program succeeded and printed
-/// "effect"); the effect's absence is not evidence of order on this lane.
+/// guard_order.effect_after.eval: an effect after the trapping guard does
+/// not run; the preceding-effect test supplies its non-vacuity control.
 #[test]
 fn an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -843,6 +830,7 @@ fn an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_eval() {
         &effect_order_source(MISMATCHED, false),
     );
     assert!(!ok, "the program must fail: {out}");
+    assert!(!out.lines().any(|line| line == "effect"), "{out}");
     assert!(out.contains(&domain_trap_line("load")), "{out}");
 }
 
@@ -859,9 +847,7 @@ fn c_run_result_with_source(dir: &TempDir, stem: &str, source: &str) -> (bool, S
     (ok, out, emitted)
 }
 
-/// The statement order the two C effect rows assert, read from the emitted C
-/// because the bytes a `print` writes before a trap do not survive
-/// `chelis_numeric_trap`'s `abort()` on a buffered stdout (chelis#1591):
+/// Supplement the executed output checks with the emitted statement order:
 /// inside `run`'s host body the `print` statement and the call into the
 /// kernel C extracts for `f(seed, x)` (`run__tensor_N`, with `f` inlined and
 /// the same entry guard `f__tensor_0` carries), in the order `effect_first`
@@ -913,16 +899,8 @@ fn assert_effect_order_in_emitted_c(emitted: &str, effect_first: bool) {
     }
 }
 
-/// guard_order.effect_before.c: the row that returns with chelis#1528. On
-/// `main` the C lane dropped the `IO` effect of a kernel-lowered body, so the
-/// string never appeared in the emitted program and no row could order it.
-/// The order is asserted from the emitted C's statement order (chelis#1591:
-/// the printed bytes are lost on a buffered stdout when the trap aborts, so
-/// they cannot carry the assertion on Linux), and the trap by execution.
-///
-/// EVIDENTIARY STATUS: regression test against `main` for the print's
-/// presence and position (absent there); disposition lock for the guard's
-/// position and the trap.
+/// guard_order.effect_before.c: preceding output survives the guard trap,
+/// including fully buffered stdout on Linux (#1591).
 #[test]
 fn an_effect_before_the_guard_runs_when_the_guard_traps_on_c() {
     if !gcc_available() {
@@ -940,16 +918,15 @@ fn an_effect_before_the_guard_runs_when_the_guard_traps_on_c() {
         out.contains("extent `4`: claimed = 4, x axis 0 = 5"),
         "{out}"
     );
+    assert_eq!(
+        out.lines().filter(|line| *line == "effect").count(),
+        1,
+        "{out}"
+    );
     assert_effect_order_in_emitted_c(&emitted, true);
 }
 
-/// guard_order.effect_after.c: the print follows the call into `f` in the
-/// emitted host body, so the trap in `f`'s prologue precedes it; asserted
-/// from the emitted C's statement order for the reason above (chelis#1591),
-/// and the trap by execution.
-///
-/// EVIDENTIARY STATUS: regression test against `main` for the print's
-/// presence and position (absent there); disposition lock for the trap.
+/// guard_order.effect_after.c: a trapped guard prevents the later print.
 #[test]
 fn an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_c() {
     if !gcc_available() {
@@ -963,6 +940,7 @@ fn an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_c() {
     );
     assert!(!ok, "the binary must fail: {out}");
     assert!(out.contains(&domain_trap_line("load")), "{out}");
+    assert!(!out.lines().any(|line| line == "effect"), "{out}");
     assert_effect_order_in_emitted_c(&emitted, false);
 }
 

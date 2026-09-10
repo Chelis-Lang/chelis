@@ -8,6 +8,9 @@ is still OPEN. Wire baseline version 2 has no legacy admission: this script
 validates its final-row shape before any issue lookup. The live wire verifier
 owns graph completeness, semantic authority, and execution evidence; a valid
 baseline shape does not prove those obligations.
+The binding baseline likewise separates structural and executed CompilerJson
+comparison rows from its four remaining native legacy signatures. Its shape
+cannot replace the binding gate's current registration and codec execution.
 
 Network gate (run by the change-gated and nightly liveness jobs; it also runs
 manually at release cuts and during red-team passes):
@@ -115,6 +118,46 @@ def wire_json_object(pairs: list[tuple[str, object]]) -> dict:
     return result
 
 
+def validate_binding_baseline(payload: object) -> None:
+    """Check comparison/legacy shape; the Rust gate owns exact row admission."""
+    if (not isinstance(payload, dict) or payload.keys() != {"version", "rows"}
+            or type(payload["version"]) is not int or payload["version"] != 2
+            or not isinstance(payload["rows"], list)):
+        raise ValueError("BINDING BASELINE requires version: 2 and rows only")
+    base = {"kind", "id", "flags"}
+    native = {"chelis_python::CompiledModel::__call__", "chelis_python::NativeTensor::shape",
+              "chelis_python::NativeTensor::__dlpack__", "chelis_python::NativeTensor::__dlpack_device__"}
+    compiler_json = {"chelis_python::" + name for name in ("check_json", "compile_json", "desugar_json", "eval_json")}
+    seen = set()
+    for row in payload["rows"]:
+        if not isinstance(row, dict) or not base <= row.keys():
+            raise ValueError("BINDING BASELINE row requires kind/id/flags")
+        name, kind, flags = row["id"], row["kind"], row["flags"]
+        if (not isinstance(name, str) or not name or kind not in ("binding-pyfunction", "binding-pymethod")
+                or not isinstance(flags, list) or not all(isinstance(flag, str) for flag in flags)
+                or flags != sorted(set(flags))):
+            raise ValueError("BINDING BASELINE invalid identity or capacity flags")
+        if name in seen:
+            raise ValueError("BINDING BASELINE duplicate identity")
+        seen.add(name)
+        if "citation" in row:
+            if (row.keys() != base | {"citation"} or name.split("(", 1)[0] not in native
+                    or kind != "binding-pymethod" or row["citation"] not in LEGACY_TRANSITION_DISPOSITIONS_BY_FAMILY["bindings"]):
+                raise ValueError("BINDING BASELINE only unchanged native rows may retain legacy shape")
+            continue
+        keys = base | {"authority", "graph_identity"}
+        if row.get("authority") == "TaggedTransport":
+            owner = name.split("(", 1)[0]
+            if (row.keys() != keys | {"contract"} or owner not in compiler_json
+                    or kind != "binding-pyfunction" or row["contract"] != "compiler-json/" + owner
+                    or not flags or not set(flags) <= {"float-carrier", "numeric-param", "numeric-return"}):
+                raise ValueError("BINDING BASELINE invalid CompilerJson comparison row")
+        elif row.keys() != keys or row.get("authority") != "nonnumeric" or flags:
+            raise ValueError("BINDING BASELINE invalid structural comparison row")
+        if not isinstance(row["graph_identity"], str) or not re.fullmatch(r"[0-9a-f]{64}", row["graph_identity"]):
+            raise ValueError("BINDING BASELINE missing graph identity")
+
+
 def census_family(census_rel: Path) -> str:
     """Return the closed family identity for a checked census artifact."""
     if census_rel.name == "capacity_census.json":
@@ -174,10 +217,12 @@ def load_census_rows(
         family = census_family(census_rel)
         payload = json.loads(
             (root / census_rel).read_text(),
-            object_pairs_hook=wire_json_object if family == "wire" else None,
+            object_pairs_hook=wire_json_object if family in {"wire", "bindings"} else None,
         )
         if family == "wire":
             validate_wire_baseline(payload)
+        elif family == "bindings":
+            validate_binding_baseline(payload)
         inherited_citation = str(payload.get("citation", "")).strip()
         for source_row in payload["rows"]:
             row = dict(source_row)

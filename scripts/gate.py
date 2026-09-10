@@ -19,7 +19,8 @@ by name so the exclusion is visible and reviewable.
 Usage (an unmanaged launcher is automatically re-executed through uv):
     python3 scripts/gate.py            # run every gate command
     python3 scripts/gate.py lint-and-unit   # run the Rust-policy subset
-    python3 scripts/gate.py integration     # run the integration subset
+    python3 scripts/gate.py ci-fast         # hosted units + reviewed integrations
+    python3 scripts/gate.py integration     # retain the legacy integration subset
     python3 scripts/gate.py integration --tests-only --partition hash:1/2
     python3 scripts/gate.py integration --support-only
     python3 scripts/gate.py runtime-representation  # run the #893 oracle stage
@@ -30,15 +31,15 @@ Usage (an unmanaged launcher is automatically re-executed through uv):
     python3 scripts/gate.py --local    # optional troubleshooting and local
                                        # validation; CI owns PR readiness
 
-Local/CI stage split (chelis#360): the full developer gate runs
-`cargo nextest run --workspace --no-fail-fast` with the default profile, while the CI
-integration stage uses the `ci` profile and delegates its two census binaries
-to the required dtype oracle. The workspace execution stays out of `--local` --
-macOS Smoke is the authoritative
-workspace oracle, and on the macOS workstation the mass first-exec
-burst it triggers can wedge assessment entirely (see
-docs/local_macos_environment.md). `--local` is optional for troubleshooting or
-additional local validation. CI on the pushed candidate owns PR readiness.
+Local/CI stage split: the complete developer gate and legacy integration stage
+retain their existing selections. The separate `ci-fast` stage builds product
+prerequisites and runs units plus the reviewed Cargo integration targets through
+`scripts/ci_test_targets.py`; it is intentionally absent from STAGE_ORDER so the
+full/manual gate does not execute a redundant subset. Full Linux and broad
+phase-oracle validation runs in heavy-e2e.yml nightly or by manual dispatch;
+Mac coverage runs in macos-nightly.yml. PR success does not certify those oracles.
+The workspace execution stays out of `--local` because the mass first-exec burst
+can wedge assessment on a Mac workstation (docs/local_macos_environment.md).
 The local command runs two workspace clippy configurations
 (compile-only, no mass exec), fmt, `chelis lint`, the regeneration and
 compile-fail guards, both oracles, plus `cargo nextest run -p <crate>
@@ -504,6 +505,7 @@ EMISSION_OBSERVER_TESTS: list[str] = [
 ]
 
 STAGES: dict[str, list[list[str]]] = {
+    "ci-fast": [[MANAGED_PYTHON, "scripts/ci_test_targets.py"]],
     "lint-and-unit": [
         CLIPPY_WORKSPACE,
         CLIPPY_SOLVER_FREE_FEATURES,
@@ -2567,7 +2569,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument(
         "stage",
         nargs="?",
-        choices=STAGE_ORDER,
+        choices=list(STAGES),
         help=(
             "Run only this CI stage's gate subset. Omit to run the complete "
             "developer gate."

@@ -162,6 +162,37 @@ pub fn enforce_style_gate(
     source: &str,
     allow_violations: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    enforce_style_gate_structured(file, source, allow_violations)
+        .map_err(|rejection| rejection.report.into())
+}
+
+/// A style-gate rejection, in both the renderings a caller may need.
+///
+/// One gate run produces both. That is the point: `chelis check` needs the
+/// human report for stderr AND one machine-facing message per issue for the
+/// check report, and running the gate twice to get them made the two
+/// disagree. `run_lint_for_single_file` re-reads the file, so a rewrite
+/// landing between two runs could leave the caller having decided to fail
+/// from run A while building its diagnostics from run B -- shipping exit 2
+/// with an empty `errors` array, the one state `spec/04` § Gating says
+/// cannot happen (chelis#886).
+pub struct StyleRejection {
+    /// The joined human report, byte-identical to what the gate has always
+    /// written to stderr.
+    pub report: String,
+    /// One message per issue, for a machine-facing carrier. Non-empty by
+    /// construction: this type is only built from a non-clean outcome, and a
+    /// non-clean outcome has at least one issue.
+    pub issues: Vec<String>,
+}
+
+/// [`enforce_style_gate`], handing back the rejection's structure rather
+/// than only its rendered text.
+pub fn enforce_style_gate_structured(
+    file: &Path,
+    source: &str,
+    allow_violations: bool,
+) -> Result<(), StyleRejection> {
     if env_disables_gate() {
         return Ok(());
     }
@@ -178,7 +209,35 @@ pub fn enforce_style_gate(
         eprintln!("{report}");
         return Ok(());
     }
-    Err(report.into())
+    let issues = issue_messages(file, &outcome);
+    debug_assert_eq!(
+        issues.len(),
+        outcome.issue_count(),
+        "one message per issue, or the report's error count lies"
+    );
+    Err(StyleRejection { report, issues })
+}
+
+/// One single-line message per issue, from the same outcome
+/// [`format_outcome`] renders for the terminal.
+///
+/// Deliberately not `format_outcome`'s output split on newlines: that string
+/// ends with a summary line that is not an issue, and a lint violation's own
+/// `Display` may not be one line forever. Building from the structured
+/// outcome keeps the count honest.
+fn issue_messages(file: &Path, outcome: &GateOutcome) -> Vec<String> {
+    let mut issues = Vec::with_capacity(outcome.issue_count());
+    if let Some(diff) = &outcome.fmt_diff {
+        issues.push(format!(
+            "{}: not canonically formatted; run `chelis fmt --inplace {}` to fix",
+            diff.path.display(),
+            file.display()
+        ));
+    }
+    for violation in &outcome.lint_violations {
+        issues.push(violation.to_string());
+    }
+    issues
 }
 
 /// Run the gate without printing or escape-hatching — used by tests

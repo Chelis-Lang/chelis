@@ -395,6 +395,17 @@ ratified at spec/04 §5.2 in the same change set:
   remaining total IEEE RNE: `cast(9007199254740993i64, f64)` yields
   `9007199254740992.0`, and `cast(16777217i32, f32)` yields `16777216.0`.
   These are explicit ByDesign controls, not a hidden f64 intermediate.
+- Bounded tensor targets (#1564) retain the declaration's precision variable
+  through checking and pass the actualized `Prim` to the host tensor cast.
+  Lowering binds original and checker-renamed formal variables independently
+  from aligned actual types, including scalar dtype witnesses, and from checked
+  result constraints when no argument carries the target. Checked cast-result
+  identities take precedence over unrelated outer binders with the same spelling.
+  The acceptance oracle is `cargo test -p chelis-cli --test
+  issue_1564_bounded_tensor_cast`: eval/generated-C agreement at all eight active
+  numeric target dtypes, truncating-cast parity, and invalid-target rejection.
+  The same-named checker/API suites additionally cover both checker ingresses,
+  exact stored dtypes, integer values beyond 2^53, and Domain/Overflow traps.
 - **Fold rule (the §C2 decline clause, applied to casts):** a
   compile-time constant fold whose cast would trap DECLINES TO FOLD -
   the condition falls to runtime, where the trap fires with its full
@@ -564,9 +575,10 @@ changed covered identity must independently be `Nonnumeric`, `TaggedTransport`,
 or `NumericOperation(atom)`; a citation or maintainer override cannot supply
 missing authority.
 
-The registered-PyO3 baseline has nine final nonnumeric registrations and eight
-legacy signatures. Discovery follows their return values and reachable payloads;
-the four compiler-JSON and four native-tensor rows still require migration.
+The registered-PyO3 baseline has nine final nonnumeric registrations, four final
+compiler-JSON tagged transports, and four legacy native signatures. Discovery
+follows their return values and reachable payloads; the four native rows still
+require migration.
 Unflagged signatures are not evidence of nonnumeric behavior. #1288 remains
 open until all families satisfy zero-exception acceptance on one integrated
 head. #1293 retains stdlib semantic alignment. The named entry commands below
@@ -851,7 +863,7 @@ Deliverables, with phase homes:
    | typed leg | artifact | live enumerator | command and expected success | standing red mutation |
    |---|---|---|---|---|
    | `wire-schema-numeric-fields` | Compiler/Python publication roots and their reachable typed graph | Actual graph, codec/admission, cache, publication and mutation execution through the private wire verifier | `cargo nextest run -p chelis-compiler-api --test capacity_census_wire`; `wire_schema_numeric_fields_match_the_reviewed_baseline` passes | Actual Rust-source graph mutations and `verified_wire_authority_cannot_be_replaced_by_a_descriptor_or_baseline` |
-   | `binding-raw-dtype-params` | `crates/chelis-python/src/lib.rs` registered PyO3 callables | live PyO3 signatures; nine final rows require input/return exposure, eight unchanged legacy rows defer it | `cargo nextest run -p chelis-python --test capacity_census_bindings`; `registered_pyfunctions_match_the_reviewed_rustdoc_signatures` passes | `a_registered_pyfunction_with_a_raw_dtype_parameter_is_rejected` |
+   | `binding-raw-dtype-params` | `crates/chelis-python/src/lib.rs` registered PyO3 callables | live PyO3 signatures; nine nonnumeric and four compiler-JSON transport rows require input/return exposure, while four unchanged native legacy rows defer it | `cargo nextest run -p chelis-python --test capacity_census_bindings`; `registered_pyfunctions_match_the_reviewed_rustdoc_signatures` passes | `a_registered_pyfunction_with_a_raw_dtype_parameter_is_rejected` |
 
    Each leg is a live enumerator, executable command, exact success
    condition, and mutation selection recorded in `coverage_manifest()`. The wire
@@ -901,8 +913,9 @@ Deliverables, with phase homes:
    96 final rows (79 verified transports and 17 numeric operations), with no
    legacy cohort. Fresh actual verification includes WireDag v9's u64
    shape-dependency transport and fixed-extent literal-witness role.
-   Nine binding rows have final nonnumeric authority and eight binding rows remain
-   legacy debt. These counts are
+   Nine binding rows have final nonnumeric authority, four compiler-JSON rows have
+   final tagged-transport authority, and four native binding rows remain legacy
+   debt. These counts are
    current inventory evidence; executable enumeration and exact one-class
    matching remain the completion oracle.
 
@@ -1412,7 +1425,17 @@ an additional serialization surface kind extends §C6's enumerators in the same
 change that introduces it.
 
 The derived identity includes role-discriminating serde attributes and codec
-shape, not just field type spellings. A custom serializer requires an explicit
+shape, not just field type spellings. Its codec identity retains the exact
+serde trait, derived/custom mode, source file and method identities. Incidental
+implementation and method line/column coordinates do not alter that structural
+identity. The execution witness still binds the complete current rustdoc
+artifacts, including those spans, and the actual source bytes and compiled
+artifacts; structural equality cannot reuse a stale witness. Relocation-only
+controls must preserve graph identity while rejecting the old artifact proof,
+and changed source ownership, codecs, methods or numeric shapes must remain
+rejected or change the structural identity. This distinction repairs
+[#1722](https://github.com/Chelis-Lang/chelis/issues/1722) without authorizing a changed
+numeric surface. A custom serializer requires an explicit
 wire-shape adapter checked against executions of the actual serializer and
 decoder. Unsupported custom serialization is an error. The artifact owns the
 discovered shape; a hand-maintained expected list cannot stand in for discovery.
@@ -1637,14 +1660,27 @@ Rust implementation and callable kind. Source JSON
 authority applies only to its typed payload subtree, including through aliases
 and generic containers; sibling text results require their own contract.
 
-The binding baseline retains eight unchanged legacy rows: the four numeric
-compiler JSON functions and four tensor methods. Discovery records both input
+For the four CompilerJson functions, concrete `CheckJson`, `CompileJson`,
+`DesugarJson` and `EvalJson` adapters retain their exact compiler result until
+the actual PyO3 `IntoPyObject` implementation serializes it. `EvalBindingsJson`
+owns the `FromPyObject` extraction into `BTreeMap<String, TensorValue>` before
+either eval route. A private execution factory joins each compiled trait owner,
+its concrete serde payload and direction, the registered function's Rustdoc
+signature, and the current wire witness. It executes native Python calls,
+constructor rejection controls and compiled MIR ownership controls. Static
+descriptors and baseline graph hashes cannot construct this witness. The
+adapter source, execution evidence and census integration form one slice:
+changing a Rust signature alone cannot retire a numeric binding row. This
+proof confers no authority on the four remaining native binding methods.
+
+The binding baseline retains four unchanged legacy rows: the compiled-model call
+and three native-tensor methods. Discovery records both input
 and return capacity, alias/container/nominal closure and unsupported dynamic
 payloads for all registered methods. Final and new rows must pass this stronger
-discovery; only an exact unchanged member of the eight-row remainder can defer
-it. Their old flags are not widened. This partial activation does not establish
-complete binding closure or numeric CompilerJson admission. The executable
-checks are `cargo nextest run -p chelis-python --test capacity_census_bindings`
+discovery; only an exact unchanged member of the four-row remainder can defer
+it. Their old flags are not widened. This activation establishes compiler-JSON
+transport admission but does not establish complete binding closure. The
+executable checks are `cargo nextest run -p chelis-python --test capacity_census_bindings`
 and `--test binding_payloads`, including malformed input, missing/duplicate
 registration, retired-exception revival, f64-return, reachable-width and
 unsupported-payload controls.

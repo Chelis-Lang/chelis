@@ -38,6 +38,14 @@
 # Grep targets if this needs revisiting:
 #   - real chelis build + gcc + run / reef build / reef install
 
+# The wire and PyO3 binding authority tests both run nested Cargo sequences in
+# target/agents/729-capacity-rustdoc. The target's nonblocking lease must keep
+# rejecting unscheduled interleaving, so nextest gives the two actual owners one
+# shared execution slot. Every custom profile inherits this override from
+# `default`, including explicit-filter runs with `--ignore-default-filter`.
+[test-groups]
+capacity-rustdoc-verifiers = { max-threads = 1 }
+
 [profile.default]
 fail-fast = false
 default-filter = '''
@@ -53,6 +61,10 @@ default-filter = '''
         + (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/))
     )
 '''
+
+[[profile.default.overrides]]
+filter = '''(binary_id(/^chelis-compiler-api::capacity_census_wire$/) & test(/^wire_schema_numeric_fields_match_the_reviewed_baseline$/)) + (binary_id(/^chelis-python::capacity_census_bindings$/) & test(/^registered_pyfunctions_match_the_reviewed_rustdoc_signatures$/))'''
+test-group = "capacity-rustdoc-verifiers"
 
 [profile.ci]
 fail-fast = false
@@ -108,6 +120,15 @@ default-filter = '''
 # reports under `target/nextest/<profile>/<path>`.
 path = "junit.xml"
 
+# Cargo target selectors define this lane. The driver ignores default filters
+# and verifies the exact compiled binary/test listing before execution.
+[profile.ci-fast]
+inherits = "default"
+fail-fast = false
+
+[profile.ci-fast.junit]
+path = "junit.xml"
+
 [profile.ci-full]
 inherits = "default"
 fail-fast = false
@@ -128,7 +149,7 @@ path = "junit.xml"
 
 [profile.nightly]
 fail-fast = false
-# The `Heavy E2E` workflow runs `cargo nextest run --profile nightly`. This
+# Manual heavy-only selection; hosted extended validation is unfiltered. This
 # default-filter is exactly the heavy set the `default` profile excludes.
 # The `ci` profile additionally delegates binaries named by oracle `--test`
 # arguments; scripts/test_nextest_profile_partition.py locks that handoff.

@@ -45,7 +45,7 @@ class ContractTests(unittest.TestCase):
     def test_primary_and_stdlib_selection_covers_final_authority_requirement_classes(self):
         groups = {group.name: group for group in oracle.GROUPS}
         primary = set(groups["primary"].selected)
-        stdlib = set(groups["stdlib"].selected)
+        stdlib = groups["stdlib"].selected
         self.assertTrue({
             "migrated_primary_rows_have_exact_final_authority_and_no_transition_disposition",
             "primary_baseline_has_zero_legacy_rows",
@@ -53,16 +53,20 @@ class ContractTests(unittest.TestCase):
             "every_primary_final_registration_binds_kind_identity_and_flags",
             "maintainer_override_is_not_a_final_authority_class",
         } <= primary)
-        self.assertTrue({
-            "capacity_census_stdlib_tests::import_failures_and_ambiguity_do_not_erase_numeric_capacity",
-            "capacity_census_stdlib_tests::unresolved_nominals_and_wrong_nominal_arguments_fail_closed",
-            "capacity_census_stdlib_tests::nested_alias_fields_and_precision_variables_are_capacity",
-            "capacity_census_stdlib_tests::forward_and_recursive_aliases_reach_a_finite_numeric_fixed_point",
-            "capacity_census_stdlib_tests::generic_summaries_substitute_used_parameter_positions",
-            "capacity_census_stdlib_tests::alias_body_changes_capacity_without_rewriting_the_authored_identity",
-            "capacity_census_stdlib_tests::symbolic_tensor_precision_requires_an_adt_operation_row",
-            "capacity_census_stdlib_tests::imported_symbolic_precision_reaches_adt_rows_without_tainting_boolean_instances",
-        } <= stdlib)
+        self.assertEqual((
+            "final_stdlib_registrations_are_exact_and_bijective_with_normative_registries",
+            "an_exported_stdlib_def_without_a_signature_fails_loudly",
+            "a_new_stdlib_numeric_def_requires_semantic_registration",
+            "stdlib_closure_tests::import_failures_and_ambiguity_do_not_erase_numeric_capacity",
+            "stdlib_closure_tests::unresolved_nominals_and_wrong_nominal_arguments_fail_closed",
+            "stdlib_closure_tests::nested_alias_fields_and_precision_variables_are_capacity",
+            "stdlib_closure_tests::forward_and_recursive_aliases_reach_a_finite_numeric_fixed_point",
+            "stdlib_closure_tests::generic_summaries_substitute_used_parameter_positions",
+            "stdlib_closure_tests::alias_body_changes_capacity_without_rewriting_the_authored_identity",
+            "stdlib_closure_tests::stdlib_closure_preserves_all_final_registered_source_identities",
+            "stdlib_closure_tests::symbolic_tensor_precision_requires_an_adt_operation_row",
+            "stdlib_closure_tests::imported_symbolic_precision_reaches_adt_rows_without_tainting_boolean_instances",
+        ), stdlib)
 
     def test_composite_keeps_capacity_missing_until_the_final_binding_gate_exists(self):
         child = next(item for item in composite.prerequisites("python") if item.name == "capacity")

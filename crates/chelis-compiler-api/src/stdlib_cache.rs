@@ -520,6 +520,7 @@ fn library_rejection_to_compiler_error(
             crate::compiler::check_errors_to_compiler_error("check", &report.errors)
         }
         crate::pipeline::LibraryRejection::ContextMismatch => CompilerError {
+            transcript: Vec::new(),
             stage: "check".to_string(),
             errors: vec![Diagnostic::general(
                 GeneralKind::Other,

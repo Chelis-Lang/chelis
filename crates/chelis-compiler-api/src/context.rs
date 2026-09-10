@@ -1141,6 +1141,7 @@ pub(crate) fn library_rejection_to_compiler_error(
             crate::compiler::check_errors_to_compiler_error("check", &report.errors)
         }
         crate::pipeline::LibraryRejection::ContextMismatch => CompilerError {
+            transcript: Vec::new(),
             stage: "check".to_string(),
             errors: vec![Diagnostic::general(
                 GeneralKind::Other,
@@ -1320,6 +1321,7 @@ fn library_structural_summary(exprs: &[chelis_deep::ast::Expr]) -> (usize, usize
 
 fn reef_error(msg: &str) -> CompilerError {
     CompilerError {
+        transcript: Vec::new(),
         stage: "compile_reef_context".to_string(),
         errors: vec![Diagnostic::general(
             GeneralKind::ReefError,
@@ -1331,6 +1333,7 @@ fn reef_error(msg: &str) -> CompilerError {
 
 fn hash_error(msg: &str) -> CompilerError {
     CompilerError {
+        transcript: Vec::new(),
         stage: "compile_reef_context".to_string(),
         errors: vec![Diagnostic::general(
             GeneralKind::HashError,

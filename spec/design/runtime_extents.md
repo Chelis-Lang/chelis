@@ -47,6 +47,10 @@ optional resolved size. `derive_dim_witnesses` serves the C/HIP prologues;
 old `symbolic_bindings` path still supplies evaluator bindings and declaration
 consumers. Passing a test of one grouping does not test the other.
 
+The eval before/after-effect rows in `runtime_extent_slice_b` assert actual
+transcript bytes across failure (#1585); C now flushes observable output before
+its traps (#1591).
+
 The checked transport in C2.4 implements the restored #1686/#1687 host
 obligations: computed reshape claims and broadcast unit preconditions survive
 inlining, graph rewrites and cache transport. Their bounded oracle retains

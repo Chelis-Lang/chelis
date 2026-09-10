@@ -1,0 +1,256 @@
+name: macOS Nightly Validation
+
+# Mac coverage is nightly and manually dispatchable. Releases validate their
+# own Darwin artifacts in release.yml. Ordinary PRs and main pushes use Linux.
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  smt-build-darwin-arm64:
+    name: SMT Feature Build (darwin-arm64)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Assert Apple Silicon runner
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "arm64"
+
+      # CMake, Python (3.11+, so cvc5's TOML codegen uses stdlib
+      # tomllib), and libclang ship in the macos-latest image and Xcode
+      # CLT; cvc5 auto-downloads and builds its own static GMP, so no
+      # brew installs are required for the cvc5 source build. `cmake` is
+      # installed defensively in case a future image drops it from PATH.
+      - name: Install build prerequisites
+        run: |
+          set -euo pipefail
+          brew list cmake >/dev/null 2>&1 || brew install cmake
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # ROBUSTNESS NOTE (darwin SMT warm-cache masks cold build): Swatinem's
+      # cache restores a previously-built cvc5 from target/, AND the
+      # chelis#583 cvc5 cache below restores a prebuilt libcvc5.a, so on a
+      # warm cache this job can pass WITHOUT ever re-running the cold cvc5
+      # source build (cmake configure + the C++ compile). A break that only
+      # manifests on a cold compile -- a cvc5/cvc5-sys bump, a new flag, a
+      # toolchain change on the macos-latest image -- would then stay green
+      # here until a cache-key change or a cache eviction forces the cold
+      # path. The release.yml darwin job uses a DIFFERENT cache key (no `key:`
+      # override) and no cvc5 cache, so it does not share either cache and is
+      # the authoritative cold-build proof for the SHIPPED artifact; treat a
+      # release-job cvc5 failure as real even when this nightly lane is green.
+      # If a cvc5/toolchain bump is in the diff, force a cold build by bumping
+      # this `key:` (e.g. `smt-darwin-arm64-v2`) AND the cvc5 CACHE_SCHEMA in
+      # the same PR so both cold paths are proven before release relies on it.
+      #
+      # chelis#583: dedicated stable-key cvc5 cache in the `darwin-arm64`
+      # namespace, decoupled from Cargo.lock churn (the Swatinem cache keys on
+      # Cargo.lock, so an unrelated bump would otherwise re-pay the ~30m cvc5
+      # build). On a warm hit cvc5-sys links the prebuilt lib. See smt-build.
+      - name: Compute cvc5 cache key
+        id: cvc5key
+        run: python3 scripts/ci_cvc5_cache.py key --namespace darwin-arm64
+
+      # Durable Release asset first, Actions cache fallback second; see the
+      # smt-build job for the full rationale.
+      - name: Fetch durable prebuilt cvc5 (Release asset)
+        id: cvc5fetch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci_cvc5_cache.py fetch --namespace darwin-arm64 --dir "${{ steps.cvc5key.outputs.dir }}"
+
+      - name: Restore prebuilt cvc5 (Actions cache fallback)
+        id: cvc5restore
+        if: steps.cvc5fetch.outputs.warm != 'true'
+        uses: actions/cache/restore@v4
+        # Best-effort: a cache-service hiccup must degrade to a from-source
+        # build, never fail this job (chelis#583).
+        continue-on-error: true
+        with:
+          path: ${{ steps.cvc5key.outputs.dir }}
+          key: ${{ steps.cvc5key.outputs.key }}
+
+      - name: Activate prebuilt cvc5 (link instead of rebuild)
+        run: python3 scripts/ci_cvc5_cache.py activate --dir "${{ steps.cvc5key.outputs.dir }}"
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: smt-darwin-arm64
+          cache-on-failure: true
+
+      - name: Build chelis-cli (release, smt)
+        run: cargo build --release -p chelis-cli --features smt
+
+      - name: Harvest cvc5 build for cache
+        id: cvc5harvest
+        run: python3 scripts/ci_cvc5_cache.py harvest --dir "${{ steps.cvc5key.outputs.dir }}"
+
+      - name: Save prebuilt cvc5
+        if: always() && steps.cvc5harvest.outputs.complete == 'true'
+        uses: actions/cache/save@v4
+        # Best-effort: saving the cvc5 cache must never fail the build.
+        continue-on-error: true
+        with:
+          path: ${{ steps.cvc5key.outputs.dir }}
+          key: ${{ steps.cvc5key.outputs.key }}
+
+      - name: Verify packaged binary architecture
+        run: |
+          set -euo pipefail
+          file target/release/chelis | grep -E 'arm64|aarch64'
+
+      - name: Verify cvc5 discharge path (smt feature live)
+        run: python3 .github/scripts/verify_release_smt.py ./target/release/chelis
+
+  macos-workspace-shard:
+    name: macOS Workspace (shard ${{ matrix.shard }}/2)
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    runs-on: macos-latest
+    # The full C6 wire verifier compiles and executes its schema, codec,
+    # publication, and native-consumer controls. A cold shard exhausted the
+    # former 30-minute cap inside that verifier; retain a bounded allowance
+    # for it and the required post-test ABI and Metal smoke checks.
+    timeout-minutes: 45
+    # Every other cargo *test* job in this workflow drops debuginfo; this
+    # one was the only omission, and it is the workflow's critical path
+    # (the `Workspace tests` step alone is longer than any whole job).
+    # macOS pays for debuginfo twice: rustc emits it, then the linker
+    # walks the debug map for every test binary the workspace produces.
+    # Nothing here reads debuginfo -- the job asserts binary architecture
+    # and runs two codegen smoke scripts -- so the only visible cost is
+    # unsymbolicated frames in a `RUST_BACKTRACE` dump on failure, which
+    # is exactly the tradeoff the Linux jobs already accept. The release
+    # SMT jobs are deliberately not in this set: they build `--release`,
+    # which these dev/test profile vars do not reach.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # See lint-rust for why this runs before the cargo cache
+      # and why the version is pinned to v8.1.0 rather than @v8.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv + wire libpython rpath
+        run: python3 scripts/ci_setup_uv_python.py
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-workspace
+          save-if: ${{ matrix.shard == 1 }}
+
+      - name: Install Python binding dependencies
+        run: uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Assert Apple Silicon runner
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "arm64"
+
+      # Run the real workspace test suite on macOS so macOS-only failures
+      # (e.g., test harnesses that miss `-framework Accelerate` on linking
+      # generated C, or Metal codegen-structure regressions) actually turn
+      # this job red. Before this step existed, macOS-only breakage was
+      # silently invisible to CI because the job only built and ran a
+      # narrow Accelerate smoke shell script. `cargo nextest run
+      # --workspace` builds everything it needs as part of test
+      # compilation, so a separate `cargo build --workspace` step
+      # beforehand is redundant under Swatinem's rust-cache. nextest's
+      # cross-binary parallelism keeps this job off the same ~200-binary
+      # serialization bloat as the Linux workspace workers; see
+      # docs/investigations/ci_integration_test_runtime_diagnosis.md.
+      - name: Workspace tests
+        env:
+          CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
+        run: cargo nextest run --workspace --profile ci-full --partition hash:${{ matrix.shard }}/2
+
+      - name: Upload macOS workspace JUnit shard
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-macos-workspace-${{ matrix.shard }}
+          path: target/nextest/ci-full/junit.xml
+          if-no-files-found: error
+          retention-days: 14
+
+      # These two configurations previously depended on a mandatory local
+      # gate. Linux Clippy cannot lint target_os=macos code. Run each once
+      # on shard 1; the existing macOS Smoke aggregate requires its success.
+      - name: Clippy macOS default features
+        if: matrix.shard == 1
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Clippy macOS solver-free features
+        if: matrix.shard == 1
+        run: cargo clippy --workspace --all-targets --features chelis-backend-c/sleef,chelis-compiler-api/emission-observer,chelis-e2e/hip-local-gpu,chelis-ir/lowering-trace,chelis-prove/clarabel,chelis-python/extension-module,chelis-runtime/ownership-ledger,chelis-types/checkpoint-compile-probe,chelis-types/generalize-sweep-oracle -- -D warnings
+
+      - name: Verify packaged binary architecture
+        if: matrix.shard == 2
+        run: |
+          set -euo pipefail
+          file target/debug/chelis | grep -E 'arm64|aarch64'
+
+      - name: Smoke test manifested C callable ABI
+        if: matrix.shard == 2
+        run: python3 .github/scripts/smoke_macos_manifested_callable.py ./target/debug/chelis
+
+      # Phase M smoke: emit `.mm` from the Metal backend and link it
+      # against the Metal/Foundation frameworks. Compile-and-link only
+      # — no kernel dispatch — because MTLCreateSystemDefaultDevice may
+      # return null on macos-latest CI VMs. Real GPU correctness lives
+      # in the M6 manual gate (`cargo test -p chelis-backend-metal
+      # --test gpu_correctness -- --ignored`) on a real workstation.
+      - name: Smoke test Metal backend codegen + link
+        if: matrix.shard == 2
+        run: python3 .github/scripts/smoke_macos_metal.py ./target/debug/chelis
+
+      - name: Validate and report test timing
+        run: >-
+          .venv/bin/python scripts/test_timing_check.py
+          --junit target/nextest/ci-full/junit.xml
+          --informational
+
+  macos-smoke:
+    name: macOS Smoke
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs: [macos-workspace-shard]
+    if: always()
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Require every macOS workspace shard
+        run: python3 scripts/ci_require_success.py macos-workspace-shard=${{ needs.macos-workspace-shard.result }}
+

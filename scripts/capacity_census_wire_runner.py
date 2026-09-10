@@ -197,7 +197,7 @@ def _unique_fields(pairs):
     return result
 
 
-def run_libtest(root: Path, binary: Path, selected) -> TestExecution:
+def run_libtest(root: Path, binary: Path, selected, *, log_prefix=None) -> TestExecution:
     selected = _selection(selected)
     binary = binary.resolve()
     before = hashlib.sha256(binary.read_bytes()).hexdigest()
@@ -221,6 +221,9 @@ def run_libtest(root: Path, binary: Path, selected) -> TestExecution:
         capture_output=True,
         check=False,
     )
+    if log_prefix is not None:
+        from capacity_census_wire_calls import record_process
+        record_process(log_prefix, command, result)
     try:
         events = [
             json.loads(line, object_pairs_hook=_unique_fields)
@@ -261,7 +264,14 @@ def select_test_binary(target: Path, source: Path, name: str, artifacts, *, kind
 
 
 def build_and_run_rust_test(
-    root: Path, target: Path, package: str, name: str, selected, *, kind="test"
+    root: Path,
+    target: Path,
+    package: str,
+    name: str,
+    selected,
+    *,
+    kind="test",
+    log_prefix=None,
 ):
     """Use Cargo's actual artifact identity; never glob for a warm executable."""
     root, target = root.resolve(), target.resolve()
@@ -301,6 +311,9 @@ def build_and_run_rust_test(
     result = subprocess.run(
         command, cwd=root, env=environment, capture_output=True, text=True, check=False
     )
+    if log_prefix is not None:
+        from capacity_census_wire_calls import record_process
+        record_process(log_prefix.with_name(log_prefix.name + "-build"), command, result)
     if result.returncode:
         raise GraphError("wire consumer test build failed: " + result.stderr[-6000:])
     try:
@@ -311,10 +324,10 @@ def build_and_run_rust_test(
     except ValueError as error:
         raise GraphError("invalid Cargo JSON test artifact output") from error
     binary = select_test_binary(target, source, name, artifacts, kind=kind)
-    return run_libtest(root, binary, selected)
+    return run_libtest(root, binary, selected, log_prefix=log_prefix)
 
 
-def run_python_tests(root: Path, selected) -> TestExecution:
+def run_python_tests(root: Path, selected, *, log_prefix=None) -> TestExecution:
     selected = _selection(selected)
     root = root.resolve()
     with tempfile.TemporaryDirectory(prefix="chelis-wire-execution-") as directory:
@@ -328,6 +341,9 @@ def run_python_tests(root: Path, selected) -> TestExecution:
             json.dumps(selected),
         )
         result = subprocess.run(command, cwd=root, capture_output=True, check=False)
+        if log_prefix is not None:
+            from capacity_census_wire_calls import record_process
+            record_process(log_prefix, command, result)
         if result.returncode:
             raise GraphError(
                 "selected Python execution failed: "
@@ -336,6 +352,8 @@ def run_python_tests(root: Path, selected) -> TestExecution:
         try:
             raw = path.read_bytes()
             packet = json.loads(raw, object_pairs_hook=_unique_fields)
+            if log_prefix is not None:
+                log_prefix.with_suffix(".execution.json").write_bytes(raw)
         except (OSError, ValueError) as error:
             raise GraphError(
                 "missing or invalid supervised Python execution receipt"

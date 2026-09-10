@@ -811,8 +811,9 @@ and per-test execution receipts; zero matches, ignored/skipped outcomes,
 listing-only evidence, and forged supervisor transcripts fail closed. The
 separate forged `__main__` and forged import-transcript controls prove that
 only the oracle-owned callback receipt can certify Python test execution. The
-blocking `compiled-value-ownership-phase0-oracle` job retains its stable
-identity while invoking the Phase 1 oracle. The receipt is valid only when the
+`compiled-value-ownership-phase0-oracle` job retains its identity in
+`heavy-e2e.yml`, invoking Phase 2 and the launch subset daily at 03:17 UTC or
+on manual dispatch. It is not a required PR check. The receipt is valid only when the
 Phase 1 oracle and all supporting representation, dtype, rejection, capacity,
 and fast-gate checks pass on the same committed head.
 

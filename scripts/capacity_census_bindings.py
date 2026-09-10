@@ -256,7 +256,7 @@ def registration_roots(graph, functions, methods, classes, provenance):
     return roots
 
 
-def discover_bindings(documents, functions, methods, classes, *, provenance=None):
+def discover_bindings(documents, functions, methods, classes, *, provenance=None, compiler_json=None):
     """Analyze exactly registered implementations; retain unresolved legacy types.
 
     The caller must reject a problem on every final/new row. Only the Rust
@@ -264,6 +264,11 @@ def discover_bindings(documents, functions, methods, classes, *, provenance=None
     knows that cohort nor grants nonnumeric or transport authority.
     """
     graph = BindingGraph(documents, classes)
+    if compiler_json is not None:
+        from capacity_census_compiler_json import OUTPUTS, VerifiedCompilerJsonBindings, require_parameter_slots
+        if type(compiler_json) is not VerifiedCompilerJsonBindings:
+            raise GraphError("compiler JSON requires the actual execution witness")
+        compiler_json.validate()
     roots = registration_roots(graph, functions, methods, classes, provenance)
     results = []
     for kind, name, item, owner, proof in roots:
@@ -277,10 +282,24 @@ def discover_bindings(documents, functions, methods, classes, *, provenance=None
                   "implementation": f"{proof[2]}#{proof[3]}",
                   "flags": [], "leaves": [], "identity": None, "problem": None}
         identities, flags, leaves = [proof], set(), []
+        adapted = set()
         try:
+            if compiler_json is not None and name in OUTPUTS:
+                require_parameter_slots(name, inputs)
             for direction, label, ty in [("input", label, ty) for label, ty in inputs] + [("output", "$return", output)]:
-                discovered = graph.exposure(ty, owner)
-                obligations = payload_obligations(discovered)
+                discovered = compiler_json.exposure(name, direction, label, ty, proof) if compiler_json is not None else None
+                if discovered is not None:
+                    adapted.add((direction, label))
+                    identities.append(("compiler-json", compiler_json.wire.graph_identity,
+                                       tuple((adapter, direction) for adapter, direction, _ in compiler_json.ownership)))
+                    # The scoped wire projection has its own exact text/codec
+                    # contracts. It cannot discharge a sibling Python subtree.
+                    obligations = set()
+                else:
+                    discovered = graph.exposure(ty, owner)
+                    obligations = payload_obligations(discovered)
+                    if compiler_json is not None and name in OUTPUTS and discovered.numeric_leaves:
+                        raise GraphError("numeric sibling outside the exact compiler JSON adapter")
                 if ("codec",) in obligations:
                     raise GraphError("source JSON result lacks a proven derived codec")
                 if direction == "output" and ("text",) in obligations:
@@ -301,6 +320,14 @@ def discover_bindings(documents, functions, methods, classes, *, provenance=None
                     flags.add("numeric-param")
             result["identity"] = hashlib.sha256(json.dumps(identities, separators=(",", ":")).encode()).hexdigest()
             result["flags"], result["leaves"] = sorted(flags), leaves
+            if adapted:
+                expected = {("output", "$return")}
+                if name == "chelis_python::eval_json":
+                    expected.add(("input", "bindings_json"))
+                if adapted != expected:
+                    raise GraphError("compiler JSON binding omitted an exact payload direction")
+                result["authority"] = "TaggedTransport"
+                result["contract"] = "compiler-json/" + name
         except GraphError as error:
             result["problem"] = str(error)
         results.append(result)

@@ -9,9 +9,10 @@ per-PR integration gate. `.config/nextest.toml` carries three profiles:
 
   - `default` excludes an explicitly-named heavy-e2e set;
   - `ci` excludes that same set plus every complete test binary named by a
-    required Phase 0-3 oracle `--test` argument;
+    Phase 0-3 oracle `--test` argument;
   - `nightly` carries the EXACT SAME set as a positive filter, and the
-    `Heavy E2E` workflow runs `cargo nextest run --profile nightly`.
+    profile remains a manual heavy selection. The hosted Linux Extended
+    Validation workflow runs the full workspace with `--ignore-default-filter`.
 
 This file locks the original workspace/nightly split plus the delegation
 contract for binaries named by oracle `--test` arguments. Selector-based
@@ -34,8 +35,8 @@ Three tiers of check:
     two nightly-owned contention cases stay out of it.
 
 The last two classes list different compiled configurations, and that is
-why CI runs them in different jobs. `ProfilePartitionTests` runs on workspace
-shard 1, whose default-feature build is warm; `GeneralizationPartitionTests`
+why nightly CI runs them in different jobs. `ProfilePartitionTests` runs in
+`full-workspace`, whose default-feature build is warm; `GeneralizationPartitionTests`
 runs on generalization shard 1, whose feature-enabled build is warm. Listing
 the generalization lane on the workspace shard recompiled the workspace under
 a second feature set and cost 4.4 hosted minutes per run. Both classes also
@@ -52,6 +53,7 @@ import sys
 import tomllib
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 NEXTEST_TOML = REPO_ROOT / ".config" / "nextest.toml"
@@ -128,6 +130,13 @@ GENERALIZATION_PR_FILTER = (
 CONTENDED_DEADLINE_RETRY_SELECTOR = (
     "binary_id(/^chelis-cli::test_suite_timeout$/) & "
     "test(/^normal_output_forwarding_is_part_of_whole_command_deadline$/)"
+)
+SHARED_RUSTDOC_GROUP = "capacity-rustdoc-verifiers"
+SHARED_RUSTDOC_OWNER_TESTS = (
+    "chelis-compiler-api::capacity_census_wire::"
+    "wire_schema_numeric_fields_match_the_reviewed_baseline",
+    "chelis-python::capacity_census_bindings::"
+    "registered_pyfunctions_match_the_reviewed_rustdoc_signatures",
 )
 
 
@@ -209,14 +218,14 @@ class FilterTextTests(unittest.TestCase):
             _norm(_negative_filter_inner(ci_block)),
             expected,
             "the `ci` filter must differ from `default` only by the exact "
-            "complete binaries named by required dtype oracle `--test` arguments",
+            "complete binaries named by dtype oracle `--test` arguments",
         )
 
     def test_ci_only_exclusions_are_executed_by_the_dtype_oracle(self):
         self.assertEqual(
             ORACLE_OWNED_BINARY_IDS,
             _oracle_selected_test_binaries(),
-            "an excluded binary is not selected by the required dtype oracle",
+            "an excluded binary is not selected by the dtype oracle",
         )
 
     def test_inherited_phase0_and_observation_binaries_are_delegated(self):
@@ -390,6 +399,73 @@ def _list_generalization_pr() -> dict[str, tuple[str, bool]]:
     return out
 
 
+def _show_shared_rustdoc_group(
+    profile: str, *, audited_consumers_only: bool = False
+) -> str:
+    """Ask nextest which tests receive the inherited group, without a test filter."""
+    cmd = [
+        "cargo",
+        "nextest",
+        "show-config",
+        "test-groups",
+        "--color",
+        "never",
+    ]
+    if audited_consumers_only:
+        cmd.extend(
+            [
+                "-p",
+                "chelis-compiler-api",
+                "-p",
+                "chelis-python",
+                "--test",
+                "capacity_census_wire",
+                "--test",
+                "capacity_census_bindings",
+            ]
+        )
+    else:
+        cmd.append("--workspace")
+    cmd.extend(
+        [
+            "--profile",
+            profile,
+            "--ignore-default-filter",
+            "--groups",
+            SHARED_RUSTDOC_GROUP,
+        ]
+    )
+    result = subprocess.run(
+        cmd,
+        cwd=REPO_ROOT,
+        env=_cargo_environment(),
+        capture_output=True,
+        text=True,
+        timeout=900,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"nextest group resolution failed for {profile!r} "
+            f"(exit {result.returncode}): {result.stderr[-2000:]}"
+        )
+    return result.stdout
+
+
+def _resolved_shared_rustdoc_members(output: str) -> set[str]:
+    """Parse nextest's resolved binary/test membership, excluding filter prose."""
+    members: set[str] = set()
+    binary = None
+    for line in output.splitlines():
+        binary_match = re.fullmatch(r"      ([^ ]+):", line)
+        if binary_match is not None:
+            binary = binary_match.group(1)
+            continue
+        test_match = re.fullmatch(r"          ([^ ]+)", line)
+        if test_match is not None and binary is not None:
+            members.add(f"{binary}::{test_match.group(1)}")
+    return members
+
+
 @unittest.skipUnless(
     _have_nextest(), "cargo nextest unavailable; skipping set-math oracle"
 )
@@ -415,6 +491,34 @@ class ProfilePartitionTests(unittest.TestCase):
             )
             for owner in dtype_oracle_manifest.OWNERS
         }
+
+    def test_fast_selection_is_a_subset_of_unfiltered_nightly(self):
+        from scripts import ci_test_targets
+        metadata = json.loads(subprocess.run(
+            ["cargo", "metadata", "--no-deps", "--format-version", "1", "--locked"],
+            cwd=REPO_ROOT, check=True, capture_output=True, text=True,
+        ).stdout)
+        selected = ci_test_targets.read_targets(REPO_ROOT / ".config/ci-test-targets.toml")
+        args = ci_test_targets.cargo_args(metadata, selected)
+        def listing(selection):
+            result = subprocess.run(
+                ["cargo", "nextest", "list", *selection, "--profile", "ci-full",
+                 "--ignore-default-filter", "--message-format", "json"],
+                cwd=REPO_ROOT, env=_cargo_environment(), check=True,
+                capture_output=True, text=True, timeout=900,
+            )
+            return json.loads(result.stdout)
+        fast = listing(args)
+        ci_test_targets.validate_listing(fast, metadata, selected)
+        full = listing(["--workspace"])
+        def active(data):
+            return {(binary, name) for binary, suite in data["rust-suites"].items()
+                    for name, info in suite["testcases"].items() if not info["ignored"]}
+        self.assertTrue(active(fast))
+        self.assertLess(active(fast), active(full))
+        self.assertTrue(all(info["filter-match"]["status"] == "matches"
+                            for suite in full["rust-suites"].values()
+                            for info in suite["testcases"].values() if not info["ignored"]))
 
     def _sets(self):
         ci_matches = {k for k, (s, _) in self.ci.items() if s == "matches"}
@@ -448,8 +552,8 @@ class ProfilePartitionTests(unittest.TestCase):
         self.assertEqual(
             overlap,
             set(),
-            f"{len(overlap)} test(s) are on BOTH the per-PR `ci` gate and "
-            f"the `nightly` gate (double-run, wastes the per-PR budget): "
+            f"{len(overlap)} test(s) are in BOTH the manual `ci` profile and "
+            f"the manual `nightly` profile: "
             f"{sorted(overlap)[:20]}",
         )
 
@@ -460,7 +564,7 @@ class ProfilePartitionTests(unittest.TestCase):
             gap,
             set(),
             f"{len(gap)} non-ignored test(s) are on neither the workspace, "
-            f"nightly, nor required-oracle lanes -- they silently stopped running "
+            f"nightly, nor manual oracle selections -- they silently stopped running "
             f"(dropped coverage): {sorted(gap)[:20]}",
         )
 
@@ -538,6 +642,22 @@ class ProfilePartitionTests(unittest.TestCase):
             "selection, so flattening has no executable duplication to remove",
         )
 
+    def test_every_profile_serializes_exactly_the_shared_target_owners(self):
+        profiles = tuple(tomllib.loads(NEXTEST_TOML.read_text())["profile"])
+        self.assertIn("builtin-atom-closure", profiles)
+        with mock.patch.dict(os.environ, {"CARGO_TERM_COLOR": "always"}):
+            for profile in profiles:
+                with self.subTest(profile=profile):
+                    output = _show_shared_rustdoc_group(profile)
+                    self.assertRegex(
+                        output,
+                        rf"(?m)^group: {SHARED_RUSTDOC_GROUP} "
+                        r"\(max threads = 1\)$",
+                    )
+                    self.assertEqual(
+                        _resolved_shared_rustdoc_members(output),
+                        set(SHARED_RUSTDOC_OWNER_TESTS),
+                    )
 
 @unittest.skipUnless(
     _have_nextest(), "cargo nextest unavailable; skipping generalization census"

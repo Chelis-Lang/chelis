@@ -304,6 +304,16 @@ f64_value = recast_float(cast(1.5, f64), [cast(0.0, f64)])
     }
 }
 
+#[test]
+fn tensor_cast_without_actualized_target_rejects_instead_of_reusing_source_dtype() {
+    let error = eval_deep_with_bindings(
+        "cast(value, p)",
+        &[("value", tensor_value(Prim::F32, vec![2], vec![1.0, 2.0]))],
+    )
+    .expect_err("a missing dtype binding must not become an identity cast");
+    assert!(error.contains("cast target `p`"), "{error}");
+}
+
 /// chelis#1558: this row's subject is the PRECISION MISMATCH, not the binder,
 /// so it keeps its subject on a bounded binder where the program is still
 /// admitted far enough to reach it. **Disposition lock**, green before and

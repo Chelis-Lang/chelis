@@ -371,6 +371,14 @@ pub(crate) fn evaluate_host_program(
     tensor_bindings: &UnordMap<String, RuntimeTensorValue>,
 ) -> Result<RuntimeOutcome, String> {
     evaluate_host_program_filtered(program, tensor_bindings, None, None)
+        .map_err(|failure| failure.message)
+}
+
+/// A failed execution still owes the effects it performed before unwinding.
+#[derive(Debug)]
+pub(crate) struct RuntimeFailure {
+    pub(crate) message: String,
+    pub(crate) transcript: Vec<String>,
 }
 
 /// Evaluate top-level non-fn bindings. When `selected_roots` is `Some`, only
@@ -387,7 +395,7 @@ pub(crate) fn evaluate_host_program_filtered(
     tensor_bindings: &UnordMap<String, RuntimeTensorValue>,
     selected_roots: Option<&[String]>,
     manifested_lowered_names: Option<&BTreeMap<String, bool>>,
-) -> Result<RuntimeOutcome, String> {
+) -> Result<RuntimeOutcome, RuntimeFailure> {
     evaluate_host_program_with_library_and_types(
         program,
         None,
@@ -428,7 +436,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
     tensor_bindings: &UnordMap<String, RuntimeTensorValue>,
     selected_roots: Option<&[String]>,
     manifested_lowered_names: Option<&BTreeMap<String, bool>>,
-) -> Result<RuntimeOutcome, String> {
+) -> Result<RuntimeOutcome, RuntimeFailure> {
     let empty_types = BTreeMap::new();
     let library_exprs = library.map(CheckedProgram::exprs).unwrap_or(&[]);
     let library_type_env = library
@@ -441,7 +449,11 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
             CheckedProgram::compose(library, program)
                 .ok_or_else(|| "runtime kernel program lost its checked library proof".to_owned())
         })
-        .transpose()?;
+        .transpose()
+        .map_err(|message| RuntimeFailure {
+            message,
+            transcript: Vec::new(),
+        })?;
     // Lowered classification. A new-code value binding that references a
     // library function (e.g. `imported_val = lib_add(20, 22)`) must
     // inherit that function's host-lane-vs-tensor-lane classification —
@@ -549,7 +561,12 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
     };
 
     for name in top_level_order {
-        let _ = ctx.resolve_top_level(&name)?;
+        if let Err(message) = ctx.resolve_top_level(&name) {
+            return Err(RuntimeFailure {
+                message,
+                transcript: ctx.transcript,
+            });
+        }
     }
 
     // Surface host-lane selected callable roots. The arrow-form

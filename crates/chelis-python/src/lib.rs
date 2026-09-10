@@ -1,5 +1,7 @@
+mod compiler_json;
 mod source_json;
 
+use compiler_json::{CheckJson, CompileJson, DesugarJson, EvalBindingsJson, EvalJson};
 use source_json::SourceJson;
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -556,20 +558,20 @@ unsafe fn load_host_runtime_api(library: &Library) -> PyResult<HostRuntimeApi> {
 }
 
 #[::pyo3::pyfunction(signature = (source, *, source_kind = "surf"))]
-fn check_json(py: Python<'_>, source: &str, source_kind: &str) -> PyResult<String> {
+fn check_json(py: Python<'_>, source: &str, source_kind: &str) -> PyResult<CheckJson> {
     let request = CheckRequest {
         source_kind: parse_source_kind(source_kind)?,
         source: source.to_string(),
     };
-    run_json(py, || compiler::check(request))
+    run_job(py, || compiler::check(request)).map(CheckJson::new)
 }
 
 #[::pyo3::pyfunction]
-fn desugar_json(py: Python<'_>, source: &str) -> PyResult<String> {
+fn desugar_json(py: Python<'_>, source: &str) -> PyResult<DesugarJson> {
     let request = DesugarRequest {
         source: source.to_string(),
     };
-    run_json(py, || compiler::desugar(request))
+    run_job(py, || compiler::desugar(request)).map(DesugarJson::new)
 }
 
 #[::pyo3::pyfunction]
@@ -587,25 +589,25 @@ fn compile_json(
     target: &str,
     source_kind: &str,
     entry_name: Option<String>,
-) -> PyResult<String> {
+) -> PyResult<CompileJson> {
     let request = CompileRequest {
         source_kind: parse_source_kind(source_kind)?,
         source: source.to_string(),
         target: parse_compile_target(target)?,
         entry_name,
     };
-    run_json(py, || compiler::compile(request))
+    run_job(py, || compiler::compile(request)).map(CompileJson::new)
 }
 
-#[::pyo3::pyfunction(signature = (source, bindings_json = "{}", *, source_kind = "surf", project_root = None))]
+#[::pyo3::pyfunction(signature = (source, bindings_json = EvalBindingsJson::empty(), *, source_kind = "surf", project_root = None), text_signature = "(source, bindings_json='{}', *, source_kind='surf', project_root=None)")]
 fn eval_json(
     py: Python<'_>,
     source: &str,
-    bindings_json: &str,
+    bindings_json: EvalBindingsJson,
     source_kind: &str,
     project_root: Option<&str>,
-) -> PyResult<String> {
-    let bindings = parse_bindings_json(bindings_json)?;
+) -> PyResult<EvalJson> {
+    let bindings = bindings_json.into_bindings();
     // Issue #816: with `project_root=`, resolve reef-declared dependencies
     // by evaluating the source against the package's compiled library
     // context. `eval` takes raw text (no file to walk from), so — unlike
@@ -624,15 +626,14 @@ fn eval_json(
         let result = py
             .allow_threads(move || run_eval_in_context_job(&root, &source, bindings))
             .map_err(compile_and_load_error)?;
-        return serde_json::to_string(&result)
-            .map_err(|err| ChelisError::new_err(format!("serialization failed: {err}")));
+        return Ok(EvalJson::new(result));
     }
     let request = EvalRequest {
         source_kind: parse_source_kind(source_kind)?,
         source: source.to_string(),
         bindings,
     };
-    run_json(py, || compiler::eval(request))
+    run_job(py, || compiler::eval(request)).map(EvalJson::new)
 }
 
 #[::pyo3::pyfunction(signature = (source, *, mode = "surf"))]
@@ -687,7 +688,7 @@ fn load(py: Python<'_>, path: &str) -> PyResult<NativeCompiledModel> {
 /// GIL reacquisition per interval on an otherwise idle thread.
 const SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Run a compiler-API job and return its JSON encoding, staying responsive
+/// Run a compiler-API job and retain its typed result, staying responsive
 /// to Python signals for the whole run (chelis#914).
 ///
 /// Previously this was `py.allow_threads(f)`, which parks the Python **main**
@@ -708,16 +709,6 @@ const SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// both lanes poll at every node visit; during front-end work, the compiler
 /// polls at phase and top-level-declaration boundaries. The join is bounded by
 /// the current cooperative unit rather than by all remaining work.
-fn run_json<T, F>(py: Python<'_>, f: F) -> PyResult<String>
-where
-    T: serde::Serialize + Send + 'static,
-    F: FnOnce() -> Result<T, CompilerError> + Send + 'static,
-{
-    let result = run_job(py, f)?;
-    serde_json::to_string(&result)
-        .map_err(|err| ChelisError::new_err(format!("serialization failed: {err}")))
-}
-
 fn run_job<T, F>(py: Python<'_>, f: F) -> PyResult<T>
 where
     T: Send + 'static,
@@ -741,7 +732,7 @@ where
             // keeps the token from outliving this job.
             let _cancel_guard = install_cancel_token(worker_token);
             // A send failure means the receiver is gone, which cannot happen
-            // while `run_json` is still on the stack holding `rx`.
+            // while `run_job` is still on the stack holding `rx`.
             let _ = tx.send(f());
         })
         .map_err(|err| ChelisError::new_err(format!("failed to spawn eval thread: {err}")))?;
@@ -877,11 +868,6 @@ fn load_artifact(
             _tempdir: tempdir,
         },
     })
-}
-
-fn parse_bindings_json(bindings_json: &str) -> PyResult<BTreeMap<String, TensorValue>> {
-    serde_json::from_str(bindings_json)
-        .map_err(|err| PyValueError::new_err(format!("invalid bindings json: {err}")))
 }
 
 fn parse_source_kind(value: &str) -> PyResult<SourceKind> {

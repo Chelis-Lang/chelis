@@ -790,10 +790,8 @@ pub(super) fn dict_lookup<'a>(
 /// `crates/chelis-ir/src/verify.rs`: cast dims must not change).
 pub(super) fn cast_tensor_value(
     tensor: RuntimeTensorValue,
-    target: &str,
+    target_prim: Prim,
 ) -> Result<RuntimeValue, String> {
-    let target_prim = Prim::parse_name(target)
-        .ok_or_else(|| format!("unsupported cast target `{target}` for tensor input"))?;
     let RuntimeTensorValue {
         value: ir_value,
         precision: src_prim,

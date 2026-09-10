@@ -2013,7 +2013,7 @@ fn recover_anchor_axis(
 }
 
 /// WS-A8: build a precision substitution map from formal vs actual
-/// tensor types at a polymorphic-def call site. The formal types come
+/// scalar or tensor types at a polymorphic-def call site. The formal types come
 /// from the def's annotated parameter signatures and may carry
 /// `(t-var {} p)` precision slots (precision polymorphism per
 /// spec/04-type-system.md §5.8). The actual types come from the call
@@ -2042,7 +2042,7 @@ fn tensor_prec_substitutions(
         let Some(formal_expr) = formal_expr else {
             continue;
         };
-        if let Some(var_name) = extract_precision_var_name(formal_expr) {
+        if let Some(var_name) = formal_param_type_var_name(formal_expr) {
             subst.entry(var_name).or_insert(actual.precision);
         }
     }
@@ -2188,8 +2188,8 @@ fn fully_monomorphic_call_precision(fn_expr: &Expr, actual_types: &[TensorType])
     let mut shared: Option<Prim> = None;
     let mut saw_formal_prec_var = false;
     for (arg_expr, actual) in arg_exprs.iter().zip(actual_types.iter()) {
-        // A scalar argument does not constrain the verb's polymorphic
-        // tensor precision; skip it.
+        // This legacy shared-tensor fallback skips scalar arguments; their
+        // precision variables are bound individually by the caller.
         if actual.dims.is_empty() {
             continue;
         }
@@ -2212,61 +2212,48 @@ fn fully_monomorphic_call_precision(fn_expr: &Expr, actual_types: &[TensorType])
     saw_formal_prec_var.then_some(shared).flatten()
 }
 
-/// issue #319: bind the renamed body precision variables of a separate-
-/// `sig` precision-polymorphic verb to the concrete call-site precision,
-/// but ONLY when the call is fully precision-monomorphic.
+/// Bind checker-renamed formal variables to their own actual precisions.
+/// Scalar dtype witnesses and tensor precision parameters both constrain the
+/// result; their dtypes may differ. An incomplete positional alignment binds
+/// nothing, preserving the lowering tripwire for unsupported call shapes.
 ///
-/// The checker renames a separate-`sig` verb's precision variable `p`
-/// when it stamps the resolved body node types (e.g. the `permute`
-/// adjoint output), so the call-site name-keyed `tensor_prec_substitutions`
-/// (keyed on the original `p`) misses the renamed name and a body node
-/// lowered through `type_from_meta` trips the §5.8.1 monomorphization
-/// tripwire. When every formal-parameter precision variable resolves to a
-/// single shared concrete precision (see
-/// [`fully_monomorphic_call_precision`]), one precision threads through
-/// the entire verb instance, so binding every body precision variable to
-/// it is sound — including a body precision variable that the checker
-/// unified across two sig precision variables (e.g. an `add` forcing
-/// `p == w`) and that therefore no longer appears verbatim in a single
-/// formal-parameter position.
-///
-/// Soundness (red-team caveat): when the call is NOT fully
-/// precision-monomorphic this binds NOTHING and the §5.8.1 tripwire
-/// fires. A genuinely precision-heterogeneous call (tensor actuals
-/// disagree) is rejected by the monomorphism check, so no body precision
-/// variable is silently promoted; a genuinely under-determined precision
-/// variable with no concrete call site surfaces as a wildcard `(t-var _)`
-/// (which `try_extract_tensor_type` already treats as a fresh type, not a
-/// tripwire) rather than reaching this binding. This preserves the
-/// no-implicit-precision-promotion invariant (spec/04-type-system.md
-/// §5.8.1).
-///
-/// Assumption (issue #319 review): this binds EVERY body precision
-/// variable to the single call-site precision, which assumes every body
-/// precision variable is ultimately tied to a parameter's precision. That
-/// holds for the precision-poly verbs this targets — the only precision
-/// source in an sdpa/attention body is the `q`/`k`/`v` parameters, so a
-/// fully-monomorphic call pins the whole body. A body carrying a
-/// genuinely INDEPENDENT precision variable — e.g. an internal
-/// polymorphic-precision helper not constrained by any parameter — would
-/// be over-constrained by this blanket bind. No such construct arises in
-/// the target verbs; supporting one would need per-variable provenance
-/// tracking rather than a single shared precision, and is out of scope.
+/// The #319 shared-tensor fallback additionally recovers body variables whose
+/// names were changed by inference across signature variables. It applies only
+/// when `fully_monomorphic_call_precision` succeeds, and never overwrites an
+/// individually resolved formal. Unknown independent body variables still owe
+/// their own provenance rather than a default dtype.
 fn formal_precision_var_bindings(
     fn_expr: &Expr,
     body: &Expr,
     actual_types: &[TensorType],
 ) -> UnordMap<String, Prim> {
-    let Some(prim) = fully_monomorphic_call_precision(fn_expr, actual_types) else {
+    let Some(formals) = fn_type_arg_exprs(fn_expr) else {
         return UnordMap::new();
+    };
+    // #1564: bind each renamed formal independently, including scalar dtype
+    // witnesses. A tensor source and its cast target need not share a dtype.
+    // Keep the positional guard: skipped callable arguments are not aligned.
+    if formals.len() != actual_types.len() {
+        return UnordMap::new();
+    }
+    let mut bindings = UnordMap::new();
+    for (formal, actual) in formals.into_iter().zip(actual_types) {
+        if let Some(name) = formal_param_type_var_name(formal)
+            && let Some(previous) = bindings.insert(name, actual.precision)
+            && previous != actual.precision
+        {
+            return UnordMap::new();
+        }
+    }
+    let Some(prim) = fully_monomorphic_call_precision(fn_expr, actual_types) else {
+        return bindings;
     };
     let mut body_prec_vars = UnordSet::new();
     collect_body_precision_var_names(body, &mut body_prec_vars);
-    body_prec_vars
-        .into_sorted()
-        .into_iter()
-        .map(|var_name| (var_name, prim))
-        .collect()
+    for name in body_prec_vars.into_sorted() {
+        bindings.entry(name).or_insert(prim);
+    }
+    bindings
 }
 
 /// issue #319: collect every precision type-variable name appearing in a
@@ -5707,6 +5694,22 @@ impl<'program> LowerCtx<'program> {
         Self::default_type()
     }
 
+    /// Read a checked scalar/tensor precision without inventing a default.
+    /// Result constraints may actualize a binder absent from every parameter.
+    fn resolved_type_precision(&self, expr: &Expr) -> Option<Prim> {
+        let (tag, _, kids) = stamped_parts(expr)?;
+        match tag {
+            DeepTag::TRef => self.resolved_type_precision(kids.first()?),
+            DeepTag::TTensor => self.resolved_type_precision(kids.last()?),
+            DeepTag::TPrim => Self::try_extract_prim(expr),
+            DeepTag::TVar => self
+                .prec_substitutions
+                .get(&Self::scalar_precision_var_name(expr)?)
+                .copied(),
+            _ => None,
+        }
+    }
+
     fn scalar_precision_var_name(expr: &Expr) -> Option<String> {
         extract_scalar_precision_var_name(expr)
     }
@@ -6497,7 +6500,7 @@ impl<'program> LowerCtx<'program> {
             LoweredValue::Host { .. } => {
                 raise_lowering_error("a host value cannot become a tensor root", None, None)
             }
-            LoweredValue::Node(id) if !prefix.contains('.') => {
+            LoweredValue::Node(id) if !prefix.contains('.') && !self.dag.roots().contains(id) => {
                 // Top-level def whose body lowered to a single existing
                 // node — no new Store is emitted. This is a region-merge
                 // during lowering: the def's source region and the
@@ -6512,6 +6515,9 @@ impl<'program> LowerCtx<'program> {
                 self.dag.add_root(*id);
             }
             LoweredValue::Node(id) => {
+                // A second declaration can name the same value. Give its
+                // observation a distinct Store identity: add_root deduplicates
+                // node IDs, while the checked manifest owes both names.
                 let output_type = self
                     .dag
                     .get(*id)
@@ -7242,7 +7248,19 @@ impl<'program> LowerCtx<'program> {
             ));
         }
 
-        if let Some(lowered) = self.try_lower_callable_app(&elems[2], &elems[3..], &ty, app_span) {
+        let checked_result_precision = match &elems[1] {
+            Expr::Map(meta, _) => meta
+                .ty()
+                .and_then(|ty| self.resolved_type_precision(ty.expression())),
+            _ => None,
+        };
+        if let Some(lowered) = self.try_lower_callable_app(
+            &elems[2],
+            &elems[3..],
+            &ty,
+            checked_result_precision,
+            app_span,
+        ) {
             return lowered;
         }
 
@@ -7259,6 +7277,7 @@ impl<'program> LowerCtx<'program> {
         func: &Expr,
         args: &[Expr],
         ty: &TensorType,
+        checked_result_precision: Option<Prim>,
         app_span: Span,
     ) -> Option<LoweredValue> {
         let callable = self.resolve_callable_expr(func)?;
@@ -7280,9 +7299,14 @@ impl<'program> LowerCtx<'program> {
             self.local_callables.contains_key(name) || self.program_defs.contains_key(name)
         });
         match callable {
-            CallableExpr::Plain(fn_expr) => {
-                Some(self.lower_plain_callable_app(&fn_expr, args, ty, app_span, inlining_name))
-            }
+            CallableExpr::Plain(fn_expr) => Some(self.lower_plain_callable_app(
+                &fn_expr,
+                args,
+                ty,
+                checked_result_precision,
+                app_span,
+                inlining_name,
+            )),
             CallableExpr::Vmap { fn_expr, axis } => {
                 Some(self.lower_vmap_callable_app(&fn_expr, axis, args, ty, app_span))
             }
@@ -8161,6 +8185,7 @@ impl<'program> LowerCtx<'program> {
         fn_expr: &ResolvedFunction,
         args: &[Expr],
         expected_return_ty: &TensorType,
+        checked_result_precision: Option<Prim>,
         _app_span: Span,
         inlining_name: Option<String>,
     ) -> LoweredValue {
@@ -8293,34 +8318,20 @@ impl<'program> LowerCtx<'program> {
         // primitives at lowering time).
         self.prec_substitutions
             .merge(tensor_prec_substitutions(&formal_type_exprs, &actual_types));
-        // issue #319: the checker renames a separate-`sig`
-        // precision-polymorphic verb's precision variable `p` to a fresh
-        // internal name (e.g. `t304`) when it stamps the resolved body
-        // node types (the `permute` adjoint output, etc.). That renamed
-        // name is not the original `p`, so the name-keyed substitution
-        // above misses it and a shape-preserving op (`permute`) lowered
-        // from the body trips the §5.8.1 monomorphization tripwire in
-        // `type_from_meta`. When EVERY formal-parameter precision var
-        // resolves to one shared concrete precision (a fully
-        // precision-monomorphic call), bind every renamed body precision
-        // var to it; otherwise bind nothing and let the tripwire / a
-        // downstream precision-mismatch diagnostic fire. This preserves
-        // the no-implicit-precision-promotion invariant for a genuinely
-        // heterogeneous or under-determined call — see
-        // `formal_precision_var_bindings`.
-        //
-        // Why recover here rather than fix the rename at the source
-        // (issue #319 review): the cleaner fix is for the checker to
-        // preserve the sig's original `p` name through `type_to_deep_expr`
-        // so the name-keyed `tensor_prec_substitutions` above already
-        // matches. But `type_to_deep_expr` prints every `TensorPrec::Var`
-        // anonymously, and threading user-facing sig-var names through the
-        // checker's `Subst`/printing touches ALL polymorphic-type printing
-        // (every verb, every diagnostic), with wide blast radius on
-        // inference and golden output. This recovery is deliberately
-        // localized to the precision-poly verb call path and is removable
-        // wholesale if the checker later preserves the name — at which
-        // point the name-keyed substitution subsumes it.
+        // [04-DTYPE-2] / §5.8.1: an expected result can be the only
+        // witness for a bounded precision. Bind its checked identity before
+        // the shared-argument fallback, which must not overwrite it. The
+        // optional precision comes from checked metadata, never default_type.
+        if let Some(prim) = checked_result_precision
+            && let Some(result) = extract_fn_return_type(fn_expr)
+            && let Some(name) = formal_param_type_var_name(result)
+        {
+            self.prec_substitutions.insert(name, prim);
+        }
+        // Body metadata uses checker-renamed variables (e.g. t304), while
+        // casts may still name the source binder (p). Resolve both from the
+        // same aligned actual arguments, preserving distinct source/target
+        // precisions. The #319 fallback handles remaining shared tensor vars.
         for (var_name, prim) in
             formal_precision_var_bindings(fn_expr, body, &actual_types).into_sorted()
         {
@@ -14255,6 +14266,18 @@ impl<'program> LowerCtx<'program> {
         let new_precision = if let Some(prim) = Self::try_extract_prim(&elems[3]) {
             // Handle (t-prim {} name) form.
             prim
+        } else if Self::scalar_precision_var_name(&elems[3]).is_some()
+            && let Expr::Map(meta, _) = &elems[1]
+            && let Some(prim) = meta
+                .ty()
+                .and_then(|ty| self.resolved_type_precision(ty.expression()))
+        {
+            // The target's source name need not occur in any parameter.
+            // The checker stamped this cast's result with that same target
+            // identity; a checked call-result constraint can resolve it.
+            // Prefer this identity to the source spelling: an outer caller
+            // can have an unrelated binder with the same name.
+            prim
         } else if let Some(var_name) = Self::scalar_precision_var_name(&elems[3])
             && let Some(prim) = self.prec_substitutions.get(&var_name).copied()
         {
@@ -17855,6 +17878,28 @@ mod tests {
     }
 
     // ── Tier-2 rank monomorphization (spec/design/rank_polymorphism.md) ──
+
+    #[test]
+    fn result_precision_requires_a_checked_numeric_type() {
+        let mut ctx = LowerCtx::new(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        );
+        let tensor = parse_type_expr("(t-tensor {} (d-lit {} 2) (t-var {} p))");
+        assert_eq!(ctx.resolved_type_precision(&tensor), None);
+        ctx.prec_substitutions.insert("p".into(), Prim::F64);
+        assert_eq!(ctx.resolved_type_precision(&tensor), Some(Prim::F64));
+        assert_eq!(
+            ctx.resolved_type_precision(&parse_type_expr("(t-prim {} int64)")),
+            Some(Prim::Int64)
+        );
+        assert_eq!(
+            ctx.resolved_type_precision(&parse_type_expr("(t-tuple {} (t-prim {} f32))")),
+            None
+        );
+    }
 
     fn parse_type_expr(src: &str) -> Expr {
         chelis_deep::parser::parse_str(src)
