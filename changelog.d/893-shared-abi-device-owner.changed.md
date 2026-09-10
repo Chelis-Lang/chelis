@@ -1,0 +1,1 @@
+Generate exact host views and dynamic device descriptors from the shared ABI schema. Validate native tensor boundaries through checked metadata owners and reject compiled artifact ABI 1 before metadata or library loading. HIP artifacts carry a separate device-owner implementation with checked strided copies, device-bound lifetime, and matching source/header staging.

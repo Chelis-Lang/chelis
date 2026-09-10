@@ -66,6 +66,18 @@ const HIP_RUNTIME_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../chelis-backend-hip/runtime/chelis_hip_runtime.h"
 ));
+const DEVICE_OWNER_CPP: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-backend-hip/runtime/chelis_device_owner.cpp"
+));
+const DEVICE_OWNER_H: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-backend-hip/runtime/chelis_device_owner.h"
+));
+const DEVICE_DESCRIPTOR_H: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-backend-hip/runtime/chelis_device_descriptor.h"
+));
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExecutionDim {
@@ -3758,6 +3770,18 @@ fn compile_result_hip(
                 path: "chelis_hip_runtime.h".to_string(),
                 contents: HIP_RUNTIME_H.to_string(),
             },
+            GeneratedFile {
+                path: "chelis_device_owner.cpp".to_string(),
+                contents: DEVICE_OWNER_CPP.to_string(),
+            },
+            GeneratedFile {
+                path: "chelis_device_owner.h".to_string(),
+                contents: DEVICE_OWNER_H.to_string(),
+            },
+            GeneratedFile {
+                path: "chelis_device_descriptor.h".to_string(),
+                contents: DEVICE_DESCRIPTOR_H.to_string(),
+            },
         ],
         compile_flags: result.compile_flags.clone(),
         link_flags: result.link_flags.clone(),
@@ -3801,6 +3825,18 @@ fn compile_result_hip_host(
             GeneratedFile {
                 path: "chelis_hip_runtime.h".to_string(),
                 contents: HIP_RUNTIME_H.to_string(),
+            },
+            GeneratedFile {
+                path: "chelis_device_owner.cpp".to_string(),
+                contents: DEVICE_OWNER_CPP.to_string(),
+            },
+            GeneratedFile {
+                path: "chelis_device_owner.h".to_string(),
+                contents: DEVICE_OWNER_H.to_string(),
+            },
+            GeneratedFile {
+                path: "chelis_device_descriptor.h".to_string(),
+                contents: DEVICE_DESCRIPTOR_H.to_string(),
             },
         ],
         compile_flags: toolchain.compile_flags,

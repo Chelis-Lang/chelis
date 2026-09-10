@@ -57,6 +57,18 @@ const HIP_RUNTIME_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../chelis-backend-hip/runtime/chelis_hip_runtime.h"
 ));
+const DEVICE_OWNER_CPP: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-backend-hip/runtime/chelis_device_owner.cpp"
+));
+const DEVICE_OWNER_H: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-backend-hip/runtime/chelis_device_owner.h"
+));
+const DEVICE_DESCRIPTOR_H: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-backend-hip/runtime/chelis_device_descriptor.h"
+));
 const METAL_RUNTIME_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../chelis-backend-metal/runtime/chelis_metal_runtime.h"
@@ -160,6 +172,9 @@ fn copy_runtime_artifacts(
     fs::write(runtime_dir.join("chelis_math.h"), MATH_H)?;
     if extras.hip {
         fs::write(runtime_dir.join("chelis_hip_runtime.h"), HIP_RUNTIME_H)?;
+        fs::write(runtime_dir.join("chelis_device_owner.cpp"), DEVICE_OWNER_CPP)?;
+        fs::write(runtime_dir.join("chelis_device_owner.h"), DEVICE_OWNER_H)?;
+        fs::write(runtime_dir.join("chelis_device_descriptor.h"), DEVICE_DESCRIPTOR_H)?;
     }
     if extras.metal {
         fs::write(runtime_dir.join("chelis_metal_runtime.h"), METAL_RUNTIME_H)?;
@@ -9592,18 +9607,20 @@ fn cmd_build_hip_host(
     link_flags.retain(|flag| *flag != "-fopenmp");
     if requires_main {
         println!(
-            "Compile: hipcc {} {} -L{} -lchelis_runtime -lpthread -ldl {} -o {}",
+            "Compile: hipcc {} {} {} -L{} -lchelis_runtime -lpthread -ldl {} -o {}",
             compile_flags.join(" "),
             c_path.display(),
+            runtime_dir.join("chelis_device_owner.cpp").display(),
             runtime_dir.display(),
             link_flags.join(" "),
             c_path.with_extension("").display()
         );
     } else {
         println!(
-            "Compile object: hipcc {} -c {}",
+            "Compile object: hipcc {} -c {} {}",
             compile_flags.join(" "),
-            c_path.display()
+            c_path.display(),
+            runtime_dir.join("chelis_device_owner.cpp").display()
         );
     }
     Ok(())
@@ -9840,17 +9857,19 @@ fn cmd_build_hip(
     flags.dedup();
     if requires_main {
         println!(
-            "Compile: hipcc {} {} -L{} -lchelis_runtime -lpthread -ldl -o {}",
+            "Compile: hipcc {} {} {} -L{} -lchelis_runtime -lpthread -ldl -o {}",
             flags.join(" "),
             c_path.display(),
+            runtime_dir.join("chelis_device_owner.cpp").display(),
             runtime_dir.display(),
             c_path.with_extension("").display()
         );
     } else {
         println!(
-            "Compile object: hipcc {} -c {}",
+            "Compile object: hipcc {} -c {} {}",
             flags.join(" "),
-            c_path.display()
+            c_path.display(),
+            runtime_dir.join("chelis_device_owner.cpp").display()
         );
     }
     Ok(())
