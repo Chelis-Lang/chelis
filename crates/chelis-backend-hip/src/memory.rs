@@ -167,10 +167,13 @@ impl MemoryPlan {
             {
                 continue;
             }
-            lines.push(format!("    chelis_gpu_free_view(d_t{idx});"));
+            lines.push(format!("    chelis_device_tensor_release(o_t{idx});"));
         }
         for slot in &self.slots {
-            lines.push(format!("    chelis_gpu_free(chelis_slot{});", slot.id));
+            lines.push(format!(
+                "    chelis_device_tensor_release(chelis_slot{});",
+                slot.id
+            ));
         }
         lines
     }

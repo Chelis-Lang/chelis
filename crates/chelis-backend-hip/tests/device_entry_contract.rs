@@ -68,3 +68,74 @@ fn support_root_exposes_generated_packet_and_official_sdk_without_owner_definiti
         );
     }
 }
+
+#[test]
+fn kernel_marshaling_uses_checked_program_rank_and_int64_geometry() {
+    // [05-OP-33] admits scalar, empty and arbitrary-rank checked metadata.
+    // The same rank must govern parameter declarations and launch arguments.
+    for rank in [0, 1, 8, 9, 33] {
+        for extent in [0, 1] {
+            let mut dag = Dag::new();
+            let ty = TensorType {
+                dims: vec![DimInfo::Lit(extent); rank],
+                precision: Prim::F32,
+            };
+            let input = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+            let output = dag.add_node(RiscOp::Neg, vec![input], ty, None);
+            dag.add_root(output);
+            let generated = support::codegen_hip(&dag, "rank_entry").unwrap();
+            let source = &generated.c_source;
+            let last_axis = rank.max(1) - 1;
+            assert!(source.contains(&format!("int64_t a_s{last_axis}")));
+            assert!(source.contains(&format!("_a_s{last_axis} =")));
+            assert!(!source.contains(&format!("int64_t a_s{}", rank.max(1))));
+            assert!(source.contains("int64_t out_size"));
+            assert!(source.contains("(int64_t)blockIdx.x * blockDim.x"));
+            for legacy in [
+                "int indices[",
+                "int out_size",
+                "int t1_size",
+                "->storage_size",
+            ] {
+                assert!(!source.contains(legacy), "rank {rank}: retained {legacy}");
+            }
+        }
+    }
+}
+
+#[test]
+fn movement_views_are_complete_before_publication_and_released_before_slots() {
+    let mut dag = Dag::new();
+    let input = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    let permuted = dag.add_node(
+        RiscOp::Permute { axes: vec![1, 0] },
+        vec![input],
+        TensorType {
+            dims: vec![DimInfo::Lit(3), DimInfo::Lit(2)],
+            precision: Prim::F32,
+        },
+        None,
+    );
+    dag.add_root(permuted);
+    let source = support::codegen_hip(&dag, "permuted_entry")
+        .unwrap()
+        .c_source;
+    assert!(source.contains("chelis_metadata_plan_view("));
+    assert!(source.contains("chelis_device_tensor_borrow("));
+    assert!(source.contains("chelis_device_tensor_clone(o_t1)"));
+    assert!(!source.contains("d_t1->strides[0] ="));
+    assert!(!source.contains("chelis_gpu_alloc_view("));
+    let view_release = source.find("chelis_device_tensor_release(o_t1);").unwrap();
+    let slot_release = source
+        .find("chelis_device_tensor_release(chelis_slot0);")
+        .unwrap();
+    assert!(view_release < slot_release);
+}

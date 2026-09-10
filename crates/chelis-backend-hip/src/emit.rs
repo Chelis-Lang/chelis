@@ -119,6 +119,8 @@ pub struct HipEmitter {
     /// Device entrypoints pre-allocate slot storage because borrowed input-backed views
     /// are not the first owners in the host memory plan.
     device_entrypoint_mode: bool,
+    /// Shared specialization for every kernel and its launch arguments.
+    kernel_rank: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -332,6 +334,13 @@ impl HipEmitter {
                 .collect(),
             extra_peak_device_bytes_estimate: 0,
             device_entrypoint_mode: false,
+            kernel_rank: dag
+                .nodes()
+                .iter()
+                .map(|node| node.output_type.dims.len())
+                .max()
+                .unwrap_or(0)
+                .max(1),
         };
 
         // First pass: collect all needed kernel sources by walking the DAG.
@@ -390,6 +399,7 @@ impl HipEmitter {
         e.line("");
 
         e.emit_input_shape_preamble(dag, &input_slots, func_name, &output_specs);
+        e.emit_reshape_count_preflight(dag);
         e.line("");
 
         // Emit static kernel module caches
@@ -450,10 +460,19 @@ impl HipEmitter {
                 let ty = &dag.get(output.id).unwrap().output_type;
                 let ndim = Self::ndim(ty);
                 let dtype = Self::dtype_macro(ty);
+                let shape = if ndim == 0 {
+                    "NULL".to_string()
+                } else {
+                    format!("chelis_output_shape_{slot}")
+                };
                 e.line(&format!(
-                    "outputs[{slot}] = chelis_alloc({ndim}, chelis_output_shape_{slot}, {dtype});"
+                    "outputs[{slot}] = chelis_alloc({ndim}, {shape}, {dtype});"
                 ));
-                e.line(&format!("chelis_device_to_host(outputs[{slot}], d_t{id});"));
+                e.line(&format!("chelis_tensor_write *output_guard_{slot} = chelis_tensor_begin_write(outputs[{slot}]);"));
+                e.line(&format!(
+                    "chelis_device_tensor_copy_to_host(output_guard_{slot}, o_t{id});"
+                ));
+                e.line(&format!("chelis_tensor_end_write(output_guard_{slot});"));
             }
         }
 
@@ -509,7 +528,7 @@ impl HipEmitter {
         let expected_outputs = output_specs.len();
 
         self.line(&format!(
-            "extern \"C\" void {func_name}_device(chelis_gpu_tensor **inputs, int n_in, chelis_gpu_tensor **outputs, int n_out) {{"
+            "extern \"C\" void {func_name}_device(const chelis_device_tensor_owner *const *inputs, int32_t n_in, chelis_device_tensor_owner **outputs, int32_t n_out) {{"
         ));
         self.indent = 1;
 
@@ -537,6 +556,7 @@ impl HipEmitter {
         self.line("");
 
         self.emit_input_shape_preamble_device(dag, input_slots, func_name);
+        self.emit_reshape_count_preflight(dag);
         self.line("");
 
         for name in kernel_names {
@@ -579,9 +599,9 @@ impl HipEmitter {
                     let input_idx = input_slots
                         .get(name.as_str())
                         .unwrap_or_else(|| panic!("missing input slot for load '{name}'"));
-                    format!("outputs[{slot}] = chelis_gpu_clone(inputs[{input_idx}]);")
+                    format!("outputs[{slot}] = chelis_device_tensor_clone(inputs[{input_idx}]);")
                 }
-                _ => format!("outputs[{slot}] = chelis_gpu_clone(d_t{id});"),
+                _ => format!("outputs[{slot}] = chelis_device_tensor_clone(o_t{id});"),
             };
             self.line(&line);
         }
@@ -717,6 +737,7 @@ impl HipEmitter {
         // across runs. Sort by label; lookups are by name and emitted
         // lines are independent per label.
         // See spec/upstream-bugs/host-emit-hashmap-iteration-nondeterminism.md.
+        self.line("if ((n_in > 0 && inputs == NULL) || (n_out > 0 && outputs == NULL)) chelis_numeric_trap(\"numeric trap: domain in entry at int64\");");
         let input_types = Self::input_types(dag);
         let sorted_labels = input_types.to_sorted();
         // Producer-supplied `func_name` flows into format-string context;
@@ -737,6 +758,7 @@ impl HipEmitter {
             self.line("abort();");
             self.indent -= 1;
             self.line("}");
+            self.line(&format!("if (chelis_tensor_dtype(inputs[{slot}]) != {}) chelis_numeric_trap(\"numeric trap: domain in load at int64\");", Self::dtype_macro(ty)));
             self.line(&format!(
                 "if (chelis_tensor_rank(inputs[{slot}]) != {}) {{",
                 Self::ndim(ty)
@@ -849,7 +871,7 @@ impl HipEmitter {
             };
             self.line(&format!(
                 "int64_t chelis_output_shape_{slot}[{}] = {{ {shape} }};",
-                Self::ndim(&node.output_type)
+                Self::ndim(&node.output_type).max(1)
             ));
         }
     }
@@ -865,6 +887,7 @@ impl HipEmitter {
         // identical across runs. Sort by label; lookups are by name
         // and emitted lines are independent per label.
         // See spec/upstream-bugs/host-emit-hashmap-iteration-nondeterminism.md.
+        self.line("if ((n_in > 0 && inputs == NULL) || (n_out > 0 && outputs == NULL)) chelis_numeric_trap(\"numeric trap: domain in entry at int64\");");
         let input_types = Self::input_types(dag);
         let sorted_labels = input_types.to_sorted();
         // Format-string-context sanitization for producer-supplied
@@ -882,13 +905,15 @@ impl HipEmitter {
             self.line("abort();");
             self.indent -= 1;
             self.line("}");
+            self.line(&format!("const chelis_gpu_tensor *input_view_{slot} = chelis_device_tensor_view(inputs[{slot}]);"));
+            self.line(&format!("if (input_view_{slot}->dtype != {}) chelis_numeric_trap(\"numeric trap: domain in load at int64\");", Self::dtype_macro(ty)));
             self.line(&format!(
-                "if (inputs[{slot}]->ndim != {}) {{",
+                "if (input_view_{slot}->rank != {}) {{",
                 Self::ndim(ty)
             ));
             self.indent += 1;
             self.line(&format!(
-                "fprintf(stderr, \"{func_name_fmt}_device: input `{label_fmt}` expected rank {}, got %d\\n\", inputs[{slot}]->ndim);",
+                "fprintf(stderr, \"{func_name_fmt}_device: input `{label_fmt}` expected rank {}, got %d\\n\", input_view_{slot}->rank);",
                 Self::ndim(ty)
             ));
             self.line("abort();");
@@ -897,11 +922,11 @@ impl HipEmitter {
             for (axis, dim) in ty.dims.iter().enumerate() {
                 if let Some(expected) = Self::known_dim_size(dim) {
                     self.line(&format!(
-                        "if (inputs[{slot}]->shape[{axis}] != {expected}) {{"
+                        "if (input_view_{slot}->shape[{axis}] != {expected}) {{"
                     ));
                     self.indent += 1;
                     self.line(&format!(
-                        "fprintf(stderr, \"{func_name_fmt}_device: input `{label_fmt}` axis {axis} expected {expected}, got %d\\n\", inputs[{slot}]->shape[{axis}]);"
+                        "fprintf(stderr, \"{func_name_fmt}_device: input `{label_fmt}` axis {axis} expected {expected}, got %lld\\n\", (long long)input_view_{slot}->shape[{axis}]);"
                     ));
                     self.line("abort();");
                     self.indent -= 1;
@@ -916,7 +941,7 @@ impl HipEmitter {
             let binding_name_fmt =
                 chelis_ir::span_sanitize::sanitize_for_format_string(&binding.name);
             self.line(&format!(
-                "int {} = inputs[{canonical_slot}]->shape[{canonical_axis}];",
+                "int64_t {} = input_view_{canonical_slot}->shape[{canonical_axis}];",
                 binding.name
             ));
             for occurrence in &binding.others {
@@ -924,12 +949,12 @@ impl HipEmitter {
                 let slot = input_slots[occ_label];
                 let occ_label_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(occ_label);
                 self.line(&format!(
-                    "if (inputs[{slot}]->shape[{occ_axis}] != {}) {{",
+                    "if (input_view_{slot}->shape[{occ_axis}] != {}) {{",
                     binding.name
                 ));
                 self.indent += 1;
                 self.line(&format!(
-                    "fprintf(stderr, \"{func_name_fmt}_device: symbolic dim `{binding_name_fmt}` mismatch: {occ_label_fmt}[{occ_axis}]=%d but {binding_name_fmt}=%d\\n\", inputs[{slot}]->shape[{occ_axis}], {});",
+                    "fprintf(stderr, \"{func_name_fmt}_device: symbolic dim `{binding_name_fmt}` mismatch: {occ_label_fmt}[{occ_axis}]= %lld but {binding_name_fmt}=%lld\\n\", (long long)input_view_{slot}->shape[{occ_axis}], (long long){});",
                     binding.name
                 ));
                 self.line("abort();");
@@ -960,7 +985,8 @@ impl HipEmitter {
             let elem = Self::elem_kind(&fused_node.output_type)?;
             let (steps, n_ext) = Self::extract_fused_steps(&fused_node.op);
             let name = Self::fused_reduction_kernel_name(node.id.0, kind);
-            let source = kernels::reduce_fused(&name, axis, steps, n_ext, kind, elem);
+            let source =
+                kernels::reduce_fused(self.kernel_rank, &name, axis, steps, n_ext, kind, elem);
             return Ok(vec![(name, source)]);
         }
 
@@ -989,6 +1015,7 @@ impl HipEmitter {
                     // WS-A4 i8/i16 → i32 promoted-accumulator path.
                     let name = Self::reduction_kernel_name_typed(kind, axis, src_prec, acc);
                     let source = kernels::reduce_sum_promoted(
+                        self.kernel_rank,
                         &name,
                         axis,
                         Self::dtype_c_type(src_prec),
@@ -1003,14 +1030,15 @@ impl HipEmitter {
                     let operand_kind = Self::elem_kind(operand_ty)?;
                     let acc_kind = Self::elem_kind(&node.output_type)?;
                     let name = Self::reduction_kernel_name(kind, axis, acc_kind);
-                    let source = kernels::reduce_sum(&name, axis, operand_kind, acc_kind);
+                    let source =
+                        kernels::reduce_sum(self.kernel_rank, &name, axis, operand_kind, acc_kind);
                     (name, source)
                 }
             }
             kernels::ReduceKind::Max => {
                 let acc_kind = Self::elem_kind(&node.output_type)?;
                 let name = Self::reduction_kernel_name(kind, axis, acc_kind);
-                let source = kernels::reduce_max(&name, axis, acc_kind);
+                let source = kernels::reduce_max(self.kernel_rank, &name, axis, acc_kind);
                 (name, source)
             }
         };
@@ -1034,22 +1062,22 @@ impl HipEmitter {
         Ok(match &node.op {
             RiscOp::MinReduce { axis } => {
                 let name = Self::extra_reduction_kernel_name("min", *axis, elem);
-                let src = kernels::reduce_min(&name, *axis, elem);
+                let src = kernels::reduce_min(self.kernel_rank, &name, *axis, elem);
                 vec![(name, src)]
             }
             RiscOp::ProdReduce { axis } => {
                 let name = Self::extra_reduction_kernel_name("prod", *axis, elem);
-                let src = kernels::reduce_prod(&name, *axis, elem);
+                let src = kernels::reduce_prod(self.kernel_rank, &name, *axis, elem);
                 vec![(name, src)]
             }
             RiscOp::Argmax { axis } => {
                 let name = Self::extra_reduction_kernel_name("argmax", *axis, elem);
-                let src = kernels::reduce_argmax(&name, *axis, elem);
+                let src = kernels::reduce_argmax(self.kernel_rank, &name, *axis, elem);
                 vec![(name, src)]
             }
             RiscOp::Argmin { axis } => {
                 let name = Self::extra_reduction_kernel_name("argmin", *axis, elem);
-                let src = kernels::reduce_argmin(&name, *axis, elem);
+                let src = kernels::reduce_argmin(self.kernel_rank, &name, *axis, elem);
                 vec![(name, src)]
             }
             _ => unreachable!("extra_reduction_kernel_sources expected Min/Prod/Argmax/Argmin"),
@@ -1265,6 +1293,10 @@ impl HipEmitter {
             RiscOp::ConstTensor { .. } => {
                 Some(format!("kernel_fill_{}", kind_for_node(node)?.suffix()))
             }
+            RiscOp::Reshape { .. } => Some(format!(
+                "kernel_reshape_{}",
+                Self::dtype_macro(&node.output_type)
+            )),
             RiscOp::Realize => Some(Self::cast_kernel_name(node, dag)?),
             RiscOp::Cast { .. } => Some(Self::cast_kernel_name(node, dag)?),
             // Both `reject_unsupported_hip_ops` copies (chelis-cli and
@@ -1289,7 +1321,6 @@ impl HipEmitter {
             // Pure-metadata movement ops and Load/Store are not kernels
             RiscOp::Load { .. }
             | RiscOp::Store { .. }
-            | RiscOp::Reshape { .. }
             | RiscOp::Permute { .. }
             | RiscOp::Expand { .. }
             | RiscOp::Stride { .. }
@@ -1372,15 +1403,22 @@ impl HipEmitter {
                 let prec = operand_prec();
                 if matches!(prec, Prim::F32 | Prim::F64) {
                     kernels::binary_elementwise(
+                        self.kernel_rank,
                         name,
                         "+",
                         Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?,
                     )
                 } else {
-                    kernels::binary_elementwise_typed(name, "+", Self::dtype_c_type(prec))
+                    kernels::binary_elementwise_typed(
+                        self.kernel_rank,
+                        name,
+                        "+",
+                        Self::dtype_c_type(prec),
+                    )
                 }
             }
             RiscOp::Sub => kernels::binary_elementwise(
+                self.kernel_rank,
                 name,
                 "-",
                 Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?,
@@ -1389,12 +1427,18 @@ impl HipEmitter {
                 let prec = operand_prec();
                 if matches!(prec, Prim::F32 | Prim::F64) {
                     kernels::binary_elementwise(
+                        self.kernel_rank,
                         name,
                         "*",
                         Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?,
                     )
                 } else {
-                    kernels::binary_elementwise_typed(name, "*", Self::dtype_c_type(prec))
+                    kernels::binary_elementwise_typed(
+                        self.kernel_rank,
+                        name,
+                        "*",
+                        Self::dtype_c_type(prec),
+                    )
                 }
             }
             // IEEE elementwise division. The type checker rejects
@@ -1414,6 +1458,7 @@ impl HipEmitter {
                      spec/04-type-system.md \u{00a7}5.4 before lowering"
                 );
                 kernels::binary_elementwise(
+                    self.kernel_rank,
                     name,
                     "/",
                     Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?,
@@ -1424,7 +1469,12 @@ impl HipEmitter {
             // `floorf(a / b)`.
             RiscOp::FloorDiv => {
                 let prec = operand_prec();
-                kernels::binary_floor_div_typed(name, Self::dtype_c_type(prec), prec.is_integer())
+                kernels::binary_floor_div_typed(
+                    self.kernel_rank,
+                    name,
+                    Self::dtype_c_type(prec),
+                    prec.is_integer(),
+                )
             }
             // chelis#178: truncating (round-toward-zero) division. Integer
             // operands only — native `/` is exactly the C truncating
@@ -1438,53 +1488,70 @@ impl HipEmitter {
                      codegen; the type checker should reject this at \
                      spec/05-risc-primitives.md \u{00a7}2.1 before lowering"
                 );
-                kernels::binary_elementwise_typed(name, "/", Self::dtype_c_type(prec))
+                kernels::binary_elementwise_typed(
+                    self.kernel_rank,
+                    name,
+                    "/",
+                    Self::dtype_c_type(prec),
+                )
             }
             RiscOp::MaxElem | RiscOp::MinElem => {
                 let precision = operand_prec();
                 let is_max = matches!(op, RiscOp::MaxElem);
                 if precision.is_integer() {
-                    kernels::binary_extrema_integer(name, is_max, Self::dtype_c_type(precision))
+                    kernels::binary_extrema_integer(
+                        self.kernel_rank,
+                        name,
+                        is_max,
+                        Self::dtype_c_type(precision),
+                    )
                 } else {
-                    kernels::binary_extrema(name, is_max, elem_for_unary()?)
+                    kernels::binary_extrema(self.kernel_rank, name, is_max, elem_for_unary()?)
                 }
             }
             RiscOp::ExtremaAdjoint { kind, operand } => kernels::extrema_adjoint(
+                self.kernel_rank,
                 name,
                 matches!(kind, ExtremaKind::Max),
                 matches!(operand, ExtremaOperand::Left),
                 elem_for_unary()?,
             ),
             RiscOp::Relu => match operand_prec() {
-                Prim::F16 => kernels::relu_reduced(name, 0x7c00, 0x03ff),
-                Prim::Bf16 => kernels::relu_reduced(name, 0x7f80, 0x007f),
-                _ => kernels::relu(name, elem_for_unary()?),
+                Prim::F16 => kernels::relu_reduced(self.kernel_rank, name, 0x7c00, 0x03ff),
+                Prim::Bf16 => kernels::relu_reduced(self.kernel_rank, name, 0x7f80, 0x007f),
+                _ => kernels::relu(self.kernel_rank, name, elem_for_unary()?),
             },
             RiscOp::ReluAdjoint => match operand_prec() {
-                Prim::F16 => kernels::relu_adjoint_reduced(name, 0x7c00, 0x03ff),
-                Prim::Bf16 => kernels::relu_adjoint_reduced(name, 0x7f80, 0x007f),
-                _ => kernels::relu_adjoint(name, elem_for_unary()?),
+                Prim::F16 => kernels::relu_adjoint_reduced(self.kernel_rank, name, 0x7c00, 0x03ff),
+                Prim::Bf16 => kernels::relu_adjoint_reduced(self.kernel_rank, name, 0x7f80, 0x007f),
+                _ => kernels::relu_adjoint(self.kernel_rank, name, elem_for_unary()?),
             },
             RiscOp::CmpLt => {
                 let operand_ty = &dag.get(node.inputs[0]).unwrap().output_type;
                 Self::require_result_width_matches_operand(node, operand_ty)?;
-                kernels::cmplt(name, Self::elem_kind(operand_ty)?)
+                kernels::cmplt(self.kernel_rank, name, Self::elem_kind(operand_ty)?)
             }
-            RiscOp::Neg => kernels::unary_prefix(name, "-", elem_for_unary()?),
+            RiscOp::Neg => kernels::unary_prefix(self.kernel_rank, name, "-", elem_for_unary()?),
             // IEEE reciprocal kernel.
-            RiscOp::Recip => kernels::unary_recip(name, elem_for_unary()?),
-            RiscOp::Exp => kernels::unary_func(name, "expf", elem_for_unary()?),
-            RiscOp::Log => kernels::unary_func(name, "logf", elem_for_unary()?),
-            RiscOp::Sin => kernels::unary_func(name, "sinf", elem_for_unary()?),
-            RiscOp::Sqrt => kernels::unary_func(name, "sqrtf", elem_for_unary()?),
-            RiscOp::Cos => kernels::unary_func(name, "cosf", elem_for_unary()?),
-            RiscOp::Tan => kernels::unary_func(name, "tanf", elem_for_unary()?),
-            RiscOp::Atan => kernels::unary_func(name, "atanf", elem_for_unary()?),
-            RiscOp::Abs => kernels::unary_func(name, "fabsf", elem_for_unary()?),
-            RiscOp::Floor => kernels::unary_func(name, "floorf", elem_for_unary()?),
-            RiscOp::Ceil => kernels::unary_func(name, "ceilf", elem_for_unary()?),
-            RiscOp::Round => kernels::unary_func(name, "rintf", elem_for_unary()?),
-            RiscOp::UniformLike { .. } => kernels::uniform_like(name, elem_for_unary()?),
+            RiscOp::Recip => kernels::unary_recip(self.kernel_rank, name, elem_for_unary()?),
+            RiscOp::Exp => kernels::unary_func(self.kernel_rank, name, "expf", elem_for_unary()?),
+            RiscOp::Log => kernels::unary_func(self.kernel_rank, name, "logf", elem_for_unary()?),
+            RiscOp::Sin => kernels::unary_func(self.kernel_rank, name, "sinf", elem_for_unary()?),
+            RiscOp::Sqrt => kernels::unary_func(self.kernel_rank, name, "sqrtf", elem_for_unary()?),
+            RiscOp::Cos => kernels::unary_func(self.kernel_rank, name, "cosf", elem_for_unary()?),
+            RiscOp::Tan => kernels::unary_func(self.kernel_rank, name, "tanf", elem_for_unary()?),
+            RiscOp::Atan => kernels::unary_func(self.kernel_rank, name, "atanf", elem_for_unary()?),
+            RiscOp::Abs => kernels::unary_func(self.kernel_rank, name, "fabsf", elem_for_unary()?),
+            RiscOp::Floor => {
+                kernels::unary_func(self.kernel_rank, name, "floorf", elem_for_unary()?)
+            }
+            RiscOp::Ceil => kernels::unary_func(self.kernel_rank, name, "ceilf", elem_for_unary()?),
+            RiscOp::Round => {
+                kernels::unary_func(self.kernel_rank, name, "rintf", elem_for_unary()?)
+            }
+            RiscOp::UniformLike { .. } => {
+                kernels::uniform_like(self.kernel_rank, name, elem_for_unary()?)
+            }
             // WS-A4: bind `accumulator` instead of `..`. The fused
             // reduction path is f32-only today (its source kernel
             // template doesn't carry a dtype suffix); the unfused path
@@ -1498,6 +1565,7 @@ impl HipEmitter {
                     let fused_node = dag.get(input_id).unwrap();
                     let (steps, n_ext) = Self::extract_fused_steps(&fused_node.op);
                     kernels::reduce_fused(
+                        self.kernel_rank,
                         name,
                         *axis,
                         steps,
@@ -1510,6 +1578,7 @@ impl HipEmitter {
                     if matches!(src, Prim::Int8 | Prim::Int16) && *accumulator == Prim::Int32 {
                         // WS-A4 i8/i16 → i32 promoted-accumulator path.
                         kernels::reduce_sum_promoted(
+                            self.kernel_rank,
                             name,
                             *axis,
                             Self::dtype_c_type(src),
@@ -1523,7 +1592,7 @@ impl HipEmitter {
                         // by the WS-A4 promoted path panic loudly inside
                         // `elem_kind` rather than silently downgrading.
                         let acc_kind = Self::elem_kind(&node.output_type)?;
-                        kernels::reduce_sum(name, *axis, operand_kind, acc_kind)
+                        kernels::reduce_sum(self.kernel_rank, name, *axis, operand_kind, acc_kind)
                     }
                 }
             }
@@ -1534,6 +1603,7 @@ impl HipEmitter {
                     let (steps, n_ext) = Self::extract_fused_steps(&fused_node.op);
                     let inner_kind = Self::elem_kind(&fused_node.output_type)?;
                     kernels::reduce_fused(
+                        self.kernel_rank,
                         name,
                         *axis,
                         steps,
@@ -1542,33 +1612,42 @@ impl HipEmitter {
                         inner_kind,
                     )
                 } else {
-                    kernels::reduce_max(name, *axis, elem_for_unary()?)
+                    kernels::reduce_max(self.kernel_rank, name, *axis, elem_for_unary()?)
                 }
             }
             RiscOp::MinReduce { axis } => {
                 let input_ty = &dag.get(node.inputs[0]).unwrap().output_type;
-                kernels::reduce_min(name, *axis, Self::elem_kind(input_ty)?)
+                kernels::reduce_min(self.kernel_rank, name, *axis, Self::elem_kind(input_ty)?)
             }
             RiscOp::ProdReduce { axis } => {
                 let input_ty = &dag.get(node.inputs[0]).unwrap().output_type;
-                kernels::reduce_prod(name, *axis, Self::elem_kind(input_ty)?)
+                kernels::reduce_prod(self.kernel_rank, name, *axis, Self::elem_kind(input_ty)?)
             }
             RiscOp::Argmax { axis } => {
                 let input_ty = &dag.get(node.inputs[0]).unwrap().output_type;
-                kernels::reduce_argmax(name, *axis, Self::elem_kind(input_ty)?)
+                kernels::reduce_argmax(self.kernel_rank, name, *axis, Self::elem_kind(input_ty)?)
             }
             RiscOp::Argmin { axis } => {
                 let input_ty = &dag.get(node.inputs[0]).unwrap().output_type;
-                kernels::reduce_argmin(name, *axis, Self::elem_kind(input_ty)?)
+                kernels::reduce_argmin(self.kernel_rank, name, *axis, Self::elem_kind(input_ty)?)
             }
-            RiscOp::Const { .. } => kernels::fill(name, elem_for_unary()?),
-            RiscOp::ConstTensor { .. } => kernels::fill(name, elem_for_unary()?),
-            RiscOp::Realize => Self::cast_kernel_source(name, node, dag)?,
-            RiscOp::Cast { .. } => Self::cast_kernel_source(name, node, dag)?,
+            RiscOp::Const { .. } => kernels::fill(self.kernel_rank, name, elem_for_unary()?),
+            RiscOp::ConstTensor { .. } => kernels::fill(self.kernel_rank, name, elem_for_unary()?),
+            RiscOp::Reshape { .. } => kernels::reshape_copy(
+                self.kernel_rank,
+                name,
+                node.output_type
+                    .precision
+                    .runtime_dtype()
+                    .expect("verified numeric representation")
+                    .byte_width(),
+            ),
+            RiscOp::Realize => self.cast_kernel_source(name, node, dag)?,
+            RiscOp::Cast { .. } => self.cast_kernel_source(name, node, dag)?,
             RiscOp::CastTrunc { .. } => {
                 return Err(Self::cast_trunc_unsupported(node));
             }
-            RiscOp::Copy => Self::cast_kernel_source(name, node, dag)?,
+            RiscOp::Copy => self.cast_kernel_source(name, node, dag)?,
             RiscOp::FusedElem { ops } => {
                 let aliased_ext = self.fused_reuse.get(&node.id).map(|reuse| {
                     let reusable = reuse.mechanics(node.id).reusable_input;
@@ -1578,6 +1657,7 @@ impl HipEmitter {
                         .expect("reusable input must appear in node inputs")
                 });
                 kernels::fused_elementwise(
+                    self.kernel_rank,
                     name,
                     ops,
                     node.inputs.len(),
@@ -1589,8 +1669,8 @@ impl HipEmitter {
                 let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
                 let elem = elem_for_unary()?;
                 match indices_ty.precision {
-                    Prim::Int32 => kernels::gather(name, "int", elem),
-                    Prim::Int64 => kernels::gather(name, "long long", elem),
+                    Prim::Int32 => kernels::gather(self.kernel_rank, name, "int", elem),
+                    Prim::Int64 => kernels::gather(self.kernel_rank, name, "long long", elem),
                     other => panic!(
                         "HIP backend sparse gather requires int32/int64 indices, got {}",
                         other.name()
@@ -1601,8 +1681,8 @@ impl HipEmitter {
                 let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
                 let elem = elem_for_unary()?;
                 match indices_ty.precision {
-                    Prim::Int32 => kernels::scatter_add(name, "int", elem),
-                    Prim::Int64 => kernels::scatter_add(name, "long long", elem),
+                    Prim::Int32 => kernels::scatter_add(self.kernel_rank, name, "int", elem),
+                    Prim::Int64 => kernels::scatter_add(self.kernel_rank, name, "long long", elem),
                     other => panic!(
                         "HIP backend sparse scatter_add requires int32/int64 indices, got {}",
                         other.name()
@@ -1612,8 +1692,8 @@ impl HipEmitter {
             RiscOp::Scatter { .. } => {
                 let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
                 match indices_ty.precision {
-                    Prim::Int32 => kernels::scatter_replace(name, "int"),
-                    Prim::Int64 => kernels::scatter_replace(name, "long long"),
+                    Prim::Int32 => kernels::scatter_replace(self.kernel_rank, name, "int"),
+                    Prim::Int64 => kernels::scatter_replace(self.kernel_rank, name, "long long"),
                     other => panic!(
                         "HIP backend sparse scatter_replace requires int32/int64 indices, got {}",
                         other.name()
@@ -1623,8 +1703,8 @@ impl HipEmitter {
             RiscOp::ScatterElements { .. } => {
                 let indices_ty = &dag.get(node.inputs[1]).unwrap().output_type;
                 match indices_ty.precision {
-                    Prim::Int32 => kernels::scatter_elements(name, "int"),
-                    Prim::Int64 => kernels::scatter_elements(name, "long long"),
+                    Prim::Int32 => kernels::scatter_elements(self.kernel_rank, name, "int"),
+                    Prim::Int64 => kernels::scatter_elements(self.kernel_rank, name, "long long"),
                     other => panic!(
                         "HIP backend sparse scatter_elements requires int32/int64 indices, got {}",
                         other.name()
@@ -1635,12 +1715,16 @@ impl HipEmitter {
             // Dispatch on the output dtype (the input dtype always matches:
             // these ops do not change precision) so the full active
             // dtype set is covered, matching the C backend.
-            RiscOp::Pad { .. } => {
-                kernels::pad_typed(name, Self::dtype_c_type(node.output_type.precision))
-            }
-            RiscOp::Shrink { .. } => {
-                kernels::shrink_typed(name, Self::dtype_c_type(node.output_type.precision))
-            }
+            RiscOp::Pad { .. } => kernels::pad_typed(
+                self.kernel_rank,
+                name,
+                Self::dtype_c_type(node.output_type.precision),
+            ),
+            RiscOp::Shrink { .. } => kernels::shrink_typed(
+                self.kernel_rank,
+                name,
+                Self::dtype_c_type(node.output_type.precision),
+            ),
             _ => unreachable!("no kernel for op: {op:?}"),
         })
     }
@@ -1648,15 +1732,16 @@ impl HipEmitter {
     /// Cast / Realize / Copy kernel source: in-precision identity when
     /// src and dst kinds agree, cross-precision conversion otherwise.
     fn cast_kernel_source(
+        &self,
         name: &str,
         node: &DagNode,
         dag: VerifiedDagView<'_>,
     ) -> Result<String, Unsupported> {
         let (src_kind, dst_kind) = Self::cast_elem_kinds(node, dag)?;
         Ok(if src_kind == dst_kind {
-            kernels::cast(name, dst_kind)
+            kernels::cast(self.kernel_rank, name, dst_kind)
         } else {
-            kernels::cast_convert(name, src_kind, dst_kind)
+            kernels::cast_convert(self.kernel_rank, name, src_kind, dst_kind)
         })
     }
 
@@ -1883,7 +1968,7 @@ impl HipEmitter {
                         if drop == node.id && node.inputs.first() == Some(&source) =>
                     {
                         if matches!(action, VerifiedDagAction::OwnedDrop { .. }) {
-                            self.line(&format!("chelis_gpu_free_view(d_t{});", source.0));
+                            self.line(&format!("chelis_device_tensor_release(o_t{});", source.0));
                         }
                     }
                     _ => {
@@ -2112,65 +2197,141 @@ impl HipEmitter {
         }
     }
 
+    fn emit_reshape_count_preflight(&mut self, dag: VerifiedDagView<'_>) {
+        for node in dag.nodes() {
+            if !matches!(node.op, RiscOp::Reshape { .. }) {
+                continue;
+            }
+            let source = dag.get(node.inputs[0]).expect("verified reshape source");
+            let id = node.id.0;
+            self.emit_metadata_plan(
+                &format!("reshape_input{id}"),
+                &source.output_type,
+                None,
+                "0",
+            );
+            self.emit_metadata_plan(&format!("reshape_output{id}"), &node.output_type, None, "0");
+            self.line(&format!("if (chelis_metadata_plan_count(reshape_input{id}) != chelis_metadata_plan_count(reshape_output{id})) chelis_numeric_trap(\"numeric trap: domain in reshape at int64\");"));
+            self.line(&format!(
+                "chelis_metadata_plan_release(reshape_output{id});"
+            ));
+            self.line(&format!("chelis_metadata_plan_release(reshape_input{id});"));
+        }
+    }
+
+    fn tagged_i64(expression: &str) -> String {
+        format!("chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)({expression}))")
+    }
+
+    fn emit_metadata_plan(
+        &mut self,
+        name: &str,
+        ty: &TensorType,
+        strides: Option<&[String]>,
+        capacity: &str,
+    ) {
+        let rank = ty.dims.len();
+        let rank_scalar = Self::tagged_i64(&rank.to_string());
+        let exemplar = format!("chelis_scalar_from_bits({}, 0)", Self::dtype_macro(ty));
+        let shape = if rank == 0 {
+            "NULL".to_string()
+        } else {
+            let values = ty
+                .dims
+                .iter()
+                .map(|dim| Self::tagged_i64(&Self::emit_dim_info(dim)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.line(&format!(
+                "const chelis_scalar {name}_shape[{rank}] = {{ {values} }};"
+            ));
+            format!("{name}_shape")
+        };
+        if let Some(strides) = strides {
+            assert_eq!(
+                strides.len(),
+                rank,
+                "a view requires every checked axis stride"
+            );
+            let stride_array = if rank == 0 {
+                "NULL".to_string()
+            } else {
+                let values = strides
+                    .iter()
+                    .map(|stride| Self::tagged_i64(stride))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.line(&format!(
+                    "const chelis_scalar {name}_strides[{rank}] = {{ {values} }};"
+                ));
+                format!("{name}_strides")
+            };
+            let capacity = Self::tagged_i64(capacity);
+            self.line(&format!("chelis_metadata_plan *{name} = chelis_metadata_plan_view({rank_scalar}, {shape}, {stride_array}, {exemplar}, {capacity});"));
+        } else {
+            self.line(&format!("chelis_metadata_plan *{name} = chelis_metadata_plan_new({rank_scalar}, {shape}, {exemplar});"));
+        }
+    }
+
+    fn emit_owner_observation(&mut self, id: usize) {
+        self.line(&format!(
+            "const chelis_gpu_tensor *d_t{id} = chelis_device_tensor_view(o_t{id});"
+        ));
+        // Kernel launch argument storage is local; no cast removes packet constness.
+        self.line(&format!("void *p_t{id} = d_t{id}->data;"));
+    }
+
     fn emit_slot_allocation_if_needed(&mut self, id: usize, ty: &TensorType) {
         if self.device_entrypoint_mode {
             return;
         }
         let slot_id = self.slot_id_for_node(id);
-        let slot = self.plan.slot(slot_id);
-        if slot.first_owner != NodeId(id) {
+        if self.plan.slot(slot_id).first_owner != NodeId(id) {
             return;
         }
-        let ndim = Self::ndim(ty);
-        let shape = Self::shape_literal(ty);
-        let dtype = Self::dtype_macro(ty);
-        self.line(&format!(
-            "chelis_gpu_tensor *chelis_slot{slot_id} = chelis_gpu_alloc({ndim}, {shape}, {dtype});"
-        ));
+        self.emit_metadata_plan(&format!("slot_plan{slot_id}"), ty, None, "0");
+        self.line(&format!("chelis_device_tensor_owner *chelis_slot{slot_id} = chelis_device_tensor_alloc(slot_plan{slot_id});"));
     }
 
     fn emit_slot_wrapper(&mut self, id: usize, ty: &TensorType) {
         self.emit_slot_allocation_if_needed(id, ty);
-        let slot_id = self.slot_id_for_node(id);
-        let ndim = Self::ndim(ty);
-        let shape = Self::shape_literal(ty);
-        let dtype = Self::dtype_macro(ty);
-        self.line(&format!(
-            "chelis_gpu_tensor *d_t{id} = chelis_gpu_alloc_view({ndim}, {shape}, {dtype}, chelis_slot{slot_id}->data, chelis_slot{slot_id}->storage_size);"
-        ));
+        let slot = self.slot_id_for_node(id);
+        let source = format!("chelis_device_tensor_view(chelis_slot{slot})");
+        let capacity = format!("{source}->byte_capacity");
+        self.emit_metadata_plan(&format!("plan_t{id}"), ty, None, &capacity);
+        self.line(&format!("chelis_device_tensor_owner *o_t{id} = chelis_device_tensor_borrow(plan_t{id}, {source}->data, {});", Self::tagged_i64(&capacity)));
+        self.emit_owner_observation(id);
     }
 
     fn emit_device_slot_allocations(&mut self, dag: VerifiedDagView<'_>) {
-        let declarations = self
+        let slots = self
             .plan
             .slots()
             .iter()
-            .map(|slot| {
-                let ty = &dag
-                    .get(slot.first_owner)
-                    .unwrap_or_else(|| panic!("missing first owner {}", slot.first_owner.0))
-                    .output_type;
-                let ndim = Self::ndim(ty);
-                let shape = Self::shape_literal(ty);
-                let dtype = Self::dtype_macro(ty);
-                format!(
-                    "chelis_gpu_tensor *chelis_slot{} = chelis_gpu_alloc({ndim}, {shape}, {dtype});",
-                    slot.id
-                )
-            })
+            .map(|slot| (slot.id, slot.first_owner))
             .collect::<Vec<_>>();
-        for declaration in declarations {
-            self.line(&declaration);
+        for (slot, owner) in slots {
+            let ty = &dag
+                .get(owner)
+                .expect("verified slot first owner")
+                .output_type;
+            self.emit_metadata_plan(&format!("slot_plan{slot}"), ty, None, "0");
+            self.line(&format!("chelis_device_tensor_owner *chelis_slot{slot} = chelis_device_tensor_alloc(slot_plan{slot});"));
         }
     }
 
-    fn emit_alias_view(&mut self, id: usize, ty: &TensorType, data_expr: &str, storage_expr: &str) {
-        let ndim = Self::ndim(ty);
-        let shape = Self::shape_literal(ty);
-        let dtype = Self::dtype_macro(ty);
-        self.line(&format!(
-            "chelis_gpu_tensor *d_t{id} = chelis_gpu_alloc_view({ndim}, {shape}, {dtype}, {data_expr}, {storage_expr});"
-        ));
+    fn emit_alias_view(&mut self, id: usize, ty: &TensorType, source: &str) {
+        let strides = (0..ty.dims.len())
+            .map(|axis| format!("{source}->strides[{axis}]"))
+            .collect::<Vec<_>>();
+        self.emit_strided_view(id, ty, source, &strides);
+    }
+
+    fn emit_strided_view(&mut self, id: usize, ty: &TensorType, source: &str, strides: &[String]) {
+        let capacity = format!("{source}->byte_capacity");
+        self.emit_metadata_plan(&format!("plan_t{id}"), ty, Some(strides), &capacity);
+        self.line(&format!("chelis_device_tensor_owner *o_t{id} = chelis_device_tensor_borrow(plan_t{id}, {source}->data, {});", Self::tagged_i64(&capacity)));
+        self.emit_owner_observation(id);
     }
 
     fn emit_const(&mut self, id: usize, value: f64, ty: &TensorType) -> Result<(), Unsupported> {
@@ -2207,14 +2368,14 @@ impl HipEmitter {
                 ));
             }
         }
-        self.line(&format!("int fill_size = d_t{id}->size;"));
+        self.line(&format!("int64_t fill_size = d_t{id}->count;"));
         self.line(&format!(
-            "void *fill_args[] = {{ &d_t{id}->data, &fill_val, &fill_size }};"
+            "void *fill_args[] = {{ &p_t{id}, &fill_val, &fill_size }};"
         ));
         self.emit_kernel_launch_expr(
             &format!("mod_{kernel}"),
             &kernel,
-            "(fill_size + 255) / 256",
+            "fill_size / 256 + (fill_size % 256 != 0)",
             "256",
             "fill_args",
         );
@@ -2241,7 +2402,7 @@ impl HipEmitter {
                 // temporary then hipMemcpy to device. For simplicity,
                 // reuse the fill kernel per-element is too slow; instead
                 // build a host-side buffer and copy.
-                self.line(&format!("int fill_size = d_t{id}->size;"));
+                self.line(&format!("int64_t fill_size = d_t{id}->count;"));
                 self.line(&format!(
                     "float *__host_data = (float*)malloc({}u * sizeof(float));",
                     data.len()
@@ -2259,7 +2420,7 @@ impl HipEmitter {
                 self.line("free(__host_data);");
             }
             kernels::ElemKind::F64 => {
-                self.line(&format!("int fill_size = d_t{id}->size;"));
+                self.line(&format!("int64_t fill_size = d_t{id}->count;"));
                 self.line(&format!(
                     "double *__host_data = (double*)malloc({}u * sizeof(double));",
                     data.len()
@@ -2290,17 +2451,13 @@ impl HipEmitter {
         match self.plan.node_kind(NodeId(id)) {
             NodeMemoryKind::UniqueInput { .. } => {
                 self.emit_slot_wrapper(id, ty);
+                let slot = self.slot_id_for_node(id);
                 self.line(&format!(
-                    "chelis_host_to_device(d_t{id}, inputs[{input_idx}]);"
+                    "chelis_device_tensor_copy_from_host(chelis_slot{slot}, inputs[{input_idx}]);"
                 ));
             }
             NodeMemoryKind::RepeatedLoadAlias { canonical_load } => {
-                self.emit_alias_view(
-                    id,
-                    ty,
-                    &format!("d_t{}->data", canonical_load.0),
-                    &format!("d_t{}->storage_size", canonical_load.0),
-                );
+                self.emit_alias_view(id, ty, &format!("d_t{}", canonical_load.0));
             }
             other => panic!("unexpected memory plan for load node {id}: {other:?}"),
         }
@@ -2309,20 +2466,10 @@ impl HipEmitter {
     fn emit_load_device(&mut self, id: usize, input_idx: usize, ty: &TensorType) {
         match self.plan.node_kind(NodeId(id)) {
             NodeMemoryKind::UniqueInput { .. } => {
-                self.emit_alias_view(
-                    id,
-                    ty,
-                    &format!("inputs[{input_idx}]->data"),
-                    &format!("inputs[{input_idx}]->storage_size"),
-                );
+                self.emit_alias_view(id, ty, &format!("input_view_{input_idx}"));
             }
             NodeMemoryKind::RepeatedLoadAlias { canonical_load } => {
-                self.emit_alias_view(
-                    id,
-                    ty,
-                    &format!("d_t{}->data", canonical_load.0),
-                    &format!("d_t{}->storage_size", canonical_load.0),
-                );
+                self.emit_alias_view(id, ty, &format!("d_t{}", canonical_load.0));
             }
             other => panic!("unexpected memory plan for load node {id}: {other:?}"),
         }
@@ -2344,23 +2491,27 @@ impl HipEmitter {
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int t{id}_size = d_t{id}->size;"));
+        self.line(&format!("int64_t t{id}_size = d_t{id}->count;"));
         // Stride params for a (8 ints)
         self.emit_stride_vars(id, "a", a);
-        self.line(&format!("int t{id}_a_ndim = d_t{a}->ndim;"));
-        self.line(&format!("int t{id}_a_size = d_t{a}->storage_size;"));
+        self.line(&format!("int64_t t{id}_a_ndim = d_t{a}->rank;"));
+        self.line(&format!(
+            "int64_t t{id}_a_size = (d_t{a}->byte_capacity / chelis_dtype_size(d_t{a}->dtype));"
+        ));
         // Stride params for b (8 ints)
         self.emit_stride_vars(id, "b", b);
-        self.line(&format!("int t{id}_b_ndim = d_t{b}->ndim;"));
-        self.line(&format!("int t{id}_b_size = d_t{b}->storage_size;"));
+        self.line(&format!("int64_t t{id}_b_ndim = d_t{b}->rank;"));
+        self.line(&format!(
+            "int64_t t{id}_b_size = (d_t{b}->byte_capacity / chelis_dtype_size(d_t{b}->dtype));"
+        ));
         // Shape params for output (8 ints)
         self.emit_shape_vars(id, "out", id);
-        self.line(&format!("int t{id}_out_ndim = d_t{id}->ndim;"));
+        self.line(&format!("int64_t t{id}_out_ndim = d_t{id}->rank;"));
         // Build args array
         self.line(&format!(
-            "void *args[] = {{ &d_t{a}->data, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
-             &d_t{b}->data, {b_stride_refs}, &t{id}_b_ndim, &t{id}_b_size, \
-             &d_t{id}->data, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
+            "void *args[] = {{ &p_t{a}, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
+             &p_t{b}, {b_stride_refs}, &t{id}_b_ndim, &t{id}_b_size, \
+             &p_t{id}, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
             a_stride_refs = self.stride_arg_refs(id, "a"),
             b_stride_refs = self.stride_arg_refs(id, "b"),
             out_shape_refs = self.shape_arg_refs(id, "out"),
@@ -2368,7 +2519,7 @@ impl HipEmitter {
         self.emit_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
             kernel_name,
-            &format!("(t{id}_size + 255) / 256"),
+            &format!("t{id}_size / 256 + (t{id}_size % 256 != 0)"),
             "256",
             "args",
         );
@@ -2393,21 +2544,21 @@ impl HipEmitter {
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int t{id}_size = d_t{id}->size;"));
+        self.line(&format!("int64_t t{id}_size = d_t{id}->count;"));
         for (name, source) in [("a", a), ("b", b), ("g", g)] {
             self.emit_stride_vars(id, name, source);
-            self.line(&format!("int t{id}_{name}_ndim = d_t{source}->ndim;"));
+            self.line(&format!("int64_t t{id}_{name}_ndim = d_t{source}->rank;"));
             self.line(&format!(
-                "int t{id}_{name}_size = d_t{source}->storage_size;"
+                "int64_t t{id}_{name}_size = (d_t{source}->byte_capacity / chelis_dtype_size(d_t{source}->dtype));"
             ));
         }
         self.emit_shape_vars(id, "out", id);
-        self.line(&format!("int t{id}_out_ndim = d_t{id}->ndim;"));
+        self.line(&format!("int64_t t{id}_out_ndim = d_t{id}->rank;"));
         self.line(&format!(
-            "void *args[] = {{ &d_t{a}->data, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
-             &d_t{b}->data, {b_stride_refs}, &t{id}_b_ndim, &t{id}_b_size, \
-             &d_t{g}->data, {g_stride_refs}, &t{id}_g_ndim, &t{id}_g_size, \
-             &d_t{id}->data, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
+            "void *args[] = {{ &p_t{a}, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
+             &p_t{b}, {b_stride_refs}, &t{id}_b_ndim, &t{id}_b_size, \
+             &p_t{g}, {g_stride_refs}, &t{id}_g_ndim, &t{id}_g_size, \
+             &p_t{id}, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
             a_stride_refs = self.stride_arg_refs(id, "a"),
             b_stride_refs = self.stride_arg_refs(id, "b"),
             g_stride_refs = self.stride_arg_refs(id, "g"),
@@ -2416,7 +2567,7 @@ impl HipEmitter {
         self.emit_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
             kernel_name,
-            &format!("(t{id}_size + 255) / 256"),
+            &format!("t{id}_size / 256 + (t{id}_size % 256 != 0)"),
             "256",
             "args",
         );
@@ -2439,22 +2590,24 @@ impl HipEmitter {
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int t{id}_size = d_t{id}->size;"));
+        self.line(&format!("int64_t t{id}_size = d_t{id}->count;"));
         self.emit_stride_vars(id, "a", a);
-        self.line(&format!("int t{id}_a_ndim = d_t{a}->ndim;"));
-        self.line(&format!("int t{id}_a_size = d_t{a}->storage_size;"));
-        self.emit_shape_vars(id, "out", id);
-        self.line(&format!("int t{id}_out_ndim = d_t{id}->ndim;"));
+        self.line(&format!("int64_t t{id}_a_ndim = d_t{a}->rank;"));
         self.line(&format!(
-            "void *args[] = {{ &d_t{a}->data, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
-             &d_t{id}->data, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
+            "int64_t t{id}_a_size = (d_t{a}->byte_capacity / chelis_dtype_size(d_t{a}->dtype));"
+        ));
+        self.emit_shape_vars(id, "out", id);
+        self.line(&format!("int64_t t{id}_out_ndim = d_t{id}->rank;"));
+        self.line(&format!(
+            "void *args[] = {{ &p_t{a}, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
+             &p_t{id}, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
             a_stride_refs = self.stride_arg_refs(id, "a"),
             out_shape_refs = self.shape_arg_refs(id, "out"),
         ));
         self.emit_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
             kernel_name,
-            &format!("(t{id}_size + 255) / 256"),
+            &format!("t{id}_size / 256 + (t{id}_size % 256 != 0)"),
             "256",
             "args",
         );
@@ -2501,17 +2654,17 @@ impl HipEmitter {
             }
         }
         self.line(&format!("unsigned long long t{id}_seed = {seed}ULL;"));
-        self.line(&format!("int t{id}_size = d_t{id}->size;"));
+        self.line(&format!("int64_t t{id}_size = d_t{id}->count;"));
         self.emit_shape_vars(id, "out", id);
-        self.line(&format!("int t{id}_out_ndim = d_t{id}->ndim;"));
+        self.line(&format!("int64_t t{id}_out_ndim = d_t{id}->rank;"));
         self.line(&format!(
-            "void *args[] = {{ &t{id}_low, &t{id}_high, &t{id}_seed, &d_t{id}->data, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
+            "void *args[] = {{ &t{id}_low, &t{id}_high, &t{id}_seed, &p_t{id}, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
             out_shape_refs = self.shape_arg_refs(id, "out"),
         ));
         self.emit_kernel_launch_expr(
             &format!("mod_{kernel}"),
             &kernel,
-            &format!("(t{id}_size + 255) / 256"),
+            &format!("t{id}_size / 256 + (t{id}_size % 256 != 0)"),
             "256",
             "args",
         );
@@ -2561,13 +2714,13 @@ impl HipEmitter {
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int t{id}_before = {before};"));
-        self.line(&format!("int t{id}_axis_size = {axis_size};"));
-        self.line(&format!("int t{id}_after = {after};"));
-        self.line(&format!("int t{id}_index_count = d_t{indices}->size;"));
-        self.line(&format!("int t{id}_total = d_t{id}->size;"));
+        self.line(&format!("int64_t t{id}_before = {before};"));
+        self.line(&format!("int64_t t{id}_axis_size = {axis_size};"));
+        self.line(&format!("int64_t t{id}_after = {after};"));
+        self.line(&format!("int64_t t{id}_index_count = d_t{indices}->count;"));
+        self.line(&format!("int64_t t{id}_total = d_t{id}->count;"));
         self.line(&format!(
-            "void *args[] = {{ &d_t{values}->data, &d_t{indices}->data, &d_t{id}->data, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_total }};"
+            "void *args[] = {{ &p_t{values}, &p_t{indices}, &p_t{id}, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_total }};"
         ));
         self.emit_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
@@ -2627,15 +2780,15 @@ impl HipEmitter {
         self.line("{");
         self.indent += 1;
         self.line(&format!(
-            "CHELIS_HIP_CHECK(hipMemcpy(d_t{id}->data, d_t{target}->data, d_t{id}->size * chelis_gpu_dtype_size(d_t{id}->dtype), hipMemcpyDeviceToDevice));"
+            "CHELIS_HIP_CHECK(hipMemcpy(d_t{id}->data, d_t{target}->data, d_t{id}->count * chelis_dtype_size(d_t{id}->dtype), hipMemcpyDeviceToDevice));"
         ));
-        self.line(&format!("int t{id}_before = {before};"));
-        self.line(&format!("int t{id}_axis_size = {axis_size};"));
-        self.line(&format!("int t{id}_after = {after};"));
-        self.line(&format!("int t{id}_index_count = d_t{indices}->size;"));
-        self.line(&format!("int t{id}_total = d_t{updates}->size;"));
+        self.line(&format!("int64_t t{id}_before = {before};"));
+        self.line(&format!("int64_t t{id}_axis_size = {axis_size};"));
+        self.line(&format!("int64_t t{id}_after = {after};"));
+        self.line(&format!("int64_t t{id}_index_count = d_t{indices}->count;"));
+        self.line(&format!("int64_t t{id}_total = d_t{updates}->count;"));
         self.line(&format!(
-            "void *args[] = {{ &d_t{indices}->data, &d_t{updates}->data, &d_t{id}->data, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_total }};"
+            "void *args[] = {{ &p_t{indices}, &p_t{updates}, &p_t{id}, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_total }};"
         ));
         self.emit_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
@@ -2700,15 +2853,15 @@ impl HipEmitter {
         self.line("{");
         self.indent += 1;
         self.line(&format!(
-            "CHELIS_HIP_CHECK(hipMemcpy(d_t{id}->data, d_t{target}->data, d_t{id}->size * chelis_gpu_dtype_size(d_t{id}->dtype), hipMemcpyDeviceToDevice));"
+            "CHELIS_HIP_CHECK(hipMemcpy(d_t{id}->data, d_t{target}->data, d_t{id}->count * chelis_dtype_size(d_t{id}->dtype), hipMemcpyDeviceToDevice));"
         ));
-        self.line(&format!("int t{id}_before = {before};"));
-        self.line(&format!("int t{id}_axis_size = {axis_size};"));
-        self.line(&format!("int t{id}_after = {after};"));
-        self.line(&format!("int t{id}_index_count = d_t{indices}->size;"));
-        self.line(&format!("int t{id}_total = d_t{updates}->size;"));
+        self.line(&format!("int64_t t{id}_before = {before};"));
+        self.line(&format!("int64_t t{id}_axis_size = {axis_size};"));
+        self.line(&format!("int64_t t{id}_after = {after};"));
+        self.line(&format!("int64_t t{id}_index_count = d_t{indices}->count;"));
+        self.line(&format!("int64_t t{id}_total = d_t{updates}->count;"));
         self.line(&format!(
-            "void *args[] = {{ &d_t{indices}->data, &d_t{updates}->data, &d_t{id}->data, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_total }};"
+            "void *args[] = {{ &p_t{indices}, &p_t{updates}, &p_t{id}, &t{id}_before, &t{id}_axis_size, &t{id}_after, &t{id}_index_count, &t{id}_total }};"
         ));
         // Single-thread serial launch preserves last-write-wins order.
         self.emit_kernel_launch_expr(&format!("mod_{kernel_name}"), kernel_name, "1", "1", "args");
@@ -2760,18 +2913,18 @@ impl HipEmitter {
         // Initialize the output from `data`; the kernel overwrites only
         // the scattered cells, so the remainder must equal `data`.
         self.line(&format!(
-            "CHELIS_HIP_CHECK(hipMemcpy(d_t{id}->data, d_t{data}->data, d_t{id}->size * chelis_gpu_dtype_size(d_t{id}->dtype), hipMemcpyDeviceToDevice));"
+            "CHELIS_HIP_CHECK(hipMemcpy(d_t{id}->data, d_t{data}->data, d_t{id}->count * chelis_dtype_size(d_t{id}->dtype), hipMemcpyDeviceToDevice));"
         ));
         self.emit_shape_vars(id, "idx", indices);
         self.emit_shape_vars(id, "out", id);
-        self.line(&format!("int t{id}_ndim = d_t{id}->ndim;"));
-        self.line(&format!("int t{id}_axis = {axis};"));
-        self.line(&format!("int t{id}_axis_size = {axis_size};"));
-        self.line(&format!("int t{id}_total = d_t{updates}->size;"));
+        self.line(&format!("int64_t t{id}_ndim = d_t{id}->rank;"));
+        self.line(&format!("int64_t t{id}_axis = {axis};"));
+        self.line(&format!("int64_t t{id}_axis_size = {axis_size};"));
+        self.line(&format!("int64_t t{id}_total = d_t{updates}->count;"));
         let idx_sh_refs = self.shape_arg_refs(id, "idx");
         let out_sh_refs = self.shape_arg_refs(id, "out");
         self.line(&format!(
-            "void *args[] = {{ &d_t{indices}->data, &d_t{updates}->data, &d_t{id}->data, {idx_sh_refs}, {out_sh_refs}, &t{id}_ndim, &t{id}_axis, &t{id}_axis_size, &t{id}_total }};"
+            "void *args[] = {{ &p_t{indices}, &p_t{updates}, &p_t{id}, {idx_sh_refs}, {out_sh_refs}, &t{id}_ndim, &t{id}_axis, &t{id}_axis_size, &t{id}_total }};"
         ));
         // Single-thread serial launch preserves last-write-wins order.
         self.emit_kernel_launch_expr(&format!("mod_{kernel_name}"), kernel_name, "1", "1", "args");
@@ -2799,33 +2952,33 @@ impl HipEmitter {
         }
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int t{id}_size = d_t{id}->size;"));
+        self.line(&format!("int64_t t{id}_size = d_t{id}->count;"));
 
         // Emit stride vars for each external input
         for (i, inp) in inputs.iter().enumerate() {
             let pfx = format!("ext{i}");
             self.emit_stride_vars(id, &pfx, inp.0);
-            self.line(&format!("int t{id}_{pfx}_ndim = d_t{}->ndim;", inp.0));
+            self.line(&format!("int64_t t{id}_{pfx}_ndim = d_t{}->rank;", inp.0));
             self.line(&format!(
-                "int t{id}_{pfx}_size = d_t{}->storage_size;",
-                inp.0
+                "int64_t t{id}_{pfx}_size = d_t{src}->byte_capacity / chelis_dtype_size(d_t{src}->dtype);",
+                src = inp.0
             ));
         }
 
         // Emit shape vars for output
         self.emit_shape_vars(id, "out", id);
-        self.line(&format!("int t{id}_out_ndim = d_t{id}->ndim;"));
+        self.line(&format!("int64_t t{id}_out_ndim = d_t{id}->rank;"));
 
         // Build args array
         let mut arg_parts = Vec::new();
         for (i, inp) in inputs.iter().enumerate() {
             let pfx = format!("ext{i}");
-            arg_parts.push(format!("&d_t{}->data", inp.0));
+            arg_parts.push(format!("&p_t{}", inp.0));
             arg_parts.push(self.stride_arg_refs(id, &pfx));
             arg_parts.push(format!("&t{id}_{pfx}_ndim"));
             arg_parts.push(format!("&t{id}_{pfx}_size"));
         }
-        arg_parts.push(format!("&d_t{id}->data"));
+        arg_parts.push(format!("&p_t{id}"));
         arg_parts.push(self.shape_arg_refs(id, "out"));
         arg_parts.push(format!("&t{id}_out_ndim"));
         arg_parts.push(format!("&t{id}_size"));
@@ -2834,7 +2987,7 @@ impl HipEmitter {
         self.emit_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
             kernel_name,
-            &format!("(t{id}_size + 255) / 256"),
+            &format!("t{id}_size / 256 + (t{id}_size % 256 != 0)"),
             "256",
             "args",
         );
@@ -2864,39 +3017,47 @@ impl HipEmitter {
         ty: &TensorType,
         spec: FusedReuseMechanics,
     ) {
-        let slot_id = self.slot_id_for_node(id);
-        let slot_is_first_owner = self.plan.slot(slot_id).first_owner == NodeId(id);
-        let ndim = Self::ndim(ty);
-        let shape = Self::shape_literal(ty);
-        let dtype = Self::dtype_macro(ty);
+        let slot = self.slot_id_for_node(id);
+        let first = self.plan.slot(slot).first_owner == NodeId(id);
         let reusable = spec.reusable_input.0;
-        if !self.device_entrypoint_mode && slot_is_first_owner {
-            self.line(&format!("chelis_gpu_tensor *chelis_slot{slot_id} = NULL;"));
+        if !self.device_entrypoint_mode && first {
             if spec.slot_has_later_owner {
+                self.emit_slot_allocation_if_needed(id, ty);
+            } else {
                 self.line(&format!(
-                    "chelis_slot{slot_id} = chelis_gpu_alloc({ndim}, {shape}, {dtype});"
+                    "chelis_device_tensor_owner *chelis_slot{slot} = NULL;"
                 ));
             }
         }
-        self.line(&format!("chelis_gpu_tensor *d_t{id};"));
-        self.line(&format!("if (chelis_gpu_is_contiguous(d_t{reusable})) {{"));
+        self.emit_metadata_plan(&format!("plan_t{id}"), ty, None, "0");
+        self.line(&format!(
+            "bool contiguous_t{id} = d_t{reusable}->rank == chelis_metadata_plan_rank(plan_t{id});"
+        ));
+        self.line(&format!("for (int32_t axis = 0; contiguous_t{id} && axis < d_t{reusable}->rank; ++axis) contiguous_t{id} = d_t{reusable}->strides[axis] == chelis_metadata_plan_strides(plan_t{id})[axis];"));
+        self.line(&format!("chelis_device_tensor_owner *o_t{id};"));
+        self.line(&format!("if (contiguous_t{id}) {{"));
         self.indent += 1;
         self.line(&format!(
-            "d_t{id} = chelis_gpu_alloc_view({ndim}, {shape}, {dtype}, d_t{reusable}->data, d_t{reusable}->storage_size);"
+            "o_t{id} = chelis_device_tensor_borrow(plan_t{id}, d_t{reusable}->data, {});",
+            Self::tagged_i64(&format!("d_t{reusable}->byte_capacity"))
         ));
         self.indent -= 1;
         self.line("} else {");
         self.indent += 1;
-        if !self.device_entrypoint_mode && slot_is_first_owner && !spec.slot_has_later_owner {
+        if !self.device_entrypoint_mode && first && !spec.slot_has_later_owner {
+            self.emit_metadata_plan(&format!("slot_plan{slot}"), ty, None, "0");
             self.line(&format!(
-                "chelis_slot{slot_id} = chelis_gpu_alloc({ndim}, {shape}, {dtype});"
+                "chelis_slot{slot} = chelis_device_tensor_alloc(slot_plan{slot});"
             ));
         }
+        let source = format!("chelis_device_tensor_view(chelis_slot{slot})");
         self.line(&format!(
-            "d_t{id} = chelis_gpu_alloc_view({ndim}, {shape}, {dtype}, chelis_slot{slot_id}->data, chelis_slot{slot_id}->storage_size);"
+            "o_t{id} = chelis_device_tensor_borrow(plan_t{id}, {source}->data, {});",
+            Self::tagged_i64(&format!("{source}->byte_capacity"))
         ));
         self.indent -= 1;
         self.line("}");
+        self.emit_owner_observation(id);
     }
 
     // ------------------------------------------------------------------
@@ -2975,16 +3136,18 @@ impl HipEmitter {
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int t{id}_out_size = d_t{id}->size;"));
-        self.line(&format!("int t{id}_axis_size = d_t{a}->shape[{axis}];"));
+        self.line(&format!("int64_t t{id}_out_size = d_t{id}->count;"));
+        self.line(&format!("int64_t t{id}_axis_size = d_t{a}->shape[{axis}];"));
         self.emit_stride_vars(id, "a", a);
-        self.line(&format!("int t{id}_a_ndim = d_t{a}->ndim;"));
-        self.line(&format!("int t{id}_a_size = d_t{a}->storage_size;"));
-        self.emit_shape_vars(id, "out", id);
-        self.line(&format!("int t{id}_out_ndim = d_t{id}->ndim;"));
+        self.line(&format!("int64_t t{id}_a_ndim = d_t{a}->rank;"));
         self.line(&format!(
-            "void *args[] = {{ &d_t{a}->data, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
-             &d_t{id}->data, {out_shape_refs}, &t{id}_out_ndim, &t{id}_out_size, &t{id}_axis_size }};",
+            "int64_t t{id}_a_size = (d_t{a}->byte_capacity / chelis_dtype_size(d_t{a}->dtype));"
+        ));
+        self.emit_shape_vars(id, "out", id);
+        self.line(&format!("int64_t t{id}_out_ndim = d_t{id}->rank;"));
+        self.line(&format!(
+            "void *args[] = {{ &p_t{a}, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
+             &p_t{id}, {out_shape_refs}, &t{id}_out_ndim, &t{id}_out_size, &t{id}_axis_size }};",
             a_stride_refs = self.stride_arg_refs(id, "a"),
             out_shape_refs = self.shape_arg_refs(id, "out"),
         ));
@@ -3035,16 +3198,18 @@ impl HipEmitter {
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int t{id}_out_size = d_t{id}->size;"));
-        self.line(&format!("int t{id}_axis_size = d_t{a}->shape[{axis}];"));
+        self.line(&format!("int64_t t{id}_out_size = d_t{id}->count;"));
+        self.line(&format!("int64_t t{id}_axis_size = d_t{a}->shape[{axis}];"));
         self.emit_stride_vars(id, "a", a);
-        self.line(&format!("int t{id}_a_ndim = d_t{a}->ndim;"));
-        self.line(&format!("int t{id}_a_size = d_t{a}->storage_size;"));
-        self.emit_shape_vars(id, "out", id);
-        self.line(&format!("int t{id}_out_ndim = d_t{id}->ndim;"));
+        self.line(&format!("int64_t t{id}_a_ndim = d_t{a}->rank;"));
         self.line(&format!(
-            "void *args[] = {{ &d_t{a}->data, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
-             &d_t{id}->data, {out_shape_refs}, &t{id}_out_ndim, &t{id}_out_size, &t{id}_axis_size }};",
+            "int64_t t{id}_a_size = (d_t{a}->byte_capacity / chelis_dtype_size(d_t{a}->dtype));"
+        ));
+        self.emit_shape_vars(id, "out", id);
+        self.line(&format!("int64_t t{id}_out_ndim = d_t{id}->rank;"));
+        self.line(&format!(
+            "void *args[] = {{ &p_t{a}, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
+             &p_t{id}, {out_shape_refs}, &t{id}_out_ndim, &t{id}_out_size, &t{id}_axis_size }};",
             a_stride_refs = self.stride_arg_refs(id, "a"),
             out_shape_refs = self.shape_arg_refs(id, "out"),
         ));
@@ -3089,9 +3254,9 @@ impl HipEmitter {
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int t{id}_out_size = d_t{id}->size;"));
+        self.line(&format!("int64_t t{id}_out_size = d_t{id}->count;"));
         self.line(&format!(
-            "int t{id}_axis_size = d_t{}->shape[{axis}];",
+            "int64_t t{id}_axis_size = d_t{}->shape[{axis}];",
             reduction_inputs[0].0
         ));
 
@@ -3099,27 +3264,27 @@ impl HipEmitter {
         for (i, inp) in ext_inputs.iter().enumerate() {
             let pfx = format!("ext{i}");
             self.emit_stride_vars(id, &pfx, inp.0);
-            self.line(&format!("int t{id}_{pfx}_ndim = d_t{}->ndim;", inp.0));
+            self.line(&format!("int64_t t{id}_{pfx}_ndim = d_t{}->rank;", inp.0));
             self.line(&format!(
-                "int t{id}_{pfx}_size = d_t{}->storage_size;",
-                inp.0
+                "int64_t t{id}_{pfx}_size = d_t{src}->byte_capacity / chelis_dtype_size(d_t{src}->dtype);",
+                src = inp.0
             ));
         }
 
         // Emit shape vars for output
         self.emit_shape_vars(id, "out", id);
-        self.line(&format!("int t{id}_out_ndim = d_t{id}->ndim;"));
+        self.line(&format!("int64_t t{id}_out_ndim = d_t{id}->rank;"));
 
         // Build args array: ext inputs + output
         let mut arg_parts = Vec::new();
         for (i, inp) in ext_inputs.iter().enumerate() {
             let pfx = format!("ext{i}");
-            arg_parts.push(format!("&d_t{}->data", inp.0));
+            arg_parts.push(format!("&p_t{}", inp.0));
             arg_parts.push(self.stride_arg_refs(id, &pfx));
             arg_parts.push(format!("&t{id}_{pfx}_ndim"));
             arg_parts.push(format!("&t{id}_{pfx}_size"));
         }
-        arg_parts.push(format!("&d_t{id}->data"));
+        arg_parts.push(format!("&p_t{id}"));
         arg_parts.push(self.shape_arg_refs(id, "out"));
         arg_parts.push(format!("&t{id}_out_ndim"));
         arg_parts.push(format!("&t{id}_out_size"));
@@ -3263,27 +3428,37 @@ impl HipEmitter {
 
     fn emit_reshape(&mut self, id: usize, inputs: &[NodeId], ty: &TensorType) {
         let a = inputs[0].0;
-        self.emit_alias_view(
-            id,
-            ty,
-            &format!("d_t{a}->data"),
-            &format!("d_t{a}->storage_size"),
+        self.emit_slot_wrapper(id, ty);
+        let kernel_name = format!("kernel_reshape_{}", Self::dtype_macro(ty));
+        self.line("{");
+        self.indent += 1;
+        self.emit_stride_vars(id, "a", a);
+        self.emit_shape_vars(id, "a", a);
+        self.line(&format!("int64_t t{id}_a_ndim = d_t{a}->rank;"));
+        self.line(&format!("int64_t t{id}_size = d_t{id}->count;"));
+        self.line(&format!(
+            "void *args[] = {{ &p_t{a}, {}, {}, &t{id}_a_ndim, &p_t{id}, &t{id}_size }};",
+            self.stride_arg_refs(id, "a"),
+            self.shape_arg_refs(id, "a")
+        ));
+        self.emit_kernel_launch_expr(
+            &format!("mod_{kernel_name}"),
+            &kernel_name,
+            &format!("t{id}_size / 256 + (t{id}_size % 256 != 0)"),
+            "256",
+            "args",
         );
+        self.indent -= 1;
+        self.line("}");
     }
 
     fn emit_permute(&mut self, id: usize, axes: &[usize], inputs: &[NodeId], ty: &TensorType) {
         let a = inputs[0].0;
-        self.emit_alias_view(
-            id,
-            ty,
-            &format!("d_t{a}->data"),
-            &format!("d_t{a}->storage_size"),
-        );
-        for (new_d, &old_d) in axes.iter().enumerate() {
-            self.line(&format!(
-                "d_t{id}->strides[{new_d}] = d_t{a}->strides[{old_d}];"
-            ));
-        }
+        let strides = axes
+            .iter()
+            .map(|axis| format!("d_t{a}->strides[{axis}]"))
+            .collect::<Vec<_>>();
+        self.emit_strided_view(id, ty, &format!("d_t{a}"), &strides);
     }
 
     fn emit_expand(
@@ -3295,30 +3470,19 @@ impl HipEmitter {
         ty: &TensorType,
     ) {
         let a = inputs[0].0;
-        self.emit_alias_view(
-            id,
-            ty,
-            &format!("d_t{a}->data"),
-            &format!("d_t{a}->storage_size"),
-        );
-        self.line(&format!("if (d_t{id}->ndim == d_t{a}->ndim) {{"));
-        self.indent += 1;
-        self.line(&format!(
-            "for (int d = 0; d < d_t{a}->ndim; d++) d_t{id}->strides[d] = d_t{a}->strides[d];"
-        ));
-        self.line(&format!("d_t{id}->strides[{axis}] = 0;"));
-        self.indent -= 1;
-        self.line("} else {");
-        self.indent += 1;
-        for d in 0..axis {
-            self.line(&format!("d_t{id}->strides[{d}] = d_t{a}->strides[{d}];"));
-        }
-        self.line(&format!("d_t{id}->strides[{axis}] = 0;"));
-        self.line(&format!(
-            "for (int d = {axis}; d < d_t{a}->ndim; d++) d_t{id}->strides[d+1] = d_t{a}->strides[d];"
-        ));
-        self.indent -= 1;
-        self.line("}");
+        let rank = ty.dims.len();
+        let strides = (0..rank)
+            .map(|d| {
+                if d == axis {
+                    "0".to_string()
+                } else if d < axis {
+                    format!("d_t{a}->strides[{d}]")
+                } else {
+                    format!("d_t{a}->strides[d_t{a}->rank == {rank} ? {d} : {}]", d - 1)
+                }
+            })
+            .collect::<Vec<_>>();
+        self.emit_strided_view(id, ty, &format!("d_t{a}"), &strides);
     }
 
     fn emit_stride(
@@ -3329,38 +3493,28 @@ impl HipEmitter {
         ty: &TensorType,
     ) {
         let a = inputs[0].0;
-        self.emit_alias_view(
-            id,
-            ty,
-            &format!("d_t{a}->data"),
-            &format!("d_t{a}->storage_size"),
-        );
-        let max_dims = ty.dims.len().max(1);
-        for (d, &s) in stride_factors.iter().enumerate() {
-            if d >= max_dims {
-                break;
-            }
-            self.line(&format!(
-                "d_t{id}->strides[{d}] = d_t{a}->strides[{d}] * {s};"
-            ));
-        }
+        assert_eq!(stride_factors.len(), ty.dims.len());
+        let strides = stride_factors.iter().enumerate().map(|(axis, factor)| {
+            format!("chelis_int_checked_mul(d_t{a}->strides[{axis}], INT64_C({factor}), 64, \"numeric trap: overflow in stride at int64\")")
+        }).collect::<Vec<_>>();
+        self.emit_strided_view(id, ty, &format!("d_t{a}"), &strides);
     }
 
-    /// Emit per-axis `int t{node_id}_{prefix}{0..7} = <val>;` constants
+    /// Emit per-axis `int64_t t{node_id}_{prefix}{0..7} = <val>;` constants
     /// from a compile-time vector, zero-padding the unused trailing axes.
     /// Used by `pad`/`shrink` for the low-padding / start-offset vectors,
     /// which are pinned in the `RiscOp` (not read from runtime metadata).
     fn emit_axis_const_vars(&mut self, node_id: usize, prefix: &str, values: &[usize]) {
-        for i in 0..kernels::MAX_DIM {
+        for i in 0..self.kernel_rank {
             let v = values.get(i).copied().unwrap_or(0);
-            self.line(&format!("int t{node_id}_{prefix}{i} = {v};"));
+            self.line(&format!("int64_t t{node_id}_{prefix}{i} = {v};"));
         }
     }
 
     /// Generate `&t{node_id}_{prefix}0, ...` arg references for the
     /// per-axis constants emitted by [`Self::emit_axis_const_vars`].
     fn axis_const_arg_refs(&self, node_id: usize, prefix: &str) -> String {
-        (0..kernels::MAX_DIM)
+        (0..self.kernel_rank)
             .map(|i| format!("&t{node_id}_{prefix}{i}"))
             .collect::<Vec<_>>()
             .join(", ")
@@ -3395,21 +3549,23 @@ impl HipEmitter {
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int t{id}_size = d_t{id}->size;"));
+        self.line(&format!("int64_t t{id}_size = d_t{id}->count;"));
         self.emit_stride_vars(id, "a", a);
-        self.line(&format!("int t{id}_a_ndim = d_t{a}->ndim;"));
-        self.line(&format!("int t{id}_a_size = d_t{a}->storage_size;"));
+        self.line(&format!("int64_t t{id}_a_ndim = d_t{a}->rank;"));
+        self.line(&format!(
+            "int64_t t{id}_a_size = (d_t{a}->byte_capacity / chelis_dtype_size(d_t{a}->dtype));"
+        ));
         self.emit_axis_const_vars(id, "lo", &lo);
         // Source shape is read from runtime metadata so symbolic/strided
         // inputs bounds-check against their real extents.
         self.emit_shape_vars(id, "srcsh", a);
         self.emit_typed_scalar_local(&format!("t{id}_fill"), fill);
         self.emit_shape_vars(id, "out", id);
-        self.line(&format!("int t{id}_out_ndim = d_t{id}->ndim;"));
+        self.line(&format!("int64_t t{id}_out_ndim = d_t{id}->rank;"));
         self.line(&format!(
-            "void *args[] = {{ &d_t{a}->data, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
+            "void *args[] = {{ &p_t{a}, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
              {lo_refs}, {srcsh_refs}, &t{id}_fill, \
-             &d_t{id}->data, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
+             &p_t{id}, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
             a_stride_refs = self.stride_arg_refs(id, "a"),
             lo_refs = self.axis_const_arg_refs(id, "lo"),
             srcsh_refs = self.shape_arg_refs(id, "srcsh"),
@@ -3418,7 +3574,7 @@ impl HipEmitter {
         self.emit_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
             kernel_name,
-            &format!("(t{id}_size + 255) / 256"),
+            &format!("t{id}_size / 256 + (t{id}_size % 256 != 0)"),
             "256",
             "args",
         );
@@ -3449,17 +3605,19 @@ impl HipEmitter {
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int t{id}_size = d_t{id}->size;"));
+        self.line(&format!("int64_t t{id}_size = d_t{id}->count;"));
         self.emit_stride_vars(id, "a", a);
-        self.line(&format!("int t{id}_a_ndim = d_t{a}->ndim;"));
-        self.line(&format!("int t{id}_a_size = d_t{a}->storage_size;"));
+        self.line(&format!("int64_t t{id}_a_ndim = d_t{a}->rank;"));
+        self.line(&format!(
+            "int64_t t{id}_a_size = (d_t{a}->byte_capacity / chelis_dtype_size(d_t{a}->dtype));"
+        ));
         self.emit_axis_const_vars(id, "start", &start);
         self.emit_shape_vars(id, "out", id);
-        self.line(&format!("int t{id}_out_ndim = d_t{id}->ndim;"));
+        self.line(&format!("int64_t t{id}_out_ndim = d_t{id}->rank;"));
         self.line(&format!(
-            "void *args[] = {{ &d_t{a}->data, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
+            "void *args[] = {{ &p_t{a}, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
              {start_refs}, \
-             &d_t{id}->data, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
+             &p_t{id}, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
             a_stride_refs = self.stride_arg_refs(id, "a"),
             start_refs = self.axis_const_arg_refs(id, "start"),
             out_shape_refs = self.shape_arg_refs(id, "out"),
@@ -3467,7 +3625,7 @@ impl HipEmitter {
         self.emit_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
             kernel_name,
-            &format!("(t{id}_size + 255) / 256"),
+            &format!("t{id}_size / 256 + (t{id}_size % 256 != 0)"),
             "256",
             "args",
         );
@@ -3513,12 +3671,7 @@ impl HipEmitter {
 
     fn emit_store(&mut self, id: usize, name: &str, inputs: &[NodeId], ty: &TensorType) {
         let a = inputs[0].0;
-        self.emit_alias_view(
-            id,
-            ty,
-            &format!("d_t{a}->data"),
-            &format!("d_t{a}->storage_size"),
-        );
+        self.emit_alias_view(id, ty, &format!("d_t{a}"));
         // Producer-supplied Store name in a `/* ... */` block-comment
         // context. LoadStoreName grammar already excludes `*` and `/`,
         // so a `*/` cannot reach this format!() via the constructor;
@@ -3535,27 +3688,27 @@ impl HipEmitter {
     // Stride/shape variable helpers
     // ------------------------------------------------------------------
 
-    /// Emit `int t{node_id}_{prefix}_s{0..7} = d_t{src_id}->strides[i];` for MAX_DIM dims.
+    /// Emit `int64_t t{node_id}_{prefix}_s{0..7} = d_t{src_id}->strides[i];` for MAX_DIM dims.
     fn emit_stride_vars(&mut self, node_id: usize, prefix: &str, src_id: usize) {
-        for i in 0..kernels::MAX_DIM {
+        for i in 0..self.kernel_rank {
             self.line(&format!(
-                "int t{node_id}_{prefix}_s{i} = ({i} < d_t{src_id}->ndim) ? d_t{src_id}->strides[{i}] : 0;"
+                "int64_t t{node_id}_{prefix}_s{i} = ({i} < d_t{src_id}->rank) ? d_t{src_id}->strides[{i}] : 0;"
             ));
         }
     }
 
-    /// Emit `int t{node_id}_{prefix}_sh{0..7} = d_t{src_id}->shape[i];` for MAX_DIM dims.
+    /// Emit `int64_t t{node_id}_{prefix}_sh{0..7} = d_t{src_id}->shape[i];` for MAX_DIM dims.
     fn emit_shape_vars(&mut self, node_id: usize, prefix: &str, src_id: usize) {
-        for i in 0..kernels::MAX_DIM {
+        for i in 0..self.kernel_rank {
             self.line(&format!(
-                "int t{node_id}_{prefix}_sh{i} = ({i} < d_t{src_id}->ndim) ? d_t{src_id}->shape[{i}] : 0;"
+                "int64_t t{node_id}_{prefix}_sh{i} = ({i} < d_t{src_id}->rank) ? d_t{src_id}->shape[{i}] : 0;"
             ));
         }
     }
 
     /// Generate `&t{node_id}_{prefix}_s0, &t{node_id}_{prefix}_s1, ...` for args array.
     fn stride_arg_refs(&self, node_id: usize, prefix: &str) -> String {
-        (0..kernels::MAX_DIM)
+        (0..self.kernel_rank)
             .map(|i| format!("&t{node_id}_{prefix}_s{i}"))
             .collect::<Vec<_>>()
             .join(", ")
@@ -3563,7 +3716,7 @@ impl HipEmitter {
 
     /// Generate `&t{node_id}_{prefix}_sh0, &t{node_id}_{prefix}_sh1, ...` for args array.
     fn shape_arg_refs(&self, node_id: usize, prefix: &str) -> String {
-        (0..kernels::MAX_DIM)
+        (0..self.kernel_rank)
             .map(|i| format!("&t{node_id}_{prefix}_sh{i}"))
             .collect::<Vec<_>>()
             .join(", ")
@@ -3579,7 +3732,7 @@ impl HipEmitter {
     ) {
         self.line(&format!("chelis_prepare_kernel_launch({module_var});"));
         self.line(&format!(
-            "chelis_launch_kernel({module_var}, \"{kernel_name}\", dim3({grid_expr}), dim3({block_expr}), {args_var});"
+            "chelis_launch_kernel({module_var}, \"{kernel_name}\", ({grid_expr}), ({block_expr}), {args_var});"
         ));
         self.line(&format!(
             "chelis_finalize_kernel_launch({module_var}, \"{kernel_name}\");"
@@ -3950,17 +4103,8 @@ impl HipEmitter {
         out
     }
 
-    fn shape_literal(ty: &TensorType) -> String {
-        let dims: Vec<String> = ty.dims.iter().map(Self::emit_dim_info).collect();
-        if dims.is_empty() {
-            "(int[]){1}".to_string()
-        } else {
-            format!("(int[]){{ {} }}", dims.join(", "))
-        }
-    }
-
     fn ndim(ty: &TensorType) -> usize {
-        if ty.dims.is_empty() { 1 } else { ty.dims.len() }
+        ty.dims.len()
     }
 
     fn known_dim_size(dim: &DimInfo) -> Option<usize> {
@@ -4317,7 +4461,9 @@ mod tests {
 
         let (source, _) = emit_test_dag(&dag, "verified_drop").unwrap();
         assert_eq!(
-            source.matches("chelis_gpu_free_view(d_t0);").count(),
+            source
+                .matches("chelis_device_tensor_release(o_t0);")
+                .count(),
             2,
             "host and device entrypoints each consume the exact verified descriptor once:\n{source}"
         );
@@ -4338,7 +4484,9 @@ mod tests {
 
         let (source, _) = emit_test_dag(&dag, "borrowed_drop").unwrap();
         assert_eq!(
-            source.matches("chelis_gpu_free_view(d_t0);").count(),
+            source
+                .matches("chelis_device_tensor_release(o_t0);")
+                .count(),
             2,
             "the borrowed descriptor may be cleaned up once per host/device entrypoint, but the logical Drop must not add a third release:\n{source}"
         );
@@ -4624,7 +4772,7 @@ mod tests {
         let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 
         assert!(hip.contains("extern \\\"C\\\" __global__ void kernel_fused_3("));
-        assert!(hip.contains("d_t3 = chelis_gpu_alloc_view(1, (int[]){ 4 }, CHELIS_DTYPE_F32, d_t1->data, d_t1->storage_size);"));
+        assert!(hip.contains("d_t3 = chelis_gpu_alloc_view(1, (int[]){ 4 }, CHELIS_DTYPE_F32, d_t1->data, (d_t1->byte_capacity / chelis_dtype_size(d_t1->dtype)));"));
         // Aliased external (ext0 ↔ x) must NOT carry __restrict__.
         assert!(!hip.contains("const float *__restrict__ ext0"));
         // Output must NOT carry __restrict__ — it aliases ext0.
@@ -4642,7 +4790,7 @@ mod tests {
         let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 
         assert!(
-            !hip.contains("d_t0->data, d_t0->storage_size"),
+            !hip.contains("d_t0->data, (d_t0->byte_capacity / chelis_dtype_size(d_t0->dtype))"),
             "the fused output must not reuse caller-owned input bytes; got:\n{hip}"
         );
     }
@@ -4687,7 +4835,7 @@ mod tests {
         let (hip, _) = emit_test_dag(&dag, "test_fn").unwrap();
 
         assert!(
-            !hip.contains("d_t1->data, d_t1->storage_size"),
+            !hip.contains("d_t1->data, (d_t1->byte_capacity / chelis_dtype_size(d_t1->dtype))"),
             "the fused output must not reuse a caller-owned view's bytes; got:\n{hip}"
         );
     }

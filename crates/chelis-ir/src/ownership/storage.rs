@@ -624,17 +624,22 @@ fn classify_nodes(
                         }
                     }
                 },
-                RiscOp::Reshape { .. }
-                | RiscOp::Permute { .. }
-                | RiscOp::Expand { .. }
-                | RiscOp::Stride { .. } => match lane {
-                    StorageLaneKind::C => StoragePlacement::OwnedSlot {
-                        slot: StorageSlotId::UNASSIGNED,
-                    },
-                    StorageLaneKind::Hip => StoragePlacement::SharedView {
-                        source: node.inputs[0],
-                    },
+                // A HIP input can have arbitrary checked strides. Reshape must
+                // materialize logical order, so its bytes and lifetime belong
+                // to the shared plan just as they do on the C lane.
+                RiscOp::Reshape { .. } => StoragePlacement::OwnedSlot {
+                    slot: StorageSlotId::UNASSIGNED,
                 },
+                RiscOp::Permute { .. } | RiscOp::Expand { .. } | RiscOp::Stride { .. } => {
+                    match lane {
+                        StorageLaneKind::C => StoragePlacement::OwnedSlot {
+                            slot: StorageSlotId::UNASSIGNED,
+                        },
+                        StorageLaneKind::Hip => StoragePlacement::SharedView {
+                            source: node.inputs[0],
+                        },
+                    }
+                }
                 RiscOp::Drop => StoragePlacement::TerminalDrop {
                     source: node.inputs[0],
                 },
@@ -1136,6 +1141,47 @@ mod tests {
                 ))
             );
         }
+    }
+
+    #[test]
+    fn hip_reshape_materializes_independent_storage_while_permute_retains_source() {
+        let mut dag = crate::dag::Dag::new();
+        let ty = TensorType {
+            dims: vec![crate::dag::DimInfo::Lit(2), crate::dag::DimInfo::Lit(3)],
+            precision: Prim::F32,
+        };
+        let input = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty, None);
+        let permute = dag.add_node(
+            RiscOp::Permute { axes: vec![1, 0] },
+            vec![input],
+            TensorType {
+                dims: vec![crate::dag::DimInfo::Lit(3), crate::dag::DimInfo::Lit(2)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let reshape = dag.add_node(
+            RiscOp::Reshape {
+                shape: vec![crate::dag::RtDim::Lit(6)],
+            },
+            vec![permute],
+            vector(6, Prim::F32),
+            None,
+        );
+        dag.add_root(reshape);
+        let plan = plan_hip_storage(verified(dag)).unwrap();
+        assert!(
+            matches!(plan.placements()[permute.0], StoragePlacement::SharedView { source } if source == input)
+        );
+        assert!(matches!(
+            plan.placements()[reshape.0],
+            StoragePlacement::OwnedSlot { .. }
+        ));
+        assert_ne!(
+            plan.placements()[input.0].slot(),
+            plan.placements()[reshape.0].slot()
+        );
+        assert_eq!(plan.max_live_bytes(), LiveByteBound::Exact(48));
     }
 
     fn vector(elements: usize, precision: Prim) -> TensorType {

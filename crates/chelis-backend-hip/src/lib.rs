@@ -96,7 +96,7 @@ pub fn codegen_hip(
     dag.emission()
         .check_axis_sources(chelis_types::unsupported::Stage::Codegen("hip"))?;
     let h_header = format!(
-        "extern \"C\" void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"
+        "#include \"chelis_device_owner.h\"\nextern \"C\" void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);\nextern \"C\" void {func_name}_device(const chelis_device_tensor_owner *const *inputs, int32_t n_in, chelis_device_tensor_owner **outputs, int32_t n_out);"
     );
     let (input_labels, output_labels, symbolic_dims) = {
         let emission = dag.emission();
