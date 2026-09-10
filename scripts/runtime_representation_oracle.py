@@ -63,7 +63,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "7128384269faf0efe51170ff641f21fc2bc378dad045213353e478b7875e642a"
+FREEZE_SHA256 = "7b1025076575d63f5c386088d897a0cdfca24574a72ecae9a8f332cc14240a9d"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -1061,7 +1061,7 @@ def mutate_fixed_rank_metadata(source: str) -> str:
 
 
 def mutate_descriptor_field(source: str) -> str:
-    return _append_probe(
+    return _insert_inside_include_guard(
         source,
         "runtime_representation_phase0_descriptor",
         """typedef struct {
@@ -1084,7 +1084,7 @@ def mutate_unknown_c_arithmetic_spelling(source: str) -> str:
     than enter as an unflagged row.
     """
 
-    return _append_probe(
+    return _insert_inside_include_guard(
         source,
         "runtime_representation_phase0_unknown_arithmetic",
         "extern _Float16 *runtime_representation_phase0_unknown_arithmetic(void);",
@@ -1111,7 +1111,7 @@ def mutate_c_public_element_pointer_export(source: str) -> str:
 def mutate_c_body_direct_data_access(source: str) -> str:
     """A new `->data` access inside a function body in a tracked header."""
 
-    return _append_probe(
+    return _insert_inside_include_guard(
         source,
         "runtime_representation_phase0_probe_touch",
         """static inline void runtime_representation_phase0_probe_touch(chelis_gpu_tensor *t) {
@@ -1128,7 +1128,7 @@ def mutate_c_extern_element_data(source: str) -> str:
     form that the paren-keyed naming rule could already see.
     """
 
-    return _append_probe(
+    return _insert_inside_include_guard(
         source,
         "runtime_representation_phase0_probe_table",
         "extern double *runtime_representation_phase0_probe_table;",
@@ -1142,7 +1142,7 @@ def mutate_c_non_descriptor_struct_field(source: str) -> str:
     do not apply to it.
     """
 
-    return _append_probe(
+    return _insert_inside_include_guard(
         source,
         "runtime_representation_phase0_probe_pair",
         """typedef struct {
@@ -1159,7 +1159,7 @@ def mutate_c_tagged_struct_field(source: str) -> str:
     let this form carry a `float *` past it without a row or an error.
     """
 
-    return _append_probe(
+    return _insert_inside_include_guard(
         source,
         "runtime_representation_phase0_probe_pool",
         """struct runtime_representation_phase0_probe_pool {
@@ -1171,7 +1171,7 @@ typedef struct runtime_representation_phase0_probe_pool runtime_representation_p
 
 
 def mutate_c_union_field(source: str) -> str:
-    return _append_probe(
+    return _insert_inside_include_guard(
         source,
         "runtime_representation_phase0_probe_slot",
         """union runtime_representation_phase0_probe_slot {
@@ -1184,7 +1184,7 @@ def mutate_c_union_field(source: str) -> str:
 def mutate_c_macro_typed_carrier(source: str) -> str:
     """A carrier whose element type only a preprocessor can see."""
 
-    return _append_probe(
+    return _insert_inside_include_guard(
         source,
         "runtime_representation_phase0_probe_slab",
         """#define RUNTIME_REPRESENTATION_PHASE0_PROBE_ELEM float
@@ -1195,7 +1195,7 @@ RUNTIME_REPRESENTATION_PHASE0_PROBE_ELEM *runtime_representation_phase0_probe_sl
 def mutate_c_multi_declarator_data(source: str) -> str:
     """Two declarators in one declaration are two owners, not one."""
 
-    return _append_probe(
+    return _insert_inside_include_guard(
         source,
         "runtime_representation_phase0_probe_pair_a",
         "extern float *runtime_representation_phase0_probe_pair_a, "
@@ -1216,7 +1216,7 @@ def mutate_c_enum_width(source: str) -> str:
 def mutate_objc_element_pointer_parameter(source: str) -> str:
     """An Objective-C header's C function carrying an element pointer."""
 
-    return _append_probe(
+    return _insert_inside_include_guard(
         source,
         "runtime_representation_phase0_probe_fill",
         """static inline void runtime_representation_phase0_probe_fill(
@@ -1265,7 +1265,7 @@ extern float *runtime_representation_phase0_probe_cfg;
 def mutate_objc_method_carrier(source: str) -> str:
     """An Objective-C method whose result is an element pointer."""
 
-    return _append_probe(
+    return _insert_inside_include_guard(
         source,
         "RuntimeRepresentationPhase0Probe",
         """@interface RuntimeRepresentationPhase0Probe : NSObject
@@ -1278,7 +1278,7 @@ def mutate_c_unclassified_cast_spelling(source: str) -> str:
     """An arithmetic spelling no vocabulary lists, in a cast rather than a
     declaration. The inverted type-word rule holds in expression position."""
 
-    return _append_probe(
+    return _insert_inside_include_guard(
         source,
         "runtime_representation_phase0_probe_cast",
         """static inline void runtime_representation_phase0_probe_cast(void *p) {
@@ -1290,7 +1290,7 @@ def mutate_c_unclassified_cast_spelling(source: str) -> str:
 def mutate_c_pointer_to_element_array(source: str) -> str:
     """A pointer to an array of elements, through a declarator group."""
 
-    return _append_probe(
+    return _insert_inside_include_guard(
         source,
         "runtime_representation_phase0_probe_rows",
         "void runtime_representation_phase0_probe_rows(float (*rows)[4]);",
@@ -1329,7 +1329,7 @@ def mutate_objc_block_parameter(source: str) -> str:
     """A block literal whose parameter is an element pointer, handed to an
     `id`, so no enclosing declaration's type reveals it."""
 
-    return _append_probe(
+    return _insert_inside_include_guard(
         source,
         "runtime_representation_phase0_probe_block",
         """static inline id runtime_representation_phase0_probe_block(void) {
@@ -1341,7 +1341,7 @@ def mutate_objc_block_parameter(source: str) -> str:
 def mutate_c_sizeof_in_array_bound(source: str) -> str:
     """A width computed in a declared type rather than in a statement."""
 
-    return _append_probe(
+    return _insert_inside_include_guard(
         source,
         "runtime_representation_phase0_probe_scratch",
         "static unsigned char runtime_representation_phase0_probe_scratch[sizeof(double) * 4];",
@@ -1365,7 +1365,7 @@ def mutate_c_int8_element_pointer(source: str) -> str:
     """An 8-bit element pointer, whose typedef resolves to a `char` spelling
     that names no element; the written spelling has to be read first."""
 
-    return _append_probe(
+    return _insert_inside_include_guard(
         source,
         "runtime_representation_phase0_probe_i8",
         "extern int8_t *runtime_representation_phase0_probe_i8;",

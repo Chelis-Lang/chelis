@@ -1725,6 +1725,7 @@
     "scripts.test_runtime_representation_oracle.MutationContractTests.test_element_final_forms_are_exact_and_never_admit_raw_access",
     "scripts.test_runtime_representation_oracle.MutationContractTests.test_every_mutation_targets_a_registered_source",
     "scripts.test_runtime_representation_oracle.MutationContractTests.test_every_seam_kind_in_the_ledger_has_a_mutation",
+    "scripts.test_runtime_representation_oracle.MutationContractTests.test_header_mutations_remain_inside_their_include_guards",
     "scripts.test_runtime_representation_oracle.MutationContractTests.test_implementation_digest_is_independent_of_import_name",
     "scripts.test_runtime_representation_oracle.MutationContractTests.test_manifest_binds_exact_mutation_semantics_and_command",
     "scripts.test_runtime_representation_oracle.MutationContractTests.test_mutation_body_change_moves_the_freeze_digest",

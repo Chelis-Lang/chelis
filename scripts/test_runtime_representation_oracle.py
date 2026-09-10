@@ -239,6 +239,22 @@ class BaselineTests(unittest.TestCase):
 
 
 class MutationContractTests(unittest.TestCase):
+    def test_header_mutations_remain_inside_their_include_guards(self) -> None:
+        for probe in oracle.phase0_mutation_probes():
+            if probe.path.suffix != ".h":
+                continue
+            source = (REPO_ROOT / probe.path).read_text()
+            mutated = probe.mutate(source)
+            original_guard_end = source.rstrip().rfind("#endif")
+            mutated_guard_end = mutated.rstrip().rfind("#endif")
+            self.assertGreaterEqual(original_guard_end, 0, probe.witness_id)
+            self.assertGreaterEqual(mutated_guard_end, 0, probe.witness_id)
+            self.assertEqual(
+                mutated[mutated_guard_end + len("#endif") :],
+                source[original_guard_end + len("#endif") :],
+                f"{probe.witness_id} planted a repeated declaration after the guard",
+            )
+
     def test_element_final_forms_are_exact_and_never_admit_raw_access(self) -> None:
         for owner in oracle.ELEMENT_FINAL_CONTRACT_OWNERS:
             self.assertTrue(oracle.owner_module_final_form(

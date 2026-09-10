@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "freeze_sha256": "7128384269faf0efe51170ff641f21fc2bc378dad045213353e478b7875e642a",
+  "freeze_sha256": "7b1025076575d63f5c386088d897a0cdfca24574a72ecae9a8f332cc14240a9d",
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -2780,7 +2780,7 @@
           "witness_id": "phase0.mutate_descriptor_field",
           "expected_kind": "descriptor-field",
           "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h",
-          "implementation_sha256": "3efd37ce58610fe600fcb16f586d289f208f14ac0ac226a19df73a83e509add2",
+          "implementation_sha256": "43837a17e04d9aa9ef67d16e5e9ddf85c1c83450c581da84776f20825258e13e",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
@@ -2989,7 +2989,7 @@
           "witness_id": "phase0.mutate_unknown_c_arithmetic_spelling",
           "expected_kind": "unknown-arithmetic-spelling",
           "path": "crates/chelis-runtime/include/chelis_simd.h",
-          "implementation_sha256": "5a275ebb9ea4a02584f6327ff34173febe3ccd31fbf7158b6a7243c7545c4aa6",
+          "implementation_sha256": "528209e5d31902f9e024054fa79c799f9efa04abf4fc684666d73527a6fd74d3",
           "expected_failure": {
             "code": "source.rejected",
             "reason_prefix": "fail-closed inventory scanner rejected"
@@ -3013,7 +3013,7 @@
           "witness_id": "phase0.mutate_c_body_direct_data_access",
           "expected_kind": "direct-data-access",
           "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h",
-          "implementation_sha256": "33eb44a5790618abb588514cfca4f66489d7aed313d6f1b1decd4aae9f233681",
+          "implementation_sha256": "3f92b83033c0ebdb91ba20c8b0f3e4b0266799ee39fa05c0ea30af57032077e7",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
@@ -3025,7 +3025,7 @@
           "witness_id": "phase0.mutate_c_extern_element_data",
           "expected_kind": "raw-element-pointer",
           "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "652af6905a6e0dbef8d69724e2f2ecc91728c0b4e80384db39ddc9d576d2b4c8",
+          "implementation_sha256": "0e691349cdfb6ef2fe1e4b8e8b04cb002cdbc7ca78c1d8fbfbe03a99ac797dc8",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
@@ -3037,7 +3037,7 @@
           "witness_id": "phase0.mutate_c_non_descriptor_struct_field",
           "expected_kind": "raw-element-pointer",
           "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "c8f3218d0584cb05027065aa074f4ac351c98dc4c93c24cde7dc019514595ad7",
+          "implementation_sha256": "89d7943fda9ab8af0d6d866ec2daed29931999695129b7baa51a5b5f1650c929",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
@@ -3049,7 +3049,7 @@
           "witness_id": "phase0.mutate_c_tagged_struct_field",
           "expected_kind": "raw-element-pointer",
           "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "c95e7a83af05f5d73227a87ba1d19090b6dee0c5d4b1fd4ff5b2622e773285ec",
+          "implementation_sha256": "66baae0e709c09a4ec03e9479725377473a14a9a50a22a9bb4f24ea7f50b0193",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
@@ -3063,7 +3063,7 @@
           "witness_id": "phase0.mutate_c_union_field",
           "expected_kind": "raw-element-pointer",
           "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "9c84593bd48bb3f3c407517d79b11f8029fef749b594054dc9e5ce70eb44d62c",
+          "implementation_sha256": "b6d58b8b6d47fc238d02b874bb0114528ba943b582f0b4aefe64b2424eeb1045",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
@@ -3077,7 +3077,7 @@
           "witness_id": "phase0.mutate_c_macro_typed_carrier",
           "expected_kind": "raw-element-pointer",
           "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h",
-          "implementation_sha256": "9b97563372d76a47b08262899d9bb90234e25a91b3dabe53916c1c7718bc582d",
+          "implementation_sha256": "8f0d0eb57078e4652fa6ad694f4ad1e488c5057b995f8a39a02350aa5a19a7b7",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
@@ -3091,7 +3091,7 @@
           "witness_id": "phase0.mutate_c_multi_declarator_data",
           "expected_kind": "raw-element-pointer",
           "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "ecdd5bcd40d1ff0f8df7f6867222895a714cb5c3ab9037f6eeb5c9df56f56be9",
+          "implementation_sha256": "a0c78b453578eb6c58692ccc1a1ce6bcb24a4526ffdeaf23ee83716a10f2bfbe",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
@@ -3120,7 +3120,7 @@
           "witness_id": "phase0.mutate_objc_element_pointer_parameter",
           "expected_kind": "raw-element-pointer",
           "path": "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h",
-          "implementation_sha256": "b81cd9a85fc1d491177f2bd0facbfa6d5d94096f4378ca74e7ee0ecc82aabd22",
+          "implementation_sha256": "4202ed69a1291bcf4a105a4101ba1496ec028792ace76c3dc90b2f4c25ccf0a2",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
@@ -3160,7 +3160,7 @@
           "witness_id": "phase0.mutate_objc_method_carrier",
           "expected_kind": "raw-element-pointer",
           "path": "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h",
-          "implementation_sha256": "56bdca1c019b3b0ec4771372617b231c695bcad5038312d3427e6bc879b1a32d",
+          "implementation_sha256": "e7a5958edfecef3fa0698863da5a7ded9cc19d05ba713c8600903bfc2505a98b",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
@@ -3174,7 +3174,7 @@
           "witness_id": "phase0.mutate_c_unclassified_cast_spelling",
           "expected_kind": "unknown-arithmetic-spelling",
           "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "a52f7f228aa161f0c440ccb28bc37a6e8cc775fa6482f053074720d320af4fbe",
+          "implementation_sha256": "1b207ca7ea965d3a5d807e8e57d314384b5721fb1c036c685bb589fb746d4236",
           "expected_failure": {
             "code": "source.rejected",
             "reason_prefix": "fail-closed inventory scanner rejected"
@@ -3186,7 +3186,7 @@
           "witness_id": "phase0.mutate_c_pointer_to_element_array",
           "expected_kind": "raw-element-pointer",
           "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "b29d9ac289d3f98a3920d1ef03b69c8ababa67229d9c4870539bfe188c8bfea0",
+          "implementation_sha256": "92711242d52e99b8e85951af0cadbaf9351da7a3ac5aece490d58d207edeb654",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
@@ -3224,7 +3224,7 @@
           "witness_id": "phase0.mutate_objc_block_parameter",
           "expected_kind": "raw-element-pointer",
           "path": "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h",
-          "implementation_sha256": "918a13029005cd66a2c7bdd93a01610279532203ffb52e0c0622e0f7576c9868",
+          "implementation_sha256": "bfed9fb46724b06a6b4c66a35c22d6b60752905a5b6aced8a0df7f3d8125ff1b",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
@@ -3238,7 +3238,7 @@
           "witness_id": "phase0.mutate_c_sizeof_in_array_bound",
           "expected_kind": "width-arithmetic",
           "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "4ca847b36f57af09c8dc3fcbb1fe59a7c5453b9d8f701fd13f2377a130352fc7",
+          "implementation_sha256": "3d8b4530f2844f61872f1ffb47e4bdc842eee9a3a1213e7702b791bcc927718d",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
@@ -3266,7 +3266,7 @@
           "witness_id": "phase0.mutate_c_int8_element_pointer",
           "expected_kind": "raw-element-pointer",
           "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "893963a2127df0a77b879dcb1805aa321c0953bf56da1bbc9a9218c7226b4bac",
+          "implementation_sha256": "ff68ddf828b03077df95b128d5b1fb85ab984fae444d4805fe841af685626062",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
