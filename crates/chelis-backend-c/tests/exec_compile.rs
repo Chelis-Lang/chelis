@@ -63,6 +63,149 @@ fn checked_indexing_run(source: &str, harness: &str) -> std::process::Output {
 }
 
 #[test]
+fn checked_c_reduction_nontrailing_kernels_execute_under_sanitizers() {
+    let ty = |dims: &[usize], precision| TensorType {
+        dims: dims.iter().copied().map(DimInfo::Lit).collect(),
+        precision,
+    };
+    for (op, precision, expected) in [
+        (
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: Prim::F32,
+            },
+            Prim::F32,
+            "9,12,27,30",
+        ),
+        (RiscOp::MaxReduce { axis: 1 }, Prim::F32, "5,6,11,12"),
+        (RiscOp::MinReduce { axis: 1 }, Prim::F32, "1,2,7,8"),
+        (RiscOp::ProdReduce { axis: 1 }, Prim::F32, "15,48,693,960"),
+        (RiscOp::Argmax { axis: 1 }, Prim::Int64, "2,2,2,2"),
+        (RiscOp::Argmin { axis: 1 }, Prim::Int64, "0,0,0,0"),
+    ] {
+        let mut dag = Dag::new();
+        let input = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty(&[2, 3, 2], Prim::F32),
+            None,
+        );
+        let output = dag.add_node(op, vec![input], ty(&[2, 2], precision), None);
+        dag.add_root(output);
+        let generated = codegen(&dag, "checked_reduce").unwrap();
+        let native = if precision == Prim::Int64 {
+            "int64_t"
+        } else {
+            "float"
+        };
+        let harness = format!(
+            r#"
+#include "chelis_runtime.h"
+#include <stdio.h>
+void checked_reduce(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    int64_t shape[] = {{2,3,2}};
+    chelis_tensor *x = chelis_alloc(3, shape, CHELIS_DTYPE_F32);
+    chelis_tensor_write *guard = chelis_tensor_begin_write(x);
+    float *data = (float*)chelis_tensor_write_view(guard).data;
+    for (int i=0;i<12;i++) data[i]=(float)(i+1);
+    chelis_tensor_end_write(guard);
+    chelis_tensor *inputs[]={{x}}, *outputs[]={{NULL}};
+    checked_reduce(inputs,1,outputs,1);
+    {native} expected[]={{ {expected} }};
+    const {native} *got = (const {native}*)chelis_tensor_read_view(outputs[0]).data;
+    if (chelis_tensor_numel(outputs[0]) != 4) return 2;
+    for (int i=0;i<4;i++) if(got[i]!=expected[i]) return 3;
+    chelis_tensor_release(outputs[0]); chelis_tensor_release(x);
+    puts("REDUCTION PASS"); return 0;
+}}
+"#
+        );
+        let result = checked_indexing_run(&generated.c_source, &harness);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(result.stdout, b"REDUCTION PASS\n");
+    }
+}
+
+#[test]
+fn checked_c_reduction_sum_and_count_preserve_empty_groups_under_sanitizers() {
+    for count in [false, true] {
+        for (shape, result_shape, expected_count) in [
+            (vec![2, 0, 3], vec![2, 3], 6),
+            (vec![0, 3, 2], vec![0, 2], 0),
+        ] {
+            let mut dag = Dag::new();
+            let precision = if count { Prim::Bool } else { Prim::F64 };
+            let result_precision = if count { Prim::Int64 } else { Prim::F64 };
+            let input = dag.add_node(
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                TensorType {
+                    dims: shape.iter().copied().map(DimInfo::Lit).collect(),
+                    precision,
+                },
+                None,
+            );
+            let op = if count {
+                RiscOp::Count { axes: vec![1] }
+            } else {
+                RiscOp::Sum {
+                    axis: 1,
+                    accumulator: Prim::F64,
+                }
+            };
+            let output = dag.add_node(
+                op,
+                vec![input],
+                TensorType {
+                    dims: result_shape.iter().copied().map(DimInfo::Lit).collect(),
+                    precision: result_precision,
+                },
+                None,
+            );
+            dag.add_root(output);
+            let generated = codegen(&dag, "checked_empty_reduce").unwrap();
+            let dtype = if count {
+                "CHELIS_DTYPE_BOOL"
+            } else {
+                "CHELIS_DTYPE_F64"
+            };
+            let native = if count { "int64_t" } else { "double" };
+            let dimensions = shape
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            let harness = format!(
+                r#"
+#include "chelis_runtime.h"
+void checked_empty_reduce(chelis_tensor **,int,chelis_tensor **,int);
+int main(void) {{
+    int64_t shape[]={{ {dimensions} }};
+    chelis_tensor *x=chelis_alloc(3,shape,{dtype}), *inputs[]={{x}}, *outputs[]={{NULL}};
+    checked_empty_reduce(inputs,1,outputs,1);
+    if (chelis_tensor_numel(outputs[0])!={expected_count}) return 2;
+    const {native} *values=(const {native}*)chelis_tensor_read_view(outputs[0]).data;
+    for(int i=0;i<{expected_count};i++) if(values[i]!=0) return 3;
+    chelis_tensor_release(outputs[0]); chelis_tensor_release(x); return 0;
+}}
+"#
+            );
+            let result = checked_indexing_run(&generated.c_source, &harness);
+            assert!(
+                result.status.success(),
+                "count={count}, shape={shape:?}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+    }
+}
+
+#[test]
 fn checked_c_movement_permute_and_expand_preserve_bits_under_sanitizers() {
     use chelis_ir::dag::RtDim;
     // Each expected map is explicit, independent of the production coordinate helpers.
@@ -4557,9 +4700,10 @@ fn direct_fused_reduction_runtime_shape_guard_case(reduce_kind: &str) {
     );
     assert_eq!(
         function_body.matches("chelis_alloc(").count(),
-        1,
-        "reduction-inlined FusedElem must not allocate an intermediate:\n{src}"
+        if reduce_kind == "sum" { 2 } else { 1 },
+        "fused reduction allocates its result and Sum's checked tree scratch:\n{src}"
     );
+    assert!(!function_body.contains(&format!("chelis_tensor *t{} =", fused_node.id.0)));
 
     let expected = if reduce_kind == "sum" {
         "29.0f, 110.0f"

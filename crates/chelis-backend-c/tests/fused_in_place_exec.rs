@@ -9,13 +9,14 @@ use support::codegen;
 
 /// Physical storage outlives a logical last use unless the emitter releases it.
 /// Cover retained dead slots, exact-capacity recycling, and early explicit Drop.
+/// Use scratch-free operators: this plan bounds DAG slots, not kernel scratch.
 #[test]
 fn physical_slot_bound_covers_executed_allocation_lifetimes() {
     use chelis_ir::ownership::{LiveByteBound, plan_c_storage};
 
     for (reduce, drop_first, expected_bound, expected_peak, expected_result) in [
         (false, false, 8, 8, "1"),
-        (true, false, 24, 24, "-4"),
+        (true, false, 24, 24, "-1"),
         (false, true, 20, 16, "2"),
     ] {
         let mut dag = Dag::new();
@@ -36,10 +37,7 @@ fn physical_slot_bound_covers_executed_allocation_lifetimes() {
             dag.add_node(RiscOp::synth_const(Prim::F32, 2.0), vec![], scalar, None)
         } else {
             let op = if reduce {
-                RiscOp::Sum {
-                    axis: 0,
-                    accumulator: Prim::F32,
-                }
+                RiscOp::MaxReduce { axis: 0 }
             } else {
                 RiscOp::Neg
             };

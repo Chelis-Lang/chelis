@@ -47,6 +47,112 @@ pub(crate) struct IterationSpace {
     elements: ElementCount,
 }
 
+/// Checked reduction grouping, independent of input payload storage and lifetime.
+pub(crate) struct ReductionMetadata {
+    input: IterationSpace,
+    selected: Box<[bool]>,
+    result: ShapeMetadata,
+    leaves: ElementCount,
+}
+
+impl ReductionMetadata {
+    pub(crate) fn new(
+        shape: &[i64],
+        axes: &[i64],
+        dtype: RuntimeDType,
+    ) -> Result<Self, MetadataError> {
+        let input = IterationSpace::new(shape)?;
+        let rank = ElementCount::scratch_entries(shape.len(), 0)?;
+        rank.scratch_len::<bool>()?;
+        rank.scratch_len::<i64>()?;
+        if axes.is_empty() {
+            return Err(MetadataError::Domain(
+                "reduction axes must be nonempty and strictly descending".into(),
+            ));
+        }
+        let mut selected = vec![false; shape.len()];
+        let mut previous = shape.len();
+        for &axis in axes {
+            let axis = if axis < 0 {
+                axis + shape.len() as i64
+            } else {
+                axis
+            };
+            let axis = usize::try_from(axis)
+                .map_err(|_| MetadataError::Domain("reduction axis outside rank".into()))?;
+            if axis >= previous {
+                return Err(MetadataError::Domain(
+                    "normalized reduction axes must be strictly descending".into(),
+                ));
+            }
+            previous = axis;
+            let slot = selected
+                .get_mut(axis)
+                .ok_or(MetadataError::Domain("reduction axis outside rank".into()))?;
+            *slot = true;
+        }
+        let output: Vec<_> = shape
+            .iter()
+            .zip(&selected)
+            .filter_map(|(&n, &selected)| (!selected).then_some(n))
+            .collect();
+        let result = ShapeMetadata::contiguous(&output, dtype)?;
+        result.bytes().allocation()?;
+        // No output group can observe the selected domain when the result is empty.
+        let leaves = if result.elements().get() == 0 {
+            ElementCount::from_extents(&[0])?
+        } else {
+            let extents: Vec<_> = shape
+                .iter()
+                .zip(&selected)
+                .filter_map(|(&n, &selected)| selected.then_some(n))
+                .collect();
+            ElementCount::from_extents(&extents)?
+        };
+        Ok(Self {
+            input,
+            selected: selected.into(),
+            result,
+            leaves,
+        })
+    }
+    pub(crate) fn result(&self) -> &ShapeMetadata {
+        &self.result
+    }
+    pub(crate) fn leaves(&self) -> ElementCount {
+        self.leaves
+    }
+    pub(crate) fn extent(&self, axis: i64) -> Result<i64, MetadataError> {
+        Ok(self.result.shape()[self.result.normalize_axis(axis)?])
+    }
+    pub(crate) fn index(&self, mut outer: i64, mut leaf: i64) -> Result<i64, MetadataError> {
+        if outer < 0
+            || outer >= self.result.elements().get()
+            || leaf < 0
+            || leaf >= self.leaves.get()
+        {
+            return Err(MetadataError::Domain(
+                "reduction index outside group or leaf domain".into(),
+            ));
+        }
+        let mut index = 0_i64;
+        let mut stride = 1_i64;
+        for (&extent, &selected) in self.input.shape.iter().zip(self.selected.iter()).rev() {
+            let remaining = if selected { &mut leaf } else { &mut outer };
+            let coordinate = *remaining % extent;
+            *remaining /= extent;
+            index = coordinate
+                .checked_mul(stride)
+                .and_then(|n| index.checked_add(n))
+                .ok_or(MetadataError::Overflow("reduction offset exceeds int64"))?;
+            stride = stride
+                .checked_mul(extent)
+                .ok_or(MetadataError::Overflow("reduction stride exceeds int64"))?;
+        }
+        Ok(index)
+    }
+}
+
 impl IterationSpace {
     pub(crate) fn new(shape: &[i64]) -> Result<Self, MetadataError> {
         ShapeMetadata::checked_rank(shape.len())?;
