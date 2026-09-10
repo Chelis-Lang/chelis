@@ -94,27 +94,12 @@ def native_output_adapter(graph, owner, output):
     return name
 
 
-def require_private_owner(graph, identity, source):
-    """Require a complete private struct; its field contracts are checked separately.
-
-    This does not decide that fields, constructors, or arbitrary tagged enums
-    implement a transport. It establishes which defining module the compiled
-    construction census must audit, without trusting a display path for privacy.
-    """
+def _private_owner_context(graph, identity, source):
     location = graph.locations.get(identity)
     _require(location is not None, "missing defining native owner")
     item = graph._item(*location)
-    body = item.get("inner", {}).get("struct")
-    _require(isinstance(body, dict), "native owner must be a concrete struct")
-    _require(not body.get("generics", {}).get("params"), "native owner cannot be generic")
     _require(item.get("span", {}).get("filename") == source,
              "native owner moved from its compiled source")
-    plain = body.get("kind", {}).get("plain")
-    _require(isinstance(plain, dict) and not plain.get("has_stripped_fields"),
-             "native owner requires a complete named-field graph")
-    fields = plain.get("fields", [])
-    _require(fields and len(fields) == len(set(map(str, fields))),
-             "native owner fields are missing or duplicated")
     module_identity = identity.rsplit("::", 1)[0]
     module_location = graph.locations.get(module_identity)
     _require(module_location is not None and module_location[0] == location[0],
@@ -136,15 +121,95 @@ def require_private_owner(graph, identity, source):
     else:
         _require(not module_body.get("is_crate"), "nested native module claims crate identity")
         private = {"restricted": {"parent": module["id"], "path": "::" + module_path}}
+    return location, item, private
+
+
+def _private_fields(graph, location, fields, private, *, positional=False):
+    _require(isinstance(fields, list) and fields
+             and all(field is not None for field in fields)
+             and len(fields) == len(set(map(str, fields))),
+             "native owner fields are missing, stripped or duplicated")
     result = []
-    for field_id in fields:
+    for index, field_id in enumerate(fields):
         field = graph._item(location[0], field_id)
         _require(field.get("visibility") == private
                  and set(field.get("inner", {})) == {"struct_field"}
                  and isinstance(field.get("name"), str),
                  "native owner field must remain private to its defining module")
+        if positional:
+            _require(field["name"] == str(index), "native tuple field position changed")
         result.append((field["name"], field["inner"]["struct_field"]))
     _require(len({name for name, _ in result}) == len(result), "duplicate native field name")
+    return tuple(result)
+
+
+def require_private_owner(graph, identity, source):
+    """Require complete private named fields; construction and field types are separate."""
+    location, item, private = _private_owner_context(graph, identity, source)
+    body = item.get("inner", {}).get("struct")
+    _require(isinstance(body, dict), "native owner must be a concrete struct")
+    _require(not body.get("generics", {}).get("params"), "native owner cannot be generic")
+    plain = body.get("kind", {}).get("plain")
+    _require(isinstance(plain, dict) and not plain.get("has_stripped_fields"),
+             "native owner requires a complete named-field graph")
+    return _private_fields(graph, location, plain.get("fields"), private)
+
+
+def require_private_tuple_owner(graph, identity, source):
+    """Expose every private tuple field; wrapping a payload grants no authority."""
+    location, item, private = _private_owner_context(graph, identity, source)
+    body = item.get("inner", {}).get("struct")
+    _require(isinstance(body, dict) and not body.get("generics", {}).get("params"),
+             "native tuple owner must be a concrete struct")
+    kind = body.get("kind", {})
+    _require(isinstance(kind, dict) and set(kind) == {"tuple"},
+             "native owner requires its exact tuple structure")
+    return tuple(ty for _, ty in _private_fields(
+        graph, location, kind["tuple"], private, positional=True,
+    ))
+
+
+def require_private_enum_owner(graph, identity, source):
+    """Expose a private owner's complete unit/tuple choices without classifying payloads.
+
+    Rust enum fields inherit visibility from the enum. Their rustdoc `default`
+    spelling is accepted only after checking that exact enclosing definition's
+    privacy and module membership. Numeric payloads remain visible obligations.
+    """
+    location, item, private = _private_owner_context(graph, identity, source)
+    _require(item.get("visibility") == private,
+             "native enum owner must remain private to its defining module")
+    body = item.get("inner", {}).get("enum")
+    _require(isinstance(body, dict) and not body.get("has_stripped_variants")
+             and not body.get("generics", {}).get("params"),
+             "native enum owner requires every concrete variant")
+    variants = body.get("variants")
+    _require(isinstance(variants, list) and variants
+             and all(variant is not None for variant in variants)
+             and len(variants) == len(set(map(str, variants))),
+             "native enum variants are missing, stripped or duplicated")
+    result = []
+    for variant_id in variants:
+        item = graph._item(location[0], variant_id)
+        _require(item.get("visibility") == "default"
+                 and set(item.get("inner", {})) == {"variant"}
+                 and isinstance(item.get("name"), str),
+                 "native variant must inherit the exact private enum owner")
+        variant = item["inner"]["variant"]
+        _require(variant.get("discriminant") is None,
+                 "native owner choice cannot introduce an explicit numeric discriminant")
+        kind = variant.get("kind")
+        if kind == "plain":
+            fields = ()
+        else:
+            _require(isinstance(kind, dict) and set(kind) == {"tuple"},
+                     "native owner choice requires its exact unit or tuple structure")
+            fields = tuple(ty for _, ty in _private_fields(
+                graph, location, kind["tuple"], "default", positional=True,
+            ))
+        result.append((item["name"], fields))
+    _require(len({name for name, _ in result}) == len(result),
+             "native enum variant names are duplicated")
     return tuple(result)
 
 
