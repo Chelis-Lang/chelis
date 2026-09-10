@@ -2170,7 +2170,7 @@ fn execution_artifact_from_compiled_observed(
                 .and_then(chelis_ir::host::preferred_tensor_entry_name);
             let preferred_entry_is_host = match preferred_entry {
                 Some(name) => {
-                    crate::target_capability::hip_entry_lane(compiled.checked(), name, Target::Hip)
+                    crate::target_capability::hip_entry_lane(compiled.checked(), name)
                         .map_err(unsupported_stage_error)?
                         == chelis_types::types::Lane::Host
                 }
