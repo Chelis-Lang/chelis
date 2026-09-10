@@ -2,6 +2,8 @@
 #ifndef CHELIS_DEVICE_DESCRIPTOR_H
 #define CHELIS_DEVICE_DESCRIPTOR_H
 #include "chelis_runtime_dtype.h"
+typedef int64_t chelis_device_metadata;
+typedef int32_t chelis_device_rank;
 
 typedef struct {
     void *data;

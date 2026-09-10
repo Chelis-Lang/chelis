@@ -3,6 +3,7 @@
 These pure controls test evidence rejection, not native boundary execution.
 The 37 actual Rust cases remain the separate executable acceptance matrix.
 """
+import copy
 import hashlib
 import json
 import os
@@ -18,6 +19,91 @@ import capacity_census_native_execution as execution
 
 
 class MatrixContractTests(unittest.TestCase):
+    def test_authority_identity_ignores_run_paths_but_binds_the_executed_contract(self):
+        packet = {
+            "schema": 1,
+            "source": {
+                "head": "current-head",
+                "common_source_sha256": "a" * 64,
+                "files": [{"path": "source.rs", "kind": "file", "sha256": "b" * 64}],
+            },
+            "selected": ["suite::test"],
+            "executed": [{"id": "suite::test", "outcome": "passed"}],
+            "binaries": [
+                {"path": f"/run-a/binary-{index}", "sha256": chr(99 + index) * 64}
+                for index in range(len(execution.GROUPS))
+            ],
+            "interpreter": {
+                "path": "/run-a/python",
+                "sha256": "i" * 64,
+                "prefix": "/run-a/venv",
+                "version": "Python test version",
+            },
+            "runtime": {
+                "cargo_artifact": "/run-a/libchelis_runtime.a",
+                "isolated_archive": "/run-a/isolated/libchelis_runtime.a",
+                "sha256": "r" * 64,
+            },
+            "captures": [
+                {
+                    "directory": "/run-a/capture",
+                    "test": "test",
+                    "fixture_kind": "host-foreign-abi",
+                    "library": {"path": "/run-a/model.so", "sha256": "l" * 64},
+                    "original_library": "/run-a/original/model.so",
+                    "completion_sha256": "m" * 64,
+                }
+            ],
+            "evidence": [{"path": "run-a.log", "sha256": "n" * 64}],
+            "limits": {"device": "simulated", "generated_c_link": "fixed"},
+        }
+        expected = execution.execution_identity(packet)
+        another_run = copy.deepcopy(packet)
+        for row in another_run["binaries"]:
+            row["path"] = row["path"].replace("/run-a/", "/run-b/")
+        another_run["interpreter"]["path"] = "/run-b/python"
+        another_run["interpreter"]["prefix"] = "/run-b/venv"
+        another_run["runtime"]["cargo_artifact"] = "/run-b/libchelis_runtime.a"
+        another_run["runtime"]["isolated_archive"] = "/run-b/isolated/libchelis_runtime.a"
+        another_run["captures"][0].update(
+            directory="/run-b/capture",
+            original_library="/run-b/original/model.so",
+            completion_sha256="z" * 64,
+        )
+        another_run["captures"][0]["library"] = {
+            "path": "/run-b/model.so",
+            "sha256": "y" * 64,
+        }
+        another_run["evidence"] = [{"path": "run-b.log", "sha256": "x" * 64}]
+        another_run["source"]["head"] = "committed-head"
+        another_run["source"]["files"].append(
+            {
+                "path": "spec/design/capacity_census_bindings.json",
+                "kind": "file",
+                "sha256": "w" * 64,
+            }
+        )
+        self.assertEqual(execution.execution_identity(another_run), expected)
+
+        mutations = (
+            (
+                "source",
+                lambda value: value["source"].update(common_source_sha256="0" * 64),
+            ),
+            ("selection", lambda value: value["selected"].append("suite::other")),
+            ("outcome", lambda value: value["executed"][0].update(outcome="failed")),
+            ("binary", lambda value: value["binaries"][0].update(sha256="0" * 64)),
+            ("interpreter", lambda value: value["interpreter"].update(sha256="0" * 64)),
+            ("runtime", lambda value: value["runtime"].update(sha256="0" * 64)),
+            ("capture", lambda value: value["captures"][0].update(test="other")),
+            ("limits", lambda value: value["limits"].update(device="hardware")),
+        )
+        for label, mutate in mutations:
+            changed = copy.deepcopy(packet)
+            mutate(changed)
+            with self.subTest(label=label):
+                self.assertNotEqual(execution.execution_identity(changed), expected)
+
     def test_fixed_worker_imports_current_helpers_with_safe_path_enabled(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()

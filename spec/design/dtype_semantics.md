@@ -573,7 +573,7 @@ integration tier, not the workspace loop.
 **Current enforcement status.** The primary census enforces canonical C
 identities, complete published-header attribution, conservative arithmetic
 classification, configuration-invariant declarations, and exact semantic
-registrations for numeric callables and stdlib constructors. Its 251 rows have
+registrations for numeric callables and stdlib constructors. Its 313 rows have
 final authority; none uses an exception disposition. The stdlib closure resolves
 imported and generic nominal types to a finite fixed point and rejects unresolved
 names. Its execution controls preserve the 84 exact [05-OP-35] identities.
@@ -589,10 +589,14 @@ changed covered identity must independently be `Nonnumeric`, `TaggedTransport`,
 or `NumericOperation(atom)`; a citation or maintainer override cannot supply
 missing authority.
 
-The registered-PyO3 baseline has nine final nonnumeric registrations, four final
-compiler-JSON tagged transports, and four legacy native signatures. Discovery
-follows their return values and reachable payloads; the four native rows still
-require migration.
+The registered-PyO3 baseline has nine final nonnumeric registrations, seven
+final tagged transports, and one exact numeric-operation registration. The
+tagged transports are the four compiler-JSON functions, the compiled-model
+tensor call, and the two DLPack methods; `NativeTensor.shape` binds to
+[05-OP-45]. Discovery follows every registration's return values and reachable
+payloads. Native authority additionally requires the current Rustdoc graph, MIR
+ownership proof, and exact native execution receipt; no binding row remains
+legacy.
 Unflagged signatures are not evidence of nonnumeric behavior. #1288 remains
 open until all families satisfy zero-exception acceptance on one integrated
 head. #1293 retains stdlib semantic alignment. The named entry commands below
@@ -877,7 +881,7 @@ Deliverables, with phase homes:
    | typed leg | artifact | live enumerator | command and expected success | standing red mutation |
    |---|---|---|---|---|
    | `wire-schema-numeric-fields` | Compiler/Python publication roots and their reachable typed graph | Actual graph, codec/admission, cache, publication and mutation execution through the private wire verifier | `cargo nextest run -p chelis-compiler-api --test capacity_census_wire`; `wire_schema_numeric_fields_match_the_reviewed_baseline` passes | Actual Rust-source graph mutations and `verified_wire_authority_cannot_be_replaced_by_a_descriptor_or_baseline` |
-   | `binding-raw-dtype-params` | `crates/chelis-python/src/lib.rs` registered PyO3 callables | live PyO3 signatures; nine nonnumeric and four compiler-JSON transport rows require input/return exposure, while four unchanged native legacy rows defer it | `cargo nextest run -p chelis-python --test capacity_census_bindings`; `registered_pyfunctions_match_the_reviewed_rustdoc_signatures` passes | `a_registered_pyfunction_with_a_raw_dtype_parameter_is_rejected` |
+   | `binding-raw-dtype-params` | `crates/chelis-python/src/lib.rs` registered PyO3 callables | live PyO3 signatures and reachable payloads; all 17 rows require current authority as nine nonnumeric registrations, seven exact tagged transports, or one exact numeric operation | `cargo nextest run -p chelis-python --test capacity_census_bindings`; `registered_pyfunctions_match_the_reviewed_rustdoc_signatures` passes | `a_registered_pyfunction_with_a_raw_dtype_parameter_is_rejected`; `final_binding_rows_cannot_regain_legacy_admission` |
 
    Each leg is a live enumerator, executable command, exact success
    condition, and mutation selection recorded in `coverage_manifest()`. The wire
@@ -895,8 +899,9 @@ Deliverables, with phase homes:
    defines the boundary; an arbitrary metadata tag does not establish it.
 
    Root identity, artifact routing and `HostReason` remain #912 work. The PyO3
-   signature leg still needs its separate return/payload discovery and native
-   runtime boundary migration. Deep stamping remains outside this wire work.
+   signature leg independently verifies return/payload discovery and native
+   runtime authority; it does not borrow authority from the wire leg. Deep
+   stamping remains outside this wire work.
 
    Binding-baseline dispositions (each entry is the C6 review a frozen
    descriptor-manifest update cites):
@@ -919,23 +924,31 @@ Deliverables, with phase homes:
    [05-OP-2]/[05-OP-34], not because any descriptor predates the ratchet.
    Typed wire and PyO3 rows follow the same structural/registration rule.
 
-   The primary baseline has completed that landing rule: its 251 discovered
-   rows have final authority as 66 exact nonnumeric rows, 16 exact tagged
-   carriers/transports, and 169 exact numeric-operation registrations. It has
+   The primary baseline has completed that landing rule: its 313 discovered
+   rows have final authority as 74 exact nonnumeric rows, 16 exact tagged
+   carriers/transports, and 223 exact numeric-operation registrations. It has
    zero grandfather, permanent-disposition, successor-override,
    integer-plumbing, or other transition rows. The wire baseline likewise has
    96 final rows (79 verified transports and 17 numeric operations), with no
    legacy cohort. Fresh actual verification includes WireDag v9's u64
    shape-dependency transport and fixed-extent literal-witness role.
-   Nine binding rows have final nonnumeric authority, four compiler-JSON rows have
-   final tagged-transport authority, and four native binding rows remain legacy
-   debt. These counts are
+   Nine binding rows have final nonnumeric authority, seven rows have final
+   tagged-transport authority, and `NativeTensor.shape` has exact
+   numeric-operation authority under [05-OP-45]. No binding row remains legacy.
+   These counts are
    current inventory evidence; executable enumeration and exact one-class
    matching remain the completion oracle.
 
+   The backend-header baseline has ten final rows discovered from the complete
+   HIP and Metal support roots under committed SDK fixtures. The generated
+   `chelis_gpu_tensor` packet is one exact tagged transport; the nine opaque
+   device-owner callables are exact [05-OP-33] numeric operations. Shared
+   runtime declarations retain their primary-baseline authority and are not
+   duplicated into the backend baseline.
+
    The final C/runtime authority partition is exact:
 
-   - `Nonnumeric` is the exact 66-descriptor registry. In particular, the
+   - `Nonnumeric` is the exact 74-descriptor registry. In particular, the
      `chelis_adt`, `chelis_dict`, `chelis_list`, `chelis_string`, and
      `chelis_tuple` retain/release pairs and `chelis_value_release` carry no
      numeric value or capacity and are registered here.
@@ -1669,8 +1682,8 @@ Rustdoc owner/function/span, and binds the source bytes into final identities.
 Renamed getters, setters, functions and methods keep their implementing Rust
 identity; an unrelated same-named helper cannot supply it. Conditional,
 macro-generated or dynamic registration forms fail closed until their
-provenance is implemented. The unchanged legacy rows also retain their exact
-Rust implementation and callable kind. Source JSON
+provenance is implemented. Native rows additionally retain their exact Rust
+implementation and callable kind. Source JSON
 authority applies only to its typed payload subtree, including through aliases
 and generic containers; sibling text results require their own contract.
 
@@ -1685,18 +1698,23 @@ constructor rejection controls and compiled MIR ownership controls. Static
 descriptors and baseline graph hashes cannot construct this witness. The
 adapter source, execution evidence and census integration form one slice:
 changing a Rust signature alone cannot retire a numeric binding row. This
-proof confers no authority on the four remaining native binding methods.
+proof supplies authority only to those four compiler-JSON transports.
 
-The binding baseline retains four unchanged legacy rows: the compiled-model call
-and three native-tensor methods. Discovery records both input
-and return capacity, alias/container/nominal closure and unsupported dynamic
-payloads for all registered methods. Final and new rows must pass this stronger
-discovery; only an exact unchanged member of the four-row remainder can defer
-it. Their old flags are not widened. This activation establishes compiler-JSON
-transport admission but does not establish complete binding closure. The
+The native binding verifier separately joins checked live PyO3 registration,
+the current Rustdoc graph, compiler-derived MIR ownership, and exact native
+execution. Its stable execution identity binds the common source, selected and
+executed outcomes, test binaries, runtime and interpreter identities, the
+capture matrix, and limits while excluding temporary run paths. The
+compiled-model call and two DLPack methods have exact tagged-transport
+authority; `NativeTensor.shape` has exact numeric-operation authority under
+[05-OP-45]. A static descriptor, baseline hash, or copied receipt cannot
+construct the sealed witness. Discovery records both input and return capacity,
+alias/container/nominal closure and unsupported dynamic payloads for every
+registered method. This activation establishes complete zero-legacy binding
+closure. The
 executable checks are `cargo nextest run -p chelis-python --test capacity_census_bindings`
 and `--test binding_payloads`, including malformed input, missing/duplicate
-registration, retired-exception revival, f64-return, reachable-width and
+registration, legacy-revival, f64-return, reachable-width and
 unsupported-payload controls.
 
 The compiled-library manifest has one shared serialized definition,
@@ -1708,10 +1726,9 @@ copy cannot substitute for that discovery or its codec execution evidence.
 
 Binding discovery must follow registered methods and return-container capacity,
 and each numeric transport must bind the actual producer/consumer contract.
-The full-shape getter and the three native tensor transport methods depend on
-#893/#1345's validated wrappers and #889's checked metadata adoption. A
-compiler-JSON binding slice can ship independently; a public unvalidated
-native wrapper cannot stand in for the missing tensor boundary. DLPack keyword
+The full-shape getter, compiled-model call, and two DLPack methods use
+#893/#1345's validated wrappers and #889's checked metadata adoption. A public
+unvalidated native wrapper cannot stand in for that tensor boundary. DLPack keyword
 validation follows the external protocol, including version/device/stream/copy
 semantics; a supported current-device zero-copy path does not authorize ignored
 keywords or promise every optional move/copy path.

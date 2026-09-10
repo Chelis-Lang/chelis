@@ -1008,6 +1008,27 @@ in the same cutover; neither the generated packet nor this plan grants numeric
 authority. Any further public callable or field requires its owning [05-OP-N]
 rule and exact registration before implementation.
 
+This delivery moves the Phase 0 coverage freeze without changing its immutable
+358-row foundation. The source universe grows from 74 to 80 files: the generated
+device packet, opaque owner header and C++ companion, Python DLPack and native
+owner modules, and the standalone generated host-view header. The C/C++ scanner
+uses one fixed C++17 lane with the committed HIP/hipBLAS and standard-library
+fixtures; adding a `.cpp` under a backend runtime root is covered by the existing
+unregistered-source mutation.
+
+Exactly 35 new scanner rows are final forms rather than transition debt: the 13
+field/carrier observations of the generated packet, nine private opaque-owner
+operations, four immutable metadata-plan shape/stride projections, six validated
+Python ingress/owner observations, and three HIP emitter projections that consume
+the closed dtype contract. The freeze names every path, kind, and owner; a rename,
+new owner, or additional row remains unclassified. A typed cast of an existing
+descriptor `data` access keeps that access's frozen identity and records the cast
+in its sample instead of manufacturing a second debt class. Forty-six retired
+fixed-rank, narrow, handwritten descriptor and raw-owner identities are deleted
+from the active ledger, leaving 244 active Phase 3/4 rows. Generated-layout
+freshness, metadata/device execution, binding execution, and the backend-header
+capacity census are the executable authority for these final forms.
+
 ## C4. Validated typed tensor access
 
 The runtime moves the raw descriptor into a `tensor_storage` module. Its fields,
@@ -1562,6 +1583,18 @@ uv run --managed-python --python 3.11 --no-project python \
 ```
 
 Final line: `RUNTIME REPRESENTATION PHASE 2: PASS`.
+
+The implementation is `scripts/runtime_representation_phase2.py`.
+`runtime_representation_phase2_tests.json` freezes five Python contract cases
+and 273 current Rust selections: 33 shared-ABI tests, six metadata-plan C API
+tests, 79 HIP descriptor/owner tests, 145 Python binding tests, and ten
+backend-header census tests. The command first obtains a complete fresh Phase 1
+receipt, then lists and executes each Phase 2 cohort with zero retries and
+verifies unchanged test artifacts and source identity. The only recorded
+non-execution is the exact HIP hardware command above; CPU SDK-fixture execution
+does not relabel it as hardware evidence. Hosted CI advances the stable
+`runtime-representation-phase0-oracle` job identity to this command and uploads
+both Phase 1 and Phase 2 receipts.
 
 ## Phase 3 — typed host runtime access and the field seal
 

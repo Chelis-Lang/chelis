@@ -556,7 +556,7 @@ impl HipEmitter {
         let expected_outputs = output_specs.len();
 
         self.line(&format!(
-            "extern \"C\" void {func_name}_device(const chelis_device_tensor_owner *const *inputs, int32_t n_in, chelis_device_tensor_owner **outputs, int32_t n_out) {{"
+            "extern \"C\" void {func_name}_device(const chelis_device_tensor_owner *const *inputs, chelis_device_rank n_in, chelis_device_tensor_owner **outputs, chelis_device_rank n_out) {{"
         ));
         self.indent = 1;
 
@@ -586,7 +586,7 @@ impl HipEmitter {
         self.line("if ((n_in > 0 && inputs == NULL) || (n_out > 0 && outputs == NULL)) chelis_numeric_trap(\"numeric trap: domain in entry at int64\");");
         self.line("int current_device = 0;");
         self.line("CHELIS_HIP_CHECK(hipGetDevice(&current_device));");
-        self.line("for (int32_t slot = 0; slot < n_in; ++slot) if (chelis_device_tensor_device(inputs[slot]) != current_device) chelis_numeric_trap(\"numeric trap: domain in device_entry at int64\");");
+        self.line("for (chelis_device_rank slot = 0; slot < n_in; ++slot) if (chelis_device_tensor_device(inputs[slot]) != current_device) chelis_numeric_trap(\"numeric trap: domain in device_entry at int64\");");
         self.emit_input_shape_preamble_device(dag, input_slots, func_name);
         self.emit_reshape_count_preflight(dag);
         self.line("");
@@ -845,7 +845,7 @@ impl HipEmitter {
             let binding_name_fmt =
                 chelis_ir::span_sanitize::sanitize_for_format_string(&binding.name);
             self.line(&format!(
-                "int64_t {} = chelis_tensor_shape(inputs[{canonical_slot}], {canonical_axis});",
+                "chelis_device_metadata {} = chelis_tensor_shape(inputs[{canonical_slot}], {canonical_axis});",
                 binding.name
             ));
             for occurrence in &binding.others {
@@ -899,7 +899,7 @@ impl HipEmitter {
             self.line("}");
         }
 
-        // Host allocation consumes the published runtime ABI's int64_t shape
+        // Host allocation consumes the published runtime ABI's chelis_device_metadata shape
         // carrier. Keep these declarations in the already-classified shape
         // preamble; device allocations below deliberately retain int[].
         for (slot, output) in output_specs.iter().enumerate() {
@@ -921,7 +921,7 @@ impl HipEmitter {
                 dims.join(", ")
             };
             self.line(&format!(
-                "int64_t chelis_output_shape_{slot}[{}] = {{ {shape} }};",
+                "chelis_device_metadata chelis_output_shape_{slot}[{}] = {{ {shape} }};",
                 Self::ndim(&node.output_type).max(1)
             ));
         }
@@ -992,7 +992,7 @@ impl HipEmitter {
             let binding_name_fmt =
                 chelis_ir::span_sanitize::sanitize_for_format_string(&binding.name);
             self.line(&format!(
-                "int64_t {} = input_view_{canonical_slot}->shape[{canonical_axis}];",
+                "chelis_device_metadata {} = input_view_{canonical_slot}->shape[{canonical_axis}];",
                 binding.name
             ));
             for occurrence in &binding.others {
@@ -2432,7 +2432,9 @@ impl HipEmitter {
                 ));
             }
         }
-        self.line(&format!("int64_t fill_size = d_t{id}->count;"));
+        self.line(&format!(
+            "chelis_device_metadata fill_size = d_t{id}->count;"
+        ));
         self.line(&format!(
             "void *fill_args[] = {{ &p_t{id}, &fill_val, &fill_size }};"
         ));
@@ -2466,7 +2468,9 @@ impl HipEmitter {
                 // temporary then hipMemcpy to device. For simplicity,
                 // reuse the fill kernel per-element is too slow; instead
                 // build a host-side buffer and copy.
-                self.line(&format!("int64_t fill_size = d_t{id}->count;"));
+                self.line(&format!(
+                    "chelis_device_metadata fill_size = d_t{id}->count;"
+                ));
                 self.line(&format!(
                     "float *__host_data = (float*)malloc({}u * sizeof(float));",
                     data.len()
@@ -2484,7 +2488,9 @@ impl HipEmitter {
                 self.line("free(__host_data);");
             }
             kernels::ElemKind::F64 => {
-                self.line(&format!("int64_t fill_size = d_t{id}->count;"));
+                self.line(&format!(
+                    "chelis_device_metadata fill_size = d_t{id}->count;"
+                ));
                 self.line(&format!(
                     "double *__host_data = (double*)malloc({}u * sizeof(double));",
                     data.len()
@@ -2555,22 +2561,30 @@ impl HipEmitter {
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int64_t t{id}_size = d_t{id}->count;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_size = d_t{id}->count;"
+        ));
         // Stride params for a (8 ints)
         self.emit_stride_vars(id, "a", a);
-        self.line(&format!("int64_t t{id}_a_ndim = d_t{a}->rank;"));
         self.line(&format!(
-            "int64_t t{id}_a_size = (d_t{a}->byte_capacity / chelis_dtype_size(d_t{a}->dtype));"
+            "chelis_device_metadata t{id}_a_ndim = d_t{a}->rank;"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_a_size = (d_t{a}->byte_capacity / chelis_dtype_size(d_t{a}->dtype));"
         ));
         // Stride params for b (8 ints)
         self.emit_stride_vars(id, "b", b);
-        self.line(&format!("int64_t t{id}_b_ndim = d_t{b}->rank;"));
         self.line(&format!(
-            "int64_t t{id}_b_size = (d_t{b}->byte_capacity / chelis_dtype_size(d_t{b}->dtype));"
+            "chelis_device_metadata t{id}_b_ndim = d_t{b}->rank;"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_b_size = (d_t{b}->byte_capacity / chelis_dtype_size(d_t{b}->dtype));"
         ));
         // Shape params for output (8 ints)
         self.emit_shape_vars(id, "out", id);
-        self.line(&format!("int64_t t{id}_out_ndim = d_t{id}->rank;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_out_ndim = d_t{id}->rank;"
+        ));
         // Build args array
         self.line(&format!(
             "void *args[] = {{ &p_t{a}, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
@@ -2608,16 +2622,22 @@ impl HipEmitter {
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int64_t t{id}_size = d_t{id}->count;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_size = d_t{id}->count;"
+        ));
         for (name, source) in [("a", a), ("b", b), ("g", g)] {
             self.emit_stride_vars(id, name, source);
-            self.line(&format!("int64_t t{id}_{name}_ndim = d_t{source}->rank;"));
             self.line(&format!(
-                "int64_t t{id}_{name}_size = (d_t{source}->byte_capacity / chelis_dtype_size(d_t{source}->dtype));"
+                "chelis_device_metadata t{id}_{name}_ndim = d_t{source}->rank;"
+            ));
+            self.line(&format!(
+                "chelis_device_metadata t{id}_{name}_size = (d_t{source}->byte_capacity / chelis_dtype_size(d_t{source}->dtype));"
             ));
         }
         self.emit_shape_vars(id, "out", id);
-        self.line(&format!("int64_t t{id}_out_ndim = d_t{id}->rank;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_out_ndim = d_t{id}->rank;"
+        ));
         self.line(&format!(
             "void *args[] = {{ &p_t{a}, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
              &p_t{b}, {b_stride_refs}, &t{id}_b_ndim, &t{id}_b_size, \
@@ -2654,14 +2674,20 @@ impl HipEmitter {
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int64_t t{id}_size = d_t{id}->count;"));
-        self.emit_stride_vars(id, "a", a);
-        self.line(&format!("int64_t t{id}_a_ndim = d_t{a}->rank;"));
         self.line(&format!(
-            "int64_t t{id}_a_size = (d_t{a}->byte_capacity / chelis_dtype_size(d_t{a}->dtype));"
+            "chelis_device_metadata t{id}_size = d_t{id}->count;"
+        ));
+        self.emit_stride_vars(id, "a", a);
+        self.line(&format!(
+            "chelis_device_metadata t{id}_a_ndim = d_t{a}->rank;"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_a_size = (d_t{a}->byte_capacity / chelis_dtype_size(d_t{a}->dtype));"
         ));
         self.emit_shape_vars(id, "out", id);
-        self.line(&format!("int64_t t{id}_out_ndim = d_t{id}->rank;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_out_ndim = d_t{id}->rank;"
+        ));
         self.line(&format!(
             "void *args[] = {{ &p_t{a}, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
              &p_t{id}, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
@@ -2718,9 +2744,13 @@ impl HipEmitter {
             }
         }
         self.line(&format!("unsigned long long t{id}_seed = {seed}ULL;"));
-        self.line(&format!("int64_t t{id}_size = d_t{id}->count;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_size = d_t{id}->count;"
+        ));
         self.emit_shape_vars(id, "out", id);
-        self.line(&format!("int64_t t{id}_out_ndim = d_t{id}->rank;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_out_ndim = d_t{id}->rank;"
+        ));
         self.line(&format!(
             "void *args[] = {{ &t{id}_low, &t{id}_high, &t{id}_seed, &p_t{id}, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
             out_shape_refs = self.shape_arg_refs(id, "out"),
@@ -2740,7 +2770,9 @@ impl HipEmitter {
     fn emit_logical_metadata_args(&mut self, id: usize, prefix: &str, source: usize) -> String {
         self.emit_shape_vars(id, prefix, source);
         self.emit_stride_vars(id, prefix, source);
-        self.line(&format!("int64_t t{id}_{prefix}_ndim = d_t{source}->rank;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_{prefix}_ndim = d_t{source}->rank;"
+        ));
         format!(
             "{}, {}, &t{id}_{prefix}_ndim",
             self.shape_arg_refs(id, prefix),
@@ -2754,8 +2786,12 @@ impl HipEmitter {
         self.indent += 1;
         self.emit_stride_vars(id, "copy", source);
         self.emit_shape_vars(id, "copy", source);
-        self.line(&format!("int64_t t{id}_copy_rank = d_t{source}->rank;"));
-        self.line(&format!("int64_t t{id}_copy_count = d_t{id}->count;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_copy_rank = d_t{source}->rank;"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_copy_count = d_t{id}->count;"
+        ));
         self.line(&format!("void *copy_args[] = {{ &p_t{source}, {}, {}, &t{id}_copy_rank, &p_t{id}, &t{id}_copy_count }};", self.stride_arg_refs(id, "copy"), self.shape_arg_refs(id, "copy")));
         let name = format!("kernel_materialize_{id}");
         self.emit_kernel_launch_expr(
@@ -2773,14 +2809,14 @@ impl HipEmitter {
         let plan = format!("sparse_geometry{id}");
         self.emit_metadata_plan(&plan, ty, None, "0");
         self.line(&format!(
-            "int64_t t{id}_axis_size = chelis_metadata_plan_shape({plan})[{axis}];"
+            "chelis_device_metadata t{id}_axis_size = chelis_metadata_plan_shape({plan})[{axis}];"
         ));
         self.line(&format!(
-            "int64_t t{id}_after = chelis_metadata_plan_strides({plan})[{axis}];"
+            "chelis_device_metadata t{id}_after = chelis_metadata_plan_strides({plan})[{axis}];"
         ));
         // An empty source admits no logical read. Avoid dividing by its zero
         // extent/stride; the bounds check rejects any attempted index into it.
-        self.line(&format!("int64_t t{id}_before = 0;"));
+        self.line(&format!("chelis_device_metadata t{id}_before = 0;"));
         self.line(&format!("if (chelis_metadata_plan_count({plan}) != 0) t{id}_before = chelis_metadata_plan_count({plan}) / t{id}_axis_size / t{id}_after;"));
         self.line(&format!("chelis_metadata_plan_release({plan});"));
     }
@@ -2824,8 +2860,12 @@ impl HipEmitter {
         self.line("{");
         self.indent += 1;
         self.emit_sparse_geometry(id, axis, values_ty);
-        self.line(&format!("int64_t t{id}_index_count = d_t{indices}->count;"));
-        self.line(&format!("int64_t t{id}_total = d_t{id}->count;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_index_count = d_t{indices}->count;"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_total = d_t{id}->count;"
+        ));
         let values_metadata = self.emit_logical_metadata_args(id, "values", values);
         let indices_metadata = self.emit_logical_metadata_args(id, "idx", indices);
         self.line(&format!(
@@ -2887,8 +2927,12 @@ impl HipEmitter {
         self.indent += 1;
         self.emit_materialize_into_slot(id, target);
         self.emit_sparse_geometry(id, axis, target_ty);
-        self.line(&format!("int64_t t{id}_index_count = d_t{indices}->count;"));
-        self.line(&format!("int64_t t{id}_total = d_t{updates}->count;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_index_count = d_t{indices}->count;"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_total = d_t{updates}->count;"
+        ));
         let indices_metadata = self.emit_logical_metadata_args(id, "idx", indices);
         let updates_metadata = self.emit_logical_metadata_args(id, "updates", updates);
         self.line(&format!(
@@ -2955,8 +2999,12 @@ impl HipEmitter {
         self.indent += 1;
         self.emit_materialize_into_slot(id, target);
         self.emit_sparse_geometry(id, axis, target_ty);
-        self.line(&format!("int64_t t{id}_index_count = d_t{indices}->count;"));
-        self.line(&format!("int64_t t{id}_total = d_t{updates}->count;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_index_count = d_t{indices}->count;"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_total = d_t{updates}->count;"
+        ));
         let indices_metadata = self.emit_logical_metadata_args(id, "idx", indices);
         let updates_metadata = self.emit_logical_metadata_args(id, "updates", updates);
         self.line(&format!(
@@ -3014,10 +3062,16 @@ impl HipEmitter {
         self.emit_materialize_into_slot(id, data);
         self.emit_shape_vars(id, "idx", indices);
         self.emit_shape_vars(id, "out", id);
-        self.line(&format!("int64_t t{id}_ndim = d_t{id}->rank;"));
-        self.line(&format!("int64_t t{id}_axis = {axis};"));
-        self.line(&format!("int64_t t{id}_axis_size = {axis_size};"));
-        self.line(&format!("int64_t t{id}_total = d_t{updates}->count;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_ndim = d_t{id}->rank;"
+        ));
+        self.line(&format!("chelis_device_metadata t{id}_axis = {axis};"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_axis_size = {axis_size};"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_total = d_t{updates}->count;"
+        ));
         let idx_sh_refs = self.shape_arg_refs(id, "idx");
         let out_sh_refs = self.shape_arg_refs(id, "out");
         self.emit_stride_vars(id, "idx", indices);
@@ -3055,22 +3109,29 @@ impl HipEmitter {
         }
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int64_t t{id}_size = d_t{id}->count;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_size = d_t{id}->count;"
+        ));
 
         // Emit stride vars for each external input
         for (i, inp) in inputs.iter().enumerate() {
             let pfx = format!("ext{i}");
             self.emit_stride_vars(id, &pfx, inp.0);
-            self.line(&format!("int64_t t{id}_{pfx}_ndim = d_t{}->rank;", inp.0));
             self.line(&format!(
-                "int64_t t{id}_{pfx}_size = d_t{src}->byte_capacity / chelis_dtype_size(d_t{src}->dtype);",
+                "chelis_device_metadata t{id}_{pfx}_ndim = d_t{}->rank;",
+                inp.0
+            ));
+            self.line(&format!(
+                "chelis_device_metadata t{id}_{pfx}_size = d_t{src}->byte_capacity / chelis_dtype_size(d_t{src}->dtype);",
                 src = inp.0
             ));
         }
 
         // Emit shape vars for output
         self.emit_shape_vars(id, "out", id);
-        self.line(&format!("int64_t t{id}_out_ndim = d_t{id}->rank;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_out_ndim = d_t{id}->rank;"
+        ));
 
         // Build args array
         let mut arg_parts = Vec::new();
@@ -3136,7 +3197,7 @@ impl HipEmitter {
         self.line(&format!(
             "bool contiguous_t{id} = d_t{reusable}->rank == chelis_metadata_plan_rank(plan_t{id});"
         ));
-        self.line(&format!("for (int32_t axis = 0; contiguous_t{id} && axis < d_t{reusable}->rank; ++axis) contiguous_t{id} = d_t{reusable}->strides[axis] == chelis_metadata_plan_strides(plan_t{id})[axis];"));
+        self.line(&format!("for (chelis_device_rank axis = 0; contiguous_t{id} && axis < d_t{reusable}->rank; ++axis) contiguous_t{id} = d_t{reusable}->strides[axis] == chelis_metadata_plan_strides(plan_t{id})[axis];"));
         self.line(&format!("chelis_device_tensor_owner *o_t{id};"));
         self.line(&format!("if (contiguous_t{id}) {{"));
         self.indent += 1;
@@ -3239,15 +3300,23 @@ impl HipEmitter {
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int64_t t{id}_out_size = d_t{id}->count;"));
-        self.line(&format!("int64_t t{id}_axis_size = d_t{a}->shape[{axis}];"));
-        self.emit_stride_vars(id, "a", a);
-        self.line(&format!("int64_t t{id}_a_ndim = d_t{a}->rank;"));
         self.line(&format!(
-            "int64_t t{id}_a_size = (d_t{a}->byte_capacity / chelis_dtype_size(d_t{a}->dtype));"
+            "chelis_device_metadata t{id}_out_size = d_t{id}->count;"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_axis_size = d_t{a}->shape[{axis}];"
+        ));
+        self.emit_stride_vars(id, "a", a);
+        self.line(&format!(
+            "chelis_device_metadata t{id}_a_ndim = d_t{a}->rank;"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_a_size = (d_t{a}->byte_capacity / chelis_dtype_size(d_t{a}->dtype));"
         ));
         self.emit_shape_vars(id, "out", id);
-        self.line(&format!("int64_t t{id}_out_ndim = d_t{id}->rank;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_out_ndim = d_t{id}->rank;"
+        ));
         self.line(&format!(
             "void *args[] = {{ &p_t{a}, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
              &p_t{id}, {out_shape_refs}, &t{id}_out_ndim, &t{id}_out_size, &t{id}_axis_size }};",
@@ -3301,15 +3370,23 @@ impl HipEmitter {
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int64_t t{id}_out_size = d_t{id}->count;"));
-        self.line(&format!("int64_t t{id}_axis_size = d_t{a}->shape[{axis}];"));
-        self.emit_stride_vars(id, "a", a);
-        self.line(&format!("int64_t t{id}_a_ndim = d_t{a}->rank;"));
         self.line(&format!(
-            "int64_t t{id}_a_size = (d_t{a}->byte_capacity / chelis_dtype_size(d_t{a}->dtype));"
+            "chelis_device_metadata t{id}_out_size = d_t{id}->count;"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_axis_size = d_t{a}->shape[{axis}];"
+        ));
+        self.emit_stride_vars(id, "a", a);
+        self.line(&format!(
+            "chelis_device_metadata t{id}_a_ndim = d_t{a}->rank;"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_a_size = (d_t{a}->byte_capacity / chelis_dtype_size(d_t{a}->dtype));"
         ));
         self.emit_shape_vars(id, "out", id);
-        self.line(&format!("int64_t t{id}_out_ndim = d_t{id}->rank;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_out_ndim = d_t{id}->rank;"
+        ));
         self.line(&format!(
             "void *args[] = {{ &p_t{a}, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
              &p_t{id}, {out_shape_refs}, &t{id}_out_ndim, &t{id}_out_size, &t{id}_axis_size }};",
@@ -3357,9 +3434,11 @@ impl HipEmitter {
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int64_t t{id}_out_size = d_t{id}->count;"));
         self.line(&format!(
-            "int64_t t{id}_axis_size = d_t{}->shape[{axis}];",
+            "chelis_device_metadata t{id}_out_size = d_t{id}->count;"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_axis_size = d_t{}->shape[{axis}];",
             reduction_inputs[0].0
         ));
 
@@ -3367,16 +3446,21 @@ impl HipEmitter {
         for (i, inp) in ext_inputs.iter().enumerate() {
             let pfx = format!("ext{i}");
             self.emit_stride_vars(id, &pfx, inp.0);
-            self.line(&format!("int64_t t{id}_{pfx}_ndim = d_t{}->rank;", inp.0));
             self.line(&format!(
-                "int64_t t{id}_{pfx}_size = d_t{src}->byte_capacity / chelis_dtype_size(d_t{src}->dtype);",
+                "chelis_device_metadata t{id}_{pfx}_ndim = d_t{}->rank;",
+                inp.0
+            ));
+            self.line(&format!(
+                "chelis_device_metadata t{id}_{pfx}_size = d_t{src}->byte_capacity / chelis_dtype_size(d_t{src}->dtype);",
                 src = inp.0
             ));
         }
 
         // Emit shape vars for output
         self.emit_shape_vars(id, "out", id);
-        self.line(&format!("int64_t t{id}_out_ndim = d_t{id}->rank;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_out_ndim = d_t{id}->rank;"
+        ));
 
         // Build args array: ext inputs + output
         let mut arg_parts = Vec::new();
@@ -3512,7 +3596,7 @@ impl HipEmitter {
             );
             let last_batch_axis = matrix_axis - 1;
             self.line(&format!(
-                "int64_t t{id}_batch_count = d_t{id}->count / {m_expr} / {n_expr};"
+                "chelis_device_metadata t{id}_batch_count = d_t{id}->count / {m_expr} / {n_expr};"
             ));
             self.line(&format!("{call}(d_t{a}, d_t{b}, d_t{id}, {m_expr}, {n_expr}, {k_expr}, t{id}_batch_count, d_t{a}->strides[{last_batch_axis}], d_t{b}->strides[{last_batch_axis}], d_t{id}->strides[{last_batch_axis}]);"));
         } else {
@@ -3551,8 +3635,12 @@ impl HipEmitter {
         self.indent += 1;
         self.emit_stride_vars(id, "a", a);
         self.emit_shape_vars(id, "a", a);
-        self.line(&format!("int64_t t{id}_a_ndim = d_t{a}->rank;"));
-        self.line(&format!("int64_t t{id}_size = d_t{id}->count;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_a_ndim = d_t{a}->rank;"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_size = d_t{id}->count;"
+        ));
         self.line(&format!(
             "void *args[] = {{ &p_t{a}, {}, {}, &t{id}_a_ndim, &p_t{id}, &t{id}_size }};",
             self.stride_arg_refs(id, "a"),
@@ -3617,14 +3705,16 @@ impl HipEmitter {
         self.emit_strided_view(id, ty, &format!("d_t{a}"), &strides);
     }
 
-    /// Emit per-axis `int64_t t{node_id}_{prefix}{0..7} = <val>;` constants
+    /// Emit per-axis `chelis_device_metadata t{node_id}_{prefix}{0..7} = <val>;` constants
     /// from a compile-time vector, zero-padding the unused trailing axes.
     /// Used by `pad`/`shrink` for the low-padding / start-offset vectors,
     /// which are pinned in the `RiscOp` (not read from runtime metadata).
     fn emit_axis_const_vars(&mut self, node_id: usize, prefix: &str, values: &[usize]) {
         for i in 0..self.kernel_rank {
             let v = values.get(i).copied().unwrap_or(0);
-            self.line(&format!("int64_t t{node_id}_{prefix}{i} = {v};"));
+            self.line(&format!(
+                "chelis_device_metadata t{node_id}_{prefix}{i} = {v};"
+            ));
         }
     }
 
@@ -3666,11 +3756,15 @@ impl HipEmitter {
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int64_t t{id}_size = d_t{id}->count;"));
-        self.emit_stride_vars(id, "a", a);
-        self.line(&format!("int64_t t{id}_a_ndim = d_t{a}->rank;"));
         self.line(&format!(
-            "int64_t t{id}_a_size = (d_t{a}->byte_capacity / chelis_dtype_size(d_t{a}->dtype));"
+            "chelis_device_metadata t{id}_size = d_t{id}->count;"
+        ));
+        self.emit_stride_vars(id, "a", a);
+        self.line(&format!(
+            "chelis_device_metadata t{id}_a_ndim = d_t{a}->rank;"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_a_size = (d_t{a}->byte_capacity / chelis_dtype_size(d_t{a}->dtype));"
         ));
         self.emit_axis_const_vars(id, "lo", &lo);
         // Source shape is read from runtime metadata so symbolic/strided
@@ -3678,7 +3772,9 @@ impl HipEmitter {
         self.emit_shape_vars(id, "srcsh", a);
         self.emit_typed_scalar_local(&format!("t{id}_fill"), fill);
         self.emit_shape_vars(id, "out", id);
-        self.line(&format!("int64_t t{id}_out_ndim = d_t{id}->rank;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_out_ndim = d_t{id}->rank;"
+        ));
         self.line(&format!(
             "void *args[] = {{ &p_t{a}, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
              {lo_refs}, {srcsh_refs}, &t{id}_fill, \
@@ -3722,15 +3818,21 @@ impl HipEmitter {
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int64_t t{id}_size = d_t{id}->count;"));
-        self.emit_stride_vars(id, "a", a);
-        self.line(&format!("int64_t t{id}_a_ndim = d_t{a}->rank;"));
         self.line(&format!(
-            "int64_t t{id}_a_size = (d_t{a}->byte_capacity / chelis_dtype_size(d_t{a}->dtype));"
+            "chelis_device_metadata t{id}_size = d_t{id}->count;"
+        ));
+        self.emit_stride_vars(id, "a", a);
+        self.line(&format!(
+            "chelis_device_metadata t{id}_a_ndim = d_t{a}->rank;"
+        ));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_a_size = (d_t{a}->byte_capacity / chelis_dtype_size(d_t{a}->dtype));"
         ));
         self.emit_axis_const_vars(id, "start", &start);
         self.emit_shape_vars(id, "out", id);
-        self.line(&format!("int64_t t{id}_out_ndim = d_t{id}->rank;"));
+        self.line(&format!(
+            "chelis_device_metadata t{id}_out_ndim = d_t{id}->rank;"
+        ));
         self.line(&format!(
             "void *args[] = {{ &p_t{a}, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
              {start_refs}, \
@@ -3805,20 +3907,20 @@ impl HipEmitter {
     // Stride/shape variable helpers
     // ------------------------------------------------------------------
 
-    /// Emit `int64_t t{node_id}_{prefix}_s{0..7} = d_t{src_id}->strides[i];` for MAX_DIM dims.
+    /// Emit `chelis_device_metadata t{node_id}_{prefix}_s{0..7} = d_t{src_id}->strides[i];` for MAX_DIM dims.
     fn emit_stride_vars(&mut self, node_id: usize, prefix: &str, src_id: usize) {
         for i in 0..self.kernel_rank {
             self.line(&format!(
-                "int64_t t{node_id}_{prefix}_s{i} = ({i} < d_t{src_id}->rank) ? d_t{src_id}->strides[{i}] : 0;"
+                "chelis_device_metadata t{node_id}_{prefix}_s{i} = ({i} < d_t{src_id}->rank) ? d_t{src_id}->strides[{i}] : 0;"
             ));
         }
     }
 
-    /// Emit `int64_t t{node_id}_{prefix}_sh{0..7} = d_t{src_id}->shape[i];` for MAX_DIM dims.
+    /// Emit `chelis_device_metadata t{node_id}_{prefix}_sh{0..7} = d_t{src_id}->shape[i];` for MAX_DIM dims.
     fn emit_shape_vars(&mut self, node_id: usize, prefix: &str, src_id: usize) {
         for i in 0..self.kernel_rank {
             self.line(&format!(
-                "int64_t t{node_id}_{prefix}_sh{i} = ({i} < d_t{src_id}->rank) ? d_t{src_id}->shape[{i}] : 0;"
+                "chelis_device_metadata t{node_id}_{prefix}_sh{i} = ({i} < d_t{src_id}->rank) ? d_t{src_id}->shape[{i}] : 0;"
             ));
         }
     }

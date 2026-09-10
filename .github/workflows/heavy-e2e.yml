@@ -337,7 +337,7 @@ jobs:
         run: .venv/bin/python scripts/compiled_value_ownership_oracle.py --phase launch
 
   runtime-representation-phase0-oracle:
-    name: Runtime Representation Phase 1 Oracle
+    name: Runtime Representation Phase 2 Oracle
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -379,8 +379,10 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: runtime-representation-phase1-receipts
-          path: target/runtime-representation-phase1/
+          name: runtime-representation-phase2-receipts
+          path: |
+            target/runtime-representation-phase1/
+            target/runtime-representation-phase2/
           if-no-files-found: error
           retention-days: 14
 

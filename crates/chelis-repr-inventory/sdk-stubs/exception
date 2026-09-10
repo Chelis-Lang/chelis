@@ -1,0 +1,9 @@
+#ifndef CHELIS_STUB_EXCEPTION
+#define CHELIS_STUB_EXCEPTION
+namespace std {
+class exception {
+public:
+    virtual const char *what() const noexcept;
+};
+}
+#endif

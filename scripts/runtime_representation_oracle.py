@@ -15,7 +15,7 @@ kernel behavior. It proves three things and nothing more:
 
 The inventory's completeness claim is over `INVENTORY_SOURCES`: an explicit,
 reviewed list of the repository files that can carry a representation seam.
-Sixty-seven are Rust and seven are C or Objective-C headers. A completeness
+Sixty-nine are Rust and eleven are C, C++, or Objective-C sources. A completeness
 claim stated over a *language* instead cannot be discharged, because a reviewer
 can always name one more construct; stated over a file list it is decidable,
 and `_assert_source_list_current` proves the list still equals the tracked
@@ -63,7 +63,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "b98c8b64a15af0e3d8395b86b98c1729af6b5253b7f7de8faea83cfd1746567f"
+FREEZE_SHA256 = "7128384269faf0efe51170ff641f21fc2bc378dad045213353e478b7875e642a"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -84,6 +84,7 @@ INVENTORY_ROOTS = (
     "crates/chelis-python/build.rs",
     "crates/chelis-backend-*/src/**/*.rs",
     "crates/chelis-backend-*/runtime/**/*.h",
+    "crates/chelis-backend-*/runtime/**/*.cpp",
     # A build script is compiled by cargo like any other source and can carry
     # a seam; a root that cannot see it is a closure hole.
     "crates/chelis-backend-*/build.rs",
@@ -100,6 +101,9 @@ INVENTORY_SOURCES: tuple[str, ...] = (
     "crates/chelis-backend-c/src/lib.rs",
     "crates/chelis-backend-c/src/memory.rs",
     "crates/chelis-backend-c/src/toolchain.rs",
+    "crates/chelis-backend-hip/runtime/chelis_device_descriptor.h",
+    "crates/chelis-backend-hip/runtime/chelis_device_owner.cpp",
+    "crates/chelis-backend-hip/runtime/chelis_device_owner.h",
     "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h",
     "crates/chelis-backend-hip/src/blas.rs",
     "crates/chelis-backend-hip/src/emit.rs",
@@ -146,13 +150,16 @@ INVENTORY_SOURCES: tuple[str, ...] = (
     "crates/chelis-ir/src/tier2.rs",
     "crates/chelis-ir/src/verify.rs",
     "crates/chelis-ir/src/vmap.rs",
-    "crates/chelis-python/src/lib.rs",
     "crates/chelis-python/src/compiler_json.rs",
+    "crates/chelis-python/src/dlpack.rs",
+    "crates/chelis-python/src/lib.rs",
+    "crates/chelis-python/src/native_tensor.rs",
     "crates/chelis-python/src/source_json.rs",
     "crates/chelis-runtime/include/chelis_blas.h",
     "crates/chelis-runtime/include/chelis_math.h",
     "crates/chelis-runtime/include/chelis_runtime.h",
     "crates/chelis-runtime/include/chelis_runtime_dtype.h",
+    "crates/chelis-runtime/include/chelis_runtime_views.h",
     "crates/chelis-runtime/include/chelis_simd.h",
     "crates/chelis-runtime/src/decimal_parse.rs",
     "crates/chelis-runtime/src/dtype_header.rs",
@@ -190,6 +197,43 @@ METADATA_FINAL_WIDTH_OWNERS = ("ElementCount::bytes", "ElementCount::scratch_len
 C_INDEX_PROJECTION_OWNERS = (
     ("crates/chelis-backend-c/src/emit.rs", "CEmitter::emit_elementwise_index_steps"),
     ("crates/chelis-backend-c/src/host_emit.rs", "HostEmitter < 'a >::emit_elementwise_index_step"),
+)
+PHASE2_FINAL_FORMS = (
+    ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "descriptor-field", "chelis_gpu_tensor::byte_capacity"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "descriptor-field", "chelis_gpu_tensor::count"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "descriptor-field", "chelis_gpu_tensor::data"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "descriptor-field", "chelis_gpu_tensor::dtype"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "descriptor-field", "chelis_gpu_tensor::ownership"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "descriptor-field", "chelis_gpu_tensor::rank"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "descriptor-field", "chelis_gpu_tensor::reserved"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "descriptor-field", "chelis_gpu_tensor::shape"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "descriptor-field", "chelis_gpu_tensor::strides"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "fixed-rank-metadata", "chelis_gpu_tensor::reserved"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "narrow-metadata", "chelis_gpu_tensor::rank"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "raw-element-pointer", "chelis_gpu_tensor::shape"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_descriptor.h", "raw-element-pointer", "chelis_gpu_tensor::strides"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_owner.cpp", "direct-data-access", "canonical_plan"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_owner.cpp", "direct-data-access", "chelis_device_tensor_clone"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_owner.cpp", "direct-data-access", "chelis_device_tensor_copy_from_host"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_owner.cpp", "direct-data-access", "chelis_device_tensor_copy_to_host"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_owner.cpp", "direct-data-access", "chelis_device_tensor_import"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_owner.cpp", "raw-element-pointer", "array_preflight"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_owner.cpp", "raw-element-pointer", "canonical_strides"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_owner.cpp", "raw-element-pointer", "tagged_array"),
+    ("crates/chelis-backend-hip/runtime/chelis_device_owner.cpp", "width-arithmetic", "array_preflight"),
+    ("crates/chelis-backend-hip/src/emit.rs", "backend-element-spelling", "HipEmitter::tagged_i64"),
+    ("crates/chelis-backend-hip/src/emit.rs", "width-arithmetic", "HipEmitter::collect_kernels"),
+    ("crates/chelis-backend-hip/src/emit.rs", "width-arithmetic", "HipEmitter::kernel_source_for_op"),
+    ("crates/chelis-python/src/lib.rs", "raw-element-pointer", "HipGetDeviceFn"),
+    ("crates/chelis-python/src/lib.rs", "width-arithmetic", "cpu_input_tensor"),
+    ("crates/chelis-python/src/lib.rs", "width-arithmetic", "gpu_input_tensor"),
+    ("crates/chelis-python/src/native_tensor.rs", "direct-data-access", "ValidatedTensor::adopt"),
+    ("crates/chelis-python/src/native_tensor.rs", "direct-data-access", "ValidatedTensor::data"),
+    ("crates/chelis-python/src/native_tensor.rs", "width-arithmetic", "ValidatedTensor::adopt"),
+    ("crates/chelis-runtime/include/chelis_runtime.h", "raw-element-pointer", "chelis_metadata_plan_shape"),
+    ("crates/chelis-runtime/include/chelis_runtime.h", "raw-element-pointer", "chelis_metadata_plan_strides"),
+    ("crates/chelis-runtime/src/lib.rs", "raw-element-pointer", "chelis_metadata_plan_shape"),
+    ("crates/chelis-runtime/src/lib.rs", "raw-element-pointer", "chelis_metadata_plan_strides"),
 )
 ELEMENT_FINAL_CONTRACT_OWNERS = (
     "ElementStorage for f64", "ElementStorage for f32",
@@ -243,6 +287,8 @@ def owner_module_final_form(kind: str, path: str, owner: str) -> bool:
     ) or (
         kind == "backend-element-spelling"
         and (path, owner) in C_INDEX_PROJECTION_OWNERS
+    ) or (
+        (path, kind, owner) in PHASE2_FINAL_FORMS
     )
 
 
@@ -611,6 +657,14 @@ def coverage_manifest(probes: Sequence[MutationProbe] | None = None) -> dict[str
             "identity": "kind|path|owner, where owner is the seam's enclosing declaration",
             "expected_success": "every hit is exact active debt from the frozen foundation",
             "owner_module_final_forms": {
+                **{
+                    path: [
+                        {"kind": kind, "owner": owner}
+                        for candidate_path, kind, owner in PHASE2_FINAL_FORMS
+                        if candidate_path == path
+                    ]
+                    for path in sorted({path for path, _, _ in PHASE2_FINAL_FORMS})
+                },
                 **{
                     path: [{"kind": "backend-element-spelling", "owner": owner}]
                     for path, owner in C_INDEX_PROJECTION_OWNERS
@@ -2009,6 +2063,14 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = _parse_args()
+    if args.phase == 2:
+        sys.path.insert(0, str(REPO_ROOT))
+        from scripts.runtime_representation_phase2 import run
+        try:
+            run()
+        except (RuntimeError, OSError, ValueError, KeyError, TypeError) as error:
+            raise OracleFailure(str(error)) from error
+        return 0
     if args.phase == 1:
         sys.path.insert(0, str(REPO_ROOT))
         from scripts.runtime_representation_phase1 import run
@@ -2018,7 +2080,7 @@ def main() -> int:
             raise OracleFailure(str(error)) from error
         return 0
     if args.phase != 0:
-        raise OracleFailure("only runtime-representation Phases 0 and 1 are implemented")
+        raise OracleFailure("only runtime-representation Phases 0, 1, and 2 are implemented")
     if args.regenerate:
         regenerate()
         return 0

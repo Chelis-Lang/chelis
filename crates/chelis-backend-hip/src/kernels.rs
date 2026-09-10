@@ -11,6 +11,7 @@
 /// Device-side helper functions included at the top of every kernel source.
 pub const DEVICE_HELPERS: &str = "\
 #include <stdint.h>
+typedef int64_t chelis_device_metadata;
 #if CHELIS_DEBUG_BOUNDS
 __device__ int chelis_gpu_failure = 0;
 __device__ void chelis_record_failure(int code) {
@@ -18,7 +19,7 @@ __device__ void chelis_record_failure(int code) {
         atomicCAS(&chelis_gpu_failure, 0, code);
     }
 }
-__device__ int64_t chelis_bounds_guard(int64_t idx, int64_t size, int code) {
+__device__ chelis_device_metadata chelis_bounds_guard(chelis_device_metadata idx, chelis_device_metadata size, int code) {
     if (idx < 0 || idx >= size) {
         chelis_record_failure(code);
         return 0;
@@ -29,22 +30,22 @@ __device__ int64_t chelis_bounds_guard(int64_t idx, int64_t size, int code) {
 #else
 #define CHELIS_GUARD_INDEX(idx, size, code) (idx)
 #endif
-__device__ void chelis_flat_to_indices(int64_t flat, const int64_t *shape, int64_t ndim, int64_t *out) {
-    for (int64_t d = ndim - 1; d >= 0; d--) {
+__device__ void chelis_flat_to_indices(chelis_device_metadata flat, const chelis_device_metadata *shape, chelis_device_metadata ndim, chelis_device_metadata *out) {
+    for (chelis_device_metadata d = ndim - 1; d >= 0; d--) {
         out[d] = flat % shape[d];
         flat /= shape[d];
     }
 }
-__device__ int64_t chelis_indices_to_flat(const int64_t *indices, const int64_t *strides, int64_t ndim) {
-    int64_t flat = 0;
-    for (int64_t d = 0; d < ndim; d++) {
+__device__ chelis_device_metadata chelis_indices_to_flat(const chelis_device_metadata *indices, const chelis_device_metadata *strides, chelis_device_metadata ndim) {
+    chelis_device_metadata flat = 0;
+    for (chelis_device_metadata d = 0; d < ndim; d++) {
         flat += indices[d] * strides[d];
     }
     return flat;
 }
-__device__ int64_t chelis_logical_offset(int64_t linear, const int64_t *shape, const int64_t *strides, int64_t rank) {
-    int64_t offset = 0;
-    for (int64_t axis = rank - 1; axis >= 0; --axis) {
+__device__ chelis_device_metadata chelis_logical_offset(chelis_device_metadata linear, const chelis_device_metadata *shape, const chelis_device_metadata *strides, chelis_device_metadata rank) {
+    chelis_device_metadata offset = 0;
+    for (chelis_device_metadata axis = rank - 1; axis >= 0; --axis) {
         offset += (linear % shape[axis]) * strides[axis];
         linear /= shape[axis];
     }
@@ -182,7 +183,7 @@ impl ElemKind {
 /// Stride parameter names for one tensor: `{prefix}_s0, {prefix}_s1, ..., {prefix}_s7`.
 fn stride_params(rank: usize, prefix: &str) -> String {
     (0..rank)
-        .map(|i| format!("int64_t {prefix}_s{i}"))
+        .map(|i| format!("chelis_device_metadata {prefix}_s{i}"))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -190,28 +191,31 @@ fn stride_params(rank: usize, prefix: &str) -> String {
 /// Shape parameter names: `{prefix}_sh0, {prefix}_sh1, ..., {prefix}_sh7`.
 fn shape_params(rank: usize, prefix: &str) -> String {
     (0..rank)
-        .map(|i| format!("int64_t {prefix}_sh{i}"))
+        .map(|i| format!("chelis_device_metadata {prefix}_sh{i}"))
         .collect::<Vec<_>>()
         .join(", ")
 }
 
-/// Emit code to build a local `int64_t[]` array from individual params.
+/// Emit code to build a local `chelis_device_metadata[]` array from individual params.
 fn build_array(rank: usize, var_name: &str, prefix: &str, suffix: &str) -> String {
     let elems: Vec<String> = (0..rank).map(|i| format!("{prefix}_{suffix}{i}")).collect();
-    format!("  int64_t {var_name}[] = {{ {} }};", elems.join(", "))
+    format!(
+        "  chelis_device_metadata {var_name}[] = {{ {} }};",
+        elems.join(", ")
+    )
 }
 
-/// Generic per-axis `int64_t` parameter list `{prefix}_{suffix}0 .. {suffix}7`.
+/// Generic per-axis `chelis_device_metadata` parameter list `{prefix}_{suffix}0 .. {suffix}7`.
 /// Used by `pad`/`shrink` for the per-axis low-padding / start-offset /
 /// source-shape vectors that are not strides or output shapes.
 fn int_params(rank: usize, prefix: &str, suffix: &str) -> String {
     (0..rank)
-        .map(|i| format!("int64_t {prefix}_{suffix}{i}"))
+        .map(|i| format!("chelis_device_metadata {prefix}_{suffix}{i}"))
         .collect::<Vec<_>>()
         .join(", ")
 }
 
-/// Build a local `int64_t[]` array from the [`int_params`] declarations.
+/// Build a local `chelis_device_metadata[]` array from the [`int_params`] declarations.
 fn build_int_array(rank: usize, var_name: &str, prefix: &str, suffix: &str) -> String {
     build_array(rank, var_name, prefix, suffix)
 }
@@ -232,18 +236,18 @@ pub fn binary_elementwise_typed(
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const {elem_c_ty} *a, {a_strides}, int64_t a_ndim, int64_t a_size,
-    const {elem_c_ty} *b, {b_strides}, int64_t b_ndim, int64_t b_size,
-    {elem_c_ty} *out, {out_shape}, int64_t out_ndim, int64_t out_size) {{
+    const {elem_c_ty} *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
+    const {elem_c_ty} *b, {b_strides}, chelis_device_metadata b_ndim, chelis_device_metadata b_size,
+    {elem_c_ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size) {{
 {build_a_s}
 {build_b_s}
 {build_out_sh}
-  int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= out_size) return;
-  int64_t indices[{rank}];
+  chelis_device_metadata indices[{rank}];
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
-  int64_t idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
-  int64_t idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
+  chelis_device_metadata idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  chelis_device_metadata idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
   out[i] = a[idx_a] {op} b[idx_b];
 }}
 ",
@@ -291,18 +295,18 @@ pub fn binary_floor_div_typed(
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const {elem_c_ty} *a, {a_strides}, int64_t a_ndim, int64_t a_size,
-    const {elem_c_ty} *b, {b_strides}, int64_t b_ndim, int64_t b_size,
-    {elem_c_ty} *out, {out_shape}, int64_t out_ndim, int64_t out_size) {{
+    const {elem_c_ty} *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
+    const {elem_c_ty} *b, {b_strides}, chelis_device_metadata b_ndim, chelis_device_metadata b_size,
+    {elem_c_ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size) {{
 {build_a_s}
 {build_b_s}
 {build_out_sh}
-  int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= out_size) return;
-  int64_t indices[{rank}];
+  chelis_device_metadata indices[{rank}];
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
-  int64_t idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
-  int64_t idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
+  chelis_device_metadata idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  chelis_device_metadata idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
 {compute}
 }}
 ",
@@ -323,18 +327,18 @@ pub fn binary_extrema(rank: usize, kernel_name: &str, is_max: bool, kind: ElemKi
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const {ty} *a, {a_strides}, int64_t a_ndim, int64_t a_size,
-    const {ty} *b, {b_strides}, int64_t b_ndim, int64_t b_size,
-    {ty} *out, {out_shape}, int64_t out_ndim, int64_t out_size) {{
+    const {ty} *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
+    const {ty} *b, {b_strides}, chelis_device_metadata b_ndim, chelis_device_metadata b_size,
+    {ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size) {{
 {build_a_s}
 {build_b_s}
 {build_out_sh}
-  int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= out_size) return;
-  int64_t indices[{rank}];
+  chelis_device_metadata indices[{rank}];
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
-  int64_t idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
-  int64_t idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
+  chelis_device_metadata idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  chelis_device_metadata idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
   {ty} av = a[idx_a];
   {ty} bv = b[idx_b];
   bool select_left = isnan(av) || (!isnan(bv) && av {comparison} bv);
@@ -362,18 +366,18 @@ pub fn binary_extrema_integer(
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const {elem_c_ty} *a, {a_strides}, int64_t a_ndim, int64_t a_size,
-    const {elem_c_ty} *b, {b_strides}, int64_t b_ndim, int64_t b_size,
-    {elem_c_ty} *out, {out_shape}, int64_t out_ndim, int64_t out_size) {{
+    const {elem_c_ty} *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
+    const {elem_c_ty} *b, {b_strides}, chelis_device_metadata b_ndim, chelis_device_metadata b_size,
+    {elem_c_ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size) {{
 {build_a_s}
 {build_b_s}
 {build_out_sh}
-  int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= out_size) return;
-  int64_t indices[{rank}];
+  chelis_device_metadata indices[{rank}];
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
-  int64_t idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
-  int64_t idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
+  chelis_device_metadata idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  chelis_device_metadata idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
   {elem_c_ty} av = a[idx_a];
   {elem_c_ty} bv = b[idx_b];
   out[i] = av {comparison} bv ? av : bv;
@@ -409,21 +413,21 @@ pub fn extrema_adjoint(
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const {ty} *a, {a_strides}, int64_t a_ndim, int64_t a_size,
-    const {ty} *b, {b_strides}, int64_t b_ndim, int64_t b_size,
-    const {ty} *g, {g_strides}, int64_t g_ndim, int64_t g_size,
-    {ty} *out, {out_shape}, int64_t out_ndim, int64_t out_size) {{
+    const {ty} *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
+    const {ty} *b, {b_strides}, chelis_device_metadata b_ndim, chelis_device_metadata b_size,
+    const {ty} *g, {g_strides}, chelis_device_metadata g_ndim, chelis_device_metadata g_size,
+    {ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size) {{
 {build_a_s}
 {build_b_s}
 {build_g_s}
 {build_out_sh}
-  int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= out_size) return;
-  int64_t indices[{rank}];
+  chelis_device_metadata indices[{rank}];
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
-  int64_t idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
-  int64_t idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
-  int64_t idx_g = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, g_s, g_ndim), g_size, 1);
+  chelis_device_metadata idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  chelis_device_metadata idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
+  chelis_device_metadata idx_g = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, g_s, g_ndim), g_size, 1);
   {ty} av = a[idx_a];
   {ty} bv = b[idx_b];
   bool select_left = isnan(av) || (!isnan(bv) && av {comparison} bv);
@@ -449,15 +453,15 @@ pub fn relu(rank: usize, kernel_name: &str, kind: ElemKind) -> String {
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const {ty} *a, {a_strides}, int64_t a_ndim, int64_t a_size,
-    {ty} *out, {out_shape}, int64_t out_ndim, int64_t out_size) {{
+    const {ty} *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
+    {ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size) {{
 {build_a_s}
 {build_out_sh}
-  int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= out_size) return;
-  int64_t indices[{rank}];
+  chelis_device_metadata indices[{rank}];
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
-  int64_t idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  chelis_device_metadata idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
   {ty} value = a[idx];
   out[i] = value < {zero} ? {zero} : value;
 }}
@@ -478,18 +482,18 @@ pub fn relu_adjoint(rank: usize, kernel_name: &str, kind: ElemKind) -> String {
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const {ty} *a, {a_strides}, int64_t a_ndim, int64_t a_size,
-    const {ty} *g, {g_strides}, int64_t g_ndim, int64_t g_size,
-    {ty} *out, {out_shape}, int64_t out_ndim, int64_t out_size) {{
+    const {ty} *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
+    const {ty} *g, {g_strides}, chelis_device_metadata g_ndim, chelis_device_metadata g_size,
+    {ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size) {{
 {build_a_s}
 {build_g_s}
 {build_out_sh}
-  int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= out_size) return;
-  int64_t indices[{rank}];
+  chelis_device_metadata indices[{rank}];
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
-  int64_t idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
-  int64_t idx_g = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, g_s, g_ndim), g_size, 1);
+  chelis_device_metadata idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  chelis_device_metadata idx_g = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, g_s, g_ndim), g_size, 1);
   out[i] = {zero} < a[idx_a] ? g[idx_g] : {zero};
 }}
 ",
@@ -514,15 +518,15 @@ pub fn relu_reduced(
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const unsigned short *a, {a_strides}, int64_t a_ndim, int64_t a_size,
-    unsigned short *out, {out_shape}, int64_t out_ndim, int64_t out_size) {{
+    const unsigned short *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
+    unsigned short *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size) {{
 {build_a_s}
 {build_out_sh}
-  int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= out_size) return;
-  int64_t indices[{rank}];
+  chelis_device_metadata indices[{rank}];
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
-  int64_t idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  chelis_device_metadata idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
   unsigned short value = a[idx];
   bool is_nan = (value & 0x{exponent_mask:04x}u) == 0x{exponent_mask:04x}u && (value & 0x{fraction_mask:04x}u) != 0;
   bool is_negative = (value & 0x8000u) != 0 && (value & 0x7fffu) != 0 && !is_nan;
@@ -547,18 +551,18 @@ pub fn relu_adjoint_reduced(
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const unsigned short *a, {a_strides}, int64_t a_ndim, int64_t a_size,
-    const unsigned short *g, {g_strides}, int64_t g_ndim, int64_t g_size,
-    unsigned short *out, {out_shape}, int64_t out_ndim, int64_t out_size) {{
+    const unsigned short *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
+    const unsigned short *g, {g_strides}, chelis_device_metadata g_ndim, chelis_device_metadata g_size,
+    unsigned short *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size) {{
 {build_a_s}
 {build_g_s}
 {build_out_sh}
-  int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= out_size) return;
-  int64_t indices[{rank}];
+  chelis_device_metadata indices[{rank}];
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
-  int64_t idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
-  int64_t idx_g = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, g_s, g_ndim), g_size, 1);
+  chelis_device_metadata idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  chelis_device_metadata idx_g = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, g_s, g_ndim), g_size, 1);
   unsigned short value = a[idx_a];
   bool is_nan = (value & 0x{exponent_mask:04x}u) == 0x{exponent_mask:04x}u && (value & 0x{fraction_mask:04x}u) != 0;
   bool is_positive = (value & 0x8000u) == 0 && (value & 0x7fffu) != 0 && !is_nan;
@@ -583,18 +587,18 @@ pub fn cmplt(rank: usize, kernel_name: &str, kind: ElemKind) -> String {
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const {ty} *a, {a_strides}, int64_t a_ndim, int64_t a_size,
-    const {ty} *b, {b_strides}, int64_t b_ndim, int64_t b_size,
-    {ty} *out, {out_shape}, int64_t out_ndim, int64_t out_size) {{
+    const {ty} *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
+    const {ty} *b, {b_strides}, chelis_device_metadata b_ndim, chelis_device_metadata b_size,
+    {ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size) {{
 {build_a_s}
 {build_b_s}
 {build_out_sh}
-  int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= out_size) return;
-  int64_t indices[{rank}];
+  chelis_device_metadata indices[{rank}];
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
-  int64_t idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
-  int64_t idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
+  chelis_device_metadata idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  chelis_device_metadata idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
   out[i] = (a[idx_a] < b[idx_b]) ? {one} : {zero};
 }}
 ",
@@ -613,15 +617,15 @@ pub fn unary_prefix(rank: usize, kernel_name: &str, op: &str, kind: ElemKind) ->
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const {ty} *a, {a_strides}, int64_t a_ndim, int64_t a_size,
-    {ty} *out, {out_shape}, int64_t out_ndim, int64_t out_size) {{
+    const {ty} *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
+    {ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size) {{
 {build_a_s}
 {build_out_sh}
-  int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= out_size) return;
-  int64_t indices[{rank}];
+  chelis_device_metadata indices[{rank}];
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
-  int64_t idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  chelis_device_metadata idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
   out[i] = {op}a[idx];
 }}
 ",
@@ -650,15 +654,15 @@ pub fn unary_recip(rank: usize, kernel_name: &str, kind: ElemKind) -> String {
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const {ty} *a, {a_strides}, int64_t a_ndim, int64_t a_size,
-    {ty} *out, {out_shape}, int64_t out_ndim, int64_t out_size) {{
+    const {ty} *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
+    {ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size) {{
 {build_a_s}
 {build_out_sh}
-  int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= out_size) return;
-  int64_t indices[{rank}];
+  chelis_device_metadata indices[{rank}];
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
-  int64_t idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  chelis_device_metadata idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
   out[i] = {one} / a[idx];
 }}
 ",
@@ -678,15 +682,15 @@ pub fn unary_func(rank: usize, kernel_name: &str, func: &str, kind: ElemKind) ->
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const {ty} *a, {a_strides}, int64_t a_ndim, int64_t a_size,
-    {ty} *out, {out_shape}, int64_t out_ndim, int64_t out_size) {{
+    const {ty} *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
+    {ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size) {{
 {build_a_s}
 {build_out_sh}
-  int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= out_size) return;
-  int64_t indices[{rank}];
+  chelis_device_metadata indices[{rank}];
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
-  int64_t idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  chelis_device_metadata idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
   out[i] = {resolved}(a[idx]);
 }}
 ",
@@ -718,29 +722,29 @@ pub fn pad_typed(rank: usize, kernel_name: &str, elem_c_ty: &str) -> String {
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const {elem_c_ty} *a, {a_strides}, int64_t a_ndim, int64_t a_size,
+    const {elem_c_ty} *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
     {pad_lo}, {src_sh},
     {elem_c_ty} fill,
-    {elem_c_ty} *out, {out_shape}, int64_t out_ndim, int64_t out_size) {{
+    {elem_c_ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size) {{
 {build_a_s}
 {build_pad_lo}
 {build_src_sh}
 {build_out_sh}
-  int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= out_size) return;
-  int64_t out_indices[{rank}];
+  chelis_device_metadata out_indices[{rank}];
   chelis_flat_to_indices(i, out_sh, out_ndim, out_indices);
-  int64_t src_indices[{rank}];
-  int64_t in_source = 1;
-  for (int64_t d = 0; d < out_ndim; d++) {{
-    int64_t s = out_indices[d] - pad_lo[d];
+  chelis_device_metadata src_indices[{rank}];
+  chelis_device_metadata in_source = 1;
+  for (chelis_device_metadata d = 0; d < out_ndim; d++) {{
+    chelis_device_metadata s = out_indices[d] - pad_lo[d];
     src_indices[d] = s;
     if (s < 0 || s >= src_sh[d]) {{
       in_source = 0;
     }}
   }}
   if (in_source) {{
-    int64_t idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(src_indices, a_s, a_ndim), a_size, 1);
+    chelis_device_metadata idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(src_indices, a_s, a_ndim), a_size, 1);
     out[i] = a[idx];
   }} else {{
     out[i] = fill;
@@ -770,21 +774,21 @@ pub fn shrink_typed(rank: usize, kernel_name: &str, elem_c_ty: &str) -> String {
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const {elem_c_ty} *a, {a_strides}, int64_t a_ndim, int64_t a_size,
+    const {elem_c_ty} *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
     {shrink_start},
-    {elem_c_ty} *out, {out_shape}, int64_t out_ndim, int64_t out_size) {{
+    {elem_c_ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size) {{
 {build_a_s}
 {build_start}
 {build_out_sh}
-  int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= out_size) return;
-  int64_t out_indices[{rank}];
+  chelis_device_metadata out_indices[{rank}];
   chelis_flat_to_indices(i, out_sh, out_ndim, out_indices);
-  int64_t src_indices[{rank}];
-  for (int64_t d = 0; d < out_ndim; d++) {{
+  chelis_device_metadata src_indices[{rank}];
+  for (chelis_device_metadata d = 0; d < out_ndim; d++) {{
     src_indices[d] = out_indices[d] + shrink_start[d];
   }}
-  int64_t idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(src_indices, a_s, a_ndim), a_size, 1);
+  chelis_device_metadata idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(src_indices, a_s, a_ndim), a_size, 1);
   out[i] = a[idx];
 }}
 ",
@@ -809,9 +813,9 @@ pub fn uniform_like(rank: usize, kernel_name: &str, kind: ElemKind) -> String {
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
     {ty} low, {ty} high, unsigned long long seed,
-    {ty} *out, {out_shape}, int64_t out_ndim, int64_t out_size) {{
+    {ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size) {{
 {build_out_sh}
-  int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= out_size) return;
   out[i] = {sampler}(seed, (unsigned long long)i, low, high);
 }}
@@ -843,19 +847,19 @@ pub fn reduce_sum(
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const {op_ty} *a, {a_strides}, int64_t a_ndim, int64_t a_size,
-    {acc_ty} *out, {out_shape}, int64_t out_ndim, int64_t out_size, int64_t axis_size) {{
+    const {op_ty} *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
+    {acc_ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size, chelis_device_metadata axis_size) {{
 {build_a_s}
 {build_out_sh}
-  int64_t outer = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  chelis_device_metadata outer = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (outer >= out_size) return;
-  int64_t out_indices[{rank}];
+  chelis_device_metadata out_indices[{rank}];
   chelis_flat_to_indices(outer, out_sh, out_ndim, out_indices);
   {acc_ty} acc = {zero};
-  for (int64_t k = 0; k < axis_size; k++) {{
-    int64_t full_indices[{rank}];
-    int64_t out_d = 0;
-    for (int64_t d = 0; d < a_ndim; d++) {{
+  for (chelis_device_metadata k = 0; k < axis_size; k++) {{
+    chelis_device_metadata full_indices[{rank}];
+    chelis_device_metadata out_d = 0;
+    for (chelis_device_metadata d = 0; d < a_ndim; d++) {{
       if (d == {axis}) {{
         full_indices[d] = k;
       }} else {{
@@ -863,7 +867,7 @@ extern \"C\" __global__ void {kernel_name}(
         out_d++;
       }}
     }}
-    int64_t src_idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(full_indices, a_s, a_ndim), a_size, 1);
+    chelis_device_metadata src_idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(full_indices, a_s, a_ndim), a_size, 1);
     acc += ({acc_ty})a[src_idx];
   }}
   out[outer] = acc;
@@ -893,19 +897,19 @@ pub fn reduce_sum_promoted(
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const {src_c_ty} *a, {a_strides}, int64_t a_ndim, int64_t a_size,
-    {acc_c_ty} *out, {out_shape}, int64_t out_ndim, int64_t out_size, int64_t axis_size) {{
+    const {src_c_ty} *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
+    {acc_c_ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size, chelis_device_metadata axis_size) {{
 {build_a_s}
 {build_out_sh}
-  int64_t outer = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  chelis_device_metadata outer = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (outer >= out_size) return;
-  int64_t out_indices[{rank}];
+  chelis_device_metadata out_indices[{rank}];
   chelis_flat_to_indices(outer, out_sh, out_ndim, out_indices);
   {acc_c_ty} acc = 0;
-  for (int64_t k = 0; k < axis_size; k++) {{
-    int64_t full_indices[{rank}];
-    int64_t out_d = 0;
-    for (int64_t d = 0; d < a_ndim; d++) {{
+  for (chelis_device_metadata k = 0; k < axis_size; k++) {{
+    chelis_device_metadata full_indices[{rank}];
+    chelis_device_metadata out_d = 0;
+    for (chelis_device_metadata d = 0; d < a_ndim; d++) {{
       if (d == {axis}) {{
         full_indices[d] = k;
       }} else {{
@@ -913,7 +917,7 @@ extern \"C\" __global__ void {kernel_name}(
         out_d++;
       }}
     }}
-    int64_t src_idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(full_indices, a_s, a_ndim), a_size, 1);
+    chelis_device_metadata src_idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(full_indices, a_s, a_ndim), a_size, 1);
     acc += ({acc_c_ty})a[src_idx];
   }}
   out[outer] = acc;
@@ -936,19 +940,19 @@ pub fn reduce_max(rank: usize, kernel_name: &str, axis: usize, kind: ElemKind) -
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const {ty} *a, {a_strides}, int64_t a_ndim, int64_t a_size,
-    {ty} *out, {out_shape}, int64_t out_ndim, int64_t out_size, int64_t axis_size) {{
+    const {ty} *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
+    {ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size, chelis_device_metadata axis_size) {{
 {build_a_s}
 {build_out_sh}
-  int64_t outer = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  chelis_device_metadata outer = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (outer >= out_size) return;
-  int64_t out_indices[{rank}];
+  chelis_device_metadata out_indices[{rank}];
   chelis_flat_to_indices(outer, out_sh, out_ndim, out_indices);
   {ty} acc = {init};
-  for (int64_t k = 0; k < axis_size; k++) {{
-    int64_t full_indices[{rank}];
-    int64_t out_d = 0;
-    for (int64_t d = 0; d < a_ndim; d++) {{
+  for (chelis_device_metadata k = 0; k < axis_size; k++) {{
+    chelis_device_metadata full_indices[{rank}];
+    chelis_device_metadata out_d = 0;
+    for (chelis_device_metadata d = 0; d < a_ndim; d++) {{
       if (d == {axis}) {{
         full_indices[d] = k;
       }} else {{
@@ -956,7 +960,7 @@ extern \"C\" __global__ void {kernel_name}(
         out_d++;
       }}
     }}
-    int64_t src_idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(full_indices, a_s, a_ndim), a_size, 1);
+    chelis_device_metadata src_idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(full_indices, a_s, a_ndim), a_size, 1);
     acc = {fmax}(acc, a[src_idx]);
   }}
   out[outer] = acc;
@@ -979,19 +983,19 @@ pub fn reduce_min(rank: usize, kernel_name: &str, axis: usize, kind: ElemKind) -
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const {ty} *a, {a_strides}, int64_t a_ndim, int64_t a_size,
-    {ty} *out, {out_shape}, int64_t out_ndim, int64_t out_size, int64_t axis_size) {{
+    const {ty} *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
+    {ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size, chelis_device_metadata axis_size) {{
 {build_a_s}
 {build_out_sh}
-  int64_t outer = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  chelis_device_metadata outer = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (outer >= out_size) return;
-  int64_t out_indices[{rank}];
+  chelis_device_metadata out_indices[{rank}];
   chelis_flat_to_indices(outer, out_sh, out_ndim, out_indices);
   {ty} acc = {init};
-  for (int64_t k = 0; k < axis_size; k++) {{
-    int64_t full_indices[{rank}];
-    int64_t out_d = 0;
-    for (int64_t d = 0; d < a_ndim; d++) {{
+  for (chelis_device_metadata k = 0; k < axis_size; k++) {{
+    chelis_device_metadata full_indices[{rank}];
+    chelis_device_metadata out_d = 0;
+    for (chelis_device_metadata d = 0; d < a_ndim; d++) {{
       if (d == {axis}) {{
         full_indices[d] = k;
       }} else {{
@@ -999,7 +1003,7 @@ extern \"C\" __global__ void {kernel_name}(
         out_d++;
       }}
     }}
-    int64_t src_idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(full_indices, a_s, a_ndim), a_size, 1);
+    chelis_device_metadata src_idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(full_indices, a_s, a_ndim), a_size, 1);
     acc = {fmin}(acc, a[src_idx]);
   }}
   out[outer] = acc;
@@ -1021,19 +1025,19 @@ pub fn reduce_prod(rank: usize, kernel_name: &str, axis: usize, kind: ElemKind) 
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const {ty} *a, {a_strides}, int64_t a_ndim, int64_t a_size,
-    {ty} *out, {out_shape}, int64_t out_ndim, int64_t out_size, int64_t axis_size) {{
+    const {ty} *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
+    {ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size, chelis_device_metadata axis_size) {{
 {build_a_s}
 {build_out_sh}
-  int64_t outer = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  chelis_device_metadata outer = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (outer >= out_size) return;
-  int64_t out_indices[{rank}];
+  chelis_device_metadata out_indices[{rank}];
   chelis_flat_to_indices(outer, out_sh, out_ndim, out_indices);
   {ty} acc = {one};
-  for (int64_t k = 0; k < axis_size; k++) {{
-    int64_t full_indices[{rank}];
-    int64_t out_d = 0;
-    for (int64_t d = 0; d < a_ndim; d++) {{
+  for (chelis_device_metadata k = 0; k < axis_size; k++) {{
+    chelis_device_metadata full_indices[{rank}];
+    chelis_device_metadata out_d = 0;
+    for (chelis_device_metadata d = 0; d < a_ndim; d++) {{
       if (d == {axis}) {{
         full_indices[d] = k;
       }} else {{
@@ -1041,7 +1045,7 @@ extern \"C\" __global__ void {kernel_name}(
         out_d++;
       }}
     }}
-    int64_t src_idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(full_indices, a_s, a_ndim), a_size, 1);
+    chelis_device_metadata src_idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(full_indices, a_s, a_ndim), a_size, 1);
     acc *= a[src_idx];
   }}
   out[outer] = acc;
@@ -1063,20 +1067,20 @@ pub fn reduce_argmax(rank: usize, kernel_name: &str, axis: usize, kind: ElemKind
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const {ty} *a, {a_strides}, int64_t a_ndim, int64_t a_size,
-    long long *out, {out_shape}, int64_t out_ndim, int64_t out_size, int64_t axis_size) {{
+    const {ty} *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
+    long long *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size, chelis_device_metadata axis_size) {{
 {build_a_s}
 {build_out_sh}
-  int64_t outer = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  chelis_device_metadata outer = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (outer >= out_size) return;
-  int64_t out_indices[{rank}];
+  chelis_device_metadata out_indices[{rank}];
   chelis_flat_to_indices(outer, out_sh, out_ndim, out_indices);
   {ty} best = {init};
   long long best_idx = 0;
-  for (int64_t k = 0; k < axis_size; k++) {{
-    int64_t full_indices[{rank}];
-    int64_t out_d = 0;
-    for (int64_t d = 0; d < a_ndim; d++) {{
+  for (chelis_device_metadata k = 0; k < axis_size; k++) {{
+    chelis_device_metadata full_indices[{rank}];
+    chelis_device_metadata out_d = 0;
+    for (chelis_device_metadata d = 0; d < a_ndim; d++) {{
       if (d == {axis}) {{
         full_indices[d] = k;
       }} else {{
@@ -1084,7 +1088,7 @@ extern \"C\" __global__ void {kernel_name}(
         out_d++;
       }}
     }}
-    int64_t src_idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(full_indices, a_s, a_ndim), a_size, 1);
+    chelis_device_metadata src_idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(full_indices, a_s, a_ndim), a_size, 1);
     {ty} v = a[src_idx];
     if (v > best) {{ best = v; best_idx = (long long)k; }}
   }}
@@ -1105,20 +1109,20 @@ pub fn reduce_argmin(rank: usize, kernel_name: &str, axis: usize, kind: ElemKind
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const {ty} *a, {a_strides}, int64_t a_ndim, int64_t a_size,
-    long long *out, {out_shape}, int64_t out_ndim, int64_t out_size, int64_t axis_size) {{
+    const {ty} *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
+    long long *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size, chelis_device_metadata axis_size) {{
 {build_a_s}
 {build_out_sh}
-  int64_t outer = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  chelis_device_metadata outer = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (outer >= out_size) return;
-  int64_t out_indices[{rank}];
+  chelis_device_metadata out_indices[{rank}];
   chelis_flat_to_indices(outer, out_sh, out_ndim, out_indices);
   {ty} best = {init};
   long long best_idx = 0;
-  for (int64_t k = 0; k < axis_size; k++) {{
-    int64_t full_indices[{rank}];
-    int64_t out_d = 0;
-    for (int64_t d = 0; d < a_ndim; d++) {{
+  for (chelis_device_metadata k = 0; k < axis_size; k++) {{
+    chelis_device_metadata full_indices[{rank}];
+    chelis_device_metadata out_d = 0;
+    for (chelis_device_metadata d = 0; d < a_ndim; d++) {{
       if (d == {axis}) {{
         full_indices[d] = k;
       }} else {{
@@ -1126,7 +1130,7 @@ extern \"C\" __global__ void {kernel_name}(
         out_d++;
       }}
     }}
-    int64_t src_idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(full_indices, a_s, a_ndim), a_size, 1);
+    chelis_device_metadata src_idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(full_indices, a_s, a_ndim), a_size, 1);
     {ty} v = a[src_idx];
     if (v < best) {{ best = v; best_idx = (long long)k; }}
   }}
@@ -1302,14 +1306,14 @@ pub fn reduce_fused(
         let pfx = format!("ext{i}");
         params.push(format!("const {ty} *{pfx}"));
         params.push(stride_params(rank, &pfx));
-        params.push(format!("int64_t {pfx}_ndim"));
-        params.push(format!("int64_t {pfx}_size"));
+        params.push(format!("chelis_device_metadata {pfx}_ndim"));
+        params.push(format!("chelis_device_metadata {pfx}_size"));
     }
     params.push(format!("{ty} *out"));
     params.push(shape_params(rank, "out"));
-    params.push("int64_t out_ndim".into());
-    params.push("int64_t out_size".into());
-    params.push("int64_t axis_size".into());
+    params.push("chelis_device_metadata out_ndim".into());
+    params.push("chelis_device_metadata out_size".into());
+    params.push("chelis_device_metadata axis_size".into());
 
     // Build local array constructions for external input strides
     let mut body_arrays = Vec::new();
@@ -1338,7 +1342,7 @@ pub fn reduce_fused(
     for i in 0..n_external {
         let pfx = format!("ext{i}");
         index_lines.push(format!(
-            "      int64_t idx_{pfx} = CHELIS_GUARD_INDEX(chelis_indices_to_flat(full_indices, {pfx}_s, {pfx}_ndim), {pfx}_size, 1);"
+            "      chelis_device_metadata idx_{pfx} = CHELIS_GUARD_INDEX(chelis_indices_to_flat(full_indices, {pfx}_s, {pfx}_ndim), {pfx}_size, 1);"
         ));
     }
 
@@ -1347,15 +1351,15 @@ pub fn reduce_fused(
 extern \"C\" __global__ void {kernel_name}(
     {params}) {{
 {arrays}
-  int64_t outer = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  chelis_device_metadata outer = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (outer >= out_size) return;
-  int64_t out_indices[{rank}];
+  chelis_device_metadata out_indices[{rank}];
   chelis_flat_to_indices(outer, out_sh, out_ndim, out_indices);
   {ty} acc = {init};
-  for (int64_t k = 0; k < axis_size; k++) {{
-    int64_t full_indices[{rank}];
-    int64_t out_d = 0;
-    for (int64_t d = 0; d < out_ndim + 1; d++) {{
+  for (chelis_device_metadata k = 0; k < axis_size; k++) {{
+    chelis_device_metadata full_indices[{rank}];
+    chelis_device_metadata out_d = 0;
+    for (chelis_device_metadata d = 0; d < out_ndim + 1; d++) {{
       if (d == {axis}) {{
         full_indices[d] = k;
       }} else {{
@@ -1424,13 +1428,13 @@ pub fn fused_elementwise(
         };
         params.push(format!("{qual}{pfx}"));
         params.push(stride_params(rank, &pfx));
-        params.push(format!("int64_t {pfx}_ndim"));
-        params.push(format!("int64_t {pfx}_size"));
+        params.push(format!("chelis_device_metadata {pfx}_ndim"));
+        params.push(format!("chelis_device_metadata {pfx}_size"));
     }
     params.push(format!("{ty} *out"));
     params.push(shape_params(rank, "out"));
-    params.push("int64_t out_ndim".into());
-    params.push("int64_t out_size".into());
+    params.push("chelis_device_metadata out_ndim".into());
+    params.push("chelis_device_metadata out_size".into());
 
     // Build local array constructions
     let mut body_arrays = Vec::new();
@@ -1445,7 +1449,7 @@ pub fn fused_elementwise(
     for i in 0..n_external {
         let pfx = format!("ext{i}");
         index_lines.push(format!(
-            "  int64_t idx_{pfx} = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, {pfx}_s, {pfx}_ndim), {pfx}_size, 1);"
+            "  chelis_device_metadata idx_{pfx} = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, {pfx}_s, {pfx}_ndim), {pfx}_size, 1);"
         ));
     }
 
@@ -1458,9 +1462,9 @@ pub fn fused_elementwise(
 extern \"C\" __global__ void {kernel_name}(
     {params}) {{
 {arrays}
-  int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= out_size) return;
-  int64_t indices[{rank}];
+  chelis_device_metadata indices[{rank}];
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
 {index_lines}
 {step_lines}
@@ -1482,8 +1486,8 @@ pub fn fill(_rank: usize, kernel_name: &str, kind: ElemKind) -> String {
     let ty = kind.c_type();
     format!(
         "{DEVICE_HELPERS}\
-extern \"C\" __global__ void {kernel_name}({ty} *data, {ty} value, int64_t size) {{
-  int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+extern \"C\" __global__ void {kernel_name}({ty} *data, {ty} value, chelis_device_metadata size) {{
+  chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= size) return;
   data[i] = value;
 }}
@@ -1499,15 +1503,15 @@ pub fn cast(rank: usize, kernel_name: &str, kind: ElemKind) -> String {
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const {ty} *a, {a_strides}, int64_t a_ndim, int64_t a_size,
-    {ty} *out, {out_shape}, int64_t out_ndim, int64_t out_size) {{
+    const {ty} *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
+    {ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size) {{
 {build_a_s}
 {build_out_sh}
-  int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= out_size) return;
-  int64_t indices[{rank}];
+  chelis_device_metadata indices[{rank}];
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
-  int64_t idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  chelis_device_metadata idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
   out[i] = a[idx];
 }}
 ",
@@ -1527,15 +1531,15 @@ pub fn cast_convert(rank: usize, kernel_name: &str, src: ElemKind, dst: ElemKind
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const {src_ty} *a, {a_strides}, int64_t a_ndim, int64_t a_size,
-    {dst_ty} *out, {out_shape}, int64_t out_ndim, int64_t out_size) {{
+    const {src_ty} *a, {a_strides}, chelis_device_metadata a_ndim, chelis_device_metadata a_size,
+    {dst_ty} *out, {out_shape}, chelis_device_metadata out_ndim, chelis_device_metadata out_size) {{
 {build_a_s}
 {build_out_sh}
-  int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= out_size) return;
-  int64_t indices[{rank}];
+  chelis_device_metadata indices[{rank}];
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
-  int64_t idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  chelis_device_metadata idx = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
   out[i] = ({dst_ty})a[idx];
 }}
 ",
@@ -1555,27 +1559,27 @@ extern \"C\" __global__ void {kernel_name}(
     const {ty} *values,
     const {index_ty} *indices,
     {ty} *out,
-    int64_t before,
-    int64_t axis_size,
-    int64_t after,
-    int64_t index_count,
-    int64_t total, {values_shape}, {values_strides}, int64_t values_ndim, {idx_shape}, {idx_strides}, int64_t idx_ndim) {{
+    chelis_device_metadata before,
+    chelis_device_metadata axis_size,
+    chelis_device_metadata after,
+    chelis_device_metadata index_count,
+    chelis_device_metadata total, {values_shape}, {values_strides}, chelis_device_metadata values_ndim, {idx_shape}, {idx_strides}, chelis_device_metadata idx_ndim) {{
 {build_values_sh}
 {build_values_s}
 {build_idx_sh}
 {build_idx_s}
-  int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= total) return;
-  int64_t d = i % after;
-  int64_t tmp = i / after;
-  int64_t index_pos = tmp % index_count;
-  int64_t b = tmp / index_count;
-  int64_t g = (int64_t)indices[chelis_logical_offset(index_pos, idx_sh, idx_s, idx_ndim)];
+  chelis_device_metadata d = i % after;
+  chelis_device_metadata tmp = i / after;
+  chelis_device_metadata index_pos = tmp % index_count;
+  chelis_device_metadata b = tmp / index_count;
+  chelis_device_metadata g = (chelis_device_metadata)indices[chelis_logical_offset(index_pos, idx_sh, idx_s, idx_ndim)];
   if (g < 0 || g >= axis_size || b >= before) {{
     CHELIS_GUARD_INDEX(g, axis_size, 2);
     return;
   }}
-  int64_t src = ((b * axis_size + g) * after) + d;
+  chelis_device_metadata src = ((b * axis_size + g) * after) + d;
   out[i] = values[chelis_logical_offset(src, values_sh, values_s, values_ndim)];
 }}
 ",
@@ -1600,27 +1604,27 @@ extern \"C\" __global__ void {kernel_name}(
     const {index_ty} *indices,
     const {ty} *updates,
     {ty} *out,
-    int64_t before,
-    int64_t axis_size,
-    int64_t after,
-    int64_t index_count,
-    int64_t total, {idx_shape}, {idx_strides}, int64_t idx_ndim, {updates_shape}, {updates_strides}, int64_t updates_ndim) {{
+    chelis_device_metadata before,
+    chelis_device_metadata axis_size,
+    chelis_device_metadata after,
+    chelis_device_metadata index_count,
+    chelis_device_metadata total, {idx_shape}, {idx_strides}, chelis_device_metadata idx_ndim, {updates_shape}, {updates_strides}, chelis_device_metadata updates_ndim) {{
 {build_idx_sh}
 {build_idx_s}
 {build_updates_sh}
 {build_updates_s}
-  int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= total) return;
-  int64_t d = i % after;
-  int64_t tmp = i / after;
-  int64_t index_pos = tmp % index_count;
-  int64_t b = tmp / index_count;
-  int64_t g = (int64_t)indices[chelis_logical_offset(index_pos, idx_sh, idx_s, idx_ndim)];
+  chelis_device_metadata d = i % after;
+  chelis_device_metadata tmp = i / after;
+  chelis_device_metadata index_pos = tmp % index_count;
+  chelis_device_metadata b = tmp / index_count;
+  chelis_device_metadata g = (chelis_device_metadata)indices[chelis_logical_offset(index_pos, idx_sh, idx_s, idx_ndim)];
   if (g < 0 || g >= axis_size || b >= before) {{
     CHELIS_GUARD_INDEX(g, axis_size, 3);
     return;
   }}
-  int64_t dst = ((b * axis_size + g) * after) + d;
+  chelis_device_metadata dst = ((b * axis_size + g) * after) + d;
   atomicAdd(&out[dst], updates[chelis_logical_offset(i, updates_sh, updates_s, updates_ndim)]);
 }}
 ",
@@ -1656,27 +1660,27 @@ extern \"C\" __global__ void {kernel_name}(
     const {index_ty} *indices,
     const float *updates,
     float *out,
-    int64_t before,
-    int64_t axis_size,
-    int64_t after,
-    int64_t index_count,
-    int64_t total, {idx_shape}, {idx_strides}, int64_t idx_ndim, {updates_shape}, {updates_strides}, int64_t updates_ndim) {{
+    chelis_device_metadata before,
+    chelis_device_metadata axis_size,
+    chelis_device_metadata after,
+    chelis_device_metadata index_count,
+    chelis_device_metadata total, {idx_shape}, {idx_strides}, chelis_device_metadata idx_ndim, {updates_shape}, {updates_strides}, chelis_device_metadata updates_ndim) {{
 {build_idx_sh}
 {build_idx_s}
 {build_updates_sh}
 {build_updates_s}
   if (blockIdx.x != 0 || threadIdx.x != 0) return;
-  for (int64_t i = 0; i < total; i++) {{
-    int64_t d = i % after;
-    int64_t tmp = i / after;
-    int64_t index_pos = tmp % index_count;
-    int64_t b = tmp / index_count;
-    int64_t g = (int64_t)indices[chelis_logical_offset(index_pos, idx_sh, idx_s, idx_ndim)];
+  for (chelis_device_metadata i = 0; i < total; i++) {{
+    chelis_device_metadata d = i % after;
+    chelis_device_metadata tmp = i / after;
+    chelis_device_metadata index_pos = tmp % index_count;
+    chelis_device_metadata b = tmp / index_count;
+    chelis_device_metadata g = (chelis_device_metadata)indices[chelis_logical_offset(index_pos, idx_sh, idx_s, idx_ndim)];
     if (g < 0 || g >= axis_size || b >= before) {{
       CHELIS_GUARD_INDEX(g, axis_size, 4);
       return;
     }}
-    int64_t dst = ((b * axis_size + g) * after) + d;
+    chelis_device_metadata dst = ((b * axis_size + g) * after) + d;
     out[dst] = updates[chelis_logical_offset(i, updates_sh, updates_s, updates_ndim)];
   }}
 }}
@@ -1711,28 +1715,28 @@ extern \"C\" __global__ void {kernel_name}(
     float *out,
     {idx_shape},
     {out_shape},
-    int64_t ndim,
-    int64_t axis,
-    int64_t axis_size,
-    int64_t total, {idx_strides}, {updates_strides}, {out_strides}) {{
+    chelis_device_metadata ndim,
+    chelis_device_metadata axis,
+    chelis_device_metadata axis_size,
+    chelis_device_metadata total, {idx_strides}, {updates_strides}, {out_strides}) {{
 {build_idx_s}
 {build_updates_s}
 {build_out_s}
 {build_idx_sh}
 {build_out_sh}
   if (blockIdx.x != 0 || threadIdx.x != 0) return;
-  int64_t coord[{rank}];
-  for (int64_t i = 0; i < total; i++) {{
+  chelis_device_metadata coord[{rank}];
+  for (chelis_device_metadata i = 0; i < total; i++) {{
     chelis_flat_to_indices(i, idx_sh, ndim, coord);
-    int64_t index_offset = chelis_indices_to_flat(coord, idx_s, ndim);
-    int64_t update_offset = chelis_indices_to_flat(coord, updates_s, ndim);
-    int64_t g = (int64_t)indices[index_offset];
+    chelis_device_metadata index_offset = chelis_indices_to_flat(coord, idx_s, ndim);
+    chelis_device_metadata update_offset = chelis_indices_to_flat(coord, updates_s, ndim);
+    chelis_device_metadata g = (chelis_device_metadata)indices[index_offset];
     if (g < 0 || g >= axis_size) {{
       CHELIS_GUARD_INDEX(g, axis_size, 4);
       return;
     }}
     coord[axis] = g;
-    int64_t dst = chelis_indices_to_flat(coord, out_s, ndim);
+    chelis_device_metadata dst = chelis_indices_to_flat(coord, out_s, ndim);
     out[dst] = updates[update_offset];
   }}
 }}
@@ -1755,16 +1759,16 @@ pub fn reshape_copy(rank: usize, kernel_name: &str, width: usize) -> String {
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    const unsigned char *a, {a_strides}, {a_shape}, int64_t a_ndim,
-    unsigned char *out, int64_t size) {{
+    const unsigned char *a, {a_strides}, {a_shape}, chelis_device_metadata a_ndim,
+    unsigned char *out, chelis_device_metadata size) {{
 {build_a_s}
 {build_a_sh}
-  int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+  chelis_device_metadata i = (chelis_device_metadata)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= size) return;
-  int64_t coordinates[{rank}];
+  chelis_device_metadata coordinates[{rank}];
   chelis_flat_to_indices(i, a_sh, a_ndim, coordinates);
-  int64_t source = chelis_indices_to_flat(coordinates, a_s, a_ndim);
-  for (int64_t byte = 0; byte < {width}; ++byte) {{
+  chelis_device_metadata source = chelis_indices_to_flat(coordinates, a_s, a_ndim);
+  for (chelis_device_metadata byte = 0; byte < {width}; ++byte) {{
     out[i * {width} + byte] = a[source * {width} + byte];
   }}
 }}
@@ -1794,29 +1798,29 @@ mod tests {
         let src = binary_elementwise(8, "kernel_add", "+", ElemKind::F32);
         // Must have individual int params, not const int* pointers
         assert!(
-            src.contains("int64_t a_s0"),
+            src.contains("chelis_device_metadata a_s0"),
             "stride params must be individual ints"
         );
         assert!(
-            src.contains("int64_t a_s7"),
+            src.contains("chelis_device_metadata a_s7"),
             "must have all MAX_DIM stride params"
         );
         assert!(
-            src.contains("int64_t out_sh0"),
+            src.contains("chelis_device_metadata out_sh0"),
             "shape params must be individual ints"
         );
         // Must build local arrays from params
         assert!(
-            src.contains("int64_t a_s[] ="),
+            src.contains("chelis_device_metadata a_s[] ="),
             "must build local stride array"
         );
         assert!(
-            src.contains("int64_t out_sh[] ="),
+            src.contains("chelis_device_metadata out_sh[] ="),
             "must build local shape array"
         );
         // Must NOT have device pointer params for strides/shapes
         assert!(
-            !src.contains("const int64_t *a_strides"),
+            !src.contains("const chelis_device_metadata *a_strides"),
             "must NOT use device pointer for strides"
         );
     }
@@ -1863,7 +1867,7 @@ mod tests {
     fn reduce_sum_kernel_has_axis_loop() {
         let src = reduce_sum(8, "kernel_sum_ax0_f32", 0, ElemKind::F32, ElemKind::F32);
         assert!(src.contains("float acc = 0.0f;"));
-        assert!(src.contains("for (int64_t k = 0; k < axis_size; k++)"));
+        assert!(src.contains("for (chelis_device_metadata k = 0; k < axis_size; k++)"));
         assert!(src.contains("if (d == 0)"));
     }
 
@@ -1949,7 +1953,7 @@ mod tests {
         let fill_src = fill(8, "k", ElemKind::F32);
         for src in [&add, &neg, &sum, &fill_src] {
             assert!(src.contains("__device__ void chelis_flat_to_indices"));
-            assert!(src.contains("__device__ int64_t chelis_indices_to_flat"));
+            assert!(src.contains("__device__ chelis_device_metadata chelis_indices_to_flat"));
             assert!(src.contains("__device__ int chelis_gpu_failure = 0;"));
             assert!(src.contains("CHELIS_GUARD_INDEX"));
         }

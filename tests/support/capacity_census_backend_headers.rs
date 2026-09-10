@@ -3,6 +3,90 @@
 
 use super::*;
 
+const BACKEND_BASELINE_REL: &str = "spec/design/capacity_census_backend_headers.json";
+const HIP_HEADERS: &[&str] = &[
+    "chelis_device_descriptor.h",
+    "chelis_device_owner.h",
+    "chelis_hip_runtime.h",
+];
+const METAL_HEADERS: &[&str] = &["chelis_metal_runtime.h"];
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BackendBaseline {
+    version: u32,
+    rows: Vec<Row>,
+}
+
+fn copy_published_headers(source: &Path, destination: &Path) {
+    for name in published_headers_on_disk(source) {
+        let target = destination.join(&name);
+        fs::create_dir_all(target.parent().expect("header parent")).unwrap();
+        fs::copy(source.join(&name), target).unwrap_or_else(|error| {
+            panic!(
+                "copy published header {} into backend census staging: {error}",
+                source.join(name).display()
+            )
+        });
+    }
+}
+
+fn live_backend_rows(root: &Path) -> Vec<Row> {
+    let runtime = root.join(INCLUDE_DIR_REL);
+    let mut rows = Vec::new();
+
+    let hip = planted_include_dir("backend-live-hip", &[]);
+    copy_published_headers(&runtime, &hip);
+    copy_published_headers(&root.join("crates/chelis-backend-hip/runtime"), &hip);
+    let hip_sdk = [root.join("crates/chelis-backend-hip/tests/fixtures/device_entry_sdk")];
+    let hip_environment = c_preprocessor::Environment {
+        compiler: "clang",
+        language: "c++",
+        include_dirs: &hip_sdk,
+        hermetic: true,
+        ..c_preprocessor::Environment::native_c()
+    };
+    rows.extend(
+        scan(
+            &hip,
+            &["chelis_hip_runtime.h", "chelis_blas.h", "chelis_math.h"],
+            &[hip_environment],
+        )
+        .into_iter()
+        .filter(|row| HIP_HEADERS.iter().any(|name| row.id.starts_with(name))),
+    );
+    fs::remove_dir_all(hip).unwrap();
+
+    let metal = planted_include_dir("backend-live-metal", &[]);
+    copy_published_headers(&runtime, &metal);
+    copy_published_headers(&root.join("crates/chelis-backend-metal/runtime"), &metal);
+    let metal_sdk = [root.join("tests/fixtures/capacity_backend_sdk")];
+    let metal_environment = c_preprocessor::Environment {
+        compiler: "clang",
+        language: "objective-c++",
+        include_dirs: &metal_sdk,
+        hermetic: true,
+        ..c_preprocessor::Environment::native_c()
+    };
+    rows.extend(
+        scan(
+            &metal,
+            &["chelis_metal_runtime.h", "chelis_blas.h", "chelis_math.h"],
+            &[metal_environment],
+        )
+        .into_iter()
+        .filter(|row| METAL_HEADERS.iter().any(|name| row.id.starts_with(name))),
+    );
+    fs::remove_dir_all(metal).unwrap();
+
+    rows.sort_by(|left, right| (&left.kind, &left.id).cmp(&(&right.kind, &right.id)));
+    assert!(
+        rows.windows(2)
+            .all(|pair| (&pair[0].kind, &pair[0].id) != (&pair[1].kind, &pair[1].id)),
+        "duplicate backend runtime census identity"
+    );
+    rows
+}
+
 fn scan(
     include_dir: &Path,
     roots: &[&str],
@@ -238,6 +322,83 @@ fn backend_scan_requires_an_actual_preprocessing_lane() {
 }
 
 #[test]
+fn backend_runtime_headers_match_the_reviewed_final_authority() {
+    let root = repo_root();
+    let baseline_path = root.join(BACKEND_BASELINE_REL);
+    let current = live_backend_rows(&root);
+    if std::env::var("CHELIS_CAPACITY_CENSUS_WRITE").as_deref() == Ok("1") {
+        fs::write(
+            &baseline_path,
+            serde_json::to_string_pretty(&BackendBaseline {
+                version: 1,
+                rows: current.clone(),
+            })
+            .unwrap()
+                + "\n",
+        )
+        .unwrap();
+    }
+    let baseline: BackendBaseline =
+        serde_json::from_str(&fs::read_to_string(&baseline_path).unwrap_or_else(|error| {
+            panic!(
+                "Phase 2 requires a reviewed live backend-header baseline at {}: {error}",
+                baseline_path.display()
+            )
+        }))
+        .expect("parse backend-header census baseline");
+    assert_eq!(
+        baseline.version, 1,
+        "unknown backend-header baseline version"
+    );
+    assert_eq!(
+        current, baseline.rows,
+        "backend runtime headers differ from the reviewed exact census"
+    );
+    let spec = fs::read_to_string(root.join(CONTROLLING_SPEC_REL)).unwrap();
+    for row in &baseline.rows {
+        assert!(
+            row.citation.is_empty(),
+            "backend final authority cannot retain a transition citation: {row:?}"
+        );
+        capacity_census_authority::classify_final_authority(
+            &authority_surface(row),
+            backend_authority_registries(),
+            &spec,
+        )
+        .unwrap_or_else(|problem| panic!("unclassified backend runtime row {row:?}: {problem}"));
+    }
+}
+
+#[test]
+fn generated_device_descriptor_requires_exact_tagged_transport_authority() {
+    let root = repo_root();
+    let row = live_backend_rows(&root)
+        .into_iter()
+        .find(|row| row.id.starts_with("chelis_device_descriptor.h:"))
+        .expect("generated device descriptor must be part of the live backend census");
+    let spec = fs::read_to_string(root.join(CONTROLLING_SPEC_REL)).unwrap();
+    assert_eq!(
+        capacity_census_authority::classify_final_authority(
+            &authority_surface(&row),
+            backend_authority_registries(),
+            &spec,
+        ),
+        Ok(capacity_census_authority::FinalAuthority::TaggedTransport)
+    );
+    let mut changed = authority_surface(&row);
+    changed.id = changed.id.replace("int64_t count", "int32_t count");
+    assert!(
+        capacity_census_authority::classify_final_authority(
+            &changed,
+            backend_authority_registries(),
+            &spec,
+        )
+        .is_err(),
+        "a narrowed generated packet must not inherit tagged-transport authority"
+    );
+}
+
+#[test]
 fn device_owner_callables_require_exact_op33_authority() {
     let root = repo_root();
     let include_dir = planted_include_dir("device-owner-authority", &[]);
@@ -262,10 +423,7 @@ fn device_owner_callables_require_exact_op33_authority() {
         &[c_preprocessor::Environment::native_c()],
     )
     .into_iter()
-    .filter(|row| {
-        row.kind == "header-export"
-            && row.id.starts_with("chelis_device_owner.h:")
-    })
+    .filter(|row| row.kind == "header-export" && row.id.starts_with("chelis_device_owner.h:"))
     .collect();
     fs::remove_dir_all(include_dir).unwrap();
     assert_eq!(rows.len(), 9, "complete opaque device owner API: {rows:?}");
@@ -276,24 +434,39 @@ fn device_owner_callables_require_exact_op33_authority() {
         .filter(|line| line.contains("chelis_device_tensor_"))
         .map(|line| {
             let signature = line.split('`').nth(1).expect("exact normative C signature");
-            format!("chelis_device_owner.h: {}", canonical_c_tokens(&format!("{signature};")))
+            format!(
+                "chelis_device_owner.h: {}",
+                canonical_c_tokens(&format!("{signature};"))
+            )
         })
         .collect();
-    assert_eq!(rows.iter().map(|row| row.id.clone()).collect::<BTreeSet<_>>(), normative);
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.id.clone())
+            .collect::<BTreeSet<_>>(),
+        normative
+    );
     for row in rows {
         let surface = authority_surface(&row);
         assert_eq!(
             capacity_census_authority::classify_final_authority(
-                &surface, final_authority_registries(), &spec,
+                &surface,
+                backend_authority_registries(),
+                &spec,
             ),
             Ok(capacity_census_authority::FinalAuthority::NumericOperation { atom: "[05-OP-33]" }),
         );
         let mut successor = surface;
-        successor.id = successor.id.replace("chelis_device_tensor_", "chelis_unchecked_device_");
+        successor.id = successor
+            .id
+            .replace("chelis_device_tensor_", "chelis_unchecked_device_");
         assert!(
             capacity_census_authority::classify_final_authority(
-                &successor, final_authority_registries(), &spec,
-            ).is_err(),
+                &successor,
+                backend_authority_registries(),
+                &spec,
+            )
+            .is_err(),
             "an unregistered renamed device operation must fail"
         );
     }

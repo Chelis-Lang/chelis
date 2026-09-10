@@ -6,7 +6,9 @@
 //! controls that matter most are the ones proving an unregistered file and an
 //! unclassifiable type word both fail rather than disappearing.
 
-use chelis_repr_inventory::c_ast::{ConditionalArms, HIP_LANE, OBJECTIVE_C_LANE, PUBLIC_C_LANE};
+use chelis_repr_inventory::c_ast::{
+    ConditionalArms, DEVICE_CXX_LANE, HIP_LANE, OBJECTIVE_C_LANE, PUBLIC_C_LANE,
+};
 use chelis_repr_inventory::{
     SourceClass, lane_for, scan_c_header, scan_c_source, scan_rust_source,
 };
@@ -173,6 +175,29 @@ fn a_raw_element_pointer_cast_is_admitted_and_a_byte_cast_is_not() {
     // `u8` is the raw byte carrier, inventoried through `direct-data-access`.
     // Treating it as an element would make every byte cast a dtype seam.
     assert!(kinds(RUNTIME, "fn f(p: *mut u8) -> *mut u8 { p as *mut u8 }").is_empty());
+}
+
+#[test]
+fn a_typed_cast_of_descriptor_data_keeps_one_direct_access_identity() {
+    let rows = scan_c_header(
+        HEADER,
+        r#"
+typedef struct { void *data; } chelis_probe_tensor;
+extern void consume(const float *);
+static inline void probe(const chelis_probe_tensor *tensor) {
+    consume((const float *)tensor->data);
+}
+"#,
+    )
+    .expect("descriptor cast must scan");
+    let rows: Vec<_> = rows
+        .into_iter()
+        .filter(|row| row.owner == "probe")
+        .map(|row| (row.kind, row.sample))
+        .collect();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].0, "direct-data-access");
+    assert!(rows[0].1.contains("(const float *)tensor->data"));
 }
 
 #[test]
@@ -634,6 +659,7 @@ fn a_rust_seam_outside_every_declaration_fails_closed() {
 // ---------------------------------------------------------------------------
 
 const HIP_HEADER: &str = "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h";
+const DEVICE_OWNER_CPP: &str = "crates/chelis-backend-hip/runtime/chelis_device_owner.cpp";
 const METAL_HEADER: &str = "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h";
 
 fn c_owners(source: &str) -> Vec<(String, String)> {
@@ -1288,6 +1314,7 @@ fn a_multi_dimensional_extent_renders_every_dimension() {
 fn the_objective_c_header_is_read_through_its_own_lane() {
     assert_eq!(lane_for(METAL_HEADER), OBJECTIVE_C_LANE);
     assert_eq!(lane_for(HIP_HEADER), HIP_LANE);
+    assert_eq!(lane_for(DEVICE_OWNER_CPP), DEVICE_CXX_LANE);
     assert_eq!(lane_for(HEADER), PUBLIC_C_LANE);
     let rows = scan_c_header(METAL_HEADER, &tracked_source(METAL_HEADER))
         .expect("the Objective-C header must scan");
@@ -1319,11 +1346,38 @@ fn the_objective_c_header_is_read_through_its_own_lane() {
 }
 
 #[test]
+fn the_real_device_owner_companion_is_parsed_as_complete_cxx() {
+    let rows = scan_c_header(DEVICE_OWNER_CPP, &tracked_source(DEVICE_OWNER_CPP))
+        .expect("the complete opaque device owner companion must scan");
+    assert!(
+        rows.iter()
+            .any(|row| row.owner == "chelis_device_tensor_import"),
+        "the C++ lane did not visit the owner implementation: {rows:?}"
+    );
+}
+
+#[test]
+fn a_cxx_decltype_cannot_hide_an_element_pointer() {
+    let rows = scan_c_source(
+        DEVICE_OWNER_CPP,
+        "decltype((float *)0) chelis_probe_pointer();",
+        DEVICE_CXX_LANE,
+    )
+    .expect("a complete C++ declaration must scan");
+    assert!(
+        rows.iter().any(|row| {
+            row.kind == "raw-element-pointer" && row.owner == "chelis_probe_pointer"
+        }),
+        "the explicit float pointer inside decltype was hidden: {rows:?}"
+    );
+}
+
+#[test]
 fn the_scan_is_independent_of_the_ambient_sdk_state() {
     // A HIP SDK on CPATH, or a ROCm include directory, must not change what
     // the header means: the lane parses under the committed stub SDK and a
-    // scrubbed environment. Planting a hipblas header on CPATH would
-    // otherwise flip `__has_include` and remove the fallback prototypes.
+    // scrubbed environment. Planting a different hipBLAS header on CPATH
+    // would otherwise replace the required committed fixture.
     let scratch = tempfile::tempdir().expect("scratch dir");
     let hipblas = scratch.path().join("hipblas");
     std::fs::create_dir_all(&hipblas).expect("mkdir");
@@ -1333,15 +1387,13 @@ fn the_scan_is_independent_of_the_ambient_sdk_state() {
     )
     .expect("write");
     let source = tracked_source(HIP_HEADER);
+    let expected = scan_c_header(HIP_HEADER, &source).expect("the committed fixture must scan");
     // SAFETY: the test owns its process environment and restores it below.
     unsafe { std::env::set_var("CPATH", scratch.path()) };
     let rows = scan_c_header(HIP_HEADER, &source);
     unsafe { std::env::remove_var("CPATH") };
     let rows = rows.expect("the ambient SDK path must be invisible to the scan");
-    assert!(
-        rows.iter().any(|row| row.owner == "hipblasSgemm"),
-        "the header's own fallback prototypes are the ones inventoried: {rows:?}"
-    );
+    assert_eq!(rows, expected, "ambient CPATH changed the inventoried rows");
 }
 
 // ---------------------------------------------------------------------------

@@ -131,6 +131,42 @@ def _require(condition, message):
         raise GraphError(message)
 
 
+def execution_identity(packet):
+    """Stable identity of the verified execution contract.
+
+    The sealed packet retains and validates run-local paths, transcripts, and
+    compiled fixture bytes. Those artifacts may encode temporary directories,
+    so persisted graph identities bind the stable current source, selected
+    outcomes, test binaries, toolchain, runtime, capture matrix, and limits.
+    """
+    binaries = packet["binaries"]
+    _require(
+        len(binaries) == len(GROUPS),
+        "native execution identity has the wrong binary set",
+    )
+    projection = {
+        "schema": packet["schema"],
+        "common_source_sha256": packet["source"]["common_source_sha256"],
+        "selected": packet["selected"],
+        "executed": packet["executed"],
+        "binaries": [
+            {"group": group.name, "sha256": binary["sha256"]}
+            for group, binary in zip(GROUPS, binaries, strict=True)
+        ],
+        "interpreter": {
+            "sha256": packet["interpreter"]["sha256"],
+            "version": packet["interpreter"]["version"],
+        },
+        "runtime_sha256": packet["runtime"]["sha256"],
+        "captures": [
+            {"test": row["test"], "fixture_kind": row["fixture_kind"]}
+            for row in packet["captures"]
+        ],
+        "limits": packet["limits"],
+    }
+    return hashlib.sha256(canonical(projection).encode()).hexdigest()
+
+
 def _unique_fields(pairs):
     result = {}
     for key, value in pairs:
@@ -383,6 +419,7 @@ class CheckedNativeExecution:
     directory: Path
     packet: dict
     packet_sha256: str
+    identity_sha256: str
 
     def __new__(cls, *args, **kwargs):
         raise TypeError("native execution requires the actual fixed current test corpus")
@@ -390,6 +427,8 @@ class CheckedNativeExecution:
     def validate(self):
         _require(hashlib.sha256(canonical(self.packet).encode()).hexdigest() == self.packet_sha256,
                  "native execution packet changed")
+        _require(execution_identity(self.packet) == self.identity_sha256,
+                 "native execution identity changed")
         _require(_source_packet(self.root) == self.packet["source"], "native execution source or head changed")
         _require(_read_json(self.directory / "report.json") == self.packet, "native execution report changed")
         _require([row for row in _files(self.directory) if row["path"] != "report.json"] == self.packet["evidence"],
@@ -478,8 +517,13 @@ def collect_native_execution(root: Path, target: Path):
     witness = object.__new__(CheckedNativeExecution)
     with (directory / "report.json").open("x") as output:
         output.write(canonical(packet) + "\n")
-    for key, value in dict(root=root, directory=directory, packet=packet,
-                           packet_sha256=hashlib.sha256(canonical(packet).encode()).hexdigest()).items():
+    for key, value in dict(
+        root=root,
+        directory=directory,
+        packet=packet,
+        packet_sha256=hashlib.sha256(canonical(packet).encode()).hexdigest(),
+        identity_sha256=execution_identity(packet),
+    ).items():
         object.__setattr__(witness, key, value)
     witness.validate()
     return witness

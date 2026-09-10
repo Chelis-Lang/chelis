@@ -25,121 +25,7 @@ mod pyo3_registration_fixture;
 use capacity_census_authority::{AuthorityRegistries, StaticSurfaceDescriptor, SurfaceDescriptor};
 use capacity_census_compiler_json::{DiscoveredRow, VerifiedBindingCensus};
 
-const PERMANENT_BINDING_DISPOSITION: &str = "permanent-disposition(C6 registered PyO3 signature surface complete descriptor set ratified 2026-08-04)";
 const BINDING_CENSUS_FAMILY: &str = "pyo3-binding";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct FrozenSurfaceRow {
-    kind: &'static str,
-    id: &'static str,
-    flags: &'static [&'static str],
-}
-
-const FROZEN_BINDING_ROWS: &[FrozenSurfaceRow] = &[
-    FrozenSurfaceRow {
-        kind: "binding-pyfunction",
-        id: "chelis_python::check_json(py: Python<'_>, source: &str, source_kind: &str) -> PyResult<String>",
-        flags: &[],
-    },
-    FrozenSurfaceRow {
-        kind: "binding-pyfunction",
-        id: "chelis_python::compile_and_load(py: Python<'_>, source_path: &str, target: &str, source_kind: &str, entry_name: Option<String>, artifact_dir: Option<&str>, project_root: Option<&str>, force_bare: bool) -> PyResult<NativeCompiledModel>",
-        flags: &[],
-    },
-    FrozenSurfaceRow {
-        kind: "binding-pyfunction",
-        id: "chelis_python::compile_json(py: Python<'_>, source: &str, target: &str, source_kind: &str, entry_name: Option<String>) -> PyResult<String>",
-        flags: &[],
-    },
-    FrozenSurfaceRow {
-        kind: "binding-pyfunction",
-        id: "chelis_python::decompile_json(py: Python<'_>, source: &str) -> PyResult<String>",
-        flags: &[],
-    },
-    FrozenSurfaceRow {
-        kind: "binding-pyfunction",
-        id: "chelis_python::desugar_json(py: Python<'_>, source: &str) -> PyResult<String>",
-        flags: &[],
-    },
-    FrozenSurfaceRow {
-        kind: "binding-pyfunction",
-        id: "chelis_python::eval_json(py: Python<'_>, source: &str, bindings_json: &str, source_kind: &str, project_root: Option<&str>) -> PyResult<String>",
-        flags: &[],
-    },
-    FrozenSurfaceRow {
-        kind: "binding-pyfunction",
-        id: "chelis_python::load(py: Python<'_>, path: &str) -> PyResult<NativeCompiledModel>",
-        flags: &[],
-    },
-    FrozenSurfaceRow {
-        kind: "binding-pyfunction",
-        id: "chelis_python::validate_json(py: Python<'_>, source: &str, mode: &str) -> PyResult<String>",
-        flags: &[],
-    },
-    FrozenSurfaceRow {
-        kind: "binding-pymethod",
-        id: "chelis_python::CompiledModel::__call__(self: &Self, py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyObject>",
-        flags: &[],
-    },
-    FrozenSurfaceRow {
-        kind: "binding-pymethod",
-        id: "chelis_python::CompiledModel::input_names(self: &Self) -> Vec<String>",
-        flags: &[],
-    },
-    FrozenSurfaceRow {
-        kind: "binding-pymethod",
-        id: "chelis_python::CompiledModel::output_names(self: &Self) -> Vec<String>",
-        flags: &[],
-    },
-    FrozenSurfaceRow {
-        kind: "binding-pymethod",
-        id: "chelis_python::CompiledModel::path(self: &Self) -> String",
-        flags: &[],
-    },
-    FrozenSurfaceRow {
-        kind: "binding-pymethod",
-        id: "chelis_python::CompiledModel::target(self: &Self) -> String",
-        flags: &[],
-    },
-    FrozenSurfaceRow {
-        kind: "binding-pymethod",
-        id: "chelis_python::NativeTensor::__dlpack__(self: &Self, py: Python<'_>, stream: Option<usize>, max_version: Option<&Bound<'_, PyAny>>, dl_device: Option<&Bound<'_, PyAny>>, copy: Option<bool>) -> PyResult<PyObject>",
-        flags: &["numeric-param"],
-    },
-    FrozenSurfaceRow {
-        kind: "binding-pymethod",
-        id: "chelis_python::NativeTensor::__dlpack_device__(self: &Self) -> (i32, i32)",
-        flags: &[],
-    },
-    FrozenSurfaceRow {
-        kind: "binding-pymethod",
-        id: "chelis_python::NativeTensor::dtype(self: &Self) -> PyResult<&'static str>",
-        flags: &[],
-    },
-    FrozenSurfaceRow {
-        kind: "binding-pymethod",
-        id: "chelis_python::NativeTensor::shape(self: &Self) -> Vec<usize>",
-        flags: &[],
-    },
-];
-
-// Only these unchanged foundation rows retain the temporary admission path.
-const ACTIVE_LEGACY_IDS: &[&str] = &[
-    "chelis_python::CompiledModel::__call__(self: &Self, py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyObject>",
-    "chelis_python::NativeTensor::__dlpack__(self: &Self, py: Python<'_>, stream: Option<usize>, max_version: Option<&Bound<'_, PyAny>>, dl_device: Option<&Bound<'_, PyAny>>, copy: Option<bool>) -> PyResult<PyObject>",
-    "chelis_python::NativeTensor::__dlpack_device__(self: &Self) -> (i32, i32)",
-    "chelis_python::NativeTensor::shape(self: &Self) -> Vec<usize>",
-];
-
-// Exact original implementations of the unchanged deferred signatures above.
-// Public-name equality cannot admit a renamed Rust implementation or a new
-// getter/setter/constructor kind into the frozen cohort.
-const ACTIVE_LEGACY_IMPLEMENTATIONS: &[&str] = &[
-    "chelis_python::NativeCompiledModel::__call__#method",
-    "chelis_python::NativeTensor::__dlpack__#method",
-    "chelis_python::NativeTensor::__dlpack_device__#method",
-    "chelis_python::NativeTensor::shape#getter",
-];
 
 const NONNUMERIC_BINDINGS: &[StaticSurfaceDescriptor] = &[
     StaticSurfaceDescriptor::new(
@@ -494,36 +380,14 @@ fn baseline_bytes() -> Vec<u8> {
         .expect("read reviewed binding census baseline")
 }
 
-fn frozen_surface_rows() -> Vec<SurfaceRow> {
-    FROZEN_BINDING_ROWS
-        .iter()
-        .map(|row| SurfaceRow {
-            kind: row.kind.to_string(),
-            id: row.id.to_string(),
-            flags: row.flags.iter().map(|flag| (*flag).to_string()).collect(),
-        })
-        .collect()
-}
-
-fn active_legacy_rows() -> Vec<SurfaceRow> {
-    frozen_surface_rows()
-        .into_iter()
-        .filter(|row| ACTIVE_LEGACY_IDS.contains(&row.id.as_str()))
-        .collect()
-}
-
 fn current_authority_problem(
     current: &[SurfaceRow],
     execution: Option<&VerifiedBindingCensus>,
 ) -> Option<String> {
-    let legacy = active_legacy_rows();
     let mut seen = std::collections::BTreeSet::new();
     for row in current {
         if !seen.insert((&row.kind, &row.id)) {
             return Some(format!("duplicate binding identity {}", row.id));
-        }
-        if legacy.contains(row) {
-            continue;
         }
         let surface = SurfaceDescriptor {
             family: BINDING_CENSUS_FAMILY.to_string(),
@@ -557,7 +421,6 @@ fn baseline_problem(bytes: &[u8]) -> Option<String> {
     if baseline.version != 2 {
         return Some("unknown binding baseline version".into());
     }
-    let legacy = active_legacy_rows();
     let mut rows = Vec::new();
     for row in &baseline.rows {
         let surface = SurfaceRow {
@@ -565,18 +428,10 @@ fn baseline_problem(bytes: &[u8]) -> Option<String> {
             id: row.id.clone(),
             flags: row.flags.clone(),
         };
-        if legacy.contains(&surface) {
-            if row.citation.as_deref() != Some(PERMANENT_BINDING_DISPOSITION)
-                || row.authority.is_some()
-                || row.graph_identity.is_some()
-                || row.contract.is_some()
-            {
-                return Some("changed legacy binding disposition".into());
-            }
-        } else if row.citation.is_some()
+        if row.citation.is_some()
             || !matches!(
                 row.authority.as_deref(),
-                Some("nonnumeric" | "TaggedTransport")
+                Some("nonnumeric" | "TaggedTransport" | "NumericOperation")
             )
             || !row
                 .graph_identity
@@ -587,25 +442,59 @@ fn baseline_problem(bytes: &[u8]) -> Option<String> {
                 "final binding requires only its authority and current graph identity".into(),
             );
         }
-        if row.authority.as_deref() == Some("TaggedTransport") {
-            let contracts = ["check_json", "compile_json", "desugar_json", "eval_json"];
-            if !contracts.iter().any(|name| {
-                row.contract.as_deref()
-                    == Some(format!("compiler-json/chelis_python::{name}").as_str())
-                    && row.id.starts_with(&format!("chelis_python::{name}("))
-            }) || row.kind != "binding-pyfunction"
-                || row.flags.is_empty()
-            {
-                return Some(
-                    "invalid compiler JSON baseline shape; execution still required".into(),
-                );
+        match row.authority.as_deref() {
+            Some("TaggedTransport") => {
+                let compiler = ["check_json", "compile_json", "desugar_json", "eval_json"]
+                    .iter()
+                    .any(|name| {
+                        row.contract.as_deref()
+                            == Some(format!("compiler-json/chelis_python::{name}").as_str())
+                            && row.id.starts_with(&format!("chelis_python::{name}("))
+                            && row.kind == "binding-pyfunction"
+                    });
+                let native = [
+                    (
+                        "native/compiled-tensor-call",
+                        "chelis_python::CompiledModel::__call__(",
+                    ),
+                    (
+                        "native/dlpack-capsule",
+                        "chelis_python::NativeTensor::__dlpack__(",
+                    ),
+                    (
+                        "native/dlpack-device",
+                        "chelis_python::NativeTensor::__dlpack_device__(",
+                    ),
+                ]
+                .iter()
+                .any(|(contract, prefix)| {
+                    row.contract.as_deref() == Some(*contract)
+                        && row.id.starts_with(prefix)
+                        && row.kind == "binding-pymethod"
+                });
+                if (!compiler && !native) || row.flags.is_empty() {
+                    return Some(
+                        "invalid binding transport baseline; execution still required".into(),
+                    );
+                }
             }
-        } else if row.contract.is_some() {
-            return Some("unexpected binding transport contract".into());
+            Some("NumericOperation") => {
+                if row.contract.as_deref() != Some("[05-OP-45]")
+                    || !row.id.starts_with("chelis_python::NativeTensor::shape(")
+                    || row.kind != "binding-pymethod"
+                    || row.flags != vec!["numeric-return".to_string()]
+                {
+                    return Some("invalid native shape operation registration".into());
+                }
+            }
+            Some("nonnumeric") if row.contract.is_some() => {
+                return Some("unexpected binding authority contract".into());
+            }
+            _ => {}
         }
         rows.push(surface);
     }
-    // The persisted transport rows carry comparison data only. They cannot be
+    // Persisted numeric rows carry comparison data only. They cannot be
     // handed to current_authority_problem as an admission registry.
     let structural: Vec<_> = rows
         .iter()
@@ -613,7 +502,10 @@ fn baseline_problem(bytes: &[u8]) -> Option<String> {
             !baseline.rows.iter().any(|row| {
                 row.kind == surface.kind
                     && row.id == surface.id
-                    && row.authority.as_deref() == Some("TaggedTransport")
+                    && matches!(
+                        row.authority.as_deref(),
+                        Some("TaggedTransport" | "NumericOperation")
+                    )
             })
         })
         .map(|row| SurfaceRow {
@@ -630,6 +522,11 @@ fn baseline_problem(bytes: &[u8]) -> Option<String> {
         .iter()
         .filter(|row| row.authority.as_deref() == Some("TaggedTransport"))
         .count();
+    let numeric_operations = baseline
+        .rows
+        .iter()
+        .filter(|row| row.authority.as_deref() == Some("NumericOperation"))
+        .count();
     let transport_contracts: std::collections::BTreeSet<_> = baseline
         .rows
         .iter()
@@ -640,10 +537,9 @@ fn baseline_problem(bytes: &[u8]) -> Option<String> {
         rows.iter().map(|row| (&row.kind, &row.id)).collect();
     if unique.len() != rows.len()
         || transport_contracts.len() != transports
-        || transports
-            != FROZEN_BINDING_ROWS.len() - ACTIVE_LEGACY_IDS.len() - NONNUMERIC_BINDINGS.len()
-        || rows.len() != legacy.len() + NONNUMERIC_BINDINGS.len() + transports
-        || legacy.iter().any(|row| !rows.contains(row))
+        || transports != 7
+        || numeric_operations != 1
+        || rows.len() != NONNUMERIC_BINDINGS.len() + transports + numeric_operations
         || NONNUMERIC_BINDINGS
             .iter()
             .any(|row| !rows.iter().any(|r| r.kind == row.kind && r.id == row.id))
@@ -658,35 +554,18 @@ fn discovered_problem(
     baseline: &Baseline,
     execution: Option<&VerifiedBindingCensus>,
 ) -> Option<String> {
-    let legacy = active_legacy_rows();
     let mut current = Vec::new();
     for row in discovered {
-        let old = SurfaceRow {
+        if let Some(problem) = &row.problem {
+            return Some(format!("{}: {problem}", row.id));
+        }
+        if row.identity.is_none() {
+            return Some(format!("{}: missing exposure identity", row.id));
+        }
+        let surface = SurfaceRow {
             kind: row.kind.clone(),
             id: row.id.clone(),
-            flags: row.legacy_flags.clone(),
-        };
-        let surface = if legacy.contains(&old) {
-            let index = ACTIVE_LEGACY_IDS
-                .iter()
-                .position(|id| *id == row.id)
-                .unwrap();
-            if row.implementation != ACTIVE_LEGACY_IMPLEMENTATIONS[index] {
-                return Some(format!("changed frozen registration provenance {}", row.id));
-            }
-            old
-        } else {
-            if let Some(problem) = &row.problem {
-                return Some(format!("{}: {problem}", row.id));
-            }
-            if row.identity.is_none() {
-                return Some(format!("{}: missing exposure identity", row.id));
-            }
-            SurfaceRow {
-                kind: row.kind.clone(),
-                id: row.id.clone(),
-                flags: row.flags.clone(),
-            }
+            flags: row.flags.clone(),
         };
         let Some(expected) = baseline
             .rows
@@ -698,11 +577,13 @@ fn discovered_problem(
         if surface.flags != expected.flags {
             return Some(format!("changed binding capacity {}", row.id));
         }
-        if !legacy.contains(&surface) && row.identity != expected.graph_identity {
+        if row.identity != expected.graph_identity {
             return Some(format!("changed reachable binding graph {}", row.id));
         }
-        if expected.authority.as_deref() == Some("TaggedTransport")
-            && (row.authority != expected.authority || row.contract != expected.contract)
+        if matches!(
+            expected.authority.as_deref(),
+            Some("TaggedTransport" | "NumericOperation")
+        ) && (row.authority != expected.authority || row.contract != expected.contract)
         {
             return Some(format!("changed binding transport contract {}", row.id));
         }
@@ -716,28 +597,36 @@ fn discovered_problem(
 
 #[test]
 fn registered_pyfunctions_match_the_reviewed_rustdoc_signatures() {
+    // The baseline cannot issue authority, so collect the sealed current
+    // execution witness before comparing any persisted identity.
+    let execution =
+        run_typed_enumerator(&registered_surface(false)).unwrap_or_else(|error| panic!("{error}"));
     let bytes = baseline_bytes();
     assert_eq!(baseline_problem(&bytes), None);
     let baseline: Baseline = serde_json::from_slice(&bytes).unwrap();
-    let execution =
-        run_typed_enumerator(&registered_surface(false)).unwrap_or_else(|error| panic!("{error}"));
     let current = execution.rows();
     assert_eq!(
         discovered_problem(current, &baseline, Some(&execution)),
         None,
-        "only exact unchanged legacy rows may defer exposure proof; every final/new row requires complete discovery and authority\nactual discovery: {}",
-        serde_json::to_string(execution.evidence()).unwrap()
+        "every numeric binding requires complete current discovery and authority\nactual discovery: {}\nexecution summary: {}",
+        serde_json::to_string(current).unwrap(),
+        serde_json::to_string(&execution.evidence()["native"]["execution"]).unwrap()
     );
     let surfaces = current
         .iter()
-        .filter(|row| row.authority.as_deref() == Some("TaggedTransport"))
+        .filter(|row| {
+            matches!(
+                row.authority.as_deref(),
+                Some("TaggedTransport" | "NumericOperation")
+            )
+        })
         .map(|row| SurfaceRow {
             kind: row.kind.clone(),
             id: row.id.clone(),
             flags: row.flags.clone(),
         })
         .collect::<Vec<_>>();
-    assert_eq!(surfaces.len(), 4);
+    assert_eq!(surfaces.len(), 8);
     assert!(
         current_authority_problem(&surfaces, None).is_some(),
         "executed rows are comparison data; copying them supplies no witness"
@@ -745,7 +634,7 @@ fn registered_pyfunctions_match_the_reviewed_rustdoc_signatures() {
 }
 
 #[test]
-fn verified_compiler_json_authority_cannot_be_replaced_by_descriptor_or_baseline() {
+fn verified_binding_authority_cannot_be_replaced_by_descriptor_or_baseline() {
     let allowed = &NONNUMERIC_BINDINGS[0];
     assert_eq!(
         current_authority_problem(
@@ -758,36 +647,80 @@ fn verified_compiler_json_authority_cannot_be_replaced_by_descriptor_or_baseline
         ),
         None
     );
-    for name in ["check_json", "compile_json", "desugar_json", "eval_json"] {
+    let descriptors = [
+        (
+            "binding-pyfunction",
+            "chelis_python::check_json(typed) -> PyResult<compiler_json::Adapter>",
+            vec!["float-carrier".into(), "numeric-return".into()],
+        ),
+        (
+            "binding-pyfunction",
+            "chelis_python::compile_json(typed) -> PyResult<compiler_json::Adapter>",
+            vec!["numeric-return".into()],
+        ),
+        (
+            "binding-pyfunction",
+            "chelis_python::desugar_json(typed) -> PyResult<compiler_json::Adapter>",
+            vec!["float-carrier".into(), "numeric-return".into()],
+        ),
+        (
+            "binding-pyfunction",
+            "chelis_python::eval_json(typed) -> PyResult<compiler_json::Adapter>",
+            vec![
+                "float-carrier".into(),
+                "numeric-param".into(),
+                "numeric-return".into(),
+            ],
+        ),
+        (
+            "binding-pymethod",
+            "chelis_python::CompiledModel::__call__(typed)",
+            vec![
+                "float-carrier".into(),
+                "numeric-param".into(),
+                "numeric-return".into(),
+            ],
+        ),
+        (
+            "binding-pymethod",
+            "chelis_python::NativeTensor::__dlpack__(typed)",
+            vec![
+                "float-carrier".into(),
+                "numeric-param".into(),
+                "numeric-return".into(),
+            ],
+        ),
+        (
+            "binding-pymethod",
+            "chelis_python::NativeTensor::__dlpack_device__(typed)",
+            vec!["numeric-return".into()],
+        ),
+        (
+            "binding-pymethod",
+            "chelis_python::NativeTensor::shape(typed)",
+            vec!["numeric-return".into()],
+        ),
+    ];
+    for (kind, id, flags) in descriptors {
         let descriptor = SurfaceRow {
-            kind: "binding-pyfunction".into(),
-            id: format!("chelis_python::{name}(typed) -> PyResult<compiler_json::Adapter>"),
-            flags: vec!["float-carrier".into(), "numeric-return".into()],
+            kind: kind.into(),
+            id: id.into(),
+            flags,
         };
         assert!(current_authority_problem(&[descriptor], None).is_some());
     }
 }
 
 #[test]
-fn retired_binding_rows_cannot_regain_legacy_admission() {
-    let retired: Vec<_> = frozen_surface_rows()
-        .into_iter()
-        .filter(|row| !active_legacy_rows().contains(row))
-        .collect();
-    assert_eq!(retired.len(), 13);
-    for mut row in retired {
-        row.flags = vec!["float-carrier".into()];
-        assert!(current_authority_problem(&[row], None).is_some());
-    }
+fn final_binding_rows_cannot_regain_legacy_admission() {
     let baseline: serde_json::Value = serde_json::from_slice(&baseline_bytes()).unwrap();
     let final_ids = baseline["rows"]
         .as_array()
         .unwrap()
         .iter()
-        .filter(|row| row.get("authority").is_some())
         .map(|row| row["id"].as_str().unwrap().to_string())
         .collect::<Vec<_>>();
-    assert_eq!(final_ids.len(), 13);
+    assert_eq!(final_ids.len(), 17);
     for id in final_ids {
         let mut mutation = baseline.clone();
         let row = mutation["rows"]
@@ -796,10 +729,10 @@ fn retired_binding_rows_cannot_regain_legacy_admission() {
             .iter_mut()
             .find(|row| row["id"].as_str() == Some(id.as_str()))
             .unwrap();
-        row["citation"] = serde_json::json!(PERMANENT_BINDING_DISPOSITION);
+        row["citation"] = serde_json::json!("retired legacy admission");
         assert!(
             baseline_problem(&serde_json::to_vec(&mutation).unwrap()).is_some(),
-            "final binding regained legacy citation admission: {id}"
+            "final binding regained citation admission: {id}"
         );
     }
 }
@@ -853,11 +786,7 @@ fn final_bindings_require_successful_current_exposure() {
                 authority: row.authority.clone(),
                 contract: row.contract.clone(),
                 problem: None,
-                implementation: ACTIVE_LEGACY_IDS
-                    .iter()
-                    .position(|id| *id == row.id)
-                    .map(|index| ACTIVE_LEGACY_IMPLEMENTATIONS[index].to_string())
-                    .unwrap_or_default(),
+                implementation: String::new(),
             })
             .collect::<Vec<_>>()
     };
@@ -866,44 +795,22 @@ fn final_bindings_require_successful_current_exposure() {
         rows: baseline
             .rows
             .iter()
-            .filter(|row| row.authority.as_deref() != Some("TaggedTransport"))
+            .filter(|row| row.authority.as_deref() == Some("nonnumeric"))
             .cloned()
             .collect(),
     };
     let structural_current: Vec<_> = make_current()
         .into_iter()
-        .filter(|row| row.authority.as_deref() != Some("TaggedTransport"))
+        .filter(|row| row.authority.as_deref() == Some("nonnumeric"))
         .collect();
     assert_eq!(
         discovered_problem(&structural_current, &structural_baseline, None),
         None
     );
-    if baseline
-        .rows
-        .iter()
-        .any(|row| row.authority.as_deref() == Some("TaggedTransport"))
-    {
-        assert!(
-            discovered_problem(&make_current(), &baseline, None).is_some(),
-            "baseline rows cannot issue compiler JSON authority"
-        );
-    }
-    for implementation in [
-        "chelis_python::renamed_numeric#function",
-        "chelis_python::NativeTensor::shape#setter",
-    ] {
-        let mut current = make_current();
-        let row = current
-            .iter_mut()
-            .find(|row| ACTIVE_LEGACY_IDS.contains(&row.id.as_str()))
-            .unwrap();
-        row.implementation = implementation.into();
-        assert!(
-            discovered_problem(&current, &baseline, None)
-                .unwrap()
-                .contains("frozen registration provenance")
-        );
-    }
+    assert!(
+        discovered_problem(&make_current(), &baseline, None).is_some(),
+        "baseline rows cannot issue numeric binding authority"
+    );
     for mutation in ["unresolved", "numeric", "stale", "missing", "duplicate"] {
         let mut current = make_current();
         let row = current
@@ -927,7 +834,7 @@ fn final_bindings_require_successful_current_exposure() {
         );
     }
     let mut value: serde_json::Value = serde_json::from_slice(&baseline_bytes()).unwrap();
-    value["citation"] = serde_json::json!(PERMANENT_BINDING_DISPOSITION);
+    value["citation"] = serde_json::json!("retired legacy admission");
     assert!(baseline_problem(&serde_json::to_vec(&value).unwrap()).is_some());
 }
 

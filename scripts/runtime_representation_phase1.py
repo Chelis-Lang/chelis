@@ -140,7 +140,7 @@ def runtime_pin(directory):
             os.environ['CHELIS_RUNTIME_DIR'] = old
 
 
-def selection(packet, root: Path, expected):
+def selection(packet, root: Path, expected=None):
     selected, binaries = [], []
     target = Path(os.environ.get('CARGO_TARGET_DIR', root / 'target')).resolve()
     try:
@@ -168,7 +168,11 @@ def selection(packet, root: Path, expected):
     except (KeyError, TypeError, ValueError) as error:
         raise OracleFailure(f'malformed nextest selection: {error}') from error
     selected.sort()
-    if not selected or len(set(selected)) != len(selected) or selected != expected:
+    if (
+        not selected
+        or len(set(selected)) != len(selected)
+        or (expected is not None and selected != expected)
+    ):
         raise OracleFailure('empty, duplicate, or drifted frozen test selection')
     return selected, artifact_hashes(binaries)
 
@@ -384,7 +388,7 @@ def execute_planner_mutations(directory):
     return receipts
 
 
-def run():
+def run() -> Path:
     check_options(sys.argv[1:])
     identity = source_identity(ROOT)
     packet = frozen_manifest(MANIFEST.read_bytes(), MANIFEST_SHA256)
@@ -427,6 +431,8 @@ def run():
                'runtime': runtime_receipt, 'native_controls': native_receipts,
                'planner_mutations': planner_receipts,
                'legs': executions}
-    (directory / 'receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
-    print(f'Current execution receipt: {directory / "receipt.json"}')
+    receipt_path = directory / 'receipt.json'
+    receipt_path.write_text(json.dumps(receipt, indent=2) + '\n')
+    print(f'Current execution receipt: {receipt_path}')
     print('RUNTIME REPRESENTATION PHASE 1: PASS')
+    return receipt_path

@@ -30,6 +30,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chelis_deep::tag::DeepTag;
 use chelis_deep::{Atom, Expr, List};
@@ -67,6 +68,7 @@ const INCLUDE_DIR_REL: &str = "crates/chelis-runtime/include";
 const HEADER_ROOTS: &[&str] = &["chelis_runtime.h", "chelis_blas.h", "chelis_math.h"];
 const STD_SRC_REL: &str = "packages/chelis-std/src";
 const CONTROLLING_SPEC_REL: &str = "spec/05-risc-primitives.md";
+static PLANTED_INCLUDE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const NUMERIC_PRIMS: &[&str] = &[
     "f64", "f32", "f16", "bf16", "f8e4m3", "int8", "int16", "int32", "int64",
 ];
@@ -722,69 +724,6 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         &["numeric-op"],
         "[05-OP-33]",
         "`chelis_metadata_plan_byte_offset` takes a canonical tagged int64 logical"
-    ),
-    final_numeric_row!(
-        "header-export",
-        "chelis_device_owner.h: chelis_device_tensor_owner * chelis_device_tensor_alloc ( chelis_metadata_plan * plan ) ;",
-        &[],
-        "[05-OP-33]",
-        "`chelis_gpu_tensor` observation. `chelis_device_tensor_alloc` consumes one"
-    ),
-    final_numeric_row!(
-        "header-export",
-        "chelis_device_owner.h: chelis_device_tensor_owner * chelis_device_tensor_borrow ( chelis_metadata_plan * plan , void * data , chelis_scalar byte_capacity ) ;",
-        &[],
-        "[05-OP-33]",
-        "`chelis_device_tensor_borrow` consumes one live metadata plan, validates its"
-    ),
-    final_numeric_row!(
-        "header-export",
-        "chelis_device_owner.h: chelis_device_tensor_owner * chelis_device_tensor_import ( const chelis_gpu_tensor * packet ) ;",
-        &[],
-        "[05-OP-33]",
-        "`chelis_device_tensor_import` validates every field of a generated raw packet"
-    ),
-    final_numeric_row!(
-        "header-export",
-        "chelis_device_owner.h: const chelis_gpu_tensor * chelis_device_tensor_view ( const chelis_device_tensor_owner * owner ) ;",
-        &[],
-        "[05-OP-33]",
-        "`chelis_device_tensor_view` returns a const generated packet observation tied"
-    ),
-    final_numeric_row!(
-        "header-export",
-        "chelis_device_owner.h: int32_t chelis_device_tensor_device ( const chelis_device_tensor_owner * owner ) ;",
-        &["numeric-op"],
-        "[05-OP-33]",
-        "`chelis_device_tensor_device` returns the owner's exact nonnegative int32"
-    ),
-    final_numeric_row!(
-        "header-export",
-        "chelis_device_owner.h: chelis_device_tensor_owner * chelis_device_tensor_clone ( const chelis_device_tensor_owner * source ) ;",
-        &[],
-        "[05-OP-33]",
-        "`chelis_device_tensor_clone` returns a distinct owner with a new contiguous"
-    ),
-    final_numeric_row!(
-        "header-export",
-        "chelis_device_owner.h: void chelis_device_tensor_release ( chelis_device_tensor_owner * owner ) ;",
-        &[],
-        "[05-OP-33]",
-        "`chelis_device_tensor_release` consumes one live opaque owner exactly once,"
-    ),
-    final_numeric_row!(
-        "header-export",
-        "chelis_device_owner.h: void chelis_device_tensor_copy_from_host ( chelis_device_tensor_owner * destination , const chelis_tensor * source ) ;",
-        &[],
-        "[05-OP-33]",
-        "`chelis_device_tensor_copy_from_host` and `chelis_device_tensor_copy_to_host`"
-    ),
-    final_numeric_row!(
-        "header-export",
-        "chelis_device_owner.h: void chelis_device_tensor_copy_to_host ( chelis_tensor_write * destination , const chelis_device_tensor_owner * source ) ;",
-        &[],
-        "[05-OP-33]",
-        "`chelis_device_tensor_copy_from_host` and `chelis_device_tensor_copy_to_host`"
     ),
     final_numeric_row!(
         "header-export",
@@ -2628,11 +2567,92 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     },
 ];
 
+const BACKEND_TAGGED_TRANSPORT_ROWS: &[StaticSurfaceDescriptor] = &[StaticSurfaceDescriptor::new(
+    PRIMARY_CENSUS_FAMILY,
+    "header-struct",
+    "chelis_device_descriptor.h: typedef struct { void * data ; const int64_t * shape ; const int64_t * strides ; int64_t count ; int64_t byte_capacity ; int32_t rank ; chelis_dtype dtype ; uint8_t ownership ; uint8_t reserved [ 2 ] ; } chelis_gpu_tensor",
+    &["numeric-op"],
+)];
+
+const BACKEND_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: chelis_device_tensor_owner * chelis_device_tensor_alloc ( chelis_metadata_plan * plan ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_gpu_tensor` observation. `chelis_device_tensor_alloc` consumes one"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: chelis_device_tensor_owner * chelis_device_tensor_borrow ( chelis_metadata_plan * plan , void * data , chelis_scalar byte_capacity ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_device_tensor_borrow` consumes one live metadata plan, validates its"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: chelis_device_tensor_owner * chelis_device_tensor_import ( const chelis_gpu_tensor * packet ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_device_tensor_import` validates every field of a generated raw packet"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: const chelis_gpu_tensor * chelis_device_tensor_view ( const chelis_device_tensor_owner * owner ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_device_tensor_view` returns a const generated packet observation tied"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: int32_t chelis_device_tensor_device ( const chelis_device_tensor_owner * owner ) ;",
+        &["numeric-op"],
+        "[05-OP-33]",
+        "`chelis_device_tensor_device` returns the owner's exact nonnegative int32"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: chelis_device_tensor_owner * chelis_device_tensor_clone ( const chelis_device_tensor_owner * source ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_device_tensor_clone` returns a distinct owner with a new contiguous"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: void chelis_device_tensor_release ( chelis_device_tensor_owner * owner ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_device_tensor_release` consumes one live opaque owner exactly once,"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: void chelis_device_tensor_copy_from_host ( chelis_device_tensor_owner * destination , const chelis_tensor * source ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_device_tensor_copy_from_host` and `chelis_device_tensor_copy_to_host`"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: void chelis_device_tensor_copy_to_host ( chelis_tensor_write * destination , const chelis_device_tensor_owner * source ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_device_tensor_copy_from_host` and `chelis_device_tensor_copy_to_host`"
+    ),
+];
+
 fn final_authority_registries() -> AuthorityRegistries<'static> {
     AuthorityRegistries {
         nonnumeric: FINAL_NONNUMERIC_ROWS,
         tagged_transports: FINAL_TAGGED_TRANSPORT_ROWS,
         numeric_operations: FINAL_NUMERIC_OPERATION_ROWS,
+    }
+}
+
+fn backend_authority_registries() -> AuthorityRegistries<'static> {
+    AuthorityRegistries {
+        nonnumeric: &[],
+        tagged_transports: BACKEND_TAGGED_TRANSPORT_ROWS,
+        numeric_operations: BACKEND_NUMERIC_OPERATION_ROWS,
     }
 }
 
@@ -2737,6 +2757,19 @@ fn coverage_manifest() -> CoverageManifest {
                 ],
             },
             CoveredLeg {
+                leg: "backend-runtime-headers".to_string(),
+                artifact: "complete chelis_hip_runtime.h and chelis_metal_runtime.h published closures with committed SDK fixtures".to_string(),
+                enumerator: "backend_headers::scan -> shared attributed preprocess_root -> header_rows".to_string(),
+                command: "cargo nextest run -p chelis-cli --test capacity_census_tripwire -E 'test(backend_headers::)'".to_string(),
+                expected_success: "backend_runtime_headers_match_the_reviewed_final_authority passes".to_string(),
+                mutations: vec![
+                    "backend_roots_cannot_omit_an_unreached_generated_header".to_string(),
+                    "backend_environments_cannot_change_a_public_numeric_signature".to_string(),
+                    "generated_device_descriptor_requires_exact_tagged_transport_authority".to_string(),
+                    "device_owner_callables_require_exact_op33_authority".to_string(),
+                ],
+            },
+            CoveredLeg {
                 leg: "wire-schema-numeric-fields".to_string(),
                 artifact: "compiler/Python serialization publication roots and their reachable \
                            rustdoc JSON type graph"
@@ -2761,7 +2794,7 @@ fn coverage_manifest() -> CoverageManifest {
                 leg: "binding-raw-dtype-params".to_string(),
                 artifact: "crates/chelis-python/src/lib.rs registered PyO3 callables".to_string(),
                 enumerator:
-                    "live PyO3 signatures; nine final rows require input/return exposure, eight unchanged legacy rows defer it"
+                    "live PyO3 signatures and reachable payloads; all 17 rows require current authority as nine nonnumeric registrations, seven exact tagged transports, or one exact numeric operation"
                         .to_string(),
                 command: "cargo nextest run -p chelis-python --test capacity_census_bindings"
                     .to_string(),
@@ -2770,7 +2803,7 @@ fn coverage_manifest() -> CoverageManifest {
                         .to_string(),
                 mutations: vec![
                     "a_registered_pyfunction_with_a_raw_dtype_parameter_is_rejected".to_string(),
-                    "retired_binding_rows_cannot_regain_legacy_admission".to_string(),
+                    "final_binding_rows_cannot_regain_legacy_admission".to_string(),
                     "copied_missing_and_duplicate_binding_registrations_fail".to_string(),
                 ],
             },
@@ -3712,9 +3745,10 @@ fn push_callable_row(
 
 fn header_rows(header_name: &str, raw: &str, typedefs: &BTreeMap<String, Vec<String>>) -> Vec<Row> {
     let text = strip_c_comments(raw);
-    let text: String = text
-        .lines()
-        .filter(|l| !l.trim_start().starts_with('#'))
+    let text: String = logical_lines(&text)
+        .into_iter()
+        .filter(|(_, line)| !line.trim_start().starts_with('#'))
+        .map(|(_, line)| line)
         .collect::<Vec<_>>()
         .join("\n")
         .replace("extern \"C\" {", "");
@@ -3809,6 +3843,21 @@ fn header_rows(header_name: &str, raw: &str, typedefs: &BTreeMap<String, Vec<Str
         }
     }
     rows
+}
+
+#[test]
+fn multiline_preprocessor_macros_do_not_create_phantom_exports() {
+    let rows = header_rows_local(
+        "fixture.h",
+        concat!(
+            "#define CHECK(call) do { \\\n",
+            "    if ((call) != 0) abort(); \\\n",
+            "} while (0)\n",
+            "int real_export(void);\n",
+        ),
+    );
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(rows[0].id.contains("real_export"));
 }
 
 // ---------------------------------------------------------------------------
@@ -5203,8 +5252,9 @@ fn exported_public_numeric_stdlib_def_is_enumerated() {
 /// walk. A name may carry a subdirectory (`sub/x.h`), which is how the
 /// recursive-walk controls plant a header one level down.
 fn planted_include_dir(label: &str, files: &[(&str, &str)]) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("census-{label}-{}", std::process::id()));
-    fs::remove_dir_all(&dir).ok();
+    let sequence = PLANTED_INCLUDE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let dir =
+        std::env::temp_dir().join(format!("census-{label}-{}-{sequence}", std::process::id()));
     fs::create_dir_all(&dir).expect("temp include dir");
     for (name, body) in files {
         let path = dir.join(name);

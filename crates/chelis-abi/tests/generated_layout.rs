@@ -178,3 +178,10 @@ fn committed_view_and_device_fragments_are_exactly_generated() {
         assert_eq!(actual, rendered, "stale generated fragment: {path}");
     }
 }
+
+#[test]
+fn generated_device_metadata_aliases_bind_exact_widths() {
+    let header = chelis_abi::render::device_descriptor_header();
+    assert!(header.contains("typedef int64_t chelis_device_metadata;"));
+    assert!(header.contains("typedef int32_t chelis_device_rank;"));
+}

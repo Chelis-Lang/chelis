@@ -1,0 +1,7 @@
+#ifndef CHELIS_STUB_CSTDIO
+#define CHELIS_STUB_CSTDIO
+#include <stdio.h>
+namespace std {
+using ::fprintf;
+}
+#endif
