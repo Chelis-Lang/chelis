@@ -23,9 +23,9 @@ before consuming any package or symbol metadata.
 
 ## 3. Compiler API Wire Contract
 
-WireDag JSON is an exact-version contract. Schema version 9 is explicitly
+WireDag JSON is an exact-version contract. Schema version 10 is explicitly
 present in every payload and is the only accepted version. A missing version,
-versions 1 through 8, and every future version are decode errors before any IR
+versions 1 through 9, and every future version are decode errors before any IR
 node is consumed. There is no versionless default, legacy migration, additive-
 variant tolerance, or best-effort compatibility path.
 

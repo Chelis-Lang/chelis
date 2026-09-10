@@ -146,7 +146,7 @@ fn malformed_claims_and_invocation_edges_are_not_decoded_or_encoded() {
 fn checked_fixture() -> WireDag {
     let mut dag = fixture();
     if let WireRiscOp::ExtentWitness { requirements, .. } = &mut dag.nodes[1].op {
-        *requirements = vec![integer(1)];
+        *requirements = vec![extent(1)];
     }
     dag.nodes[2].op = WireRiscOp::CheckedUnitAxis {
         axis: WireRtAxis::Lit { value: 0 },
@@ -154,7 +154,7 @@ fn checked_fixture() -> WireDag {
     dag.nodes[2].inputs = vec![0, 1];
     dag.nodes[2].shape_deps.clear();
     dag.nodes[2].output_type = WireTensorType {
-        dims: vec![WireDimInfo::Lit { size: 1 }],
+        dims: vec![WireDimInfo::Lit { size: extent(1) }],
         precision: "f32".into(),
     };
     for id in [3, 4] {
@@ -182,7 +182,7 @@ fn checked_fixture() -> WireDag {
             dims: vec![],
             precision: "int64".into(),
         },
-        shape_deps: vec![integer(2)],
+        shape_deps: vec![2],
         span_id: Some("reshape-call".into()),
         merged_spans: vec![],
     });
@@ -221,7 +221,7 @@ fn checked_extent_wire_never_accepts_an_unproved_refinement() {
                 dag.nodes[2].inputs.pop();
             }
             1 => dag.nodes[2].inputs[1] = 0,
-            2 => dag.nodes[2].output_type.dims[0] = WireDimInfo::Lit { size: 2 },
+            2 => dag.nodes[2].output_type.dims[0] = WireDimInfo::Lit { size: extent(2) },
             3 => dag.nodes[2].output_type.precision = "f64".into(),
             4 => {
                 if let WireRiscOp::ExtentWitness { requirements, .. } = &mut dag.nodes[1].op {

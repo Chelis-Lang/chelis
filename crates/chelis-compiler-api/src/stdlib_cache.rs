@@ -95,6 +95,7 @@ use crate::schema::{Diagnostic, GeneralKind};
 /// following ones are now expected.
 // V14: opaque producer annotations use an explicit data wire variant.
 // V15: declared literal results and call-witness payloads are retained.
+// V17: authored program signatures and checked extent carriers are mandatory.
 // V16: scalar/storage payloads use the exact dtype-tagged bit codecs;
 // the changed key rejects previous positional payloads before decode.
 const STDLIB_CACHE_FORMAT_VERSION: u32 =
@@ -547,12 +548,12 @@ mod tests {
 
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes() {
-        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 16);
+        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 17);
     }
 
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes_and_nominal_kinds() {
-        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 16);
+        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 17);
     }
 
     #[test]

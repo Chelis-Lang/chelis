@@ -43,11 +43,11 @@ NOT be published as a frozen low-level guarantee while the implementation evolve
 - **WHEN** documenting `.chb`
 - **THEN** the project does not publish a frozen low-level layout guarantee while the format is still expected to evolve
 
-### Requirement: Exact WireDag schema version 9
+### Requirement: Exact WireDag schema version 10
 
-The compiler-API JSON WireDag surface SHALL carry explicit schema version 9,
-and version 9 SHALL be the only accepted version. Missing, versionless,
-versions 1 through 8, future, unknown-variant, and best-effort payloads SHALL
+The compiler-API JSON WireDag surface SHALL carry explicit schema version 10,
+and version 10 SHALL be the only accepted version. Missing, versionless,
+versions 1 through 9, future, unknown-variant, and best-effort payloads SHALL
 fail before IR construction. `Count.axes` SHALL already be the complete
 non-empty unique normalized original-axis vector in strictly descending order;
 encoder and decoder both reject a noncanonical vector. `Pad.fill` SHALL be a
@@ -62,7 +62,7 @@ SHALL be explicit, including empty lists and a null span identity.
 
 #### Scenario: Unknown or older schema fails before IR construction
 
-- **WHEN** a consumer receives a versionless, v1-v8, future-version, or unknown-variant WireDag payload
+- **WHEN** a consumer receives a versionless, v1-v9, future-version, or unknown-variant WireDag payload
 - **THEN** decoding fails before any IR node is materialized
 
 #### Scenario: Noncanonical Count axes are not rewritten

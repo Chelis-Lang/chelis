@@ -74,12 +74,12 @@ pub(crate) trait CachePayload:
 }
 
 impl CachePayload for crate::LibraryContext {
-    const FORMAT_VERSION: u32 = 12;
+    const FORMAT_VERSION: u32 = 13;
     const KEY_DOMAIN: &'static [u8] = b"chelis_library_typecheck_v";
 }
 
 impl CachePayload for crate::StdLibContext {
-    const FORMAT_VERSION: u32 = 16;
+    const FORMAT_VERSION: u32 = 17;
     const KEY_DOMAIN: &'static [u8] = b"chelis_std_typecheck_v";
 }
 

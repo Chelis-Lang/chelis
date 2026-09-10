@@ -1997,7 +1997,9 @@ pub struct WireRecordPatternField {
 ///   numeric domains, and references validated in their declared owners.
 ///   Shape dependencies are exact u64 node identities and literal-witness
 ///   requirements use the fixed int64 extent carrier.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 9;
+/// - `10`: checked reshape scalars and checked unit-axis refinements retain
+///   independent actual/required values through graph transport.
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 10;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
@@ -2166,9 +2168,10 @@ impl WireDag {
                         || node.inputs.len() != 2
                         || !scalar(&node.output_type)
                         || node.inputs.iter().any(|id| {
-                            self.nodes.get(*id).is_none_or(|input| {
-                                input.id != *id || *id >= index || !scalar(&input.output_type)
-                            })
+                            usize::try_from(*id)
+                                .ok()
+                                .and_then(|id| self.nodes.get(id))
+                                .is_none_or(|input| !scalar(&input.output_type))
                         })
                     {
                         return Err(WireDagContractError::new(format!(
@@ -2184,11 +2187,11 @@ impl WireDag {
                         let [input_id, witness_id] = node.inputs.as_slice() else {
                             return None;
                         };
-                        if *input_id >= index || *witness_id >= index {
+                        if *input_id >= host_index(index) || *witness_id >= host_index(index) {
                             return None;
                         }
-                        let input = self.nodes.get(*input_id)?;
-                        let witness = self.nodes.get(*witness_id)?;
+                        let input = self.nodes.get(usize::try_from(*input_id).ok()?)?;
+                        let witness = self.nodes.get(usize::try_from(*witness_id).ok()?)?;
                         let WireRiscOp::ExtentWitness {
                             axis:
                                 WireRtAxis::Lit {
@@ -2204,9 +2207,7 @@ impl WireDag {
                             || witness.id != *witness_id
                             || witness.inputs.as_slice() != [*input_id]
                             || observed_axis != axis
-                            || !requirements.iter().any(|value| {
-                                value.prim() == Prim::Int64 && value.as_i64_exact() == Some(1)
-                            })
+                            || !requirements.iter().any(|value| value.get() == 1)
                         {
                             return None;
                         }
@@ -2225,7 +2226,7 @@ impl WireDag {
                             .enumerate()
                             .all(|(index, (input, output))| {
                                 if index == axis {
-                                    return matches!(output, WireDimInfo::Lit { size: 1 });
+                                    return matches!(output, WireDimInfo::Lit { size } if size.get() == 1);
                                 }
                                 match (input, output) {
                                     (
