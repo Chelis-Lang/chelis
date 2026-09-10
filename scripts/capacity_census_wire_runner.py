@@ -377,9 +377,11 @@ if __name__ == "__main__":
     try:
         if len(sys.argv) != 5 or sys.argv[1] != "--supervise":
             raise GraphError("only the wire verifier may invoke the receipt supervisor")
-        raise SystemExit(
-            _supervise(Path(sys.argv[2]), Path(sys.argv[3]), json.loads(sys.argv[4]))
-        )
+        from ci_timing import subprocesses
+        with subprocesses():
+            raise SystemExit(
+                _supervise(Path(sys.argv[2]), Path(sys.argv[3]), json.loads(sys.argv[4]))
+            )
     except (GraphError, OSError, ValueError) as error:
         print(f"wire execution failed: {error}", file=sys.stderr)
         raise SystemExit(1) from error

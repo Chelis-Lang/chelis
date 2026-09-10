@@ -265,6 +265,14 @@ def _restore_snapshot(paths: tuple[Path, ...], snapshot: dict[Path, bytes]) -> N
             path.unlink()
 
 
+def snapshot_violations(committed, first, second):
+    """Compare all owned outputs, including missing or unexpected identities."""
+    paths = sorted(committed.keys() | first.keys() | second.keys())
+    stale = [path for path in paths if committed.get(path) != first.get(path)]
+    unstable = [path for path in paths if first.get(path) != second.get(path)]
+    return stale, unstable
+
+
 def check_generated_outputs(repo: Path, *, debug: bool) -> int:
     """Fail closed unless committed bytes are current and generation is stable."""
     version = chelis_std_version(repo)
@@ -294,8 +302,7 @@ def check_generated_outputs(repo: Path, *, debug: bool) -> int:
     finally:
         _restore_snapshot(outputs, committed)
 
-    stale = [path for path in outputs if committed.get(path) != first.get(path)]
-    unstable = [path for path in outputs if first.get(path) != second.get(path)]
+    stale, unstable = snapshot_violations(committed, first, second)
     for path in stale:
         print(
             f"ERROR: stale generated output: {path.relative_to(repo)}",
@@ -337,4 +344,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    from ci_timing import subprocesses
+    with subprocesses():
+        sys.exit(main())
