@@ -1215,8 +1215,8 @@ fn checked_c_movement_permute_and_expand_preserve_bits_under_sanitizers() {
             let output = dag.add_node(op.clone(), vec![input], ty(output_shape), None);
             dag.add_root(output);
             let generated = codegen(&dag, "checked_movement").unwrap();
-            assert!(generated.c_source.contains("chelis_tensor_unravel_index("));
-            assert!(generated.c_source.contains("chelis_tensor_flat_index("));
+            assert!(generated.c_source.contains("chelis_movement_index("));
+            assert!(generated.c_source.contains("chelis_movement_plan_release("));
             let spell = |values: &[usize]| {
                 if values.is_empty() {
                     "0".into()
@@ -1285,10 +1285,7 @@ int main(void) {{
                 let check = generated
                     .c_source
                     .lines()
-                    .find(|line| {
-                        line.contains("chelis_tensor_check_permute(")
-                            || line.contains("chelis_tensor_check_expand(")
-                    })
+                    .find(|line| line.contains("chelis_movement_check_target("))
                     .unwrap();
                 let allocation = generated
                     .c_source
@@ -1299,11 +1296,7 @@ int main(void) {{
                     generated.c_source.find(check).unwrap()
                         < generated.c_source.find(allocation).unwrap()
                 );
-                let invalid = if input_shape == &[2, 3] {
-                    check.replace("(chelis_scalar[]){chelis_scalar_from_bits(CHELIS_DTYPE_I64, 1), chelis_scalar_from_bits(CHELIS_DTYPE_I64, 0)}", "(chelis_scalar[]){chelis_scalar_from_bits(CHELIS_DTYPE_I64, 0), chelis_scalar_from_bits(CHELIS_DTYPE_I64, 0)}")
-                } else {
-                    check.strip_suffix("1);").unwrap().to_string() + "9);"
-                };
+                let invalid = check.replace("CHELIS_DTYPE_I64, 3)", "CHELIS_DTYPE_I64, 4)");
                 assert_ne!(invalid, check);
                 // Observe the real allocation site without allocating: malformed metadata
                 // must trap first. Removing or moving validation exposes that site.
@@ -1325,24 +1318,14 @@ int main(void) {{
                 }
             }
             if prim == Prim::Int64 && input_shape == &[2, 2, 2] {
-                let mut inverse = generated.c_source.clone();
-                for (old, new) in [
-                    (
-                        "in_indices[1] = out_indices[0];",
-                        "in_indices[0] = out_indices[1];",
-                    ),
-                    (
-                        "in_indices[2] = out_indices[1];",
-                        "in_indices[1] = out_indices[2];",
-                    ),
-                    (
-                        "in_indices[0] = out_indices[2];",
-                        "in_indices[2] = out_indices[0];",
-                    ),
-                ] {
-                    assert!(inverse.contains(old));
-                    inverse = inverse.replace(old, new);
-                }
+                let axis_line = generated
+                    .c_source
+                    .lines()
+                    .find(|line| line.contains("t1_axes[3]"))
+                    .unwrap();
+                let inverse = generated.c_source.replace(axis_line,
+                    "chelis_scalar t1_axes[3] = {chelis_scalar_from_bits(CHELIS_DTYPE_I64, 2), chelis_scalar_from_bits(CHELIS_DTYPE_I64, 0), chelis_scalar_from_bits(CHELIS_DTYPE_I64, 1)};");
+                assert_ne!(inverse, generated.c_source);
                 let run = checked_indexing_run(&inverse, &harness);
                 assert_eq!(
                     run.status.code(),
@@ -1351,7 +1334,7 @@ int main(void) {{
                 );
             }
             if prim == Prim::Int64 && input_shape == &[2, 3] {
-                let anchor = "chelis_tensor_flat_index(t0, in_indices)";
+                let anchor = "chelis_movement_index(t1_movement, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)i))";
                 assert!(generated.c_source.contains(anchor));
                 let mutant = generated
                     .c_source
@@ -7172,7 +7155,7 @@ fn a_local_class_guards_at_its_operation_and_renders_the_numeric_trap() {
     assert!(
         result
             .c_source
-            .contains("chelis_numeric_trap(\"numeric trap: domain in expand at int64\")"),
+            .contains("chelis_numeric_trap(\"numeric trap: domain in insert at int64\")"),
         "and `<op>` names the operation introducing the extent: {}",
         result.c_source
     );
@@ -7203,11 +7186,11 @@ int main() {{
     };
 
     // `stride(x, 2)` yields `ceil(n / 2)`, so the claim `n` and the extent
-    // the `expand` actually reads agree only at n = 1.
+    // the rank-inserting operation actually reads agree only at n = 1.
     let (ok, out) = run("local_guard", 3);
     assert!(!ok, "ceil(3/2) = 2 is not the claimed 3: {out}");
     assert!(
-        out.contains("numeric trap: domain in expand at int64"),
+        out.contains("numeric trap: domain in insert at int64"),
         "the local guard renders [04-NUM-9]: {out}"
     );
     assert!(
@@ -7355,7 +7338,7 @@ fn numeric_local_extent_claims_execute_exactly() {
                     };
                     let name =
                         format!("numeric_local_{resolved_name}_{reshape}_{tensor_size}_{good}");
-                    let op = if reshape { "reshape" } else { "expand" };
+                    let op = if reshape { "reshape" } else { "insert" };
                     let trap = format!("numeric trap: domain in {op} at int64");
                     let context = format!("node {} axis 0 = {observed}", root.0);
                     let expected = if reshape {
@@ -7651,7 +7634,7 @@ int main() {{
     assert!(!ok, "the local literal claim must trap: {out}");
     assert!(
         out.lines()
-            .any(|line| line == "numeric trap: domain in expand at int64")
+            .any(|line| line == "numeric trap: domain in insert at int64")
             && out.contains("claimed = 4")
             && out.contains("node 2 axis 0 = 5")
             && !out.contains("NO TRAP"),

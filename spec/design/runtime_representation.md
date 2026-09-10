@@ -801,6 +801,39 @@ new identity or owner exception. JSON ordering and movement coordinate scratch,
 the movement source operation diagnostic identity, the complete Phase 1 consumer audit and execution
 receipt/mutation oracle, and Phase 2 descriptors/bindings remain outstanding.
 
+#### Immutable movement geometry (#889)
+
+The C permutation, expansion/insertion, padding, shrinking and striding consumers
+snapshot checked input/result metadata into one private movement plan before output
+allocation or reuse. The plan projects each checked row-major index directly;
+rank-sized coordinate arrays and per-element scratch are removed. Its projection
+allocation is checked and cannot grow during construction. Padding iterates the
+source domain and maps into the filled result; the other forms iterate the result
+and map into the source. Empty domains perform no projection or payload access.
+
+The exact eight OP33 APIs bind this metadata contract and preserve every payload
+representation. Closed operation and side enums select the shape policy and
+canonical diagnostic, without carrying numeric data. Plans retain no payload and
+remain valid during source writes and after release/repurpose. The shared IR
+`ExpansionKind` derivation distinguishes rank-preserving expansion from insertion
+on verified static types under spec/10 §3.4; both the C plan selector and local dimension guard use
+that form. No serialized IR or Python binding signature changes.
+
+The bounded acceptance surface combines runtime `checked_c_movement_plans` and
+private `checked_metadata` in debug/release, `metadata_compile`'s field-privacy and
+production step/offset/bijection mutations, the two backend movement source suites,
+`exec_compile::checked_c_movement_*` with optimized ASan/UBSan and exact stored-bit
+maps, `movement_expansion_kind`, the runtime movement CLI suite, and
+`parity_checked_reshape`. The CLI positive/negative pair uses an extent read from a
+locally shortened tensor and checks exact `expand`/`insert` trap identities. Bare
+scalar expansion extents remain outside the admitted CLI surface under #469.
+The frozen Phase 0 manifest requires these executions; its foundation stays fixed,
+with no new owner exception. This B1 contract amendment adds the explicit movement
+receipt registrations and their negative controls. Full Phase 1 allocation/view/
+copy coverage and its composite receipt oracle remain separate work, as do Phase 2
+descriptors and bindings. This is one geometry slice because the shared plan, all
+five consumers, semantic authority and executable controls must ship together.
+
 ## C3. One generated host/device descriptor schema
 
 A new leaf crate, `chelis-abi`, depends only on `chelis-vocab` outside the

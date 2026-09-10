@@ -45,6 +45,41 @@ use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 
 use crate::dag::{Dag, DagNode, DimInfo, NodeId, RiscOp, RtAxis, RtDim};
 
+/// The two distinct primitives represented by a verified `RiscOp::Expand`.
+/// Spec/10 section 3.4 selects the form by the verified input/output rank relation;
+/// mutable runtime metadata supplies no source-operation authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpansionKind {
+    Expand,
+    Insert,
+}
+impl ExpansionKind {
+    pub fn primitive_name(self) -> &'static str {
+        match self {
+            Self::Expand => "expand",
+            Self::Insert => "insert",
+        }
+    }
+}
+/// An invalid or non-expansion node has no form; verification rejects invalid ranks.
+pub fn expansion_kind(dag: &Dag, id: NodeId) -> Option<ExpansionKind> {
+    let node = dag.get(id)?;
+    if !matches!(node.op, RiscOp::Expand { .. }) {
+        return None;
+    }
+    let input = dag.get(*node.inputs.first()?)?;
+    match node
+        .output_type
+        .dims
+        .len()
+        .checked_sub(input.output_type.dims.len())
+    {
+        Some(0) => Some(ExpansionKind::Expand),
+        Some(1) => Some(ExpansionKind::Insert),
+        _ => None,
+    }
+}
+
 /// Where one realized output axis gets its extent.
 ///
 /// The variant set is C4's, and it is deliberately closed: an extent is a
@@ -1773,6 +1808,16 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
             // [04-NUM-9]'s `<op>` names the operation that introduces the
             // guarded extent, in the same vocabulary every other trap on this
             // lane uses.
+            let op = if matches!(node.op, RiscOp::Expand { .. }) {
+                // A malformed unverified node supplies no operation claim. The
+                // verifier owns rejecting it; every executable node has a form.
+                let Some(kind) = expansion_kind(dag, member.node) else {
+                    continue;
+                };
+                kind.primitive_name()
+            } else {
+                crate::grad::risc_op_name(&node.op)
+            };
             sites.push((
                 (member.node.0, member.axis),
                 LocalGuardClaim {
@@ -1781,7 +1826,7 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
                         Some(value) => CanonicalExtent::Resolved(value),
                         None => CanonicalExtent::Binder(name.clone()),
                     },
-                    op: crate::grad::risc_op_name(&node.op),
+                    op,
                     observed: LocalGuardObservation::Carrier(carrier.clone()),
                 },
             ));

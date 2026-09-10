@@ -1005,7 +1005,7 @@
   "shrink.root.mismatch": {
     "c": {
       "stage": "execute",
-      "stderr": "movement target mismatch at node 2 axis 0\nnumeric trap: domain in shrink at int64",
+      "stderr": "Domain: movement target shape mismatch\nnumeric trap: domain in shrink at int64",
       "stdout": "",
       "success": false
     },

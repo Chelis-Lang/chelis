@@ -5763,41 +5763,24 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     ) {
         let a = inputs[0].0;
         let elem_type = Self::elem_type(ty);
-        let axis_values = if axes.is_empty() {
-            "0".to_string()
-        } else {
-            axes.iter()
-                .map(|axis| format!("chelis_scalar_from_bits(CHELIS_DTYPE_I64, {axis})"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        self.line(&format!(
-            "chelis_tensor_check_permute(t{a}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {}), {}, (chelis_scalar[]){{{axis_values}}});",
-            Self::ndim(ty), Self::tagged_shape_literal(ty)
-        ));
+        self.emit_affine_bounds(
+            &format!("t{id}_axes"),
+            &axes.iter().map(usize::to_string).collect::<Vec<_>>(),
+        );
+        self.line(&format!("chelis_movement_plan *t{id}_movement = chelis_tensor_permute_plan(t{a}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {}), t{id}_axes);", axes.len()));
+        self.line(&format!("chelis_movement_check_target(t{id}_movement, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {}), {});", Self::ndim(ty), Self::tagged_shape_literal(ty)));
         self.emit_slot_wrapper(id, ty);
-        self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
+        self.line(&format!(
+            "for (int64_t i = 0; i < chelis_movement_count(t{id}_movement); i++) {{"
+        ));
         self.indent += 1;
-        self.line(&format!(
-            "chelis_scalar out_indices[t{id}_rank > 0 ? t{id}_rank : 1];"
-        ));
-        self.line(&format!(
-            "chelis_scalar in_indices[t{a}_rank > 0 ? t{a}_rank : 1];"
-        ));
-        self.line(&format!(
-            "chelis_tensor_unravel_index(t{id}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)i), out_indices);"
-        ));
-        for (new_d, &old_d) in axes.iter().enumerate() {
-            self.line(&format!("in_indices[{old_d}] = out_indices[{new_d}];"));
-        }
-        self.line(&format!(
-            "int64_t src = chelis_tensor_flat_index(t{a}, in_indices);"
-        ));
+        self.line(&format!("int64_t src = chelis_movement_index(t{id}_movement, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)i));"));
         self.line(&format!(
             "(({elem_type}*)t{id}_data)[i] = ((const {elem_type}*)t{a}_data)[src];"
         ));
         self.indent -= 1;
         self.line("}");
+        self.line(&format!("chelis_movement_plan_release(t{id}_movement);"));
     }
 
     // ---- Expand ----
@@ -5811,57 +5794,31 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         dag: VerifiedDagView<'_>,
     ) {
         let a = inputs[0].0;
-        // An op-declared expanded axis is bound from the exact structural
-        // size carrier. This keeps the value edge explicit and makes
-        // `shape_deps` unnecessary for Expand.
-        // A site is emitted when EITHER map names it: the legacy walk still
-        // owns declarations, and the derivation owns guards, so gating on the
-        // walk alone would let the derivation find a guard site the walk
-        // cannot see and emit nothing.
+        let extent = Self::bound_c_expr(size, inputs, a, axis, dag);
         if self.runtime_dim_sites.contains_key(&(id, axis))
             || self.local_dim_guard_sites.contains_key(&id)
         {
-            let extent = Self::bound_c_expr(size, inputs, a, axis, dag);
-            self.emit_runtime_dim_sites(id, &[(axis, extent)]);
+            self.emit_runtime_dim_sites(id, &[(axis, extent.clone())]);
         }
+        let operation = match dag.expansion_kind(NodeId(id)) {
+            chelis_ir::axis_sources::ExpansionKind::Expand => "CHELIS_MOVEMENT_EXPAND",
+            chelis_ir::axis_sources::ExpansionKind::Insert => "CHELIS_MOVEMENT_INSERT",
+        };
         let elem_type = Self::elem_type(ty);
-        self.line(&format!(
-            "chelis_tensor_check_expand(t{a}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {}), {}, {axis});",
-            Self::ndim(ty), Self::tagged_shape_literal(ty)
-        ));
+        self.line(&format!("chelis_movement_plan *t{id}_movement = chelis_tensor_expand_plan(t{a}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {axis}), chelis_scalar_from_bits(CHELIS_DTYPE_I64, ({extent})), {operation});"));
+        self.line(&format!("chelis_movement_check_target(t{id}_movement, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {}), {});", Self::ndim(ty), Self::tagged_shape_literal(ty)));
         self.emit_slot_wrapper(id, ty);
-        self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
+        self.line(&format!(
+            "for (int64_t i = 0; i < chelis_movement_count(t{id}_movement); i++) {{"
+        ));
         self.indent += 1;
-        self.line(&format!(
-            "chelis_scalar out_indices[t{id}_rank > 0 ? t{id}_rank : 1];"
-        ));
-        self.line(&format!(
-            "chelis_scalar in_indices[t{a}_rank > 0 ? t{a}_rank : 1];"
-        ));
-        self.line(&format!(
-            "chelis_tensor_unravel_index(t{id}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)i), out_indices);"
-        ));
-        self.line(&format!("if (t{id}_rank == t{a}_rank) {{"));
-        self.indent += 1;
-        self.line(&format!(
-            "for (int d = 0; d < t{a}_rank; d++) in_indices[d] = d == {axis} ? chelis_scalar_from_bits(CHELIS_DTYPE_I64, 0) : out_indices[d];"
-        ));
-        self.indent -= 1;
-        self.line("} else {");
-        self.indent += 1;
-        self.line(&format!(
-            "for (int d = 0; d < t{a}_rank; d++) in_indices[d] = out_indices[d < {axis} ? d : d + 1];"
-        ));
-        self.indent -= 1;
-        self.line("}");
-        self.line(&format!(
-            "int64_t src = chelis_tensor_flat_index(t{a}, in_indices);"
-        ));
+        self.line(&format!("int64_t src = chelis_movement_index(t{id}_movement, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)i));"));
         self.line(&format!(
             "(({elem_type}*)t{id}_data)[i] = ((const {elem_type}*)t{a}_data)[src];"
         ));
         self.indent -= 1;
         self.line("}");
+        self.line(&format!("chelis_movement_plan_release(t{id}_movement);"));
     }
 
     // ---- Pad ----
@@ -6016,27 +5973,18 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     }
 
     /// Derive checked extents before consuming the existing ordered extent claims.
-    fn emit_affine_shape(&mut self, id: usize, a: usize, ty: &TensorType, op: &str, bounds: &str) {
+    fn emit_affine_plan(&mut self, id: usize, a: usize, ty: &TensorType, op: &str, bounds: &str) {
         let rank = ty.dims.len();
-        self.line(&format!(
-            "chelis_scalar t{id}_movement_shape[{}];",
-            rank.max(1)
-        ));
-        self.line(&format!(
-            "chelis_tensor_{op}_shape(t{a}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {rank}), {bounds}, t{id}_movement_shape);"
-        ));
-        let extents = (0..rank)
-            .map(|axis| (axis, format!("t{id}_movement_shape[{axis}].bits")))
-            .collect::<Vec<_>>();
+        let operation = match op {
+            "pad" => "CHELIS_MOVEMENT_PAD",
+            "shrink" => "CHELIS_MOVEMENT_SHRINK",
+            "stride" => "CHELIS_MOVEMENT_STRIDE",
+            _ => unreachable!("affine emitter operation"),
+        };
+        self.line(&format!("chelis_movement_plan *t{id}_movement = chelis_tensor_affine_plan(t{a}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {rank}), {bounds}, {operation});"));
+        let extents = (0..rank).map(|axis| (axis, format!("chelis_movement_extent(t{id}_movement, CHELIS_MOVEMENT_RESULT, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {axis}))"))).collect::<Vec<_>>();
         self.emit_runtime_dim_sites(id, &extents);
-        // Check every submitted axis, including static and symbolic bystanders.
-        // Equal element counts alone cannot authorize a different movement shape.
-        for (axis, dim) in ty.dims.iter().enumerate() {
-            let expected = Self::emit_dim_info(dim);
-            self.line(&format!(
-                "if (t{id}_movement_shape[{axis}].bits != ({expected})) {{ fprintf(stderr, \"movement target mismatch at node {id} axis {axis}\\n\"); chelis_numeric_trap(\"numeric trap: domain in {op} at int64\"); }}"
-            ));
-        }
+        self.line(&format!("chelis_movement_check_target(t{id}_movement, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {rank}), {});", Self::tagged_shape_literal(ty)));
     }
 
     fn emit_pad(
@@ -6062,8 +6010,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             .collect::<Vec<_>>();
         self.emit_affine_bounds(&format!("t{id}_before"), &before);
         self.emit_affine_bounds(&format!("t{id}_after"), &after);
-        self.emit_affine_bounds(&format!("t{id}_steps"), &vec!["1".into(); padding.len()]);
-        self.emit_affine_shape(id, a, ty, "pad", &format!("t{id}_before, t{id}_after"));
+        self.emit_affine_plan(id, a, ty, "pad", &format!("t{id}_before, t{id}_after"));
         self.emit_slot_wrapper(id, ty);
         assert_eq!(fill.prim(), ty.precision, "verified pad fill dtype");
         let bits = match fill.element_ref() {
@@ -6093,18 +6040,17 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             };
             self.line(&format!("chelis_fill_scalar(t{id}_write_guard, chelis_scalar_from_bits({dtype}, {literal}));"));
         }
-        self.line(&format!("for (int64_t i = 0; i < t{a}_size; i++) {{"));
-        self.indent += 1;
         self.line(&format!(
-            "chelis_scalar coordinates[t{a}_rank > 0 ? t{a}_rank : 1];"
+            "for (int64_t i = 0; i < chelis_movement_count(t{id}_movement); i++) {{"
         ));
-        self.line(&format!("chelis_tensor_unravel_index(t{a}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)i), coordinates);"));
-        self.line(&format!("int64_t dst = chelis_tensor_affine_index(t{id}, coordinates, t{id}_before, t{id}_steps);"));
+        self.indent += 1;
+        self.line(&format!("int64_t dst = chelis_movement_index(t{id}_movement, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)i));"));
         self.line(&format!(
             "(({et}*)t{id}_data)[dst] = ((const {et}*)t{a}_data)[i];"
         ));
         self.indent -= 1;
         self.line("}");
+        self.line(&format!("chelis_movement_plan_release(t{id}_movement);"));
     }
 
     fn emit_shrink(
@@ -6145,8 +6091,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             .collect::<Vec<_>>();
         self.emit_affine_bounds(&format!("t{id}_start"), &start);
         self.emit_affine_bounds(&format!("t{id}_end"), &end);
-        self.emit_affine_bounds(&format!("t{id}_steps"), &vec!["1".into(); bounds.len()]);
-        self.emit_affine_shape(id, a, ty, "shrink", &format!("t{id}_start, t{id}_end"));
+        self.emit_affine_plan(id, a, ty, "shrink", &format!("t{id}_start, t{id}_end"));
         // Preserve the existing runtime-bound empty-range rejection shared
         // with Eval. The metadata API also serves statically empty tensors;
         // this operation-level admission rule is separate from shape safety.
@@ -6156,20 +6101,17 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             }
         }
         self.emit_slot_wrapper(id, ty);
-        self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
+        self.line(&format!(
+            "for (int64_t i = 0; i < chelis_movement_count(t{id}_movement); i++) {{"
+        ));
         self.indent += 1;
-        self.line(&format!(
-            "chelis_scalar coordinates[t{id}_rank > 0 ? t{id}_rank : 1];"
-        ));
-        self.line(&format!("chelis_tensor_unravel_index(t{id}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)i), coordinates);"));
-        self.line(&format!(
-            "int64_t src = chelis_tensor_affine_index(t{a}, coordinates, t{id}_start, t{id}_steps);"
-        ));
+        self.line(&format!("int64_t src = chelis_movement_index(t{id}_movement, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)i));"));
         self.line(&format!(
             "(({et}*)t{id}_data)[i] = ((const {et}*)t{a}_data)[src];"
         ));
         self.indent -= 1;
         self.line("}");
+        self.line(&format!("chelis_movement_plan_release(t{id}_movement);"));
     }
 
     fn emit_stride(
@@ -6188,21 +6130,19 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             .map(|(axis, n)| Self::bound_c_expr(n, inputs, a, axis, dag))
             .collect::<Vec<_>>();
         self.emit_affine_bounds(&format!("t{id}_steps"), &steps);
-        self.emit_affine_bounds(&format!("t{id}_offsets"), &vec!["0".into(); strides.len()]);
-        self.emit_affine_shape(id, a, ty, "stride", &format!("t{id}_steps"));
+        self.emit_affine_plan(id, a, ty, "stride", &format!("t{id}_steps, NULL"));
         self.emit_slot_wrapper(id, ty);
-        self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
-        self.indent += 1;
         self.line(&format!(
-            "chelis_scalar coordinates[t{id}_rank > 0 ? t{id}_rank : 1];"
+            "for (int64_t i = 0; i < chelis_movement_count(t{id}_movement); i++) {{"
         ));
-        self.line(&format!("chelis_tensor_unravel_index(t{id}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)i), coordinates);"));
-        self.line(&format!("int64_t src = chelis_tensor_affine_index(t{a}, coordinates, t{id}_offsets, t{id}_steps);"));
+        self.indent += 1;
+        self.line(&format!("int64_t src = chelis_movement_index(t{id}_movement, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)i));"));
         self.line(&format!(
             "(({et}*)t{id}_data)[i] = ((const {et}*)t{a}_data)[src];"
         ));
         self.indent -= 1;
         self.line("}");
+        self.line(&format!("chelis_movement_plan_release(t{id}_movement);"));
     }
 
     // ---- Realize ----
@@ -6952,8 +6892,9 @@ mod tests {
             None,
         );
         let c = emit_test_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("in_indices[1] = out_indices[0]"));
-        assert!(c.contains("in_indices[0] = out_indices[1]"));
+        assert!(c.contains("chelis_tensor_permute_plan(t0,"));
+        assert!(c.contains("chelis_movement_index(t1_movement,"));
+        assert!(c.contains("t1_axes[2] = { chelis_scalar_from_bits(CHELIS_DTYPE_I64, (1)), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (0)) }"));
         assert!(!c.contains("t1->strides[0] ="));
     }
 
@@ -6976,9 +6917,9 @@ mod tests {
             None,
         );
         let c = emit_test_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains(
-            "in_indices[d] = d == 0 ? chelis_scalar_from_bits(CHELIS_DTYPE_I64, 0) : out_indices[d]"
-        ));
+        assert!(c.contains("chelis_tensor_expand_plan(t0,"));
+        assert!(c.contains("CHELIS_MOVEMENT_EXPAND"));
+        assert!(c.contains("chelis_movement_index(t1_movement,"));
         assert!(!c.contains("t1->strides[0] ="));
     }
 
@@ -7304,7 +7245,7 @@ mod tests {
         assert!(c.contains(
             "chelis_fill_scalar(t1_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_F32,"
         ));
-        assert!(c.contains("chelis_tensor_affine_index(t1, coordinates, t1_before, t1_steps)"));
+        assert!(c.contains("chelis_movement_index(t1_movement,"));
     }
 
     #[test]
@@ -7325,7 +7266,7 @@ mod tests {
             None,
         );
         let c = emit_test_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("chelis_tensor_affine_index(t0, coordinates, t1_start, t1_steps)"));
+        assert!(c.contains("chelis_movement_index(t1_movement,"));
     }
 
     /// chelis#368: the `SHRINK_TO_END` full-axis sentinel is an eval-lane
@@ -7372,7 +7313,7 @@ mod tests {
             None,
         );
         let c = emit_test_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("chelis_tensor_affine_index(t0, coordinates, t1_offsets, t1_steps)"));
+        assert!(c.contains("chelis_movement_index(t1_movement,"));
         assert!(!c.contains("t1->strides[0] ="));
     }
 

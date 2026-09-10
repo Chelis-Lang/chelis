@@ -22,8 +22,8 @@ mod ieee_narrow;
 mod metadata;
 use metadata::{
     AllocationBytes, AxisDecomposition, ByteCount, ElementCount, IterationSpace, MatmulDimension,
-    MatmulMetadata, MatmulPart, MetadataError, ReductionMetadata, ShapeMetadata, SparseMetadata,
-    WindowMetadata,
+    MatmulMetadata, MatmulPart, MetadataError, MovementMetadata, MovementOp, ReductionMetadata,
+    ShapeMetadata, SparseMetadata, WindowMetadata,
 };
 mod ownership_ledger;
 
@@ -2527,6 +2527,173 @@ pub const CHELIS_WINDOW_GRAD: chelis_window_op = 4;
 pub type chelis_window_side = c_int;
 pub const CHELIS_WINDOW_SOURCE: chelis_window_side = 0;
 pub const CHELIS_WINDOW_RESULT: chelis_window_side = 1;
+#[allow(non_camel_case_types)]
+pub type chelis_movement_op = c_int;
+pub const CHELIS_MOVEMENT_EXPAND: chelis_movement_op = 0;
+pub const CHELIS_MOVEMENT_INSERT: chelis_movement_op = 1;
+pub const CHELIS_MOVEMENT_PAD: chelis_movement_op = 2;
+pub const CHELIS_MOVEMENT_SHRINK: chelis_movement_op = 3;
+pub const CHELIS_MOVEMENT_STRIDE: chelis_movement_op = 4;
+#[allow(non_camel_case_types)]
+pub type chelis_movement_side = c_int;
+pub const CHELIS_MOVEMENT_SOURCE: chelis_movement_side = 0;
+pub const CHELIS_MOVEMENT_RESULT: chelis_movement_side = 1;
+#[allow(non_camel_case_types)]
+pub struct chelis_movement_plan {
+    metadata: MovementMetadata,
+    op: &'static str,
+}
+unsafe fn movement_plan<'a>(plan: *const chelis_movement_plan) -> &'a chelis_movement_plan {
+    if plan.is_null() {
+        affine_result::<()>(
+            Err(MetadataError::Domain("null movement plan".into())),
+            "movement",
+        );
+    }
+    &*plan
+}
+unsafe fn movement_plan_rank(input: *const chelis_tensor, rank: chelis_scalar, op: &str) -> usize {
+    tensor_metadata_dtype(input, op);
+    let rank = affine_scalar(rank, op);
+    if rank < 0 {
+        affine_result::<()>(
+            Err(MetadataError::Domain("negative movement rank".into())),
+            op,
+        );
+    }
+    let rank = affine_result(
+        i32::try_from(rank).map_err(|_| MetadataError::Overflow("movement rank exceeds int32")),
+        op,
+    );
+    if rank != (*input).rank() {
+        affine_result::<()>(
+            Err(MetadataError::Domain("movement rank mismatch".into())),
+            op,
+        );
+    }
+    (*input).shape().len()
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_permute_plan(
+    input: *const chelis_tensor,
+    rank: chelis_scalar,
+    axes: *const chelis_scalar,
+) -> *mut chelis_movement_plan {
+    let op = "permute";
+    let rank = movement_plan_rank(input, rank, op);
+    let axes = affine_array(axes, rank, op);
+    let metadata = affine_result(MovementMetadata::permuted(&(*input).metadata, &axes), op);
+    Box::into_raw(Box::new(chelis_movement_plan { metadata, op }))
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_expand_plan(
+    input: *const chelis_tensor,
+    axis: chelis_scalar,
+    size: chelis_scalar,
+    operation: chelis_movement_op,
+) -> *mut chelis_movement_plan {
+    let (op, insert) = match operation {
+        CHELIS_MOVEMENT_EXPAND => ("expand", false),
+        CHELIS_MOVEMENT_INSERT => ("insert", true),
+        _ => affine_result(
+            Err(MetadataError::Domain("invalid expansion operation".into())),
+            "movement",
+        ),
+    };
+    tensor_metadata_dtype(input, op);
+    let metadata = affine_result(
+        MovementMetadata::expanded(
+            &(*input).metadata,
+            affine_scalar(axis, op),
+            affine_scalar(size, op),
+            insert,
+        ),
+        op,
+    );
+    Box::into_raw(Box::new(chelis_movement_plan { metadata, op }))
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_affine_plan(
+    input: *const chelis_tensor,
+    rank: chelis_scalar,
+    first: *const chelis_scalar,
+    second: *const chelis_scalar,
+    operation: chelis_movement_op,
+) -> *mut chelis_movement_plan {
+    let (op, kind) = match operation {
+        CHELIS_MOVEMENT_PAD => ("pad", MovementOp::Pad),
+        CHELIS_MOVEMENT_SHRINK => ("shrink", MovementOp::Shrink),
+        CHELIS_MOVEMENT_STRIDE => ("stride", MovementOp::Stride),
+        _ => affine_result(
+            Err(MetadataError::Domain("invalid affine operation".into())),
+            "movement",
+        ),
+    };
+    let rank = movement_plan_rank(input, rank, op);
+    let first = affine_array(first, rank, op);
+    let second = if matches!(kind, MovementOp::Stride) {
+        Vec::new()
+    } else {
+        affine_array(second, rank, op)
+    };
+    let metadata = affine_result(
+        MovementMetadata::affine(&(*input).metadata, &first, &second, kind),
+        op,
+    );
+    Box::into_raw(Box::new(chelis_movement_plan { metadata, op }))
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_movement_extent(
+    plan: *const chelis_movement_plan,
+    side: chelis_movement_side,
+    axis: chelis_scalar,
+) -> i64 {
+    let plan = movement_plan(plan);
+    let shape = match side {
+        CHELIS_MOVEMENT_SOURCE => plan.metadata.input(),
+        CHELIS_MOVEMENT_RESULT => plan.metadata.result(),
+        _ => affine_result(
+            Err(MetadataError::Domain("invalid movement side".into())),
+            plan.op,
+        ),
+    };
+    affine_result(shape.extent_at(affine_scalar(axis, plan.op)), plan.op)
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_movement_count(plan: *const chelis_movement_plan) -> i64 {
+    movement_plan(plan).metadata.count().get()
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_movement_index(
+    plan: *const chelis_movement_plan,
+    linear: chelis_scalar,
+) -> i64 {
+    let plan = movement_plan(plan);
+    affine_result(plan.metadata.index(affine_scalar(linear, plan.op)), plan.op)
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_movement_check_target(
+    plan: *const chelis_movement_plan,
+    rank: chelis_scalar,
+    shape: *const chelis_scalar,
+) {
+    let plan = movement_plan(plan);
+    let shape = reduction_array(rank, shape, plan.op);
+    if shape != plan.metadata.result().shape() {
+        affine_result::<()>(
+            Err(MetadataError::Domain(
+                "movement target shape mismatch".into(),
+            )),
+            plan.op,
+        );
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_movement_plan_release(plan: *mut chelis_movement_plan) {
+    movement_plan(plan);
+    drop(Box::from_raw(plan));
+}
+
 pub struct chelis_window_plan {
     metadata: WindowMetadata,
     op: &'static str,

@@ -305,6 +305,21 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_movement_plan * chelis_tensor_affine_plan ( const chelis_tensor * input , chelis_scalar rank , const chelis_scalar * first , const chelis_scalar * second , chelis_movement_op operation ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_movement_plan * chelis_tensor_expand_plan ( const chelis_tensor * input , chelis_scalar axis , chelis_scalar size , chelis_movement_op operation ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_movement_plan * chelis_tensor_permute_plan ( const chelis_tensor * input , chelis_scalar rank , const chelis_scalar * axes ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: chelis_option * chelis_dict_get ( const chelis_dict * dict , chelis_value key ) ;",
       "flags": []
     },
@@ -774,6 +789,27 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_movement_count ( const chelis_movement_plan * plan ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_movement_extent ( const chelis_movement_plan * plan , chelis_movement_side side , chelis_scalar axis ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_movement_index ( const chelis_movement_plan * plan , chelis_scalar linear ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: int64_t chelis_reduction_count ( const chelis_reduction_plan * plan ) ;",
       "flags": [
         "numeric-op"
@@ -979,6 +1015,16 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_movement_check_target ( const chelis_movement_plan * plan , chelis_scalar rank , const chelis_scalar * shape ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_movement_plan_release ( chelis_movement_plan * plan ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_option_release ( const chelis_option * option ) ;",
       "flags": []
     },
@@ -1157,6 +1203,16 @@
     {
       "kind": "header-struct",
       "id": "chelis_runtime.h: typedef enum { CHELIS_MATMUL_ROWS = 0 , CHELIS_MATMUL_COLUMNS = 1 , CHELIS_MATMUL_REDUCTION = 2 } chelis_matmul_dimension_kind",
+      "flags": []
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime.h: typedef enum { CHELIS_MOVEMENT_EXPAND = 0 , CHELIS_MOVEMENT_INSERT = 1 , CHELIS_MOVEMENT_PAD = 2 , CHELIS_MOVEMENT_SHRINK = 3 , CHELIS_MOVEMENT_STRIDE = 4 } chelis_movement_op",
+      "flags": []
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime.h: typedef enum { CHELIS_MOVEMENT_SOURCE = 0 , CHELIS_MOVEMENT_RESULT = 1 } chelis_movement_side",
       "flags": []
     },
     {

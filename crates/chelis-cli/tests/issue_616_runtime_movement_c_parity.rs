@@ -560,3 +560,42 @@ fn issue_616_runtime_shrink_overshoot_errs_in_both_lanes() {
         "C rejection must use the canonical shrink domain diagnostic; stderr={stderr}"
     );
 }
+
+#[test]
+fn checked_movement_expansion_guards_preserve_expand_and_insert_identity() {
+    for (op, result_shape) in [("expand", "3"), ("insert", "3, 1")] {
+        for (size, valid) in [(4, true), (3, false)] {
+            let source = format!(
+                "module Repro.MovementIdentity\nsig f: tensor[1, f32] -> tensor[n, f32] -> tensor[{result_shape}, f32]\ndef f(x, y) = {{\n  small = shrink(y, [[0i64, sub(shape(y, 0i32), 1i64)]])\n  {op}(x, 0i32, shape(small, 0i32))\n}}\nout = f(to_tensor([1.0f32]), to_tensor([{}]))\n",
+                vec!["1.0f32"; size].join(", ")
+            );
+            let stem = format!("movement_{op}_{size}");
+            let eval = run_eval(&source, &stem);
+            let (_dir, build_dir) = build_c(&source, &stem);
+            let bin = gcc(&build_dir, &stem, None, "identity_bin");
+            let compiled = StdCommand::new(bin).output().unwrap();
+            for (lane, output) in [("eval", eval), ("C", compiled)] {
+                if valid {
+                    assert!(
+                        output.status.success(),
+                        "{lane} {op}: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    assert_eq!(
+                        parse_tensor_data(&String::from_utf8_lossy(&output.stdout)),
+                        vec![1.0; 3]
+                    );
+                } else {
+                    assert!(!output.status.success(), "{lane} {op} accepted bad extent");
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    assert!(
+                        stderr
+                            .lines()
+                            .any(|line| line == format!("numeric trap: domain in {op} at int64")),
+                        "{lane} {op}: {stderr}"
+                    );
+                }
+            }
+        }
+    }
+}
