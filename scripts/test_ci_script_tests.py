@@ -41,6 +41,9 @@ class TimingTests(unittest.TestCase):
             original = subprocess.run
             with ci_timing.subprocesses(), ci_timing.subprocesses():
                 self.assertEqual(subprocess.run([sys.executable, "-c", "pass"]).returncode, 0)
+                self.assertEqual(subprocess.run(args=[sys.executable, "-c", "pass"]).returncode, 0)
+                self.assertEqual(subprocess.run(Path(sys.executable), input="", text=True).returncode, 0)
+                self.assertEqual(subprocess.run([sys.executable, "-c", "raise SystemExit(7)"]).returncode, 7)
                 with self.assertRaises(subprocess.CalledProcessError):
                     subprocess.run([sys.executable, "-c", "raise SystemExit(7)"], check=True)
                 with self.assertRaises(FileNotFoundError):
@@ -48,7 +51,8 @@ class TimingTests(unittest.TestCase):
             self.assertIs(subprocess.run, original)
             rows = [json.loads(line) for p in Path(tmp).glob("*.jsonl") for line in p.read_text().splitlines()]
             ended = [r for r in rows if r["event"] == "finish"]
-            self.assertEqual([r["outcome"] for r in ended], ["success", "CalledProcessError", "FileNotFoundError"])
+            self.assertEqual([r["outcome"] for r in ended], ["success", "success", "success", "failure", "CalledProcessError", "FileNotFoundError"])
+            self.assertEqual([r.get("returncode") for r in ended], [0, 0, 0, 7, 7, None])
             self.assertTrue(all(r["seconds"] >= 0 for r in ended))
             self.assertTrue(all("env" not in r for r in rows))
 
@@ -68,6 +72,24 @@ class TimingTests(unittest.TestCase):
             names = [r["name"] for r in rows]
             self.assertTrue(any(n.endswith(".setUpClass") for n in names))
             self.assertTrue(any(n.endswith(".test_failure") for n in names))
+
+    def test_failed_or_skipped_class_setup_is_not_recorded_as_success(self):
+        for error, outcome in ((RuntimeError("setup failed"), "failure"),
+                               (unittest.SkipTest("missing prerequisite"), "skipped")):
+            class Example(unittest.TestCase):
+                @classmethod
+                def setUpClass(cls):
+                    raise error
+
+                def test_unused(self):
+                    self.fail("setup must prevent execution")
+
+            with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"CHELIS_CI_TIMING_DIR": tmp}):
+                result = runner.execute(list(runner.flatten(unittest.defaultTestLoader.loadTestsFromTestCase(Example))), stream=io.StringIO())
+                self.assertFalse(runner.passed(result, "nightly"))
+                rows = [json.loads(line) for p in Path(tmp).glob("*.jsonl") for line in p.read_text().splitlines()]
+                ended = [r for r in rows if r["event"] == "finish"]
+                self.assertEqual([r["outcome"] for r in ended], [outcome])
 
     def test_empty_or_skipped_nightly_is_not_success(self):
         result = unittest.TestResult()

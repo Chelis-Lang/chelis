@@ -95,8 +95,14 @@ class TimedResult(unittest.TextTestResult):
 class TimedSuite(unittest.TestSuite):
     def _handleClassSetUp(self, test, result):
         if test.__class__ != getattr(result, "_previousTestClass", None):
-            with ci_timing.span(test.id().rsplit(".", 1)[0] + ".setUpClass", "setup"):
-                return super()._handleClassSetUp(test, result)
+            with ci_timing.span(test.id().rsplit(".", 1)[0] + ".setUpClass", "setup") as timing:
+                errors, skips = len(result.errors), len(result.skipped)
+                value = super()._handleClassSetUp(test, result)
+                if len(result.errors) > errors:
+                    timing["outcome"] = "failure"
+                elif len(result.skipped) > skips:
+                    timing["outcome"] = "skipped"
+                return value
 
 
 def execute(tests, stream=None):

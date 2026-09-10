@@ -20,15 +20,17 @@ def record(row):
 def span(name, kind):
     start = time.monotonic()
     record({"event": "start", "name": name, "kind": kind})
-    outcome = "success"
+    details = {"outcome": "success"}
     try:
-        yield
+        yield details
     except BaseException as error:
-        outcome = type(error).__name__
+        details["outcome"] = type(error).__name__
+        if isinstance(error, subprocess.CalledProcessError):
+            details["returncode"] = error.returncode
         raise
     finally:
         record({"event": "finish", "name": name, "kind": kind,
-                "seconds": time.monotonic() - start, "outcome": outcome})
+                "seconds": time.monotonic() - start, **details})
 
 
 @contextmanager
@@ -44,10 +46,16 @@ def subprocesses():
         return
     original = subprocess.run
 
-    def run(command, *args, **kwargs):
-        name = command if isinstance(command, str) else " ".join(map(str, command))
-        with span(name, "subprocess"):
-            return original(command, *args, **kwargs)
+    def run(*args, **kwargs):
+        command = args[0] if args else kwargs.get("args", ())
+        name = (os.fsdecode(command) if isinstance(command, (str, bytes, os.PathLike))
+                else " ".join(map(str, command)))
+        with span(name, "subprocess") as timing:
+            completed = original(*args, **kwargs)
+            timing["returncode"] = completed.returncode
+            if completed.returncode:
+                timing["outcome"] = "failure"
+            return completed
 
     run._chelis_timed = True
     subprocess.run = run
