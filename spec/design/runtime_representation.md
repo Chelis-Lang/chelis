@@ -758,12 +758,18 @@ int64 product, byte count and target capacity before the first scratch access.
 Empty objects allocate a zero-count owner without entering the ordering loops.
 
 The bounded acceptance surface is `checked_c_json_scratch` for delegation and
-lifetime controls plus `issue_1314_json_bigint`'s recursive canonical Unicode,
-reordered and empty object case through Eval/C. Erasing allocation, guard entry,
-guard exit or release is rejected. These commands extend the frozen Phase 0
-manifest; its immutable foundation and active identities stay unchanged. Literal
-ingress, movement coordinate scratch and source diagnostic identity, the complete
-Phase 1 consumer audit/receipt oracle, and Phase 2 remain separate obligations.
+cleanup-tail spelling, plus `issue_1314_json_bigint`'s recursive canonical Unicode,
+reordered and empty object case through Eval/C. Its separate
+`json_scratch_execution_detects_skipped_cleanup` test links the exact Cargo archive
+built with the private ownership ledger and executes the emitted ordering helper
+with an explicitly released caller. Empty and two-entry objects leave zero live
+owners/bytes. Output-preserving last-iteration return and omitted-owner-release
+mutations must leave live ownership; omitted guard exit must fail with the active
+write-guard error. The source check alone does not prove control-flow cleanup.
+These execution registrations move the frozen Phase 0 contract under B1; its
+immutable foundation and active identities stay unchanged. Literal ingress,
+movement coordinate scratch and source diagnostic identity, the complete Phase 1
+consumer audit/receipt oracle, and Phase 2 remain separate obligations.
 
 ## C3. One generated host/device descriptor schema
 

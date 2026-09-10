@@ -62,7 +62,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "2bc4863a38243f1c7b5e0c5b33e2d30df73fdd44c64febb261ce3db26d6e04a6"
+FREEZE_SHA256 = "b2205e8d5160c9fe6f7760fca9e448b0b4c755981a881fe9954ebcb85dcf7f5e"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -1705,6 +1705,11 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
             "checked C JSON ordering scratch recursive and empty execution",
             ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "issue_1314_json_bigint",
              "-E", "test(=json_object_serialization_is_recursive_canonical_unicode_order_in_eval_and_c)"),
+        ),
+        OracleLeg(
+            "checked C JSON scratch ownership ledger and skipped-cleanup mutations",
+            ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "issue_1314_json_bigint",
+             "-E", "test(=json_scratch_execution_detects_skipped_cleanup)"),
         ),
         OracleLeg(
             "checked C window delegation and bypass mutations",

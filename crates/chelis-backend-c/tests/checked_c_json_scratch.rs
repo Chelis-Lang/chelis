@@ -1,4 +1,5 @@
-//! Canonical JSON ordering uses checked runtime scratch.
+//! Canonical JSON ordering delegates capacity and spells a cleanup tail.
+//! The CLI ownership-ledger test proves the executed cleanup, including early returns.
 const HOST: &str = include_str!("../src/host_emit.rs");
 fn checked_json(source: &str) -> bool {
     let start = source
@@ -31,7 +32,7 @@ fn checked_json(source: &str) -> bool {
         && !body.contains("sizeof(")
 }
 #[test]
-fn json_order_scratch_has_checked_capacity_and_balanced_owner() {
+fn json_order_scratch_has_checked_capacity_and_cleanup_tail() {
     assert!(checked_json(HOST));
 }
 #[test]
