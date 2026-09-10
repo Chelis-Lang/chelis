@@ -951,13 +951,36 @@ pub(super) fn infer_cast(
     let new_prec = match target_ty {
         Type::Var(target) => {
             // A cast inside a declaration may name one of that declaration's
-            // quantified scalar type variables. Keep the target symbolic and
+            // bounded dtype variables. Keep the target symbolic and
             // let the declared signature plus its numeric consumers select the
             // concrete active dtype. This is the source-level spelling needed
             // by [05-OP-35]'s same-p `linspace` and `arange` graphs; a closed
             // cast outside such a declaration still rejects the name in the
             // resolver above.
             return match resolved {
+                Type::Tensor(dims, source) if subst.tvar_restriction(target).is_some() => {
+                    // [05-OP-63]: a dtype change preserves every dimension.
+                    // The declaration's [04-DTYPE-2] bound is retained on the
+                    // precision variable and checked at each instantiation.
+                    if mode == CastMode::Trunc {
+                        let source_is_float = match source {
+                            TensorPrec::Concrete(p) => p.is_float(),
+                            TensorPrec::Var(p) => {
+                                subst.tvar_restriction(p) == Some(TypeVarRestriction::ActiveFloat)
+                            }
+                        };
+                        if !source_is_float
+                            || subst.tvar_restriction(target) != Some(TypeVarRestriction::ActiveInt)
+                        {
+                            return report(errors, CheckError::new(
+                                CheckErrorKind::CastNonTensor,
+                                "`cast_trunc` requires a float source and an integer target ([05-OP-6]); use `cast` for other conversions".to_string(),
+                                vec![],
+                            ));
+                        }
+                    }
+                    Type::Tensor(dims, TensorPrec::Var(target))
+                }
                 Type::Prim(source) if source.is_numeric() => Type::Var(target),
                 Type::Var(_) | Type::Error(_) => Type::Var(target),
                 other => report(

@@ -1509,7 +1509,7 @@ impl<'a> EvalContext<'a> {
                     .map_err(|trap| trap.to_string())?;
                 Ok(RuntimeValue::from_scalar_value(cast))
             }
-            (RuntimeValue::Tensor(tensor), _) => cast_tensor_value(tensor, target),
+            (RuntimeValue::Tensor(tensor), _) => cast_tensor_value(tensor, target_prim),
             (other, _) => Err(format!(
                 "unsupported cast from {other:?} to {}",
                 target_prim.name()

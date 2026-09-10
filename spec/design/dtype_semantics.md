@@ -395,6 +395,15 @@ ratified at spec/04 §5.2 in the same change set:
   remaining total IEEE RNE: `cast(9007199254740993i64, f64)` yields
   `9007199254740992.0`, and `cast(16777217i32, f32)` yields `16777216.0`.
   These are explicit ByDesign controls, not a hidden f64 intermediate.
+- Bounded tensor targets (#1564) retain the declaration's precision variable
+  through checking and pass the actualized `Prim` to the host tensor cast.
+  Lowering binds original and checker-renamed formal variables independently
+  from aligned actual types, including scalar dtype witnesses.
+  The acceptance oracle is `cargo test -p chelis-cli --test
+  issue_1564_bounded_tensor_cast`: eval/generated-C agreement at all eight active
+  numeric target dtypes, truncating-cast parity, and invalid-target rejection.
+  The same-named checker/API suites additionally cover both checker ingresses,
+  exact stored dtypes, integer values beyond 2^53, and Domain/Overflow traps.
 - **Fold rule (the §C2 decline clause, applied to casts):** a
   compile-time constant fold whose cast would trap DECLINES TO FOLD -
   the condition falls to runtime, where the trap fires with its full
