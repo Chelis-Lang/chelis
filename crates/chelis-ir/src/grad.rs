@@ -1863,7 +1863,27 @@ fn compute_adjoints(
             None
         }
         RiscOp::CheckedReshapeExtent { .. } => Some(vec![]),
-        RiscOp::Copy | RiscOp::CheckedUnitAxis { .. } => Some(vec![(node.inputs[0], g)]),
+        RiscOp::CheckedUnitAxis {
+            axis: crate::dag::RtAxis::Lit(axis),
+        } => {
+            let input = node.inputs[0];
+            let input_ty = forward
+                .get(input)
+                .expect("checked input")
+                .output_type
+                .clone();
+            let mut inputs = vec![g];
+            let mut new_shape = restore_target(dag, forward, input, &input_ty.dims, &mut inputs);
+            // Restore the parameter's shape through the checked witness. A
+            // known bad caller must reach the primal Domain check, rather
+            // than make a literal-sized cotangent fail graph verification.
+            let slot = inputs.len();
+            inputs.push(node.inputs[1]);
+            new_shape[*axis as usize] = RtDim::Node(slot);
+            let gradient = dag.add_node(RiscOp::Reshape { new_shape }, inputs, input_ty, None);
+            Some(vec![(input, gradient)])
+        }
+        RiscOp::Copy => Some(vec![(node.inputs[0], g)]),
         RiscOp::Drop => None,
         RiscOp::Gather { axis } => {
             let values = node.inputs[0];

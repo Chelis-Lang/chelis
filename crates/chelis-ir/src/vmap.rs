@@ -95,6 +95,13 @@ pub fn vectorize_axis0(dag: &Dag, batch_dim: DimInfo) -> Result<Dag, String> {
                 axis: RtAxis::Lit(axis.checked_add(1).expect("vmap axis fits int32")),
                 requirements: requirements.clone(),
             },
+            RiscOp::CheckedReshapeExtent {
+                claim,
+                axis: RtAxis::Lit(axis),
+            } => RiscOp::CheckedReshapeExtent {
+                claim: claim.clone(),
+                axis: RtAxis::Lit(axis + 1),
+            },
             RiscOp::CheckedUnitAxis {
                 axis: RtAxis::Lit(axis),
             } => RiscOp::CheckedUnitAxis {

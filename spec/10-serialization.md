@@ -42,6 +42,24 @@ fields and edges. `WireDagNode.shape_deps` contains nonnegative exact `int64`
 shape numbers. `shape_deps`, `span_id` (explicitly null when absent), and
 `merged_spans` are mandatory fields, including when their lists are empty.
 
+`WireRiscOp::CheckedReshapeExtent { claim, axis }` has two earlier rank-zero
+`int64` inputs: the independently computed target extent and the required
+extent. Its rank-zero `int64` output carries the computed extent after their
+equality check. `claim` is diagnostic text; the second input identifies the
+requirement, including a declaring signature's shape witness. The normalized
+`int32` result-axis position is nonnegative. Missing fields, invalid references,
+wrong arity, or non-scalar/non-`int64` inputs or output are encoding and decoding
+errors. A resolved result-type dimension does not substitute for either input.
+
+`WireRiscOp::CheckedUnitAxis { axis }` has two earlier inputs: a tensor and an
+`ExtentWitness` reading exactly that tensor at the same normalized axis, with
+an explicit requirement of one. Its output preserves the input's dtype, rank
+and all other dimensions, refining only that axis to literal one. A different
+tensor, axis, witness operation, missing unit requirement, or unrelated type
+refinement is an encoding and decoding error. These checked operations preserve
+their source provenance and invocation dependencies through the mandatory node
+fields and edges above; discarded data results do not erase their checks.
+
 `WireRiscOp::Count { axes }` carries the complete
 non-empty vector of unique normalized original-axis positions in strictly
 descending order under [05-OP-29]. An encoder rejects any empty, duplicate,

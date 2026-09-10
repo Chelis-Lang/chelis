@@ -1940,9 +1940,9 @@ fn narrow_substitutes_param_bound_dim_var_for_wildcard() {
             TensorPrec::Concrete(Prim::F64),
         )),
     );
-    let param_dvars = param_bound_dvars(&decl);
+    let param_dvars = param_bound_dims(&decl);
     assert!(
-        param_dvars.contains(&n),
+        param_dvars.contains(&Dim::Var(n)),
         "n appears in a parameter tensor position, so it is param-bound"
     );
     let narrowed = narrow_wildcards_with(&body, &decl, &param_dvars);
@@ -1957,6 +1957,35 @@ fn narrow_substitutes_param_bound_dim_var_for_wildcard() {
         ),
         "the return wildcard must narrow to the param-bound dim var n, not stay `*`"
     );
+}
+
+#[test]
+fn declared_named_dimension_requires_its_own_signature_parameter() {
+    for has_parameter in [true, false] {
+        let parameter_dim = Dim::Name(if has_parameter { "rows" } else { "cols" }.into());
+        let declared = Type::Fn(
+            vec![Type::Tensor(
+                vec![parameter_dim],
+                TensorPrec::Concrete(Prim::F32),
+            )],
+            Box::new(Type::Tensor(
+                vec![Dim::Name("rows".into()), Dim::Lit(2)],
+                TensorPrec::Concrete(Prim::F32),
+            )),
+        );
+        let Type::Fn(params, _) = &declared else {
+            unreachable!()
+        };
+        let body = Type::Fn(
+            params.clone(),
+            Box::new(Type::Tensor(
+                vec![Dim::Wildcard, Dim::Lit(2)],
+                TensorPrec::Concrete(Prim::F32),
+            )),
+        );
+        let narrowed = narrow_wildcards_with(&body, &declared, &param_bound_dims(&declared));
+        assert_eq!(narrowed, if has_parameter { declared } else { body });
+    }
 }
 
 /// A *return-only* dim var (it appears in the declared return but in
@@ -1982,9 +2011,9 @@ fn narrow_keeps_wildcard_for_return_only_dim_var() {
             TensorPrec::Concrete(Prim::Int32),
         )),
     );
-    let param_dvars = param_bound_dvars(&decl);
+    let param_dvars = param_bound_dims(&decl);
     assert!(
-        !param_dvars.contains(&n),
+        !param_dvars.contains(&Dim::Var(n)),
         "n is return-only: it must not be in the param-bound set"
     );
     let narrowed = narrow_wildcards_with(&body, &decl, &param_dvars);
@@ -2003,7 +2032,7 @@ fn narrow_keeps_wildcard_for_return_only_dim_var() {
 /// self-contained (the original #39 behavior).
 #[test]
 fn narrow_substitutes_literal_for_wildcard_unconditionally() {
-    let empty = UnordSet::new();
+    let empty = Vec::new();
     let body = Type::Tensor(
         vec![Dim::Wildcard, Dim::Wildcard],
         TensorPrec::Concrete(Prim::F32),

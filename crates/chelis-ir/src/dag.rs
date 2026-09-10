@@ -1097,11 +1097,13 @@ impl RiscOp {
             Self::ScatterAdd { .. } => Semantic(Id::Scatter),
             Self::Scatter { .. } => Semantic(Id::ScatterReplace),
             Self::ScatterElements { .. } => Semantic(Id::ScatterElements),
-            // ExtentWitness is the compiler's call-boundary requirement
-            // carrier under [04-NUM-9], not a callable Table-A operation.
+            // Extent witnesses and checks carry the compiler's operation
+            // preconditions under [04-NUM-9], not callable Table-A operations.
             // Its tagged requirements and shape-only dependency are checked
             // by the IR verifier and the runtime-extent oracle.
             Self::ExtentWitness { .. }
+            | Self::CheckedReshapeExtent { .. }
+            | Self::CheckedUnitAxis { .. }
             | Self::OneHot { .. }
             | Self::Const { .. }
             | Self::ConstTensor { .. }

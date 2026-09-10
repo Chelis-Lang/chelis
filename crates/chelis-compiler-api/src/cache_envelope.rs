@@ -166,6 +166,8 @@ pub(crate) fn lowered_library_payload_matches(
                 == sorted_map_bytes(expected.symbol_table())?
             && sorted_btree_map_bytes(cached.program_defs())?
                 == sorted_btree_map_bytes(expected.program_defs())?
+            && sorted_btree_map_bytes(cached.program_signatures())?
+                == sorted_btree_map_bytes(expected.program_signatures())?
             && sorted_btree_map_bytes(cached.program_types())?
                 == sorted_btree_map_bytes(expected.program_types())?
             && sorted_btree_map_bytes(cached.lowered_names())?

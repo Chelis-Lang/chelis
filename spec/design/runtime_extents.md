@@ -363,8 +363,8 @@ witnesses and unit refinements together. The verifier and exact wire decoder
 reject missing claims, wrong arity or scalar types, and unsupported refinements.
 The public completion command for these two obligations is
 `cargo nextest run -p chelis-cli --test runtime_extent_claim_preparation -E
- 'test(=omitted_extent_claim_contract)'`; it executes 90 independently authored
-export/binding/main fixtures. Internal rewrite and wire mutation tests support
+ 'test(=omitted_extent_claim_contract)'`; it executes 117 independently authored
+export/binding/main fixtures and three executable-example controls. Internal rewrite and wire mutation tests support
 that oracle. The recorded pre-implementation run executes all 90 fixtures and
 fails 42 contract assertions. These are pending implementation receipts, not
 acceptance. HIP/Metal execution remains with the documented platform handoff.

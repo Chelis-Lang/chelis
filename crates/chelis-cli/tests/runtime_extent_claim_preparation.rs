@@ -413,8 +413,34 @@ return 0;
 }
 
 fn observe(case: &Case) -> Value {
+    observe_with_dependency(case, None)
+}
+
+fn observe_with_dependency(case: &Case, library: Option<&str>) -> Value {
     let dir = tempdir().expect("fixture directory");
-    let path = dir.path().join("fixture.ch");
+    if let Some(library) = library {
+        let version = chelis_compiler_api::COMPILER_VERSION;
+        fs::create_dir_all(dir.path().join("mylib/src")).unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(
+            dir.path().join("src/placeholder.ch"),
+            "module App.Placeholder\ndef placeholder() -> int32 = 0i32\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("reef.toml"), format!("[package]\nname = \"app\"\nversion = \"0.1.0\"\ncompiler = \"={version}\"\nmodule_prefix = \"App\"\n[dependencies]\nmylib = {{ path = \"./mylib\" }}\n")).unwrap();
+        fs::write(dir.path().join("mylib/reef.toml"), format!("[package]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"={version}\"\nmodule_prefix = \"Mylib\"\n")).unwrap();
+        fs::write(
+            dir.path().join("mylib/src/claims.ch"),
+            format!("module Mylib.Claims\nexport (f)\n{library}\n"),
+        )
+        .unwrap();
+        fs::write(dir.path().join("reef.lock"), format!("[package]\nname = \"app\"\nversion = \"0.1.0\"\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"={version}\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n")).unwrap();
+    }
+    let path = dir.path().join(if library.is_some() {
+        "src/fixture.ch"
+    } else {
+        "fixture.ch"
+    });
     fs::write(&path, &case.source).expect("write fixture");
     let binary = Path::new(env!("CARGO_BIN_EXE_chelis"));
     let check = run(
@@ -697,7 +723,14 @@ fn current_observations_are_explicit_and_do_not_claim_acceptance() {
     assert!(
         changed.is_empty()
             && observed.as_object().unwrap().len() == expected.as_object().unwrap().len(),
-        "behavior changed in {changed:?}: compare each cell with its contract before updating the issue-owned baseline"
+        "behavior changed in {changed:?}: compare each cell with its contract before updating the issue-owned baseline. Observations: {}",
+        serde_json::to_string_pretty(
+            &changed
+                .iter()
+                .map(|id| ((*id).clone(), observed[*id].clone()))
+                .collect::<serde_json::Map<_, _>>()
+        )
+        .unwrap()
     );
     assert!(
         !failures.is_empty(),
@@ -1398,12 +1431,84 @@ fn omitted_extent_claim_contract() {
                 );
             }
         }
+        for (rows, cols, expected) in [
+            (2, 4, Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])),
+            (
+                3,
+                4,
+                Expected::Domain("reshape", &["claimed = 3", "reshape axis 0 = 2"]),
+            ),
+            (
+                2,
+                6,
+                Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"]),
+            ),
+        ] {
+            add(
+                &format!("omitted.unread.{rows}.{cols}"),
+                1686,
+                "def f(unread: tensor[rows, f32], x: tensor[cols, f32]) -> tensor[rows, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])",
+                "(tensor[rows, f32], tensor[cols, f32]) -> tensor[rows, 2, f32]",
+                vec![vector(rows), vector(cols)],
+                expected,
+                "() -> tensor[rows, 2, f32]",
+            );
+        }
+        for divisor in [1, 2] {
+            let definition = format!(
+                "def g(x: tensor[n, f32]) -> tensor[n, 1, f32] = reshape(x, [floor_div(shape(x, 0i32), 1i64), 1i64])\ndef h(x: tensor[n, f32]) -> tensor[n, {divisor}, f32] = reshape(x, [floor_div(shape(x, 0i32), {divisor}i64), {divisor}i64])\ndef f(a: tensor[left, f32], b: tensor[right, f32]) -> tensor[f32] = add(sum(sum(g(a), 1i32), 0i32), sum(sum(h(b), 1i32), 0i32))"
+            );
+            add(
+                &format!("omitted.separate_scopes.{divisor}"),
+                1686,
+                &definition,
+                "(tensor[left, f32], tensor[right, f32]) -> tensor[f32]",
+                vec![vector(4), vector(6)],
+                if divisor == 1 {
+                    Expected::Tensor(vec![], vec![31.0])
+                } else {
+                    Expected::Domain("reshape", &["claimed = 6", "reshape axis 0 = 3"])
+                },
+                "() -> tensor[f32]",
+            );
+        }
     }
     assert_eq!(
         fixtures.len(),
-        102,
+        117,
         "three routes for every positive/negative operation form"
     );
+    let example = include_str!("../../../examples/checked_runtime_extents.ch");
+    for (id, source, expected) in [
+        (
+            "match",
+            example.to_owned(),
+            Expected::Tensor(vec![2, 2], vec![2.0, 4.0, 6.0, 8.0]),
+        ),
+        (
+            "unit",
+            example.replace("to_tensor([2.0f32])", "to_tensor([2.0f32, 3.0f32])"),
+            Expected::Domain("load", &["claimed = 1", "b axis 0 = 2"]),
+        ),
+        (
+            "reshape",
+            example.replace("3.0f32, 4.0f32])", "3.0f32, 4.0f32, 5.0f32, 6.0f32])"),
+            Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"]),
+        ),
+    ] {
+        fixtures.push((
+            Case {
+                id: format!("checked.example.{id}"),
+                issue: 1277,
+                source,
+                signature: None,
+                expected,
+                exported: None,
+            },
+            Some("() -> tensor[2, 2, f32]".to_owned()),
+        ));
+    }
+    assert_eq!(fixtures.len(), 120);
     let mut failures = Vec::new();
     for (case, main_signature) in &fixtures {
         let observation = observe(case);
@@ -1419,5 +1524,205 @@ fn omitted_extent_claim_contract() {
             }
         }
     }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn imported_checked_extent_contract() {
+    let mut failures = Vec::new();
+    for good in [true, false] {
+        for (family, library, arguments, expected) in [
+            (
+                "reshape",
+                "def f(x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])",
+                literal(&vector(if good { 4 } else { 6 })),
+                if good {
+                    Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])
+                } else {
+                    Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"])
+                },
+            ),
+            (
+                "unit",
+                "def f(b: tensor[unit, f32]) -> tensor[3, f32] = expand(b, 0i32, 3i64)",
+                if good {
+                    "to_tensor([5.0f32])".into()
+                } else {
+                    "to_tensor([5.0f32, 6.0f32])".into()
+                },
+                if good {
+                    Expected::Tensor(vec![3], vec![5.0; 3])
+                } else {
+                    Expected::Domain("load", &["claimed = 1", "b axis 0 = 2"])
+                },
+            ),
+            (
+                "literal",
+                "def f(x: tensor[n, f32]) -> tensor[4, f32] = insert(scalar_to_tensor(7.0f32), 0i32, shape(x, 0i32))",
+                literal(&vector(if good { 4 } else { 5 })),
+                if good {
+                    Expected::Tensor(vec![4], vec![7.0; 4])
+                } else {
+                    Expected::Domain("load", &["claimed = 4", "x axis 0 = 5"])
+                },
+            ),
+        ] {
+            for (form, prefix) in [("binding", "out ="), ("main", "def main() =")] {
+                let case = Case {
+                    id: format!("import.{family}.{form}.{good}"),
+                    issue: 1277,
+                    source: format!(
+                        "module App.Fixture\nimport Mylib.Claims (f)\n{prefix} f({arguments})\n"
+                    ),
+                    signature: None,
+                    expected: expected.clone(),
+                    exported: None,
+                };
+                let observation = observe_with_dependency(&case, Some(library));
+                println!("{}: {}", case.id, observation);
+                failures.extend(contract_failures(&case, &observation));
+                let (signature, result) = match family {
+                    "reshape" => ("(tensor[d0, f32]) -> tensor[2, 2, f32]", "2, 2"),
+                    "unit" => ("(tensor[unit, f32]) -> tensor[3, f32]", "3"),
+                    "literal" => ("(tensor[d0, f32]) -> tensor[4, f32]", "4"),
+                    _ => unreachable!(),
+                };
+                for (name, expected) in [
+                    ("pkg__mylib__Mylib__Claims__f", signature.to_owned()),
+                    (
+                        "pkg__app__App__Fixture__main",
+                        format!("() -> tensor[{result}, f32]"),
+                    ),
+                ] {
+                    if name.ends_with("__main") && form != "main" {
+                        continue;
+                    }
+                    let actual = &observation["check"]["signatures"][name];
+                    if actual != &expected {
+                        failures.push(format!(
+                            "{}.signature {name}: expected {expected}, observed {actual}",
+                            case.id
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn checked_extent_transforms_contract() {
+    let mut failures = Vec::new();
+    let mut count = 0;
+    for family in ["reshape", "unit"] {
+        for good in [true, false] {
+            let (definition, signature, input, matrix, mapped, gradient, domain) = if family
+                == "reshape"
+            {
+                (
+                    "def f(x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])",
+                    "(tensor[d0, f32]) -> tensor[2, 2, f32]",
+                    vector(if good { 4 } else { 6 }),
+                    if good {
+                        "to_tensor([[1.0f32, 2.0f32, 3.0f32, 4.0f32], [5.0f32, 6.0f32, 7.0f32, 8.0f32]])"
+                    } else {
+                        "to_tensor([[1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32], [7.0f32, 8.0f32, 9.0f32, 10.0f32, 11.0f32, 12.0f32]])"
+                    },
+                    Expected::Tensor(vec![2, 2, 2], (1..=8).map(f64::from).collect()),
+                    Expected::Tensor(vec![4], vec![1.0; 4]),
+                    Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"]),
+                )
+            } else {
+                (
+                    "def f(b: tensor[unit, f32]) -> tensor[3, f32] = expand(b, 0i32, 3i64)",
+                    "(tensor[unit, f32]) -> tensor[3, f32]",
+                    Input {
+                        dims: vec![if good { 1 } else { 2 }],
+                        values: if good { vec![5.0] } else { vec![5.0, 6.0] },
+                    },
+                    if good {
+                        "to_tensor([[5.0f32], [7.0f32]])"
+                    } else {
+                        "to_tensor([[5.0f32, 6.0f32], [7.0f32, 8.0f32]])"
+                    },
+                    Expected::Tensor(vec![2, 3], vec![5.0, 5.0, 5.0, 7.0, 7.0, 7.0]),
+                    Expected::Tensor(vec![1], vec![3.0]),
+                    Expected::Domain("load", &["claimed = 1", "b axis 0 = 2"]),
+                )
+            };
+            for transform in ["vmap", "grad", "masked_grad"] {
+                let (extra, call, expected) = if transform == "vmap" {
+                    (
+                        String::new(),
+                        format!("vmap(f)({matrix})"),
+                        if good {
+                            mapped.clone()
+                        } else if family == "reshape" {
+                            Expected::Domain("reshape", &["claimed = 2", "reshape axis 1 = 3"])
+                        } else {
+                            Expected::Domain("load", &["claimed = 1", "b axis 1 = 2"])
+                        },
+                    )
+                } else {
+                    let reduction = if family == "reshape" {
+                        "sum(sum(f(x), 1i32), 0i32)"
+                    } else {
+                        "sum(f(x), 0i32)"
+                    };
+                    let body = if transform == "masked_grad" {
+                        format!("mul({reduction}, scalar_to_tensor(0.0f32))")
+                    } else {
+                        reduction.into()
+                    };
+                    let extra = format!("\ndef loss(x: tensor[n, f32]) -> tensor[f32] = {body}\n");
+                    let positive = if transform == "masked_grad" {
+                        Expected::Tensor(input.dims.clone(), vec![0.0; input.values.len()])
+                    } else {
+                        gradient.clone()
+                    };
+                    (
+                        extra,
+                        format!("grad(loss)({})", literal(&input)),
+                        if good { positive } else { domain.clone() },
+                    )
+                };
+                for (form, prefix) in [("binding", "out ="), ("main", "def main() =")] {
+                    let case = Case {
+                        id: format!("transform.{family}.{transform}.{form}.{good}"),
+                        issue: 1277,
+                        source: format!("{definition}\n{extra}{prefix} {call}\n"),
+                        signature: Some(signature),
+                        expected: expected.clone(),
+                        exported: None,
+                    };
+                    let observation = observe(&case);
+                    println!("{}: {}", case.id, observation);
+                    failures.extend(contract_failures(&case, &observation));
+                    if form == "main" {
+                        let dims = if transform == "vmap" {
+                            if family == "reshape" {
+                                "2, 2, 2".to_owned()
+                            } else {
+                                "2, 3".to_owned()
+                            }
+                        } else {
+                            input.dims[0].to_string()
+                        };
+                        let expected = format!("() -> tensor[{dims}, f32]");
+                        let actual = &observation["check"]["signatures"]["main"];
+                        if actual != &expected {
+                            failures.push(format!(
+                                "{}.main.signature: expected {expected}, observed {actual}",
+                                case.id
+                            ));
+                        }
+                    }
+                    count += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(count, 24);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

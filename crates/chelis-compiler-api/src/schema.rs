@@ -2285,10 +2285,14 @@ impl WireDag {
                 }
             }
             match &node.op {
-                WireRiscOp::CheckedReshapeExtent { .. } => {
+                WireRiscOp::CheckedReshapeExtent {
+                    axis: WireRtAxis::Lit { value: axis },
+                    ..
+                } => {
                     let scalar =
                         |ty: &WireTensorType| ty.dims.is_empty() && ty.precision == "int64";
-                    if node.inputs.len() != 2
+                    if *axis < 0
+                        || node.inputs.len() != 2
                         || !scalar(&node.output_type)
                         || node.inputs.iter().any(|id| {
                             self.nodes.get(*id).is_none_or(|input| {

@@ -1754,14 +1754,26 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
     }
 
     let body_expr = kids.get(1)?;
+    let result_claim = lookup_declared_type_expr(program, name)
+        .and_then(|ty| parse_expanded_fn_type_expr(program, &ty))
+        .and_then(|(_, result)| tensor_type_from_host_input(&result));
     // Issue #197: a fatal lowering diagnostic (AD-rejection) must
     // propagate as a panic so the outer `catch_lowering_external`
     // surfaces it to the user. Silently absorbing it with `.ok()`
     // would let the host fallback emit an undefined-symbol call to
     // the grad function.
-    let context = crate::lower::prepare_subexpr_lowering_context(program.type_env(), defs.clone());
+    let context = crate::lower::prepare_subexpr_lowering_context(
+        program.type_env(),
+        defs.clone(),
+        Arc::new(crate::lower::collect_top_level_sigs(program.exprs())),
+    );
     match crate::lower::try_lower_subexpr_program_with_ordered_inputs(
-        body_expr, scope, &context, None, 0,
+        body_expr,
+        scope,
+        &context,
+        result_claim.as_ref(),
+        None,
+        0,
     ) {
         Ok((dag, _)) => Some(dag),
         Err(diagnostic) if diagnostic.fatal => {
@@ -3775,6 +3787,7 @@ fn lower_kernel_dag(
                 expr,
                 scope_types,
                 &context,
+                declaring_params.is_some().then_some(expected),
                 None,
                 0,
             )?
@@ -3786,6 +3799,7 @@ fn lower_kernel_dag(
                 expr,
                 scope_types,
                 &context,
+                declaring_params.is_some().then_some(expected),
                 state.seed,
                 state.counter,
             )?;
@@ -11622,6 +11636,7 @@ fn cached_subexpr_lowering_context(
     let context = crate::lower::prepare_subexpr_lowering_context(
         program.type_env(),
         cached_program_defs(program),
+        Arc::new(crate::lower::collect_top_level_sigs(program.exprs())),
     );
     if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get) {
         SUBEXPR_LOWERING_CONTEXT_CACHE.with(|cache| {

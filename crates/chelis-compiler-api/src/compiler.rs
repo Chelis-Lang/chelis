@@ -2465,12 +2465,8 @@ fn compile_rewritten_decls_in_context(
     // `unknown runtime name pkg__chelis__std__Std__Time__is_leap_year`
     // on any new-code call into a library function.
     let library_runtime = LibraryRuntime {
-        exprs: context.library_checked().annotated_exprs().to_vec(),
-        type_env: context.library_checked().type_env().clone(),
-        lowered_names: crate::runtime::library_lowered_names(
-            context.library_checked().annotated_exprs(),
-            context.library_checked().type_env(),
-        ),
+        checked: context.library_checked().clone(),
+        lowered_names: crate::runtime::library_lowered_names(context.library_checked()),
     };
 
     Ok(CompiledSource {
@@ -2769,8 +2765,7 @@ fn eval_compiled(
     let host_outcome = if let Some(library) = compiled.library_runtime.as_ref() {
         evaluate_host_program_with_library_and_types(
             compiled.checked(),
-            &library.exprs,
-            &library.type_env,
+            Some(&library.checked),
             Some(&library.lowered_names),
             &tensor_values_by_name,
             host_selected_root_names,
@@ -3408,15 +3403,9 @@ fn required_inputs_for_dag_root(dag: &Dag, root: NodeId) -> BTreeSet<String> {
 /// references when called from new code.
 #[derive(Clone)]
 struct LibraryRuntime {
-    /// Library `def` annotated_exprs. Pulled into `top_level_defs`
-    /// before the new-code defs so new-code can shadow on collision.
-    exprs: Vec<DeepExpr>,
-    /// Library-side type-env. Bucket 1 (`grad`/`vmap`/`realize` host
-    /// runtime support) routes through `lower_subexpr_program`, which
-    /// expects the merged library + new-code Deep type-env so a
-    /// library-name reference inside a `grad` body resolves the same
-    /// way it does in the monolithic compile.
-    type_env: BTreeMap<String, DeepExpr>,
+    /// The checked proof, definitions and declarations travel together;
+    /// imported calls consult the same kernel owner as generated C.
+    checked: CheckedProgram,
     /// Library-side lowered-vs-host classification. Threaded through
     /// so `evaluate_host_program_with_library`'s "is this a tensor
     /// root vs a host-init" decision is byte-identical to what the

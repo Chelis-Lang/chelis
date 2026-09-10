@@ -445,8 +445,8 @@ pub(super) fn extract_string_literal(expr: &deep::Expr) -> Option<String> {
 ///
 /// - `Dim::Lit(_)` — always safe. Concrete literals are self-contained.
 ///
-/// - `Dim::Var(v)` — safe ONLY when `v` is also bound by a *parameter*
-///   tensor-dim position of the declared signature (`param_dvars`). This
+/// - `Dim::Var(v)` or `Dim::Name(v)` — safe ONLY when `v` is also bound by a *parameter*
+///   tensor-dim position of the declared signature (`param_dims`). This
 ///   is the `const_col[n](spots: tensor[n, f32], ..) -> tensor[n, 1]`
 ///   family: the body's `to_tensor(map(..))` return is `tensor[*, 1]`,
 ///   but the declared return dim `n` is the same dim var as the `spots`
@@ -459,20 +459,16 @@ pub(super) fn extract_string_literal(expr: &deep::Expr) -> Option<String> {
 ///   A *return-only* dim var (one that appears in the declared return but
 ///   in NO parameter tensor position — e.g. `arange[n](start: int32,
 ///   stop: int32) -> tensor[n, int32]`, where the length comes from a
-///   value parameter) is NOT in `param_dvars` and is deliberately left as
+///   value parameter) is NOT in `param_dims` and is deliberately left as
 ///   `Wildcard`. Baking such an unbound var into the generalized scheme is
 ///   the red-team RT-39+44 soundness regression (commit 8067c9ce): it
 ///   leaks a free dim var into callers and breaks the chelis-std self-test
-///   corpus. The `param_dvars` gate is exactly the line between "the
+///   corpus. The `param_dims` gate is exactly the line between "the
 ///   caller supplies this dim" (safe) and "this dim is output-inferred /
 ///   value-parameter-derived" (unsafe).
 ///
 /// - `Dim::Name`, `Dim::Rank`, existing `Var`/`Lit` in `ty` — preserved.
-pub(super) fn narrow_wildcards_with(
-    ty: &Type,
-    template: &Type,
-    param_dvars: &UnordSet<DimVar>,
-) -> Type {
+pub(super) fn narrow_wildcards_with(ty: &Type, template: &Type, param_dims: &[Dim]) -> Type {
     match (ty, template) {
         (Type::Tensor(dims, prec), Type::Tensor(tmpl_dims, _)) if dims.len() == tmpl_dims.len() => {
             let new_dims = dims
@@ -480,7 +476,9 @@ pub(super) fn narrow_wildcards_with(
                 .zip(tmpl_dims.iter())
                 .map(|(d, t)| match (d, t) {
                     (Dim::Wildcard, Dim::Lit(_)) => t.clone(),
-                    (Dim::Wildcard, Dim::Var(v)) if param_dvars.contains(v) => t.clone(),
+                    (Dim::Wildcard, Dim::Var(_) | Dim::Name(_)) if param_dims.contains(t) => {
+                        t.clone()
+                    }
                     _ => d.clone(),
                 })
                 .collect();
@@ -490,16 +488,16 @@ pub(super) fn narrow_wildcards_with(
             let new_args = args
                 .iter()
                 .zip(t_args.iter())
-                .map(|(a, t)| narrow_wildcards_with(a, t, param_dvars))
+                .map(|(a, t)| narrow_wildcards_with(a, t, param_dims))
                 .collect();
-            let new_ret = Box::new(narrow_wildcards_with(ret, t_ret, param_dvars));
+            let new_ret = Box::new(narrow_wildcards_with(ret, t_ret, param_dims));
             Type::Fn(new_args, new_ret)
         }
         (Type::Tuple(ts), Type::Tuple(t_ts)) if ts.len() == t_ts.len() => {
             let new_ts = ts
                 .iter()
                 .zip(t_ts.iter())
-                .map(|(t, tt)| narrow_wildcards_with(t, tt, param_dvars))
+                .map(|(t, tt)| narrow_wildcards_with(t, tt, param_dims))
                 .collect();
             Type::Tuple(new_ts)
         }
@@ -507,7 +505,7 @@ pub(super) fn narrow_wildcards_with(
             let new_args = args
                 .iter()
                 .zip(t_args.iter())
-                .map(|(a, t)| narrow_wildcards_with(a, t, param_dvars))
+                .map(|(a, t)| narrow_wildcards_with(a, t, param_dims))
                 .collect();
             Type::Adt(n.clone(), new_args)
         }
@@ -517,7 +515,7 @@ pub(super) fn narrow_wildcards_with(
                 .zip(t_args)
                 .map(|(argument, template)| match (argument, template) {
                     (NominalArg::Type(ty), NominalArg::Type(template)) => {
-                        NominalArg::Type(narrow_wildcards_with(ty, template, param_dvars))
+                        NominalArg::Type(narrow_wildcards_with(ty, template, param_dims))
                     }
                     (
                         NominalArg::Dimension(Dim::Wildcard),
@@ -525,8 +523,8 @@ pub(super) fn narrow_wildcards_with(
                     ) => NominalArg::Dimension(template.clone()),
                     (
                         NominalArg::Dimension(Dim::Wildcard),
-                        NominalArg::Dimension(template @ Dim::Var(var)),
-                    ) if param_dvars.contains(var) => NominalArg::Dimension(template.clone()),
+                        NominalArg::Dimension(template @ (Dim::Var(_) | Dim::Name(_))),
+                    ) if param_dims.contains(template) => NominalArg::Dimension(template.clone()),
                     _ => argument.clone(),
                 })
                 .collect();
@@ -536,20 +534,44 @@ pub(super) fn narrow_wildcards_with(
     }
 }
 
-/// Collect the set of dim vars that occur in a *parameter* (non-return)
+/// Collect the dimension variables and names in a *parameter* (non-return)
 /// tensor-dim position of a resolved declared `Fn` signature. These are
 /// the dims a caller binds from its actual arguments; the
 /// `narrow_wildcards_with` gate uses this set to decide when a body
-/// wildcard may be safely narrowed to a declared `Dim::Var`. A non-`Fn`
-/// type (or one whose params carry no tensor dim vars) yields the empty
+/// wildcard may be safely narrowed to its declared binder. A non-`Fn`
+/// type (or one whose params carry no dimension binders) yields the empty
 /// set, so narrowing falls back to the literal-only behavior.
-pub(super) fn param_bound_dvars(decl_ty: &Type) -> UnordSet<DimVar> {
-    let mut out = UnordSet::new();
-    if let Type::Fn(params, _) = decl_ty {
-        for param in params {
-            for dv in crate::env::free_dvars(param) {
-                out.insert(dv);
+pub(super) fn param_bound_dims(decl_ty: &Type) -> Vec<Dim> {
+    let mut out = Vec::new();
+    let Type::Fn(params, _) = decl_ty else {
+        return out;
+    };
+    let mut pending = params.iter().collect::<Vec<_>>();
+    while let Some(ty) = pending.pop() {
+        match ty {
+            Type::Tensor(dims, _) => out.extend(
+                dims.iter()
+                    .filter(|dim| matches!(dim, Dim::Name(_) | Dim::Var(_)))
+                    .cloned(),
+            ),
+            Type::Ref(inner) => pending.push(inner),
+            Type::Tuple(items) | Type::Adt(_, items) => pending.extend(items),
+            Type::KindedAdt(_, items) => {
+                for item in items {
+                    match item {
+                        NominalArg::Type(ty) => pending.push(ty),
+                        NominalArg::Dimension(dim @ (Dim::Name(_) | Dim::Var(_))) => {
+                            out.push(dim.clone());
+                        }
+                        NominalArg::Dimension(_) => {}
+                    }
+                }
             }
+            Type::Fn(args, result) => {
+                pending.extend(args);
+                pending.push(result);
+            }
+            Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error(_) => {}
         }
     }
     out
@@ -2591,15 +2613,15 @@ pub(super) fn infer_top_level(
                 ));
             }
             // #39 wildcard narrowing. The narrow may now substitute a
-            // declared `Dim::Var` (not just `Dim::Lit`) into a body
-            // wildcard, but ONLY for dim vars bound by a parameter tensor
-            // position (`param_bound_dvars`). That keeps the
+            // declared `Dim::Var` or `Dim::Name` into a body
+            // wildcard, but ONLY for binders in a parameter tensor
+            // position (`param_bound_dims`). That keeps the
             // `const_col[n](spots: tensor[n, ..]) -> tensor[n, 1]` family's
             // return dim tied to its input (chelis#405 / WS-3 build ICE)
             // while leaving return-only / value-parameter dims as
             // wildcards (the RT-39+44 soundness boundary, commit 8067c9ce).
-            let param_dvars = param_bound_dvars(&resolved_decl);
-            narrow_wildcards_with(&resolved_body, &resolved_decl, &param_dvars)
+            let param_dims = param_bound_dims(&resolved_decl);
+            narrow_wildcards_with(&resolved_body, &resolved_decl, &param_dims)
         } else if let Some(provisional) = provisional_recursive_type {
             if let Err(error) = unify(&body_ty, provisional, subst) {
                 errors.push(error.into());

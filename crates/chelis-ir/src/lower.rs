@@ -594,6 +594,9 @@ pub struct LoweredLibrary {
     /// these to inline calls to library functions (matching the monolithic
     /// behaviour of `lower_program(library + new)`).
     program_defs: BTreeMap<String, Expr>,
+    /// Authored declarations retain their binder spelling independently of
+    /// inferred expression metadata. Exact definition names own these scopes.
+    program_signatures: BTreeMap<String, Expr>,
     /// Library declared types, keyed by name. Used to resolve unbound
     /// `(var libname)` Load types when the new-code expression's metadata
     /// is `default_type`.
@@ -633,6 +636,11 @@ impl LoweredLibrary {
     /// Return the immutable program definitions.
     pub fn program_defs(&self) -> &BTreeMap<String, Expr> {
         &self.program_defs
+    }
+
+    /// Return the authored signatures paired with these definitions.
+    pub fn program_signatures(&self) -> &BTreeMap<String, Expr> {
+        &self.program_signatures
     }
 
     /// Return the immutable program types.
@@ -796,10 +804,12 @@ fn lower_program_to_library_inner(
         .collect();
     log_sub("program_types_build", &mut sub_t);
     let program_defs = collect_top_level_defs(program.exprs());
+    let program_signatures = collect_top_level_sigs(program.exprs());
     log_sub("collect_top_level_defs", &mut sub_t);
     let mut ctx = LowerCtx::new(
         program_types.clone(),
         program_defs.clone(),
+        program_signatures.clone(),
         program.linearity().clone(),
     );
     #[cfg(feature = "lowering-trace")]
@@ -901,6 +911,7 @@ fn lower_program_to_library_inner(
         dag: linear_dag,
         symbol_table,
         program_defs,
+        program_signatures,
         program_types,
         linearity: program.linearity().clone(),
         lowered_names,
@@ -1147,7 +1158,19 @@ fn lower_program_with_context_inner(
         program_defs.insert(name, body);
     }
 
-    let mut ctx = LowerCtx::new(program_types, program_defs, new_program.linearity().clone());
+    let mut program_signatures = library.program_signatures.clone();
+    // A replacement definition without a declaration must not inherit the
+    // previous definition's binder scope.
+    for name in collect_top_level_defs(new_program.exprs()).keys() {
+        program_signatures.remove(name);
+    }
+    program_signatures.extend(collect_top_level_sigs(new_program.exprs()));
+    let mut ctx = LowerCtx::new(
+        program_types,
+        program_defs,
+        program_signatures,
+        new_program.linearity().clone(),
+    );
 
     // Seed the lowering ctx with the cloned library DAG and the library's
     // name -> NodeId bindings. Library drops are terminal markers for the
@@ -1282,7 +1305,11 @@ pub fn try_lower_subexpr_program_with_random_state_progress(
         .into_sorted()
         .into_iter()
         .collect::<BTreeMap<_, _>>();
-    let context = prepare_subexpr_lowering_context(&full_type_env, Arc::new(program_defs));
+    let context = prepare_subexpr_lowering_context(
+        &full_type_env,
+        Arc::new(program_defs),
+        Arc::new(full_type_env.clone()),
+    );
     try_lower_subexpr_program_with_context_and_random_state(
         expr,
         scoped_tensor_types,
@@ -1296,11 +1323,13 @@ pub fn try_lower_subexpr_program_with_random_state_progress(
 pub(crate) struct SubexprLoweringContext {
     program_types: Arc<BTreeMap<String, TensorType>>,
     program_defs: Arc<BTreeMap<String, Expr>>,
+    program_signatures: Arc<BTreeMap<String, Expr>>,
 }
 
 pub(crate) fn prepare_subexpr_lowering_context(
     full_type_env: &BTreeMap<String, Expr>,
     program_defs: Arc<BTreeMap<String, Expr>>,
+    program_signatures: Arc<BTreeMap<String, Expr>>,
 ) -> SubexprLoweringContext {
     assert_decode_once_in_env("lower_subexpr_program: type_env", full_type_env);
     assert_decode_once_in_env("lower_subexpr_program: program_defs", &program_defs);
@@ -1311,6 +1340,7 @@ pub(crate) fn prepare_subexpr_lowering_context(
     SubexprLoweringContext {
         program_types: Arc::new(program_types),
         program_defs,
+        program_signatures,
     }
 }
 
@@ -1325,6 +1355,7 @@ pub(crate) fn try_lower_subexpr_program_with_context_and_controls(
             expr,
             scoped_tensor_types.into_sorted(),
             context,
+            None,
             None,
             0,
             true,
@@ -1350,6 +1381,7 @@ pub(crate) fn try_lower_subexpr_program_with_context_and_random_state(
         expr,
         scoped_tensor_types.into_sorted(),
         context,
+        None,
         random_seed,
         random_counter,
     )
@@ -1362,6 +1394,7 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs(
     expr: &Expr,
     scoped_bindings: Vec<(String, TensorType)>,
     context: &SubexprLoweringContext,
+    result_claim: Option<&TensorType>,
     random_seed: Option<u64>,
     random_counter: u64,
 ) -> Result<(Dag, u64), LowerDiagnostic> {
@@ -1371,6 +1404,7 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs(
             expr,
             scoped_bindings,
             context,
+            result_claim,
             random_seed,
             random_counter,
             false,
@@ -1383,6 +1417,7 @@ fn lower_subexpr_program_inner_impl(
     expr: &Expr,
     scoped_bindings: Vec<(String, TensorType)>,
     context: &SubexprLoweringContext,
+    result_claim: Option<&TensorType>,
     random_seed: Option<u64>,
     random_counter: u64,
     include_list_controls: bool,
@@ -1390,6 +1425,7 @@ fn lower_subexpr_program_inner_impl(
     let mut ctx = LowerCtx::new(
         context.program_types.clone(),
         context.program_defs.clone(),
+        context.program_signatures.clone(),
         LinearityInfo::default(),
     );
     ctx.random_seed = random_seed;
@@ -1411,7 +1447,10 @@ fn lower_subexpr_program_inner_impl(
         ctx.bindings.insert(name, LoweredValue::Node(load));
     }
     ctx.prepare_parameter_witnesses(&parameter_names, &parameter_types, None);
-    let value = ctx.lower_expr(expr);
+    // Kernel inputs already have structural interface-axis carriers. Keep
+    // those reads intact; explicit checked claims still use signature witnesses.
+    ctx.binding_witnesses.clear();
+    let value = ctx.lower_expr_with_claim(expr, result_claim);
     let value = ctx.retain_invocation_witnesses(value, 0);
     // Each leaf of the result pytree must be a DISTINCT root node.
     // `Dag::add_root` deduplicates by node id, so when the same node feeds
@@ -3076,7 +3115,7 @@ fn collect_top_level_defs(exprs: &[Expr]) -> BTreeMap<String, Expr> {
     defs
 }
 
-fn collect_top_level_sigs(exprs: &[Expr]) -> BTreeMap<String, Expr> {
+pub(crate) fn collect_top_level_sigs(exprs: &[Expr]) -> BTreeMap<String, Expr> {
     let mut sigs = BTreeMap::new();
     for expr in exprs {
         collect_top_level_sigs_from_expr(expr, &mut sigs);
@@ -4750,19 +4789,44 @@ fn compute_reduce_window_out_dims(
 }
 
 #[derive(Clone)]
+struct ResolvedFunction {
+    expression: Expr,
+    /// Travels with the resolved callable through lexical aliases and AD.
+    /// It is a claim, never evidence of the body's actual result extent.
+    signature: Option<Expr>,
+}
+
+impl std::ops::Deref for ResolvedFunction {
+    type Target = Expr;
+    fn deref(&self) -> &Expr {
+        &self.expression
+    }
+}
+
+impl ResolvedFunction {
+    fn result_type(&self) -> Option<&Expr> {
+        self.signature
+            .as_ref()
+            .and_then(stamped_parts)
+            .and_then(|(tag, _, kids)| (tag == DeepTag::TFn).then(|| kids.last()).flatten())
+            .or_else(|| extract_fn_return_type(&self.expression))
+    }
+}
+
+#[derive(Clone)]
 enum CallableExpr {
-    Plain(Expr),
+    Plain(ResolvedFunction),
     Vmap {
-        fn_expr: Expr,
+        fn_expr: ResolvedFunction,
         axis: usize,
     },
     VmapGrad {
-        fn_expr: Expr,
+        fn_expr: ResolvedFunction,
         wrt: Option<Vec<usize>>,
         axis: usize,
     },
     Grad {
-        fn_expr: Expr,
+        fn_expr: ResolvedFunction,
         wrt: Option<Vec<usize>>,
     },
     /// A reference to a function-valued parameter (e.g. `f` inside
@@ -5111,9 +5175,10 @@ struct LowerCtx {
     /// selected, ordinary node edges carry the declaring witness's identity.
     signature_witnesses: Vec<(String, NodeId)>,
     invocation_witnesses: Vec<NodeId>,
-    local_callables: UnordMap<String, Expr>,
+    local_callables: UnordMap<String, CallableExpr>,
     program_types: Arc<BTreeMap<String, TensorType>>,
     program_defs: Arc<BTreeMap<String, Expr>>,
+    program_signatures: Arc<BTreeMap<String, Expr>>,
     random_seed: Option<u64>,
     random_counter: u64,
     /// Scalar Bool activation for path-sensitive Random nodes inside an AD
@@ -5225,6 +5290,7 @@ impl LowerCtx {
     fn new(
         program_types: impl Into<Arc<BTreeMap<String, TensorType>>>,
         program_defs: impl Into<Arc<BTreeMap<String, Expr>>>,
+        program_signatures: impl Into<Arc<BTreeMap<String, Expr>>>,
         linearity: LinearityInfo,
     ) -> Self {
         Self {
@@ -5241,6 +5307,7 @@ impl LowerCtx {
             local_callables: UnordMap::new(),
             program_types: program_types.into(),
             program_defs: program_defs.into(),
+            program_signatures: program_signatures.into(),
             random_seed: None,
             random_counter: 0,
             random_path_condition: None,
@@ -5744,7 +5811,26 @@ impl LowerCtx {
                 .dims
                 .get(usize::try_from(*axis).ok()?)
                 .cloned(),
-            RtDim::Node(_) | RtDim::ToEnd | RtDim::Sym(_) => None,
+            RtDim::Node(slot) => {
+                let witness = self.dag.get(*inputs.get(*slot)?)?;
+                let RiscOp::ExtentWitness {
+                    axis: RtAxis::Lit(axis),
+                    ..
+                } = &witness.op
+                else {
+                    return None;
+                };
+                // Read the actual tensor axis, independently of the witness's
+                // requirements and the caller's declared result. Keeping the
+                // witness as the size input still retains its runtime checks.
+                self.dag
+                    .get(*witness.inputs.first()?)?
+                    .output_type
+                    .dims
+                    .get(usize::try_from(*axis).ok()?)
+                    .cloned()
+            }
+            RtDim::ToEnd | RtDim::Sym(_) => None,
         }
     }
 
@@ -6095,7 +6181,7 @@ impl LowerCtx {
             Some(DeepTag::Lit) => self.lower_lit(elems),
             Some(DeepTag::Var) => self.lower_var(elems),
             Some(DeepTag::App) => self.lower_app(elems, span, claim),
-            Some(DeepTag::Fn) => self.lower_fn(elems),
+            Some(DeepTag::Fn) => self.lower_fn(elems, claim),
             Some(DeepTag::Pipe) => self.lower_pipe(elems),
             Some(DeepTag::Cast) => self.lower_cast(elems),
             Some(DeepTag::If) => self.lower_if(elems),
@@ -6264,13 +6350,24 @@ impl LowerCtx {
             Expr::Atom(Atom::Name(s), _) => s.clone(),
             _ => String::new(),
         };
-        let body_id = self.lower_expr(&elems[3]);
+        let declared_result = self
+            .program_signatures
+            .get(&name)
+            .and_then(stamped_parts)
+            .and_then(|(tag, _, kids)| (tag == DeepTag::TFn).then(|| kids.last()).flatten())
+            .map(Self::type_from_type_expr);
+        let body_id = self.lower_expr_with_claim(&elems[3], declared_result.as_ref());
         if !name.is_empty() {
             if self.is_host_list_expr(&elems[3]) {
                 self.list_bindings.insert(name.clone(), elems[3].clone());
             }
-            self.bindings.insert(name, body_id.clone());
-            if let Some(callable) = self.callable_binding_expr(&elems[3]) {
+            self.bindings.insert(name.clone(), body_id.clone());
+            if let Some(mut callable) = self.callable_binding_expr(&elems[3]) {
+                if let CallableExpr::Plain(function) = &mut callable
+                    && let Some(signature) = self.program_signatures.get(&name)
+                {
+                    function.signature = Some(signature.clone());
+                }
                 self.local_callables.insert(
                     match &elems[2] {
                         Expr::Atom(Atom::Name(s), _) => s.clone(),
@@ -6816,7 +6913,10 @@ impl LowerCtx {
     ) -> Option<CallableExpr> {
         let (tag, _, kids) = stamped_parts(expr)?;
         match tag {
-            DeepTag::Fn => Some(CallableExpr::Plain(expr.clone())),
+            DeepTag::Fn => Some(CallableExpr::Plain(ResolvedFunction {
+                expression: expr.clone(),
+                signature: None,
+            })),
             DeepTag::Var => {
                 let name = kids.first().and_then(|expr| match expr {
                     Expr::Atom(Atom::Name(name), _) => Some(name.clone()),
@@ -6846,12 +6946,17 @@ impl LowerCtx {
                 // unresolved helper forwarding preserves the parameter until
                 // its eventual application. See
                 // `docs/investigations/pipe_fn_param_stage_diagnosis.md`.
-                if let Some(body) = self
-                    .local_callables
-                    .get(&name)
-                    .or_else(|| self.program_defs.get(&name))
-                {
-                    return self.resolve_callable_expr_inner(body, visited);
+                if let Some(callable) = self.local_callables.get(&name) {
+                    return Some(callable.clone());
+                }
+                if let Some(body) = self.program_defs.get(&name) {
+                    let mut callable = self.resolve_callable_expr_inner(body, visited)?;
+                    if let CallableExpr::Plain(function) = &mut callable
+                        && let Some(signature) = self.program_signatures.get(&name)
+                    {
+                        function.signature = Some(signature.clone());
+                    }
+                    return Some(callable);
                 }
                 if self.fn_typed_params.contains(&name) {
                     return Some(CallableExpr::Parameter { name });
@@ -6929,8 +7034,8 @@ impl LowerCtx {
         }
     }
 
-    fn callable_binding_expr(&self, expr: &Expr) -> Option<Expr> {
-        self.resolve_callable_expr(expr).map(|_| expr.clone())
+    fn callable_binding_expr(&self, expr: &Expr) -> Option<CallableExpr> {
+        self.resolve_callable_expr(expr)
     }
 
     fn extract_grad_wrt_indices(&self, expr: &Expr) -> Option<Vec<usize>> {
@@ -6961,7 +7066,7 @@ impl LowerCtx {
 
     fn lower_grad_callable_app(
         &mut self,
-        fn_expr: &Expr,
+        fn_expr: &ResolvedFunction,
         wrt_indices: Option<&[usize]>,
         args: &[Expr],
         app_span: Span,
@@ -6979,7 +7084,7 @@ impl LowerCtx {
     /// the exact primal structure required by spec/06 section 2.1.
     fn lower_grad_callable_with_values(
         &mut self,
-        fn_expr: &Expr,
+        fn_expr: &ResolvedFunction,
         wrt_indices: Option<&[usize]>,
         actual_args: &[LoweredValue],
         app_span: Span,
@@ -7078,6 +7183,7 @@ impl LowerCtx {
         let mut subctx = LowerCtx::new(
             self.program_types.clone(),
             self.program_defs.clone(),
+            self.program_signatures.clone(),
             LinearityInfo::default(),
         );
         #[cfg(feature = "lowering-trace")]
@@ -7291,7 +7397,7 @@ impl LowerCtx {
                 }
             }
         }
-        let lowered_output = subctx.lower_expr(body);
+        let lowered_output = subctx.lower_resolved_body(fn_expr, &param_names, body);
         let output = lowered_output.expect_node("grad requires a scalar floating output");
         // The subcontext starts at the enclosing handler's current ordinal.
         // Hand the consumed ordinal count back before lowering any following
@@ -7598,7 +7704,7 @@ impl LowerCtx {
 
     fn lower_plain_callable_app(
         &mut self,
-        fn_expr: &Expr,
+        fn_expr: &ResolvedFunction,
         args: &[Expr],
         expected_return_ty: &TensorType,
         _app_span: Span,
@@ -7701,7 +7807,7 @@ impl LowerCtx {
                         self.fn_typed_params.insert(name.clone());
                     }
                     _ => {
-                        self.local_callables.insert(name.clone(), arg_expr.clone());
+                        self.local_callables.insert(name.clone(), callable);
                     }
                 }
             } else {
@@ -7819,7 +7925,8 @@ impl LowerCtx {
                 ),
             );
         }
-        let declared_result = extract_fn_return_type(fn_expr)
+        let declared_result = fn_expr
+            .result_type()
             .map(|expr| {
                 Self::type_from_type_expr_with_subst(
                     expr,
@@ -7838,7 +7945,7 @@ impl LowerCtx {
         let result = stacker::maybe_grow(64 * 1024, 4 * 1024 * 1024, || {
             self.lower_expr_with_claim(body, Some(&declared_result))
         });
-        if let Some(ret_ty_expr) = extract_fn_return_type(fn_expr) {
+        if let Some(ret_ty_expr) = fn_expr.result_type() {
             let ret_ty = Self::type_from_type_expr_with_subst(
                 ret_ty_expr,
                 &self.prec_substitutions,
@@ -7878,9 +7985,60 @@ impl LowerCtx {
         result
     }
 
+    /// Execute a resolved signature activation over bindings already placed
+    /// by an AD, vectorization, pipe, or host-list call boundary.
+    fn lower_resolved_body(
+        &mut self,
+        function: &ResolvedFunction,
+        params: &[String],
+        body: &Expr,
+    ) -> LoweredValue {
+        let saved_witnesses = self.binding_witnesses.clone();
+        let saved_signature = self.signature_witnesses.clone();
+        let start = self.invocation_witnesses.len();
+        let formal_types = params
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                extract_param_type(function, index)
+                    .map(|ty| {
+                        Self::formal_param_type_for_call(
+                            ty,
+                            &self.prec_substitutions,
+                            &self.rank_substitutions,
+                        )
+                    })
+                    .or_else(|| {
+                        self.bindings
+                            .get(name)
+                            .and_then(LoweredValue::as_single_node)
+                            .and_then(|id| self.dag.get(id))
+                            .map(|node| node.output_type.clone())
+                    })
+                    .unwrap_or_else(Self::default_type)
+            })
+            .collect::<Vec<_>>();
+        self.prepare_parameter_witnesses(params, &formal_types, self.current_span_id.clone());
+        let claim = function.result_type().map(|ty| {
+            Self::type_from_type_expr_with_subst(
+                ty,
+                &self.prec_substitutions,
+                &self.rank_substitutions,
+            )
+        });
+        let result = self.lower_expr_with_claim(body, claim.as_ref());
+        if let Some(claim) = &claim {
+            self.preserve_literal_result(&result, claim);
+        }
+        let result = self.retain_invocation_witnesses(result, start);
+        self.binding_witnesses = saved_witnesses;
+        self.signature_witnesses = saved_signature;
+        result
+    }
+
     fn lower_plain_callable_with_values(
         &mut self,
-        fn_expr: &Expr,
+        fn_expr: &ResolvedFunction,
         args: &[LoweredValue],
     ) -> LoweredValue {
         let Some((param_names, body)) = self.extract_fn_parts(fn_expr) else {
@@ -7906,8 +8064,8 @@ impl LowerCtx {
             }
             self.bindings.insert(name.clone(), arg_id);
         }
-        let result = self.lower_expr(body);
-        if let Some(ret_ty_expr) = extract_fn_return_type(fn_expr) {
+        let result = self.lower_resolved_body(fn_expr, &param_names, body);
+        if let Some(ret_ty_expr) = fn_expr.result_type() {
             let ret_ty = Self::type_from_type_expr_with_subst(
                 ret_ty_expr,
                 &self.prec_substitutions,
@@ -7926,7 +8084,7 @@ impl LowerCtx {
 
     fn lower_vmap_callable_app(
         &mut self,
-        fn_expr: &Expr,
+        fn_expr: &ResolvedFunction,
         axis: usize,
         args: &[Expr],
         _ty: &TensorType,
@@ -7941,7 +8099,7 @@ impl LowerCtx {
 
     fn lower_vmap_callable_with_nodes(
         &mut self,
-        fn_expr: &Expr,
+        fn_expr: &ResolvedFunction,
         axis: usize,
         actual_args: &[NodeId],
         app_span: Span,
@@ -8021,6 +8179,7 @@ impl LowerCtx {
         let mut subctx = LowerCtx::new(
             self.program_types.clone(),
             self.program_defs.clone(),
+            self.program_signatures.clone(),
             LinearityInfo::default(),
         );
         #[cfg(feature = "lowering-trace")]
@@ -8048,7 +8207,7 @@ impl LowerCtx {
                 .bindings
                 .insert(name.clone(), LoweredValue::Node(load));
         }
-        let root_value = subctx.lower_expr(body);
+        let root_value = subctx.lower_resolved_body(fn_expr, &param_names, body);
         for root in root_value.flatten_nodes() {
             subctx.dag.add_root(root);
         }
@@ -8148,7 +8307,7 @@ impl LowerCtx {
 
     fn lower_vmap_grad_callable_app(
         &mut self,
-        fn_expr: &Expr,
+        fn_expr: &ResolvedFunction,
         wrt_indices: Option<&[usize]>,
         axis: usize,
         args: &[Expr],
@@ -8167,7 +8326,7 @@ impl LowerCtx {
     /// inherits the argument from the previous pipe stage).
     fn lower_vmap_grad_callable_with_nodes(
         &mut self,
-        fn_expr: &Expr,
+        fn_expr: &ResolvedFunction,
         wrt_indices: Option<&[usize]>,
         axis: usize,
         actual_args: &[NodeId],
@@ -8240,6 +8399,7 @@ impl LowerCtx {
         let mut subctx = LowerCtx::new(
             self.program_types.clone(),
             self.program_defs.clone(),
+            self.program_signatures.clone(),
             LinearityInfo::default(),
         );
         #[cfg(feature = "lowering-trace")]
@@ -8277,7 +8437,7 @@ impl LowerCtx {
         }
 
         let output = subctx
-            .lower_expr(body)
+            .lower_resolved_body(fn_expr, &param_names, body)
             .expect_node("vmap(grad(...)) requires a scalar floating output");
         subctx.dag.add_root(output);
         // Issue #197: route through grad_dag_checked so a
@@ -12017,7 +12177,10 @@ impl LowerCtx {
             None => {
                 let witness = self.dag.add_node(
                     RiscOp::ExtentWitness {
-                        parameter: bare_var_name(expr).unwrap_or_else(|| "expand operand".into()),
+                        parameter: match &self.dag.get(input).expect("expand input").op {
+                            RiscOp::Load { name } => name.as_str().to_owned(),
+                            _ => bare_var_name(expr).unwrap_or_else(|| "expand operand".into()),
+                        },
                         axis: rt_axis.clone(),
                         requirements: Vec::new(),
                     },
@@ -12945,7 +13108,7 @@ impl LowerCtx {
     }
 
     /// `(fn {} (params {} p1 p2 ...) body)`
-    fn lower_fn(&mut self, elems: &[Expr]) -> LoweredValue {
+    fn lower_fn(&mut self, elems: &[Expr], claim: Option<&TensorType>) -> LoweredValue {
         if elems.len() < 4 {
             raise_malformed_deep(
                 "an `fn` form with fewer than 4 elements",
@@ -13006,21 +13169,23 @@ impl LowerCtx {
             }
         }
 
-        let declared_result = elems
-            .get(1)
-            .and_then(|expr| match expr {
-                Expr::Map(meta, _) => meta.ty().map(|value| value.expression()),
-                _ => None,
-            })
-            .and_then(stamped_parts)
-            .and_then(|(tag, _, kids)| (tag == DeepTag::TFn).then(|| kids.last()).flatten())
-            .map(|expr| {
-                Self::type_from_type_expr_with_subst(
-                    expr,
-                    &self.prec_substitutions,
-                    &self.rank_substitutions,
-                )
-            });
+        let declared_result = claim.cloned().or_else(|| {
+            elems
+                .get(1)
+                .and_then(|expr| match expr {
+                    Expr::Map(meta, _) => meta.ty().map(|value| value.expression()),
+                    _ => None,
+                })
+                .and_then(stamped_parts)
+                .and_then(|(tag, _, kids)| (tag == DeepTag::TFn).then(|| kids.last()).flatten())
+                .map(|expr| {
+                    Self::type_from_type_expr_with_subst(
+                        expr,
+                        &self.prec_substitutions,
+                        &self.rank_substitutions,
+                    )
+                })
+        });
         let Some((DeepTag::Params, _, params)) = stamped_parts(&elems[2]) else {
             raise_malformed_deep(
                 "an `fn` form without its parameter list",
@@ -14473,7 +14638,12 @@ mod tests {
 
     fn parse_and_lower_unchecked(src: &str) -> Dag {
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
-        let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+        let mut ctx = LowerCtx::new(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        );
         for expr in &exprs {
             let _ = ctx.lower_expr(expr);
         }
@@ -14482,7 +14652,12 @@ mod tests {
 
     #[test]
     fn typed_fail_placeholder_keeps_a_backward_shape_dependency() {
-        let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+        let mut ctx = LowerCtx::new(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        );
         let out_ty = TensorType {
             dims: vec![DimInfo::Named("result".to_string(), None)],
             precision: Prim::F32,
@@ -14570,7 +14745,12 @@ mod tests {
             dims: vec![DimInfo::Lit(size)],
             precision: chelis_types::types::Prim::F32,
         };
-        let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+        let mut ctx = LowerCtx::new(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        );
         let x = ctx
             .dag
             .add_node(RiscOp::Load { name: "x".into() }, vec![], x_ty, None);
@@ -14604,7 +14784,7 @@ mod tests {
     fn issue_318_expand_shape_arg_recovers_rank0_source_extent() {
         let expr = r#"
             (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))}
-                 (var {} expand)
+                 (var {} insert)
                  (app {type: (t-prim {} f32)}
                       (var {} scalar_to_tensor)
                       (cast {type: (t-prim {} f32)} (lit {} 3.0) (t-prim {} f32)))
@@ -14645,7 +14825,7 @@ mod tests {
     fn issue_318_expand_shape_arg_no_dead_node() {
         let expr = r#"
             (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))}
-                 (var {} expand)
+                 (var {} insert)
                  (app {type: (t-prim {} f32)}
                       (var {} scalar_to_tensor)
                       (cast {type: (t-prim {} f32)} (lit {} 3.0) (t-prim {} f32)))
@@ -14729,7 +14909,7 @@ mod tests {
     fn issue_318_expand_shape_arg_tracks_named_tensor_size() {
         let expr = r#"
             (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
-                 (var {} expand)
+                 (var {} insert)
                  (app {type: (t-prim {} f32)}
                       (var {} scalar_to_tensor)
                       (cast {type: (t-prim {} f32)} (lit {} 3.0) (t-prim {} f32)))
@@ -14765,7 +14945,7 @@ mod tests {
     fn issue_318_expand_literal_size_still_recovers_extent() {
         let expr = r#"
             (app {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))}
-                 (var {} expand)
+                 (var {} insert)
                  (app {type: (t-prim {} f32)}
                       (var {} scalar_to_tensor)
                       (cast {type: (t-prim {} f32)} (lit {} 3.0) (t-prim {} f32)))
@@ -14797,7 +14977,12 @@ mod tests {
             dims: vec![DimInfo::Lit(size)],
             precision: chelis_types::types::Prim::F32,
         };
-        let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+        let mut ctx = LowerCtx::new(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        );
         let x = ctx
             .dag
             .add_node(RiscOp::Load { name: "x".into() }, vec![], x_ty, None);
@@ -14826,7 +15011,7 @@ mod tests {
                             (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x)
                             (cast {} (lit {} 0) (t-prim {} int32))))
                  (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
-                      (var {} expand)
+                      (var {} insert)
                       (app {type: (t-prim {} f32)}
                            (var {} scalar_to_tensor)
                            (cast {type: (t-prim {} f32)} (lit {} 3.0) (t-prim {} f32)))
@@ -14874,7 +15059,7 @@ mod tests {
                             (var {type: (t-tensor {} (d-lit {} 5) (t-prim {} f32))} x)
                             (cast {} (lit {} 0) (t-prim {} int32))))
                  (app {type: (t-tensor {} (d-lit {} 5) (t-prim {} f32))}
-                      (var {} expand)
+                      (var {} insert)
                       (app {type: (t-prim {} f32)}
                            (var {} scalar_to_tensor)
                            (cast {type: (t-prim {} f32)} (lit {} 3.0) (t-prim {} f32)))
@@ -14917,7 +15102,7 @@ mod tests {
             (let {}
                  (bind {} len (cast {} (lit {} 7) (t-prim {} int32)))
                  (app {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}
-                      (var {} expand)
+                      (var {} insert)
                       (app {type: (t-prim {} f32)}
                            (var {} scalar_to_tensor)
                            (cast {type: (t-prim {} f32)} (lit {} 3.0) (t-prim {} f32)))
@@ -14959,7 +15144,7 @@ mod tests {
                        len
                        (cast {} (lit {} 5) (t-prim {} int32)))
                  (app {type: (t-tensor {} (d-lit {} 1) (t-prim {} f32))}
-                      (var {} expand)
+                      (var {} insert)
                       (app {type: (t-prim {} f32)}
                            (var {} scalar_to_tensor)
                            (cast {type: (t-prim {} f32)} (lit {} 3.0) (t-prim {} f32)))
@@ -15483,6 +15668,7 @@ mod tests {
                 .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
                 .collect::<BTreeMap<_, _>>(),
             collect_top_level_defs(checked.exprs()),
+            collect_top_level_sigs(checked.exprs()),
             LinearityInfo::default(),
         );
         let out_kids = match out_body {
@@ -15588,6 +15774,7 @@ mod tests {
                     .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
                     .collect::<BTreeMap<_, _>>(),
                 program_defs.clone(),
+                collect_top_level_sigs(checked.exprs()),
                 LinearityInfo::default(),
             );
             ctx.extract_fn_parts(&jac_fn).expect("jac_row fn parts")
@@ -15599,6 +15786,7 @@ mod tests {
                 .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
                 .collect::<BTreeMap<_, _>>(),
             program_defs.clone(),
+            collect_top_level_sigs(checked.exprs()),
             LinearityInfo::default(),
         );
         let app_exprs = chelis_deep::parser::parse_str(
@@ -15628,9 +15816,12 @@ mod tests {
             panic!("expected bind list");
         };
         let target_fn = bind_kids[1].clone();
-        inline_ctx
-            .local_callables
-            .insert("target".to_string(), target_fn.clone());
+        inline_ctx.local_callables.insert(
+            "target".to_string(),
+            inline_ctx
+                .resolve_callable_expr(&target_fn)
+                .expect("target callable"),
+        );
         let (DeepTag::Fn, _, target_kids) = stamped_parts(&target_fn).expect("expected target fn")
         else {
             panic!("expected target fn");
@@ -15643,6 +15834,7 @@ mod tests {
                 .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
                 .collect::<BTreeMap<_, _>>(),
             program_defs,
+            collect_top_level_sigs(checked.exprs()),
             LinearityInfo::default(),
         );
         subctx.local_callables = inline_ctx.local_callables.clone();
@@ -15743,7 +15935,12 @@ mod tests {
         // `(import {} ...)` form isn't run through the regular
         // type-checker path; we want a direct lowering observation.
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
-        let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+        let mut ctx = LowerCtx::new(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        );
         for expr in &exprs {
             ctx.lower_top_level(expr);
         }
@@ -15767,7 +15964,12 @@ mod tests {
             (import-all {} Math)
         "#;
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
-        let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+        let mut ctx = LowerCtx::new(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        );
         for expr in &exprs {
             ctx.lower_top_level(expr);
         }
@@ -16226,7 +16428,7 @@ mod tests {
                       (bind {}
                             twos
                             (app {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))}
-                                 (var {} expand)
+                                 (var {} insert)
                                  (app {type: (t-prim {} f32)}
                                       (var {} scalar_to_tensor)
                                       (cast {type: (t-prim {} f32)} (lit {} 2.0) (t-prim {} f32)))
@@ -16451,7 +16653,12 @@ mod tests {
             .next()
             .expect("one expression");
         let outcome = catch_lowering(move || {
-            let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+            let mut ctx = LowerCtx::new(
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                LinearityInfo::default(),
+            );
             let _ = ctx.lower_expr(&expr);
         });
         let Err(diagnostic) = outcome else {
@@ -16507,7 +16714,12 @@ mod tests {
         .pop()
         .expect("one expression");
         let outcome = catch_lowering(move || {
-            let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+            let mut ctx = LowerCtx::new(
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                LinearityInfo::default(),
+            );
             ctx.random_seed = Some(7);
             let _ = ctx.lower_expr(&expr);
             ctx.dag
@@ -16543,7 +16755,12 @@ mod tests {
         .pop()
         .expect("one expression");
         let outcome = catch_lowering(move || {
-            let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+            let mut ctx = LowerCtx::new(
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                LinearityInfo::default(),
+            );
             let _ = ctx.lower_expr(&expr);
             ctx.dag
         });
@@ -16581,7 +16798,12 @@ mod tests {
                 7,
             ),
         ];
-        let ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+        let ctx = LowerCtx::new(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        );
         for (source, expected) in cases {
             let expr = chelis_deep::parser::parse_str(source)
                 .unwrap_or_else(|error| panic!("parse seed control {source}: {error}"))
@@ -16609,7 +16831,12 @@ mod tests {
             "(cast {} (cast {} (lit {type: (t-prim {} int32)} 7) \
                  (t-prim {} string)) (t-prim {} int64))",
         ];
-        let ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+        let ctx = LowerCtx::new(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        );
         for source in cases {
             let expr = chelis_deep::parser::parse_str(source)
                 .unwrap_or_else(|error| panic!("parse forged seed {source}: {error}"))
@@ -16644,7 +16871,12 @@ mod tests {
             "(app {type: (t-prim {} int64)} (var {} neg) 1)",
             "(cast {} (cast {} 42 (t-prim {} int32)) (t-prim {} int64))",
         ];
-        let ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+        let ctx = LowerCtx::new(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        );
         for source in cases {
             let expr = chelis_deep::parser::parse_str(source)
                 .unwrap_or_else(|error| panic!("parse unstamped seed {source}: {error}"))
@@ -16704,8 +16936,12 @@ mod tests {
                 .pop()
                 .expect("one handled-random expression");
             let outcome = catch_lowering(move || {
-                let mut ctx =
-                    LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+                let mut ctx = LowerCtx::new(
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                    LinearityInfo::default(),
+                );
                 ctx.random_seed = Some(7);
                 let _ = ctx.lower_expr(&expr);
             });
@@ -16740,7 +16976,12 @@ mod tests {
         .pop()
         .expect("one expression");
         let outcome = catch_lowering(move || {
-            let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+            let mut ctx = LowerCtx::new(
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                LinearityInfo::default(),
+            );
             ctx.random_seed = Some(7);
             let _ = ctx.lower_expr(&expr);
         });
@@ -16772,7 +17013,12 @@ mod tests {
         .pop()
         .expect("one expression");
         let outcome = catch_lowering(move || {
-            let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+            let mut ctx = LowerCtx::new(
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                LinearityInfo::default(),
+            );
             ctx.random_seed = Some(7);
             let _ = ctx.lower_expr(&expr);
         });
@@ -16804,7 +17050,12 @@ mod tests {
         .pop()
         .expect("one expression");
         let outcome = catch_lowering(move || {
-            let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+            let mut ctx = LowerCtx::new(
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                LinearityInfo::default(),
+            );
             ctx.random_seed = Some(7);
             let _ = ctx.lower_expr(&expr);
         });
@@ -17319,7 +17570,12 @@ mod regression_tests {
 
     fn parse_and_lower_unchecked(src: &str) -> Dag {
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
-        let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+        let mut ctx = LowerCtx::new(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        );
         for expr in &exprs {
             let _ = ctx.lower_expr(expr);
         }
@@ -17452,7 +17708,12 @@ mod regression_tests {
             "#,
         )
         .expect("parse failed");
-        let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+        let mut ctx = LowerCtx::new(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        );
         let _ = ctx.lower_expr(&exprs[0]);
         let load_x = ctx
             .dag
@@ -17908,7 +18169,12 @@ mod regression_tests {
             .unwrap_or_else(|error| panic!("parse binder literal {literal}: {error}"))
             .pop()
             .expect("one binder cast");
-            let mut ctx = LowerCtx::new(BTreeMap::new(), BTreeMap::new(), LinearityInfo::default());
+            let mut ctx = LowerCtx::new(
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                LinearityInfo::default(),
+            );
             ctx.prec_substitutions.insert("p".to_string(), target);
             let _ = ctx.lower_expr(&expr);
 
