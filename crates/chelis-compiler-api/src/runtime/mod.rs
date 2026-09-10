@@ -554,6 +554,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         program: Some(kernel_program.as_ref().unwrap_or(program)),
         def_kernels: UnordMap::new(),
         transcript: Vec::new(),
+        transcript_capture: crate::transcript_capture::current_transcript_capture(),
         resolving_top_levels: Vec::new(),
         random_seed: None,
         random_counter: 0,
@@ -976,6 +977,7 @@ struct EvalContext<'a> {
     /// `EvalContext::def_kernel`).
     def_kernels: UnordMap<String, Option<std::sync::Arc<chelis_ir::host::HostDefKernel>>>,
     transcript: Vec<String>,
+    transcript_capture: Option<crate::TranscriptCapture>,
     resolving_top_levels: Vec<String>,
     random_seed: Option<u64>,
     random_counter: u64,
