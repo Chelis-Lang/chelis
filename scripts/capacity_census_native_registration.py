@@ -16,6 +16,7 @@ from capacity_census_wire_adapters import _target_lease, canonical, source_ident
 
 
 SOURCE = "crates/chelis-python/src/lib.rs"
+BUILD_COMMAND = ("cargo", "build", "--locked", "-p", "chelis-python", "--example", "native_binding_probe", "--message-format=json")
 CLASSES = {"CompiledModel": "chelis_python::NativeCompiledModel", "NativeTensor": "chelis_python::NativeTensor"}
 SLOTS = (
     ("CompiledModel", "NativeCompiledModel", "__call__", "method", "wrapper_descriptor"),
@@ -88,11 +89,25 @@ class CheckedNativeRegistrations:
         _require(hashlib.sha256(canonical(self.packet).encode()).hexdigest() == self.packet_sha256,
                  "native registration packet changed")
         _require(_digest(self.binary[0]) == self.binary[1], "native registration binary changed")
-        for process in self.processes:
+        _require(type(self.processes) is tuple and len(self.processes) == 2,
+                 "native registration requires build and execution processes")
+        for process, command in zip(self.processes, (list(BUILD_COMMAND), [self.binary[0]])):
+            _require(isinstance(process, dict) and set(process) == {
+                "command", "returncode", "stdout", "stderr",
+            } and process["command"] == command
+                and type(process["returncode"]) is int and process["returncode"] == 0,
+                     "native registration process failed or changed")
             for stream in ("stdout", "stderr"):
                 artifact = process[stream]
+                _require(isinstance(artifact, dict) and set(artifact) == {"path", "sha256"},
+                         "malformed native registration transcript")
                 _require(_digest(artifact["path"]) == artifact["sha256"],
                          "native registration transcript changed")
+        try:
+            recorded_packet = json.loads(Path(self.processes[1]["stdout"]["path"]).read_text())
+        except (OSError, ValueError) as error:
+            raise GraphError("native registration execution output is unreadable") from error
+        _require(recorded_packet == self.packet, "native registration packet differs from executed output")
         return validate_native_registration(self.root, self.packet)
 
 
@@ -106,7 +121,7 @@ def collect_native_registration(root: Path, target: Path):
     source = root / "crates/chelis-python/examples/native_binding_probe.rs"
     environment = {**os.environ, "CARGO_TARGET_DIR": str(target), "CARGO_BUILD_JOBS": "1",
                    "PYO3_PYTHON": sys.executable, "VIRTUAL_ENV": sys.prefix}
-    command = ["cargo", "build", "--locked", "-p", "chelis-python", "--example", "native_binding_probe", "--message-format=json"]
+    command = list(BUILD_COMMAND)
     with _target_lease(target):
         result = subprocess.run(command, cwd=root, env=environment, capture_output=True, text=True)
         build = record_process(target / "native-registration-processes/build", command, result)
