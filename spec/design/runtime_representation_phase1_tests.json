@@ -944,6 +944,7 @@
         "chelis-backend-c::tests::adv_tan_emits_tanf_not_tanhf",
         "chelis-backend-c::tests::blas_option_keeps_primitive_matmul_off_vendor_path",
         "chelis-backend-c::tests::canonical_matmul_codegen_compiles_and_runs",
+        "chelis-backend-c::tests::canonical_matmul_numerics_ignore_blas_hint",
         "chelis-backend-c::tests::checked_c_metadata_dag_reshape_executes_under_ubsan",
         "chelis-backend-c::tests::checked_cast_identity_materializes_a_noncontiguous_source",
         "chelis-backend-c::tests::codegen_accepts_well_sized_leading_axis_pad",
@@ -957,7 +958,7 @@
         "chelis-backend-c::tests::dag_codegen_with_static_entry_option_emits_static_prefix",
         "chelis-backend-c::tests::f64_tensor_const_and_add_produces_correct_output",
         "chelis-backend-c::tests::f64_tensor_sin_at_pi_over_4",
-        "chelis-backend-c::tests::generated_code_compiles_with_openmp",
+        "chelis-backend-c::tests::generated_code_compiles_with_platform_parallelism",
         "chelis-backend-c::tests::host_program_tensor_helper_blas_sets_toolchain_requirement",
         "chelis-backend-c::tests::host_program_tensor_helpers_are_static_entry_not_exported",
         "chelis-backend-c::tests::issue_252_harness_input_fill_round_trips_exact_f32_bits",
@@ -973,7 +974,6 @@
         "chelis-backend-c::tests::numerical_expand_add_broadcast",
         "chelis-backend-c::tests::numerical_large_vector_add_then_sum",
         "chelis-backend-c::tests::numerical_log_e",
-        "chelis-backend-c::tests::numerical_matmul_blas_when_available",
         "chelis-backend-c::tests::numerical_matmul_fallback",
         "chelis-backend-c::tests::numerical_max_elem",
         "chelis-backend-c::tests::numerical_max_reduce",
@@ -1748,6 +1748,7 @@
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_execution_requires_one_passing_framework_case_per_selection",
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_expected_mutation_failure_requires_the_exact_assertion_case",
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_failed_process_cannot_publish_a_passing_transcript",
+    "scripts.test_runtime_representation_phase1.ReceiptTests.test_fixture_target_isolated_from_inherited_target_and_preserves_foreign_junit",
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_fresh_execution_cannot_reuse_old_junit",
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_manifest_cannot_erase_a_selected_negative_or_mutation",
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_missing_or_changed_binary_after_execution_is_rejected",
@@ -1881,6 +1882,32 @@
       ],
       "selected": [
         "chelis-cli::issue_616_runtime_movement_c_parity::issue_616_multi_axis_runtime_pad_matches_c"
+      ]
+    },
+    {
+      "kind": "missing-c-compiler",
+      "args": [
+        "-p",
+        "chelis-backend-c",
+        "--lib",
+        "-E",
+        "test(=tests::generated_code_compiles_with_platform_parallelism)"
+      ],
+      "selected": [
+        "chelis-backend-c::tests::generated_code_compiles_with_platform_parallelism"
+      ]
+    },
+    {
+      "kind": "missing-c-compiler",
+      "args": [
+        "-p",
+        "chelis-backend-c",
+        "--lib",
+        "-E",
+        "test(=tests::canonical_matmul_numerics_ignore_blas_hint)"
+      ],
+      "selected": [
+        "chelis-backend-c::tests::canonical_matmul_numerics_ignore_blas_hint"
       ]
     },
     {

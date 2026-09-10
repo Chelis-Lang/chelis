@@ -9,6 +9,25 @@ from scripts import runtime_representation_phase1 as oracle
 
 
 class ReceiptTests(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(mock.patch.dict(oracle.os.environ))
+        oracle.os.environ.pop('CARGO_TARGET_DIR', None)
+
+    def test_fixture_target_isolated_from_inherited_target_and_preserves_foreign_junit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / 'external-target'
+            sentinel = target / 'nextest' / oracle.PROFILE / 'junit.xml'
+            sentinel.parent.mkdir(parents=True)
+            sentinel.write_bytes(b'foreign execution receipt')
+            env = dict(oracle.os.environ, CARGO_TARGET_DIR=str(target))
+            result = oracle.subprocess.run(
+                [oracle.sys.executable, '-m', 'unittest',
+                 __name__ + '.ReceiptTests.test_selection_requires_current_binary_and_exact_nonempty_census',
+                 __name__ + '.ReceiptTests.test_fresh_execution_cannot_reuse_old_junit'],
+                cwd=oracle.ROOT, env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(sentinel.read_bytes(), b'foreign execution receipt')
+
     def test_runtime_archive_requires_current_cargo_artifact_identity(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

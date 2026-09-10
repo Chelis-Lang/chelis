@@ -1354,9 +1354,13 @@ Native execution uses a separately pinned archive from the current
 identity, copies it into an exclusive directory, sets `CHELIS_RUNTIME_DIR`, and
 checks its digest after all executions. Each selected direct-link harness honors
 that explicit archive. Eight empty-archive controls must fail at the actual
-linker despite complete older archives in the warm target. Three missing-compiler
-controls prevent native compile checks from returning early; reduced-float BLAS
-cases use the platform toolchain and must execute. The JSON ownership-ledger
+linker despite complete older archives in the warm target. Five missing-compiler
+controls prevent native compile checks from returning early. Selected library
+native cases have no availability exits: parallelism follows the configured
+platform toolchain, and the canonical matmul case executes with the BLAS hint
+without claiming a vendor call. Reduced-float BLAS cases use the platform
+toolchain and must execute. Python fixtures isolate their target configuration
+and prove that an inherited target's execution evidence survives. The JSON ownership-ledger
 mutation test independently builds/selects its instrumented Cargo artifact.
 This acceptance pin does not resolve the broader production archive discovery
 work in #1354; other consumers retain that issue's obligations.

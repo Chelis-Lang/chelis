@@ -27,7 +27,7 @@ ROOT = phase0.REPO_ROOT
 OracleFailure = phase0.OracleFailure
 PROFILE = 'runtime-representation'
 MANIFEST = ROOT / 'spec/design/runtime_representation_phase1_tests.json'
-MANIFEST_SHA256 = '918a48a5a43f61a5eea91cd2bc63da38b92224670d79605132f533b1da34041c'
+MANIFEST_SHA256 = '4eba2dd89631fb92ac34df5ad5b91f6cb581508394071ad8ae9a5aa8a01e9263'
 MANUAL_TEST = 'an_allocation_above_int32_elements_reports_its_true_extent'
 
 
@@ -292,12 +292,14 @@ def native_controls():
         args = ['-p', package, *(['--test', binary] if binary else ['--lib']), '-E', f'test(={test})']
         identity = f'{package}::{binary}::{test}' if binary else f'{package}::{test}'
         controls.append({'kind': 'empty-runtime-archive', 'args': args, 'selected': [identity]})
-    for binary, test in [('dtype_matrix_bf16_f16', 'bf16_matmul_agrees_with_evaluator'),
+    for binary, test in [(None, 'tests::generated_code_compiles_with_platform_parallelism'),
+                         (None, 'tests::canonical_matmul_numerics_ignore_blas_hint'),
+                         ('dtype_matrix_bf16_f16', 'bf16_matmul_agrees_with_evaluator'),
                          ('fused_compile', 'c_fused_codegen_compiles'),
                          ('fused_compile', 'c_fused_reduce_compiles')]:
         controls.append({'kind': 'missing-c-compiler',
-                         'args': ['-p', 'chelis-backend-c', '--test', binary, '-E', f'test(={test})'],
-                         'selected': [f'chelis-backend-c::{binary}::{test}']})
+                         'args': ['-p', 'chelis-backend-c', *(['--test', binary] if binary else ['--lib']), '-E', f'test(={test})'],
+                         'selected': [f'chelis-backend-c::{binary}::{test}' if binary else f'chelis-backend-c::{test}']})
     return controls
 
 
