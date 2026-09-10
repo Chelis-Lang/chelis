@@ -19,6 +19,7 @@ use tempfile::tempdir;
 struct Counts {
     blas: usize,
     allocs: usize,
+    reduction_scratch_allocs: usize,
     fused: usize,
     user_helper_defs: usize,
     /// Total bytes summed across every `chelis_alloc(N, (int64_t[]){...},
@@ -52,6 +53,13 @@ fn build_and_count(source: &str, name: &str) -> Counts {
     let c = fs::read_to_string(&c_path).expect("read generated c");
     let blas = c.matches("cblas_sgemm").count() + c.matches("chelis_blas_matmul").count();
     let allocs = c.matches("chelis_alloc(").count();
+    let reduction_scratch_allocs = c
+        .lines()
+        .filter(|line| {
+            line.contains("chelis_tensor *__sum_scratch_")
+                && line.contains("= chelis_alloc(1, &__sum_n_")
+        })
+        .count();
     let fused = c.matches("parallel for simd").count();
     let user_helper_defs = c.matches("static void my_mm__tensor_").count();
 
@@ -94,6 +102,7 @@ fn build_and_count(source: &str, name: &str) -> Counts {
     Counts {
         blas,
         allocs,
+        reduction_scratch_allocs,
         fused,
         user_helper_defs,
         total_alloc_bytes,
@@ -145,9 +154,11 @@ fn inline_matmul_forms_preserve_primitive_arithmetic_and_storage() {
             "vendor GEMM changes the specified reduction tree"
         );
         // Two inserted operands and their product each have shape [8,16,4];
-        // the reduced output is [8,4]. These are actual tensor submissions,
-        // excluding the per-output 16-element reduction scratch allocation.
-        assert_eq!(counts.allocs, 4);
+        // the reduced output is [8,4]. The fifth allocation site owns the
+        // per-output 16-element scratch via its checked dynamic leaf count.
+        // The literal-shape byte total below measures the four DAG submissions.
+        assert_eq!(counts.allocs, 5);
+        assert_eq!(counts.reduction_scratch_allocs, 1);
         assert_eq!(counts.total_alloc_bytes, (3 * 8 * 16 * 4 + 8 * 4) * 4);
     }
     assert_eq!(direct_c.total_alloc_bytes, inline_c.total_alloc_bytes);
