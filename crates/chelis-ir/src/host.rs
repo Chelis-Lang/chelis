@@ -3111,6 +3111,17 @@ pub fn host_def_kernel(
         return Ok(None);
     };
     let name = canonical;
+    // A generic definition has no standalone kernel. Its checked application
+    // supplies the precision/rank bindings, including when its result is bool
+    // and would otherwise look concrete enough to classify as a kernel.
+    if top_level_fn_is_type_polymorphic(program, name)
+        || lookup_declared_type_expr(program, name).is_some_and(|signature| {
+            crate::lower::type_expr_has_precision_var(&signature)
+                || crate::lower::type_expr_has_rank_var(&signature)
+        })
+    {
+        return Ok(None);
+    }
     // `ty_expr` is redundant with the lookup `host_def_signature` performs
     // first (the C caller passes that same lookup's result), so `None` here
     // yields the identical signature.
@@ -10778,6 +10789,10 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
             let value = lower_host_expr(arg, program, scope, tensor_helpers)?;
             let preferred_ty = fn_sig
                 .and_then(|(param_tys, _)| param_tys.get(index - 1))
+                // The generic declaration is not an argument actualization.
+                // Keep the checked actual's dtype and extents so the helper's
+                // ordinary call inliner can bind the declaration identities.
+                .filter(|ty| !ty.is_unresolved())
                 .cloned()
                 .or_else(|| expr_tensor_type(arg, program, scope).map(HostTypeTerm::Tensor))
                 .or_else(|| {
