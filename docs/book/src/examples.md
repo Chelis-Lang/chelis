@@ -7,6 +7,7 @@ in `examples/illustrative/`.
 
 Use these files when you want examples that should survive the normal CLI loop:
 
+- `examples/recursive_cast_targets.ch`: recursive generic scalar casts at each call's concrete dtype.
 - `examples/hello_tensor.ch`: tensor construction and elementwise addition.
 - `examples/integer_functions.ch`: integer literal returns and nullary calls in eval and C builds.
 - `examples/linreg.ch`: matmul, insert, copy, and reductions.
