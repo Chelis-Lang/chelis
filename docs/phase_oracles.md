@@ -13,7 +13,7 @@ Status legend:
 - **continuous gate** — runs through `scripts/gate.py` in hosted CI and the
   documented local pre-push subset, but is not a workspace test binary
 - **nightly gate** — runs in **Linux Extended Validation** (`heavy-e2e.yml`),
-  daily at 03:17 UTC or by manual dispatch. Its unfiltered full workspace pass
+  daily at 03:17 UTC or by manual dispatch. Its combined workspace/dtype pass
   includes all non-ignored default-feature tests, including those also run on PRs.
 - **manual gate** — requires `#[ignore]` plus a documented prerequisite; see
   [`manual_gates.md`](manual_gates.md)

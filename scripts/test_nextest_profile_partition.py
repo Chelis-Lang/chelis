@@ -123,8 +123,12 @@ NIGHTLY_RECURSIVE_SELECTOR = (
 NIGHTLY_CACHE_CONCURRENCY_SELECTOR = (
     "binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/)"
 )
+CENSUS_SELECTOR = (
+    "binary_id(/^chelis-compiler-api::capacity_census_wire$/) | "
+    "binary_id(/^chelis-python::capacity_census_bindings$/)"
+)
 GENERALIZATION_PR_FILTER = (
-    f"not ({NIGHTLY_CACHE_CONCURRENCY_SELECTOR} | "
+    f"not ({CENSUS_SELECTOR} | {NIGHTLY_CACHE_CONCURRENCY_SELECTOR} | "
     f"({NIGHTLY_RECURSIVE_SELECTOR}))"
 )
 CONTENDED_DEADLINE_RETRY_SELECTOR = (
@@ -641,6 +645,14 @@ class ProfilePartitionTests(unittest.TestCase):
             "the control corpus no longer contains any inherited duplicate "
             "selection, so flattening has no executable duplication to remove",
         )
+
+    def test_linux_workspace_and_dtype_cover_the_complete_census_partition(self):
+        active = lambda listing: {k for k, (status, ignored) in listing.items() if status == "matches" and not ignored}
+        full = active(self.full)
+        census = {k for k in full if k.startswith(("chelis-compiler-api::capacity_census_wire::", "chelis-python::capacity_census_bindings::"))}
+        self.assertTrue(census)
+        self.assertLessEqual(census, active(self.dtype_flat))
+        self.assertEqual(active(_list_filterset(f"not ({CENSUS_SELECTOR})")), full - census)
 
     def test_every_profile_serializes_exactly_the_shared_target_owners(self):
         profiles = tuple(tomllib.loads(NEXTEST_TOML.read_text())["profile"])

@@ -399,4 +399,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    from ci_timing import subprocesses
+    with subprocesses():
+        sys.exit(main())

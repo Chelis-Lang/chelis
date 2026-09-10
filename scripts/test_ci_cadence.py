@@ -23,12 +23,12 @@ def assert_extended(test, pr, nightly):
         job = jobs[name]
         test.assertNotIn("if", job)
         test.assertFalse(job.get("continue-on-error", False))
-        test.assertEqual(job["timeout-minutes"], 60 if name.startswith("generalize") else 45)
+        test.assertEqual(job["timeout-minutes"], 60 if name.startswith(("generalize", "dtype")) else 45)
         steps = [s for s in job["steps"] if s.get("run", "").startswith(command)]
         test.assertEqual(len(steps), 1, command)
         test.assertNotIn("if", steps[0])
         test.assertFalse(steps[0].get("continue-on-error", False))
-    for name in ("full-workspace", "integration-support", "backend-sanitizers-full"):
+    for name in ("full-workspace", "script-nightly", "integration-support", "backend-sanitizers-full"):
         job = jobs[name]
         test.assertNotIn("if", job)
         test.assertFalse(job.get("continue-on-error", False))
@@ -42,12 +42,14 @@ def assert_extended(test, pr, nightly):
     full = jobs["full-workspace"]
     test.assertEqual(full["timeout-minutes"], 60)
     capacity = lambda job: [s for s in job["steps"] if s.get("name") == "Restore capacity rustdoc build"]
-    test.assertEqual(len(capacity(full)), 1)
-    test.assertEqual(capacity(full), capacity(jobs["dtype-phase3-oracle"]))
+    test.assertFalse(capacity(full))
+    test.assertFalse(capacity(jobs["generalize-sweep-oracle-shard"]))
+    test.assertEqual(len(capacity(jobs["dtype-phase3-oracle"])), 1)
     test.assertNotIn("strategy", full)
     commands = [s.get("run") for s in full["steps"]]
     test.assertIn("cargo build --workspace --lib --bins", commands)
-    test.assertIn("cargo nextest run --workspace --profile ci-full --ignore-default-filter --no-fail-fast", commands)
+    test.assertIn("cargo nextest run --workspace --profile ci-full --ignore-default-filter --no-fail-fast -E 'not (binary_id(/^chelis-compiler-api::capacity_census_wire$/) | binary_id(/^chelis-python::capacity_census_bindings$/))'", commands)
+    test.assertIn(".venv/bin/python scripts/ci_script_tests.py nightly", [s.get("run") for s in jobs["script-nightly"]["steps"]])
     test.assertIn("cargo test -p chelis-cli --test chelis_std_self_test_corpus -- --ignored --nocapture", commands)
     test.assertIn("cargo test -p chelis-backend-c", [s.get("run") for s in jobs["backend-sanitizers-full"]["steps"]])
     support = jobs["integration-support"]
@@ -58,7 +60,7 @@ def assert_extended(test, pr, nightly):
     test.assertIn("ProfilePartitionTests", str(full))
     test.assertEqual(pr["jobs"]["integration"]["needs"], ["changes", "ci-fast"])
     report = jobs["report"]
-    test.assertEqual(set(report["needs"]), set(MOVED) | {"full-workspace", "integration-support", "backend-sanitizers-full"})
+    test.assertEqual(set(report["needs"]), set(MOVED) | {"full-workspace", "script-nightly", "integration-support", "backend-sanitizers-full"})
     test.assertIn("always()", report["if"])
     test.assertEqual(report["steps"][0]["env"]["RESULTS"], "${{ toJSON(needs) }}")
 
@@ -88,7 +90,7 @@ class ExtendedCadenceTests(unittest.TestCase):
                         assert_extended(self, self.pr, nightly)
 
     def test_skipped_full_or_support_or_sanitizer_execution_is_rejected(self):
-        for name in ("full-workspace", "integration-support", "backend-sanitizers-full"):
+        for name in ("full-workspace", "script-nightly", "integration-support", "backend-sanitizers-full"):
             nightly = copy.deepcopy(self.nightly)
             nightly["jobs"][name]["if"] = "false"
             with self.subTest(job=name), self.assertRaises(AssertionError):
@@ -107,17 +109,13 @@ class ExtendedCadenceTests(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 assert_extended(self, self.pr, nightly)
 
-    def test_missing_or_divergent_full_capacity_cache_is_rejected(self):
-        for mutation in ("remove", "key"):
-            nightly = copy.deepcopy(self.nightly)
-            steps = nightly["jobs"]["full-workspace"]["steps"]
-            cache = next(s for s in steps if s.get("name") == "Restore capacity rustdoc build")
-            if mutation == "remove":
-                steps.remove(cache)
-            else:
-                cache["with"]["key"] += "-wrong"
-            with self.subTest(mutation=mutation), self.assertRaises(AssertionError):
-                assert_extended(self, self.pr, nightly)
+    def test_census_cannot_silently_return_to_full_workspace(self):
+        nightly = copy.deepcopy(self.nightly)
+        for step in nightly["jobs"]["full-workspace"]["steps"]:
+            if step.get("run", "").startswith("cargo nextest run"):
+                step["run"] = step["run"].split(" -E ")[0]
+        with self.assertRaises(AssertionError):
+            assert_extended(self, self.pr, nightly)
 
 
 if __name__ == "__main__":
