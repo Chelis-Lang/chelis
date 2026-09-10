@@ -81,10 +81,19 @@ static inline double chelis_f64_from_bits(uint64_t bits) {
  * (`a / chelis_int_div_guard(b)`). Float division is IEEE-754 (`1.0/0.0 ==
  * inf`) and is never guarded. The message matches the evaluator's
  * `integer division or remainder by zero` exactly. */
+/* spec/04 section 4.7: output from preceding effects survives a later trap.
+ * abort() need not flush C streams (notably on glibc). Preserve the original
+ * failure even if a stream itself cannot be flushed. */
+static inline _Noreturn void chelis_flush_and_abort(void) {
+    (void)fflush(stdout);
+    (void)fflush(stderr);
+    abort();
+}
+
 static inline int64_t chelis_int_div_guard(int64_t divisor) {
     if (divisor == 0) {
         fprintf(stderr, "integer division or remainder by zero\n");
-        abort();
+        chelis_flush_and_abort();
     }
     return divisor;
 }
@@ -102,11 +111,11 @@ static inline int64_t chelis_int_abs_guard(int64_t value, int bits,
         case 64: minimum = INT64_MIN; break;
         default:
             fprintf(stderr, "chelis internal error: invalid integer abs width %d\n", bits);
-            abort();
+            chelis_flush_and_abort();
     }
     if (value == minimum) {
         fprintf(stderr, "%s\n", trap_message);
-        abort();
+        chelis_flush_and_abort();
     }
     return value < 0 ? -value : value;
 }
@@ -123,13 +132,13 @@ static inline void chelis_int_limits(int bits, int64_t *minimum, int64_t *maximu
         case 64: *minimum = INT64_MIN; *maximum = INT64_MAX; break;
         default:
             fprintf(stderr, "chelis internal error: invalid integer width %d\n", bits);
-            abort();
+            chelis_flush_and_abort();
     }
 }
 
 static inline void chelis_numeric_trap(const char *message) {
     fprintf(stderr, "%s\n", message);
-    abort();
+    chelis_flush_and_abort();
 }
 
 static inline int64_t chelis_int_checked_add(int64_t lhs, int64_t rhs, int bits,
@@ -281,12 +290,12 @@ static inline int64_t chelis_int_from_twos(uint64_t value, int bits) {
 static inline void chelis_int_shift_validate(int64_t amount, int bits) {
     if (bits != 8 && bits != 16 && bits != 32 && bits != 64) {
         fprintf(stderr, "invalid integer shift width: %d\n", bits);
-        abort();
+        chelis_flush_and_abort();
     }
     if (amount < 0) {
         fprintf(stderr, "shift amount must be non-negative, got %lld\n",
                 (long long)amount);
-        abort();
+        chelis_flush_and_abort();
     }
 }
 
