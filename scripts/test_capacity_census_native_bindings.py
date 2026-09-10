@@ -13,6 +13,7 @@ from capacity_census_native_bindings import (
     require_native_slots,
     native_output_adapter,
     require_private_owner,
+    native_input_role,
 )
 from test_capacity_census_graph import Artifact, primitive, reference
 
@@ -24,6 +25,27 @@ def fixture():
     for item_id, identity in enumerate(NATIVE_OUTPUTS.values(), 20):
         artifact.external(item_id, identity)
     return artifact
+
+
+def input_fixture():
+    artifact = fixture()
+    for item_id, identity in {
+        40: "pyo3::marker::Python", 41: "pyo3::instance::Bound",
+        42: "pyo3::types::tuple::PyTuple", 43: "pyo3::types::dict::PyDict",
+        44: "core::option::Option", 45: "chelis_python::dlpack::DLPackStreamRequest",
+        46: "chelis_python::dlpack::DLPackVersionRequest",
+        47: "chelis_python::dlpack::DLPackDeviceRequest",
+        48: "chelis_python::dlpack::DLPackRequest",
+    }.items():
+        artifact.external(item_id, identity)
+    borrow = lambda ty: {"borrowed_ref": {"type": ty, "is_mutable": False, "lifetime": None}}
+    return artifact, {
+        "self": borrow({"generic": "Self"}), "py": reference(40),
+        "args": borrow(reference(41, reference(42))),
+        "kwargs": reference(44, borrow(reference(41, reference(43)))),
+        "stream": reference(44, reference(45)), "max_version": reference(44, reference(46)),
+        "dl_device": reference(44, reference(47)), "copy": reference(44, primitive("bool")),
+    }
 
 
 def private_owner_fixture():
@@ -44,6 +66,34 @@ def private_owner_fixture():
 
 
 class NativeBoundaryObligations(unittest.TestCase):
+    def test_dynamic_input_authority_is_scoped_to_the_registered_payload_slot(self):
+        artifact, types = input_fixture()
+        graph = RustdocGraph([artifact.doc])
+        owners = {
+            "chelis_python::CompiledModel::__call__": ("self", "py", "args", "kwargs"),
+            "chelis_python::NativeTensor::__dlpack__":
+                ("self", "py", "stream", "max_version", "dl_device", "copy"),
+            "chelis_python::NativeTensor::__dlpack_device__": ("self",),
+            "chelis_python::NativeTensor::shape": ("self",),
+        }
+        for owner, labels in owners.items():
+            for label in labels:
+                self.assertIsInstance(native_input_role(graph, owner, label, types[label]), str)
+                for changed in (primitive("f64"), reference(44, primitive("i64")),
+                                {"tuple": [types[label], primitive("f64")]}):
+                    with self.subTest(owner=owner, label=label, changed=changed), self.assertRaises(GraphError):
+                        native_input_role(graph, owner, label, changed)
+            for label in set(types) - set(labels):
+                with self.subTest(owner=owner, label=label), self.assertRaises(GraphError):
+                    native_input_role(graph, owner, label, types[label])
+        # Decoded requests are untrusted. They cannot be replaced by an alleged
+        # already-validated request or by the outgoing device projection.
+        owner = "chelis_python::NativeTensor::__dlpack__"
+        for label in ("stream", "max_version", "dl_device"):
+            for changed in (reference(44, reference(48)), reference(44, reference(22))):
+                with self.subTest(label=label), self.assertRaises(GraphError):
+                    native_input_role(graph, owner, label, changed)
+
     def test_every_registered_boundary_requires_all_and_only_its_slots(self):
         slots = {
             "chelis_python::CompiledModel::__call__": ("self", "py", "args", "kwargs"),
