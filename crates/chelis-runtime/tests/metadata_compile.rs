@@ -95,6 +95,16 @@ fn weakened_metadata_construction_fails_the_executable_contract() {
     ));
     for (from, to, witness) in [
         (
+            "linear / self.inner.get() % self.indices.elements().get()",
+            "0",
+            "sparse_metadata_binds_indices_to_exact_hyperplane_and_elementwise_domains",
+        ),
+        (
+            "let coordinate = if axis == self.axis {",
+            "let coordinate = if false {",
+            "sparse_metadata_binds_indices_to_exact_hyperplane_and_elementwise_domains",
+        ),
+        (
             "*slot = true;",
             "*slot = false;",
             "reduction_metadata_binds_grouping_to_checked_input_and_result_domains",
@@ -271,7 +281,7 @@ fn internal_callers_cannot_forge_counts_or_restore_independent_tensor_fields() {
     );
     let context = format!(
         "#![allow(dead_code, non_camel_case_types)]\nmod metadata;\n\
-         use metadata::{{ShapeMetadata, ElementCount, ByteCount, AllocationBytes, ReductionMetadata}};\n\
+         use metadata::{{ShapeMetadata, ElementCount, ByteCount, AllocationBytes, ReductionMetadata, SparseMetadata}};\n\
          use chelis_vocab::RuntimeDType;\nuse std::sync::atomic::AtomicU8;\n\
          struct HeapHeader;\nstruct TensorStorageProvenance;\nstruct chelis_tensor_write;\n\
          {declarations}\n"
@@ -288,9 +298,22 @@ fn internal_callers_cannot_forge_counts_or_restore_independent_tensor_fields() {
             let _: i64 = storage.byte_capacity.get();
             let plan = ReductionMetadata::new(&[2, 3], &[1], RuntimeDType::I64).unwrap();
             let _: i64 = plan.index(1, 2).unwrap();
+            let indices = ShapeMetadata::contiguous(&[2], RuntimeDType::I64).unwrap();
+            let sparse = SparseMetadata::new(&metadata, &indices, 1, false).unwrap();
+            let _: i64 = sparse.data_index(0, 1).unwrap();
         }
     "#;
     let mut negatives = vec![
+        (
+            "fn bad(m: &mut SparseMetadata) { m.domain = ShapeMetadata::contiguous(&[99], RuntimeDType::I64).unwrap(); }".to_owned(),
+            "E0616",
+            "domain",
+        ),
+        (
+            "fn bad(m: &mut SparseMetadata) { m.axis = 99; }".to_owned(),
+            "E0616",
+            "axis",
+        ),
         (
             "fn bad(m: &mut ReductionMetadata) { m.leaves = ElementCount::from_extents(&[99]).unwrap(); }".to_owned(),
             "E0616",

@@ -366,6 +366,11 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_sparse_plan * chelis_tensor_sparse_plan ( const chelis_tensor * base , const chelis_tensor * indices , const chelis_tensor * updates , chelis_scalar axis , chelis_sparse_op operation ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: chelis_string chelis_adt_get_tag ( const chelis_adt * adt ) ;",
       "flags": []
     },
@@ -745,6 +750,34 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_sparse_count ( const chelis_sparse_plan * plan ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_sparse_data_index ( const chelis_sparse_plan * plan , chelis_scalar linear , chelis_scalar selected ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_sparse_extent ( const chelis_sparse_plan * plan , chelis_scalar axis ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_sparse_index_slot ( const chelis_sparse_plan * plan , chelis_scalar linear ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: int64_t chelis_string_len ( chelis_string value ) ;",
       "flags": [
         "numeric-op"
@@ -905,6 +938,16 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_sparse_check_target ( const chelis_sparse_plan * plan , chelis_scalar rank , const chelis_scalar * shape ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_sparse_plan_release ( chelis_sparse_plan * plan ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_string_release ( chelis_string value ) ;",
       "flags": []
     },
@@ -998,6 +1041,11 @@
     {
       "kind": "header-struct",
       "id": "chelis_runtime.h: typedef enum { CHELIS_REDUCE_SUM = 0 , CHELIS_REDUCE_COUNT = 1 , CHELIS_REDUCE_MAX = 2 , CHELIS_REDUCE_MIN = 3 , CHELIS_REDUCE_PROD = 4 , CHELIS_REDUCE_ARGMAX = 5 , CHELIS_REDUCE_ARGMIN = 6 } chelis_reduction_op",
+      "flags": []
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime.h: typedef enum { CHELIS_SPARSE_GATHER = 0 , CHELIS_SPARSE_ADD = 1 , CHELIS_SPARSE_REPLACE = 2 , CHELIS_SPARSE_ELEMENTS = 3 } chelis_sparse_op",
       "flags": []
     },
     {

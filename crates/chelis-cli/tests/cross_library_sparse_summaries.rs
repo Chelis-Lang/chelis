@@ -61,6 +61,8 @@
 //! above pin the surface that W4-A's structured rejection enum must
 //! cover.
 
+mod common;
+
 use std::fs;
 use std::process::Command;
 
@@ -149,74 +151,36 @@ fn function_body(c: &str, function: &str) -> String {
     panic!("function `{function}` body did not close in generated C");
 }
 
-/// Count occurrences of the inline-sparse-gather canonical out-index
-/// arithmetic shape. Both `CEmitter::emit_sparse_gather` and
-/// `HostEmitter::emit_sparse_gather_summary_body` emit a line of
-/// shape:
-///
-/// ```text
-/// int <prefix>_out = ((<prefix>_b * <prefix>_index_count + <prefix>_i) * <prefix>_after) + <prefix>_d;
-/// ```
-///
-/// We match the trailing arithmetic literal (the structural skeleton
-/// minus the prefix). This is more robust than substring-matching
-/// suffixed variable names, which carry numeric helper IDs that vary
-/// run-to-run.
-fn count_gather_out_index_lines(body: &str) -> usize {
-    body.matches("_index_count + ").count()
+/// The inline loop must obtain every domain/index from the checked plan.
+/// Operation tags distinguish the three summaries without depending on temp IDs.
+fn body_contains_checked_sparse_loop(body: &str, operation: &str) -> bool {
+    [
+        "chelis_tensor_sparse_plan(",
+        "chelis_sparse_check_target(",
+        "chelis_sparse_count(",
+        "chelis_sparse_index_slot(",
+        "chelis_sparse_data_index(",
+        "chelis_sparse_plan_release(",
+        "chelis_host_tensor_data(",
+        "for (int64_t ",
+        operation,
+    ]
+    .iter()
+    .all(|required| body.contains(required))
 }
 
-fn count_gather_dtype_dispatch(body: &str) -> usize {
-    body.lines()
-        .filter(|line| {
-            line.contains("chelis_host_tensor_dtype(")
-                && line.contains("== CHELIS_DTYPE_I64")
-                && line.contains("chelis_host_tensor_data(")
-        })
-        .count()
-}
-
-/// `true` when the body emits an inline sparse-gather loop:
-///
-///   * the out-index arithmetic shape appears at least once
-///   * the int32/int64 dtype dispatch literal appears at least once
-///   * the loop-bound triple (`_axis_size = `, `_after = `,
-///     `_index_count = `) is present — these come from
-///     `emit_sparse_gather`'s setup block
-///   * gather distinguishes from scatter (add or replace) by NOT
-///     containing the `memcpy(` setup that both scatter variants
-///     use to copy the base/target buffer before the update loop
 fn body_contains_inline_gather_loop(body: &str) -> bool {
-    count_gather_out_index_lines(body) >= 1
-        && count_gather_dtype_dispatch(body) >= 1
-        && body.contains("_axis_size = ")
-        && body.contains("_after = ")
-        && body.contains("_index_count = ")
-        && !body.contains("memcpy(")
+    body_contains_checked_sparse_loop(body, "CHELIS_SPARSE_GATHER") && !body.contains("memcpy(")
 }
 
-/// `true` when the body emits an inline sparse-scatter-add loop.
-/// Distinguished from gather by `memcpy(` (copies the base into the
-/// output) and from scatter-replace by the `+=` accumulator.
 fn body_contains_inline_scatter_add_loop(body: &str) -> bool {
-    count_gather_out_index_lines(body) >= 1
-        && count_gather_dtype_dispatch(body) >= 1
-        && body.contains("_axis_size = ")
-        && body.contains("_after = ")
-        && body.contains("_index_count = ")
+    body_contains_checked_sparse_loop(body, "CHELIS_SPARSE_ADD")
         && body.contains("memcpy(")
         && body.contains("] += ")
 }
 
-/// `true` when the body emits an inline sparse-scatter-replace loop.
-/// Distinguished from scatter-add by the absence of `+=` and from
-/// gather by the presence of `memcpy(`.
 fn body_contains_inline_scatter_replace_loop(body: &str) -> bool {
-    count_gather_out_index_lines(body) >= 1
-        && count_gather_dtype_dispatch(body) >= 1
-        && body.contains("_axis_size = ")
-        && body.contains("_after = ")
-        && body.contains("_index_count = ")
+    body_contains_checked_sparse_loop(body, "CHELIS_SPARSE_REPLACE")
         && body.contains("memcpy(")
         && !body.contains("] += ")
 }
@@ -252,8 +216,7 @@ fn user_def_gather_helper_emits_inline_sparse_gather_loop() {
     assert!(
         body_contains_inline_gather_loop(&f_body),
         "user-def wrapper `f` MUST recover the inline sparse-gather loop \
-         (locked markers: canonical out-index arithmetic, dtype dispatch, \
-         loop-bound triple, NO memcpy). Body was:\n{f_body}"
+         (locked markers: checked plan, exact target, projected indices, NO memcpy). Body was:\n{f_body}"
     );
     assert!(
         !body_contains_tensor_helper_call(&f_body),
@@ -601,4 +564,65 @@ fn rejected_scatter_replace_with_extra_op_falls_back() {
         "rejected scatter-replace helper's caller MUST fall back to a \
          host call. Body:\n{f_body}"
     );
+}
+
+/// [05-OP-33] host-summary adoption retains the nontrailing domain and exact
+/// integer payload. Duplicate replacements execute in updates row-major order.
+#[test]
+fn checked_sparse_host_helpers_execute_nontrailing_exact_integer_domains() {
+    for (op, result_shape, expected) in [
+        (
+            "gather(base,indices,1)",
+            "2,2",
+            vec![
+                9007199254740995i64,
+                9007199254740995,
+                9007199254740998,
+                9007199254740998,
+            ],
+        ),
+        (
+            "scatter_replace(base,indices,updates,1)",
+            "2,3",
+            vec![
+                9007199254740993i64,
+                9007199254740994,
+                9007199254741002,
+                9007199254740996,
+                9007199254740997,
+                9007199254741004,
+            ],
+        ),
+    ] {
+        let source = format!(
+            "def inner(base: tensor[2,3,int64], indices: tensor[2,int64], updates: tensor[2,2,int64]) -> tensor[{result_shape},int64] = {op}\ndef outer(base: tensor[2,3,int64], indices: tensor[2,int64], updates: tensor[2,2,int64]) -> tensor[{result_shape},int64] = inner(base,indices,updates)\nbase: tensor[2,3,int64] = reshape(to_tensor([9007199254740993i64,9007199254740994i64,9007199254740995i64,9007199254740996i64,9007199254740997i64,9007199254740998i64]),[2i64,3i64])\nindices: tensor[2,int64] = to_tensor([2i64,2i64])\nupdates: tensor[2,2,int64] = reshape(to_tensor([9007199254741001i64,9007199254741002i64,9007199254741003i64,9007199254741004i64]),[2i64,2i64])\nresult = outer(base,indices,updates)\n"
+        );
+        let source = chelis_surf::format::format_source(&source).unwrap();
+        let c = build_to_c(&source, "checked_sparse_host_source");
+        let body = function_body(&c, "outer");
+        assert!(body_contains_checked_sparse_loop(
+            &body,
+            if op.starts_with("gather") {
+                "CHELIS_SPARSE_GATHER"
+            } else {
+                "CHELIS_SPARSE_REPLACE"
+            }
+        ));
+        let actual = common::build_and_run(&source, "checked_sparse_host_exec");
+        let line = actual
+            .lines()
+            .find(|line| line.starts_with("result = tensor("))
+            .expect("result tensor");
+        let values = line
+            .split_once("data=[")
+            .unwrap()
+            .1
+            .split_once(']')
+            .unwrap()
+            .0
+            .split(',')
+            .map(|value| value.trim().parse::<i64>().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(values, expected);
+    }
 }

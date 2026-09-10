@@ -2116,6 +2116,36 @@ exact ADT identity by [05-OP-34].
 > retain [04-NUM-9]'s canonical primitive identity at int64. These metadata operations
 > have no cotangent or arithmetic accumulator and do not select a reduction algorithm.
 >
+> `chelis_tensor_sparse_plan` snapshots checked base, index, and (for scatter)
+> update metadata before output allocation or reuse. Its exact tagged int64 axis
+> normalizes once against the base rank. The closed `chelis_sparse_op` identifies
+> gather, scatter-add, replace-scatter, or element-wise scatter; canonical numeric
+> failure identities are respectively `gather`, `scatter`, `scatter_replace`, and
+> `scatter_elements`. Index tensors have an active signed-integer dtype. Scatter
+> updates have the base dtype and the exact section 3.5 shape, including every
+> dimension of an empty tensor. Gather supplies no update tensor. Hyperplane
+> iteration replaces the base axis with the complete index shape; element-wise
+> iteration has the index shape and validates every non-scattered bound.
+> Counts, strides, representation bytes, and target projection are checked before
+> the independently owned opaque plan is returned.
+>
+> `chelis_sparse_extent` observes the result shape, using one-step axis
+> normalization; `chelis_sparse_count` observes the checked iteration count.
+> `chelis_sparse_index_slot` maps an in-range row-major iteration position to its
+> index-tensor slot. `chelis_sparse_data_index` maps that position and its exact
+> tagged int64 selected index to the base-tensor position, requiring the selected
+> index in `[0, base.shape[axis])`. Empty iteration domains admit no index. The
+> mapping preserves section 3.5's row-major update order and selects no arithmetic
+> algorithm. `chelis_sparse_check_target` requires the exact result rank and shape,
+> transported as canonical tagged int64 scalars, before allocation or reuse;
+> positive array lengths require complete non-null arrays.
+> `chelis_sparse_plan_release` consumes the live plan exactly once. Plans retain
+> no tensor payload or ownership and remain valid after source release or repurpose;
+> observations may run concurrently while the plan remains live. Malformed carriers
+> and invalid domains trap `Domain`; unrepresentable metadata or offsets trap
+> `Overflow`, retaining [04-NUM-9]'s canonical primitive identity at int64. These
+> metadata operations have no cotangent or arithmetic accumulator.
+>
 > `chelis_tensor_reshape` accepts a live, flat `List<int64>` of target extents
 > and an idle tensor of any active element dtype. It applies the same checked
 > reshape validation before allocating result storage, returns an independent

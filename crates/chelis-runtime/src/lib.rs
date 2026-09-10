@@ -22,7 +22,7 @@ mod ieee_narrow;
 mod metadata;
 use metadata::{
     AllocationBytes, AxisDecomposition, ByteCount, ElementCount, IterationSpace, MetadataError,
-    ReductionMetadata, ShapeMetadata,
+    ReductionMetadata, ShapeMetadata, SparseMetadata,
 };
 mod ownership_ledger;
 
@@ -2445,6 +2445,158 @@ fn affine_result<T>(result: Result<T, MetadataError>, op: &str) -> T {
         eprintln!("{error}");
         runtime_fail!("numeric trap: {class} in {op} at int64")
     })
+}
+
+#[allow(non_camel_case_types)]
+pub type chelis_sparse_op = c_int;
+pub const CHELIS_SPARSE_GATHER: chelis_sparse_op = 0;
+pub const CHELIS_SPARSE_ADD: chelis_sparse_op = 1;
+pub const CHELIS_SPARSE_REPLACE: chelis_sparse_op = 2;
+pub const CHELIS_SPARSE_ELEMENTS: chelis_sparse_op = 3;
+
+#[allow(non_camel_case_types)]
+pub struct chelis_sparse_plan {
+    metadata: SparseMetadata,
+    gather: bool,
+    op: &'static str,
+}
+
+impl chelis_sparse_plan {
+    fn result(&self) -> &ShapeMetadata {
+        if self.gather {
+            self.metadata.domain()
+        } else {
+            self.metadata.base()
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_sparse_plan(
+    base: *const chelis_tensor,
+    indices: *const chelis_tensor,
+    updates: *const chelis_tensor,
+    axis: chelis_scalar,
+    operation: chelis_sparse_op,
+) -> *mut chelis_sparse_plan {
+    let op = match operation {
+        CHELIS_SPARSE_GATHER => "gather",
+        CHELIS_SPARSE_ADD => "scatter",
+        CHELIS_SPARSE_REPLACE => "scatter_replace",
+        CHELIS_SPARSE_ELEMENTS => "scatter_elements",
+        _ => runtime_fail!("Domain: unknown sparse operation"),
+    };
+    let base_dtype = tensor_metadata_dtype(base, op);
+    let index_dtype = tensor_metadata_dtype(indices, op);
+    if !matches!(
+        index_dtype,
+        RuntimeDType::I8 | RuntimeDType::I16 | RuntimeDType::I32 | RuntimeDType::I64
+    ) {
+        affine_result::<()>(
+            Err(MetadataError::Domain(
+                "sparse indices require a signed integer dtype".into(),
+            )),
+            op,
+        );
+    }
+    let metadata = affine_result(
+        SparseMetadata::new(
+            &(*base).metadata,
+            &(*indices).metadata,
+            affine_scalar(axis, op),
+            operation == CHELIS_SPARSE_ELEMENTS,
+        ),
+        op,
+    );
+    let gather = operation == CHELIS_SPARSE_GATHER;
+    if !gather {
+        if updates.is_null() {
+            affine_result::<()>(
+                Err(MetadataError::Domain("scatter requires updates".into())),
+                op,
+            );
+        }
+        let updates_dtype = tensor_metadata_dtype(updates, op);
+        if updates_dtype != base_dtype || (*updates).shape() != metadata.domain().shape() {
+            affine_result::<()>(
+                Err(MetadataError::Domain(
+                    "scatter update shape or dtype mismatch".into(),
+                )),
+                op,
+            );
+        }
+    }
+    Box::into_raw(Box::new(chelis_sparse_plan {
+        metadata,
+        gather,
+        op,
+    }))
+}
+
+unsafe fn sparse_plan<'a>(plan: *const chelis_sparse_plan) -> &'a chelis_sparse_plan {
+    if plan.is_null() {
+        runtime_fail!("Domain: null sparse plan");
+    }
+    &*plan
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_sparse_extent(
+    plan: *const chelis_sparse_plan,
+    axis: chelis_scalar,
+) -> i64 {
+    let p = sparse_plan(plan);
+    affine_result(p.result().extent_at(affine_scalar(axis, p.op)), p.op)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_sparse_count(plan: *const chelis_sparse_plan) -> i64 {
+    sparse_plan(plan).metadata.domain().elements().get()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_sparse_index_slot(
+    plan: *const chelis_sparse_plan,
+    linear: chelis_scalar,
+) -> i64 {
+    let p = sparse_plan(plan);
+    affine_result(p.metadata.index_slot(affine_scalar(linear, p.op)), p.op)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_sparse_data_index(
+    plan: *const chelis_sparse_plan,
+    linear: chelis_scalar,
+    selected: chelis_scalar,
+) -> i64 {
+    let p = sparse_plan(plan);
+    affine_result(
+        p.metadata
+            .data_index(affine_scalar(linear, p.op), affine_scalar(selected, p.op)),
+        p.op,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_sparse_check_target(
+    plan: *const chelis_sparse_plan,
+    rank: chelis_scalar,
+    shape: *const chelis_scalar,
+) {
+    let p = sparse_plan(plan);
+    let shape = reduction_array(rank, shape, p.op);
+    if shape != p.result().shape() {
+        affine_result::<()>(
+            Err(MetadataError::Domain("sparse target shape mismatch".into())),
+            p.op,
+        );
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_sparse_plan_release(plan: *mut chelis_sparse_plan) {
+    sparse_plan(plan);
+    drop(Box::from_raw(plan));
 }
 
 #[allow(non_camel_case_types)]
