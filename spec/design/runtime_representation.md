@@ -403,7 +403,11 @@ only deleted active debt is removed and current samples are refreshed.
 
 ### C2.2 Runtime metadata types
 
-All host and device allocation/view paths consume privately constructed values:
+`chelis-abi` is the shared owner of checked descriptor metadata. The runtime's
+existing descriptor/count/byte/stride validation moves into that owner; it is
+not copied into a second implementation. Runtime and binding consumers use the
+same checked types. All host and device allocation/view paths consume values
+whose fields are private to this owner and whose public constructors validate:
 
 ```rust
 pub struct ShapeMetadata { /* rank, extents, strides, count */ }
@@ -411,6 +415,14 @@ pub struct ElementCount(i64);
 pub struct ByteCount(i64);
 pub struct AllocationBytes(usize);
 ```
+
+The crate depends only on the standard library and `chelis-vocab`. Metadata
+construction may own shape and stride vectors, but it never owns or allocates
+tensor storage, frees tensor bytes, or performs arithmetic on tensor payloads.
+Runtime-specific execution and iteration consumers may remain in the runtime;
+they consume the shared checked authority instead of deriving another product,
+byte count, stride, or descriptor validity decision. Python does not link the C
+runtime merely to obtain this validation.
 
 `ShapeMetadata` checks rank/domain agreement, non-negative extents, and checked
 product. Owned contiguous allocation derives checked row-major strides; a view
@@ -439,6 +451,11 @@ immutable after checked construction; repurpose replaces it atomically after
 the existing uniqueness, provenance, and exact-storage-capacity checks.
 Storage capacity is a validated `ByteCount`. This is metadata privacy, not the
 later descriptor/element-pointer ownership seal.
+
+That module is the source of the Phase 2 extraction into `chelis-abi`, not a
+permanent second owner. The extraction preserves the checked types' behavior
+and error classes. It does not flatten the host tensor's owner graph or change
+its public C ABI.
 
 `ElementCount` owns zero-aware extent products. `ShapeMetadata` additionally
 derives every canonical suffix stride using checked arithmetic: an empty
@@ -858,22 +875,31 @@ The Phase 1 composite below includes this shape observation contract.
 
 ## C3. One generated host/device descriptor schema
 
-A new leaf crate, `chelis-abi`, depends only on `chelis-vocab` outside the
-standard library. It owns a declarative field schema and renderers; it does not
-allocate, free, or interpret tensor values. The schema generates:
+A leaf crate, `chelis-abi`, depends only on `chelis-vocab` outside the
+standard library. It owns C2.2's checked descriptor metadata, a declarative
+field schema, and renderers. It never owns tensor storage, frees tensor bytes,
+or interprets tensor payloads. The schema generates:
 
-1. the Rust raw host descriptor used by the runtime owner module;
-2. the private host descriptor behind [05-OP-44]'s opaque `chelis_tensor`
-   handle and [05-OP-31]'s exact read/write view layouts;
-3. a Rust raw device descriptor used by Python's private device-entry module;
+1. [05-OP-31]'s exact Rust and C read/write view layouts;
+2. a Rust raw device descriptor used by Python's private device-entry module;
    and
-4. the corresponding internal C/HIP device declaration.
+3. the corresponding internal C/HIP device declaration.
 
-The host and device descriptors share these schema field classes: opaque data
-pointer, dynamic shape/stride pointers, `int64` element count and byte capacity,
-`int32` rank, exact dtype tag, ownership, and reserved bytes. Device ownership
-and address-space behavior remain distinct, so the two descriptors may be
-different named types; their numeric metadata cannot diverge.
+The host tensor retains its private `HeapHeader`, `TensorStorage`, one
+`ShapeMetadata`, access state, and embedded write-guard composition. There is
+no generated flat host record containing independently writable copies of its
+rank, shape, strides, count, or capacity. The opaque [05-OP-44] handle exposes
+no layout, so a C mirror of this private owner graph is neither needed nor
+permitted. Public read/write views are validated projections with the exact
+layout and lifetime from [05-OP-31], not another metadata authority.
+
+Host metadata and the raw device descriptor use the same checked field
+domains: opaque data pointer, dynamic shape/stride pointers, `int64` element
+count and byte capacity, `int32` rank, exact dtype tag, ownership, and reserved
+bytes. A raw device packet is a projection of validated metadata with a live
+owner; it cannot create checked authority. Device ownership and address-space
+behavior remain distinct from the host owner graph. Sharing field domains
+does not require identical internal objects.
 
 The schema macro/renderers expand inside each owning private module. Generated
 Rust fields are private to that module; ordinary consumers receive opaque
@@ -1392,10 +1418,18 @@ close #893 or Phases 2–5.
 **Requires:** Phase 1.
 
 **Delivers:** C3 completely and the binding/device portion of C4: `chelis-abi`,
-generated host/device descriptors, freshness and layout probes, dynamic-rank
+the moved shared metadata authority, generated host views/device descriptors,
+freshness and layout probes, dynamic-rank
 exact metadata plus private validated Python/DLPack wrappers, and the deletion
 of every handwritten mirror. The current [#1289] public ABI and [#1347]
 zero-extent behavior are positive receipts.
+
+Shared extraction and spec-derived tests may be prepared against existing
+checked code while the remaining Phase 1 consumers are in flight. This does
+not satisfy the prerequisite: Phase 2 adoption and landing require the landed
+Phase 1 base and its complete execution/mutation oracle. The callable device
+layout cutover and spec/11's ABI version 2 producer/consumer admission ship
+together; version 1 must fail before metadata interpretation or library loading.
 
 **Issue exit:** [#1345] closes after Python host-to-device, device entry,
 device-to-host, and DLPack paths pass rank 0, 1, 8, and greater-than-8 cases,
