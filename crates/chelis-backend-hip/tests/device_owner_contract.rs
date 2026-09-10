@@ -80,18 +80,51 @@ fn published_owner_is_opaque_and_packet_observation_cannot_be_mutated() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let directory = tempfile::tempdir().unwrap();
     for (name, body, success) in [
-        ("opaque-use", "void probe(chelis_device_tensor_owner *owner) { const chelis_gpu_tensor *view = chelis_device_tensor_view(owner); (void)view; }", true),
-        ("owner-construction", "void probe() { chelis_device_tensor_owner owner{}; }", false),
-        ("owner-field", "void probe(chelis_device_tensor_owner *owner) { (void)owner->plan; }", false),
-        ("packet-write", "void probe(chelis_device_tensor_owner *owner) { chelis_device_tensor_view(owner)->count = 7; }", false),
-        ("packet-finalizer", "void probe(chelis_device_tensor_owner *owner) { chelis_device_tensor_release(chelis_device_tensor_view(owner)); }", false),
+        (
+            "opaque-use",
+            "void probe(chelis_device_tensor_owner *owner) { const chelis_gpu_tensor *view = chelis_device_tensor_view(owner); (void)view; }",
+            true,
+        ),
+        (
+            "owner-construction",
+            "void probe() { chelis_device_tensor_owner owner{}; }",
+            false,
+        ),
+        (
+            "owner-field",
+            "void probe(chelis_device_tensor_owner *owner) { (void)owner->plan; }",
+            false,
+        ),
+        (
+            "packet-write",
+            "void probe(chelis_device_tensor_owner *owner) { chelis_device_tensor_view(owner)->count = 7; }",
+            false,
+        ),
+        (
+            "packet-finalizer",
+            "void probe(chelis_device_tensor_owner *owner) { chelis_device_tensor_release(chelis_device_tensor_view(owner)); }",
+            false,
+        ),
     ] {
         let source = directory.path().join(format!("{name}.cpp"));
-        fs::write(&source, format!("#include \"chelis_device_owner.h\"\n{body}\n")).unwrap();
+        fs::write(
+            &source,
+            format!("#include \"chelis_device_owner.h\"\n{body}\n"),
+        )
+        .unwrap();
         let output = Command::new(env::var_os("CXX").unwrap_or_else(|| "c++".into()))
-            .args(["-std=c++17", "-fsyntax-only", "-I"]).arg(root.join("runtime"))
-            .arg("-I").arg(root.join("../chelis-runtime/include"))
-            .arg(source).output().unwrap();
-        assert_eq!(output.status.success(), success, "{name}: {}", String::from_utf8_lossy(&output.stderr));
+            .args(["-std=c++17", "-fsyntax-only", "-I"])
+            .arg(root.join("runtime"))
+            .arg("-I")
+            .arg(root.join("../chelis-runtime/include"))
+            .arg(source)
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.success(),
+            success,
+            "{name}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

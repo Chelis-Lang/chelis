@@ -25,9 +25,11 @@ fn device_entry_borrows_opaque_inputs_and_clones_escaping_results_at_dynamic_ran
             generated.c_source.contains(signature),
             "rank {rank}: device entry must borrow opaque owner handles"
         );
-        assert!(generated
-            .c_source
-            .contains("chelis_device_tensor_clone(inputs[0])"));
+        assert!(
+            generated
+                .c_source
+                .contains("chelis_device_tensor_clone(inputs[0])")
+        );
         for legacy in [
             "chelis_gpu_tensor **inputs",
             "chelis_gpu_clone(",
