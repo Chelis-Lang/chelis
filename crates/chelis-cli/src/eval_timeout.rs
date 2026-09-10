@@ -2,7 +2,7 @@
 use chelis_compiler_api::{
     CancelToken, CancelTokenGuard, TranscriptCapture, TranscriptCaptureGuard,
 };
-use std::{sync::mpsc, time::Duration};
+use std::{io::Write, sync::mpsc, time::Duration};
 
 const HARD_EXIT_GRACE: Duration = Duration::from_secs(5);
 
@@ -71,9 +71,14 @@ fn run_watchdog(
         // occurs while the capture mutex is held.
         let output = crate::eval_output::EvalOutput::failure(lines, message.clone(), json);
         if let Err(error) = output.emit_effects() {
-            eprintln!("error: could not write completed evaluation output: {error}");
+            let _ = writeln!(
+                std::io::stderr(),
+                "error: could not write completed evaluation output: {error}"
+            );
         }
-        eprintln!("error: {message}");
+        // A closed diagnostic sink must not panic the terminal owner and
+        // strand the main thread waiting for an exit that will never happen.
+        let _ = writeln!(std::io::stderr(), "error: {message}");
         std::process::exit(1);
     }
 }
@@ -141,6 +146,29 @@ mod tests {
             if !json && !empty {
                 assert!(stdout.ends_with("before-timeout\n"));
             }
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn closed_stderr_does_not_prevent_forced_exit() {
+        use std::os::{fd::OwnedFd, unix::net::UnixStream};
+        use std::process::Stdio;
+        for mode in ["text", "json", "empty-text", "empty-json"] {
+            let (reader, writer) = UnixStream::pair().unwrap();
+            drop(reader);
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "eval_timeout::tests::forced_exit_child",
+                    "--nocapture",
+                ])
+                .env("CHELIS_TEST_FORCED_TRANSCRIPT", mode)
+                .stdout(Stdio::null())
+                .stderr(Stdio::from(OwnedFd::from(writer)))
+                .status()
+                .unwrap();
+            assert_eq!(status.code(), Some(1), "closed stderr in {mode}");
         }
     }
 
