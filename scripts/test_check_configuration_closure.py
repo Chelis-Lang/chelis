@@ -325,27 +325,24 @@ class MatrixCoverageTests(unittest.TestCase):
         self.assertEqual(set(gate_rows.values()), {CLOSURE.PER_PULL_REQUEST})
         self.assertIn("no-default-features", gate_rows)
 
-    def test_gate_rows_list_macos_exactly_when_ci_runs_them(self) -> None:
-        # Coverage at the registered cadence comes from hosted execution.
-        # test_hosted_validation separately rejects skipped or nonblocking
-        # Clippy steps and an aggregate that does not require their result.
-        workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/ci.yml").read_text())
+    def test_macos_rows_are_nightly_and_linux_rows_remain_per_pr(self) -> None:
+        owner = ".github/workflows/macos-nightly.yml"
+        workflow = yaml.safe_load((REPO_ROOT / owner).read_text())
         job = workflow["jobs"]["macos-workspace-shard"]
         self.assertEqual(job["runs-on"], "macos-latest")
         commands = [step.get("run") for step in job["steps"]]
-        checked = 0
-        for run in CLOSURE.CLIPPY_MATRIX:
-            if run.owner != "scripts/gate.py":
-                continue
-            checked += 1
-            self.assertEqual(
-                "macos" in run.hosts,
-                " ".join(run.command) in commands,
-                f"{run.label}: hosts {run.hosts} disagree with hosted macOS commands",
-            )
-        self.assertEqual(checked, 3)
-        by_label = {run.label: run for run in CLOSURE.CLIPPY_MATRIX}
-        self.assertEqual(by_label["no-default-features"].hosts, ("linux",))
+        mac_rows = [run for run in CLOSURE.CLIPPY_MATRIX if "macos" in run.hosts]
+        self.assertEqual(len(mac_rows), 2)
+        for run in mac_rows:
+            self.assertEqual(run.hosts, ("macos",))
+            self.assertEqual(run.owner, owner)
+            self.assertEqual(run.cadence, CLOSURE.NIGHTLY)
+            self.assertIn(" ".join(run.command), commands)
+        gate_rows = [run for run in CLOSURE.CLIPPY_MATRIX if run.owner == "scripts/gate.py"]
+        self.assertEqual(len(gate_rows), 3)
+        for run in gate_rows:
+            self.assertEqual(run.hosts, ("linux",))
+            self.assertEqual(run.cadence, CLOSURE.PER_PULL_REQUEST)
 
     def test_rejects_a_run_its_owner_does_not_issue(self) -> None:
         run = CLOSURE.ClippyRun(

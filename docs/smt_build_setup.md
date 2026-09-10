@@ -104,7 +104,7 @@ before reaching its proof steps.
 
 Building cvc5 from source is ~22 minutes of CMake/make. The SMT lanes must
 never pay that on the per-PR path, so every SMT lane (the required `smt-build`,
-the `smt-build-glibc231` and `smt-build-darwin-arm64` prove-in-CI lanes, and
+the Linux `smt-build-glibc231` and nightly `smt-build-darwin-arm64` lanes, and
 `smt-full-prove.yml`) LINKS a prebuilt cvc5 instead of rebuilding it. The
 prebuilt tree is held in TWO stores, tried in order, driven by
 `scripts/ci_cvc5_cache.py`:
@@ -160,8 +160,8 @@ ever changes shape (it rotates the store key AND the asset filename, and the
 
 A cvc5-sys bump is the ONLY event that legitimately puts a cold from-source
 cvc5 build back on the per-PR path, because the new version's Release asset
-does not exist until `build-cvc5.yml` republishes it (which happens on push to
-`main`, i.e. after merge). To keep the bump PR itself warm, publish the new
+does not exist until `build-cvc5.yml` republishes it (Linux on relevant main
+pushes; Darwin nightly or on manual dispatch). To keep the bump PR itself warm, publish the new
 assets first:
 
 1. On the bump branch, run `build-cvc5.yml` via **workflow_dispatch** (it must
@@ -206,6 +206,15 @@ and CA certificates before checkout. After checkout, `ci_apt_get.py
 immutable `20260901T000000Z` Debian and Debian Security snapshots before
 installing build dependencies. Python 3.11 also lets cvc5 use `tomllib`
 without a separate moving PyPI bootstrap.
+
+### Darwin validation cadence
+
+`macos-nightly.yml` owns `smt-build-darwin-arm64`: daily at 04:17 UTC and
+manual dispatch on a chosen branch, with a 60-minute timeout for cold cvc5 builds.
+Ordinary PRs and main pushes run no Darwin builds. The prebuilt producer's daily
+01:17 UTC run fills missing Darwin assets before validation; manual dispatch can
+force a rebuild. Relevant main pushes can produce Linux assets only. Release
+validation still builds and checks its own Darwin shipping artifact in `release.yml`.
 
 ## Release builds (chelis#422)
 

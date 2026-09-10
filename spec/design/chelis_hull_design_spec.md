@@ -970,32 +970,38 @@ type CheckResult =
 
 ---
 
-### Release-pinned scalar observation repair (Hull #18, 2026-09-09)
+### Versioned scalar comparison observations
 
-Hull's existing scalar differential campaign runs on the released host pin and
-is not an implementation of the current exact execution codec in spec/10 §3.
-For that historical observation leg, `compiler_eval_scalar` admits only the
-pin's execution envelope version 2, exit zero, and exactly one root. A rank-zero
-tensor root is read from `value.shape = []` and
-`value.data = {dtype: "f32", values: [number]}`. Require that dtype, rank and
-one-element cardinality before reading the number; do not read the first element
-of an arbitrary tensor or treat missing data as a nonfinite result. The old
-array-shaped `data` form, wrong/missing dtype, non-scalar shape, absent/extra
-elements and nonnumeric elements are not scalar observations. Existing scalar
-root cases retain their separate interpretation and tolerance policy.
+The released-host differential campaign dispatches explicitly on execution
+envelope version, requiring exit zero and exactly one root. Schema 2 retains its
+historical scalar interpretation: existing scalar conversions and rank-zero f32
+tensor data `{dtype: "f32", values: [number]}` with exactly one numeric element.
+Other tensor ranks, malformed data and missing versions fail this leg. The old
+array-shaped data form and absent/extra/nonnumeric elements remain invalid.
+This is a historical observation relation, not an alternative compiler codec.
 
-This is a bounded Hull decoder repair, not a second compiler wire format or a
-legacy fallback in the compiler's normative version-3 codec. Missing and other
-envelope versions fail the pinned leg; future exact-bit, full-tensor and
-nonfinite-class comparisons need their own checked observation boundary.
-An undecodable result still occupies a failing existing campaign bucket, never
-disappears from its denominator. No compiler behavior, CLI, ABI or pin changes.
+Schema 3 uses spec/10 §3.2 to decode numeric scalars, booleans and tensors into
+typed observations retaining exact integer values, floating bit strings, dtype
+and ordered shape. Validate payload members, dtype widths/ranges, nonnegative
+exact-int64 extents, dynamic-int32 rank and complete cardinality before
+projection. Signed zero, infinity signs and NaN payloads remain distinct in the
+observation. Aggregates outside this profile are not silently projected.
 
-Acceptance requires synthetic envelope/dtype/rank/cardinality negative parity
-and a native end-to-end reproduction of the rank-zero f32 conditional cast that
-returns 8, plus a different scalar tensor value. The full standing 10,000-check/
-1,000-eval campaign remains owed after this repair and the separate positional
-sum repair; it does not certify the current normative exact codec.
+The ordinary campaign still compares a separately named scalar projection under
+its historical f32 tolerance and nonfinite-collapse policy; this is neither
+full-tensor nor IEEE-class agreement. Nonzero exits, malformed/out-of-profile
+observations and unsupported explicit schema versions receive distinct failing
+outcomes. All remain in the requested denominator. No compiler wire format,
+behavior or pin changes follow from this Hull observation boundary; the
+compiler's normative decoder still rejects versions other than 3.
+
+Acceptance requires real captured schema-3 output and released schema-2
+end-to-end cases, retaining the rank-zero f32 conditional cast returning 8 and
+a different scalar tensor value. Include positive/negative dtype, payload, rank,
+cardinality and version tests, exact-bit retention, and campaign accounting
+controls for every new failure category. The full standing 10,000-check/
+1,000-eval campaign remains a separate obligation; neither decoding nor scalar
+tolerance agreement certifies the current normative exact codec.
 
 ### Opt-in compiler trace for the canonical LaCaDiLE revision
 
