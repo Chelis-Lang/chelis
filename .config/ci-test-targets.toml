@@ -11,6 +11,14 @@ package = "chelis-cli"
 name = "issue_1741_scalar_gradient_cli"
 
 [[target]]
+package = "chelis-compiler-api"
+name = "issue_1650_empty_tensor_api"
+
+[[target]]
+package = "chelis-cli"
+name = "issue_1650_empty_tensor_cli"
+
+[[target]]
 package = "chelis-deep"
 name = "roundtrip"
 

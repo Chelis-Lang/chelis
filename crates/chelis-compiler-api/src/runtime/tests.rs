@@ -2726,10 +2726,9 @@ fn list_tensor_bridges_preserve_every_numeric_dtype() {
     for prim in dtypes {
         let value = numeric_scalar(prim, 7, if prim == Prim::F64 { 1e100 } else { 1.5 });
         let expected_float = if prim == Prim::F64 { 1e100 } else { 1.5 };
-        let (tensor_prim, _, tensor_data) =
-            nested_list_to_tensor_data(std::slice::from_ref(&value))
+        let (_, tensor_data) =
+            nested_list_to_tensor_data(std::slice::from_ref(&value), prim, &[Some(1)])
                 .expect("to_tensor list ingress");
-        assert_eq!(tensor_prim, prim, "to_tensor must preserve the input dtype");
         match tensor_data {
             ListTensorData::Int(values) => assert_eq!(values, vec![7]),
             ListTensorData::Float(values) => assert_eq!(values, vec![expected_float]),
@@ -2770,7 +2769,7 @@ fn list_tensor_bridges_reject_same_family_dtype_substitution() {
     let int8 = numeric_scalar(Prim::Int8, 7, 0.0);
     let int16 = numeric_scalar(Prim::Int16, 7, 0.0);
     assert!(
-        nested_list_to_tensor_data(&[int8.clone(), int16.clone()]).is_err(),
+        nested_list_to_tensor_data(&[int8.clone(), int16.clone()], Prim::Int8, &[Some(2)]).is_err(),
         "to_tensor must reject heterogeneous integer widths"
     );
     assert!(
@@ -3400,4 +3399,18 @@ fn fo_diag_truncation_is_owned_by_the_boundary() {
     let rendered = describe_value(&wide);
     assert!(rendered.ends_with(" more bytes elided)"));
     assert!(rendered.starts_with("string \"\u{1F600}"));
+}
+
+/// [05-OP-57]: checked metadata, never empty payloads, supplies dtype and
+/// hidden extents. Invalid data or missing witnesses cannot choose defaults.
+#[test]
+fn list_tensor_bridges_require_checked_dtype_and_empty_shape_evidence() {
+    let (shape, data) = nested_list_to_tensor_data(&[], Prim::F64, &[Some(0), Some(3)]).unwrap();
+    assert_eq!(shape, vec![0, 3]);
+    assert!(matches!(data, ListTensorData::Float(values) if values.is_empty()));
+    assert!(nested_list_to_tensor_data(&[], Prim::F64, &[Some(0), None]).is_err());
+    assert!(nested_list_to_tensor_data(&[], Prim::F64, &[Some(1)]).is_err());
+    assert!(nested_list_to_tensor_data(&[], Prim::String, &[Some(0)]).is_err());
+    let value = numeric_scalar(Prim::Int8, 1, 0.0);
+    assert!(nested_list_to_tensor_data(&[value], Prim::Int16, &[Some(1)]).is_err());
 }
