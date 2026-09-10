@@ -41,7 +41,7 @@ class MatrixContractTests(unittest.TestCase):
                 "CHELIS_TEST_CC": "/foreign/test-compiler", "CHELIS_HIPCC": "/foreign/hipcc",
                 "CHELIS_DEVICE_OWNER_TEST_WORKER": "1", "CHELIS_NATIVE_ENV_TEST_WORKER": "1",
                 "CHELIS_NATIVE_EXECUTION_CAPTURE": "/foreign/capture", "PYTHONPATH": "/foreign/python",
-        }
+            }
             with mock.patch.dict(os.environ, hostile):
                 before = dict(os.environ)
                 child = execution._worker_environment(runtime, group, execution.GROUPS[0])
@@ -111,7 +111,7 @@ class RetainedCaptureTests(unittest.TestCase):
             "compiled/program.so": b"actual library stand-in for pure record validation",
             "compiled/program.json": b'{"abi_version":2,"target":"c"}',
             "compiled/libchelis_runtime.a": self.runtime,
-            }
+        }
         original = self.root / "deleted-original"
         self.files["loaded-model.json"] = json.dumps({
             "path": str(original / "program.so"), "root": str(original),
@@ -204,6 +204,53 @@ class RetainedCaptureTests(unittest.TestCase):
         path.unlink()
         path.symlink_to(other)
         with self.assertRaises(GraphError): self.validate()
+
+
+class NativeExecutionIntegration(unittest.TestCase):
+    """Current collection is the only input to these acceptance controls."""
+    @classmethod
+    def setUpClass(cls):
+        root = Path(__file__).resolve().parent.parent
+        requested = os.environ.get("CARGO_TARGET_DIR")
+        if not requested:
+            raise RuntimeError("native execution integration requires an explicit owned target")
+        cls.witness = execution.collect_native_execution(root, Path(requested))
+
+    def test_current_fixed_corpus_binds_37_outcomes_and_all_49_actual_fixture_instances(self):
+        packet = self.witness.validate()
+        self.assertEqual(len(packet["selected"]), 37)
+        self.assertEqual(len(packet["executed"]), 37)
+        self.assertTrue(all(row["outcome"] == "passed" for row in packet["executed"]))
+        self.assertEqual(len(packet["captures"]), 49)
+        self.assertEqual(len(packet["binaries"]), 6)
+        self.assertEqual(json.loads((self.witness.directory / "report.json").read_text()), packet)
+        generated = [row for row in packet["captures"] if row["fixture_kind"] == "generated-c-current-runtime"]
+        self.assertEqual(len(generated), 13)
+        self.assertTrue(all(not Path(row["original_library"]).exists() for row in generated),
+                        "recording must preserve default model-owned TempDir deletion")
+
+    def test_current_receipt_rejects_corrupted_missing_binary_runtime_fixture_and_transcripts(self):
+        packet = self.witness.validate()
+        first = Path(packet["captures"][0]["directory"])
+        library = Path(packet["captures"][0]["library"]["path"])
+        candidates = [Path(packet["binaries"][0]["path"]), Path(packet["runtime"]["cargo_artifact"]),
+                      Path(packet["runtime"]["isolated_archive"]), library, library.with_suffix(".json"),
+                      first / "loaded-model.json", first / "completion.json",
+                      self.witness.directory / "groups/native_tensor_boundary/test.stdout.log",
+                      self.witness.directory / "report.json"]
+        for path in candidates:
+            with self.subTest(path=path):
+                original = path.read_bytes()
+                try:
+                    path.write_bytes(original + b"changed")
+                    with self.assertRaises(GraphError): self.witness.validate()
+                    path.unlink()
+                    with self.assertRaises(GraphError): self.witness.validate()
+                finally:
+                    path.write_bytes(original)
+        with mock.patch.object(execution, "_source_packet", return_value={"head": "changed"}):
+            with self.assertRaises(GraphError): self.witness.validate()
+        self.witness.validate()
 
 
 EXPECTED_MATRIX = (
