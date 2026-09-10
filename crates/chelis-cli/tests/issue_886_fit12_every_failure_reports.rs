@@ -339,3 +339,71 @@ fn a_non_zero_exit_always_carries_at_least_one_diagnostic() {
         );
     }
 }
+
+#[test]
+fn every_directory_entry_carries_a_report_never_a_display_string() {
+    // chelis#886 [04-FIT-12], the structural half.
+    //
+    // `cmd_check <dir>` used to match on `cmd_check_one`'s `Result` and, in
+    // the `Err` arm, push `{"file":...,"error":"<display string>"}` -- a
+    // message occupying the slot its sibling fills with a full report. A
+    // consumer walking `files[]` got a report for one entry and a sentence
+    // for the next, with no `kind`, no `severity`, and nothing from the
+    // closed diagnostic vocabulary.
+    //
+    // That arm is gone, and not because someone remembered to delete it:
+    // `cmd_check_one` is total, so the value it matched on cannot be
+    // constructed. This test pins the observable half of that; the type
+    // tests in `main.rs` pin the cause.
+    let dir = tempdir().expect("tempdir");
+    fs::write(
+        dir.path().join("ok.ch"),
+        b"def f(x: f32) -> f32 = add(x, x)\n",
+    )
+    .expect("write");
+    fs::write(dir.path().join("ugly.ch"), b"def  h(x:f32)->f32=add(x,x)\n").expect("write");
+    let unreadable = dir.path().join("locked.ch");
+    fs::write(&unreadable, b"def g(x: f32) -> f32 = add(x, x)\n").expect("write");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).expect("chmod");
+    }
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["check"])
+        .arg(dir.path())
+        .output()
+        .expect("run chelis check");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644));
+    }
+
+    let envelope: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("directory mode must emit an envelope: {e}\n{stdout}"));
+    let files = envelope["files"].as_array().expect("files array");
+    assert_eq!(files.len(), 3, "one entry per file: {stdout}");
+
+    for entry in files {
+        let name = entry["file"].as_str().unwrap_or("<unnamed>");
+        assert!(
+            entry.get("error").is_none(),
+            "{name}: carries a display string where a report belongs; {entry}"
+        );
+        let report = entry
+            .get("report")
+            .unwrap_or_else(|| panic!("{name}: no report; {entry}"));
+        assert!(
+            report.get("errors").is_some(),
+            "{name}: the report must be a check report; {entry}"
+        );
+    }
+
+    // Two of the three fail, so the envelope's exit status reflects them.
+    assert_eq!(output.status.code(), Some(2), "stdout={stdout}");
+}
