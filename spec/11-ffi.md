@@ -39,6 +39,18 @@ Empty and rank-zero descriptors obey the same rules; no fixed-rank carrier,
 host-width extent, implicit f64 conversion, or default tensor repairs invalid
 input. Unsupported valid device/dtype combinations are rejected explicitly.
 
+A native invocation preserves the admitted manifest's dimension constraints
+across every supplied and returned tensor. A concrete extent equals the observed
+int64 extent. Repeated named dimension identities obey spec/04 §4.1's equality
+rule across input and output axes. An unresolved named result extent requires a
+binding from an admitted input or an explicit concrete constraint in that
+manifest. Wildcard `*` dimensions remain independently unknown: they create no
+shared equality binding, and each concrete wildcard extent constrains only its
+own axis. A dimension with neither a name nor a concrete extent is malformed.
+Names are identities, never expressions for the native adapter to evaluate;
+computed relations retain their owning checker's admitted transport and runtime
+checks.
+
 The `NativeTensor.shape` getter is exactly the non-differentiable metadata
 operation [05-OP-45]. Its Rust result is `Vec<i64>` and its Python result is an
 ordered collection of exact Python integers. `NativeTensor.dtype` reports the
