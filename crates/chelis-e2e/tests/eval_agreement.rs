@@ -319,6 +319,7 @@ fn agreement_op_for_risc(op: &RiscOp) -> AgreementOp {
         | RiscOp::Div
         | RiscOp::FloorDiv
         | RiscOp::TruncDiv
+        | RiscOp::Mod
         | RiscOp::CmpLt
         | RiscOp::MaxElem
         | RiscOp::MinElem

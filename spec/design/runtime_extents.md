@@ -433,7 +433,7 @@ cargo nextest run -p chelis-cli -p chelis-ir -p chelis-compiler-api -p chelis-ba
 
 The new public matrix has 117 initial exported/binding/main fixtures, 69
 result-graph fixtures, 48 complete-shape-list scheduling fixtures,
-six folded-source caller-contract fixtures, 48 producing-source expression fixtures
+six folded-source caller-contract fixtures, 48 producing-source expression fixtures,
 six dynamic remainder fixtures and 12 HIP host CLI/API executions,
 three executable example controls, 24 grad/vmap controls
 and 12 imported-call controls. Every
