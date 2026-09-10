@@ -497,7 +497,7 @@ fn inferred_signatures_is_a_member_of_the_report_not_a_spliced_fragment() {
     // carrier makes the sequence a sequence.
     let rows = parsed.inferred_signatures.expect("present when requested");
     assert_eq!(rows.len(), 1, "one def, one row: {stdout}");
-    assert_eq!(rows[0]["function"], "add_one");
+    assert_eq!(rows[0].function, "add_one");
 
     // Position and single-line rendering are part of the document, not of
     // the rows: the member sits between `unresolved_names` and `errors`,
@@ -524,9 +524,11 @@ fn a_rejected_program_still_reports_the_requested_member() {
     );
     let parsed: chelis_compiler_api::schema::WireCheckResult =
         serde_json::from_slice(&output.stdout).expect("JSON");
-    assert_eq!(
-        parsed.inferred_signatures,
-        Some(Vec::new()),
+    assert!(
+        parsed
+            .inferred_signatures
+            .as_ref()
+            .is_some_and(Vec::is_empty),
         "the member is present and empty, not absent"
     );
     assert!(!parsed.errors.is_empty(), "the fixture must be rejected");

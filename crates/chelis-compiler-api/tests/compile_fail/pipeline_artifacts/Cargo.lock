@@ -314,6 +314,7 @@ dependencies = [
  "chelis-unord",
  "chelis-vocab",
  "half",
+ "schemars",
  "serde",
  "sha2",
  "stacker",

@@ -1,0 +1,1 @@
+Fixed #1288's Python wire verification on Linux by binding the direct compiler driver to its pinned sysroot libraries, preparing its owned Cargo target safely, and checking the ratified WireDag v9 identity.

@@ -1,4 +1,6 @@
+use crate::schema::numbers::{NonnegativeExtent, SourceInteger};
 use chelis_deep::DeepTag;
+use chelis_types::types::Prim;
 use chelis_unord::{UnordMap, UnordSet};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -11,8 +13,8 @@ use chelis_ir::dag::{
 };
 use chelis_ir::eval;
 use chelis_surf::ast::{
-    BinOp, Decl, Expr, ImportKind, LetBinding, LetPattern, Literal, MatchArm, Param, Pattern,
-    TypeExpr, UnaryOp, Variant, VariantFields,
+    BinOp, Decl, Expr, ImportKind, LetBinding, LetPattern, MatchArm, Param, Pattern, TypeExpr,
+    UnaryOp, Variant, VariantFields,
 };
 use chelis_types::{
     CheckedProgram,
@@ -38,15 +40,15 @@ use crate::schema::{
     LowerResult, ParseRequest, ParseResult, RenameRequest, RenameResult, ReplaceFunctionRequest,
     ReplaceFunctionResult, RootManifestEntryResult, RootManifestResult, SourceKind, Span,
     ValidateMode, ValidateRequest, ValidateResult, WireBinOp, WireDag, WireDagNode,
-    WireDagSchemaError, WireDeepAtom, WireDeepExpr, WireDeepExprKind, WireDimExpr, WireDimInfo,
-    WireExtremaKind, WireExtremaOperand, WireFusedInput, WireFusedStep, WireFusedStepOp,
-    WireImportKind, WireLetBinding, WireLetPattern, WireLiteral, WireMatchArm, WireMetaEntry,
-    WireParam, WirePattern, WirePropertyOption, WireRecordExprField, WireRecordPatternField,
-    WireRecordTypeField, WireRiscOp, WireRtAxis, WireRtDim, WireSurfDecl, WireSurfExpr,
-    WireSurfTypeExpr, WireTensorType, WireTypeInvariant, WireUnaryOp, WireVariant,
+    WireDagSchemaError, WireDimExpr, WireDimInfo, WireExtremaKind, WireExtremaOperand,
+    WireFusedInput, WireFusedStep, WireFusedStepOp, WireImportKind, WireLetBinding, WireLetPattern,
+    WireMatchArm, WireParam, WirePattern, WirePropertyOption, WireRecordExprField,
+    WireRecordPatternField, WireRecordTypeField, WireRiscOp, WireRtAxis, WireRtDim, WireSurfDecl,
+    WireSurfExpr, WireSurfTypeExpr, WireTensorType, WireTypeInvariant, WireUnaryOp, WireVariant,
     WireVariantFields,
 };
 use crate::schema::{stage_error, stage_error_with_span, unsupported_stage_error};
+use crate::source_wire::{SourceWireResult, wire_deep_expr, wire_literal};
 
 const RUNTIME_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -69,7 +71,7 @@ const HIP_RUNTIME_H: &str = include_str!(concat!(
 pub struct ExecutionDim {
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub size: Option<usize>,
+    pub size: Option<NonnegativeExtent>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -189,7 +191,15 @@ pub fn parse(request: ParseRequest) -> Result<ParseResult> {
             let decls = parse_surf(&request.source)?;
             Ok(ParseResult {
                 source_kind: SourceKind::Surf,
-                surf_ast: Some(decls.iter().map(wire_decl).collect()),
+                surf_ast: Some(
+                    decls
+                        .iter()
+                        .map(wire_decl)
+                        .collect::<SourceWireResult<_>>()
+                        .map_err(|message| {
+                            stage_error("parse", &message, GeneralKind::ValidationError)
+                        })?,
+                ),
                 deep_ast: None,
             })
         }
@@ -198,7 +208,15 @@ pub fn parse(request: ParseRequest) -> Result<ParseResult> {
             Ok(ParseResult {
                 source_kind: SourceKind::Deep,
                 surf_ast: None,
-                deep_ast: Some(exprs.iter().map(wire_deep_expr).collect()),
+                deep_ast: Some(
+                    exprs
+                        .iter()
+                        .map(wire_deep_expr)
+                        .collect::<SourceWireResult<_>>()
+                        .map_err(|message| {
+                            stage_error("parse", &message, GeneralKind::ValidationError)
+                        })?,
+                ),
             })
         }
     }
@@ -209,7 +227,11 @@ pub fn desugar(request: DesugarRequest) -> Result<DesugarResult> {
     let deep_exprs = chelis_surf::desugar::desugar_program(&decls);
     Ok(DesugarResult {
         deep_text: chelis_deep::printer::print_canonical(&deep_exprs),
-        deep_ast: deep_exprs.iter().map(wire_deep_expr).collect(),
+        deep_ast: deep_exprs
+            .iter()
+            .map(wire_deep_expr)
+            .collect::<SourceWireResult<_>>()
+            .map_err(|message| stage_error("desugar", &message, GeneralKind::ValidationError))?,
     })
 }
 
@@ -375,7 +397,10 @@ pub fn rename(request: RenameRequest) -> Result<RenameResult> {
             .as_ref()
             .map(chelis_deep::printer::print_expr),
         module_deep: chelis_deep::printer::print_canonical(report.as_exprs()),
-        renamed_references: edited.renamed_references,
+        renamed_references: edited
+            .renamed_references
+            .try_into()
+            .map_err(|error| stage_error("rename", error, GeneralKind::Other))?,
     })
 }
 
@@ -410,7 +435,10 @@ pub fn change_signature(request: ChangeSignatureRequest) -> Result<ChangeSignatu
         changed_def_deep: chelis_deep::printer::print_expr(&edited.changed_def),
         changed_defsig_deep: chelis_deep::printer::print_expr(&edited.changed_defsig),
         module_deep: chelis_deep::printer::print_canonical(report.as_exprs()),
-        rewritten_calls: edited.rewritten_calls,
+        rewritten_calls: edited
+            .rewritten_calls
+            .try_into()
+            .map_err(|error| stage_error("change-signature", error, GeneralKind::Other))?,
     })
 }
 
@@ -514,7 +542,7 @@ fn require_valid_deep(stage: &str, exprs: &[DeepExpr]) -> Result<()> {
             // chelis#1395: `validate` reports a coordinate and no end, so
             // the location travels as a point rather than an invented range.
             Some(DiagnosticSpan::Point {
-                offset: warning.offset,
+                offset: crate::schema::host_index(warning.offset),
             }),
         )),
     }
@@ -740,7 +768,11 @@ fn edit_validation_error_to_compiler_error(
             ..
         } => (GeneralKind::LinearityError, *location, deep_path.clone()),
     };
-    let mut diagnostic = Diagnostic::general(kind, error.message(), 1.0);
+    let mut diagnostic = Diagnostic::general(
+        kind,
+        error.message(),
+        crate::schema::numbers::UnitInterval::new(1.0).expect("constant severity"),
+    );
     diagnostic.span = location;
     diagnostic.deep_path = deep_path.map(wire_deep_error_path);
     CompilerError {
@@ -775,7 +807,11 @@ fn replacement_error_to_compiler_error(error: crate::fragment::ReplacementError)
             ..
         } => (GeneralKind::LinearityError, *location, deep_path.clone()),
     };
-    let mut diagnostic = Diagnostic::general(kind, error.message(), 1.0);
+    let mut diagnostic = Diagnostic::general(
+        kind,
+        error.message(),
+        crate::schema::numbers::UnitInterval::new(1.0).expect("constant severity"),
+    );
     diagnostic.span = location;
     diagnostic.deep_path = deep_path.map(wire_deep_error_path);
     CompilerError {
@@ -832,23 +868,8 @@ pub fn check(request: crate::schema::CheckRequest) -> Result<CheckResult> {
     // An embedder can reach this on the public API today by installing a
     // CancelToken (exported since chelis#914) and calling compiler::check.
     bail_if_cancelled("check")?;
-    Ok(CheckResult {
-        score: report.score,
-        components: FitnessComponents {
-            parse: report.components.parse,
-            structure: report.components.structure,
-            names: report.components.names,
-            types: report.components.types,
-        },
-        typed_nodes: report.typed_nodes,
-        untyped_nodes: report.untyped_nodes,
-        total_nodes: report.total_nodes,
-        unresolved_names: report.unresolved_names,
-        // The embedding API has no `--show-inferred` counterpart, so the
-        // member is absent rather than empty (chelis#886 [04-FIT-13]).
-        inferred_signatures: None,
-        errors: report.errors.iter().map(check_error_diagnostic).collect(),
-    })
+    CheckResult::try_from_fitness(&report)
+        .map_err(|error| stage_error("report", error, GeneralKind::Other))
 }
 
 pub fn lower(request: LowerRequest) -> Result<LowerResult> {
@@ -858,7 +879,8 @@ pub fn lower(request: LowerRequest) -> Result<LowerResult> {
         request.entry.as_deref(),
         Target::Eval,
     )?;
-    let dag = wire_dag(&compiled.dag);
+    let dag = wire_dag(&compiled.dag)
+        .map_err(|error| stage_error("schema", error, GeneralKind::Other))?;
     // WI-2 validate-on-consume: fail closed before this DAG crosses the
     // process edge to the client. A build that emits a `schema_version` it
     // cannot itself interpret must surface a typed `schema`-stage error, not
@@ -869,7 +891,7 @@ pub fn lower(request: LowerRequest) -> Result<LowerResult> {
         named_roots: compiled
             .named_roots
             .into_entries()
-            .map(|(name, node)| (name.into_string(), node.0))
+            .map(|(name, node)| (name.into_string(), crate::schema::host_index(node.0)))
             .collect(),
     })
 }
@@ -2222,7 +2244,7 @@ fn execution_artifact_from_compiled_observed(
             Ok(compiled_execution_artifact(
                 &func_name,
                 Some(format!("{func_name}_device")),
-                compile_result_hip(target, &func_name, &result),
+                compile_result_hip(target, &func_name, &result)?,
                 manifest_result(&compiled.program),
                 execution_input_specs(&hip_dag, &result.input_labels)?,
                 execution_output_specs(&hip_dag, &result.output_labels)?,
@@ -2426,9 +2448,8 @@ fn compile_rewritten_decls_in_context(
     // shared effect and linearity transitions.
     let analysis =
         crate::pipeline::analyze_prepared_with_library(prepared, context.checked_library())
-            .map_err(|report| CompilerError {
-                stage: "check".to_string(),
-                errors: report.errors.iter().map(check_error_diagnostic).collect(),
+            .map_err(|report| {
+                crate::compiler::check_errors_to_compiler_error("check", &report.errors)
             })
             .map_err(|error| cancelled_or("check", error))?;
     bail_if_cancelled("effects")?;
@@ -2529,16 +2550,20 @@ pub fn check_in_context(
     // time and counted there.
     let total_nodes = compiled.checked().exprs().len();
     Ok(CheckResult {
-        score: 1.0,
+        score: crate::schema::numbers::UnitInterval::new(1.0).expect("constant score"),
         components: FitnessComponents {
-            parse: 1.0,
-            structure: 1.0,
-            names: 1.0,
-            types: 1.0,
+            parse: crate::schema::numbers::UnitInterval::new(1.0).expect("constant score"),
+            structure: crate::schema::numbers::UnitInterval::new(1.0).expect("constant score"),
+            names: crate::schema::numbers::UnitInterval::new(1.0).expect("constant score"),
+            types: crate::schema::numbers::UnitInterval::new(1.0).expect("constant score"),
         },
-        typed_nodes: total_nodes,
-        untyped_nodes: 0,
-        total_nodes,
+        typed_nodes: total_nodes
+            .try_into()
+            .map_err(|error| stage_error("report", error, GeneralKind::Other))?,
+        untyped_nodes: crate::schema::numbers::NonnegativeCount::new(0).expect("zero count"),
+        total_nodes: total_nodes
+            .try_into()
+            .map_err(|error| stage_error("report", error, GeneralKind::Other))?,
         unresolved_names: vec![],
         inferred_signatures: None,
         errors: vec![],
@@ -2837,7 +2862,7 @@ fn eval_compiled(
         .into_iter()
         .map(|(node_id, name, value)| {
             Ok(EvaluatedRoot {
-                node_id,
+                node_id: crate::schema::host_index(node_id),
                 name: Some(name),
                 // Render the display text HERE, where the runtime value's
                 // dtype tags still exist; the wire `value` below cannot
@@ -2921,22 +2946,23 @@ pub fn grad(request: GradRequest) -> Result<GradResult> {
                 .grad_nodes
                 .get(node)
                 .copied()
-                .map(|grad_node| (name.clone(), grad_node.0))
+                .map(|grad_node| (name.clone(), crate::schema::host_index(grad_node.0)))
         })
         .collect();
 
-    let dag = wire_dag(&grad_result.dag);
+    let dag = wire_dag(&grad_result.dag)
+        .map_err(|error| stage_error("schema", error, GeneralKind::Other))?;
     // WI-2 validate-on-consume: fail closed before the gradient DAG crosses
     // the process edge (same rationale as `lower`).
     schema_stage_check(dag.validate_schema_version())?;
     Ok(GradResult {
         dag,
-        output_node: grad_result.output_node.0,
+        output_node: crate::schema::host_index(grad_result.output_node.0),
         grad_nodes_by_name,
         forward_nodes_by_name: compiled
             .forward_node_index
             .into_entries()
-            .map(|(name, node)| (name.into_string(), node.0))
+            .map(|(name, node)| (name.into_string(), crate::schema::host_index(node.0)))
             .collect(),
     })
 }
@@ -3010,23 +3036,25 @@ pub(crate) fn pipeline_rejection_to_compiler_error(
         PipelineRejection::Preparation(PreparationError::Expansion(error)) => {
             stage_error("desugar", error.to_string(), GeneralKind::MacroError)
         }
-        PipelineRejection::Type { fitness } => CompilerError {
-            stage: "check".to_string(),
-            errors: fitness.errors.iter().map(check_error_diagnostic).collect(),
-        },
+        PipelineRejection::Type { fitness } => {
+            crate::compiler::check_errors_to_compiler_error("check", &fitness.errors)
+        }
         PipelineRejection::Effects { errors } => CompilerError {
             stage: "effects".to_string(),
             errors: errors
                 .iter()
                 .map(|error| {
-                    Diagnostic::general(GeneralKind::EffectError, error.message.clone(), 0.8)
+                    Diagnostic::general(
+                        GeneralKind::EffectError,
+                        error.message.clone(),
+                        crate::schema::numbers::UnitInterval::new(0.8).expect("constant severity"),
+                    )
                 })
                 .collect(),
         },
-        PipelineRejection::Linearity { errors } => CompilerError {
-            stage: "linearity".to_string(),
-            errors: errors.iter().map(check_error_diagnostic).collect(),
-        },
+        PipelineRejection::Linearity { errors } => {
+            crate::compiler::check_errors_to_compiler_error("linearity", &errors)
+        }
         PipelineRejection::Lower(diagnostic) => stage_error_with_span(
             "lower",
             diagnostic.to_string(),
@@ -3539,8 +3567,8 @@ fn deep_ingress_error(stage: &str, error: &chelis_deep::StampOrParseError) -> Co
         // The stamp half carries a measured extent, so it reports a range
         // where the parse half above can only report a point (chelis#1395).
         chelis_deep::StampOrParseError::Stamp(stamp_error) => Some(DiagnosticSpan::Range {
-            offset: stamp_error.span.offset,
-            len: stamp_error.span.len,
+            offset: crate::schema::host_index(stamp_error.span.offset),
+            len: crate::schema::host_index(stamp_error.span.len),
         }),
     };
     stage_error_with_span(stage, error.to_string(), GeneralKind::DeepParseError, span)
@@ -3663,8 +3691,8 @@ fn compile_result_hip(
     target: CompileTarget,
     func_name: &str,
     result: &HipCodegenResult,
-) -> CompileResult {
-    CompileResult {
+) -> Result<CompileResult> {
+    Ok(CompileResult {
         target,
         entry_name: func_name.to_string(),
         files: vec![
@@ -3691,9 +3719,13 @@ fn compile_result_hip(
         ],
         compile_flags: result.compile_flags.clone(),
         link_flags: result.link_flags.clone(),
-        peak_device_bytes_estimate: result.peak_device_bytes_estimate,
+        peak_device_bytes_estimate: result
+            .peak_device_bytes_estimate
+            .map(TryInto::try_into)
+            .transpose()
+            .map_err(|error| stage_error("compile", error, GeneralKind::Other))?,
         manifest: RootManifestResult::default(),
-    }
+    })
 }
 
 fn compile_result_hip_host(
@@ -3755,7 +3787,9 @@ fn execution_input_specs(dag: &Dag, labels: &[String]) -> Result<Vec<ExecutionTe
                     GeneralKind::CompileError,
                 )
             })?;
-            Ok(execution_tensor_spec(label.clone(), ty))
+            execution_tensor_spec(label.clone(), ty).map_err(|message| {
+                stage_error("compile", message, GeneralKind::CompileError)
+            })
         })
         .collect()
 }
@@ -3779,7 +3813,9 @@ fn execution_output_specs(dag: &Dag, labels: &[String]) -> Result<Vec<ExecutionT
                     )
                 })?
                 .output_type;
-            Ok(execution_tensor_spec(label.clone(), ty))
+            execution_tensor_spec(label.clone(), ty).map_err(|message| {
+                stage_error("compile", message, GeneralKind::CompileError)
+            })
         })
         .collect()
 }
@@ -3814,29 +3850,32 @@ fn execution_output_nodes(dag: &Dag) -> Vec<NodeId> {
     nodes
 }
 
-fn execution_tensor_spec(name: String, ty: &TensorType) -> ExecutionTensorSpec {
-    ExecutionTensorSpec {
+fn execution_tensor_spec(name: String, ty: &TensorType) -> WireResult<ExecutionTensorSpec> {
+    i32::try_from(ty.dims.len()).map_err(|_| "execution tensor rank exceeds int32".to_string())?;
+    Ok(ExecutionTensorSpec {
         name,
         dtype: ty.precision.name().to_string(),
         dims: ty
             .dims
             .iter()
-            .map(|dim| match dim {
-                DimInfo::Lit(size) => ExecutionDim {
-                    name: None,
-                    size: Some(*size),
-                },
-                DimInfo::Named(name, Some(size)) => ExecutionDim {
-                    name: Some(name.clone()),
-                    size: Some(*size),
-                },
-                DimInfo::Named(name, None) => ExecutionDim {
-                    name: Some(name.clone()),
-                    size: None,
-                },
+            .map(|dim| {
+                Ok(match dim {
+                    DimInfo::Lit(size) => ExecutionDim {
+                        name: None,
+                        size: Some(NonnegativeExtent::try_from(*size)?),
+                    },
+                    DimInfo::Named(name, Some(size)) => ExecutionDim {
+                        name: Some(name.clone()),
+                        size: Some(NonnegativeExtent::try_from(*size)?),
+                    },
+                    DimInfo::Named(name, None) => ExecutionDim {
+                        name: Some(name.clone()),
+                        size: None,
+                    },
+                })
             })
-            .collect(),
-    }
+            .collect::<WireResult<Vec<_>>>()?,
+    })
 }
 
 fn reject_unsized_named_dims(dag: &Dag, target: &'static str) -> Result<()> {
@@ -5245,8 +5284,8 @@ pub(crate) fn schema_stage_check(
 /// ranges and stay on `Span`.
 fn deep_span_to_diagnostic(span: Option<chelis_deep::Span>) -> Option<DiagnosticSpan> {
     span.map(|span| DiagnosticSpan::Range {
-        offset: span.offset,
-        len: span.len,
+        offset: crate::schema::host_index(span.offset),
+        len: crate::schema::host_index(span.len),
     })
 }
 
@@ -5305,7 +5344,9 @@ fn parse_error_span_surf(source: &str, err: &chelis_surf::parser::ParseError) ->
             offset, ..
         } => *offset,
     };
-    DiagnosticSpan::Point { offset }
+    DiagnosticSpan::Point {
+        offset: crate::schema::host_index(offset),
+    }
 }
 
 fn parse_error_span_deep(err: &chelis_deep::parser::ParseError) -> DiagnosticSpan {
@@ -5317,7 +5358,9 @@ fn parse_error_span_deep(err: &chelis_deep::parser::ParseError) -> DiagnosticSpa
         chelis_deep::parser::ParseError::ForbiddenSpanChar { value_offset, .. } => *value_offset,
         chelis_deep::parser::ParseError::Metadata(error) => error.span.offset,
     };
-    DiagnosticSpan::Point { offset }
+    DiagnosticSpan::Point {
+        offset: crate::schema::host_index(offset),
+    }
 }
 
 /// Project a check diagnostic onto the wire carrier.
@@ -5327,26 +5370,39 @@ fn parse_error_span_deep(err: &chelis_deep::parser::ParseError) -> DiagnosticSpa
 /// carrier, which is the drift the issue exists to remove. The one
 /// implementation lives beside `Diagnostic`; this keeps the name its callers
 /// already use.
-pub(crate) fn check_error_diagnostic(error: &CheckError) -> Diagnostic {
-    Diagnostic::from_check_error(error)
+pub(crate) fn check_errors_to_compiler_error(stage: &str, errors: &[CheckError]) -> CompilerError {
+    match errors
+        .iter()
+        .map(Diagnostic::try_from_check_error)
+        .collect::<std::result::Result<Vec<_>, _>>()
+    {
+        Ok(errors) => CompilerError {
+            stage: stage.to_string(),
+            errors,
+        },
+        Err(error) => stage_error("report", error, GeneralKind::Other),
+    }
 }
 
 fn span(span: chelis_deep::Span) -> Span {
     Span {
-        offset: span.offset,
-        len: span.len,
+        offset: crate::schema::host_index(span.offset),
+        len: crate::schema::host_index(span.len),
     }
 }
 
-fn wire_decl(decl: &Decl) -> WireSurfDecl {
-    match decl {
+fn wire_decl(decl: &Decl) -> SourceWireResult<WireSurfDecl> {
+    Ok(match decl {
         Decl::Module {
             name,
             decls,
             span: s,
         } => WireSurfDecl::Module {
             name: name.clone(),
-            decls: decls.iter().map(wire_decl).collect(),
+            decls: decls
+                .iter()
+                .map(wire_decl)
+                .collect::<SourceWireResult<_>>()?,
             span: span(*s),
         },
         Decl::Import {
@@ -5381,11 +5437,16 @@ fn wire_decl(decl: &Decl) -> WireSurfDecl {
             params: params.clone(),
             variants: variants.iter().map(wire_variant).collect(),
             opaque: *opaque,
-            invariant: invariant.as_ref().map(|inv| WireTypeInvariant {
-                binder: inv.binder.clone(),
-                body: wire_expr(&inv.body),
-                span: span(inv.span),
-            }),
+            invariant: invariant
+                .as_ref()
+                .map(|inv| -> SourceWireResult<_> {
+                    Ok(WireTypeInvariant {
+                        binder: inv.binder.clone(),
+                        body: wire_expr(&inv.body)?,
+                        span: span(inv.span),
+                    })
+                })
+                .transpose()?,
             span: span(*s),
         },
         Decl::TypeAlias {
@@ -5407,7 +5468,7 @@ fn wire_decl(decl: &Decl) -> WireSurfDecl {
         } => WireSurfDecl::MacroDef {
             name: name.clone(),
             params: params.clone(),
-            body: wire_expr(body),
+            body: wire_expr(body)?,
             span: span(*s),
         },
         Decl::FunDef {
@@ -5429,7 +5490,7 @@ fn wire_decl(decl: &Decl) -> WireSurfDecl {
                 .collect(),
             params: params.iter().map(wire_param).collect(),
             ret_ty: ret_ty.as_ref().map(wire_type_expr),
-            body: wire_expr(body),
+            body: wire_expr(body)?,
             span: span(*s),
         },
         Decl::Property {
@@ -5442,9 +5503,15 @@ fn wire_decl(decl: &Decl) -> WireSurfDecl {
         } => WireSurfDecl::Property {
             name: name.clone(),
             params: params.iter().map(wire_param).collect(),
-            preconditions: preconditions.iter().map(wire_expr).collect(),
-            body: wire_expr(body),
-            options: options.iter().map(wire_property_option).collect(),
+            preconditions: preconditions
+                .iter()
+                .map(wire_expr)
+                .collect::<SourceWireResult<_>>()?,
+            body: wire_expr(body)?,
+            options: options
+                .iter()
+                .map(wire_property_option)
+                .collect::<SourceWireResult<_>>()?,
             span: span(*s),
         },
         Decl::LetDef {
@@ -5455,35 +5522,37 @@ fn wire_decl(decl: &Decl) -> WireSurfDecl {
         } => WireSurfDecl::LetDef {
             name: name.clone(),
             ty: ty.as_ref().map(wire_type_expr),
-            value: wire_expr(value),
+            value: wire_expr(value)?,
             span: span(*s),
         },
         Decl::Export { names, span: s } => WireSurfDecl::Export {
             names: names.clone(),
             span: span(*s),
         },
-    }
+    })
 }
 
-fn wire_property_option(option: &chelis_surf::ast::PropertyOption) -> WirePropertyOption {
-    match option {
+fn wire_property_option(
+    option: &chelis_surf::ast::PropertyOption,
+) -> SourceWireResult<WirePropertyOption> {
+    Ok(match option {
         chelis_surf::ast::PropertyOption::Tolerance(value, s) => WirePropertyOption::Tolerance {
-            value: wire_expr(value),
+            value: wire_expr(value)?,
             span: span(*s),
         },
         chelis_surf::ast::PropertyOption::Seed(value, s) => WirePropertyOption::Seed {
-            value: wire_expr(value),
+            value: wire_expr(value)?,
             span: span(*s),
         },
         chelis_surf::ast::PropertyOption::Samples(value, s) => WirePropertyOption::Samples {
-            value: wire_expr(value),
+            value: wire_expr(value)?,
             span: span(*s),
         },
         chelis_surf::ast::PropertyOption::Contract(id, s) => WirePropertyOption::Contract {
             id: id.clone(),
             span: span(*s),
         },
-    }
+    })
 }
 
 fn wire_import_kind(kind: &ImportKind) -> WireImportKind {
@@ -5525,10 +5594,10 @@ fn wire_param(param: &Param) -> WireParam {
     }
 }
 
-fn wire_expr(expr: &Expr) -> WireSurfExpr {
-    match expr {
+fn wire_expr(expr: &Expr) -> SourceWireResult<WireSurfExpr> {
+    Ok(match expr {
         Expr::Lit(lit, s) => WireSurfExpr::Lit {
-            literal: wire_literal(lit),
+            literal: wire_literal(lit)?,
             span: span(*s),
         },
         Expr::Var(name, s) => WireSurfExpr::Var {
@@ -5540,176 +5609,183 @@ fn wire_expr(expr: &Expr) -> WireSurfExpr {
             span: span(*s),
         },
         Expr::Apply(func, args, s) => WireSurfExpr::Apply {
-            func: Box::new(wire_expr(func)),
-            args: args.iter().map(wire_expr).collect(),
+            func: Box::new(wire_expr(func)?),
+            args: args
+                .iter()
+                .map(wire_expr)
+                .collect::<SourceWireResult<_>>()?,
             span: span(*s),
         },
         Expr::List(items, s) => WireSurfExpr::List {
-            items: items.iter().map(wire_expr).collect(),
+            items: items
+                .iter()
+                .map(wire_expr)
+                .collect::<SourceWireResult<_>>()?,
             span: span(*s),
         },
         Expr::Record(name, fields, s) => WireSurfExpr::Record {
             name: name.clone(),
             fields: fields
                 .iter()
-                .map(|(field, value)| WireRecordExprField {
-                    name: field.clone(),
-                    value: wire_expr(value),
+                .map(|(field, value)| {
+                    Ok(WireRecordExprField {
+                        name: field.clone(),
+                        value: wire_expr(value)?,
+                    })
                 })
-                .collect(),
+                .collect::<SourceWireResult<_>>()?,
             span: span(*s),
         },
         Expr::RecordUpdate(base, fields, s) => WireSurfExpr::RecordUpdate {
-            base: Box::new(wire_expr(base)),
+            base: Box::new(wire_expr(base)?),
             fields: fields
                 .iter()
-                .map(|(field, value)| WireRecordExprField {
-                    name: field.clone(),
-                    value: wire_expr(value),
+                .map(|(field, value)| {
+                    Ok(WireRecordExprField {
+                        name: field.clone(),
+                        value: wire_expr(value)?,
+                    })
                 })
-                .collect(),
+                .collect::<SourceWireResult<_>>()?,
             span: span(*s),
         },
         Expr::Access(inner, field, s) => WireSurfExpr::Access {
-            expr: Box::new(wire_expr(inner)),
+            expr: Box::new(wire_expr(inner)?),
             field: field.clone(),
             span: span(*s),
         },
         Expr::TupleGet(inner, index, s) => WireSurfExpr::TupleGet {
-            expr: Box::new(wire_expr(inner)),
-            index: *index,
+            expr: Box::new(wire_expr(inner)?),
+            index: SourceInteger::new(*index),
             span: span(*s),
         },
         Expr::Binary(op, lhs, rhs, s) => WireSurfExpr::Binary {
             op: wire_bin_op(*op),
-            lhs: Box::new(wire_expr(lhs)),
-            rhs: Box::new(wire_expr(rhs)),
+            lhs: Box::new(wire_expr(lhs)?),
+            rhs: Box::new(wire_expr(rhs)?),
             span: span(*s),
         },
         Expr::Unary(op, inner, s) => WireSurfExpr::Unary {
             op: wire_unary_op(*op),
-            expr: Box::new(wire_expr(inner)),
+            expr: Box::new(wire_expr(inner)?),
             span: span(*s),
         },
         Expr::Pipe(inner, stages, s) => WireSurfExpr::Pipe {
-            expr: Box::new(wire_expr(inner)),
-            stages: stages.iter().map(wire_expr).collect(),
+            expr: Box::new(wire_expr(inner)?),
+            stages: stages
+                .iter()
+                .map(wire_expr)
+                .collect::<SourceWireResult<_>>()?,
             span: span(*s),
         },
         Expr::If(cond, then_branch, else_branch, s) => WireSurfExpr::If {
-            cond: Box::new(wire_expr(cond)),
-            then_branch: Box::new(wire_expr(then_branch)),
-            else_branch: Box::new(wire_expr(else_branch)),
+            cond: Box::new(wire_expr(cond)?),
+            then_branch: Box::new(wire_expr(then_branch)?),
+            else_branch: Box::new(wire_expr(else_branch)?),
             span: span(*s),
         },
         Expr::Match(inner, arms, s) => WireSurfExpr::Match {
-            expr: Box::new(wire_expr(inner)),
-            arms: arms.iter().map(wire_match_arm).collect(),
+            expr: Box::new(wire_expr(inner)?),
+            arms: arms
+                .iter()
+                .map(wire_match_arm)
+                .collect::<SourceWireResult<_>>()?,
             span: span(*s),
         },
         Expr::Lambda(params, body, s) => WireSurfExpr::Lambda {
             params: params.iter().map(wire_param).collect(),
-            body: Box::new(wire_expr(body)),
+            body: Box::new(wire_expr(body)?),
             span: span(*s),
         },
         Expr::Tuple(items, s) => WireSurfExpr::Tuple {
-            items: items.iter().map(wire_expr).collect(),
+            items: items
+                .iter()
+                .map(wire_expr)
+                .collect::<SourceWireResult<_>>()?,
             span: span(*s),
         },
         Expr::Cast(inner, ty, mode, s) => WireSurfExpr::Cast {
-            expr: Box::new(wire_expr(inner)),
+            expr: Box::new(wire_expr(inner)?),
             ty: ty.clone(),
             mode: mode.deep_selector().map(str::to_string),
             span: span(*s),
         },
         Expr::Grad(inner, wrt, s) => WireSurfExpr::Grad {
-            expr: Box::new(wire_expr(inner)),
+            expr: Box::new(wire_expr(inner)?),
             wrt: wrt.clone(),
             span: span(*s),
         },
         Expr::Vmap(inner, axis, s) => WireSurfExpr::Vmap {
-            expr: Box::new(wire_expr(inner)),
-            axis: *axis,
+            expr: Box::new(wire_expr(inner)?),
+            axis: axis.map(SourceInteger::new),
             span: span(*s),
         },
         Expr::Jit(inner, s) => WireSurfExpr::Jit {
-            expr: Box::new(wire_expr(inner)),
+            expr: Box::new(wire_expr(inner)?),
             span: span(*s),
         },
         Expr::Realize(inner, s) => WireSurfExpr::Realize {
-            expr: Box::new(wire_expr(inner)),
+            expr: Box::new(wire_expr(inner)?),
             span: span(*s),
         },
         Expr::Copy(inner, s) => WireSurfExpr::Copy {
-            expr: Box::new(wire_expr(inner)),
+            expr: Box::new(wire_expr(inner)?),
             span: span(*s),
         },
         Expr::Borrow(inner, s) => WireSurfExpr::Borrow {
-            expr: Box::new(wire_expr(inner)),
+            expr: Box::new(wire_expr(inner)?),
             span: span(*s),
         },
         Expr::WithSeed(seed, body, s) => WireSurfExpr::WithSeed {
-            seed: Box::new(wire_expr(seed)),
-            body: Box::new(wire_expr(body)),
+            seed: Box::new(wire_expr(seed)?),
+            body: Box::new(wire_expr(body)?),
             span: span(*s),
         },
         Expr::WithDevice(device, body, s) => WireSurfExpr::WithDevice {
-            device: Box::new(wire_expr(device)),
-            body: Box::new(wire_expr(body)),
+            device: Box::new(wire_expr(device)?),
+            body: Box::new(wire_expr(body)?),
             span: span(*s),
         },
         Expr::Par(exprs, s) => WireSurfExpr::Par {
-            exprs: exprs.iter().map(wire_expr).collect(),
+            exprs: exprs
+                .iter()
+                .map(wire_expr)
+                .collect::<SourceWireResult<_>>()?,
             span: span(*s),
         },
         Expr::Do(exprs, s) => WireSurfExpr::Do {
-            exprs: exprs.iter().map(wire_expr).collect(),
+            exprs: exprs
+                .iter()
+                .map(wire_expr)
+                .collect::<SourceWireResult<_>>()?,
             span: span(*s),
         },
         Expr::Quote(expr, s) => WireSurfExpr::Quote {
-            expr: Box::new(wire_expr(expr)),
+            expr: Box::new(wire_expr(expr)?),
             span: span(*s),
         },
         Expr::Unquote(expr, s) => WireSurfExpr::Unquote {
-            expr: Box::new(wire_expr(expr)),
+            expr: Box::new(wire_expr(expr)?),
             span: span(*s),
         },
         Expr::Splice(expr, s) => WireSurfExpr::Splice {
-            expr: Box::new(wire_expr(expr)),
+            expr: Box::new(wire_expr(expr)?),
             span: span(*s),
         },
         Expr::Annotate(inner, ty, s) => WireSurfExpr::Annotate {
-            expr: Box::new(wire_expr(inner)),
+            expr: Box::new(wire_expr(inner)?),
             ty: wire_type_expr(ty),
             span: span(*s),
         },
         Expr::Block(bindings, body, s) => WireSurfExpr::Block {
-            bindings: bindings.iter().map(wire_let_binding).collect(),
-            body: Box::new(wire_expr(body)),
+            bindings: bindings
+                .iter()
+                .map(wire_let_binding)
+                .collect::<SourceWireResult<_>>()?,
+            body: Box::new(wire_expr(body)?),
             span: span(*s),
         },
-    }
-}
-
-fn wire_literal(lit: &Literal) -> WireLiteral {
-    match lit {
-        Literal::Int(value) => WireLiteral::Int { value: *value },
-        Literal::Float(value) => WireLiteral::Float { value: *value },
-        // Typed-suffix literals (spec §5.5): preserve the suffix across
-        // the wire boundary so the receiving side sees the same type.
-        Literal::TypedInt(value, suffix) => WireLiteral::TypedInt {
-            value: *value,
-            suffix: suffix.as_str().to_string(),
-        },
-        Literal::TypedFloat(value, suffix) => WireLiteral::TypedFloat {
-            value: *value,
-            suffix: suffix.as_str().to_string(),
-        },
-        Literal::Str(value) => WireLiteral::Str {
-            value: value.clone(),
-        },
-        Literal::Bool(value) => WireLiteral::Bool { value: *value },
-    }
+    })
 }
 
 fn wire_bin_op(op: BinOp) -> WireBinOp {
@@ -5737,60 +5813,68 @@ fn wire_unary_op(op: UnaryOp) -> WireUnaryOp {
     }
 }
 
-fn wire_match_arm(arm: &MatchArm) -> WireMatchArm {
-    WireMatchArm {
-        pattern: wire_pattern(&arm.pattern),
-        guard: arm.guard.as_ref().map(wire_expr),
-        body: wire_expr(&arm.body),
+fn wire_match_arm(arm: &MatchArm) -> SourceWireResult<WireMatchArm> {
+    Ok(WireMatchArm {
+        pattern: wire_pattern(&arm.pattern)?,
+        guard: arm.guard.as_ref().map(wire_expr).transpose()?,
+        body: wire_expr(&arm.body)?,
         span: span(arm.span),
-    }
+    })
 }
 
-fn wire_pattern(pattern: &Pattern) -> WirePattern {
-    match pattern {
+fn wire_pattern(pattern: &Pattern) -> SourceWireResult<WirePattern> {
+    Ok(match pattern {
         Pattern::Wildcard(s) => WirePattern::Wildcard { span: span(*s) },
         Pattern::Var(name, s) => WirePattern::Var {
             name: name.clone(),
             span: span(*s),
         },
         Pattern::Lit(lit, s) => WirePattern::Lit {
-            literal: wire_literal(lit),
+            literal: wire_literal(lit)?,
             span: span(*s),
         },
         Pattern::Constructor(name, args, s) => WirePattern::Constructor {
             name: name.clone(),
-            args: args.iter().map(wire_pattern).collect(),
+            args: args
+                .iter()
+                .map(wire_pattern)
+                .collect::<SourceWireResult<_>>()?,
             span: span(*s),
         },
         Pattern::Tuple(items, s) => WirePattern::Tuple {
-            items: items.iter().map(wire_pattern).collect(),
+            items: items
+                .iter()
+                .map(wire_pattern)
+                .collect::<SourceWireResult<_>>()?,
             span: span(*s),
         },
         Pattern::Record(name, fields, s) => WirePattern::Record {
             name: name.clone(),
             fields: fields
                 .iter()
-                .map(|(name, pattern)| WireRecordPatternField {
-                    name: name.clone(),
-                    pattern: wire_pattern(pattern),
+                .map(|(name, pattern)| {
+                    Ok(WireRecordPatternField {
+                        name: name.clone(),
+                        pattern: wire_pattern(pattern)?,
+                    })
                 })
-                .collect(),
+                .collect::<SourceWireResult<_>>()?,
             span: span(*s),
         },
         Pattern::As(name, pattern, s) => WirePattern::As {
             name: name.clone(),
-            pattern: Box::new(wire_pattern(pattern)),
+            pattern: Box::new(wire_pattern(pattern)?),
             span: span(*s),
         },
-    }
+    })
 }
 
-fn wire_let_binding(binding: &LetBinding) -> WireLetBinding {
-    WireLetBinding {
+fn wire_let_binding(binding: &LetBinding) -> SourceWireResult<WireLetBinding> {
+    Ok(WireLetBinding {
         pattern: wire_let_pattern(&binding.pattern),
         ty: binding.ty.as_ref().map(wire_type_expr),
-        value: wire_expr(&binding.value),
-    }
+        value: wire_expr(&binding.value)?,
+    })
 }
 
 fn wire_let_pattern(pattern: &LetPattern) -> WireLetPattern {
@@ -5848,137 +5932,131 @@ fn wire_type_expr(ty: &TypeExpr) -> WireSurfTypeExpr {
     }
 }
 
-fn wire_deep_expr(expr: &DeepExpr) -> WireDeepExpr {
-    fn encode(expr: chelis_deep::raw::RawExpr) -> WireDeepExpr {
-        use chelis_deep::raw::{RawAtom, RawExpr};
-        let source_span = Some(span(expr.span()));
-        let kind = match expr {
-            RawExpr::ExtensionData(data) => WireDeepExprKind::ExtensionData {
-                syntax: data.syntax().into(),
-            },
-            RawExpr::Atom(atom, _) => WireDeepExprKind::Atom {
-                atom: match atom {
-                    RawAtom::Symbol(value) => WireDeepAtom::Symbol { value },
-                    RawAtom::Int(value) => WireDeepAtom::Int { value },
-                    RawAtom::Float(value) => WireDeepAtom::Float { value },
-                    RawAtom::Str(value) => WireDeepAtom::Str { value },
-                    RawAtom::Bool(value) => WireDeepAtom::Bool { value },
-                },
-            },
-            RawExpr::List(elements, _) => WireDeepExprKind::List {
-                elements: elements.into_iter().map(encode).collect(),
-            },
-            RawExpr::Map(entries, _) => WireDeepExprKind::Map {
-                entries: entries
-                    .into_iter()
-                    .map(|(key, value)| WireMetaEntry {
-                        key,
-                        value: encode(value),
-                    })
-                    .collect(),
-            },
-            RawExpr::MetaExpr { entries, expr, .. } => WireDeepExprKind::MetaExpr {
-                entries: entries
-                    .into_iter()
-                    .map(|(key, value)| WireMetaEntry {
-                        key,
-                        value: encode(value),
-                    })
-                    .collect(),
-                expr: Box::new(encode(*expr)),
-            },
-        };
-        WireDeepExpr {
-            kind,
-            span: source_span,
-        }
-    }
-    encode(expr.to_raw())
+type WireResult<T> = std::result::Result<T, String>;
+
+fn wire_extent(value: usize) -> WireResult<NonnegativeExtent> {
+    NonnegativeExtent::try_from(value)
 }
 
-fn wire_dag(dag: &Dag) -> WireDag {
-    WireDag {
+fn wire_axis(value: usize) -> WireResult<i32> {
+    i32::try_from(value).map_err(|_| "wire axis exceeds int32".to_string())
+}
+
+fn wire_float_parameter(value: f64, precision: Prim) -> WireResult<chelis_types::ScalarValue> {
+    if !value.is_finite() || !matches!(precision, Prim::F16 | Prim::Bf16 | Prim::F32 | Prim::F64) {
+        return Err(
+            "wire random parameter requires a finite value at the active float dtype".to_string(),
+        );
+    }
+    let scalar = chelis_types::scalar_from_f64("wire_parameter", precision, value)
+        .map_err(|error| error.to_string())?;
+    if scalar.as_f64_lossy().to_bits() != value.to_bits() {
+        return Err(
+            "IR random parameter is not an exact stored value of its active dtype".to_string(),
+        );
+    }
+    Ok(scalar)
+}
+
+fn wire_dag(dag: &Dag) -> WireResult<WireDag> {
+    let wire = WireDag {
         schema_version: crate::schema::WIRE_DAG_SCHEMA_VERSION,
-        nodes: dag.nodes().iter().map(wire_dag_node).collect(),
-        roots: dag.roots().iter().map(|id| id.0).collect(),
-    }
+        nodes: dag
+            .nodes()
+            .iter()
+            .map(wire_dag_node)
+            .collect::<WireResult<_>>()?,
+        roots: dag
+            .roots()
+            .iter()
+            .map(|id| crate::schema::host_index(id.0))
+            .collect(),
+    };
+    wire.validate_wire_contract()
+        .map_err(|error| error.to_string())?;
+    Ok(wire)
 }
 
-fn wire_dag_node(node: &chelis_ir::dag::DagNode) -> WireDagNode {
-    WireDagNode {
+fn wire_dag_node(node: &chelis_ir::dag::DagNode) -> WireResult<WireDagNode> {
+    Ok(WireDagNode {
         shape_deps: node
             .shape_deps
             .iter()
-            .map(|id| {
-                chelis_types::scalar_from_i64(
-                    "load",
-                    chelis_types::types::Prim::Int64,
-                    i64::try_from(id.0).expect("node id fits int64"),
-                )
-                .expect("int64 node reference")
-            })
+            .map(|id| crate::schema::host_index(id.0))
             .collect(),
         span_id: node.span_id.clone(),
         merged_spans: node.merged_spans.clone(),
-        id: node.id.0,
-        op: wire_op(&node.op),
-        inputs: node.inputs.iter().map(|id| id.0).collect(),
-        output_type: wire_tensor_type(&node.output_type),
-    }
+        id: crate::schema::host_index(node.id.0),
+        op: wire_op(&node.op, node.output_type.precision)?,
+        inputs: node
+            .inputs
+            .iter()
+            .map(|id| crate::schema::host_index(id.0))
+            .collect(),
+        output_type: wire_tensor_type(&node.output_type)?,
+    })
 }
 
-fn wire_tensor_type(ty: &TensorType) -> WireTensorType {
-    WireTensorType {
-        dims: ty.dims.iter().map(wire_dim).collect(),
+fn wire_tensor_type(ty: &TensorType) -> WireResult<WireTensorType> {
+    Ok(WireTensorType {
+        dims: ty.dims.iter().map(wire_dim).collect::<WireResult<_>>()?,
         precision: ty.precision.name().to_string(),
-    }
+    })
 }
 
-fn wire_dim(dim: &DimInfo) -> WireDimInfo {
-    match dim {
+fn wire_dim(dim: &DimInfo) -> WireResult<WireDimInfo> {
+    Ok(match dim {
         DimInfo::Named(name, size) => WireDimInfo::Named {
             name: name.clone(),
-            size: *size,
+            size: size.map(wire_extent).transpose()?,
         },
-        DimInfo::Lit(size) => WireDimInfo::Lit { size: *size },
-    }
+        DimInfo::Lit(size) => WireDimInfo::Lit {
+            size: wire_extent(*size)?,
+        },
+    })
 }
 
-fn wire_dim_expr(expr: &chelis_ir::dag::DimExpr) -> WireDimExpr {
+fn wire_dim_expr(expr: &chelis_ir::dag::DimExpr) -> WireResult<WireDimExpr> {
     use chelis_ir::dag::DimExpr;
-    match expr {
-        DimExpr::Concrete(value) => WireDimExpr::Concrete { value: *value },
+    Ok(match expr {
+        DimExpr::Concrete(value) => WireDimExpr::Concrete {
+            value: wire_extent(*value)?,
+        },
         DimExpr::Sym(name) => WireDimExpr::Sym { name: name.clone() },
         DimExpr::Mul(lhs, rhs) => WireDimExpr::Mul {
-            lhs: Box::new(wire_dim_expr(lhs)),
-            rhs: Box::new(wire_dim_expr(rhs)),
+            lhs: Box::new(wire_dim_expr(lhs)?),
+            rhs: Box::new(wire_dim_expr(rhs)?),
         },
         DimExpr::Div(lhs, rhs) => WireDimExpr::Div {
-            lhs: Box::new(wire_dim_expr(lhs)),
-            rhs: Box::new(wire_dim_expr(rhs)),
+            lhs: Box::new(wire_dim_expr(lhs)?),
+            rhs: Box::new(wire_dim_expr(rhs)?),
         },
-    }
+    })
 }
 
 /// chelis#616: map a movement-op / reshape-target [`RtDim`] to its wire form.
-fn wire_bound(b: &RtDim) -> WireRtDim {
-    match b {
-        RtDim::Lit(n) => WireRtDim::Lit { value: *n },
+fn wire_bound(b: &RtDim) -> WireResult<WireRtDim> {
+    Ok(match b {
+        RtDim::Lit(n) => WireRtDim::Lit {
+            value: wire_extent(*n)?,
+        },
         RtDim::ToEnd => WireRtDim::ToEnd,
-        RtDim::Node(i) => WireRtDim::Node { input: *i },
+        RtDim::Node(i) => WireRtDim::Node {
+            input: crate::schema::host_index(*i),
+        },
         RtDim::Sym(name) => WireRtDim::Sym { name: name.clone() },
         RtDim::InputAxis {
             tensor,
             axis: chelis_ir::dag::RtAxis::Lit(axis),
         } => WireRtDim::InputAxis {
-            tensor: *tensor,
+            tensor: crate::schema::host_index(*tensor),
             axis: WireRtAxis::Lit { value: *axis },
         },
-    }
+    })
 }
 
-fn wire_op(op: &RiscOp) -> WireRiscOp {
-    match op {
+fn wire_op(op: &RiscOp, precision: Prim) -> WireResult<WireRiscOp> {
+    Ok(match op {
         RiscOp::Add => WireRiscOp::Add,
         RiscOp::Sub => WireRiscOp::Sub,
         RiscOp::Mul => WireRiscOp::Mul,
@@ -6014,22 +6092,34 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
         RiscOp::Ceil => WireRiscOp::Ceil,
         RiscOp::Round => WireRiscOp::Round,
         RiscOp::UniformLike { low, high, seed } => WireRiscOp::UniformLike {
-            low: *low,
-            high: *high,
+            low: wire_float_parameter(*low, precision)?,
+            high: wire_float_parameter(*high, precision)?,
             seed: *seed,
         },
         RiscOp::Dropout { rate, seed } => WireRiscOp::Dropout {
-            rate: *rate,
+            rate: wire_float_parameter(*rate, precision)?,
             seed: *seed,
         },
         RiscOp::Sum { axis, accumulator } => WireRiscOp::Sum {
-            axis: *axis,
+            axis: wire_axis(*axis)?,
             accumulator: accumulator.name().to_string(),
         },
-        RiscOp::Count { axes } => WireRiscOp::Count { axes: axes.clone() },
-        RiscOp::MaxReduce { axis } => WireRiscOp::MaxReduce { axis: *axis },
-        RiscOp::MinReduce { axis } => WireRiscOp::MinReduce { axis: *axis },
-        RiscOp::ProdReduce { axis } => WireRiscOp::ProdReduce { axis: *axis },
+        RiscOp::Count { axes } => WireRiscOp::Count {
+            axes: axes
+                .iter()
+                .copied()
+                .map(wire_axis)
+                .collect::<WireResult<_>>()?,
+        },
+        RiscOp::MaxReduce { axis } => WireRiscOp::MaxReduce {
+            axis: wire_axis(*axis)?,
+        },
+        RiscOp::MinReduce { axis } => WireRiscOp::MinReduce {
+            axis: wire_axis(*axis)?,
+        },
+        RiscOp::ProdReduce { axis } => WireRiscOp::ProdReduce {
+            axis: wire_axis(*axis)?,
+        },
         RiscOp::ReduceWindow {
             reducer,
             window_shape,
@@ -6041,8 +6131,16 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
                 chelis_ir::dag::ReduceWindowKind::Sum => "sum".to_string(),
                 chelis_ir::dag::ReduceWindowKind::Mean => "mean".to_string(),
             },
-            window_shape: window_shape.clone(),
-            strides: strides.clone(),
+            window_shape: window_shape
+                .iter()
+                .copied()
+                .map(wire_extent)
+                .collect::<WireResult<_>>()?,
+            strides: strides
+                .iter()
+                .copied()
+                .map(wire_extent)
+                .collect::<WireResult<_>>()?,
         },
         RiscOp::ReduceWindowGrad {
             reducer,
@@ -6055,39 +6153,64 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
                 chelis_ir::dag::ReduceWindowKind::Sum => "sum".to_string(),
                 chelis_ir::dag::ReduceWindowKind::Mean => "mean".to_string(),
             },
-            window_shape: window_shape.clone(),
-            strides: strides.clone(),
+            window_shape: window_shape
+                .iter()
+                .copied()
+                .map(wire_extent)
+                .collect::<WireResult<_>>()?,
+            strides: strides
+                .iter()
+                .copied()
+                .map(wire_extent)
+                .collect::<WireResult<_>>()?,
         },
-        RiscOp::Argmax { axis } => WireRiscOp::Argmax { axis: *axis },
-        RiscOp::Argmin { axis } => WireRiscOp::Argmin { axis: *axis },
+        RiscOp::Argmax { axis } => WireRiscOp::Argmax {
+            axis: wire_axis(*axis)?,
+        },
+        RiscOp::Argmin { axis } => WireRiscOp::Argmin {
+            axis: wire_axis(*axis)?,
+        },
         RiscOp::Reshape { new_shape } => WireRiscOp::Reshape {
-            new_shape: new_shape.iter().map(wire_bound).collect(),
+            new_shape: new_shape
+                .iter()
+                .map(wire_bound)
+                .collect::<WireResult<_>>()?,
         },
-        RiscOp::Permute { axes } => WireRiscOp::Permute { axes: axes.clone() },
+        RiscOp::Permute { axes } => WireRiscOp::Permute {
+            axes: axes
+                .iter()
+                .copied()
+                .map(wire_axis)
+                .collect::<WireResult<_>>()?,
+        },
         RiscOp::Expand { axis, size } => WireRiscOp::Expand {
-            axis: *axis,
-            size: wire_bound(size),
+            axis: wire_axis(*axis)?,
+            size: wire_bound(size)?,
         },
-        RiscOp::OneHot { vocab } => WireRiscOp::OneHot { vocab: *vocab },
+        RiscOp::OneHot { vocab } => WireRiscOp::OneHot {
+            vocab: wire_extent(*vocab)?,
+        },
         RiscOp::Pad { padding, fill } => WireRiscOp::Pad {
             padding: padding
                 .iter()
-                .map(|(s, e)| (wire_bound(s), wire_bound(e)))
-                .collect(),
+                .map(|(s, e)| Ok((wire_bound(s)?, wire_bound(e)?)))
+                .collect::<WireResult<_>>()?,
             fill: *fill,
         },
         RiscOp::Shrink { bounds } => WireRiscOp::Shrink {
             bounds: bounds
                 .iter()
-                .map(|(s, e)| (wire_bound(s), wire_bound(e)))
-                .collect(),
+                .map(|(s, e)| Ok((wire_bound(s)?, wire_bound(e)?)))
+                .collect::<WireResult<_>>()?,
         },
         RiscOp::Stride { strides } => WireRiscOp::Stride {
-            strides: strides.iter().map(wire_bound).collect(),
+            strides: strides.iter().map(wire_bound).collect::<WireResult<_>>()?,
         },
         RiscOp::Const { value } => WireRiscOp::Const { value: *value },
         RiscOp::ConstTensor { data } => WireRiscOp::ConstTensor { data: data.clone() },
-        RiscOp::Shape { axis } => WireRiscOp::Shape { axis: *axis },
+        RiscOp::Shape { axis } => WireRiscOp::Shape {
+            axis: wire_axis(*axis)?,
+        },
         RiscOp::ExtentWitness {
             parameter,
             axis: chelis_ir::dag::RtAxis::Lit(axis),
@@ -6095,7 +6218,11 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
         } => WireRiscOp::ExtentWitness {
             parameter: parameter.clone(),
             axis: WireRtAxis::Lit { value: *axis },
-            requirements: requirements.clone(),
+            requirements: requirements
+                .iter()
+                .copied()
+                .map(NonnegativeExtent::try_from)
+                .collect::<WireResult<_>>()?,
         },
         RiscOp::CheckedReshapeExtent {
             claim,
@@ -6156,12 +6283,12 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
                         .input_indices
                         .iter()
                         .map(|input| match input {
-                            FusedInput::External(index) => {
-                                WireFusedInput::External { index: *index }
-                            }
-                            FusedInput::PreviousStep(index) => {
-                                WireFusedInput::PreviousStep { index: *index }
-                            }
+                            FusedInput::External(index) => WireFusedInput::External {
+                                index: crate::schema::host_index(*index),
+                            },
+                            FusedInput::PreviousStep(index) => WireFusedInput::PreviousStep {
+                                index: crate::schema::host_index(*index),
+                            },
                         })
                         .collect(),
                 })
@@ -6174,27 +6301,172 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
             k,
             accumulator,
         } => WireRiscOp::BlasMatmul {
-            batch_dims: batch_dims.iter().map(wire_dim_expr).collect(),
-            m: wire_dim_expr(m),
-            n: wire_dim_expr(n),
-            k: wire_dim_expr(k),
+            batch_dims: batch_dims
+                .iter()
+                .map(wire_dim_expr)
+                .collect::<WireResult<_>>()?,
+            m: wire_dim_expr(m)?,
+            n: wire_dim_expr(n)?,
+            k: wire_dim_expr(k)?,
             accumulator: accumulator.name().to_string(),
         },
-        RiscOp::Gather { axis } => WireRiscOp::Gather { axis: *axis },
-        RiscOp::ScatterAdd { axis } => WireRiscOp::ScatterAdd { axis: *axis },
-        RiscOp::Scatter { axis } => WireRiscOp::Scatter { axis: *axis },
-        RiscOp::ScatterElements { axis } => WireRiscOp::ScatterElements { axis: *axis },
-    }
+        RiscOp::Gather { axis } => WireRiscOp::Gather {
+            axis: wire_axis(*axis)?,
+        },
+        RiscOp::ScatterAdd { axis } => WireRiscOp::ScatterAdd {
+            axis: wire_axis(*axis)?,
+        },
+        RiscOp::Scatter { axis } => WireRiscOp::Scatter {
+            axis: wire_axis(*axis)?,
+        },
+        RiscOp::ScatterElements { axis } => WireRiscOp::ScatterElements {
+            axis: wire_axis(*axis)?,
+        },
+    })
 }
+
+#[cfg(test)]
+use crate::schema::ExecutionValue;
+
+#[cfg(test)]
+#[path = "../../../tests/support/wire_values.rs"]
+pub(crate) mod wire_values;
 
 #[cfg(test)]
 #[allow(deprecated)] // exercises eval_many for behavior parity; deprecation is for external callers
 mod tests {
     use super::*;
     use crate::schema::ExecutionValue;
+    use crate::schema::{WireDeepAtom, WireDeepExprKind};
     use std::fs;
     use std::path::Path;
     use tempfile::TempDir;
+
+    fn native_wire_witness_fixture() -> Dag {
+        use chelis_ir::dag::RtAxis;
+        let mut dag = Dag::new();
+        let input = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Named("rows".into(), None)],
+                precision: Prim::F32,
+            },
+            Some("input-span".into()),
+        );
+        let requirements = [4, 4, 9]
+            .into_iter()
+            .map(|value| chelis_types::scalar_from_i64("load", Prim::Int64, value).unwrap())
+            .collect();
+        let witness = dag.add_node(
+            RiscOp::ExtentWitness {
+                parameter: "x".into(),
+                axis: RtAxis::Lit(0),
+                requirements,
+            },
+            vec![input],
+            TensorType {
+                dims: vec![],
+                precision: Prim::Int64,
+            },
+            Some("call-span".into()),
+        );
+        dag.node_mut(witness).unwrap().merged_spans = vec!["result-span".into()];
+        let root = dag.add_node(
+            RiscOp::Const {
+                value: chelis_types::scalar_from_i64("load", Prim::Int64, 9).unwrap(),
+            },
+            vec![],
+            TensorType {
+                dims: vec![],
+                precision: Prim::Int64,
+            },
+            None,
+        );
+        dag.node_mut(root).unwrap().shape_deps = vec![witness];
+        dag.add_root(root);
+        dag
+    }
+
+    #[test]
+    fn native_wire_witness_projection_preserves_exact_claims_and_provenance() {
+        let dag = native_wire_witness_fixture();
+        let projected = wire_dag(&dag).unwrap();
+        let json = serde_json::to_value(&projected).unwrap();
+        assert_eq!(json["schema_version"], 9);
+        assert_eq!(
+            json["nodes"][1]["op"]["requirements"],
+            serde_json::json!([4, 4, 9])
+        );
+        assert_eq!(
+            json["nodes"][1]["op"]["axis"],
+            serde_json::json!({"axis":"lit","value":0})
+        );
+        assert_eq!(json["nodes"][1]["span_id"], "call-span");
+        assert_eq!(
+            json["nodes"][1]["merged_spans"],
+            serde_json::json!(["result-span"])
+        );
+        assert_eq!(json["nodes"][2]["shape_deps"], serde_json::json!([1]));
+        assert_eq!(json["nodes"][2]["span_id"], serde_json::Value::Null);
+        let decoded = WireDag::from_validated_json(&json.to_string()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+    }
+
+    #[test]
+    fn native_wire_witness_projection_rejects_invalid_requirements_and_edges() {
+        use chelis_ir::dag::{NodeId, RtAxis};
+        for (invalid, expected) in [
+            (
+                chelis_types::scalar_from_i64("load", Prim::Int64, -1).unwrap(),
+                "dimension extent must be a nonnegative int64",
+            ),
+            (
+                chelis_types::scalar_from_i64("load", Prim::Int32, 4).unwrap(),
+                "source integer requires exact int64 dtype",
+            ),
+        ] {
+            let mut dag = native_wire_witness_fixture();
+            let RiscOp::ExtentWitness { requirements, .. } =
+                &mut dag.node_mut(NodeId(1)).unwrap().op
+            else {
+                unreachable!()
+            };
+            requirements[0] = invalid;
+            assert_eq!(wire_dag(&dag).unwrap_err(), expected);
+        }
+        for mutation in 0..4 {
+            let mut dag = native_wire_witness_fixture();
+            match mutation {
+                0 => dag.node_mut(NodeId(2)).unwrap().shape_deps = vec![NodeId(2)],
+                1 => dag.node_mut(NodeId(1)).unwrap().inputs.clear(),
+                2 => dag.node_mut(NodeId(1)).unwrap().output_type.precision = Prim::F32,
+                3 => {
+                    let RiscOp::ExtentWitness { axis, .. } =
+                        &mut dag.node_mut(NodeId(1)).unwrap().op
+                    else {
+                        unreachable!()
+                    };
+                    *axis = RtAxis::Lit(1);
+                }
+                _ => unreachable!(),
+            }
+            assert!(wire_dag(&dag).is_err(), "native mutation {mutation}");
+        }
+    }
+
+    #[test]
+    fn wire_producer_rejects_numeric_narrowing_instead_of_repairing_ir() {
+        assert!(wire_float_parameter(f64::from(0.1_f32), Prim::F32).is_ok());
+        assert!(wire_float_parameter(0.1_f64, Prim::F32).is_err());
+        assert!(wire_float_parameter(f64::NAN, Prim::F64).is_err());
+        assert!(wire_float_parameter(1.0, Prim::Int64).is_err());
+        assert_eq!(wire_axis(0).unwrap(), 0);
+        assert!(wire_axis(usize::MAX).is_err());
+        assert_eq!(wire_extent(0).unwrap().get(), 0);
+        #[cfg(target_pointer_width = "64")]
+        assert!(wire_extent(usize::MAX).is_err());
+    }
 
     /// chelis#1395 [04-FIT-16]: a lexer error carries a byte offset, so the
     /// carrier transports it.
@@ -6221,7 +6493,7 @@ mod tests {
         assert_eq!(
             span,
             DiagnosticSpan::Point {
-                offset: source.find('"').expect("the fixture has a quote"),
+                offset: u64::try_from(source.find('"').expect("the fixture has a quote")).unwrap(),
             },
             "the point must be the offset the lexer reported"
         );
@@ -6246,7 +6518,7 @@ mod tests {
         assert_eq!(
             span,
             DiagnosticSpan::Point {
-                offset: source.find('"').expect("the fixture has a quote"),
+                offset: u64::try_from(source.find('"').expect("the fixture has a quote")).unwrap(),
             }
         );
     }
@@ -6312,7 +6584,7 @@ mod tests {
             .expect("typed Deep must parse and stamp");
         assert!(matches!(exprs.first(), Some(DeepExpr::Node(_, _))));
 
-        let wire = wire_deep_expr(&exprs[0]);
+        let wire = wire_deep_expr(&exprs[0]).expect("finite Deep source must encode");
         let WireDeepExprKind::List { elements } = wire.kind else {
             panic!("a typed node must cross the wire as its canonical list shape");
         };
@@ -7442,11 +7714,17 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
             artifact.inputs
         );
         assert_eq!(artifact.outputs.len(), 1, "{:?}", artifact.outputs);
-        let input_dims: Vec<Option<usize>> =
-            artifact.inputs[0].dims.iter().map(|d| d.size).collect();
+        let input_dims: Vec<Option<usize>> = artifact.inputs[0]
+            .dims
+            .iter()
+            .map(|d| d.size.map(|size| usize::try_from(size.get()).unwrap()))
+            .collect();
         assert_eq!(input_dims, vec![Some(2)], "main's input is tensor[2, f32]");
-        let output_dims: Vec<Option<usize>> =
-            artifact.outputs[0].dims.iter().map(|d| d.size).collect();
+        let output_dims: Vec<Option<usize>> = artifact.outputs[0]
+            .dims
+            .iter()
+            .map(|d| d.size.map(|size| usize::try_from(size.get()).unwrap()))
+            .collect();
         assert_eq!(output_dims, vec![Some(2)]);
     }
 
@@ -7470,7 +7748,7 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
             "x".to_string(),
             crate::schema::TensorValue {
                 shape: vec![2],
-                data: crate::schema::TensorElements::F32(vec![3.0, 4.0]),
+                data: wire_values::storage_f32(vec![3.0, 4.0]),
             },
         );
         let eval_result = eval_in_context_with_bindings(&context, source, bindings)
@@ -7493,7 +7771,7 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
         };
         assert_eq!(
             data,
-            crate::schema::TensorElements::F32(vec![3.0, 4.0]),
+            wire_values::storage_f32(vec![3.0, 4.0]),
             "identity consume(x) == x"
         );
 
@@ -7504,8 +7782,11 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
             1,
             "compiled output arity agrees with the single eval root"
         );
-        let output_dims: Vec<Option<usize>> =
-            artifact.outputs[0].dims.iter().map(|d| d.size).collect();
+        let output_dims: Vec<Option<usize>> = artifact.outputs[0]
+            .dims
+            .iter()
+            .map(|d| d.size.map(|size| usize::try_from(size.get()).unwrap()))
+            .collect();
         assert_eq!(
             output_dims,
             vec![Some(2)],
@@ -7520,7 +7801,7 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
             "live".to_string(),
             crate::schema::TensorValue {
                 shape: vec![2],
-                data: crate::schema::TensorElements::F32(vec![3.0, 4.0]),
+                data: wire_values::storage_f32(vec![3.0, 4.0]),
             },
         );
         let result = eval(EvalRequest {
@@ -7548,14 +7829,14 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
             "x".to_string(),
             crate::schema::TensorValue {
                 shape: vec![2],
-                data: crate::schema::TensorElements::F32(vec![1.0, 2.0]),
+                data: wire_values::storage_f32(vec![1.0, 2.0]),
             },
         );
         bindings.insert(
             "y".to_string(),
             crate::schema::TensorValue {
                 shape: vec![2],
-                data: crate::schema::TensorElements::F32(vec![3.0, 4.0]),
+                data: wire_values::storage_f32(vec![3.0, 4.0]),
             },
         );
         let result = eval(EvalRequest {
@@ -7599,7 +7880,7 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
             "x".to_string(),
             crate::schema::TensorValue {
                 shape: vec![2],
-                data: crate::schema::TensorElements::F32(vec![1.0, 2.0]),
+                data: wire_values::storage_f32(vec![1.0, 2.0]),
             },
         );
         let result = eval(EvalRequest {
@@ -7622,14 +7903,14 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
             "x".to_string(),
             crate::schema::TensorValue {
                 shape: vec![2],
-                data: crate::schema::TensorElements::F32(vec![1.0, 2.0]),
+                data: wire_values::storage_f32(vec![1.0, 2.0]),
             },
         );
         bindings.insert(
             "y".to_string(),
             crate::schema::TensorValue {
                 shape: vec![2],
-                data: crate::schema::TensorElements::F32(vec![3.0, 4.0]),
+                data: wire_values::storage_f32(vec![3.0, 4.0]),
             },
         );
         let source = "type Pair =\n\
@@ -7676,7 +7957,7 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
             "x".to_string(),
             crate::schema::TensorValue {
                 shape: vec![2],
-                data: crate::schema::TensorElements::F32(vec![1.0, 2.0]),
+                data: wire_values::storage_f32(vec![1.0, 2.0]),
             },
         );
         let source = "type Pair =\n\
@@ -7951,7 +8232,7 @@ dims = (rank(x), shape(x, 1), numel(x))
                 "x".to_string(),
                 crate::schema::TensorValue {
                     shape: vec![2, 3],
-                    data: crate::schema::TensorElements::F32(vec![0.0; 6]),
+                    data: wire_values::storage_f32(vec![0.0; 6]),
                 },
             )]),
         })
@@ -7963,21 +8244,21 @@ dims = (rank(x), shape(x, 1), numel(x))
                 .roots
                 .iter()
                 .any(|root| root.name.as_deref() == Some("dims.0")
-                    && matches!(root.value, ExecutionValue::Int64 { value: 2 }))
+                    && matches!(root.value, ExecutionValue::Scalar { value } if value.get().prim() == Prim::Int64 && value.get().as_i64_exact() == Some(2)))
         );
         assert!(
             result
                 .roots
                 .iter()
                 .any(|root| root.name.as_deref() == Some("dims.1")
-                    && matches!(root.value, ExecutionValue::Int64 { value: 3 }))
+                    && matches!(root.value, ExecutionValue::Scalar { value } if value.get().prim() == Prim::Int64 && value.get().as_i64_exact() == Some(3)))
         );
         assert!(
             result
                 .roots
                 .iter()
                 .any(|root| root.name.as_deref() == Some("dims.2")
-                    && matches!(root.value, ExecutionValue::Int64 { value: 6 }))
+                    && matches!(root.value, ExecutionValue::Scalar { value } if value.get().prim() == Prim::Int64 && value.get().as_i64_exact() == Some(6)))
         );
     }
 
@@ -7990,7 +8271,10 @@ dims = (rank(x), shape(x, 1), numel(x))
                 "x".to_string(),
                 crate::schema::TensorValue {
                     shape: vec![1],
-                    data: crate::schema::TensorElements::F16(vec![1.5]),
+                    data: serde_json::from_value(
+                        serde_json::json!({"dtype":"f16","bits":["3e00"]}),
+                    )
+                    .unwrap(),
                 },
             )]),
         })
@@ -8040,7 +8324,7 @@ result = if matches_path then parsed else cast(0, int64)
                 .roots
                 .iter()
                 .any(|root| root.name.as_deref() == Some("result")
-                    && matches!(root.value, ExecutionValue::Int64 { value: 42 }))
+                    && matches!(root.value, ExecutionValue::Scalar { value } if value.get().prim() == Prim::Int64 && value.get().as_i64_exact() == Some(42)))
         );
         assert_eq!(result.transcript, vec!["ckpt-42.safetensors".to_string()]);
     }
@@ -8064,21 +8348,21 @@ shifted = shr(cast(8, int64), cast(1, int64))
                 .roots
                 .iter()
                 .any(|root| root.name.as_deref() == Some("bits")
-                    && matches!(root.value, ExecutionValue::Int64 { value: 7 }))
+                    && matches!(root.value, ExecutionValue::Scalar { value } if value.get().prim() == Prim::Int64 && value.get().as_i64_exact() == Some(7)))
         );
         assert!(
             result
                 .roots
                 .iter()
                 .any(|root| root.name.as_deref() == Some("rem")
-                    && matches!(root.value, ExecutionValue::Int64 { value: 2 }))
+                    && matches!(root.value, ExecutionValue::Scalar { value } if value.get().prim() == Prim::Int64 && value.get().as_i64_exact() == Some(2)))
         );
         assert!(
             result
                 .roots
                 .iter()
                 .any(|root| root.name.as_deref() == Some("shifted")
-                    && matches!(root.value, ExecutionValue::Int64 { value: 4 }))
+                    && matches!(root.value, ExecutionValue::Scalar { value } if value.get().prim() == Prim::Int64 && value.get().as_i64_exact() == Some(4)))
         );
     }
 
@@ -8102,7 +8386,7 @@ value = sum_to(cast(3, int64))
                 .roots
                 .iter()
                 .any(|root| root.name.as_deref() == Some("value")
-                    && matches!(root.value, ExecutionValue::Int64 { value: 6 }))
+                    && matches!(root.value, ExecutionValue::Scalar { value } if value.get().prim() == Prim::Int64 && value.get().as_i64_exact() == Some(6)))
         );
     }
 
@@ -8157,7 +8441,7 @@ label = if eq(year, cast(2024, int64)) then "leap" else "plain"
                 .roots
                 .iter()
                 .any(|root| root.name.as_deref() == Some("year")
-                    && matches!(root.value, ExecutionValue::Int64 { value: 2024 }))
+                    && matches!(root.value, ExecutionValue::Scalar { value } if value.get().prim() == Prim::Int64 && value.get().as_i64_exact() == Some(2024)))
         );
         assert!(
             result
@@ -8310,7 +8594,7 @@ b: tensor[2, f32] = b
             "a".to_string(),
             crate::schema::TensorValue {
                 shape: vec![2],
-                data: crate::schema::TensorElements::F32(vec![1.0, 2.0]),
+                data: wire_values::storage_f32(vec![1.0, 2.0]),
             },
         );
         // `b` is intentionally omitted so that evaluating root `b` fails.
@@ -8436,7 +8720,7 @@ b: tensor[2, f32] = b
             "a".to_string(),
             crate::schema::TensorValue {
                 shape: vec![2],
-                data: crate::schema::TensorElements::F32(vec![1.0, 2.0]),
+                data: wire_values::storage_f32(vec![1.0, 2.0]),
             },
         );
 

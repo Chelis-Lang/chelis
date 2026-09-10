@@ -141,7 +141,7 @@ fn polymorphic_return_borrow_chain_is_accepted_post_fix() {
 
     let json = run_check(&fixture);
     let kinds = error_kinds(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         kinds.is_empty(),
         "polymorphic-return borrow chain must produce no errors post-fix; got {kinds:?}"
@@ -180,7 +180,7 @@ fn id4_roundtrip_workaround_still_works() {
 
     let json = run_check(&fixture);
     let kinds = error_kinds(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         kinds.is_empty(),
         "id4 round-trip workaround must produce no errors; got {kinds:?}"
@@ -253,7 +253,7 @@ fn direct_relu_borrow_chain_keeps_working() {
 
     let json = run_check(&fixture);
     let kinds = error_kinds(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         kinds.is_empty(),
         "direct relu → borrow chain must keep working; got {kinds:?}"
@@ -281,7 +281,7 @@ fn issue_154_tensor_carrying_record_adt_still_borrows() {
 
     let json = run_check(&fixture);
     let kinds = error_kinds(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         kinds.is_empty(),
         "chelis#154 tensor-carrying record ADT borrow must keep working; got {kinds:?}"
@@ -509,7 +509,7 @@ fn borrow_of_poly_param_pinned_to_tensor_is_accepted() {
 
     let json = run_check(&fixture);
     let kinds = error_kinds(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         kinds.is_empty(),
         "a deferred borrow that resolves to a tensor must be accepted; got {kinds:?}"
@@ -628,7 +628,7 @@ fn borrow_of_concrete_carrier_adt_is_accepted() {
 
     let json = run_check(&fixture);
     let kinds = error_kinds(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         kinds.is_empty(),
         "a deferred borrow that resolves to a tensor-carrying ADT must be \
@@ -682,7 +682,7 @@ fn borrow_of_concrete_transitive_carrier_is_accepted() {
 
     let json = run_check(&fixture);
     let kinds = error_kinds(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         kinds.is_empty(),
         "a deferred borrow that resolves to a transitively-tensor-carrying \
@@ -762,7 +762,7 @@ fn borrow_of_inferred_param_resolving_to_carrier_is_accepted() {
         "def use_it(seed) -> bool = consume_bnp(&seed)\n",
     );
     let kinds = error_kinds(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         kinds.is_empty(),
         "a borrow of an inferred parameter that inference resolves to a \
@@ -802,7 +802,7 @@ fn borrow_of_inferred_param_agrees_across_both_ingresses() {
         error_messages(&deep),
         "Surf and Deep ingresses must agree on the error list"
     );
-    assert_eq!(surf["score"], 1, "perfect-score contract: {surf}");
+    assert_eq!(surf["score"], 1.0, "perfect-score contract: {surf}");
     assert!(
         error_kinds(&surf).is_empty(),
         "both ingresses must accept the inferred-parameter borrow; got {:?}",
@@ -825,7 +825,7 @@ fn borrow_of_unannotated_def_resolving_to_carrier_is_accepted() {
         "def use_it(seed) = consume_bnp(&seed)\n",
     );
     let kinds = error_kinds(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         kinds.is_empty(),
         "a borrow inside a def with no annotation at all must be accepted \
@@ -848,7 +848,7 @@ fn borrow_of_lambda_param_resolving_to_carrier_is_accepted() {
         "def use_it[n](p: BatchNormParams[n]) -> bool = (fn (v) -> consume_bnp(&v))(p)\n",
     );
     let kinds = error_kinds(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         kinds.is_empty(),
         "a borrow of a lambda parameter that resolves to a carrier must be \
@@ -871,7 +871,7 @@ fn borrow_of_let_alias_of_inferred_param_is_accepted() {
         "def use_it(seed) -> bool = {\n  v = seed\n  consume_bnp(&v)\n}\n",
     );
     let kinds = error_kinds(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         kinds.is_empty(),
         "a borrow of a let alias of an inferred parameter must be accepted \
@@ -1006,7 +1006,7 @@ fn borrow_of_relu_result_with_unresolved_dims_is_accepted() {
 
     let json = run_check(&fixture);
     let kinds = error_kinds(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         kinds.is_empty(),
         "a borrow of a tensor with unresolved dimension variables must be \

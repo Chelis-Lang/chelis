@@ -3279,7 +3279,7 @@ fn eval_surf_sample(
                 effects: None,
                 span: chelis_deep::Span::new(0, 0),
             });
-            debug_assert_eq!(tensor.data.len(), tensor.shape.iter().product::<usize>());
+            debug_assert!(tensor.validate().is_ok());
         }
     }
     source_decls.push(Decl::LetDef {
@@ -3353,7 +3353,7 @@ fn eval_bool_with_bindings(
         [root] => match &root.value {
             ExecutionValue::Bool { value } => Ok(*value),
             ExecutionValue::Tensor { value } if value.shape.is_empty() && value.data.len() == 1 => {
-                Ok(value.data.element_as_f64_lossy(0) != 0.0)
+                Ok(value.data.element_f64_lossy(0) != 0.0)
             }
             other => Err(format!(
                 "property root evaluated to non-bool value: {other:?}"

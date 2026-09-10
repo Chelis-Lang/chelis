@@ -330,7 +330,7 @@ fixtures preceded implementation and both runners now pass.
 `runtime_extent_literal_transport` checks independent requirements, invalid
 carriers, root liveness, CSE/folding, grad and vmap. `wire_extent_witness`
 checks exact claims, invocation edges and source provenance on roundtrip,
-plus rejection of missing fields and malformed claims/edges. WireDag v8
+plus rejection of missing fields and malformed claims/edges. WireDag v9
 adds these explicit fields; stdlib/library cache versions are 15/11.
 The wider named-claim and op-computed-source exits remain separate. HIP and
 Metal retain their existing runtime scalar shape-read exclusions; these

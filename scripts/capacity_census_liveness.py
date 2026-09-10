@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Capacity census liveness gate (chelis#729, dtype_semantics.md section C6).
 
-The Rust tripwires prove that every discovered row either has exactly one
-final authority or belongs to the exact sealed foundation-era legacy set.
-This script checks the leg CI cannot: that every issue cited by an active
-legacy disposition is still OPEN. Rows with final authority omit a citation
-and are deliberately outside this liveness ledger.
+The owning tripwires verify discovered rows against their final authority
+and, for families that still retain it, sealed foundation-era legacy debt.
+This script checks that every issue cited by an active legacy disposition
+is still OPEN. Wire baseline version 2 has no legacy admission: this script
+validates its final-row shape before any issue lookup. The live wire verifier
+owns graph completeness, semantic authority, and execution evidence; a valid
+baseline shape does not prove those obligations.
 
 Network gate (run by the change-gated and nightly liveness jobs; it also runs
 manually at release cuts and during red-team passes):
@@ -40,11 +42,6 @@ CENSUS_RELS = (
 )
 ISSUE_REF = re.compile(r"chelis#(\d+)")
 LEGACY_TRANSITION_DISPOSITIONS_BY_FAMILY = {
-    "wire": frozenset(
-        {
-            "permanent-disposition(C6 dtype-tagged wire schema complete descriptor set ratified 2026-08-04)",
-        }
-    ),
     "bindings": frozenset(
         {
             "permanent-disposition(C6 registered PyO3 signature surface complete descriptor set ratified 2026-08-04)",
@@ -56,6 +53,66 @@ LEGACY_TRANSITION_DISPOSITIONS = frozenset(
     for dispositions in LEGACY_TRANSITION_DISPOSITIONS_BY_FAMILY.values()
     for disposition in dispositions
 )
+WIRE_ROW_KEYS = frozenset({"kind", "id", "flags", "authority", "contract"})
+
+
+def wire_row_problem(row: object) -> str | None:
+    """Validate persisted final-row shape, not the claimed contract's authority."""
+    if not isinstance(row, dict) or row.keys() != WIRE_ROW_KEYS:
+        return "WIRE BASELINE row requires exactly kind/id/flags/authority/contract; no legacy fields"
+    identity = row["id"]
+    if (
+        row["kind"] != "wire-schema-numeric-field"
+        or not isinstance(identity, str)
+        or not identity.strip()
+    ):
+        return "WIRE BASELINE row must identify a wire-schema numeric field"
+    if row["flags"] not in (["float-carrier"], ["numeric-field"]):
+        return f"WIRE BASELINE row requires exactly one numeric capacity flag: {identity}"
+    if row["authority"] not in ("TaggedTransport", "NumericOperation"):
+        return f"WIRE BASELINE row requires TaggedTransport or NumericOperation: {identity}"
+    contract = row["contract"]
+    if not isinstance(contract, str) or not contract.strip():
+        return f"WIRE BASELINE row requires a final-authority contract: {identity}"
+    if row["authority"] == "NumericOperation" and not re.fullmatch(
+        r"\[05-OP-[0-9]+\]", contract
+    ):
+        return f"WIRE BASELINE numeric operation contract requires [05-OP-N]: {identity}"
+    return None
+
+
+def validate_wire_baseline(payload: object) -> None:
+    """Reject version/shape drift and duplicate identities without trusting a count.
+
+    Source digests, graph identities, and execution receipts are fresh verifier
+    output. They cannot be supplied by this persisted version-2 baseline.
+    """
+    if (
+        not isinstance(payload, dict)
+        or payload.keys() != {"version", "rows"}
+        or type(payload["version"]) is not int
+        or payload["version"] != 2
+        or not isinstance(payload["rows"], list)
+    ):
+        raise ValueError("WIRE BASELINE requires exactly version: 2 and rows: [...]; no legacy fields")
+    identities: set[str] = set()
+    for row in payload["rows"]:
+        problem = wire_row_problem(row)
+        if problem:
+            raise ValueError(problem)
+        if row["id"] in identities:
+            raise ValueError(f"WIRE BASELINE DUPLICATE identity: {row['id']}")
+        identities.add(row["id"])
+
+
+def wire_json_object(pairs: list[tuple[str, object]]) -> dict:
+    """Do not let a repeated JSON key overwrite a version or row contract."""
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"WIRE BASELINE DUPLICATE JSON key: {key}")
+        result[key] = value
+    return result
 
 
 def census_family(census_rel: Path) -> str:
@@ -105,17 +162,22 @@ def load_census_rows(
     root: Path,
     census_rels: tuple[Path, ...] = CENSUS_RELS,
 ) -> list[dict]:
-    """Load all frozen census rows and apply a baseline-level citation.
+    """Load census rows, validating wire final-only shape before issue lookup.
 
     The original covered-family baseline stores citations per row because
-    individual legacy seams can have different owners. The generated typed
-    baselines share one citation, kept at the top level so generator output is
-    entirely structural. A row-level citation, when present, remains stronger.
+    individual legacy seams can have different owners. A legacy typed family
+    may share one baseline-level citation; a row citation remains stronger.
+    The wire baseline rejects either citation location, including empty ones.
     """
     rows: list[dict] = []
     for census_rel in census_rels:
-        payload = json.loads((root / census_rel).read_text())
         family = census_family(census_rel)
+        payload = json.loads(
+            (root / census_rel).read_text(),
+            object_pairs_hook=wire_json_object if family == "wire" else None,
+        )
+        if family == "wire":
+            validate_wire_baseline(payload)
         inherited_citation = str(payload.get("citation", "")).strip()
         for source_row in payload["rows"]:
             row = dict(source_row)
@@ -135,6 +197,14 @@ def adjudicate(rows: list[dict], issues: dict[int, IssueRecord]) -> list[str]:
     """
     problems: list[str] = []
     for row in rows:
+        family = str(row.get("_census_family", "")).strip()
+        if family == "wire":
+            problem = wire_row_problem(
+                {key: value for key, value in row.items() if key != "_census_family"}
+            )
+            if problem:
+                problems.append(problem)
+            continue
         citation = str(row.get("citation", "")).strip()
         row_id = f"[{row.get('kind', '?')}] {row.get('id', '?')}"
         if not citation:
@@ -142,7 +212,6 @@ def adjudicate(rows: list[dict], issues: dict[int, IssueRecord]) -> list[str]:
         if citation == "TODO":
             problems.append(f"TODO legacy disposition (Rust tripwire should have caught this): {row_id}")
             continue
-        family = str(row.get("_census_family", "")).strip()
         family_dispositions = LEGACY_TRANSITION_DISPOSITIONS_BY_FAMILY.get(
             family, frozenset()
         )
@@ -213,7 +282,12 @@ def fetch_issue(
 
 def main() -> int:
     root = Path(__file__).resolve().parent.parent
-    rows = load_census_rows(root)
+    try:
+        rows = load_census_rows(root)
+    except (OSError, ValueError) as error:
+        print(f"capacity census baseline violation: {error}")
+        print("CAPACITY CENSUS LIVENESS: FAIL")
+        return 1
     legacy_rows = [
         row for row in rows if str(row.get("citation", "")).strip()
     ]

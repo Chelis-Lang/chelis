@@ -80,6 +80,15 @@ host library or device does not authorize dtype substitution.
 The callable tensor interface rejects a scalar-signature entry; evaluation
 admits scalar results under its own execution-value contract.
 
+The callable artifact metadata uses the exact uint32 discriminant
+`abi_version: 1`. A consumer requires this field and validates the supported
+ABI version before decoding the remaining metadata, inspecting its source,
+or opening the compiled library. Missing, duplicate, non-integer, and
+unsupported version fields are errors; no missing-version default or
+versionless fallback is permitted. This discriminant selects the callable
+ABI and is distinct from execution-value and DAG schema versions. Tensor
+metadata retains the exact extent and dtype contracts above.
+
 `project_root` supplies Reef dependency context. `compile_and_load` discovers
 a root from an importing Surf source unless explicitly disabled; an explicit
 nonempty root selects that context. Evaluation from raw text requires an

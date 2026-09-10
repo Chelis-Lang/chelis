@@ -39,7 +39,12 @@ fn produced_value_flatteners_have_no_lossy_numeric_fallback() {
         "fn flatten_field_value(",
         "fn validate_produced_env(",
     );
-    for forbidden in ["as f64", "to_f64_lossy_vec", "element_as_f64_lossy"] {
+    for forbidden in [
+        "as f64",
+        "to_f64_lossy_vec",
+        "element_as_f64_lossy",
+        "element_f64_lossy",
+    ] {
         assert!(
             !flatten.contains(forbidden),
             "obligation produced-value flattener contains lossy path `{forbidden}`"
@@ -56,7 +61,12 @@ fn produced_value_flatteners_have_no_lossy_numeric_fallback() {
         "fn read_produced_field(",
         "fn sample_raw_input_expr(",
     );
-    for forbidden in ["as f64", "to_f64_lossy_vec", "element_as_f64_lossy"] {
+    for forbidden in [
+        "as f64",
+        "to_f64_lossy_vec",
+        "element_as_f64_lossy",
+        "element_f64_lossy",
+    ] {
         assert!(
             !read.contains(forbidden),
             "opaque producer reader contains lossy path `{forbidden}`"
@@ -67,24 +77,20 @@ fn produced_value_flatteners_have_no_lossy_numeric_fallback() {
         "opaque tensor fields must cross through the exhaustive typed wire reader"
     );
 
-    for variant in [
-        "ExecutionValue::Float16",
-        "ExecutionValue::Bfloat16",
-        "ExecutionValue::Float32",
-        "ExecutionValue::Float64",
-        "ExecutionValue::Int8",
-        "ExecutionValue::Int16",
-        "ExecutionValue::Int32",
-        "ExecutionValue::Int64",
-        "ExecutionValue::Bool",
-    ] {
+    for variant in ["ExecutionValue::Scalar", "ExecutionValue::Bool"] {
         assert!(
             flatten.contains(variant),
-            "obligation flattener must classify public scalar carrier `{variant}`"
+            "obligation flattener must classify {variant}"
         );
         assert!(
             read.contains(variant),
-            "opaque producer reader must classify public scalar carrier `{variant}`"
+            "opaque reader must classify {variant}"
+        );
+    }
+    for reader in [flatten, read] {
+        assert!(
+            reader.contains("value.get().prim() == prim"),
+            "scalar wire admission must require exact dtype equality"
         );
     }
     for forbidden in ["if prim.is_float()", "if prim.is_integer()"] {

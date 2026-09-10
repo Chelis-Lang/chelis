@@ -87,15 +87,11 @@ class DtypeIngressTests(unittest.TestCase):
             ("int16", -16),
             ("int32", -32),
             ("int64", 2**53 + 1),
-            ("float16", 1.5),
-            ("bfloat16", 1.5),
-            ("float32", 0.25),
-            ("float64", 1e100),
         ]
         for wire_type, value in cases:
             with self.subTest(wire_type=wire_type):
                 self.assertEqual(
-                    chelis._execution_value({"type": wire_type, "value": value}),
+                    chelis._execution_value({"type": "scalar", "value": {"dtype": wire_type, "value": value}}),
                     value,
                 )
 

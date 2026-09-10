@@ -204,84 +204,113 @@ def classify_check_program(
 # EVAL-LANE OUTCOME. Mirrors compiler_eval_scalar + read_root_scalar +
 # differential_eval (check.ch 528-704).
 # ============================================================================
-def _read_numeric_value(dtype: object, value: object) -> NumericScalar | None:
-    """Mechanically decode one execution-wire v2 numeric carrier.
+_FLOAT_FORMATS = {"f64": (16, "!d"), "f32": (8, "!f"),
+                  "f16": (4, "!e"), "bf16": (4, "!f")}
+_INTEGER_WIDTHS = {"int64": 64, "int32": 32, "int16": 16, "int8": 8}
 
-    Rust emits the shortest decimal which round-trips at the carrier width.
-    Python's JSON reader materializes that token as binary64, so an f32 token
-    must be rounded at f32 width before comparison. This recovers the value the
-    tagged carrier denotes; it does not introduce a comparison tolerance.
-    Reduced floats are already carried as exact binary64 images. Integer tags
-    remain Python integers so their exact values never pass through binary64.
+
+def _read_numeric_value(carrier: object) -> NumericScalar | None:
+    """Read spec/10 §3.2's exact carrier for numerical comparison.
+
+    Each float is unpacked at its declared width before Python comparison.
+    Integers remain integers. This numeric view preserves finite values, zero
+    sign and nonfinite class; it does not round-trip NaN payload identities.
     """
-    if dtype in (
-        "f16",
-        "float16",
-        "bf16",
-        "bfloat16",
-        "f32",
-        "float32",
-        "f64",
-        "float64",
-    ):
-        if value is None:
-            return math.nan
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not isinstance(carrier, dict):
+        return None
+    dtype = carrier.get("dtype")
+    if not isinstance(dtype, str):
+        return None
+    if dtype in _FLOAT_FORMATS:
+        if set(carrier) != {"dtype", "bits"}:
             return None
-        numeric = float(value)
-        if dtype in ("f32", "float32"):
-            return struct.unpack("!f", struct.pack("!f", numeric))[0]
-        return numeric
-    if dtype in ("int8", "int16", "int32", "int64"):
-        if isinstance(value, bool) or not isinstance(value, int):
+        digits, fmt = _FLOAT_FORMATS[dtype]
+        bits = carrier["bits"]
+        if (not isinstance(bits, str) or len(bits) != digits
+                or any(c not in "0123456789abcdef" for c in bits)):
             return None
-        return value
-    if dtype == "bool" and isinstance(value, bool):
-        return 1 if value else 0
+        raw = bytes.fromhex(bits)
+        if dtype == "bf16":
+            raw += b"\x00\x00"
+        return struct.unpack(fmt, raw)[0]
+    if set(carrier) != {"dtype", "value"}:
+        return None
+    value = carrier["value"]
+    if dtype in _INTEGER_WIDTHS:
+        width = _INTEGER_WIDTHS[dtype]
+        if type(value) is int and -(1 << (width - 1)) <= value < (1 << (width - 1)):
+            return value
+    elif dtype == "bool" and type(value) is bool:
+        return int(value)
     return None
 
 
 def _read_root_scalar(root_value: object) -> NumericScalar | None:
-    """The numeric view of one v2 EvaluatedRoot value.
+    """The first scalar element of a valid v3 scalar, bool or tensor root.
 
-    Numeric scalar and tensor carriers are interpreted at their tagged dtype.
-    An explicit JSON null on a float carrier is the NON-FINITE sentinel
-    (Some(NaN), not None). Other value types return None.
+    Other execution variants have no scalar projection. A tensor's entire
+    storage and shape are admitted before reading its first element.
     """
-    if not isinstance(root_value, dict):
+    if not isinstance(root_value, dict) or set(root_value) != {"type", "value"}:
         return None
     ty = root_value.get("type")
     val = root_value.get("value")
-    scalar = _read_numeric_value(ty, val)
-    if scalar is not None:
-        return scalar
-    if ty == "tensor":
-        if isinstance(val, dict):
-            data = val.get("data")
-            # Execution wire v2 (chelis#729): the tensor payload is the
-            # tagged per-dtype form {"dtype": ..., "values": [...]}. The
-            # legacy v1 bare-array branch was DELETED at the chelis#729
-            # rework: no archived v1 outputs exist in this repo, the
-            # toolchain's own decoder now rejects v1 payloads loudly, and
-            # a v1 shape reaching this reader means a stale producer that
-            # must be regenerated, not silently replayed.
-            if isinstance(data, dict):
-                values = data.get("values")
-                if (
-                    isinstance(values, list)
-                    and len(values) > 0
-                    and isinstance(values[0], (bool, int, float))
-                ):
-                    return _read_numeric_value(data.get("dtype"), values[0])
-                return None
-            if isinstance(data, list):
-                raise ValueError(
-                    "legacy v1 bare-array tensor payload is not supported: "
-                    "regenerate the output with a current chelis "
-                    "(execution wire v2, chelis#729)"
-                )
+    if ty == "scalar":
+        if isinstance(val, dict) and val.get("dtype") != "bool":
+            return _read_numeric_value(val)
         return None
+    if ty == "bool":
+        return int(val) if type(val) is bool else None
+    if ty == "tensor":
+        if not isinstance(val, dict) or set(val) != {"shape", "data"}:
+            return None
+        shape, data = val["shape"], val["data"]
+        if isinstance(data, list):
+            raise ValueError("legacy v1 bare-array tensor payload is not supported: "
+                             "regenerate the output with execution wire v3")
+        if (not isinstance(shape, list) or len(shape) >= 1 << 31
+                or any(type(d) is not int or not 0 <= d < 1 << 63 for d in shape)
+                or not isinstance(data, dict)):
+            return None
+        dtype = data.get("dtype")
+        if not isinstance(dtype, str):
+            return None
+        if dtype in _FLOAT_FORMATS:
+            payload, scalar_payload = "bits", "bits"
+            item_bytes = _FLOAT_FORMATS[dtype][0] // 2
+        elif dtype in _INTEGER_WIDTHS or dtype == "bool":
+            payload, scalar_payload = "values", "value"
+            item_bytes = _INTEGER_WIDTHS.get(dtype, 8) // 8
+        else:
+            return None
+        if set(data) != {"dtype", payload} or not isinstance(data[payload], list):
+            return None
+        values = data[payload]
+        count = 0 if 0 in shape else math.prod(shape)
+        if count != len(values) or count > min((1 << 63) - 1, sys.maxsize // item_bytes):
+            return None
+        first = None
+        for index, value in enumerate(values):
+            decoded = _read_numeric_value({"dtype": dtype, scalar_payload: value})
+            if decoded is None:
+                return None
+            if index == 0:
+                first = decoded
+        return first
     return None
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON member {key!r}")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(token: str) -> None:
+    raise ValueError(f"non-JSON numeric constant {token}")
 
 
 def compiler_eval_scalar(exit_code: int, stdout: str) -> NumericScalar | None:
@@ -291,10 +320,13 @@ def compiler_eval_scalar(exit_code: int, stdout: str) -> NumericScalar | None:
     if exit_code != 0:
         return None
     try:
-        root = json.loads(stdout)
+        root = json.loads(stdout, object_pairs_hook=_unique_json_object,
+                          parse_constant=_reject_json_constant)
     except (json.JSONDecodeError, ValueError):
         return None
     if not isinstance(root, dict):
+        return None
+    if type(root.get("schema_version")) is not int or root["schema_version"] != 3:
         return None
     roots = root.get("roots")
     if not isinstance(roots, list) or len(roots) == 0:
@@ -302,11 +334,10 @@ def compiler_eval_scalar(exit_code: int, stdout: str) -> NumericScalar | None:
     first = roots[0]
     if not isinstance(first, dict):
         return None
-    return _read_root_scalar(first.get("value"))
-
-
-def _is_finite(x: NumericScalar) -> bool:
-    return math.isfinite(x)
+    try:
+        return _read_root_scalar(first.get("value"))
+    except ValueError:
+        return None
 
 
 def derive_eval_outcome(
@@ -315,20 +346,22 @@ def derive_eval_outcome(
     tol: float,
 ) -> tuple[str, str]:
     """PURE eval-agreement classifier, mirroring differential_eval (check.ch 696).
-    Returns (bucket, detail) over EVAL_BUCKETS. NON-FINITE reconciliation:
-    compiler-null (NaN sentinel) AND Hull-non-finite -> agree; a finite value is
-    never close to a non-finite one. NaN never matches under tolerance."""
+    Returns (bucket, detail) over EVAL_BUCKETS. NaNs agree by class; infinities
+    agree only with the same sign. Finite comparisons keep the pinned tolerance
+    and exact integer subtraction."""
     if reference_scalar is None:
         return "ref_not_value", ""
     if compiler_scalar is None:
         return "compiler_crash", "compiler eval produced no parseable scalar root"
     c = compiler_scalar
     r = reference_scalar
-    # compiler reported a non-finite (NaN sentinel) AND Hull also non-finite.
-    if math.isnan(c) and not _is_finite(r):
-        return "agree", ""
-    # f32_close: NaN never matches; abs diff within tol.
     if math.isnan(r) or math.isnan(c):
+        if math.isnan(r) and math.isnan(c):
+            return "agree", ""
+        return "disagree", f"reference {r} vs compiler {c}"
+    if math.isinf(r) or math.isinf(c):
+        if r == c:
+            return "agree", ""
         return "disagree", f"reference {r} vs compiler {c}"
     if abs(r - c) <= tol:
         return "agree", ""

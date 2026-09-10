@@ -87,7 +87,7 @@ fn borrow_tensor_carrying_record_adt_is_accepted() {
 
     let json = run_check(&fixture);
     let kinds = error_kinds(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         kinds.is_empty(),
         "borrowing a tensor-carrying record ADT must produce no errors; got {kinds:?}"
@@ -189,7 +189,7 @@ fn destructured_generic_adt_field_borrow_is_accepted() {
 
     let json = run_check(&fixture);
     let kinds = error_kinds(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         kinds.is_empty(),
         "borrowing a destructured tensor field of a generic ADT must produce no errors; got {kinds:?}"
@@ -222,7 +222,7 @@ fn destructured_generic_adt_field_borrow_with_nested_adt() {
 
     let json = run_check(&fixture);
     let kinds = error_kinds(&json);
-    assert_eq!(json["score"], 1, "perfect-score contract: {json}");
+    assert_eq!(json["score"], 1.0, "perfect-score contract: {json}");
     assert!(
         kinds.is_empty(),
         "borrowing a destructured nested ADT field must produce no errors; got {kinds:?}"

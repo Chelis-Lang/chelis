@@ -322,8 +322,8 @@ edges (`spec/design/dtype_semantics.md` §C6) bind every change that touches
 numeric data, whether or not you have read that document:
 
 - **No numeric channel outside the tagged carrier.** A public ADT variant, wire
-  field, exported C signature, exported C data declaration, or binding parameter that
-  carries numeric values as
+  field, exported C signature, exported C data declaration, or binding parameter
+  or result that carries numeric values as
   bare `f64`/`double`, or that takes a raw integer dtype id, is a review-blocking
   finding. Zero-exception classification is the landing rule: every discovered row
   must end in exactly one final authority class - structurally nonnumeric, a
@@ -336,10 +336,15 @@ numeric data, whether or not you have read that document:
   nonnumeric rows, 16 structurally recognized tagged carriers/transports, and
   169 registered numeric operations (the [05-OP-35] stdlib registrations among
   them). It retains no grandfather, successor-override, permanent-disposition,
-  integer-plumbing, or other transition rows. The
-  84 typed-wire and eight registered-PyO3 baseline rows remain sealed legacy cohorts;
-  nine source/name/path/vocabulary and opaque-handle bindings have final nonnumeric
-  authority, while Count's wire field is final-registered. Those lists confer no authorization
+  integer-plumbing, or other transition rows. The wire baseline has 96 final
+  numeric leaves: 79 verified transports and 17 exact numeric operations.
+  WireDag v9 includes the `WireDagNode.shape_deps: u64` transport and the fixed
+  `NonnegativeExtent` carrier's literal-witness requirement role. Its
+  private verifier requires current graph, codec/admission, cache, publication
+  and mutation execution; neither a static descriptor nor a baseline grants
+  wire authority. Nine source/name/path/vocabulary and opaque-handle bindings have final
+  nonnumeric authority; eight registered-PyO3 baseline rows remain a sealed legacy
+  cohort. That cohort confers no authorization
   for a new, renamed, reclassified, or otherwise changed row, and a change touching one
   must move it to a final authority class rather than copy its disposition. A bare
   numeric carrier has no citation or maintainer-override path:

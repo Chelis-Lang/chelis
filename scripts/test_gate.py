@@ -600,6 +600,7 @@ GATE_WORKER_RUN_COMMANDS = {
         # gate asserts it rather than assuming it.
         "python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1",
         "python3 scripts/ci_setup_uv_python.py",
+        "uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml",
         "python3 scripts/gate.py integration --tests-only "
         "--partition hash:${{ matrix.shard }}/2",
         ".venv/bin/python -m unittest "
@@ -2086,6 +2087,33 @@ class CiParityTests(unittest.TestCase):
                 "the script-unit job must discover it continuously"
             ),
         )
+        block = _ci_job_block("script-unit")
+        dependencies = "uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml"
+        scripts = ".venv/bin/python -m unittest discover -s scripts -p 'test_*.py'"
+        bindings = ".venv/bin/python -m unittest discover -s bindings/python/tests -p 'test_*.py'"
+        for command in (dependencies, scripts, bindings):
+            _assert_executable_run_once(block, command)
+        for command in (scripts, bindings):
+            self.assertLess(
+                block.index("run: " + dependencies),
+                block.index("run: " + command),
+                "binding dependencies must precede every native facade consumer",
+            )
+
+    def test_native_binding_dependencies_cannot_follow_script_discovery(self):
+        block = _ci_job_block("script-unit")
+        dependency_step = (
+            "      - name: Install Python binding dependencies\n"
+            "        run: uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml\n\n"
+        )
+        self.assertEqual(block.count(dependency_step), 1)
+        late = block.replace(dependency_step, "").replace(
+            "      - name: Python binding ingress unit tests",
+            dependency_step + "      - name: Python binding ingress unit tests",
+        )
+        with mock.patch(__name__ + "._ci_job_block", return_value=late):
+            with self.assertRaisesRegex(AssertionError, "binding dependencies"):
+                self.test_python_binding_ingress_suite_is_continuous()
 
     def test_dtype_phase3_oracle_runs_beside_the_workspace_suite(self):
         workspace_block = _ci_job_block("workspace-tests")
@@ -2095,7 +2123,7 @@ class CiParityTests(unittest.TestCase):
         top_level_permissions = workflow[
             workflow.index("permissions:\n") : workflow.index("\nenv:\n")
         ]
-        numpy_command = "run: uv pip install --python .venv/bin/python 'numpy>=2.0'"
+        numpy_command = "run: uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml"
         oracle_command = "run: .venv/bin/python scripts/dtype_phase3_oracle.py"
         authenticated_oracle = (
             "env:\n"

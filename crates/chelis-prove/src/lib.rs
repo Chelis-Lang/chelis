@@ -131,3 +131,10 @@ pub use tier_b::{
 pub use transformation::{Transformation, TransformationPipeline, TransformationRecord};
 pub use transformation_harness::{CorpusEntry, HarnessResult, harness_is_sound, run_harness};
 pub use worker::{enable_isolation, run_worker_if_requested};
+
+#[cfg(test)]
+#[path = "../../../tests/support/wire_values.rs"]
+mod wire_values;
+
+#[cfg(test)]
+use chelis_compiler_api::schema::ExecutionValue;

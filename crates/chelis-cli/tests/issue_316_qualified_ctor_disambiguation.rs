@@ -96,7 +96,7 @@ fn qualified_constructor_references_disambiguate_same_named_modes() {
     let combo = file_entry(&json, "combo.ch");
     let report = &combo["report"];
     assert_eq!(
-        report["score"], 1,
+        report["score"], 1.0,
         "qualified references must let both Modes coexist: {combo}"
     );
     assert!(
@@ -216,7 +216,7 @@ fn qualified_constructor_patterns_match_per_module() {
     let combo = file_entry(&json, "combo.ch");
     let report = &combo["report"];
     assert_eq!(
-        report["score"], 1,
+        report["score"], 1.0,
         "qualified constructor patterns must type-check per module: {combo}"
     );
     assert!(
@@ -251,7 +251,7 @@ fn qualified_type_annotation_resolves_per_module() {
     let combo = file_entry(&json, "combo.ch");
     let report = &combo["report"];
     assert_eq!(
-        report["score"], 1,
+        report["score"], 1.0,
         "qualified type annotation must resolve and type-check: {combo}"
     );
     assert!(

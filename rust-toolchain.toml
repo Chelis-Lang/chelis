@@ -25,4 +25,6 @@
 # price of the workflows having no version in them to keep in sync.
 [toolchain]
 channel = "1.98.0"
-components = ["rustfmt", "clippy"]
+# The wire publication verifier uses the matching compiler's typed MIR API.
+# rustc-dev must share this exact pin; a different compiler ABI cannot inspect it.
+components = ["rustfmt", "clippy", "rustc-dev"]

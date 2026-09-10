@@ -12,6 +12,11 @@ use super::host_ops::terminal_name_matches;
 use super::named_axis::*;
 use super::*;
 
+enum ArgRepack {
+    Tensor,
+    Structured { shape: GradListShape },
+}
+
 #[derive(Clone)]
 enum GradListShape {
     Leaf,
@@ -95,10 +100,6 @@ impl<'a> EvalContext<'a> {
         // wrt-selected differentiable targets get a slot; a non-selected
         // or non-differentiable argument still marshals its placeholders
         // (the body may read it) but owns no gradient root.
-        enum ArgRepack {
-            Tensor,
-            Structured { shape: GradListShape },
-        }
         let mut arg_repacks: Vec<ArgRepack> = Vec::with_capacity(args.len());
         // wrt indices for this grad call, if narrowed (`grad(f, wrt=i)`).
         // `None` means differentiate every differentiable argument, exactly

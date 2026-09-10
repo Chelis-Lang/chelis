@@ -74,6 +74,11 @@
 
 #![allow(clippy::uninlined_format_args)]
 
+#[path = "../../../tests/support/wire_values.rs"]
+mod wire_values;
+
+use chelis_compiler_api::schema::ExecutionValue;
+
 use assert_cmd::Command;
 use tempfile::tempdir;
 
@@ -1828,21 +1833,21 @@ fn c_defcall_root_rescued_beside_direct_root_issue_750() {
 
 /// The wire exit: `ExecutionValue`/`TensorValue` serialize numeric payloads
 /// through serde_json. Finite f64 and full-range i64 must round-trip
-/// bit-exactly. Out-of-capacity cells (NaN/inf have no JSON number form;
-/// int64 above 2^53 cannot ride `TensorValue`'s `Vec<f64>`) are [#729]/[#686]
-/// storage decisions recorded at the schema (§C2.4) - deliberately no
-/// assertion pins them here.
+/// bit-exactly through the stored-value codec in spec/10 §3.2.
 #[test]
 fn wire_execution_value_rendering_round_trips() {
     use chelis_compiler_api::schema::{ExecutionValue, TensorValue};
 
     let finite: Vec<f64> = F64_ROWS.iter().map(|r| r.value).collect();
     for &v in &finite {
-        let json = serde_json::to_string(&ExecutionValue::Float64 { value: v }).expect("serialize");
+        let json = serde_json::to_string(&wire_values::scalar_f64(v)).expect("serialize");
         let back: ExecutionValue = serde_json::from_str(&json).expect("parse");
         match back {
-            ExecutionValue::Float64 { value } => assert_eq!(
-                value.to_bits(),
+            ExecutionValue::Scalar { value } => assert_eq!(
+                match value.get().element_ref() {
+                    chelis_types::ElementRef::F64(value) => value.to_bits(),
+                    other => panic!("expected f64, got {other:?}"),
+                },
                 v.to_bits(),
                 "wire f64 {v:?} did not round-trip through `{json}`"
             ),
@@ -1852,8 +1857,8 @@ fn wire_execution_value_rendering_round_trips() {
 
     let tensor = ExecutionValue::Tensor {
         value: TensorValue {
-            shape: vec![finite.len()],
-            data: chelis_compiler_api::schema::TensorElements::from_f64_vec(finite.clone()),
+            shape: vec![i64::try_from(finite.len()).unwrap()],
+            data: wire_values::storage_f64(finite.clone()),
         },
     };
     let json = serde_json::to_string(&tensor).expect("serialize");
@@ -1868,11 +1873,20 @@ fn wire_execution_value_rendering_round_trips() {
     }
 
     for v in [i64::MAX, -i64::MAX, 9007199254740993_i64, 0] {
-        let json = serde_json::to_string(&ExecutionValue::Int64 { value: v }).expect("serialize");
+        let json = serde_json::to_string(&wire_values::scalar_integer(
+            chelis_types::types::Prim::Int64,
+            v,
+        ))
+        .expect("serialize");
         let back: ExecutionValue = serde_json::from_str(&json).expect("parse");
         match back {
-            ExecutionValue::Int64 { value } => {
-                assert_eq!(value, v, "wire i64 {v} did not round-trip through `{json}`")
+            ExecutionValue::Scalar { value } => {
+                assert_eq!(value.get().prim(), chelis_types::types::Prim::Int64);
+                assert_eq!(
+                    value.get().as_i64_exact().unwrap(),
+                    v,
+                    "wire i64 {v} did not round-trip through `{json}`"
+                )
             }
             other => panic!("wire round-trip changed the variant: {other:?}"),
         }
@@ -1908,9 +1922,7 @@ def make(x: f32) -> Probability = Probability { value: x }
     for violating in [2.5_f64, -0.5_f64] {
         let payload = ExecutionValue::Adt {
             ctor: "Probability".to_string(),
-            fields: vec![ExecutionValue::Float32 {
-                value: violating as f32,
-            }],
+            fields: vec![wire_values::scalar_f32(violating as f32)],
         };
         let err = try_decode_adt_value(&exprs, &payload)
             .expect_err("out-of-band probability must be rejected");

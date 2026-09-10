@@ -1,0 +1,1 @@
+Updated CLI, Python, and cache regression fixtures for the exact numeric wire formats, retaining bit-level scalar checks, diagnostic member-order checks, and previous-version cache rejection. Runtime-extent observation fixtures preserve their existing values, traps, and pending contracts while adopting f64 report-number encoding.

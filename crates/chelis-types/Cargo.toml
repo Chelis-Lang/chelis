@@ -17,6 +17,7 @@ chelis-pred.workspace = true
 chelis-vocab.workspace = true
 half.workspace = true
 serde.workspace = true
+schemars = "0.8"
 sha2 = "0.10"
 stacker.workspace = true
 thiserror.workspace = true

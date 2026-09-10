@@ -228,8 +228,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # A small number of workflow guards inspect Cargo metadata. They do not
-      # compile the workspace, but they require the stable cargo executable.
+      # Script guards also build and execute the C6 wire consumer tests.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -244,11 +243,11 @@ jobs:
       - name: Install shared-skill validator dependency
         run: uv pip install --python .venv/bin/python PyYAML==6.0.3
 
+      - name: Install Python binding dependencies
+        run: uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml
+
       - name: Script unit tests (scripts/test_*.py)
         run: .venv/bin/python -m unittest discover -s scripts -p 'test_*.py'
-
-      - name: Install Python binding ingress test dependency
-        run: uv pip install --python .venv/bin/python 'numpy>=2.0'
 
       - name: Python binding ingress unit tests
         run: .venv/bin/python -m unittest discover -s bindings/python/tests -p 'test_*.py'
@@ -688,6 +687,9 @@ jobs:
           # publishes a new entry, avoiding a same-key save race.
           save-if: ${{ matrix.shard == 1 }}
 
+      - name: Install Python binding dependencies
+        run: uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml
+
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
@@ -833,8 +835,8 @@ jobs:
       - name: Create uv-managed venv + wire libpython rpath
         run: python3 scripts/ci_setup_uv_python.py
 
-      - name: Install dtype-oracle Python dependency
-        run: uv pip install --python .venv/bin/python 'numpy>=2.0'
+      - name: Install Python binding dependencies
+        run: uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
@@ -1073,6 +1075,9 @@ jobs:
       - name: Create uv-managed venv + wire libpython rpath
         run: python3 scripts/ci_setup_uv_python.py
 
+      - name: Install Python binding dependencies
+        run: uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml
+
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
@@ -1157,11 +1162,11 @@ jobs:
       matrix:
         shard: [1, 2]
     runs-on: macos-latest
-    # Successful runs normally finish in 14-16 minutes, but hosted-runner
-    # variance can push the workspace suite past the old 20-minute job cap.
-    # Keep a hard ceiling while leaving measured headroom for the post-test
-    # architecture, manifested-C-ABI, and Metal smoke checks.
-    timeout-minutes: 30
+    # The full C6 wire verifier compiles and executes its schema, codec,
+    # publication, and native-consumer controls. A cold shard exhausted the
+    # former 30-minute cap inside that verifier; retain a bounded allowance
+    # for it and the required post-test ABI and Metal smoke checks.
+    timeout-minutes: 45
     # Skip on docs-only PRs (chelis#419); a skipped required job reports
     # success. macOS Smoke is the authoritative workspace oracle, so it
     # runs on every code PR and every push; only a pure-prose PR skips it.
@@ -1202,6 +1207,9 @@ jobs:
         with:
           shared-key: macos-workspace
           save-if: ${{ matrix.shard == 1 }}
+
+      - name: Install Python binding dependencies
+        run: uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest

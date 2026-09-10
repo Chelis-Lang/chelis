@@ -144,7 +144,7 @@ class SemanticAuthorityTests(unittest.TestCase):
 
     def test_movement_ambiguity_requires_the_real_contract(self):
         blocks = registry.atom_blocks(self.spec)
-        for operation in ("shrink", "stride"):
+        for operation in ("shrink", "stride", "permute"):
             identity = next(name for name in self.rows if name.split(":")[1] == operation)
             atom = self.rows[identity]
             clause = "`reshape(x,shape)`, `permute(x,axes)`, `expand(x,axis,size)`"

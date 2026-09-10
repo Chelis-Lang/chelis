@@ -47,13 +47,22 @@ fn eval_json(expr: &str) -> Value {
 }
 
 fn scalar_result(json: &Value) -> f64 {
-    json.get("roots")
+    assert_eq!(json["schema_version"], 3);
+    let value = json
+        .get("roots")
         .and_then(Value::as_array)
         .and_then(|roots| roots.first())
         .and_then(|root| root.get("value"))
-        .and_then(|value| value.get("value"))
-        .and_then(Value::as_f64)
-        .unwrap_or_else(|| panic!("expected a scalar root value; json={json}"))
+        .unwrap_or_else(|| panic!("expected a scalar root value; json={json}"));
+    assert_eq!(value["type"], "scalar");
+    assert_eq!(value["value"]["dtype"], "f64");
+    let bits = value["value"]["bits"].as_str().expect("stored f64 bits");
+    assert_eq!(bits.len(), 16, "f64 carries exactly 64 bits");
+    assert!(
+        bits.bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    );
+    f64::from_bits(u64::from_str_radix(bits, 16).expect("canonical f64 bits"))
 }
 
 #[test]

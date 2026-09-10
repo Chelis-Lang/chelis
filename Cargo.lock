@@ -589,6 +589,7 @@ version = "0.18.6"
 dependencies = [
  "anyhow",
  "chelis-tide",
+ "chelis-types",
  "crossterm",
  "ratatui",
  "tempfile",
@@ -909,6 +910,7 @@ dependencies = [
  "chelis-vocab",
  "half",
  "quote",
+ "schemars",
  "serde",
  "serde_json",
  "sha2",

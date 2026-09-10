@@ -1,0 +1,1 @@
+Install Python binding dependencies before CI script tests execute the native wire consumer, include native test failure details in the wire verifier's diagnostics, and allow the complete wire verifier to finish within a bounded macOS CI job budget.

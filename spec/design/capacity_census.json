@@ -60,12 +60,15 @@
       },
       {
         "leg": "wire-schema-numeric-fields",
-        "artifact": "crates/chelis-compiler-api/src/schema.rs public serialized type graph",
-        "enumerator": "rustdoc JSON public schema type graph -> wire-schema numeric fields",
+        "artifact": "compiler/Python serialization publication roots and their reachable rustdoc JSON type graph",
+        "enumerator": "capacity_census_typed.py wire -> private wire verifier: publication graph inventory, final authority, and execution receipts",
         "command": "cargo nextest run -p chelis-compiler-api --test capacity_census_wire",
         "expected_success": "wire_schema_numeric_fields_match_the_reviewed_baseline passes",
         "mutations": [
-          "adding_or_removing_a_public_serialized_f64_field_changes_the_census"
+          "adding_or_removing_a_public_serialized_f64_field_changes_the_census",
+          "verified_wire_authority_cannot_be_replaced_by_a_descriptor_or_baseline",
+          "wire_baseline_rejects_exception_fields_and_nonfinal_classes",
+          "wire_rows_cannot_erase_capacity_or_duplicate_an_identity"
         ]
       },
       {
