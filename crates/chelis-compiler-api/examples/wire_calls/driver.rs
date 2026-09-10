@@ -815,6 +815,10 @@ impl<'tcx> NativeDiscovery<'tcx> {
                         ("caller", caller.clone()),
                         ("definition", definition(tcx, *def)),
                         ("variant", quoted(adt.variant(*variant).name.as_str())),
+                        (
+                            "variant_definition",
+                            definition(tcx, adt.variant(*variant).def_id),
+                        ),
                         ("arguments", array(aggregate_args)),
                         (
                             "destination",

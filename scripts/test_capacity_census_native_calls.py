@@ -262,6 +262,45 @@ pub fn floating(value: f64) -> NativeValue { NativeValue { floating: value } }
         )
         self.assertEqual(evidence.raw["errors"], [])
 
+    def test_aggregate_variant_identity_and_arguments_are_compiler_exact(self):
+        evidence = self.observe(
+            """
+struct NativeValue(Vec<i64>);
+enum Local<T> { Ok(T), Err }
+pub fn core_ok(value: NativeValue) -> Result<NativeValue, &'static str> { Ok(value) }
+pub fn core_err() -> Result<NativeValue, &'static str> { Err("bad") }
+pub fn local_ok(value: NativeValue) -> Local<NativeValue> { Local::Ok(value) }
+pub fn local_err() -> Local<NativeValue> { Local::Err }
+"""
+        )
+        rows = [
+            row
+            for row in evidence.raw["aggregates"]
+            if row["variant"] in {"Ok", "Err"}
+        ]
+        core = [row for row in rows if row["variant_definition"]["crate"] == "core"]
+        local = [
+            row for row in rows if row["variant_definition"]["crate"] == "native_fixture"
+        ]
+        self.assertEqual({row["variant"] for row in core}, {"Ok", "Err"})
+        self.assertEqual({row["variant"] for row in local}, {"Ok", "Err"})
+        self.assertTrue(
+            all(
+                {
+                    "stable_crate_id",
+                    "def_id",
+                    "def_path_hash",
+                }
+                <= row["variant_definition"].keys()
+                for row in rows
+            )
+        )
+        self.assertNotEqual(
+            next(row for row in core if row["variant"] == "Ok")["variant_definition"],
+            next(row for row in local if row["variant"] == "Ok")["variant_definition"],
+        )
+        self.assertIn("NativeValue", json.dumps(core))
+
     def test_payload_alias_generic_nesting_and_lifetime_only_openness_are_recorded(self):
         integer = self.observe(
             """
