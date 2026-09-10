@@ -215,6 +215,54 @@ pub fn live(_: CompiledInputs) -> CompiledTensorResults {
         )
         self.assertEqual(calls_named(missing, "execute_checked"), [])
 
+    def test_indirect_calls_keep_formal_types_without_inventing_a_callee(self):
+        evidence = self.observe(
+            """
+pub struct Tensor(i64);
+fn export(value: Tensor) -> i64 { value.0 }
+pub fn direct(value: Tensor) -> i64 { export(value) }
+pub fn indirect(value: Tensor, export: fn(Tensor) -> i64) -> i64 { export(value) }
+"""
+        )
+        self.assertEqual(evidence.raw["errors"], [])
+        calls = {
+            call["caller"]["definition"]["item_name"]: call
+            for call in evidence.raw["calls"]
+        }
+        direct, indirect = calls["direct"], calls["indirect"]
+        self.assertIsNotNone(direct["callee"])
+        self.assertEqual(indirect["kind"], "indirect")
+        self.assertIsNone(indirect["callee"])
+        self.assertEqual(indirect["formal_inputs"], direct["formal_inputs"])
+        self.assertEqual(indirect["formal_result"], direct["formal_result"])
+        self.assertEqual(indirect["formal_inputs"][0]["nominal"]["item_name"], "Tensor")
+        self.assertEqual(
+            indirect["formal_result"]["shape"], {"tag": "primitive", "name": "i64"}
+        )
+
+    def test_indirect_call_formals_distinguish_reversed_numeric_channels(self):
+        evidence = self.observe(
+            """
+pub struct Tensor(i64);
+pub fn export(value: Tensor, call: fn(Tensor) -> i64) -> i64 { call(value) }
+pub fn import(value: i64, call: fn(i64) -> Tensor) -> Tensor { call(value) }
+"""
+        )
+        self.assertEqual(evidence.raw["errors"], [])
+        calls = {
+            call["caller"]["definition"]["item_name"]: call
+            for call in evidence.raw["calls"]
+        }
+        export, imported = calls["export"], calls["import"]
+        self.assertIsNone(export["callee"])
+        self.assertIsNone(imported["callee"])
+        self.assertNotEqual(export["formal_inputs"], imported["formal_inputs"])
+        self.assertNotEqual(export["formal_result"], imported["formal_result"])
+        self.assertEqual(
+            imported["formal_inputs"][0]["shape"], {"tag": "primitive", "name": "i64"}
+        )
+        self.assertEqual(imported["formal_result"]["nominal"]["item_name"], "Tensor")
+
     def test_conversion_closures_retain_exact_lexical_owners(self):
         evidence = self.observe(
             """
