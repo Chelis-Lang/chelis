@@ -52,6 +52,7 @@ import sys
 import tomllib
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 NEXTEST_TOML = REPO_ROOT / ".config" / "nextest.toml"
@@ -406,6 +407,8 @@ def _show_shared_rustdoc_group(
         "nextest",
         "show-config",
         "test-groups",
+        "--color",
+        "never",
     ]
     if audited_consumers_only:
         cmd.extend(
@@ -613,18 +616,19 @@ class ProfilePartitionTests(unittest.TestCase):
     def test_every_profile_serializes_exactly_the_shared_target_owners(self):
         profiles = tuple(tomllib.loads(NEXTEST_TOML.read_text())["profile"])
         self.assertIn("builtin-atom-closure", profiles)
-        for profile in profiles:
-            with self.subTest(profile=profile):
-                output = _show_shared_rustdoc_group(profile)
-                self.assertRegex(
-                    output,
-                    rf"(?m)^group: {SHARED_RUSTDOC_GROUP} "
-                    r"\(max threads = 1\)$",
-                )
-                self.assertEqual(
-                    _resolved_shared_rustdoc_members(output),
-                    set(SHARED_RUSTDOC_OWNER_TESTS),
-                )
+        with mock.patch.dict(os.environ, {"CARGO_TERM_COLOR": "always"}):
+            for profile in profiles:
+                with self.subTest(profile=profile):
+                    output = _show_shared_rustdoc_group(profile)
+                    self.assertRegex(
+                        output,
+                        rf"(?m)^group: {SHARED_RUSTDOC_GROUP} "
+                        r"\(max threads = 1\)$",
+                    )
+                    self.assertEqual(
+                        _resolved_shared_rustdoc_members(output),
+                        set(SHARED_RUSTDOC_OWNER_TESTS),
+                    )
 
 @unittest.skipUnless(
     _have_nextest(), "cargo nextest unavailable; skipping generalization census"
