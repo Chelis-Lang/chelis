@@ -47,15 +47,14 @@ optional resolved size. `derive_dim_witnesses` serves the C/HIP prologues;
 old `symbolic_bindings` path still supplies evaluator bindings and declaration
 consumers. Passing a test of one grouping does not test the other.
 
-Current failure boundaries:
+The checked transport in C2.4 implements the restored #1686/#1687 host
+obligations: computed reshape claims and broadcast unit preconditions survive
+inlining, graph rewrites and cache transport. Their bounded oracle retains
+independent declaration, value and failure assertions. Remaining failure boundaries:
 
 - #1374/#1376: lowering may drop the argument whose axis witnesses the result
   claim. Root reachability cannot recover a signature that is no longer
   represented, and an unread argument still owes its signature check.
-- #1686: arithmetic reshape targets lose named/literal result checks after
-  inlining. This is original #1375 work omitted by its closing PR #1597.
-- #1687: non-unit broadcast operands lose their runtime checks after
-  inlining. This retains the original #597/#1619 negative exit.
 - #1397: checked function stamps now retain the declared result; movement
   execution still owes its guard and general wildcard-returning roots can
   disappear from eval and entry emission. #1378's public vmap witness remains
@@ -85,9 +84,9 @@ shape. B2b-1 owns preservation and enforcement of those scoped claims.
 
 The bounded acceptance command is `singleton_broadcast_contract` in C5.
 Literal call/inlining obligations, op-computed local guards, and scoped claim transport
-remain separate obligations below. In particular, an inlined call with a
-non-unit argument still loses its runtime unit guard (#1687); repairing #1619's
-anonymous-output rewrite does not establish claim preservation through calls.
+have separate receipts below. C2.4's checked transport closes the inlined
+non-unit host obligation (#1687); #1658's anonymous-output rewrite alone did
+not establish that claim preservation through calls.
 
 ## Part I: implementation contracts
 
@@ -647,7 +646,7 @@ All are Slice B work under #1277 unless expressly separated.
 | owner | entry | deliverable and exit |
 |---|---|---|
 | B2b-0b: remaining local guards | merged B2r/S2b and #1658's broadcast preparation repair | guard literal and resolved numeric claims from independent local size sources; op-computed local extents; exact positive/negative C/Eval rows |
-| B2b-1: claim transport | C2 contract and red fixtures; integrates B2b-0b | declaring-signature helper guard order, then atomic computed-reshape and broadcast-unit transport (#1686/#1687); scoped checked/lowered identities, explicit caller witnesses, multi-claim axes, rebuild/wire transport and migrated binding consumers; #1374/#1376/#1566, #1397's declaration-erasure half, with #1377's literal call/inlined-root exit established by the witness subset |
+| B2b-1: claim transport | C2 contract and red fixtures; integrates B2b-0b | preserve the shipped helper-order and C2.4 checked-reshape/unit receipts (#1686/#1687); finish general scoped checked/lowered identities, explicit caller witnesses, multi-claim axes, rebuild/wire transport and migrated binding consumers; #1374/#1376/#1566, #1397's declaration-erasure half, with #1377's literal call/inlined-root exit established by the witness subset |
 | B2b-root: root execution | can start independently; acceptance composes B2b-1 | #1397's general wildcard-root boundary; run or diagnose every accepted root; unlock and reverify #1378's exact public value witness |
 | B2b-2: sources and acceptance | guards and claim transport for every newly admitted row | finish declaration sources (#665/#1556), supply #1482's missing shape source, remove provenance restrictions (#1266/#569/#1379), then remove unused `shape_deps` |
 | B2b-3: phase exit | preceding host repairs and per-row platform dispositions | register actual passing receipts, correct measured stale baselines, retire phase c from final selection; phase b/final remain red until their named obligations pass |
