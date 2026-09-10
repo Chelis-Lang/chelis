@@ -417,6 +417,11 @@ fn drive_parity(path: &Path, expect_executable: bool) {
 // the harness fails loud rather than silently shrinking.
 
 #[test]
+fn parity_generic_value_roots() {
+    drive_parity(&examples_root().join("generic_value_roots.ch"), true);
+}
+
+#[test]
 fn parity_source_file_names() {
     drive_parity(&examples_root().join("source-file-names.ch"), true);
 }
@@ -612,6 +617,7 @@ fn parity_corpus_is_complete() {
         "dict_foundation.ch",
         "explicit_normalization.ch",
         "generic_explicit_shape.ch",
+        "generic_value_roots.ch",
         "hash_order_determinism.ch",
         "hello_tensor.ch",
         "induction_bond.ch",
