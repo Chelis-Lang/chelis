@@ -410,37 +410,6 @@
       ]
     },
     {
-      "name": "checked C literal ingress delegation controls",
-      "args": [
-        "-p",
-        "chelis-backend-c",
-        "--test",
-        "checked_c_host_metadata",
-        "-E",
-        "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
-      ],
-      "selected": [
-        "chelis-backend-c::checked_c_host_metadata::constant_copy_validates_literal_domain_before_storage",
-        "chelis-backend-c::checked_c_host_metadata::dimension_rendering_has_no_unchecked_arithmetic_variant",
-        "chelis-backend-c::checked_c_host_metadata::literal_ingress_bypass_controls_fail"
-      ]
-    },
-    {
-      "name": "checked C literal storage optimized sanitizer execution",
-      "args": [
-        "-p",
-        "chelis-backend-c",
-        "--test",
-        "exec_compile",
-        "-E",
-        "(test(checked_literals_)) & (not test(=an_allocation_above_int32_elements_reports_its_true_extent))"
-      ],
-      "selected": [
-        "chelis-backend-c::exec_compile::checked_literals_preserve_every_storage_width_and_reject_count_mismatch",
-        "chelis-backend-c::exec_compile::checked_literals_reject_inconsistent_ir_storage_dtype"
-      ]
-    },
-    {
       "name": "checked C JSON ordering scratch delegation and lifetime controls",
       "args": [
         "-p",
@@ -483,6 +452,37 @@
       ],
       "selected": [
         "chelis-cli::issue_1314_json_bigint::json_scratch_execution_detects_skipped_cleanup"
+      ]
+    },
+    {
+      "name": "checked C literal ingress delegation controls",
+      "args": [
+        "-p",
+        "chelis-backend-c",
+        "--test",
+        "checked_c_host_metadata",
+        "-E",
+        "not test(=an_allocation_above_int32_elements_reports_its_true_extent)"
+      ],
+      "selected": [
+        "chelis-backend-c::checked_c_host_metadata::constant_copy_validates_literal_domain_before_storage",
+        "chelis-backend-c::checked_c_host_metadata::dimension_rendering_has_no_unchecked_arithmetic_variant",
+        "chelis-backend-c::checked_c_host_metadata::literal_ingress_bypass_controls_fail"
+      ]
+    },
+    {
+      "name": "checked C literal storage optimized sanitizer execution",
+      "args": [
+        "-p",
+        "chelis-backend-c",
+        "--test",
+        "exec_compile",
+        "-E",
+        "(test(checked_literals_)) & (not test(=an_allocation_above_int32_elements_reports_its_true_extent))"
+      ],
+      "selected": [
+        "chelis-backend-c::exec_compile::checked_literals_preserve_every_storage_width_and_reject_count_mismatch",
+        "chelis-backend-c::exec_compile::checked_literals_reject_inconsistent_ir_storage_dtype"
       ]
     },
     {
