@@ -2160,12 +2160,13 @@ impl WireDag {
             match &node.op {
                 WireRiscOp::CheckedReshapeExtent {
                     axis: WireRtAxis::Lit { value: axis },
-                    ..
+                    claims,
                 } => {
                     let scalar =
                         |ty: &WireTensorType| ty.dims.is_empty() && ty.precision == "int64";
                     if *axis < 0
-                        || node.inputs.len() != 2
+                        || claims.is_empty()
+                        || node.inputs.len() != claims.len() + 1
                         || !scalar(&node.output_type)
                         || node.inputs.iter().any(|id| {
                             usize::try_from(*id)
@@ -2175,7 +2176,7 @@ impl WireDag {
                         })
                     {
                         return Err(WireDagContractError::new(format!(
-                            "WireDag CheckedReshapeExtent node {} requires two earlier scalar int64 inputs and a scalar int64 output",
+                            "WireDag CheckedReshapeExtent node {} requires an earlier scalar int64 actual, one earlier scalar int64 input per nonempty claim, and a scalar int64 output",
                             node.id
                         )));
                     }
@@ -2969,7 +2970,7 @@ pub enum WireRiscOp {
         requirements: Vec<NonnegativeExtent>,
     },
     CheckedReshapeExtent {
-        claim: String,
+        claims: Vec<String>,
         axis: WireRtAxis,
     },
     CheckedUnitAxis {

@@ -433,9 +433,15 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
                     ));
                 }
             }
-            RiscOp::CheckedReshapeExtent { .. }
-            | RiscOp::CheckedUnitAxis { .. }
-            | RiscOp::ReluAdjoint => {
+            RiscOp::CheckedReshapeExtent { claims, .. } => {
+                if claims.is_empty() || arity != claims.len() + 1 {
+                    errors.push(format!(
+                        "checked reshape extent at node {} requires an actual and one scalar input per nonempty claim",
+                        node.id.0
+                    ));
+                }
+            }
+            RiscOp::CheckedUnitAxis { .. } | RiscOp::ReluAdjoint => {
                 if arity != 2 {
                     errors.push(format!(
                         "binary checked op at node {} has {} inputs (expected 2)",

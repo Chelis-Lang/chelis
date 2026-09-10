@@ -2307,7 +2307,7 @@ where
                 )?
             }
             RiscOp::CheckedReshapeExtent {
-                claim,
+                claims,
                 axis: crate::dag::RtAxis::Lit(axis),
             } => {
                 let actual = values[&node.inputs[0]]
@@ -2315,15 +2315,17 @@ where
                     .scalar_at(0)
                     .as_i64_exact()
                     .ok_or("checked reshape actual must be int64")?;
-                let required = values[&node.inputs[1]]
-                    .storage()
-                    .scalar_at(0)
-                    .as_i64_exact()
-                    .ok_or("checked reshape requirement must be int64")?;
-                if actual != required {
-                    return Err(format!(
-                        "extent `{claim}`: claimed = {required}, reshape axis {axis} = {actual}\nnumeric trap: domain in reshape at int64"
-                    ));
+                for (claim, input) in claims.iter().zip(&node.inputs[1..]) {
+                    let required = values[input]
+                        .storage()
+                        .scalar_at(0)
+                        .as_i64_exact()
+                        .ok_or("checked reshape requirement must be int64")?;
+                    if actual != required {
+                        return Err(format!(
+                            "extent `{claim}`: claimed = {required}, reshape axis {axis} = {actual}\nnumeric trap: domain in reshape at int64"
+                        ));
+                    }
                 }
                 values[&node.inputs[0]].clone()
             }

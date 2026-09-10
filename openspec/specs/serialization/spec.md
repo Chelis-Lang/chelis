@@ -64,8 +64,10 @@ context respectively. Missing or unknown sites SHALL fail decoding.
 SHALL be explicit, including empty lists and a null span identity.
 
 `CheckedReshapeExtent` SHALL preserve separate scalar-int64 input edges for
-the actual computed extent and the required extent, plus diagnostic claim text
-and a normalized result-axis position. `CheckedUnitAxis` SHALL reference the
+the actual computed extent and each required extent, plus a nonempty ordered
+list of corresponding diagnostic labels and a normalized result-axis position.
+Every requirement SHALL have its own input edge; all equalities SHALL be
+checked in list order before forwarding the actual extent. `CheckedUnitAxis` SHALL reference the
 original tensor and an `ExtentWitness` for that exact tensor axis with an
 explicit requirement of one; only that axis may refine to one. Missing fields,
 wrong input/output types, a different witness axis or tensor, and unrelated

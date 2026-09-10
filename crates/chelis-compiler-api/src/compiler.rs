@@ -6232,10 +6232,10 @@ fn wire_op(op: &RiscOp, precision: Prim) -> WireResult<WireRiscOp> {
                 .collect::<WireResult<_>>()?,
         },
         RiscOp::CheckedReshapeExtent {
-            claim,
+            claims,
             axis: chelis_ir::dag::RtAxis::Lit(axis),
         } => WireRiscOp::CheckedReshapeExtent {
-            claim: claim.clone(),
+            claims: claims.clone(),
             axis: WireRtAxis::Lit { value: *axis },
         },
         RiscOp::CheckedUnitAxis {

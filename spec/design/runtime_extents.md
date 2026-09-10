@@ -343,11 +343,12 @@ host execution receipts do not certify device execution.
 The checked-extent integration owns #1686 and #1687. It adds two checked
 carriers to the construction and consumer inventory above:
 
-- `CheckedReshapeExtent { claim, axis }` consumes two ordinary scalar `int64`
-  inputs: the independently computed target and its required value. The
-  requirement is a tagged literal constant or the declaring parameter's
+- `CheckedReshapeExtent { claims, axis }` consumes an ordinary scalar `int64`
+  input for the independently computed target and one for each required value.
+  Each requirement is a tagged literal constant or the declaring parameter's
   `ExtentWitness`, selected within the current signature activation before
-  substitution. `claim` is diagnostic text, not identity. The checked scalar
+  substitution. The nonempty `claims` list contains ordered diagnostic labels,
+  not identities. Each requirement is checked in list order. The checked scalar
   becomes the reshape target before allocation. Its computed axis has a fresh
   runtime identity; the declared requirement remains an explicit checked edge.
 - `CheckedUnitAxis { axis }` consumes the original tensor and that same
@@ -365,6 +366,16 @@ current activation; entering and leaving a call saves and restores that map.
 An inserted axis derived from a witness also retains a fresh runtime identity,
 so an independently known actual cannot make intermediate ownership validation
 preempt the witness's runtime check.
+
+Result requirements are resolved before entering the body. After lowering,
+the returned tensor's per-axis source derivation attaches them to unique
+computed reshape scalar carriers. This follows aliases, shape-preserving
+operations and helper results without forwarding raw binders through syntax.
+A scalar starts as an identity carrier and becomes checked before its consuming
+reshape; inner and outer requirements remain distinct input edges. A claim
+introduced after a value was already produced executes at that call boundary.
+Literal-condition host functions use existing DAG branch pruning while retaining
+their full declaring signature; dynamic host control flow keeps its existing route.
 
 Each activation owns fresh witness nodes. The lowering environment maps the
 signature's binders to these exact nodes and restores that map on return;
@@ -400,8 +411,9 @@ cargo nextest run -p chelis-cli -p chelis-ir -p chelis-compiler-api --lib \
   -E 'binary(runtime_extent_claim_preparation) | binary(runtime_extent_checked_transport) | binary(wire_extent_witness) | test(=cached_imports_preserve_computed_claims_and_unit_preconditions) | test(=previous_checked_extent_cache_is_rejected_before_payload_decode) | test(context_decode_rejects_missing_or_forged_authored_signatures)'
 ```
 
-The new public matrix has 117 exported/binding/main fixtures, three executable
-example controls, 24 grad/vmap controls and 12 imported-call controls. Every
+The new public matrix has 117 initial exported/binding/main fixtures, 69
+result-graph fixtures, three executable example controls, 24 grad/vmap controls
+and 12 imported-call controls. Every
 case checks declarations independently of actual shape/value or required
 Domain failure. The same command retains the earlier literal and helper-order
 receipts, checks IR rewrites and malformed wire edges, and executes matching
@@ -696,7 +708,11 @@ scoped claims and declaring witnesses before substitution/folding; a checked
 scalar compares an independently computed reshape target before allocation,
 and a checked tensor enforces an operand-axis precondition before refining that
 axis. Their explicit dependencies retain nested/discarded checks through
-rewrites and wire/cache boundaries. The `omitted_extent_claim_contract` runner
+rewrites and wire/cache boundaries. `computed_claim_result_graph_contract` adds
+69 exact-type/value/failure cases for copy, negation, static conditionals, inferred
+helpers, aliases, same-spelled binders in different signatures and an untaken
+invalid branch, each across exports, bindings and inlined main.
+The `omitted_extent_claim_contract` runner
 must assert declarations, actual shape/values and runtime Domain failures on
 exported calls, bindings and inlined main before either issue closes. HIP/Metal
 execution remains with the platform owners described below.

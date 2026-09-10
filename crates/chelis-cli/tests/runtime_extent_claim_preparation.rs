@@ -1265,6 +1265,159 @@ fn helper_signature_guard_order_contract() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// Result claims follow axis provenance, including an inferred helper result.
+/// Each call route checks the declared type independently of either runtime.
+#[test]
+fn computed_claim_result_graph_contract() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut fixtures = Vec::new();
+    for (kind, claim, divisor, n, signature, expected) in [
+        (
+            "literal",
+            "2",
+            2,
+            4,
+            "(tensor[d0, f32]) -> tensor[2, 2, f32]",
+            Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]),
+        ),
+        (
+            "literal",
+            "2",
+            2,
+            6,
+            "(tensor[d0, f32]) -> tensor[2, 2, f32]",
+            Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"]),
+        ),
+        (
+            "named",
+            "n",
+            1,
+            4,
+            "(tensor[d0, f32]) -> tensor[d0, 1, f32]",
+            Expected::Tensor(vec![4, 1], vec![1.0, 2.0, 3.0, 4.0]),
+        ),
+        (
+            "named",
+            "n",
+            2,
+            4,
+            "(tensor[d0, f32]) -> tensor[d0, 2, f32]",
+            Expected::Domain("reshape", &["claimed = 4", "reshape axis 0 = 2"]),
+        ),
+    ] {
+        let reshape =
+            format!("reshape(x, [floor_div(shape(x, 0i32), {divisor}i64), {divisor}i64])");
+        for (form, helper, body) in [
+            ("copy", String::new(), format!("copy({reshape})")),
+            ("neg", String::new(), format!("neg({reshape})")),
+            (
+                "static_if",
+                String::new(),
+                format!("if true then {reshape} else {reshape}"),
+            ),
+            (
+                "helper",
+                format!("def g(x: tensor[n, f32]) = {reshape}\n"),
+                "g(x)".to_owned(),
+            ),
+            (
+                "alias_helper",
+                format!("def g(x: tensor[n, f32]) = copy({reshape})\n"),
+                "{\n  r = g(x)\n  alias = r\n  neg(neg(alias))\n}".to_owned(),
+            ),
+        ] {
+            let expected = match (&expected, form) {
+                (Expected::Tensor(dims, values), "neg") => {
+                    Expected::Tensor(dims.clone(), values.iter().map(|v| -v).collect())
+                }
+                _ => expected.clone(),
+            };
+            let mut routes = Vec::new();
+            call_matrix(
+                &mut routes,
+                &format!("result_graph.{kind}.{form}.{divisor}.x{n}"),
+                1686,
+                &format!(
+                    "{helper}def f(x: tensor[n, f32]) -> tensor[{claim}, {divisor}, f32] = {body}"
+                ),
+                signature,
+                vec![vector(n)],
+                expected,
+            );
+            for case in routes {
+                let main_claim = if kind == "literal" { 2 } else { n };
+                let main = case
+                    .source
+                    .contains("def main()")
+                    .then(|| format!("() -> tensor[{main_claim}, {divisor}, f32]"));
+                fixtures.push((case, main));
+            }
+        }
+    }
+    // The inner n witnesses x; the outer n witnesses an unread argument.
+    // The inferred helper must not resolve the outer requirement in its own scope.
+    for (rows, cols, expected) in [
+        (2, 4, Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])),
+        (
+            3,
+            4,
+            Expected::Domain("reshape", &["claimed = 3", "reshape axis 0 = 2"]),
+        ),
+    ] {
+        let mut routes = Vec::new();
+        call_matrix(
+            &mut routes,
+            &format!("result_graph.distinct_witnesses.{rows}.{cols}"),
+            1686,
+            "def g(x: tensor[n, f32]) = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])\ndef f(unread: tensor[n, f32], x: tensor[m, f32]) -> tensor[n, 2, f32] = copy(g(x))",
+            "(tensor[d0, f32], tensor[d1, f32]) -> tensor[d0, 2, f32]",
+            vec![vector(rows), vector(cols)],
+            expected,
+        );
+        for case in routes {
+            let main = case
+                .source
+                .contains("def main()")
+                .then(|| format!("() -> tensor[{rows}, 2, f32]"));
+            fixtures.push((case, main));
+        }
+    }
+    // Static branch pruning must not attach a claim to the unexecuted producer.
+    let mut routes = Vec::new();
+    call_matrix(
+        &mut routes,
+        "result_graph.untaken",
+        1686,
+        "def bad(x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])\ndef f(x: tensor[n, f32]) -> tensor[2, 2, f32] = if false then bad(x) else to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]])",
+        "(tensor[d0, f32]) -> tensor[2, 2, f32]",
+        vec![vector(6)],
+        Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]),
+    );
+    for case in routes {
+        let main = case
+            .source
+            .contains("def main()")
+            .then(|| "() -> tensor[2, 2, f32]".to_owned());
+        fixtures.push((case, main));
+    }
+    assert_eq!(fixtures.len(), 69);
+    let mut failures = Vec::new();
+    for (case, main_signature) in fixtures {
+        let observed = observe(&case);
+        println!("{}: {}", case.id, observed);
+        failures.extend(contract_failures(&case, &observed));
+        if let Some(signature) = main_signature {
+            if observed["check"]["signatures"]["main"] != signature {
+                failures.push(format!(
+                    "{} main signature: {} != {signature}",
+                    case.id, observed["check"]["signatures"]["main"]
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// #1686/#1687 retain the original #1375/#597/#1619 host exits. These
 /// expectations come from section 4.7 and [05-MOV-1], never from lane agreement.
 #[test]

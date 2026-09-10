@@ -98,10 +98,10 @@ pub fn vectorize_axis0(dag: &Dag, batch_dim: DimInfo) -> Result<Dag, String> {
                 requirements: requirements.clone(),
             },
             RiscOp::CheckedReshapeExtent {
-                claim,
+                claims,
                 axis: RtAxis::Lit(axis),
             } => RiscOp::CheckedReshapeExtent {
-                claim: claim.clone(),
+                claims: claims.clone(),
                 axis: RtAxis::Lit(axis + 1),
             },
             RiscOp::CheckedUnitAxis {
@@ -268,9 +268,8 @@ fn bound_input_slots(op: &RiscOp) -> UnordSet<usize> {
         RiscOp::CheckedUnitAxis { .. } => {
             slots.insert(1);
         }
-        RiscOp::CheckedReshapeExtent { .. } => {
-            slots.insert(0);
-            slots.insert(1);
+        RiscOp::CheckedReshapeExtent { claims, .. } => {
+            slots.extend(0..=claims.len());
         }
         _ => {}
     }

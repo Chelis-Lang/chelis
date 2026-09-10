@@ -27,6 +27,21 @@ const ALLOWED: &[(&str, usize, &str)] = &[
         1,
         "the checked C metadata example broadcasts tensor[1, 2, int64] to tensor[3, 2, int64] at its unit axis, retaining rank 2",
     ),
+    (
+        "examples/checked_runtime_extents.ch",
+        1,
+        "a runtime unit-axis broadcast multiplies a computed reshape without raising rank",
+    ),
+    (
+        "crates/chelis-compiler-api/tests/disk_cache.rs",
+        1,
+        "current and restored library caches retain the same-rank unit broadcast precondition",
+    ),
+    (
+        "scripts/runtime_extent_cache_compatibility.py",
+        1,
+        "the two-binary cache oracle compares matching and mismatching operands of a same-rank unit broadcast",
+    ),
     // These spell the checked C metadata API, not a Chelis program call.
     // Keep exact counts so additions still require classification.
     (
@@ -169,7 +184,7 @@ const ALLOWED: &[(&str, usize, &str)] = &[
     ),
     (
         "crates/chelis-cli/tests/runtime_extent_claim_preparation.rs",
-        9,
+        15,
         "same-rank broadcasts for record projection, literal/symbolic/folded sizes, sum validation, and exported/binding/root acceptance with a runtime unit-operand control and refusal; rank-raising claim fixtures use insert",
     ),
     // `expand`'s own runtime behaviour suite. It exists because the previous

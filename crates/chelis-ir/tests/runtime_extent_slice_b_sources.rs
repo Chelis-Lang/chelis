@@ -1034,7 +1034,7 @@ fn every_risc_op_yields_exactly_one_source_per_output_axis() {
     nodes.push(add(
         &mut dag,
         RiscOp::CheckedReshapeExtent {
-            claim: "unit".into(),
+            claims: vec!["unit".into()],
             axis: RtAxis::Lit(0),
         },
         vec![witness, required],

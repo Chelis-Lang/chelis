@@ -720,11 +720,12 @@ pub enum RiscOp {
         requirements: Vec<chelis_types::ScalarValue>,
     },
     /// Checks an independently computed reshape target (input 0) against
-    /// its declaring witness or literal requirement (input 1). Both inputs
-    /// and the result are scalar int64. `claim` is diagnostic text only;
-    /// the input edge identifies the signature activation's requirement.
+    /// its declaring witnesses or literal requirements (inputs 1..). Every
+    /// input and the result is scalar int64. The nonempty `claims` labels
+    /// correspond one-to-one to requirement edges, checked in order. Labels
+    /// are diagnostic only; edges identify each activation's requirement.
     CheckedReshapeExtent {
-        claim: String,
+        claims: Vec<String>,
         axis: RtAxis,
     },
     /// Refines one tensor axis to one after its exact ExtentWitness has

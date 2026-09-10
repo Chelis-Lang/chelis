@@ -25,7 +25,7 @@ fn checked_extent(dag: &mut Dag, actual: i64, required: i64) -> NodeId {
     let required = scalar(dag, required);
     dag.add_node(
         RiscOp::CheckedReshapeExtent {
-            claim: "rows".into(),
+            claims: vec!["rows".into()],
             axis: RtAxis::Lit(0),
         },
         vec![actual, required],
@@ -95,6 +95,60 @@ fn computed_claim_checks_independent_values_before_returning_a_scalar() {
         }
     }
 }
+#[test]
+fn multiple_claims_keep_each_requirement_and_reject_missing_edges() {
+    for second in [2, 3] {
+        let mut dag = Dag::new();
+        let actual = scalar(&mut dag, 2);
+        let inner = scalar(&mut dag, 2);
+        let outer = scalar(&mut dag, second);
+        let checked = dag.add_node(
+            RiscOp::CheckedReshapeExtent {
+                claims: vec!["inner".into(), "outer".into()],
+                axis: RtAxis::Lit(0),
+            },
+            vec![actual, inner, outer],
+            scalar_type(),
+            None,
+        );
+        dag.add_root(checked);
+        assert!(chelis_ir::verify::verify(&dag).is_empty());
+        let mut rewritten = common_subexpr_eliminate(&dag);
+        constant_fold(&mut rewritten);
+        let rewritten = dead_code_eliminate(&rewritten);
+        for graph in [dag.clone(), rewritten] {
+            let result = eval_tensor_with(&graph, |_| None);
+            if second == 2 {
+                let root = graph.roots()[0];
+                assert_eq!(
+                    result.unwrap()[&root].storage().scalar_at(0).as_i64_exact(),
+                    Some(2)
+                );
+            } else {
+                let error = result.unwrap_err();
+                assert!(
+                    error.contains("extent `outer`: claimed = 3, reshape axis 0 = 2"),
+                    "{error}"
+                );
+                assert!(
+                    error.contains("numeric trap: domain in reshape at int64"),
+                    "{error}"
+                );
+            }
+        }
+        let mut missing = dag.clone();
+        missing.node_mut(checked).unwrap().inputs.pop();
+        assert!(!chelis_ir::verify::verify(&missing).is_empty());
+        let mut empty = dag;
+        empty.node_mut(checked).unwrap().op = RiscOp::CheckedReshapeExtent {
+            claims: Vec::new(),
+            axis: RtAxis::Lit(0),
+        };
+        empty.node_mut(checked).unwrap().inputs.truncate(1);
+        assert!(!chelis_ir::verify::verify(&empty).is_empty());
+    }
+}
+
 #[test]
 fn checked_unit_refinement_requires_the_same_observed_tensor_axis() {
     for actual in [1, 2] {
@@ -220,7 +274,7 @@ fn computed_reshape() -> (Dag, NodeId, NodeId) {
     let actual = dag.add_node(RiscOp::FloorDiv, vec![shape, two], scalar_type(), None);
     let checked = dag.add_node(
         RiscOp::CheckedReshapeExtent {
-            claim: "2".into(),
+            claims: vec!["2".into()],
             axis: RtAxis::Lit(0),
         },
         vec![actual, two],

@@ -194,7 +194,7 @@ fn checked_fixture() -> WireDag {
     dag.nodes.push(WireDagNode {
         id: 5,
         op: WireRiscOp::CheckedReshapeExtent {
-            claim: "rows".into(),
+            claims: vec!["rows".into()],
             axis: WireRtAxis::Lit { value: 0 },
         },
         inputs: vec![3, 4],
@@ -219,7 +219,7 @@ fn checked_extent_edges_roundtrip_exactly_and_legacy_versions_are_rejected() {
     let mut old = json.clone();
     old["schema_version"] = serde_json::json!(WIRE_DAG_SCHEMA_VERSION - 1);
     assert!(WireDag::from_validated_json(&old.to_string()).is_err());
-    for (node, field) in [(5, "claim"), (5, "axis"), (2, "axis")] {
+    for (node, field) in [(5, "claims"), (5, "axis"), (2, "axis")] {
         let mut missing = json.clone();
         missing["nodes"][node]["op"]
             .as_object_mut()
@@ -230,6 +230,30 @@ fn checked_extent_edges_roundtrip_exactly_and_legacy_versions_are_rejected() {
             "missing node {node} field {field}"
         );
     }
+}
+
+#[test]
+fn multiple_claim_edges_are_bijective_with_labels_on_the_wire() {
+    let mut dag = checked_fixture();
+    let WireRiscOp::CheckedReshapeExtent { claims, .. } = &mut dag.nodes[5].op else {
+        unreachable!()
+    };
+    claims.push("outer".into());
+    dag.nodes[5].inputs.push(3);
+    let json = serde_json::to_value(&dag).unwrap();
+    assert_eq!(
+        serde_json::to_value(WireDag::from_validated_json(&json.to_string()).unwrap()).unwrap(),
+        json
+    );
+    let mut missing = dag.clone();
+    missing.nodes[5].inputs.pop();
+    assert!(missing.validate_wire_contract().is_err());
+    let WireRiscOp::CheckedReshapeExtent { claims, .. } = &mut dag.nodes[5].op else {
+        unreachable!()
+    };
+    claims.clear();
+    dag.nodes[5].inputs.truncate(1);
+    assert!(dag.validate_wire_contract().is_err());
 }
 
 #[test]

@@ -2178,7 +2178,7 @@
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_node",
-      "sample": "acc = chelis_fmin_propnan_f32(acc, ((const float*)t{a}_data)[src_idx]);"
+      "sample": "if (((const int64_t*)t{actual}_data)[0] != ((const int64_t*)t{required}_data)[0]) {{"
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_recip_reduced_f",

@@ -47,11 +47,13 @@ references to strictly earlier nodes. It does not carry shape numbers.
 `shape_deps`, `span_id` (explicitly null when absent), and `merged_spans` are
 mandatory fields, including when their lists are empty.
 
-`WireRiscOp::CheckedReshapeExtent { claim, axis }` has two earlier rank-zero
-`int64` inputs: the independently computed target extent and the required
-extent. Its rank-zero `int64` output carries the computed extent after their
-equality check. `claim` is diagnostic text; the second input identifies the
-requirement, including a declaring signature's shape witness. The normalized
+`WireRiscOp::CheckedReshapeExtent { claims, axis }` has an earlier rank-zero
+`int64` input for the independently computed target extent, followed by one
+earlier scalar `int64` input per requirement. The nonempty `claims` list contains
+diagnostic labels in the same order as those requirement inputs. Its rank-zero
+`int64` output carries the computed extent after all equality checks, in list
+order. Labels are diagnostic text; input edges identify requirements, including
+each declaring signature's shape witness. The normalized
 `int32` result-axis position is nonnegative. Missing fields, invalid references,
 wrong arity, or non-scalar/non-`int64` inputs or output are encoding and decoding
 errors. A resolved result-type dimension does not substitute for either input.
@@ -97,7 +99,7 @@ int64 node. The decoder enforces the owner matrix from
 `spec/05-risc-primitives.md` §2.4.1, the source rank and dtype, the normalized
 axis range, and the exact input cardinality before IR construction.
 
-Every tagged variant must be known to the version 9 decoder. `OneHot` remains only a transient
+Every tagged variant must be known to the version 10 decoder. `OneHot` remains only a transient
 IR/specialization marker and backends must not receive it after specialization.
 
 Execution-value envelopes carry the independently required exact

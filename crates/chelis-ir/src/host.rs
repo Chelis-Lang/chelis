@@ -6712,10 +6712,30 @@ fn should_keep_tensor_expr_in_host_lane(expr: &Expr) -> bool {
     let Expr::List(list, _) = expr else {
         return false;
     };
-    if matches!(
-        tag(list),
-        Some(DeepTag::TupleGet | DeepTag::If | DeepTag::Match)
-    ) {
+    if tag(list) == Some(DeepTag::If) {
+        // The DAG lowerer already prunes literal conditions. Keep the whole
+        // declaring signature on that kernel, instead of extracting a host
+        // branch as a signatureless helper and losing its result obligation.
+        // A dynamic condition retains host control flow and its activation.
+        let kids = children(list);
+        let literal_bool = kids.first().and_then(|condition| {
+            let condition = match condition {
+                Expr::List(lit, _) if tag(lit) == Some(DeepTag::Lit) => children(lit).first()?,
+                other => other,
+            };
+            match condition {
+                Expr::Atom(Atom::Bool(value), _) => Some(*value),
+                _ => None,
+            }
+        });
+        return match literal_bool {
+            Some(taken) => kids
+                .get(if taken { 1 } else { 2 })
+                .is_none_or(should_keep_tensor_expr_in_host_lane),
+            None => true,
+        };
+    }
+    if matches!(tag(list), Some(DeepTag::TupleGet | DeepTag::Match)) {
         return true;
     }
     if tag(list) != Some(DeepTag::App) {
