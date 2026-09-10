@@ -11,6 +11,67 @@ fn cli(args: &[&str]) -> std::process::Output {
 }
 
 #[test]
+fn staged_size_example_checks_exact_mask_and_rejects_a_false_result_claim() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("staged.ch");
+    let source = include_str!("../../../examples/dropout_staged_claim.ch");
+    for valid in [true, false] {
+        let source = if valid {
+            source.to_owned()
+        } else {
+            source
+                .replace(
+                    "source = to_tensor([1.0f32, 1.0f32])",
+                    "source = to_tensor([1.0f32, 1.0f32, 1.0f32])",
+                )
+                .replace(
+                    "x = to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32])",
+                    "x = to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32])",
+                )
+        };
+        std::fs::write(&file, source).unwrap();
+        let path = file.to_str().unwrap();
+        assert!(cli(&["fmt", "--inplace", path]).status.success());
+        assert!(cli(&["lint", "--check", path]).status.success());
+        let checked = cli(&["check", path]);
+        assert!(
+            checked.status.success(),
+            "{}",
+            String::from_utf8_lossy(&checked.stderr)
+        );
+        let checked: Value = serde_json::from_slice(&checked.stdout).unwrap();
+        assert_eq!(checked["score"], 1.0);
+        assert_eq!(checked["errors"], serde_json::json!([]));
+        let output = cli(&["eval", "--file", path, "--json"]);
+        if valid {
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let result: chelis_compiler_api::schema::EvalResult =
+                serde_json::from_slice(&output.stdout).unwrap();
+            let chelis_compiler_api::schema::ExecutionValue::Tensor { value } =
+                &result.roots[0].value
+            else {
+                panic!("{result:?}")
+            };
+            assert_eq!(value.shape, vec![2, 2]);
+            assert_eq!(value.data.to_f64_lossy_vec(), vec![2.0, 0.0, 0.0, 0.0]);
+        } else {
+            assert!(!output.status.success());
+            let error = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                error.contains("claimed = 2")
+                    && error.contains("reshape axis 0 = 3")
+                    && error.contains("numeric trap: domain in reshape at int64"),
+                "{error}"
+            );
+        }
+    }
+}
+
+#[test]
 fn executable_example_survives_format_check_and_exact_eval() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("dropout.ch");

@@ -473,6 +473,82 @@ struct DrawKey {
     ordinal: u64,
 }
 
+/// Opaque evaluator companion to the ordinary host stage plan. Partitioning
+/// transports source associations directly; serialized DAGs cannot recreate it.
+#[derive(Debug, Clone)]
+pub struct StagedEvaluationPlan {
+    logical: EvaluationPlan,
+    segments: Vec<EvaluationSegment>,
+}
+
+#[derive(Debug, Clone)]
+struct EvaluationSegment {
+    dag: Dag,
+    metadata: ExecutionMetadata,
+}
+
+impl StagedEvaluationPlan {
+    pub(crate) fn new(dag: Dag, metadata: ExecutionMetadata) -> Result<Self, String> {
+        Ok(Self {
+            logical: EvaluationPlan::new(dag, metadata)?,
+            segments: Vec::new(),
+        })
+    }
+
+    pub(crate) fn append_segment(&mut self, dag: Dag, remap: &UnordMap<NodeId, NodeId>) {
+        let mut metadata = self.logical.metadata.clone();
+        metadata.sites = metadata
+            .sites
+            .into_sorted()
+            .into_iter()
+            .filter_map(|(node, site)| remap.get(&node).map(|mapped| (*mapped, site)))
+            .collect();
+        metadata.order = dag.nodes().iter().map(|node| node.id).collect();
+        self.segments.push(EvaluationSegment { dag, metadata });
+    }
+
+    /// Start one invocation. Its keys and scope counters survive every cut.
+    pub fn frame<'a>(
+        &'a self,
+        context: &'a mut RandomExecutionContext,
+    ) -> Result<StagedEvaluationFrame<'a>, String> {
+        Ok(StagedEvaluationFrame {
+            frame: self.logical.frame(context)?,
+            segments: self.segments.iter(),
+        })
+    }
+}
+
+/// Invocation-local state for the kernels of a checked staged region.
+pub struct StagedEvaluationFrame<'a> {
+    frame: ExecutionFrame<'a>,
+    segments: std::slice::Iter<'a, EvaluationSegment>,
+}
+
+impl StagedEvaluationFrame<'_> {
+    /// A host source executes between kernels and may advance the inherited
+    /// stream. Forward/replay keys and nested-scope counters remain private.
+    pub fn with_context<T>(&mut self, run: impl FnOnce(&mut RandomExecutionContext) -> T) -> T {
+        run(self.frame.context)
+    }
+
+    /// Execute the next partitioned numeric segment in the same invocation.
+    pub fn eval_next_kernel<F>(
+        &mut self,
+        load_input: F,
+    ) -> Result<UnordMap<NodeId, TensorValue>, String>
+    where
+        F: FnMut(&str) -> Option<TensorValue>,
+    {
+        let segment = self
+            .segments
+            .next()
+            .ok_or("staged evaluation has no next kernel")?;
+        self.frame.metadata = &segment.metadata;
+        crate::eval::eval_tensor_segment_with_strict(&segment.dag, &mut self.frame, load_input)
+    }
+}
+
 pub(crate) struct ExecutionFrame<'a> {
     metadata: &'a ExecutionMetadata,
     counters: Vec<u64>,
@@ -618,6 +694,106 @@ mod tests {
             seed: Some(42),
             counter: 0,
         })
+    }
+
+    #[test]
+    fn staged_replay_keeps_its_forward_key_across_a_host_draw_and_scope_cuts() {
+        use crate::host::HostParam;
+        use crate::host::staged::{HostSource, HostStage, HostValueId, StageValue};
+        use crate::host_type_state::{HostPrecisionTerm, HostTypeTerm};
+        use std::collections::BTreeMap;
+        for nested in [false, true] {
+            for rate in [0.5, 1.0] {
+                let mut logical = fixture(&[rate, rate], 4, true);
+                if nested {
+                    logical.metadata.scopes.push(Scope { seed: Some(42) });
+                    logical.metadata.sites.insert(
+                        NodeId(1),
+                        RandomSite::Forward {
+                            draw: DrawId(0),
+                            scope: ScopeId(1),
+                        },
+                    );
+                }
+                let ty = logical.dag.get(NodeId(0)).unwrap().output_type.clone();
+                let sources = [HostSource {
+                    before: 2,
+                    value: StageValue::Host(HostValueId(0)),
+                    ty: HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64)),
+                    expression: chelis_deep::parser::parse_str("(lit {type: (t-prim {} int64)} 0)")
+                        .unwrap()
+                        .remove(0),
+                    captures: vec![(
+                        "forward".into(),
+                        StageValue::Tensor(NodeId(1)),
+                        HostTypeTerm::Tensor(ty.clone()),
+                    )],
+                }];
+                let mut companion =
+                    StagedEvaluationPlan::new(logical.dag.clone(), logical.metadata).unwrap();
+                let plan = crate::host::staged::partition(
+                    &logical.dag,
+                    &sources,
+                    &[HostParam {
+                        name: "x".into(),
+                        ty: HostTypeTerm::Tensor(ty),
+                    }],
+                    &BTreeMap::from([(NodeId(0), "x".into())]),
+                    &BTreeMap::new(),
+                    Some(&mut companion),
+                )
+                .unwrap();
+                let mut context = context();
+                // Ordinal 1 and ordinal 0 have different independently pinned masks.
+                context.state.counter = 1;
+                let mut values = UnordMap::new();
+                values.insert("x".into(), TensorValue::from_vec(vec![4], vec![1.0; 4]));
+                let result = (|| {
+                    let mut frame = companion.frame(&mut context)?;
+                    for stage in plan.stages() {
+                        match stage {
+                            HostStage::Source { captures, .. } => {
+                                let expected = if nested {
+                                    vec![0.0, 2.0, 0.0, 0.0]
+                                } else {
+                                    vec![2.0, 0.0, 0.0, 0.0]
+                                };
+                                assert_eq!(values[&captures[0].value].to_f64_lossy_vec(), expected);
+                                frame.with_context(|context| context.state.counter += 1);
+                            }
+                            HostStage::Kernel { dag, outputs } => {
+                                let computed =
+                                    frame.eval_next_kernel(|name| values.get(name).cloned())?;
+                                for (name, root) in outputs.iter().zip(dag.roots()) {
+                                    values.insert(name.clone(), computed[root].clone());
+                                }
+                            }
+                        }
+                    }
+                    Ok::<_, String>(values[plan.output()].to_f64_lossy_vec())
+                })();
+                if rate == 1.0 {
+                    assert_eq!(
+                        result.unwrap_err(),
+                        "numeric trap: domain in dropout at f32"
+                    );
+                    assert_eq!(
+                        context.state.counter, 1,
+                        "failed validation cannot reach the host cut"
+                    );
+                } else {
+                    assert_eq!(
+                        result.unwrap(),
+                        if nested {
+                            vec![0.0, 2.0, 0.0, 0.0]
+                        } else {
+                            vec![2.0, 0.0, 0.0, 0.0]
+                        }
+                    );
+                    assert_eq!(context.state.counter, if nested { 2 } else { 3 });
+                }
+            }
+        }
     }
 
     #[test]

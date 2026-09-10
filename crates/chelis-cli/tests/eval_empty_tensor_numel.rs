@@ -64,11 +64,12 @@ fn write_program(dir: &Path, name: &str, body: &str) -> PathBuf {
 
 #[test]
 fn eval_numel_empty_tensor() {
+    // [05-OP-57] supplies dtype through the List type, never a default.
     let dir = tempdir().expect("tempdir");
     let path = write_program(
         dir.path(),
         "numel_empty.ch",
-        "result = numel(to_tensor([]))\n",
+        "result = {\n  empty_values: List[f32] = []\n  numel(to_tensor(empty_values))\n}\n",
     );
     let (ok, stdout, stderr) = eval_file(&path);
     assert!(
@@ -84,7 +85,7 @@ fn eval_numel_empty_tensor() {
 
 #[test]
 fn eval_rank_empty_tensor() {
-    // Pin that to_tensor([]) is a rank-1 empty tensor, not a scalar. The
+    // Pin that a typed empty List produces a rank-1 tensor, not a scalar. The
     // bug surface for numel(empty) is not in rank inference; this fixture
     // locks the shape distinction so a future "fix" that flips empty
     // to rank-0 trips here.
@@ -92,7 +93,7 @@ fn eval_rank_empty_tensor() {
     let path = write_program(
         dir.path(),
         "rank_empty.ch",
-        "result = rank(to_tensor([]))\n",
+        "result = {\n  empty_values: List[f32] = []\n  rank(to_tensor(empty_values))\n}\n",
     );
     let (ok, stdout, stderr) = eval_file(&path);
     assert!(

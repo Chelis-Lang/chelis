@@ -826,66 +826,53 @@ pub(super) fn cast_trunc_tensor_value(
 /// sub-lists at the same level must have matching length and matching
 /// precision.
 ///
-/// Returns `(precision, shape, flat_data)`. Empty outer lists fall
-/// back to an `[0]` shape with `Prim::F32` (matching the rank-1 path
-/// behaviour for compatibility).
+/// The checked leaf dtype and rank are required inputs. Empty Lists carry
+/// no payload evidence, and hidden trailing extents require checked witnesses
+/// rather than a guessed dtype or shape ([05-OP-57]).
 pub(super) fn nested_list_to_tensor_data(
     outer: &[RuntimeValue],
-) -> Result<(Prim, Vec<usize>, ListTensorData), String> {
+    precision: Prim,
+    expected_shape: &[Option<usize>],
+) -> Result<(Vec<usize>, ListTensorData), String> {
+    let Some((expected_extent, inner_extents)) = expected_shape.split_first() else {
+        return Err("to_tensor expected a positive-rank checked result".into());
+    };
+    if expected_extent.is_some_and(|extent| extent != outer.len()) {
+        return Err("to_tensor List length disagrees with its checked tensor extent".into());
+    }
     if outer.is_empty() {
-        return Ok((Prim::F32, vec![0], ListTensorData::Float(Vec::new())));
+        let mut shape = vec![0];
+        for extent in inner_extents {
+            shape.push(extent.ok_or(
+                "to_tensor cannot resolve an inner extent hidden by an empty List [05-OP-57]",
+            )?);
+        }
+        return Ok((shape, list_to_tensor_data(outer, precision)?));
+    }
+    if inner_extents.is_empty() {
+        let data = list_to_tensor_data(outer, precision)?;
+        return Ok((vec![outer.len()], data));
     }
 
-    // Decide whether this is a leaf level (numeric/bool elements) or a
-    // recursive level (List elements) based on the first element. The
-    // homogeneity check below catches the mixed case.
-    let first_is_list = matches!(&outer[0], RuntimeValue::List(_));
-
-    if !first_is_list {
-        // Leaf level — same code path as the original list_to_tensor.
-        let (precision, data) = list_to_tensor_data(outer)?;
-        return Ok((precision, vec![data.len()], data));
-    }
-
-    let mut precision: Option<Prim> = None;
-    let mut inner_shape: Option<Vec<usize>> = None;
-    let mut data: Option<ListTensorData> = None;
-    for (idx, value) in outer.iter().enumerate() {
+    let mut rows = outer.iter().enumerate().map(|(index, value)| {
         let RuntimeValue::List(inner) = value else {
             return Err(format!(
-                "to_tensor expects homogeneous nested lists; element {idx} is not a List"
+                "to_tensor expects homogeneous nested lists; element {index} is not a List"
             ));
         };
-        let (sub_precision, sub_shape, sub_data) = nested_list_to_tensor_data(inner)?;
-        match &precision {
-            None => precision = Some(sub_precision),
-            Some(p) if *p == sub_precision => {}
-            Some(p) => {
-                return Err(format!(
-                    "to_tensor requires homogeneous numeric or bool elements; expected {p:?}, got {sub_precision:?} at element {idx}"
-                ));
-            }
+        nested_list_to_tensor_data(inner, precision, inner_extents)
+    });
+    let (inner_shape, mut data) = rows.next().expect("nonempty List checked above")?;
+    for row in rows {
+        let (shape, row_data) = row?;
+        if shape != inner_shape {
+            return Err("to_tensor requires uniform inner shape".into());
         }
-        match &inner_shape {
-            None => inner_shape = Some(sub_shape),
-            Some(s) if *s == sub_shape => {}
-            Some(s) => {
-                return Err(format!(
-                    "to_tensor requires uniform inner shape; expected {s:?}, got {sub_shape:?} at element {idx}"
-                ));
-            }
-        }
-        match &mut data {
-            None => data = Some(sub_data),
-            Some(existing) => existing.extend(sub_data)?,
-        }
+        data.extend(row_data)?;
     }
-
     let mut shape = vec![outer.len()];
-    shape.extend(inner_shape.unwrap_or_default());
-    let precision = precision.unwrap_or(Prim::F32);
-    let data = data.unwrap_or(ListTensorData::Float(Vec::new()));
-    Ok((precision, shape, data))
+    shape.extend(inner_shape);
+    Ok((shape, data))
 }
 
 /// Wide ingress buffer for `to_tensor`: exact i64 for the integer/bool
@@ -929,61 +916,39 @@ impl ListTensorData {
     }
 }
 
-fn list_to_tensor_data(values: &[RuntimeValue]) -> Result<(Prim, ListTensorData), String> {
-    // Element classification: integer scalars carry exact i64 in the wide
-    // ingress buffer while retaining the ELEMENT's own dtype; floats carry
-    // their exact f64 image at their own dtype; bools carry 0/1 into a Bool
-    // tensor. The homogeneity check pins the precision to whatever the first
-    // typed element advertised. The wide buffer is not authority to widen
-    // the resulting tensor.
-    let mut precision: Option<Prim> = None;
-    let mut ints: Vec<i64> = Vec::new();
-    let mut floats: Vec<f64> = Vec::new();
+fn list_to_tensor_data(values: &[RuntimeValue], precision: Prim) -> Result<ListTensorData, String> {
+    // The declared dtype is authoritative even for zero elements. Nonempty
+    // payloads validate against it; they never choose or change that dtype.
+    let mut ints = Vec::new();
+    let mut floats = Vec::new();
     for value in values {
         match value {
-            RuntimeValue::Scalar(payload) if payload.dtype().is_integer() => {
-                let element_dtype = payload.dtype();
-                precision.get_or_insert(element_dtype);
-                if precision != Some(element_dtype) {
-                    return Err(
-                        "to_tensor requires homogeneous numeric or bool list elements".to_string(),
-                    );
-                }
+            RuntimeValue::Scalar(payload)
+                if payload.dtype() == precision && precision.is_integer() =>
+            {
                 ints.push(payload.as_i64());
             }
-            RuntimeValue::Scalar(payload) if payload.dtype().is_float() => {
-                let element_dtype = payload.dtype();
-                precision.get_or_insert(element_dtype);
-                if precision != Some(element_dtype) {
-                    return Err(
-                        "to_tensor requires homogeneous numeric or bool list elements".to_string(),
-                    );
-                }
+            RuntimeValue::Scalar(payload)
+                if payload.dtype() == precision && precision.is_float() =>
+            {
                 floats.push(payload.as_f64_lossy());
             }
-            RuntimeValue::Bool(value) => {
-                precision.get_or_insert(Prim::Bool);
-                if precision != Some(Prim::Bool) {
-                    return Err(
-                        "to_tensor requires homogeneous numeric or bool list elements".to_string(),
-                    );
-                }
-                ints.push(if *value { 1 } else { 0 });
+            RuntimeValue::Bool(value) if precision == Prim::Bool => {
+                ints.push(i64::from(*value));
             }
-            other => {
-                return Err(format!(
-                    "to_tensor expects numeric or bool list elements, got {other:?}"
-                ));
-            }
+            _ => return Err(
+                "to_tensor requires homogeneous numeric or bool list elements at the checked dtype"
+                    .into(),
+            ),
         }
     }
-    let precision = precision.unwrap_or(Prim::F32);
-    let data = if precision.is_float() {
-        ListTensorData::Float(floats)
+    if precision.is_float() {
+        Ok(ListTensorData::Float(floats))
+    } else if precision.is_integer() || precision == Prim::Bool {
+        Ok(ListTensorData::Int(ints))
     } else {
-        ListTensorData::Int(ints)
-    };
-    Ok((precision, data))
+        Err("to_tensor requires an active numeric or bool element dtype".into())
+    }
 }
 
 pub(super) fn tensor_to_list_values(
@@ -1036,14 +1001,7 @@ fn pad_sequences_rows(
         let RuntimeValue::List(items) = sequence else {
             return Err(format!("{op} expects nested lists, got {sequence:?}"));
         };
-        let (row_precision, row) = list_to_tensor_data(items)?;
-        if row_precision != pad_precision && !items.is_empty() {
-            return Err(format!(
-                "{op} requires homogeneous numeric nested lists at `{}`; got `{}`",
-                pad_precision.name(),
-                row_precision.name()
-            ));
-        }
+        let row = list_to_tensor_data(items, pad_precision)?;
         lens.push(row.len());
         rows.push(row);
     }

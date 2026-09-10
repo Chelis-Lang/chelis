@@ -1,6 +1,8 @@
 //! Chelis compiler CLI.
 
 mod c_source_name;
+mod eval_output;
+mod eval_timeout;
 mod prove;
 mod style_gate;
 
@@ -1589,7 +1591,7 @@ fn cmd_eval(
     explicit_target: bool,
     timeout: Option<u64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let _cancel_guard = timeout.map(install_eval_timeout);
+    let watchdog = timeout.map(|secs| eval_timeout::EvalTimeout::install(secs, json));
     let outcome = cmd_eval_inner(
         file,
         expr,
@@ -1598,77 +1600,30 @@ fn cmd_eval(
         target,
         explicit_target,
     );
-    match (outcome, timeout) {
-        (Err(err), Some(secs)) if chelis_compiler_api::is_cancellation(&err.to_string()) => {
-            Err(format!("evaluation timed out after {secs}s (--timeout)").into())
-        }
-        (outcome, _) => outcome,
+    // All formatting, including diagnostics, precedes the terminal claim.
+    // A stalled formatter still leaves completed effects with the watchdog.
+    let mut output = match outcome {
+        Ok(output) => output,
+        Err(error) => eval_output::EvalOutput::failure(Vec::new(), error.to_string(), json),
+    };
+    if let (Some(secs), Some(error)) = (timeout, output.error.as_mut())
+        && chelis_compiler_api::is_cancellation(error)
+    {
+        *error = format!("evaluation timed out after {secs}s (--timeout)");
     }
+    if watchdog
+        .as_ref()
+        .is_some_and(|watchdog| !watchdog.claim_normal())
+    {
+        // The forced path owns emission and process exit. Returning here
+        // would let main report success or emit a second diagnostic.
+        loop {
+            std::thread::park();
+        }
+    }
+    drop(watchdog);
+    output.emit()
 }
-
-/// Arm the `--timeout` watchdog and install its token for the current thread.
-///
-/// Two-stage on purpose. The token is the clean path: the compiler and the
-/// eval lanes notice it at their next check point and unwind normally, so
-/// destructors run and the error surfaces through the ordinary error channel.
-/// A grace period after the deadline, the watchdog gives up on cooperation and
-/// exits the process.
-///
-/// **Why the backstop stays after chelis#930.** When only evaluation was
-/// cancellable (chelis#914), the backstop was not a backstop at all: a
-/// compile-bound program could never observe the token, so the hard exit was
-/// the *normal* path for that entire class and the effective deadline was
-/// silently `<N> + grace`. chelis#930 made parse / desugar / check / lower poll
-/// the token too, so cooperative unwinding is now the ordinary outcome for
-/// compile-bound programs as well — measured on the chelis#930 repro, a
-/// front-end-bound `--timeout 2` now reports at ~2.05 s instead of at the
-/// 7 s hard exit.
-///
-/// It is not, however, removable, because "everything is cancellable" is
-/// stronger than what the front end actually proves. Cancellation is polled at
-/// phase boundaries and at top-level-declaration boundaries, so the residual
-/// uninterruptible unit is one declaration — unbounded in principle — and
-/// several steps on the `eval --file` path poll nothing at all: the style gate,
-/// reef graph preparation and linking, and lowering's whole-program walk. A
-/// genuinely wedged pass (an accidental non-terminating loop in the compiler)
-/// would never reach a poll by construction. `--timeout` exists to give
-/// unattended runs an unconditional loud failure, and a guarantee qualified by
-/// "unless the wedge is somewhere we did not instrument" is not that. Silently
-/// not timing out remains the worse failure, so the backstop stays as defence
-/// in depth rather than as the mechanism.
-fn install_eval_timeout(secs: u64) -> chelis_compiler_api::CancelTokenGuard {
-    let token = chelis_compiler_api::CancelToken::new();
-    let watchdog = token.clone();
-    // Detached by design: this thread only sleeps and sets a flag, holds no
-    // resources, and must outlive nothing. The process exits when `cmd_eval`
-    // returns, whichever stage got there first.
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(secs));
-        watchdog.cancel();
-        std::thread::sleep(TIMEOUT_HARD_EXIT_GRACE);
-        // Still alive: the cooperative path did not reach a node visit.
-        //
-        // The suffix is the whole point of this line (chelis#1607). The
-        // cooperative path prints the same prefix through the ordinary error
-        // channel and exits 1 as well, so without it a forced exit and a clean
-        // unwind are one event to any reader, and they are not: this one killed
-        // the process, so destructors did not run and nothing was flushed. A
-        // user who sees it has learned something actionable, and a test can
-        // finally tell the two apart without timing them.
-        eprintln!(
-            "error: evaluation timed out after {secs}s (--timeout); \
-             cancellation did not complete within {grace}s, forced exit",
-            grace = TIMEOUT_HARD_EXIT_GRACE.as_secs()
-        );
-        std::process::exit(1);
-    });
-    chelis_compiler_api::install_cancel_token(token)
-}
-
-/// How long the `--timeout` watchdog waits for cooperative cancellation to
-/// unwind before hard-exiting. Generous relative to the per-node check so a
-/// single long-running tensor op is not cut short spuriously.
-const TIMEOUT_HARD_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn cmd_eval_inner(
     file: Option<&std::path::Path>,
@@ -1677,7 +1632,7 @@ fn cmd_eval_inner(
     allow_style_violations: bool,
     target: chelis_types::types::Target,
     _explicit_target: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<eval_output::EvalOutput, Box<dyn std::error::Error>> {
     // The style gate runs only on the `--file` form (a real on-disk
     // source). The `--expr` form is a synthetic one-line snippet
     // wrapped as `__eval_result = <expr>` and never lands on disk, so
@@ -1723,14 +1678,14 @@ fn cmd_eval_inner(
                 chelis_deep::parse_and_stamp_file(&deep_source)
                     .map_err(|err| boxed_string_error(err.to_string()))?;
                 return if json {
-                    run_eval_json_emit(try_eval_result_for_target(
+                    prepare_eval_json(try_eval_result_for_target(
                         SourceKind::Deep,
                         &deep_source,
                         None,
                         target,
                     ))
                 } else {
-                    run_eval_emit(try_eval_for_target(
+                    prepare_eval_text(try_eval_for_target(
                         SourceKind::Deep,
                         &deep_source,
                         None,
@@ -1751,8 +1706,8 @@ fn cmd_eval_inner(
                 .then(chelis_types::install_linked_program_guard);
             if let Some(package_root) = &eval_package_root {
                 let source = fs::read_to_string(path)?;
-                match run_eval_in_context(package_root, &source, json, target) {
-                    Ok(()) => return Ok(()),
+                match prepare_eval_in_context(package_root, &source, json, target) {
+                    Ok(output) => return Ok(output),
                     Err(EvalInContextError::Compile(msg)) => return Err(msg.into()),
                 }
             }
@@ -1771,14 +1726,14 @@ fn cmd_eval_inner(
             // exclusively from the manifest.
             let selected_roots = manifest_root_names_from_decls(&entry_decls, &checked, target);
             if json {
-                run_eval_json_emit(try_eval_result_for_target(
+                prepare_eval_json(try_eval_result_for_target(
                     SourceKind::Surf,
                     &source,
                     Some(&selected_roots),
                     target,
                 ))
             } else {
-                run_eval_emit(try_eval_for_target(
+                prepare_eval_text(try_eval_for_target(
                     SourceKind::Surf,
                     &source,
                     Some(&selected_roots),
@@ -1791,14 +1746,14 @@ fn cmd_eval_inner(
             // resolution — keep the legacy path.
             let source = format!("__eval_result = {e}");
             if json {
-                run_eval_json_emit(try_eval_result_for_target(
+                prepare_eval_json(try_eval_result_for_target(
                     SourceKind::Surf,
                     &source,
                     None,
                     target,
                 ))
             } else {
-                run_eval_emit(try_eval_for_target(SourceKind::Surf, &source, None, target))
+                prepare_eval_text(try_eval_for_target(SourceKind::Surf, &source, None, target))
             }
         }
         (None, None) => Err("provide --file or an expression".into()),
@@ -1847,12 +1802,12 @@ enum EvalInContextError {
 /// if present (matching how `chelis test` plumbs it to workers); Phase K
 /// uses it to key the disk cache so a warm `chelis eval --file` re-run
 /// against unchanged sources skips the ~67s library compile entirely.
-fn run_eval_in_context(
+fn prepare_eval_in_context(
     package_root: &Path,
     source: &str,
     json: bool,
     target: chelis_types::types::Target,
-) -> Result<(), EvalInContextError> {
+) -> Result<eval_output::EvalOutput, EvalInContextError> {
     let reef_home = env::var_os("CHELIS_REEF_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(""));
@@ -1880,9 +1835,12 @@ fn run_eval_in_context(
         match chelis_compiler_api::compiler::eval_in_context_for_target(&context, source, target) {
             Ok(result) => result,
             Err(error) => {
-                emit_failed_eval_transcript(&error.transcript, json)
-                    .map_err(|err| EvalInContextError::Compile(err.to_string()))?;
-                return Err(EvalInContextError::Compile(join_eval_error(error)));
+                let transcript = error.transcript.clone();
+                return Ok(eval_output::EvalOutput::failure(
+                    transcript,
+                    join_eval_error(error),
+                    json,
+                ));
             }
         };
     if json {
@@ -1892,55 +1850,33 @@ fn run_eval_in_context(
         // consumers get a single parseable document on stdout.
         let rendered = serde_json::to_string(&result)
             .map_err(|err| EvalInContextError::Compile(format!("eval JSON serialize: {err}")))?;
-        println!("{rendered}");
-        return Ok(());
+        return Ok(eval_output::EvalOutput::json(rendered));
     }
-    let formatted = format_eval_result(&result);
-    if formatted.is_empty() {
-        warn_eval_no_roots();
-        return Ok(());
-    }
-    println!("{formatted}");
-    Ok(())
+    Ok(eval_output::EvalOutput::text(format_eval_result(&result)))
 }
 
-fn run_eval_emit(outcome: Result<String, CompilerError>) -> Result<(), Box<dyn std::error::Error>> {
-    match outcome {
-        Ok(result) => {
-            if result.is_empty() {
-                warn_eval_no_roots();
-                return Ok(());
-            }
-            println!("{result}");
-            Ok(())
-        }
+fn prepare_eval_text(
+    outcome: Result<String, CompilerError>,
+) -> Result<eval_output::EvalOutput, Box<dyn std::error::Error>> {
+    Ok(match outcome {
+        Ok(result) => eval_output::EvalOutput::text(result),
         Err(error) => {
-            emit_failed_eval_transcript(&error.transcript, false)?;
-            Err(join_eval_error(error).into())
+            let transcript = error.transcript.clone();
+            eval_output::EvalOutput::failure(transcript, join_eval_error(error), false)
         }
-    }
+    })
 }
 
-/// JSON counterpart to [`run_eval_emit`]. Stdout carries the raw
-/// `EvalResult` serde JSON only; nothing else is written there. An
-/// empty-roots program serializes to `{"roots":[]}` (valid JSON) rather
-/// than emitting the human stderr breadcrumb, so a scripted consumer
-/// always receives a single parseable document. Errors propagate as a
-/// boxed error (stderr + nonzero exit), unchanged from the text path.
-fn run_eval_json_emit(
+fn prepare_eval_json(
     outcome: Result<chelis_compiler_api::schema::EvalResult, CompilerError>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    match outcome {
-        Ok(result) => {
-            let rendered = serde_json::to_string(&result)?;
-            println!("{rendered}");
-            Ok(())
-        }
+) -> Result<eval_output::EvalOutput, Box<dyn std::error::Error>> {
+    Ok(match outcome {
+        Ok(result) => eval_output::EvalOutput::json(serde_json::to_string(&result)?),
         Err(error) => {
-            emit_failed_eval_transcript(&error.transcript, true)?;
-            Err(join_eval_error(error).into())
+            let transcript = error.transcript.clone();
+            eval_output::EvalOutput::failure(transcript, join_eval_error(error), true)
         }
-    }
+    })
 }
 
 /// Keep JSON stdout free of partial results and flush effects before the
@@ -1957,18 +1893,6 @@ fn emit_failed_eval_transcript(transcript: &[String], json: bool) -> io::Result<
     } else {
         write_lines(&mut io::stdout().lock())
     }
-}
-
-// G7 CLI sub-bug: when `chelis eval --file <foo.ch>` is handed a Surf
-// input that contains only `def` declarations and no top-level
-// evaluable expression, `format_eval_result` returns an empty string
-// and both eval paths short-circuit with exit 0 and no output. That
-// silent success is a footgun for interactive users. Emit a stderr
-// warning at the short-circuit site so humans get a breadcrumb;
-// preserve exit 0 so scripted consumers that pipe stdout downstream
-// keep working. See `docs/investigations/cli_eval_empty_roots_diagnosis.md`.
-fn warn_eval_no_roots() {
-    eprintln!("warning: input contains only def declarations; nothing to evaluate");
 }
 
 fn cmd_cost(file: &Path, json: bool) -> Result<(), Box<dyn std::error::Error>> {

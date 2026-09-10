@@ -72,6 +72,116 @@ fn splitmix64(mut value: u64) -> u64 {
 }
 
 #[test]
+fn staged_claim_failure_commits_the_preceding_draw_and_reuse_keeps_live_ordinals() {
+    use chelis_ir::host::staged::HostStage;
+    let source = "def sample(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = {\n dead = dropout(source, 0.0f32)\n dropout(reshape(x, [numel(dead), 2i64]), 0.5f32)\n}";
+    let declarations = chelis_surf::parser::parse_str(source).unwrap();
+    let checked =
+        chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(&declarations))
+            .unwrap();
+    let mut context = RandomExecutionContext::new(RandomLoweringState {
+        seed: Some(42),
+        counter: 5,
+    });
+    let product = chelis_ir::host::host_def_evaluation_plan(&checked, "sample", &context)
+        .unwrap()
+        .unwrap();
+    let staged = product.kernel_for_inspection().staged.as_ref().unwrap();
+    let execution = product
+        .staged_plan()
+        .expect("checked stages retain Random provenance");
+    assert!(product.plan().is_none());
+    for count in [2, 3, 2] {
+        let before = context.state().counter;
+        let mut values = UnordMap::new();
+        values.insert(
+            "source".into(),
+            TensorValue::from_vec(vec![count], vec![1.0; count]),
+        );
+        values.insert(
+            "x".into(),
+            TensorValue::from_vec(vec![count * 2], vec![1.0; count * 2]),
+        );
+        let result = (|| {
+            let mut frame = execution.frame(&mut context)?;
+            for stage in staged.stages() {
+                match stage {
+                    HostStage::Source {
+                        captures, output, ..
+                    } => {
+                        // This source is numel(dead): read the actually executed
+                        // capture, and prove its draw preceded this host cut.
+                        frame.with_context(|context| {
+                            assert_eq!(context.state().counter, before + 1)
+                        });
+                        let captured = &values[&captures[0].value];
+                        assert_eq!(captured.to_f64_lossy_vec(), vec![1.0; count]);
+                        let extent = chelis_types::scalar_from_i64(
+                            "numel",
+                            Prim::Int64,
+                            captured.storage().len() as i64,
+                        )
+                        .unwrap();
+                        values.insert(
+                            output.clone(),
+                            TensorValue::from_storage(
+                                vec![],
+                                chelis_types::tensor_from_scalars(Prim::Int64, &[extent]),
+                            ),
+                        );
+                    }
+                    HostStage::Kernel { dag, outputs } => {
+                        let computed = frame.eval_next_kernel(|name| values.get(name).cloned())?;
+                        for (output, root) in outputs.iter().zip(dag.roots()) {
+                            values.insert(output.clone(), computed[root].clone());
+                        }
+                    }
+                }
+            }
+            Ok::<_, String>(values[staged.output()].clone())
+        })();
+        if count == 3 {
+            let error = result.unwrap_err();
+            assert!(
+                error.contains("claimed = 2") && error.contains("reshape axis 0 = 3"),
+                "{error}"
+            );
+            assert_eq!(context.state().counter, before + 1);
+        } else {
+            let actual = result.unwrap();
+            assert_eq!(actual.shape, vec![2, 2]);
+            let expected = (0..4)
+                .map(|index| {
+                    let word = splitmix64(
+                        42 ^ splitmix64(before + 1).rotate_left(17)
+                            ^ splitmix64(index).rotate_left(41),
+                    );
+                    if (((word >> 11) as f64 / 9007199254740992.0) as f32) < 0.5 {
+                        0.0
+                    } else {
+                        2.0
+                    }
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(actual.to_f64_lossy_vec(), expected);
+            assert_eq!(context.state().counter, before + 2);
+        }
+    }
+    let mut wrong = RandomExecutionContext::new(RandomLoweringState {
+        seed: Some(7),
+        counter: 19,
+    });
+    assert!(
+        execution
+            .frame(&mut wrong)
+            .err()
+            .unwrap()
+            .contains("inherited seed")
+    );
+    assert_eq!(wrong.state().counter, 19);
+}
+
+#[test]
 fn source_profile_names_exclusions_before_plan_construction() {
     use chelis_ir::evaluation::{EvaluationProfile, LegacyEvaluationReason as Reason};
     let draw = "(app {} (var {} dropout) (var {} x) (lit {type: (t-prim {} f32)} 0.5))";

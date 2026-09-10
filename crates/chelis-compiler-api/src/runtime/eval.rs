@@ -396,9 +396,10 @@ impl<'a> EvalContext<'a> {
         args: Vec<RuntimeValue>,
     ) -> Result<RuntimeValue, String> {
         let execution_plan = kernel.plan();
+        let staged_execution = kernel.staged_plan();
         let kernel = kernel.kernel_for_inspection();
         if let Some(plan) = &kernel.staged {
-            return self.apply_staged_host_plan(name, plan, params, args);
+            return self.apply_staged_host_plan(name, plan, staged_execution, params, args);
         }
         if params.len() != args.len() {
             return Err(format!(
@@ -511,6 +512,7 @@ impl<'a> EvalContext<'a> {
         &mut self,
         name: &str,
         plan: &chelis_ir::host::staged::HostStagedPlan,
+        execution: Option<&chelis_ir::evaluation::StagedEvaluationPlan>,
         params: &[String],
         args: Vec<RuntimeValue>,
     ) -> Result<RuntimeValue, String> {
@@ -520,6 +522,11 @@ impl<'a> EvalContext<'a> {
             return Err(format!("staged kernel `{name}` argument arity mismatch"));
         }
         let mut values: UnordMap<String, RuntimeValue> = params.iter().cloned().zip(args).collect();
+        let mut context = RandomExecutionContext::new(RandomLoweringState {
+            seed: self.random_seed,
+            counter: self.random_counter,
+        });
+        let mut execution = execution.map(|plan| plan.frame(&mut context)).transpose()?;
         for stage in plan.stages() {
             match stage {
                 HostStage::Source {
@@ -529,6 +536,7 @@ impl<'a> EvalContext<'a> {
                     ty,
                 } => {
                     let saved = std::mem::take(&mut self.bindings);
+                    let saved_types = std::mem::take(&mut self.binding_types);
                     for capture in captures {
                         let value = values
                             .get(&capture.value)
@@ -540,10 +548,33 @@ impl<'a> EvalContext<'a> {
                             }
                             (_, value) => value,
                         };
+                        // A staged tensor capture retains the checked type
+                        // needed by host primitive/transform routing. An
+                        // untyped capture masks any same-named outer type.
+                        let declared = match &capture.ty {
+                            HostTypeTerm::Tensor(ty) => self.static_type_expr_of(
+                                &make_var_with_type(&capture.binding, ty, expression.span()),
+                            ),
+                            _ => None,
+                        };
+                        self.binding_types.insert(capture.binding.clone(), declared);
                         self.bindings.insert(capture.binding.clone(), value);
                     }
-                    let result = self.eval_expr(expression);
+                    let result = if let Some(frame) = &mut execution {
+                        frame.with_context(|context| {
+                            self.random_counter = context.state().counter;
+                            let result = self.eval_expr(expression);
+                            *context = RandomExecutionContext::new(RandomLoweringState {
+                                seed: self.random_seed,
+                                counter: self.random_counter,
+                            });
+                            result
+                        })
+                    } else {
+                        self.eval_expr(expression)
+                    };
                     self.bindings = saved;
+                    self.binding_types = saved_types;
                     let value = result?;
                     if matches!(
                         ty,
@@ -575,14 +606,29 @@ impl<'a> EvalContext<'a> {
                             );
                         }
                     }
-                    let (computed, counter) =
-                        chelis_ir::eval::eval_tensor_roots_with_strict_random_progress(
-                            dag,
-                            dag.roots(),
-                            self.random_counter,
-                            |input| inputs.get(input).cloned(),
-                        )?;
-                    self.random_counter = counter;
+                    let computed = if let Some(frame) = &mut execution {
+                        // Resolving a captured top-level input can itself
+                        // advance the host stream before this kernel starts.
+                        frame.with_context(|context| {
+                            *context = RandomExecutionContext::new(RandomLoweringState {
+                                seed: self.random_seed,
+                                counter: self.random_counter,
+                            });
+                        });
+                        let result = frame.eval_next_kernel(|input| inputs.get(input).cloned());
+                        frame.with_context(|context| self.random_counter = context.state().counter);
+                        result?
+                    } else {
+                        let (computed, counter) =
+                            chelis_ir::eval::eval_tensor_roots_with_strict_random_progress(
+                                dag,
+                                dag.roots(),
+                                self.random_counter,
+                                |input| inputs.get(input).cloned(),
+                            )?;
+                        self.random_counter = counter;
+                        computed
+                    };
                     for (output, root) in outputs.iter().zip(dag.roots()) {
                         let value = computed
                             .get(root)
@@ -2437,12 +2483,71 @@ impl<'a> EvalContext<'a> {
             }
             "to_tensor" => {
                 let values = expect_list_arg(args, 0)?;
-                // Bucket 4b: support nested numeric/bool lists. The outer
-                // list contributes the leading dim; if its elements are
-                // themselves uniformly-shaped numeric/bool lists, those
-                // contribute additional inner dims (and so on
-                // recursively).
-                let (precision, shape, data) = nested_list_to_tensor_data(&values)?;
+                // [05-OP-57]: recover dtype and rank from checked types, not
+                // from payloads (empty Lists cannot carry that evidence).
+                let mut list_depth = 0;
+                let mut leaf_type = arg_type_exprs.first().and_then(Option::as_ref);
+                while let Some(inner) = leaf_type.and_then(checked_list_element) {
+                    list_depth += 1;
+                    leaf_type = Some(inner);
+                }
+                let result_children = result_type_expr
+                    .and_then(tagged_expr_children)
+                    .filter(|(tag, _)| *tag == DeepTag::TTensor)
+                    .map(|(_, children)| children);
+                let precision = result_children
+                    .and_then(|children| children.last())
+                    .and_then(|ty| checked_precision_leaf(ty, &self.precision_bindings))
+                    .or_else(|| {
+                        leaf_type
+                            .and_then(|ty| checked_precision_leaf(ty, &self.precision_bindings))
+                    })
+                    .ok_or("to_tensor requires a resolved checked element dtype [05-OP-57]")?;
+                let expected_shape = if let Some((_, dimensions)) =
+                    result_children.and_then(|children| children.split_last())
+                {
+                    dimensions
+                        .iter()
+                        .map(|dimension| {
+                            let Some((tag, children)) = tagged_expr_children(dimension) else {
+                                return Err(
+                                    "to_tensor has malformed checked dimensions".to_string()
+                                );
+                            };
+                            let extent = match tag {
+                                DeepTag::DLit => children.first().and_then(int_value),
+                                DeepTag::DName | DeepTag::DVar => children
+                                    .first()
+                                    .and_then(symbol_name)
+                                    .and_then(|name| self.bindings.get(name))
+                                    .and_then(|value| match value {
+                                        RuntimeValue::Scalar(payload)
+                                            if payload.dtype() == Prim::Int64 =>
+                                        {
+                                            Some(payload.as_i64())
+                                        }
+                                        _ => None,
+                                    }),
+                                _ => {
+                                    return Err(
+                                        "to_tensor requires a resolved checked rank".to_string()
+                                    );
+                                }
+                            };
+                            extent
+                                .map(|extent| {
+                                    usize::try_from(extent).map_err(|_| {
+                                        "to_tensor extent is not representable".to_string()
+                                    })
+                                })
+                                .transpose()
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                } else {
+                    vec![None; list_depth]
+                };
+                let (shape, data) =
+                    nested_list_to_tensor_data(&values, precision, &expected_shape)?;
                 let storage =
                     chelis_types::finalize_tensor("to_tensor", precision, data.into_raw())
                         .map_err(|trap| trap.to_string())?;
@@ -2888,7 +2993,11 @@ impl<'a> EvalContext<'a> {
                 let value = args
                     .first()
                     .ok_or_else(|| "print expects 1 argument".to_string())?;
-                self.transcript.push(render_value(value));
+                let line = render_value(value);
+                if let Some(capture) = &self.transcript_capture {
+                    capture.append(line.clone());
+                }
+                self.transcript.push(line);
                 Ok(RuntimeValue::Unit)
             }
             "fail" => {
@@ -3050,7 +3159,11 @@ impl<'a> EvalContext<'a> {
                 let value = args
                     .first()
                     .ok_or_else(|| "debug expects 1 argument".to_string())?;
-                self.transcript.push(render_value(value));
+                let line = render_value(value);
+                if let Some(capture) = &self.transcript_capture {
+                    capture.append(line.clone());
+                }
+                self.transcript.push(line);
                 Ok(value.clone())
             }
             "min_reduce" => {

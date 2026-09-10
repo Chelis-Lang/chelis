@@ -3079,6 +3079,7 @@ pub struct HostDefEvaluationPlan {
     kernel: HostDefKernel,
     plan: Option<crate::evaluation::EvaluationPlan>,
     profile: crate::evaluation::EvaluationProfile,
+    staged_plan: Option<crate::evaluation::StagedEvaluationPlan>,
 }
 
 impl HostDefEvaluationPlan {
@@ -3090,6 +3091,9 @@ impl HostDefEvaluationPlan {
     }
     pub fn profile(&self) -> crate::evaluation::EvaluationProfile {
         self.profile
+    }
+    pub fn staged_plan(&self) -> Option<&crate::evaluation::StagedEvaluationPlan> {
+        self.staged_plan.as_ref()
     }
 }
 
@@ -3170,15 +3174,19 @@ fn host_def_kernel_product(
             crate::evaluation::LegacyEvaluationReason::LegacyApi,
         ),
     };
-    // Staged host regions retain their existing execution contract. A fixed
-    // Random source plan must keep its complete graph and replay metadata.
-    if profile != crate::evaluation::EvaluationProfile::FixedControl {
-        match staged_def_kernel(program, &signature, random)? {
+    // Claims are constructed before partitioning, while the evaluator keeps
+    // the source-owned Random associations across those same stage cuts.
+    let mut staged_plan = None;
+    {
+        let execution_out = (profile == crate::evaluation::EvaluationProfile::FixedControl)
+            .then_some(&mut staged_plan);
+        match staged_def_kernel_product(program, &signature, random, execution_out)? {
             staged::StagingAttempt::Ready(kernel) => {
                 return Ok(Some(HostDefEvaluationPlan {
                     kernel,
                     plan: None,
                     profile,
+                    staged_plan,
                 }));
             }
             staged::StagingAttempt::HostControlBoundary => return Ok(None),
@@ -3253,6 +3261,7 @@ fn host_def_kernel_product(
         },
         plan,
         profile,
+        staged_plan: None,
     }))
 }
 
@@ -3260,6 +3269,15 @@ fn staged_def_kernel(
     program: &CheckedProgram,
     signature: &HostDefSignature,
     random: Option<RandomLoweringState>,
+) -> Result<staged::StagingAttempt<HostDefKernel>, crate::lower::LowerDiagnostic> {
+    staged_def_kernel_product(program, signature, random, None)
+}
+
+fn staged_def_kernel_product(
+    program: &CheckedProgram,
+    signature: &HostDefSignature,
+    random: Option<RandomLoweringState>,
+    execution_out: Option<&mut Option<crate::evaluation::StagedEvaluationPlan>>,
 ) -> Result<staged::StagingAttempt<HostDefKernel>, crate::lower::LowerDiagnostic> {
     use staged::StagingAttempt;
     let HostTypeTerm::Tensor(expected) = &signature.ret_ty else {
@@ -3319,6 +3337,7 @@ fn staged_def_kernel(
         &context,
         expected,
         random,
+        execution_out,
     );
     let lowered = match lowered {
         Ok(lowered) => lowered,
@@ -5779,14 +5798,21 @@ fn lower_host_expr_kind(
             })?;
             let value = lower_host_expr(child, program, scope, tensor_helpers)?;
 
-            // chelis#1110: the lexical carrier is f64, but the checker-stamped
-            // `lit` node owns the literal's declared width. Preserve that
-            // semantic operation explicitly in HostExpr so an enclosing cast
-            // cannot widen the unfinalized lexical decimal. This is the host
-            // counterpart of static DAG leaf finalization in `lower.rs`.
-            if matches!(value.kind, HostExprKind::Float(_))
-                && let Some(precision) = expr_scalar_float_precision(expr)
-                && precision != chelis_types::types::Prim::F64
+            // The lexical carriers are i64/f64, but the checked `lit` owns
+            // the value's width ([04-LIT-1]). Finalize before any return,
+            // binding or enclosing cast: otherwise ownership sees an int64
+            // return from an int32 function (#1732), or widening observes an
+            // unfinalized decimal (#1110). A marked integer-source float
+            // likewise casts directly from the exact integer, never via f64.
+            let lexical_precision = match &value.kind {
+                HostExprKind::Int(_) => Some(chelis_types::types::Prim::Int64),
+                HostExprKind::Float(_) => Some(chelis_types::types::Prim::F64),
+                _ => None,
+            };
+            if let Some(lexical_precision) = lexical_precision
+                && let Some(precision) = expr_scalar_primitive(expr)
+                && (precision.is_integer() || precision.is_float())
+                && precision != lexical_precision
             {
                 HostExpr::new(HostExprKind::Builtin {
                     name: "cast".to_string(),
@@ -5996,9 +6022,14 @@ fn lower_host_expr_kind(
             // raises the same fatal branded diagnostic as the IR-lane
             // `lower_cast` - the build lane previously typed it Unknown,
             // fell back to the inferred operand type, and shipped a
-            // working binary while eval rejected the same file. Only the
-            // `(t-prim {} name)` and bare-symbol spellings are validated;
-            // `t-var` targets (precision-polymorphic casts) stay legal.
+            // working binary while eval rejected the same file. Raw
+            // `(t-prim {} name)` and bare symbols retain name validation;
+            // `t-var` targets are legal once their checked identity has
+            // been actualized by the active specialization (#1418).
+            // The result metadata uses checker IDs, unlike the authored
+            // target spelling; expr_host_type applies the matching active
+            // substitution. Never select the target from the operand.
+            let ty = expr_host_type(expr, program, scope);
             let bogus_target_name =
                 match children(list).get(1) {
                     Some(Expr::List(tlist, _))
@@ -6016,7 +6047,19 @@ fn lower_host_expr_kind(
                     }
                     _ => None,
                 };
-            if let Some(bogus) = bogus_target_name {
+            let unresolved_target_name = ty.is_unresolved().then(|| {
+                children(list)
+                    .get(1)
+                    .and_then(|target| {
+                        symbol_name(target).or_else(|| {
+                            stamped_parts(target)
+                                .and_then(|(_, _, kids)| kids.first())
+                                .and_then(symbol_name)
+                        })
+                    })
+                    .unwrap_or("an unresolved cast target")
+            });
+            if let Some(bogus) = bogus_target_name.or(unresolved_target_name) {
                 let unsupported = chelis_types::unsupported::Unsupported::new(
                     chelis_types::unsupported::UnsupportedKind::Dtype(bogus.to_string()),
                     "a `cast` target in host lowering",
@@ -6039,7 +6082,6 @@ fn lower_host_expr_kind(
             let operand = children(list)
                 .first()
                 .ok_or_else(|| host_expr_lowering_error(expr, "a `cast` node has no operand"))?;
-            let ty = expr_host_type(expr, program, scope);
             let mut value = lower_host_expr(operand, program, scope, tensor_helpers)?;
             if binder_float_literal_keeps_f32_source(operand, &ty) {
                 value = HostExpr::new(HostExprKind::Builtin {
@@ -6048,7 +6090,6 @@ fn lower_host_expr_kind(
                     ty: HostTypeTerm::Float32,
                 });
             }
-            let inferred_ty = host_expr_type(&value);
             // The rung travels with the callable name so the host lane
             // and the DAG lane land on the same C guard ([05-OP-6]).
             let name = match chelis_deep::cast_mode_of(children(list)) {
@@ -6063,7 +6104,7 @@ fn lower_host_expr_kind(
             HostExpr::new(HostExprKind::Builtin {
                 name,
                 args: vec![value],
-                ty: if ty.is_unresolved() { inferred_ty } else { ty },
+                ty,
             })
         }
         Expr::List(list, _) if tag(list) == Some(DeepTag::App) => {
@@ -12999,8 +13040,12 @@ fn infer_app_expr_host_type(
 /// dispatch and the consuming tensor-helper Load both share, so the
 /// write and read sides stay consistent even in the fallback.
 fn expr_scalar_float_precision(expr: &Expr) -> Option<chelis_types::types::Prim> {
+    expr_scalar_primitive(expr).filter(|prim| prim.is_float())
+}
+
+fn expr_scalar_primitive(expr: &Expr) -> Option<chelis_types::types::Prim> {
     if let Expr::MetaExpr(meta, _) = expr {
-        return expr_scalar_float_precision(&meta.expr);
+        return expr_scalar_primitive(&meta.expr);
     }
     let (node_tag, meta, kids) = stamped_parts(expr)?;
     let prim_of_t_prim = |type_expr: &Expr| -> Option<chelis_types::types::Prim> {
@@ -13014,13 +13059,13 @@ fn expr_scalar_float_precision(expr: &Expr) -> Option<chelis_types::types::Prim>
     if let Some(type_expr) = meta.ty().map(|ty| ty.expression())
         && let Some(prim) = prim_of_t_prim(type_expr)
     {
-        return prim.is_float().then_some(prim);
+        return Some(prim);
     }
     if node_tag == DeepTag::Cast
         && let Some(target) = kids.get(1)
         && let Some(prim) = prim_of_t_prim(target)
     {
-        return prim.is_float().then_some(prim);
+        return Some(prim);
     }
     None
 }
@@ -14026,9 +14071,9 @@ fn infer_builtin_host_type(name: &str, args: &[HostExpr]) -> Option<HostTypeTerm
                 .collect::<Option<Vec<_>>>()?;
             infer_einsum_tensor_type(equation, &tensors).map(HostTypeTerm::Tensor)
         }
-        "tuple-get" => match (arg_tys.first(), args.get(1).map(|e| &e.kind)) {
-            (Some(HostTypeTerm::Tuple(items)), Some(HostExprKind::Int(index))) => items
-                .get(*index as usize)
+        "tuple-get" => match (arg_tys.first(), args.get(1).and_then(host_expr_int_literal)) {
+            (Some(HostTypeTerm::Tuple(items)), Some(index)) => items
+                .get(index as usize)
                 .cloned()
                 .or(Some(fresh_host_inference())),
             _ => Some(fresh_host_inference()),
@@ -16956,6 +17001,30 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
                 precision: Prim::F32,
             }))),
         );
+    }
+
+    #[test]
+    fn tuple_projection_retains_a_typed_literal_index() {
+        let pair = HostExpr::new(HostExprKind::Var(
+            "pair".to_string(),
+            HostTypeTerm::Tuple(vec![
+                HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int32)),
+                HostTypeTerm::Bool,
+            ]),
+        ));
+        for index in [1, -1, 2] {
+            let index_expr = HostExpr::new(HostExprKind::Builtin {
+                name: "cast".to_string(),
+                args: vec![HostExpr::new(HostExprKind::Int(index))],
+                ty: HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int32)),
+            });
+            let result = infer_builtin_host_type("tuple-get", &[pair.clone(), index_expr]);
+            if index == 1 {
+                assert_eq!(result, Some(HostTypeTerm::Bool));
+            } else {
+                assert!(result.is_some_and(|ty| ty.is_unresolved()));
+            }
+        }
     }
 
     #[test]

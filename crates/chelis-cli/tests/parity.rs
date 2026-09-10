@@ -15,8 +15,8 @@
 //!     Then assert the eval lane and the C lane agree: every line
 //!     byte-equal, tensor lines included.
 //!
-//! The explicitly evaluator-only `dropout_fixed_stream.ch` has a bounded
-//! per-file exception: clean check, exact executable eval output, and the
+//! The explicitly evaluator-only dropout examples have bounded
+//! per-file exceptions: clean check, exact executable eval output, and the
 //! current typed C rejection are all tested. It makes no compiled parity
 //! claim; the ordinary three-lane driver remains unchanged for other files.
 //!
@@ -438,13 +438,27 @@ fn parity_dict_foundation() {
 
 #[test]
 fn parity_dropout_fixed_stream_eval_and_c_rejection() {
+    check_dropout_eval_and_c_rejection(
+        "dropout_fixed_stream.ch",
+        b"main.0 = tensor(shape=[4], data=[0.0, 2.0, 0.0, 0.0])\nmain.1 = tensor(shape=[4], data=[2.0, 0.0, 0.0, 0.0])\n",
+    );
+}
+
+#[test]
+fn parity_dropout_staged_claim_eval_and_c_rejection() {
+    check_dropout_eval_and_c_rejection(
+        "dropout_staged_claim.ch",
+        b"main = tensor(shape=[2, 2], data=[2.0, 0.0, 0.0, 0.0])\n",
+    );
+}
+
+fn check_dropout_eval_and_c_rejection(file: &str, expected: &[u8]) {
     use chelis_compiler_api::{
         compiler::compile,
         schema::{CompileRequest, CompileTarget, SourceKind},
     };
-    let path = examples_root().join("dropout_fixed_stream.ch");
+    let path = examples_root().join(file);
     assert_check_clean(&path);
-    let expected = b"main.0 = tensor(shape=[4], data=[0.0, 2.0, 0.0, 0.0])\nmain.1 = tensor(shape=[4], data=[2.0, 0.0, 0.0, 0.0])\n";
     assert_eq!(run_eval(&path), expected);
     let error = compile(CompileRequest {
         source_kind: SourceKind::Surf,
@@ -541,6 +555,16 @@ fn parity_ordered_extent_claims() {
 #[test]
 fn parity_literal_extent_claim() {
     drive_parity(&examples_root().join("literal_extent_claim.ch"), true);
+}
+
+#[test]
+fn parity_integer_functions() {
+    drive_parity(&examples_root().join("integer_functions.ch"), true);
+}
+
+#[test]
+fn parity_recursive_cast_targets() {
+    drive_parity(&examples_root().join("recursive_cast_targets.ch"), true);
 }
 
 #[test]
@@ -655,11 +679,13 @@ fn parity_corpus_is_complete() {
         "count_bool_axes.ch",
         "dict_foundation.ch",
         "dropout_fixed_stream.ch",
+        "dropout_staged_claim.ch",
         "explicit_normalization.ch",
         "generic_explicit_shape.ch",
         "hash_order_determinism.ch",
         "hello_tensor.ch",
         "induction_bond.ch",
+        "integer_functions.ch",
         "iter_foundation.ch",
         "kinded_nominal_dimensions.ch",
         "linreg.ch",
@@ -671,6 +697,7 @@ fn parity_corpus_is_complete() {
         "opaque_invariants.ch",
         "opaque_invariants_simplex.ch",
         "rank_poly_borrow.ch",
+        "recursive_cast_targets.ch",
         "recursive_generic.ch",
         "scalar_string_foundation.ch",
         "tensor_structural_ops.ch",
