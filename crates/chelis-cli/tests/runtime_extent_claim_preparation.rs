@@ -1637,6 +1637,75 @@ fn staged_reshape_sources_preserve_captures_and_order() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// Spec/04 §4.7.3 and [05-OP-50]: packing a local tuple and changing a
+/// rank-zero value's scalar surface must preserve its actual extent source.
+#[test]
+fn staged_sources_preserve_tuple_captures() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut cases = Vec::new();
+    for n in [4, 6] {
+        for (kind, body) in [
+            ("tuple", "{\n  sizes = (floor_div(numel(x), 2i64), 2i64)\n  reshape(x, [sizes.0, sizes.1])\n}"),
+            ("nested_tuple", "{\n  sizes = ((floor_div(numel(x), 2i64), 2i64), x)\n  reshape(sizes.1, [sizes.0.0, sizes.0.1])\n}"),
+            ("tuple_host_consumer", "{\n  sizes = (floor_div(numel(x), 2i64), 2i64)\n  reshape(x, [bitand(sizes.0, 3i64), sizes.1])\n}"),
+        ] {
+            call_matrix(
+                &mut cases,
+                &format!("staged_source.{kind}.x{n}"),
+                1686,
+                &format!("def f(x: tensor[n, f32]) -> tensor[2, 2, f32] = {body}"),
+                "(tensor[d0, f32]) -> tensor[2, 2, f32]",
+                vec![vector(n)],
+                if n == 4 { Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]) }
+                else { Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"]) },
+            );
+        }
+    }
+    assert_eq!(cases.len(), 18);
+    let mut failures = Vec::new();
+    for case in cases {
+        let observed = observe(&case);
+        println!("{}: {}", case.id, observed);
+        failures.extend(contract_failures(&case, &observed));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn staged_sources_preserve_scalar_and_tensor_views() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut cases = Vec::new();
+    for n in [4, 6] {
+        let mut input = vector(n);
+        if n == 6 {
+            input.values[5] = 8.0; // sum 23; 23 & 3 is the incompatible extent 3.
+        }
+        for (kind, body) in [
+            ("scalar_view", "{\n  total = tensor_to_scalar(sum(x, 0i32))\n  size = bitand(cast(total, int64), 3i64)\n  reshape(x, [size, 2i64])\n}"),
+            ("retained_views", "{\n  tensor_total = sum(x, 0i32)\n  total = tensor_to_scalar(tensor_total)\n  tensor_again = scalar_to_tensor(total)\n  size = mul(bitand(cast(total, int64), 3i64), mul(numel(tensor_total), numel(tensor_again)))\n  reshape(x, [size, 2i64])\n}"),
+        ] {
+            call_matrix(
+                &mut cases,
+                &format!("staged_source.{kind}.x{n}"),
+                1686,
+                &format!("def f(x: tensor[n, f32]) -> tensor[2, 2, f32] = {body}"),
+                "(tensor[d0, f32]) -> tensor[2, 2, f32]",
+                vec![input.clone()],
+                if n == 4 { Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]) }
+                else { Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"]) },
+            );
+        }
+    }
+    assert_eq!(cases.len(), 12);
+    let mut failures = Vec::new();
+    for case in cases {
+        let observed = observe(&case);
+        println!("{}: {}", case.id, observed);
+        failures.extend(contract_failures(&case, &observed));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 #[test]
 fn staged_graph_segments_preserve_eager_sources() {
     assert!(gcc_available(), "C toolchain required; no lane may skip");
