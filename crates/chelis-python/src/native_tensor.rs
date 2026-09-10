@@ -403,12 +403,28 @@ impl ValidatedTensor {
     }
 
     pub(super) fn synchronize_device(&self) -> PyResult<()> {
-        // The dynamic HIP owner's plan and library-bound synchronization API
-        // are prepared with its separate adoption. Never ignore a requested
-        // synchronization while that adapter is absent.
-        Err(pyo3::exceptions::PyBufferError::new_err(
-            "HIP DLPack stream synchronization is unsupported",
-        ))
+        let TensorOwner::Gpu(handle) = &self.inner._owner else {
+            return Err(pyo3::exceptions::PyBufferError::new_err(
+                "tensor has no HIP storage owner",
+            ));
+        };
+        let current = handle
+            .api
+            .current()
+            .map_err(|error| pyo3::exceptions::PyBufferError::new_err(error.to_string()))?;
+        if current != self.inner.device.1 {
+            return Err(pyo3::exceptions::PyBufferError::new_err(
+                "HIP DLPack export requires the validated owner's current device",
+            ));
+        }
+        // A full-device barrier meets every supported consumer-stream ordering
+        // obligation without treating the untrusted stream request as an owner.
+        if unsafe { (handle.api.synchronize)() } != 0 {
+            return Err(pyo3::exceptions::PyBufferError::new_err(
+                "HIP DLPack synchronization failed",
+            ));
+        }
+        Ok(())
     }
 }
 

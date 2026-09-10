@@ -131,6 +131,7 @@ type DeviceViewFn = unsafe extern "C" fn(*const DeviceTensorOwner) -> *const Che
 type DeviceReleaseFn = unsafe extern "C" fn(*mut DeviceTensorOwner);
 type DeviceIdFn = unsafe extern "C" fn(*const DeviceTensorOwner) -> i32;
 type HipGetDeviceFn = unsafe extern "C" fn(*mut c_int) -> i32;
+type HipSynchronizeFn = unsafe extern "C" fn() -> i32;
 #[derive(Clone, Copy)]
 struct DeviceRuntimeApi {
     import: DeviceImportFn,
@@ -138,6 +139,7 @@ struct DeviceRuntimeApi {
     release: DeviceReleaseFn,
     device: DeviceIdFn,
     current_device: HipGetDeviceFn,
+    synchronize: HipSynchronizeFn,
 }
 impl DeviceRuntimeApi {
     fn current(self) -> PyResult<i32> {
@@ -460,6 +462,7 @@ unsafe fn load_device_runtime_api(library: &Library) -> PyResult<DeviceRuntimeAp
         release: load!(DeviceReleaseFn, b"chelis_device_tensor_release\0"),
         device: load!(DeviceIdFn, b"chelis_device_tensor_device\0"),
         current_device: load!(HipGetDeviceFn, b"hipGetDevice\0"),
+        synchronize: load!(HipSynchronizeFn, b"hipDeviceSynchronize\0"),
     })
 }
 
