@@ -602,6 +602,7 @@ pub(crate) fn stage_error_with_span(
     );
     diagnostic.span = span;
     crate::compiler::CompilerError {
+        transcript: Vec::new(),
         stage: stage.to_owned(),
         errors: vec![diagnostic],
     }
@@ -609,6 +610,7 @@ pub(crate) fn stage_error_with_span(
 
 pub(crate) fn unsupported_stage_error(error: Unsupported) -> crate::compiler::CompilerError {
     crate::compiler::CompilerError {
+        transcript: Vec::new(),
         stage: "compile".to_owned(),
         errors: vec![Diagnostic::unsupported(error)],
     }

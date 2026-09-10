@@ -3,7 +3,7 @@
 mod prove;
 mod style_gate;
 
-use chelis_compiler_api::compiler::BuildTarget;
+use chelis_compiler_api::compiler::{BuildTarget, CompilerError};
 use chelis_compiler_api::schema::{
     CheckResult, Diagnostic, EvalRequest, SourceKind, WireInferredAdtArg, WireInferredDim,
     WireInferredDimensionArg, WireInferredEffect, WireInferredPrecision, WireInferredType,
@@ -1876,8 +1876,14 @@ fn run_eval_in_context(
             }
         };
     let result =
-        chelis_compiler_api::compiler::eval_in_context_for_target(&context, source, target)
-            .map_err(|err| EvalInContextError::Compile(join_eval_error(err)))?;
+        match chelis_compiler_api::compiler::eval_in_context_for_target(&context, source, target) {
+            Ok(result) => result,
+            Err(error) => {
+                emit_failed_eval_transcript(&error.transcript, json)
+                    .map_err(|err| EvalInContextError::Compile(err.to_string()))?;
+                return Err(EvalInContextError::Compile(join_eval_error(error)));
+            }
+        };
     if json {
         // JSON mode: stdout carries the raw `EvalResult` serde JSON
         // only. Empty-roots inputs serialize to `{"roots":[]}` (valid
@@ -1897,7 +1903,7 @@ fn run_eval_in_context(
     Ok(())
 }
 
-fn run_eval_emit(outcome: Result<String, String>) -> Result<(), Box<dyn std::error::Error>> {
+fn run_eval_emit(outcome: Result<String, CompilerError>) -> Result<(), Box<dyn std::error::Error>> {
     match outcome {
         Ok(result) => {
             if result.is_empty() {
@@ -1907,7 +1913,10 @@ fn run_eval_emit(outcome: Result<String, String>) -> Result<(), Box<dyn std::err
             println!("{result}");
             Ok(())
         }
-        Err(e) => Err(e.into()),
+        Err(error) => {
+            emit_failed_eval_transcript(&error.transcript, false)?;
+            Err(join_eval_error(error).into())
+        }
     }
 }
 
@@ -1918,7 +1927,7 @@ fn run_eval_emit(outcome: Result<String, String>) -> Result<(), Box<dyn std::err
 /// always receives a single parseable document. Errors propagate as a
 /// boxed error (stderr + nonzero exit), unchanged from the text path.
 fn run_eval_json_emit(
-    outcome: Result<chelis_compiler_api::schema::EvalResult, String>,
+    outcome: Result<chelis_compiler_api::schema::EvalResult, CompilerError>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match outcome {
         Ok(result) => {
@@ -1926,7 +1935,26 @@ fn run_eval_json_emit(
             println!("{rendered}");
             Ok(())
         }
-        Err(e) => Err(e.into()),
+        Err(error) => {
+            emit_failed_eval_transcript(&error.transcript, true)?;
+            Err(join_eval_error(error).into())
+        }
+    }
+}
+
+/// Keep JSON stdout free of partial results and flush effects before the
+/// caller reports the diagnostic, including when stdout is a pipe.
+fn emit_failed_eval_transcript(transcript: &[String], json: bool) -> io::Result<()> {
+    let write_lines = |output: &mut dyn Write| -> io::Result<()> {
+        for line in transcript {
+            writeln!(output, "{line}")?;
+        }
+        output.flush()
+    };
+    if json {
+        write_lines(&mut io::stderr().lock())
+    } else {
+        write_lines(&mut io::stdout().lock())
     }
 }
 
@@ -9921,7 +9949,10 @@ fn run_tide_repl() -> Result<(), Box<dyn std::error::Error>> {
             let eval_source = format!("{}\n__tide_result = {}", accumulated_source, trimmed);
             match try_eval(SourceKind::Surf, &eval_source, None) {
                 Ok(result) => println!("= {result}"),
-                Err(e) => eprintln!("error: {e}"),
+                Err(error) => {
+                    emit_failed_eval_transcript(&error.transcript, false)?;
+                    eprintln!("error: {}", join_eval_error(error));
+                }
             }
         }
     }
@@ -9955,7 +9986,7 @@ fn try_eval_result(
     source_kind: SourceKind,
     source: &str,
     selected_roots: Option<&[String]>,
-) -> Result<chelis_compiler_api::schema::EvalResult, String> {
+) -> Result<chelis_compiler_api::schema::EvalResult, CompilerError> {
     try_eval_result_for_target(
         source_kind,
         source,
@@ -9969,7 +10000,7 @@ fn try_eval_result_for_target(
     source: &str,
     selected_roots: Option<&[String]>,
     target: chelis_types::types::Target,
-) -> Result<chelis_compiler_api::schema::EvalResult, String> {
+) -> Result<chelis_compiler_api::schema::EvalResult, CompilerError> {
     let request = EvalRequest {
         source_kind,
         source: source.to_string(),
@@ -9980,7 +10011,6 @@ fn try_eval_result_for_target(
     } else {
         chelis_compiler_api::compiler::eval_for_target(request, target)
     }
-    .map_err(join_eval_error)
 }
 
 /// Flatten a `CompilerError` into the single string this CLI's error channel
@@ -10034,7 +10064,7 @@ fn try_eval(
     source_kind: SourceKind,
     source: &str,
     selected_roots: Option<&[String]>,
-) -> Result<String, String> {
+) -> Result<String, CompilerError> {
     let result = try_eval_result(source_kind, source, selected_roots)?;
     Ok(format_eval_result(&result))
 }
@@ -10044,7 +10074,7 @@ fn try_eval_for_target(
     source: &str,
     selected_roots: Option<&[String]>,
     target: chelis_types::types::Target,
-) -> Result<String, String> {
+) -> Result<String, CompilerError> {
     let result = try_eval_result_for_target(source_kind, source, selected_roots, target)?;
     Ok(format_eval_result(&result))
 }

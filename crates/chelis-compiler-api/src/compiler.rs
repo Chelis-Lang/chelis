@@ -112,6 +112,9 @@ pub struct CompiledExecutionArtifact {
 
 #[derive(Debug, Clone)]
 pub struct CompilerError {
+    /// Output already produced by a failed evaluation, in execution order.
+    /// Empty for failures before execution; never contains fabricated roots.
+    pub transcript: Vec<String>,
     pub stage: String,
     pub errors: Vec<Diagnostic>,
 }
@@ -776,6 +779,7 @@ fn edit_validation_error_to_compiler_error(
     diagnostic.span = location;
     diagnostic.deep_path = deep_path.map(wire_deep_error_path);
     CompilerError {
+        transcript: Vec::new(),
         stage: error.stage().to_string(),
         errors: vec![diagnostic],
     }
@@ -815,6 +819,7 @@ fn replacement_error_to_compiler_error(error: crate::fragment::ReplacementError)
     diagnostic.span = location;
     diagnostic.deep_path = deep_path.map(wire_deep_error_path);
     CompilerError {
+        transcript: Vec::new(),
         stage: error.stage().to_string(),
         errors: vec![diagnostic],
     }
@@ -2809,8 +2814,16 @@ fn eval_compiled(
             Some(&manifested_lowered_names),
         )
     }
-    .map_err(eval_stage_error)?;
+    .map_err(|failure| {
+        let mut error = eval_stage_error(failure.message);
+        error.transcript = failure.transcript;
+        error
+    })?;
 
+    let preserve_transcript = |mut error: CompilerError| {
+        error.transcript.clone_from(&host_outcome.transcript);
+        error
+    };
     let roots = observed_entries
         .iter()
         .copied()
@@ -2863,7 +2876,8 @@ fn eval_compiled(
                 .unwrap_or(index);
             Ok((node_id, entry.name.clone(), value))
         })
-        .collect::<Result<Vec<_>>>()?
+        .collect::<Result<Vec<_>>>()
+        .map_err(preserve_transcript)?
         .into_iter()
         .map(|(node_id, name, value)| {
             Ok(EvaluatedRoot {
@@ -2876,7 +2890,8 @@ fn eval_compiled(
                 value: runtime_value_to_schema(&value).map_err(eval_stage_error)?,
             })
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Result<Vec<_>>>()
+        .map_err(preserve_transcript)?;
 
     Ok(EvalResult {
         schema_version: crate::schema::EXECUTION_VALUE_SCHEMA_VERSION,
@@ -3045,6 +3060,7 @@ pub(crate) fn pipeline_rejection_to_compiler_error(
             crate::compiler::check_errors_to_compiler_error("check", &fitness.errors)
         }
         PipelineRejection::Effects { errors } => CompilerError {
+            transcript: Vec::new(),
             stage: "effects".to_string(),
             errors: errors
                 .iter()
@@ -5385,6 +5401,7 @@ pub(crate) fn check_errors_to_compiler_error(stage: &str, errors: &[CheckError])
         .collect::<std::result::Result<Vec<_>, _>>()
     {
         Ok(errors) => CompilerError {
+            transcript: Vec::new(),
             stage: stage.to_string(),
             errors,
         },

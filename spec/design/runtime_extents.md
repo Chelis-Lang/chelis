@@ -43,6 +43,10 @@ optional resolved size. `derive_dim_witnesses` serves the C/HIP prologues;
 old `symbolic_bindings` path still supplies evaluator bindings and declaration
 consumers. Passing a test of one grouping does not test the other.
 
+The eval before/after-effect rows in `runtime_extent_slice_b` assert actual
+transcript bytes across failure (#1585); C's buffered-output repair remains
+separately owned by #1591.
+
 Current failure boundaries:
 
 - #1374/#1376: lowering may drop the argument whose axis witnesses the result

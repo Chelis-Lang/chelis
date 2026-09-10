@@ -177,6 +177,12 @@ selected manifest names in the same order. Tuple roots and statically fixed
 ADT roots use dotted component names. If a lane cannot produce an owed root,
 evaluation exits nonzero instead of returning a partial JSON document.
 
+If evaluation fails after `print` or `debug`, text mode emits the preceding
+transcript on stdout before reporting the error on stderr. Later effects do
+not run and no result roots are printed. With `--json`, failure leaves stdout
+empty and emits the preceding transcript on stderr before the diagnostic;
+successful JSON responses keep the transcript inside the result document.
+
 ### Bounding a slow evaluation
 
 Interactively, Ctrl-C stops a running `chelis eval` immediately. For

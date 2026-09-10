@@ -18,6 +18,20 @@ The backend strategy is intentionally sequential:
 
 The project does **not** plan multiple competing native code generators in Phase 0.
 
+### 1.1 Evaluation output and failure
+
+`chelis eval` preserves output produced before an evaluation failure in source
+order. In text mode it writes those transcript lines to stdout before reporting
+the failure on stderr and exiting nonzero. It does not publish result roots for
+the failed evaluation. Effects following the failure do not execute.
+
+With `--json`, stdout is reserved for the successful result document, including
+its transcript. On failure stdout is empty; preceding transcript lines are
+written to stderr before the diagnostic. Both ordinary and package-context
+evaluation obey the same channel rules. Compiler API evaluation errors retain
+the preceding transcript separately from diagnostics so embedders can choose
+their own output sink without rerunning the program.
+
 ## 2. Phase 0: C Backend
 
 The C backend is the reference implementation.
