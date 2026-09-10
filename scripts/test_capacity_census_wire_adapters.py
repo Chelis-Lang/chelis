@@ -142,6 +142,104 @@ class ConstGenericGraph(unittest.TestCase):
         self.assertEqual(before.numeric_leaves, after.numeric_leaves)
 
 
+class CodecIdentityControls(unittest.TestCase):
+    """Source coordinates belong to execution evidence, not structural shape."""
+
+    def fixture(self):
+        from test_capacity_census_graph import Artifact, primitive
+
+        artifact = Artifact("fixture")
+        artifact.struct(1, "Payload", [artifact.field("value", primitive("u32"))])
+        body = artifact.doc["index"]["1"]["inner"]["struct"]
+        for position, impl_id in enumerate(body["impls"]):
+            item = artifact.doc["index"][str(impl_id)]
+            item["attrs"] = []
+            line = 100 + 20 * position
+            item["span"] = {
+                "filename": "fixture.rs", "begin": [line, 1], "end": [line + 10, 2]
+            }
+            method_id = 950 + position
+            artifact.add(method_id, "serialize" if position == 0 else "deserialize",
+                         {"function": {}})
+            artifact.doc["index"][str(method_id)]["span"] = {
+                "filename": "fixture.rs", "begin": [line + 1, 5], "end": [line + 9, 6]
+            }
+            item["inner"]["impl"]["items"] = [method_id]
+        return artifact.doc
+
+    def discover(self, document):
+        from capacity_census_wire_adapters import _CodecShapeGraph
+        from test_capacity_census_graph import reference
+
+        class CodecGraph(_CodecShapeGraph):
+            def _codec(self, crate, inner):
+                return self._serde_implementations(
+                    crate, inner, {"Serialize", "Deserialize"}, "fixture.rs"
+                )
+
+        return CodecGraph([document], []).discover("fixture", reference(1))
+
+    def test_codec_line_and_column_movement_preserves_structural_identity(self):
+        before = self.fixture()
+        moved = copy.deepcopy(before)
+        for item in moved["index"].values():
+            if "span" in item:
+                for end in ("begin", "end"):
+                    item["span"][end][0] += 6
+                    item["span"][end][1] += 2
+        self.assertNotEqual(moved, before)
+        original, relocated = self.discover(before), self.discover(moved)
+        self.assertEqual(original.numeric_leaves, relocated.numeric_leaves)
+        self.assertEqual(original.identity, relocated.identity)
+
+    def test_codec_provenance_and_implementation_mode_still_reject(self):
+        original = self.fixture()
+        impl_id = str(original["index"]["1"]["inner"]["struct"]["impls"][0])
+        for mutation in ("source", "method-source", "missing-span", "missing-method-span",
+                         "trait", "derived", "missing-method", "negative", "synthetic"):
+            with self.subTest(mutation=mutation):
+                document = copy.deepcopy(original)
+                item = document["index"][impl_id]
+                body = item["inner"]["impl"]
+                method = document["index"][str(body["items"][0])]
+                if mutation == "source":
+                    item["span"]["filename"] = "unrelated.rs"
+                elif mutation == "method-source":
+                    method["span"]["filename"] = "unrelated.rs"
+                elif mutation == "missing-span":
+                    item.pop("span")
+                elif mutation == "missing-method-span":
+                    method.pop("span")
+                elif mutation == "trait":
+                    document["paths"][str(body["trait"]["id"])]["path"][0] = "impostor"
+                elif mutation == "derived":
+                    item["attrs"] = ["automatically_derived"]
+                elif mutation == "missing-method":
+                    body["items"] = []
+                else:
+                    body["is_" + mutation] = True
+                with self.assertRaises(GraphError):
+                    self.discover(document)
+
+    def test_changed_method_or_numeric_shape_cannot_reuse_identity(self):
+        original = self.fixture()
+        baseline = self.discover(original)
+        for mutation in ("method", "width", "field", "serde"):
+            with self.subTest(mutation=mutation):
+                document = copy.deepcopy(original)
+                body = document["index"]["1"]["inner"]["struct"]
+                field = document["index"][str(body["kind"]["plain"]["fields"][0])]
+                if mutation == "method":
+                    document["index"]["950"]["name"] = "other_conversion"
+                elif mutation == "width":
+                    field["inner"]["struct_field"] = {"primitive": "u64"}
+                elif mutation == "field":
+                    field["name"] = "other_value"
+                else:
+                    document["index"]["1"]["attrs"] = [{"other": '#[serde(rename = "Other")]'}]
+                self.assertNotEqual(baseline.identity, self.discover(document).identity)
+
+
 class CanonicalCodecControls(unittest.TestCase):
     def test_selected_cases_include_json_binary_width_and_rejection_pairs(self):
         from capacity_census_wire_adapters import codec_cases
