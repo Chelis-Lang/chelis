@@ -119,6 +119,8 @@ def _definition(raw: dict, crate: str, path: str) -> DefinitionIdentity:
 def _associated(raw: dict, self_path: str, name: str,
                 trait: tuple[str, str] | None = None) -> DefinitionIdentity:
     """Resolve by exact self and trait identities, never impl ordinals."""
+    expected_owner = _definition(raw, "chelis_python", self_path)
+    expected_trait = None if trait is None else _definition(raw, *trait)
     found = set()
     for body in raw["bodies"]:
         implementation = body.get("implementation")
@@ -131,8 +133,9 @@ def _associated(raw: dict, self_path: str, name: str,
         owner = implementation.get("self_type", {}).get("nominal")
         if not isinstance(owner, dict):
             continue
-        _identity(owner)
-        if owner.get("crate") != "chelis_python" or owner.get("path") != self_path:
+        if (_identity(owner) != expected_owner
+                or owner.get("crate") != "chelis_python"
+                or owner.get("path") != self_path):
             continue
         actual_trait = implementation.get("trait")
         if trait is None:
@@ -141,8 +144,9 @@ def _associated(raw: dict, self_path: str, name: str,
         else:
             if not isinstance(actual_trait, dict):
                 continue
-            _identity(actual_trait)
-            if (actual_trait.get("crate"), actual_trait.get("path")) != trait:
+            if (_identity(actual_trait) != expected_trait or (
+                actual_trait.get("crate"), actual_trait.get("path")
+            ) != trait):
                 continue
         found.add(_identity(definition))
     label = f"{self_path}::{name}"
