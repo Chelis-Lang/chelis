@@ -771,6 +771,36 @@ immutable foundation and active identities stay unchanged. Literal ingress,
 movement coordinate scratch and source diagnostic identity, the complete Phase 1
 consumer audit/receipt oracle, and Phase 2 remain separate obligations.
 
+#### Generated C literal ingress (#889)
+
+Tensor literals carry finalized tagged scalar images instead of a raw payload
+array and an unchecked byte-count copy. Two exact OP33 entry points validate the
+complete result rank/shape, zero dtype exemplar and element count before storage
+allocation or reuse, then validate every source carrier before the first guarded
+write. The write preserves each declared storage width and its exact bits; it
+neither converts values nor accumulates. Mismatched IR storage/result dtypes are
+rejected during emission. Empty literals submit a null array with exact zero count.
+
+The C dimension renderer accepts only `DimInfo` leaves; its unused arithmetic
+`DimExpr` renderer is removed, so those callers cannot emit unchecked products or
+divisions through that path.
+
+The bounded execution surface is `checked_c_literal` in debug/release,
+`checked_c_host_metadata` delegation/bypass controls, native
+`exec_compile::checked_literals_*` under optimized ASan/UBSan.
+Literal tests exercise all nine storage representations, rank zero and empty
+domains, exact int64 values above 2^53, floating bit patterns, invalid counts,
+tags/payloads and overflow. A malformed last carrier must trap with canonical
+`const`/int64 identity while every destination element remains unchanged. These
+commands extend the frozen Phase 0 manifest; removing or reordering ingress calls
+is rejected by the bounded source controls.
+
+The immutable 358-row foundation is unchanged. Removing the literal emitter's raw
+storage/element-spelling templates reduces active debt from 294 to 292 without a
+new identity or owner exception. JSON ordering and movement coordinate scratch,
+the movement source operation diagnostic identity, the complete Phase 1 consumer audit and execution
+receipt/mutation oracle, and Phase 2 descriptors/bindings remain outstanding.
+
 ## C3. One generated host/device descriptor schema
 
 A new leaf crate, `chelis-abi`, depends only on `chelis-vocab` outside the

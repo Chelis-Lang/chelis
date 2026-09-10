@@ -392,7 +392,7 @@ class ManifestTests(unittest.TestCase):
         ])
         commands = [leg.argv for leg in oracle.phase0_legs()]
         for test in ("checked_metadata", "metadata_compile", "checked_metadata_padding", "checked_c_metadata",
-                     "checked_c_indexing", "checked_c_movement", "checked_c_reduction", "checked_c_sparse", "checked_c_matmul", "checked_c_window", "exact_tagged_c_abi",
+                     "checked_c_indexing", "checked_c_movement", "checked_c_reduction", "checked_c_sparse", "checked_c_matmul", "checked_c_window", "checked_c_literal", "exact_tagged_c_abi",
                      "op33_empty_tensor_axis_decomposition", "op33_tensor_validation",
                      "op33_legal_domain_matrix", "dim_carrier_int64",
                      "tensor_repurpose", "tensor_write_guard"):
@@ -433,6 +433,11 @@ class ManifestTests(unittest.TestCase):
         self.assertTrue(any("issue_1314_json_bigint" in command and "test(=json_object_serialization_is_recursive_canonical_unicode_order_in_eval_and_c)" in command for command in commands))
 
         self.assertTrue(any("issue_1314_json_bigint" in command and "test(=json_scratch_execution_detects_skipped_cleanup)" in command for command in commands))
+
+    def test_checked_literals_require_delegation_and_native_execution(self) -> None:
+        commands = [leg.argv for leg in oracle.phase0_legs()]
+        self.assertTrue(any("chelis-backend-c" in command and "checked_c_host_metadata" in command for command in commands))
+        self.assertTrue(any("exec_compile" in command and "test(checked_literals_)" in command for command in commands))
 
     def test_checked_windows_require_source_controls_and_native_execution(self) -> None:
         commands = [leg.argv for leg in oracle.phase0_legs()]

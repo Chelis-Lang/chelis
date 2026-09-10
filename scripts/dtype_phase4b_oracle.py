@@ -280,7 +280,9 @@ EXPECTED_OP_MANIFESTS = {
 | checked window window_index | `int64_t chelis_window_index(const chelis_window_plan *plan, chelis_scalar group, chelis_scalar leaf)` |
 | checked window window_check_tensor | `void chelis_window_check_tensor(const chelis_window_plan *plan, const chelis_tensor *tensor, chelis_window_side side)` |
 | checked window window_check_target | `void chelis_window_check_target(const chelis_window_plan *plan, chelis_window_side side, chelis_scalar rank, const chelis_scalar *shape)` |
-| checked window window_plan_release | `void chelis_window_plan_release(chelis_window_plan *plan)` |""".splitlines()
+| checked window window_plan_release | `void chelis_window_plan_release(chelis_window_plan *plan)` |
+| checked literal tensor_check_literal | `void chelis_tensor_check_literal(chelis_scalar rank, const chelis_scalar *shape, chelis_scalar exemplar, chelis_scalar count)` |
+| checked literal tensor_write_literal | `void chelis_tensor_write_literal(chelis_tensor_write *guard, chelis_scalar count, const chelis_scalar *values)` |""".splitlines()
     ),
     "05-OP-34": tuple(
         """\
@@ -490,7 +492,7 @@ FROZEN_ATOM_DIGESTS = {
     "05-OP-30": "30c8c04f547161b7c40cbe5659a0c5fee34102f34a6fc605bcde8740221b461b",
     "05-OP-31": "20100b3524f8381469ea2a24d035da89be346f7809b70bfd6698aa94b6df9031",
     "05-OP-32": "fc45b2ef829aeebdb0d524059c63452cd2d9c733a5c2cdf85b5bfdd845bda8a1",
-    "05-OP-33": "9d6ca47ca0c5fb47393786e4d6ae56e87ba2d66d2154b0e99ac0ee06cc1d815e",
+    "05-OP-33": "426749ba509782b9dfc91a47d0aa7a58af2f27d36025e9a7ae5eb5307622e9cd",
     "05-OP-34": "0d2c7d4a051a43dc6b0c93b241434ff1d66bbd7a3e6d47e5c74b669d2fd687bf",
     "05-OP-35": "6eb9a0e1023aeed6dcf43abe8623a9b94dcb38db15224f38915320108c276ef7",
     "05-OP-36": "aeaaf9888f922b31159b8b7536444603897d649c8fb477e77bda659346177ab4",

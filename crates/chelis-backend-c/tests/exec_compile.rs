@@ -67,6 +67,120 @@ fn checked_indexing_run(source: &str, harness: &str) -> std::process::Output {
         .unwrap()
 }
 
+fn checked_literal_dag(storage: chelis_types::TensorStorage, extent: usize, output: Prim) -> Dag {
+    let mut dag = Dag::new();
+    dag.add_node(
+        RiscOp::ConstTensor { data: storage },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Lit(extent)],
+            precision: output,
+        },
+        None,
+    );
+    dag
+}
+#[test]
+fn checked_literals_preserve_every_storage_width_and_reject_count_mismatch() {
+    use chelis_types::{RawTensor, StorageView, finalize_tensor};
+    for dtype in [
+        Prim::F32,
+        Prim::F64,
+        Prim::F16,
+        Prim::Bf16,
+        Prim::Int8,
+        Prim::Int16,
+        Prim::Int32,
+        Prim::Int64,
+        Prim::Bool,
+    ] {
+        let raw = if dtype.is_float() {
+            RawTensor::Float(vec![-0.0, 1.5, f64::INFINITY, f64::NAN])
+        } else if dtype == Prim::Bool {
+            RawTensor::Int(vec![0, 1, 1, 0])
+        } else if dtype == Prim::Int64 {
+            RawTensor::Int(vec![i64::MIN, 9007199254740993, -1, i64::MAX])
+        } else {
+            RawTensor::Int(vec![-1, 0, 1, 127])
+        };
+        let storage = finalize_tensor("const", dtype, raw).unwrap();
+        let expected: Vec<u8> = match storage.view() {
+            StorageView::F64(v) => v.iter().flat_map(|x| x.to_bits().to_ne_bytes()).collect(),
+            StorageView::F32(v) => v.iter().flat_map(|x| x.to_bits().to_ne_bytes()).collect(),
+            StorageView::F16(v) => v.iter().flat_map(|x| x.to_bits().to_ne_bytes()).collect(),
+            StorageView::Bf16(v) => v.iter().flat_map(|x| x.to_bits().to_ne_bytes()).collect(),
+            StorageView::I64(v) => v.iter().flat_map(|x| x.to_ne_bytes()).collect(),
+            StorageView::I32(v) => v.iter().flat_map(|x| x.to_ne_bytes()).collect(),
+            StorageView::I16(v) => v.iter().flat_map(|x| x.to_ne_bytes()).collect(),
+            StorageView::I8(v) => v.iter().map(|x| *x as u8).collect(),
+            StorageView::Bool(v) => v.to_vec(),
+        };
+        for extent in [4, 3, 0] {
+            let source = codegen(
+                &checked_literal_dag(storage.clone(), extent, dtype),
+                "literal_probe",
+            )
+            .unwrap()
+            .c_source;
+            let bytes = expected
+                .iter()
+                .map(u8::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            let harness = format!(
+                r#"
+#include "chelis_runtime.h"
+#include <string.h>
+extern void literal_probe(chelis_tensor**,int,chelis_tensor**,int);
+int main(void) {{
+ chelis_tensor *out[1]={{0}};literal_probe(0,0,out,1);
+ unsigned char expected[]={{{bytes}}};
+ chelis_read_view v=chelis_tensor_read_view(out[0]);
+ if(v.dtype!={dtype} || v.count!=4 || memcmp(v.data,expected,sizeof expected))return 10;
+ chelis_tensor_release(out[0]);return 0;
+}}
+"#,
+                dtype = dtype.runtime_dtype().unwrap().c_macro()
+            );
+            let out = checked_indexing_run(&source, &harness);
+            if extent == 4 {
+                assert!(out.status.success(), "{dtype:?}: {out:?}");
+            } else {
+                assert_eq!(out.status.code(), Some(1), "{dtype:?}/{extent}: {out:?}");
+                assert!(
+                    String::from_utf8_lossy(&out.stderr)
+                        .lines()
+                        .any(|s| s == "numeric trap: domain in const at int64"),
+                    "{out:?}"
+                );
+            }
+        }
+        let empty = storage.reuse_gather(&[]);
+        let source = codegen(&checked_literal_dag(empty, 0, dtype), "literal_probe")
+            .unwrap()
+            .c_source;
+        let harness = r#"#include "chelis_runtime.h"
+extern void literal_probe(chelis_tensor**,int,chelis_tensor**,int);
+int main(void){chelis_tensor *out[1]={0};literal_probe(0,0,out,1);if(chelis_tensor_numel(out[0])!=0)return 1;chelis_tensor_release(out[0]);return 0;}"#;
+        let out = checked_indexing_run(&source, harness);
+        assert!(out.status.success(), "{dtype:?} empty: {out:?}");
+    }
+}
+#[test]
+fn checked_literals_reject_inconsistent_ir_storage_dtype() {
+    let value = chelis_types::finalize_tensor(
+        "const",
+        Prim::F32,
+        chelis_types::RawTensor::Float(vec![1.0]),
+    )
+    .unwrap();
+    let result = codegen(&checked_literal_dag(value, 1, Prim::Int32), "literal_probe");
+    assert!(
+        result.is_err(),
+        "inconsistent literal storage dtype must reject"
+    );
+}
+
 fn checked_window_dag(reducer: ReduceWindowKind, gradient: bool) -> Dag {
     let mut dag = Dag::new();
     let input = TensorType {

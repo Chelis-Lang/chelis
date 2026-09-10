@@ -344,6 +344,9 @@ typedef enum {
     CHELIS_SPARSE_GATHER = 0, CHELIS_SPARSE_ADD = 1,
     CHELIS_SPARSE_REPLACE = 2, CHELIS_SPARSE_ELEMENTS = 3
 } chelis_sparse_op;
+void chelis_tensor_check_literal(chelis_scalar rank, const chelis_scalar *shape, chelis_scalar exemplar, chelis_scalar count);
+void chelis_tensor_write_literal(chelis_tensor_write *guard, chelis_scalar count, const chelis_scalar *values);
+
 // Checked valid-padding geometry; plans retain no tensor storage.
 typedef enum { CHELIS_WINDOW_SUM = 0, CHELIS_WINDOW_MEAN = 1, CHELIS_WINDOW_MAX = 2, CHELIS_WINDOW_MIN = 3, CHELIS_WINDOW_GRAD = 4 } chelis_window_op;
 typedef enum { CHELIS_WINDOW_SOURCE = 0, CHELIS_WINDOW_RESULT = 1 } chelis_window_side;

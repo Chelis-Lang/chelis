@@ -62,7 +62,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "6d8b172ec3067b130ec5c7c997e984be1ae2080f149cfdb54f6bd9bceb5aec3b"
+FREEZE_SHA256 = "9587b41cb7c9e32149e01b72d8cf5e3f2c865787ed7c945bb78bbb7a21ba6c65"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -1671,7 +1671,7 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
                 "--test", "checked_metadata", "--test", "metadata_compile",
                 "--test", "checked_metadata_padding", "--test", "checked_c_metadata",
                 "--test", "checked_c_indexing", "--test", "checked_c_movement", "--test", "checked_c_affine",
-                "--test", "checked_c_reduction", "--test", "checked_c_sparse", "--test", "checked_c_matmul", "--test", "checked_c_window",
+                "--test", "checked_c_reduction", "--test", "checked_c_sparse", "--test", "checked_c_matmul", "--test", "checked_c_window", "--test", "checked_c_literal",
                 "--test", "exact_tagged_c_abi",
                 "--test", "op33_empty_tensor_axis_decomposition",
                 "--test", "op33_tensor_validation",
@@ -1711,6 +1711,15 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
             "checked C JSON scratch ownership ledger and skipped-cleanup mutations",
             ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "issue_1314_json_bigint",
              "-E", "test(=json_scratch_execution_detects_skipped_cleanup)"),
+        ),
+        OracleLeg(
+            "checked C literal ingress delegation controls",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_host_metadata"),
+        ),
+        OracleLeg(
+            "checked C literal storage optimized sanitizer execution",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "exec_compile",
+             "-E", "test(checked_literals_)"),
         ),
         OracleLeg(
             "checked C window delegation and bypass mutations",

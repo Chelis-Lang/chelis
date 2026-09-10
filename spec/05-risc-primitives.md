@@ -2179,6 +2179,32 @@ exact ADT identity by [05-OP-34].
 > `Overflow`, with [04-NUM-9]'s canonical `matmul` identity at int64. There is no
 > cotangent or arithmetic accumulator for these metadata operations.
 >
+> `chelis_tensor_check_literal` validates a complete result shape and literal
+> element count, both carried as exact tagged int64 values, against a canonical
+> zero exemplar of the literal's element dtype. Shape rank, extents, strides,
+> count, representation bytes, and target allocation projection must be valid;
+> the literal count must be nonnegative and equal the checked result element
+> count. Rank zero requires one literal element; an empty shape domain requires
+> zero. Positive rank requires a complete non-null shape array. Validation occurs
+> before destination allocation or reuse and before reading the literal buffer.
+> All active storage dtypes are admitted without payload conversion. Malformed
+> metadata or count mismatch traps `Domain`; unrepresentable metadata traps
+> `Overflow`, with canonical `const` identity at int64. This metadata check has
+> no cotangent or accumulator.
+>
+> `chelis_tensor_write_literal` takes a live tensor write guard, an exact tagged
+> int64 count, and that many complete, stable, nonoverlapping `chelis_scalar`
+> values. Zero count permits a null value pointer. The count must equal the
+> destination's checked element count. Every source carrier must be canonical and
+> have the destination dtype; all carriers and the complete source array's target
+> byte projection are validated before the first destination write. Each stored
+> element bit is preserved at its declared representation width, with no dtype
+> conversion or arithmetic accumulator. Metadata or carrier mismatch traps
+> `Domain`, and an unrepresentable source array traps `Overflow`, with canonical
+> `const` identity at int64. The write guard remains live and exclusively owns the
+> destination throughout; the operation neither ends it nor retains the source.
+> This constant-storage ingress has no cotangent.
+>
 > `chelis_tensor_window_plan` snapshots the complete input and valid-padding
 > result metadata from [05-RWIN-1]'s positive trailing window and stride lists,
 > transported as equal-length arrays of exact tagged int64 values. The tagged
