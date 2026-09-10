@@ -86,8 +86,10 @@ def constructor_scope_ownership(raw, carrier, roots):
             continue
         key = _body_identity(aggregate.get("caller"))
         _require(key in instances, "constructor caller differs from its actual body")
-        identity, kind, parents, _, opened = key
-        _require(not opened, "open constructor instance cannot establish ownership")
+        identity, kind, parents, _, _ = key
+        # rustc inventories both a closure's generic template and its concrete
+        # instantiations, even in a nongeneric conversion. Both have the same
+        # lexical owner. This rule does not discharge their type/flow obligations.
         owner = identity
         nested = False
         while identity not in roots and kind == "Closure":

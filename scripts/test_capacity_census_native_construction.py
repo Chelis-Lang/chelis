@@ -133,24 +133,34 @@ class ConstructorScopes(unittest.TestCase):
         with self.assertRaisesRegex(NativeFlowEvidenceError, "missing"):
             self.check(raw, roots=roots)
 
-    def test_conflicting_body_ancestry_and_open_construction_fail(self):
+    def test_conflicting_body_ancestry_and_incomplete_evidence_fail(self):
         self.check()
-        for mutation in ("conflict", "open", "errors", "wrong-scope"):
+        for mutation in ("conflict", "duplicate", "errors", "wrong-scope"):
             with self.subTest(mutation=mutation):
                 raw = copy.deepcopy(self.raw)
                 if mutation == "conflict":
                     changed = copy.deepcopy(raw["bodies"][0])
                     changed["kind"] = "Fn"
                     raw["bodies"].append(changed)
-                elif mutation == "open":
-                    raw["bodies"][0]["open_type_or_const"] = True
-                    raw["aggregates"][0]["caller"]["open_type_or_const"] = True
+                elif mutation == "duplicate":
+                    raw["bodies"].append(copy.deepcopy(raw["bodies"][0]))
                 elif mutation == "errors":
                     raw["errors"] = ["unresolved body"]
                 else:
                     raw["scope"] = "compiler-json"
                 with self.assertRaises(NativeFlowEvidenceError):
                     self.check(raw)
+
+    def test_generic_templates_share_scope_without_proving_instantiation(self):
+        self.check()
+        self.raw["bodies"][0]["open_type_or_const"] = True
+        self.raw["aggregates"][0]["caller"]["open_type_or_const"] = True
+        self.check()
+        # A caller still cannot assert a concrete instance absent from the
+        # actual compiler body census. Lexical equality is not type authority.
+        self.raw["aggregates"][0]["caller"]["open_type_or_const"] = False
+        with self.assertRaisesRegex(NativeFlowEvidenceError, "actual body"):
+            self.check()
 
 
 class CompiledConstructorScopes(unittest.TestCase):
@@ -231,4 +241,3 @@ pub fn entry(value: i64) -> i64 { Validated::convert(value).0 }
 """)
         with self.assertRaisesRegex(NativeFlowEvidenceError, "outside"):
             constructor_scope_ownership(raw, *self.policy(raw))
-
