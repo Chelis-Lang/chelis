@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -113,6 +114,11 @@ class LibtestReceipts(unittest.TestCase):
                 "#[test] fn managed_python() {\n"
                 ' assert_eq!(std::env::var("PYO3_PYTHON"), std::env::var("EXPECTED_PYTHON"));\n'
                 ' assert_eq!(std::env::var("VIRTUAL_ENV"), std::env::var("EXPECTED_VENV"));\n'
+                ' assert_eq!(std::env::var("PYTHONPATH"), std::env::var("EXPECTED_SITE"));\n'
+                ' assert!(std::env::var_os("PYTHONHOME").is_none());\n'
+                ' assert!(std::env::var_os("PYTHONUSERBASE").is_none());\n'
+                ' assert_eq!(std::env::var("PYTHONNOUSERSITE").unwrap(), "1");\n'
+                ' assert_eq!(std::env::var("PYTHONSAFEPATH").unwrap(), "1");\n'
                 "}\n"
             )
             subprocess.run(
@@ -127,8 +133,14 @@ class LibtestReceipts(unittest.TestCase):
                 {
                     "PYO3_PYTHON": "/unrelated/python",
                     "VIRTUAL_ENV": "/unrelated/venv",
+                    "PYTHONPATH": "/unrelated/site-packages",
+                    "PYTHONHOME": "/unrelated/home",
+                    "PYTHONUSERBASE": "/unrelated/user",
                     "EXPECTED_PYTHON": sys.executable,
                     "EXPECTED_VENV": sys.prefix,
+                    "EXPECTED_SITE": os.pathsep.join(dict.fromkeys(
+                        sysconfig.get_path(key) for key in ("purelib", "platlib")
+                    )),
                 },
             ):
                 run_libtest(root, binary, ("managed_python",))
