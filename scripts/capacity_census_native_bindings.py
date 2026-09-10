@@ -124,7 +124,18 @@ def require_private_owner(graph, identity, source):
     _require(not module_body.get("is_stripped") and item["id"] in module_body.get("items", []),
              "native owner is outside its defining module")
     module_path = module_identity.partition("::")[2]
-    private = {"restricted": {"parent": module["id"], "path": "::" + module_path}}
+    is_root = module["id"] == graph.documents[location[0]]["root"]
+    _require(is_root == (module_identity == location[0]),
+             "native owner module differs from the defining crate root")
+    if is_root:
+        _require(module_body.get("is_crate") is True, "native root lacks compiler crate identity")
+        # Rustdoc canonicalizes root-private visibility to `crate`: the root
+        # already contains every local module. Constructor ownership therefore
+        # still requires the complete local-crate MIR census, not this spelling.
+        private = "crate"
+    else:
+        _require(not module_body.get("is_crate"), "nested native module claims crate identity")
+        private = {"restricted": {"parent": module["id"], "path": "::" + module_path}}
     result = []
     for field_id in fields:
         field = graph._item(location[0], field_id)
