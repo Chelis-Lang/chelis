@@ -809,7 +809,7 @@ impl HipEmitter {
             self.line("abort();");
             self.indent -= 1;
             self.line("}");
-            self.line(&format!("if (chelis_tensor_dtype(inputs[{slot}]) != {}) chelis_numeric_trap(\"numeric trap: domain in load at int64\");", Self::dtype_macro(ty)));
+            self.line(&format!("if (chelis_tensor_read_view(inputs[{slot}]).dtype != {}) chelis_numeric_trap(\"numeric trap: domain in load at int64\");", Self::dtype_macro(ty)));
             self.line(&format!(
                 "if (chelis_tensor_rank(inputs[{slot}]) != {}) {{",
                 Self::ndim(ty)
