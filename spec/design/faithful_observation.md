@@ -737,16 +737,12 @@ the staged manual Decimal fixtures remain outside this oracle; no Phase 3
 value cell is hidden behind `#[ignore]`.
 
 **Continuous execution:** the authoritative Phase 2 command runs in the
-dedicated `Faithful Observation Phase 2 Oracle` CI job on every push and every
-PR that does not change only non-executable prose. This document is a
-structural input to the oracle, so `scripts/ci_detect_docs_only.py` explicitly
-classifies it as executable: a Markdown-only edit here runs the full matrix,
-while unrelated documentation-only changes retain the normal skip. The oracle
-is a separate blocking leg rather than an extra step hidden in the workspace
-or dtype job; the stable `Integration Tests (Linux)` context fails closed
-unless the workspace, dtype, and faithful-observation legs all succeed.
-`scripts/test_gate.py` locks the job boundary, workspace cache target,
-docs-only fail-safe, command, toolchain, managed Python, and aggregation edge.
+`Faithful Observation Phase 2 Oracle` job of `heavy-e2e.yml`, daily at
+03:17 UTC and on manual dispatch. It is absent from ordinary PR and main-push
+CI. The nightly report requires this independent worker and every other
+extended-validation worker to succeed. `scripts/test_ci_cadence.py` guards
+cadence and execution; `scripts/test_gate.py` retains the command, toolchain,
+managed Python, and workspace-cache checks.
 The Phase 2 corpus's constituent Rust cells also run under workspace nextest,
 but that supporting coverage does not replace this oracle's ledger equality,
 `FORMAT_CLASS_TABLE`, doc-citation parity, `B2_RULE_INSTRUMENTS` manifest, or

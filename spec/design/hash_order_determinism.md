@@ -276,12 +276,14 @@ The two residuals differ in that the feature one has a nightly `--all-features`
 backstop and this one has none at any cadence. Bringing it in requires a
 supported Windows host, not a further row.
 
-Two of the three per-pull-request rows (`default-features` and
-`solver-free-features`) list macOS among their hosts. Shard 1 of
-`macos-workspace-shard` installs Clippy and runs both configurations; the
+The Linux per-pull-request rows remain `default-features`,
+`solver-free-features`, and `no-default-features`. Separate macOS nightly rows
+register the first two configurations in `.github/workflows/macos-nightly.yml`.
+Shard 1 of `macos-workspace-shard` installs Clippy and runs both configurations; the
 `macos-smoke` aggregate requires that shard to succeed. Attribute-form
 `#[cfg(target_os = "macos")]` regions therefore receive these two lint
-configurations in CI. `python3 scripts/gate.py --local` remains an optional
+configurations nightly and on manual dispatch, not on ordinary PRs or main
+pushes. `python3 scripts/gate.py --local` remains an optional
 local reproduction. The
 `no-default-features` row is Linux-only: `--local` dropped it and kept the
 other two because the closure check's source-reconciliation leg needs the

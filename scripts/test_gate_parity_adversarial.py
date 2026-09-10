@@ -19,6 +19,7 @@ unreviewed workflow change, not misidentified as a Cargo invocation.
 
 import importlib.util
 import io
+import shutil
 import sys
 import tempfile
 import unittest
@@ -48,6 +49,11 @@ def _run_parity_against(workflow_text: str) -> unittest.TestResult:
     it, and run the whole `CiParityTests` suite. Returns the result."""
     tg = _load_test_gate()
     with tempfile.TemporaryDirectory() as tmp:
+        # The parity suite also checks explicitly owned nightly jobs. Retain
+        # sibling workflows while mutating only the ordinary CI document.
+        for sibling in CI_YML.parent.glob("*.yml"):
+            if sibling.name != "ci.yml":
+                shutil.copyfile(sibling, Path(tmp) / sibling.name)
         path = Path(tmp) / "ci.yml"
         path.write_text(workflow_text)
         tg.CI_YML = path

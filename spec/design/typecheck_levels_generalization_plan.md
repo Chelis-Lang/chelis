@@ -475,3 +475,12 @@ Chelis language semantics.
 | Parity passes while production still sweeps | Independent reference-disabled zero-visit assertion in the authoritative oracle |
 | Quantifier reordering creates false parity failures | Deterministic ID ordering and exact ordered-scheme equality |
 | Performance claim expands into chelis#1205 | Generated binding corpus and explicit nested-lowering exclusion |
+
+### Hosted cadence
+
+The four-partition feature oracle and its fail-closed aggregate run in
+`.github/workflows/heavy-e2e.yml`, daily at 03:17 UTC or on manual dispatch.
+They do not run on ordinary PRs or main pushes. The exhaustive semantic command
+and its two explicit contention exclusions are unchanged; the unfiltered default
+workspace nightly owns those excluded cases. Phase acceptance still requires
+the named oracle on the candidate, independently of PR-check success.

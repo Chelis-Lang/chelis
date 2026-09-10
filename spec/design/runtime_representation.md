@@ -15,6 +15,11 @@ mirror can make one buffer mean two incompatible things. The end state makes an
 in-repository mismatch unavailable through ordinary APIs and makes a malformed
 foreign carrier fail before data access.
 
+The Phase 0 oracle runs in the dedicated `runtime-representation-phase0-oracle`
+job in `heavy-e2e.yml`, daily at 03:17 UTC and on manual dispatch, with a
+45-minute timeout. Ordinary PR and main-push CI do not run this full oracle;
+its command and phase acceptance requirements remain unchanged.
+
 ## Summary
 
 Chelis already has most of the right facts. `RuntimeDType::repr()` names the

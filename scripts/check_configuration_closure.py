@@ -33,7 +33,7 @@ Acceptance is exit 0 with the final line ``CONFIGURATION CLOSURE: PASS``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import os
 from pathlib import Path
@@ -62,9 +62,9 @@ class ClippyRun:
     #: Hosts covered at the registered cadence. The gate owns the canonical
     #: per-pull-request commands; CI's `lint-and-unit` job runs all three on
     #: Linux, and `macos-workspace-shard` runs default and solver-free Clippy
-    #: on macOS. `no-default-features` still has Linux coverage only.
+    #: on macOS nightly. `no-default-features` has Linux coverage only.
     #: `scripts/test_check_configuration_closure.py` checks the macOS command
-    #: pairing; `scripts/test_hosted_validation.py` guards its required CI
+    #: pairing; `scripts/test_hosted_validation.py` guards its nightly
     #: routing. Optional `--local` execution is supporting evidence.
     hosts: tuple[str, ...]
     cadence: str
@@ -128,7 +128,7 @@ CLIPPY_MATRIX: tuple[ClippyRun, ...] = (
             "warnings",
         ),
         owner="scripts/gate.py",
-        hosts=("linux", "macos"),
+        hosts=("linux",),
         cadence=PER_PULL_REQUEST,
     ),
     ClippyRun(
@@ -153,7 +153,7 @@ CLIPPY_MATRIX: tuple[ClippyRun, ...] = (
             "warnings",
         ),
         owner="scripts/gate.py",
-        hosts=("linux", "macos"),
+        hosts=("linux",),
         cadence=PER_PULL_REQUEST,
     ),
     ClippyRun(
@@ -206,6 +206,20 @@ CLIPPY_MATRIX: tuple[ClippyRun, ...] = (
         cadence=NIGHTLY,
     ),
 )
+# The same configurations cover target_os=macos at a daily cadence. Separate
+# rows prevent Linux PR execution from being reported as Mac PR coverage.
+CLIPPY_MATRIX += tuple(
+    replace(
+        run,
+        label=f"{run.label}-macos",
+        owner=".github/workflows/macos-nightly.yml",
+        hosts=("macos",),
+        cadence=NIGHTLY,
+    )
+    for run in CLIPPY_MATRIX
+    if run.label in {"default-features", "solver-free-features"}
+)
+
 
 @dataclass(frozen=True)
 class NightlyOnlySource:
