@@ -80,6 +80,14 @@ struct OutputSpec {
     label: String,
 }
 
+#[derive(Clone, Copy)]
+enum SparseEmission {
+    Gather,
+    Add,
+    Replace,
+    Elements,
+}
+
 struct MatmulEmitSpec {
     a: NodeId,
     b: NodeId,
@@ -1794,14 +1802,6 @@ impl CEmitter {
         }
     }
 
-    fn emit_dim_info(dim: &DimInfo) -> String {
-        match dim {
-            DimInfo::Lit(n) => n.to_string(),
-            DimInfo::Named(_, Some(n)) => n.to_string(),
-            DimInfo::Named(name, None) => name.clone(),
-        }
-    }
-
     fn emit_dim_expr(expr: &DimExpr) -> String {
         match expr {
             DimExpr::Concrete(n) => n.to_string(),
@@ -1924,10 +1924,6 @@ impl CEmitter {
         } else {
             format!("INT64_C({value})")
         }
-    }
-
-    fn elem_size_expr(ty: &TensorType) -> String {
-        format!("sizeof({})", Self::elem_type(ty))
     }
 
     /// Returns true when the tensor's element type is `double`, requiring
@@ -4430,13 +4426,6 @@ impl CEmitter {
         ));
     }
 
-    fn dim_product_expr(dims: &[DimInfo]) -> String {
-        dims.iter()
-            .map(Self::emit_dim_info)
-            .reduce(|lhs, rhs| format!("({lhs} * {rhs})"))
-            .unwrap_or_else(|| "1".to_string())
-    }
-
     fn emit_sparse_gather(
         &mut self,
         id: usize,
@@ -4445,70 +4434,7 @@ impl CEmitter {
         ty: &TensorType,
         dag: VerifiedDagView<'_>,
     ) {
-        let values = inputs[0].0;
-        let indices = inputs[1].0;
-        let values_ty = &dag.get(inputs[0]).unwrap().output_type;
-        let indices_ty = &dag.get(inputs[1]).unwrap().output_type;
-        let value_et = Self::elem_type(values_ty);
-        let index_et = Self::elem_type(indices_ty);
-        let before = Self::dim_product_expr(&values_ty.dims[..axis]);
-        let axis_size = Self::emit_dim_info(&values_ty.dims[axis]);
-        let after = Self::dim_product_expr(&values_ty.dims[axis + 1..]);
-        self.line(&format!("chelis_tensor *t{id}_values = t{values};"));
-        self.line(&format!("chelis_tensor *t{id}_indices = t{indices};"));
-        self.emit_slot_wrapper(id, ty);
-        self.line(&format!(
-            "const {value_et} *t{id}_values_data = (const {value_et}*)t{values}_data;"
-        ));
-        self.line(&format!(
-            "const {index_et} *t{id}_indices_data = (const {index_et}*)t{indices}_data;"
-        ));
-        self.line(&format!(
-            "{value_et} *t{id}_out_data = ({value_et}*)t{id}_data;"
-        ));
-        self.line(&format!("int64_t t{id}_before = {before};"));
-        self.line(&format!("int64_t t{id}_axis_size = {axis_size};"));
-        self.line(&format!("int64_t t{id}_after = {after};"));
-        self.line(&format!("int64_t t{id}_index_count = t{indices}_size;"));
-        self.line(&format!(
-            "for (int64_t t{id}_b = 0; t{id}_b < t{id}_before; t{id}_b++) {{"
-        ));
-        self.indent += 1;
-        self.line(&format!(
-            "for (int64_t t{id}_i = 0; t{id}_i < t{id}_index_count; t{id}_i++) {{"
-        ));
-        self.indent += 1;
-        self.line(&format!(
-            "int64_t t{id}_g = (t{indices}_dtype == CHELIS_DTYPE_I64) ? (int64_t)((const int64_t*)t{indices}_data)[t{id}_i] : (int64_t)t{id}_indices_data[t{id}_i];"
-        ));
-        self.line(&format!(
-            "if (t{id}_g < 0 || t{id}_g >= t{id}_axis_size) abort();"
-        ));
-        self.line(&format!(
-            "for (int64_t t{id}_d = 0; t{id}_d < t{id}_after; t{id}_d++) {{"
-        ));
-        self.indent += 1;
-        self.line(&format!(
-            "int64_t t{id}_out = ((t{id}_b * t{id}_index_count + t{id}_i) * t{id}_after) + t{id}_d;"
-        ));
-        self.line(&format!(
-            "int64_t t{id}_src = ((t{id}_b * t{id}_axis_size + t{id}_g) * t{id}_after) + t{id}_d;"
-        ));
-        self.line(&format!(
-            "t{id}_out_data[t{id}_out] = t{id}_values_data[t{id}_src];"
-        ));
-        self.indent -= 1;
-        self.line("}");
-        self.indent -= 1;
-        self.line("}");
-        self.indent -= 1;
-        self.line("}");
-        self.line(&format!(
-            "if (t{id}_values != t{values}) chelis_tensor_release(t{id}_values);"
-        ));
-        self.line(&format!(
-            "if (t{id}_indices != t{indices}) chelis_tensor_release(t{id}_indices);"
-        ));
+        self.emit_sparse_checked(id, axis, inputs, ty, dag, SparseEmission::Gather);
     }
 
     fn emit_sparse_scatter_add(
@@ -4519,94 +4445,9 @@ impl CEmitter {
         ty: &TensorType,
         dag: VerifiedDagView<'_>,
     ) {
-        let target = inputs[0].0;
-        let indices = inputs[1].0;
-        let updates = inputs[2].0;
-        let target_ty = &dag.get(inputs[0]).unwrap().output_type;
-        let indices_ty = &dag.get(inputs[1]).unwrap().output_type;
-        let updates_ty = &dag.get(inputs[2]).unwrap().output_type;
-        let target_et = Self::elem_type(target_ty);
-        let index_et = Self::elem_type(indices_ty);
-        let update_et = Self::elem_type(updates_ty);
-        let target_elem_size = Self::elem_size_expr(target_ty);
-        let before = Self::dim_product_expr(&target_ty.dims[..axis]);
-        let axis_size = Self::emit_dim_info(&target_ty.dims[axis]);
-        let after = Self::dim_product_expr(&target_ty.dims[axis + 1..]);
-        self.line(&format!("chelis_tensor *t{id}_target = t{target};"));
-        self.line(&format!("chelis_tensor *t{id}_indices = t{indices};"));
-        self.line(&format!("chelis_tensor *t{id}_updates = t{updates};"));
-        self.emit_slot_wrapper(id, ty);
-        self.line(&format!(
-            "const {index_et} *t{id}_indices_data = (const {index_et}*)t{indices}_data;"
-        ));
-        self.line(&format!(
-            "const {update_et} *t{id}_updates_data = (const {update_et}*)t{updates}_data;"
-        ));
-        self.line(&format!(
-            "{target_et} *t{id}_out_data = ({target_et}*)t{id}_data;"
-        ));
-        self.line(&format!(
-            "memcpy(t{id}_data, t{target}_data, (size_t)t{id}_size * {target_elem_size});"
-        ));
-        self.line(&format!("int64_t t{id}_before = {before};"));
-        self.line(&format!("int64_t t{id}_axis_size = {axis_size};"));
-        self.line(&format!("int64_t t{id}_after = {after};"));
-        self.line(&format!("int64_t t{id}_index_count = t{indices}_size;"));
-        self.line(&format!(
-            "for (int64_t t{id}_b = 0; t{id}_b < t{id}_before; t{id}_b++) {{"
-        ));
-        self.indent += 1;
-        self.line(&format!(
-            "for (int64_t t{id}_i = 0; t{id}_i < t{id}_index_count; t{id}_i++) {{"
-        ));
-        self.indent += 1;
-        self.line(&format!(
-            "int64_t t{id}_g = (t{indices}_dtype == CHELIS_DTYPE_I64) ? (int64_t)((const int64_t*)t{indices}_data)[t{id}_i] : (int64_t)t{id}_indices_data[t{id}_i];"
-        ));
-        self.line(&format!(
-            "if (t{id}_g < 0 || t{id}_g >= t{id}_axis_size) abort();"
-        ));
-        self.line(&format!(
-            "for (int64_t t{id}_d = 0; t{id}_d < t{id}_after; t{id}_d++) {{"
-        ));
-        self.indent += 1;
-        self.line(&format!(
-            "int64_t t{id}_src = ((t{id}_b * t{id}_index_count + t{id}_i) * t{id}_after) + t{id}_d;"
-        ));
-        self.line(&format!(
-            "int64_t t{id}_out = ((t{id}_b * t{id}_axis_size + t{id}_g) * t{id}_after) + t{id}_d;"
-        ));
-        self.line(&format!(
-            "t{id}_out_data[t{id}_out] += t{id}_updates_data[t{id}_src];"
-        ));
-        self.indent -= 1;
-        self.line("}");
-        self.indent -= 1;
-        self.line("}");
-        self.indent -= 1;
-        self.line("}");
-        self.line(&format!(
-            "if (t{id}_target != t{target}) chelis_tensor_release(t{id}_target);"
-        ));
-        self.line(&format!(
-            "if (t{id}_indices != t{indices}) chelis_tensor_release(t{id}_indices);"
-        ));
-        self.line(&format!(
-            "if (t{id}_updates != t{updates}) chelis_tensor_release(t{id}_updates);"
-        ));
+        self.emit_sparse_checked(id, axis, inputs, ty, dag, SparseEmission::Add);
     }
 
-    /// Emit a bounded sparse replace-scatter (last-write-wins) loop.
-    ///
-    /// The deterministic order matches `spec/05-risc-primitives.md` §3.5:
-    /// updates-tensor row-major (C order) flat iteration. We iterate
-    /// `(b, i, d)` in the same nesting as `emit_sparse_scatter_add` —
-    /// that nest order traverses `updates` flat-index ascending, so
-    /// the **last write wins** invariant matches the IR evaluator
-    /// (`scatter_replace` in `chelis_ir::eval`). The loop is single-
-    /// threaded: no `#pragma omp parallel for`. Adding parallelism
-    /// would race on duplicate indices and break determinism, which
-    /// is the whole reason this op rejects AD.
     fn emit_sparse_scatter_replace(
         &mut self,
         id: usize,
@@ -4615,96 +4456,9 @@ impl CEmitter {
         ty: &TensorType,
         dag: VerifiedDagView<'_>,
     ) {
-        let target = inputs[0].0;
-        let indices = inputs[1].0;
-        let updates = inputs[2].0;
-        let target_ty = &dag.get(inputs[0]).unwrap().output_type;
-        let indices_ty = &dag.get(inputs[1]).unwrap().output_type;
-        let updates_ty = &dag.get(inputs[2]).unwrap().output_type;
-        let target_et = Self::elem_type(target_ty);
-        let index_et = Self::elem_type(indices_ty);
-        let update_et = Self::elem_type(updates_ty);
-        let target_elem_size = Self::elem_size_expr(target_ty);
-        let before = Self::dim_product_expr(&target_ty.dims[..axis]);
-        let axis_size = Self::emit_dim_info(&target_ty.dims[axis]);
-        let after = Self::dim_product_expr(&target_ty.dims[axis + 1..]);
-        self.line(&format!("chelis_tensor *t{id}_target = t{target};"));
-        self.line(&format!("chelis_tensor *t{id}_indices = t{indices};"));
-        self.line(&format!("chelis_tensor *t{id}_updates = t{updates};"));
-        self.emit_slot_wrapper(id, ty);
-        self.line(&format!(
-            "const {index_et} *t{id}_indices_data = (const {index_et}*)t{indices}_data;"
-        ));
-        self.line(&format!(
-            "const {update_et} *t{id}_updates_data = (const {update_et}*)t{updates}_data;"
-        ));
-        self.line(&format!(
-            "{target_et} *t{id}_out_data = ({target_et}*)t{id}_data;"
-        ));
-        self.line(&format!(
-            "memcpy(t{id}_data, t{target}_data, (size_t)t{id}_size * {target_elem_size});"
-        ));
-        self.line(&format!("int64_t t{id}_before = {before};"));
-        self.line(&format!("int64_t t{id}_axis_size = {axis_size};"));
-        self.line(&format!("int64_t t{id}_after = {after};"));
-        self.line(&format!("int64_t t{id}_index_count = t{indices}_size;"));
-        // Single-threaded sequential loop: deterministic last-write-wins
-        // requires that no two writes to the same target cell race. The
-        // outer (b, i, d) iteration order is the canonical
-        // updates-tensor row-major traversal.
-        self.line(&format!(
-            "for (int64_t t{id}_b = 0; t{id}_b < t{id}_before; t{id}_b++) {{"
-        ));
-        self.indent += 1;
-        self.line(&format!(
-            "for (int64_t t{id}_i = 0; t{id}_i < t{id}_index_count; t{id}_i++) {{"
-        ));
-        self.indent += 1;
-        self.line(&format!(
-            "int64_t t{id}_g = (t{indices}_dtype == CHELIS_DTYPE_I64) ? (int64_t)((const int64_t*)t{indices}_data)[t{id}_i] : (int64_t)t{id}_indices_data[t{id}_i];"
-        ));
-        self.line(&format!(
-            "if (t{id}_g < 0 || t{id}_g >= t{id}_axis_size) abort();"
-        ));
-        self.line(&format!(
-            "for (int64_t t{id}_d = 0; t{id}_d < t{id}_after; t{id}_d++) {{"
-        ));
-        self.indent += 1;
-        self.line(&format!(
-            "int64_t t{id}_src = ((t{id}_b * t{id}_index_count + t{id}_i) * t{id}_after) + t{id}_d;"
-        ));
-        self.line(&format!(
-            "int64_t t{id}_out = ((t{id}_b * t{id}_axis_size + t{id}_g) * t{id}_after) + t{id}_d;"
-        ));
-        // Last-write-wins assignment (NOT accumulation).
-        self.line(&format!(
-            "t{id}_out_data[t{id}_out] = t{id}_updates_data[t{id}_src];"
-        ));
-        self.indent -= 1;
-        self.line("}");
-        self.indent -= 1;
-        self.line("}");
-        self.indent -= 1;
-        self.line("}");
-        self.line(&format!(
-            "if (t{id}_target != t{target}) chelis_tensor_release(t{id}_target);"
-        ));
-        self.line(&format!(
-            "if (t{id}_indices != t{indices}) chelis_tensor_release(t{id}_indices);"
-        ));
-        self.line(&format!(
-            "if (t{id}_updates != t{updates}) chelis_tensor_release(t{id}_updates);"
-        ));
+        self.emit_sparse_checked(id, axis, inputs, ty, dag, SparseEmission::Replace);
     }
 
-    /// Emit C for ONNX `ScatterElements` (spec §3.5.1). Element-wise:
-    /// `data`, `indices`, `updates` share a rank; `indices.dims ==
-    /// updates.dims`; `output.dims == data.dims`. Each flat update
-    /// position is decomposed into a coordinate over the indices shape;
-    /// the `axis` coordinate is replaced by `indices[i]` and the write
-    /// lands at the corresponding linear offset in the (data-shaped)
-    /// output. Last-write-wins under updates row-major order, so the
-    /// loop is single-threaded.
     fn emit_sparse_scatter_elements(
         &mut self,
         id: usize,
@@ -4713,106 +4467,68 @@ impl CEmitter {
         ty: &TensorType,
         dag: VerifiedDagView<'_>,
     ) {
-        let data = inputs[0].0;
-        let indices = inputs[1].0;
-        let updates = inputs[2].0;
-        let data_ty = &dag.get(inputs[0]).unwrap().output_type;
-        let indices_ty = &dag.get(inputs[1]).unwrap().output_type;
-        let updates_ty = &dag.get(inputs[2]).unwrap().output_type;
-        let data_et = Self::elem_type(data_ty);
-        let index_et = Self::elem_type(indices_ty);
-        let update_et = Self::elem_type(updates_ty);
-        let data_elem_size = Self::elem_size_expr(data_ty);
-        let rank = data_ty.dims.len();
+        self.emit_sparse_checked(id, axis, inputs, ty, dag, SparseEmission::Elements);
+    }
 
-        self.line(&format!("chelis_tensor *t{id}_data_input = t{data};"));
-        self.line(&format!("chelis_tensor *t{id}_indices = t{indices};"));
-        self.line(&format!("chelis_tensor *t{id}_updates = t{updates};"));
+    /// Validate the whole iteration shape before storage submission; each loop
+    /// position then obtains both its index slot and base offset from that plan.
+    fn emit_sparse_checked(
+        &mut self,
+        id: usize,
+        axis: usize,
+        inputs: &[NodeId],
+        ty: &TensorType,
+        dag: VerifiedDagView<'_>,
+        operation: SparseEmission,
+    ) {
+        let base = inputs[0].0;
+        let indices = inputs[1].0;
+        let (operation, update) = match operation {
+            SparseEmission::Gather => ("CHELIS_SPARSE_GATHER", None),
+            SparseEmission::Add => ("CHELIS_SPARSE_ADD", Some("+=")),
+            SparseEmission::Replace => ("CHELIS_SPARSE_REPLACE", Some("=")),
+            SparseEmission::Elements => ("CHELIS_SPARSE_ELEMENTS", Some("=")),
+        };
+        let updates = update.map(|_| inputs[2].0);
+        let updates_arg = updates
+            .map(|n| format!("t{n}"))
+            .unwrap_or_else(|| "NULL".into());
+        let index_type = Self::elem_type(&TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        });
+        let index_element = Self::elem_type(&dag.get(inputs[1]).unwrap().output_type);
+        let element = Self::elem_type(ty);
+        self.line(&format!("chelis_sparse_plan *t{id}_sparse = chelis_tensor_sparse_plan(t{base}, t{indices}, {updates_arg}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {axis}), {operation});"));
+        let extents = (0..ty.dims.len()).map(|axis| (axis, format!("chelis_sparse_extent(t{id}_sparse, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {axis}))"))).collect::<Vec<_>>();
+        self.emit_runtime_dim_sites(id, &extents);
+        let rank = ty.dims.len();
+        let shape = Self::tagged_shape_literal(ty);
+        self.line(&format!("chelis_sparse_check_target(t{id}_sparse, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {rank}), {shape});"));
+        self.line(&format!(
+            "{index_type} t{id}_sparse_count = chelis_sparse_count(t{id}_sparse);"
+        ));
         self.emit_slot_wrapper(id, ty);
-        self.line(&format!(
-            "const {index_et} *t{id}_indices_data = (const {index_et}*)t{indices}_data;"
-        ));
-        self.line(&format!(
-            "const {update_et} *t{id}_updates_data = (const {update_et}*)t{updates}_data;"
-        ));
-        self.line(&format!(
-            "{data_et} *t{id}_out_data = ({data_et}*)t{id}_data;"
-        ));
-        self.line(&format!(
-            "memcpy(t{id}_data, t{data}_data, (size_t)t{id}_size * {data_elem_size});"
-        ));
-        // Per-axis sizes for the indices/updates grid and the data grid,
-        // plus the data row-major strides used to recompute the output
-        // offset after the axis coordinate is replaced by the index.
-        let axis_size = Self::emit_dim_info(&data_ty.dims[axis]);
-        self.line(&format!("int t{id}_axis = {axis};"));
-        self.line(&format!("int64_t t{id}_axis_size = {axis_size};"));
-        self.line(&format!("int64_t t{id}_update_count = t{updates}_size;"));
-        for d in 0..rank {
-            let idx_dim = Self::emit_dim_info(&indices_ty.dims[d]);
-            let data_dim = Self::emit_dim_info(&data_ty.dims[d]);
-            self.line(&format!("int64_t t{id}_idim{d} = {idx_dim};"));
-            self.line(&format!("int64_t t{id}_ddim{d} = {data_dim};"));
+        if updates.is_some() {
+            self.line(&format!("if (t{id}_byte_capacity != 0 && t{id}_data != t{base}_data) memcpy(t{id}_data, t{base}_data, (size_t)t{id}_byte_capacity);"));
         }
-        // Single-threaded sequential loop over the updates tensor in
-        // row-major flat order: deterministic last-write-wins requires
-        // no two writes to the same output cell race.
+        // Ascending iteration positions are the exact updates row-major order,
+        // including duplicate destinations. Each scatter therefore stays serial.
         self.line(&format!(
-            "for (int64_t t{id}_i = 0; t{id}_i < t{id}_update_count; t{id}_i++) {{"
+            "for ({index_type} t{id}_i = 0; t{id}_i < t{id}_sparse_count; ++t{id}_i) {{"
         ));
         self.indent += 1;
-        // #476: int tensors store their values bit-packed into the
-        // float-typed `->data`, so reading `(int)t->data[i]` on a
-        // CHELIS_DTYPE_I32 index tensor would `(int)`-truncate the FLOAT
-        // reinterpretation of the int32 bits (e.g. index `2` →
-        // `(int)2.8e-45f` → `0`), silently gathering the wrong row.
-        // The read must go through the dtype-correct pointer cast on
-        // BOTH dtype branches. The hyperplane sparse emits (gather,
-        // scatter_replace, scatter_add) do the same via their
-        // already-declared `t{id}_indices_data` (`const {index_et}*`)
-        // pointer; the element-wise emit casts inline here because it
-        // has no such pre-declared pointer in scope.
-        self.line(&format!(
-            "int64_t t{id}_g = (t{indices}_dtype == CHELIS_DTYPE_I64) ? (int64_t)((const int64_t*)t{indices}_data)[t{id}_i] : (int64_t)((const int32_t*)t{indices}_data)[t{id}_i];"
-        ));
-        self.line(&format!(
-            "if (t{id}_g < 0 || t{id}_g >= t{id}_axis_size) abort();"
-        ));
-        // Decompose the flat updates index into per-axis coordinates
-        // over the indices/updates shape, then build the output linear
-        // offset over the data shape with the axis coordinate replaced
-        // by the scattered index.
-        self.line(&format!("int64_t t{id}_rem = t{id}_i;"));
-        self.line(&format!("int64_t t{id}_out = 0;"));
-        for d in (0..rank).rev() {
-            self.line(&format!("int64_t t{id}_c{d} = t{id}_rem % t{id}_idim{d};"));
-            self.line(&format!("t{id}_rem /= t{id}_idim{d};"));
+        self.line(&format!("{index_type} t{id}_index_slot = chelis_sparse_index_slot(t{id}_sparse, chelis_scalar_from_bits(CHELIS_DTYPE_I64, t{id}_i));"));
+        self.line(&format!("{index_type} t{id}_selected = ((const {index_element}*)t{indices}_data)[t{id}_index_slot];"));
+        self.line(&format!("{index_type} t{id}_base_index = chelis_sparse_data_index(t{id}_sparse, chelis_scalar_from_bits(CHELIS_DTYPE_I64, t{id}_i), chelis_scalar_from_bits(CHELIS_DTYPE_I64, t{id}_selected));"));
+        if let (Some(updates), Some(update)) = (updates, update) {
+            self.line(&format!("(({element}*)t{id}_data)[t{id}_base_index] {update} ((const {element}*)t{updates}_data)[t{id}_i];"));
+        } else {
+            self.line(&format!("(({element}*)t{id}_data)[t{id}_i] = ((const {element}*)t{base}_data)[t{id}_base_index];"));
         }
-        // out = sum_d (coord_d or g at axis) * stride_d, computed via a
-        // running row-major fold over the data dims.
-        self.line(&format!("int64_t t{id}_stride = 1;"));
-        for d in (0..rank).rev() {
-            self.line(&format!(
-                "int64_t t{id}_coord{d} = (t{id}_axis == {d}) ? t{id}_g : t{id}_c{d};"
-            ));
-            self.line(&format!("t{id}_out += t{id}_coord{d} * t{id}_stride;"));
-            self.line(&format!("t{id}_stride *= t{id}_ddim{d};"));
-        }
-        // Last-write-wins assignment (NOT accumulation).
-        self.line(&format!(
-            "t{id}_out_data[t{id}_out] = t{id}_updates_data[t{id}_i];"
-        ));
         self.indent -= 1;
         self.line("}");
-        self.line(&format!(
-            "if (t{id}_data_input != t{data}) chelis_tensor_release(t{id}_data_input);"
-        ));
-        self.line(&format!(
-            "if (t{id}_indices != t{indices}) chelis_tensor_release(t{id}_indices);"
-        ));
-        self.line(&format!(
-            "if (t{id}_updates != t{updates}) chelis_tensor_release(t{id}_updates);"
-        ));
+        self.line(&format!("chelis_sparse_plan_release(t{id}_sparse);"));
     }
 
     // ---- Reduce sum ----
@@ -8510,11 +8226,9 @@ mod tests {
 
         let c = emit_test_dag(&dag, "test_fn").unwrap();
 
-        assert!(c.contains("const double *t2_values_data = (const double*)t0_data;"));
-        assert!(c.contains("const int32_t *t2_indices_data = (const int32_t*)t1_data;"));
-        assert!(c.contains("double *t2_out_data = (double*)t2_data;"));
-        assert!(c.contains("t1_dtype == CHELIS_DTYPE_I64"));
-        assert!(c.contains("t2_out_data[t2_out] = t2_values_data[t2_src];"));
+        assert!(c.contains("((const int32_t*)t1_data)[t2_index_slot]"));
+        assert!(c.contains("chelis_sparse_data_index(t2_sparse,"));
+        assert!(c.contains("((double*)t2_data)[t2_i] = ((const double*)t0_data)[t2_base_index];"));
     }
 
     #[test]
@@ -8554,7 +8268,7 @@ mod tests {
             !c.contains("128 * 50000 * 1024"),
             "sparse gather codegen must not compute dense embedding volume"
         );
-        assert!(c.contains("t1_dtype == CHELIS_DTYPE_I64"));
+        assert!(c.contains("chelis_sparse_index_slot(t2_sparse,"));
     }
 
     #[test]
@@ -8620,11 +8334,9 @@ mod tests {
 
         let c = emit_test_dag(&dag, "test_fn").unwrap();
 
-        assert!(c.contains("const int64_t *t3_indices_data = (const int64_t*)t1_data;"));
-        assert!(c.contains("const double *t3_updates_data = (const double*)t2_data;"));
-        assert!(c.contains("double *t3_out_data = (double*)t3_data;"));
-        assert!(c.contains("memcpy(t3_data, t0_data, (size_t)t3_size * sizeof(double));"));
-        assert!(c.contains("t3_out_data[t3_out] += t3_updates_data[t3_src];"));
+        assert!(c.contains("((const int64_t*)t1_data)[t3_index_slot]"));
+        assert!(c.contains("memcpy(t3_data, t0_data, (size_t)t3_byte_capacity);"));
+        assert!(c.contains("((double*)t3_data)[t3_base_index] += ((const double*)t2_data)[t3_i];"));
     }
 
     #[test]

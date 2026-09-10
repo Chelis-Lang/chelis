@@ -47,6 +47,128 @@ pub(crate) struct IterationSpace {
     elements: ElementCount,
 }
 
+/// The checked row-major domain shared by gather and scatter consumers.
+pub(crate) struct SparseMetadata {
+    base: ShapeMetadata,
+    indices: ShapeMetadata,
+    domain: ShapeMetadata,
+    axis: usize,
+    elementwise: bool,
+    inner: ElementCount,
+    source_axis: AxisDecomposition,
+}
+
+impl SparseMetadata {
+    pub(crate) fn new(
+        base: &ShapeMetadata,
+        indices: &ShapeMetadata,
+        axis: i64,
+        elementwise: bool,
+    ) -> Result<Self, MetadataError> {
+        let axis = base.normalize_axis(axis)?;
+        let shape = if elementwise {
+            if base.shape.len() != indices.shape.len()
+                || base
+                    .shape
+                    .iter()
+                    .zip(indices.shape.iter())
+                    .enumerate()
+                    .any(|(d, (base, index))| d != axis && index > base)
+            {
+                return Err(MetadataError::Domain(
+                    "element-wise scatter shape mismatch".into(),
+                ));
+            }
+            indices.shape.to_vec()
+        } else {
+            let rank = base
+                .shape
+                .len()
+                .checked_sub(1)
+                .and_then(|rank| rank.checked_add(indices.shape.len()))
+                .ok_or(MetadataError::Overflow("sparse domain rank overflow"))?;
+            ShapeMetadata::checked_rank(rank)?;
+            ElementCount::scratch_entries(rank, 0)?.scratch_len::<i64>()?;
+            base.shape[..axis]
+                .iter()
+                .chain(indices.shape.iter())
+                .chain(base.shape[axis + 1..].iter())
+                .copied()
+                .collect()
+        };
+        let domain = ShapeMetadata::contiguous(&shape, base.dtype)?;
+        domain.bytes().allocation()?;
+        let inner = if domain.elements().get() == 0 || elementwise {
+            ElementCount::from_extents(&[0])?
+        } else {
+            ElementCount::from_extents(&base.shape[axis + 1..])?
+        };
+        Ok(Self {
+            base: base.clone(),
+            indices: indices.clone(),
+            domain,
+            axis,
+            elementwise,
+            inner,
+            source_axis: base.axis_decomposition(axis)?,
+        })
+    }
+
+    pub(crate) fn base(&self) -> &ShapeMetadata {
+        &self.base
+    }
+    pub(crate) fn domain(&self) -> &ShapeMetadata {
+        &self.domain
+    }
+    pub(crate) fn index_slot(&self, linear: i64) -> Result<i64, MetadataError> {
+        self.domain.require_index(linear)?;
+        Ok(if self.elementwise {
+            linear
+        } else {
+            linear / self.inner.get() % self.indices.elements().get()
+        })
+    }
+    pub(crate) fn data_index(&self, linear: i64, selected: i64) -> Result<i64, MetadataError> {
+        self.domain.require_index(linear)?;
+        if selected < 0 || selected >= self.base.shape[self.axis] {
+            return Err(MetadataError::Domain(
+                "sparse index outside base axis".into(),
+            ));
+        }
+        if self.elementwise {
+            let mut remaining = linear;
+            let mut offset = 0_i64;
+            for (axis, &extent) in self.indices.shape.iter().enumerate().rev() {
+                let coordinate = if axis == self.axis {
+                    selected
+                } else {
+                    remaining % extent
+                };
+                remaining /= extent;
+                offset = coordinate
+                    .checked_mul(self.base.strides[axis])
+                    .and_then(|n| offset.checked_add(n))
+                    .ok_or(MetadataError::Overflow("sparse offset exceeds int64"))?;
+            }
+            self.base.require_index(offset)?;
+            Ok(offset)
+        } else {
+            let outer = linear / self.inner.get() / self.indices.elements().get();
+            let inner = linear % self.inner.get();
+            let offset = self.source_axis.linear_index(
+                usize::try_from(outer)
+                    .map_err(|_| MetadataError::Overflow("sparse outer exceeds target"))?,
+                usize::try_from(selected)
+                    .map_err(|_| MetadataError::Overflow("sparse index exceeds target"))?,
+                usize::try_from(inner)
+                    .map_err(|_| MetadataError::Overflow("sparse inner exceeds target"))?,
+            )?;
+            i64::try_from(offset)
+                .map_err(|_| MetadataError::Overflow("sparse offset exceeds int64"))
+        }
+    }
+}
+
 /// Checked reduction grouping, independent of input payload storage and lifetime.
 pub(crate) struct ReductionMetadata {
     input: IterationSpace,
@@ -301,6 +423,9 @@ impl ShapeMetadata {
     }
     pub(crate) fn shape(&self) -> &[i64] {
         &self.shape
+    }
+    pub(crate) fn extent_at(&self, axis: i64) -> Result<i64, MetadataError> {
+        Ok(self.shape[self.normalize_axis(axis)?])
     }
     pub(crate) fn strides(&self) -> &[i64] {
         &self.strides

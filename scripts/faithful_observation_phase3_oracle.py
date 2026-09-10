@@ -58,6 +58,7 @@ ALLOWED_IGNORES = {
 REQUIRED_TESTS = {
     PARITY_SOURCE: {
         "parity_checked_reshape",
+        "parity_checked_sparse_axes",
         "parity_dict_foundation",
         "parity_count_bool_axes",
         "parity_explicit_normalization",
@@ -136,6 +137,9 @@ REQUIRED_EVAL_RECEIPTS = {
 }
 
 # Guard artifact: exact definitions for every frozen Phase 3 executable row.
+# PR #1692 adds checked_sparse_axes with independent stored-bit/index/shape
+# controls. The corpus guard changes only by adding its executable filename;
+# deletion, empty-body, library-only, and corpus-removal mutations remain red.
 # A digest changes only when the owning design's corpus is intentionally revised
 # and the replacement behavior has independent review evidence. Editing this map
 # merely to accept a changed test is not a repair.
@@ -175,7 +179,8 @@ REQUIRED_TEST_DEFINITION_SHA256: dict[Path, dict[str, str]] = {
         "parity_comparator_reports_sub_tolerance_float_drift": "40d029638fe1b70c1611adab72eeb31c1befed97d74c5400f5aae82f8c86aafe",
         "parity_constraint_directed_risk_guards_library_only": "ac6933d790a89ff00d7658e1260d61614ccc2547d9a91a67a0aa98918e33ca32",
         "parity_count_bool_axes": "66e82bb4aeedafabc5d77eefeec25cb2728085becf2fdf44c335631fde750ba9",
-        "parity_corpus_is_complete": "cdb48ab89e5357b92e47a459634ed9543d4b6de050e6487eb91b17f9fab67e9a",
+        "parity_checked_sparse_axes": "69b1b926e2294ef2dcf704f68d218f0c692788c943aa3f6a88ed06e331e107b0",
+        "parity_corpus_is_complete": "16483022d06347f71e1adb3abbc519a22157b83682b45b764b37815979d07080",
         "parity_explicit_normalization": "d09c17ffa744ee21214877d59476ce58441480e4f6f8a29d6eb5edf3ad1417cb",
         "parity_dict_foundation": "1bfd21bf0d78c9f36869908852a963037e0f13e36d5f9bc73b77131ff9d2970f",
         "parity_generic_explicit_shape": "72ebff1fb9ca21ef52e6622c724f90e7f24f9054c8bff0b5c582be8582007f73",

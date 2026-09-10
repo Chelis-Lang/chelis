@@ -613,8 +613,8 @@ from 324 to 321. Checked-add/multiply and bounds mutations execute against the
 private metadata owner. No new inventory identity or owner exception is admitted.
 The complete Phase 1 oracle remains a separate deliverable.
 
-After the reduction/Count delivery below, generated C adoption still requires
-sparse/BLAS loop domains and window metadata/scratch allocation. The
+After the reduction/Count and sparse deliveries below, generated C adoption still
+requires BLAS loop domains and window metadata/scratch allocation. The
 complete Phase 1 execution receipt/mutation oracle remains outstanding. Host-only results do not establish
 device execution or close #889/#893. Generated host/device descriptors and
 validated Python/DLPack wrappers remain under #893/#1345; #1288 consumes those
@@ -650,6 +650,34 @@ The 358 foundation identities remain unchanged; no new owner exception is admitt
 The retired Sum raw-index template leaves active debt (314 to 313). This supports
 the reduction slice only: sparse/BLAS/window consumers and the complete Phase 1
 execution-receipt oracle remain open. It does not close #889 or #893.
+
+
+#### Generated C sparse loops (#889)
+
+Gather, ScatterAdd, ScatterReplace, and ScatterElements share a checked
+`SparseMetadata` domain. Hyperplane operations bind the base prefix/suffix to the
+complete index shape; elementwise replacement binds each index coordinate to its
+base axis. The runtime checks exact updates/result shapes and dtype, and projects
+index slots and selected base indices from this domain. Snapshots retain no payload
+and require no per-index allocation. Generated DAG loops and all three host sparse
+summary paths check the target before allocation or reuse. Scatter copies consume
+checked byte counts, and ascending update positions preserve duplicate-write order.
+
+The seven registered C functions and their opaque plan form one adoption slice with
+the sparse consumers: exact shapes, loop domains, and index maps must agree before
+submission. Arithmetic algorithms and existing backend dtype admission are unchanged.
+The bounded oracle combines runtime `checked_c_sparse`, private metadata and
+construction/mutation controls in debug/release, backend `checked_c_sparse`, native
+`checked_c_sparse_` sanitizer tests, host-summary execution/rejection tests, and
+`checked_sparse_axes.ch` evaluator/C parity. Native controls cover all nine stored
+payload representations on Gather/Replace/Elements, duplicate f32 ScatterAdd,
+nontrailing domains, empty results, and invalid indices; the host Add summary is
+executed directly from IR because it is produced by AD rather than a Surf builtin.
+
+The Phase 0 foundation keeps all 358 identities. Replacing thirteen raw sparse
+consumer owners reduces active debt from 313 to 300 without a new exception. The
+coverage freeze adds these executable suites; it does not establish the complete
+Phase 1 execution-receipt oracle or the remaining BLAS/window/host consumers.
 
 
 ## C3. One generated host/device descriptor schema

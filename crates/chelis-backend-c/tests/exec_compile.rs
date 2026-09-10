@@ -63,6 +63,342 @@ fn checked_indexing_run(source: &str, harness: &str) -> std::process::Output {
 }
 
 #[test]
+fn checked_c_sparse_mappings_preserve_stored_bits_under_sanitizers() {
+    for (prim, dtype, seed) in [
+        (Prim::F32, "CHELIS_DTYPE_F32", 0x3f800000_u64),
+        (Prim::F64, "CHELIS_DTYPE_F64", 0x3ff0000000000000),
+        (Prim::F16, "CHELIS_DTYPE_F16", 0x3c00),
+        (Prim::Bf16, "CHELIS_DTYPE_BF16", 0x3f80),
+        (Prim::Int8, "CHELIS_DTYPE_I8", 10),
+        (Prim::Int16, "CHELIS_DTYPE_I16", 100),
+        (Prim::Int32, "CHELIS_DTYPE_I32", 100),
+        (Prim::Int64, "CHELIS_DTYPE_I64", 9_007_199_254_740_993),
+        (Prim::Bool, "CHELIS_DTYPE_BOOL", 0),
+    ] {
+        for (index_prim, index_dtype, index_type) in [
+            (Prim::Int32, "CHELIS_DTYPE_I32", "int32_t"),
+            (Prim::Int64, "CHELIS_DTYPE_I64", "int64_t"),
+        ] {
+            for (op, base_shape, output_shape, selected, map) in [
+                (
+                    RiscOp::Gather { axis: 1 },
+                    vec![2, 3, 2],
+                    vec![2, 2, 2, 2],
+                    "2,0,1,2",
+                    "4,5,0,1,2,3,4,5,10,11,6,7,8,9,10,11",
+                ),
+                // Negative map entries select unchanged base cells (-index-1).
+                (
+                    RiscOp::Scatter { axis: 1 },
+                    vec![2, 3, 2],
+                    vec![2, 3, 2],
+                    "2,0,2,0",
+                    "6,7,-3,-4,4,5,14,15,-9,-10,12,13",
+                ),
+                (
+                    RiscOp::ScatterElements { axis: 1 },
+                    vec![2, 3],
+                    vec![2, 3],
+                    "2,0,1,1",
+                    "1,-2,0,-4,3,-6",
+                ),
+            ] {
+                let gather = matches!(op, RiscOp::Gather { .. });
+                let elements = matches!(op, RiscOp::ScatterElements { .. });
+                let ty = |shape: &[usize], precision| TensorType {
+                    dims: shape.iter().copied().map(DimInfo::Lit).collect(),
+                    precision,
+                };
+                let mut dag = Dag::new();
+                let base = dag.add_node(
+                    RiscOp::Load {
+                        name: "base".into(),
+                    },
+                    vec![],
+                    ty(&base_shape, prim),
+                    None,
+                );
+                let indices = dag.add_node(
+                    RiscOp::Load {
+                        name: "indices".into(),
+                    },
+                    vec![],
+                    ty(&[2, 2], index_prim),
+                    None,
+                );
+                let mut inputs = vec![base, indices];
+                let update_shape = if elements {
+                    vec![2, 2]
+                } else {
+                    vec![2, 2, 2, 2]
+                };
+                if !gather {
+                    inputs.push(dag.add_node(
+                        RiscOp::Load {
+                            name: "updates".into(),
+                        },
+                        vec![],
+                        ty(&update_shape, prim),
+                        None,
+                    ));
+                }
+                let output = dag.add_node(op, inputs, ty(&output_shape, prim), None);
+                dag.add_root(output);
+                let generated = codegen(&dag, "checked_sparse").unwrap();
+                let dimensions =
+                    |s: &[usize]| s.iter().map(usize::to_string).collect::<Vec<_>>().join(",");
+                let base_dims = dimensions(&base_shape);
+                let update_dims = dimensions(&update_shape);
+                let output_dims = dimensions(&output_shape);
+                let base_rank = base_shape.len();
+                let update_rank = update_shape.len();
+                let output_rank = output_shape.len();
+                let input_count = if gather { 2 } else { 3 };
+                let gather = usize::from(gather);
+                let harness = format!(
+                    r#"
+#include "chelis_runtime.h"
+#include <string.h>
+void checked_sparse(chelis_tensor **, int, chelis_tensor **, int);
+static uint64_t bits(int64_t index, int update) {{
+    return {dtype} == CHELIS_DTYPE_BOOL ? (uint64_t)(((index/2+index)%2)^update) : UINT64_C({seed}) + (uint64_t)index + (update ? 32 : 0);
+}}
+static void fill(chelis_tensor *t, int update) {{
+    chelis_tensor_write *g = chelis_tensor_begin_write(t);
+    chelis_write_view v = chelis_tensor_write_view(g);
+    for (int64_t i=0;i<v.count;++i) {{ uint64_t value=bits(i,update); memcpy((unsigned char*)v.data+i*chelis_dtype_size({dtype}), &value, chelis_dtype_size({dtype})); }}
+    chelis_tensor_end_write(g);
+}}
+int main(void) {{
+    chelis_tensor *base=chelis_alloc({base_rank},(int64_t[]){{{base_dims}}},{dtype});
+    chelis_tensor *indices=chelis_alloc(2,(int64_t[]){{2,2}},{index_dtype});
+    chelis_tensor *updates=chelis_alloc({update_rank},(int64_t[]){{{update_dims}}},{dtype});
+    fill(base,0); fill(updates,1);
+    chelis_tensor_write *g=chelis_tensor_begin_write(indices);
+    {index_type} values[4]={{{selected}}};
+    memcpy(chelis_tensor_write_view(g).data,values,sizeof values); chelis_tensor_end_write(g);
+    chelis_tensor *in[]={{base,indices,updates}}, *out[1]={{0}};
+    checked_sparse(in,{input_count},out,1);
+    int64_t shape[]={{{output_dims}}}; int expected[]={{{map}}};
+    if (chelis_tensor_rank(out[0])!={output_rank}) return 2;
+    for (int a=0;a<{output_rank};++a) if(chelis_tensor_shape(out[0],a)!=shape[a]) return 3;
+    chelis_read_view v=chelis_tensor_read_view(out[0]);
+    if (v.count != sizeof expected / sizeof expected[0]) return 4;
+    for(int64_t i=0;i<v.count;++i) {{
+        uint64_t got=0; memcpy(&got,(const unsigned char*)v.data+i*chelis_dtype_size({dtype}),chelis_dtype_size({dtype}));
+        int index=expected[i]; uint64_t want=bits(index<0 ? -index-1 : index, !{gather} && index>=0);
+        if(got!=want) return 5;
+    }}
+    chelis_tensor_release(out[0]); chelis_tensor_release(base); chelis_tensor_release(indices); chelis_tensor_release(updates);
+    puts("SPARSE PASS"); return 0;
+}}
+"#
+                );
+                let result = checked_indexing_run(&generated.c_source, &harness);
+                assert!(
+                    result.status.success(),
+                    "{prim:?}/{index_prim:?}: {}\n{}",
+                    String::from_utf8_lossy(&result.stderr),
+                    generated.c_source
+                );
+                assert_eq!(result.stdout, b"SPARSE PASS\n");
+            }
+        }
+    }
+}
+
+#[test]
+fn checked_c_sparse_empty_and_invalid_domains_execute_under_sanitizers() {
+    let ty = |shape: &[usize], precision| TensorType {
+        dims: shape.iter().copied().map(DimInfo::Lit).collect(),
+        precision,
+    };
+    for (op, diagnostic) in [
+        (RiscOp::Gather { axis: 1 }, "gather"),
+        (RiscOp::ScatterAdd { axis: 1 }, "scatter"),
+        (RiscOp::Scatter { axis: 1 }, "scatter_replace"),
+        (RiscOp::ScatterElements { axis: 1 }, "scatter_elements"),
+    ] {
+        for (empty, selected) in [(true, 0), (false, -1), (false, 3), (false, 2)] {
+            let gather = matches!(op, RiscOp::Gather { .. });
+            let elements = matches!(op, RiscOp::ScatterElements { .. });
+            let n = if empty { 0 } else { 2 };
+            let index_shape = if elements { vec![2, n] } else { vec![n] };
+            let output_shape = if gather { vec![2, n] } else { vec![2, 3] };
+            let mut dag = Dag::new();
+            let base = dag.add_node(
+                RiscOp::Load {
+                    name: "base".into(),
+                },
+                vec![],
+                ty(&[2, 3], Prim::F32),
+                None,
+            );
+            let indices = dag.add_node(
+                RiscOp::Load {
+                    name: "indices".into(),
+                },
+                vec![],
+                ty(&index_shape, Prim::Int64),
+                None,
+            );
+            let mut inputs = vec![base, indices];
+            if !gather {
+                inputs.push(dag.add_node(
+                    RiscOp::Load {
+                        name: "updates".into(),
+                    },
+                    vec![],
+                    ty(&[2, n], Prim::F32),
+                    None,
+                ));
+            }
+            let output = dag.add_node(op.clone(), inputs, ty(&output_shape, Prim::F32), None);
+            dag.add_root(output);
+            let source = codegen(&dag, "sparse_boundary").unwrap().c_source;
+            let index_rank = index_shape.len();
+            let index_dims = index_shape
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            let input_count = if gather { 2 } else { 3 };
+            let check = if empty && gather {
+                "if (v.count != 0 || chelis_tensor_shape(out[0],0)!=2 || chelis_tensor_shape(out[0],1)!=0) return 2;".to_string()
+            } else {
+                let expected = if empty {
+                    "0,1,2,3,4,5"
+                } else if gather {
+                    "2,2,5,5"
+                } else if diagnostic == "scatter" {
+                    "0,1,5,3,4,12"
+                } else {
+                    "0,1,2,3,4,4"
+                };
+                format!(
+                    "float expected[]={{{expected}}}; if(v.count != sizeof expected / sizeof expected[0]) return 2; for(int64_t i=0;i<v.count;++i) if(((const float*)v.data)[i]!=expected[i]) return 3;"
+                )
+            };
+            let harness = format!(
+                r#"
+#include "chelis_runtime.h"
+void sparse_boundary(chelis_tensor **,int,chelis_tensor **,int);
+int main(void) {{
+    chelis_tensor *base=chelis_alloc(2,(int64_t[]){{2,3}},CHELIS_DTYPE_F32);
+    chelis_tensor *indices=chelis_alloc({index_rank},(int64_t[]){{{index_dims}}},CHELIS_DTYPE_I64);
+    chelis_tensor *updates=chelis_alloc(2,(int64_t[]){{2,{n}}},CHELIS_DTYPE_F32);
+    chelis_tensor_write *g=chelis_tensor_begin_write(base); chelis_write_view w=chelis_tensor_write_view(g);
+    for(int64_t i=0;i<w.count;++i) ((float*)w.data)[i]=(float)i; chelis_tensor_end_write(g);
+    g=chelis_tensor_begin_write(indices); w=chelis_tensor_write_view(g);
+    for(int64_t i=0;i<w.count;++i) ((int64_t*)w.data)[i]={selected}; chelis_tensor_end_write(g);
+    g=chelis_tensor_begin_write(updates); w=chelis_tensor_write_view(g);
+    for(int64_t i=0;i<w.count;++i) ((float*)w.data)[i]=(float)(i+1); chelis_tensor_end_write(g);
+    chelis_tensor *in[]={{base,indices,updates}},*out[1]={{0}}; sparse_boundary(in,{input_count},out,1);
+    chelis_read_view v=chelis_tensor_read_view(out[0]); {check}
+    chelis_tensor_release(out[0]); chelis_tensor_release(base); chelis_tensor_release(indices); chelis_tensor_release(updates);
+    puts("SPARSE BOUNDARY PASS"); return 0;
+}}
+"#
+            );
+            let mut sources = vec![source];
+            if diagnostic == "scatter" {
+                use chelis_ir::host::{
+                    HostTensorHelper, HostTensorInput, summarize_sparse_helper_for_test,
+                };
+                let inputs = vec![
+                    HostTensorInput {
+                        name: "base".into(),
+                        ty: ty(&[2, 3], Prim::F32),
+                    },
+                    HostTensorInput {
+                        name: "indices".into(),
+                        ty: ty(&index_shape, Prim::Int64),
+                    },
+                    HostTensorInput {
+                        name: "updates".into(),
+                        ty: ty(&[2, n], Prim::F32),
+                    },
+                ];
+                let output = ty(&output_shape, Prim::F32);
+                let specialization = summarize_sparse_helper_for_test(&dag, &inputs, &output);
+                assert!(matches!(
+                    specialization,
+                    Some(chelis_ir::host::HostTensorSpecialization::SparseScatterAdd(
+                        _
+                    ))
+                ));
+                let params = inputs
+                    .iter()
+                    .map(|input| HostParam {
+                        name: input.name.clone(),
+                        ty: HostType::Tensor(input.ty.clone()),
+                    })
+                    .collect::<Vec<_>>();
+                let body = HostExpr::new(HostExprKind::TensorCall {
+                    helper: 0,
+                    args: params
+                        .iter()
+                        .map(|param| {
+                            HostExpr::new(HostExprKind::Var(param.name.clone(), param.ty.clone()))
+                        })
+                        .collect(),
+                    ty: HostType::Tensor(output.clone()),
+                });
+                let helper = HostTensorHelper {
+                    name: "sparse_add_helper".into(),
+                    dag: dag.clone(),
+                    inputs,
+                    output: output.clone(),
+                    specialization,
+                    summary_rejection: None,
+                };
+                let program = HostProgram {
+                    globals: vec![],
+                    global_tensor_helpers: vec![],
+                    summary_rejections: vec![],
+                    functions: vec![HostFunction {
+                        name: "host_sparse_add".into(),
+                        params,
+                        ret_ty: HostType::Tensor(output),
+                        body,
+                        tensor_helpers: vec![helper],
+                        origin: HostFunctionOrigin::Authored,
+                        specialization: None,
+                        summary_rejections: vec![],
+                    }],
+                };
+                let mut host_source = emit_host_program(&program, "host_sparse_boundary").unwrap();
+                assert!(host_source.contains("CHELIS_SPARSE_ADD"));
+                host_source.push_str("\nvoid sparse_boundary(chelis_tensor **in,int n_in,chelis_tensor **out,int n_out) { (void)n_in; (void)n_out; out[0]=host_sparse_add(in[0],in[1],in[2]); }\n");
+                sources.push(host_source);
+            }
+            for source in sources {
+                let result = checked_indexing_run(&source, &harness);
+                if !empty && selected != 2 {
+                    assert!(!result.status.success());
+                    let stderr = String::from_utf8_lossy(&result.stderr);
+                    assert!(
+                        stderr.contains(&format!("numeric trap: domain in {diagnostic} at int64")),
+                        "{stderr}"
+                    );
+                    assert!(
+                        !stderr.contains("AddressSanitizer") && !stderr.contains("runtime error:"),
+                        "{stderr}"
+                    );
+                } else {
+                    assert!(
+                        result.status.success(),
+                        "{diagnostic}, empty={empty}: {}",
+                        String::from_utf8_lossy(&result.stderr)
+                    );
+                    assert_eq!(result.stdout, b"SPARSE BOUNDARY PASS\n");
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn checked_c_reduction_nontrailing_kernels_execute_under_sanitizers() {
     let ty = |dims: &[usize], precision| TensorType {
         dims: dims.iter().copied().map(DimInfo::Lit).collect(),
