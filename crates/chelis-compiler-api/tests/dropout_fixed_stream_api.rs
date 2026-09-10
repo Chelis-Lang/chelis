@@ -1,4 +1,4 @@
-//! Source-shell acceptance for the bounded fixed-control dropout plan.
+//! API source-shell acceptance for the bounded fixed-control dropout plan.
 #![allow(deprecated)] // Explicit compatibility/parity coverage for prepare_eval.
 #[path = "../../../tests/support/wire_values.rs"]
 mod wire_values;
@@ -218,6 +218,18 @@ fn fixed_primitive_in_a_host_tuple_uses_the_same_plan_core() {
             .iter()
             .any(|diagnostic| diagnostic.message == "numeric trap: domain in dropout at f32"),
         "{error:?}"
+    );
+}
+
+#[test]
+fn dropout_failure_preserves_only_the_executed_output_prefix() {
+    let source = "def run() -> tensor[1, f32] = with seed(42i64) {\n _ = print(\"before\")\n x = to_tensor([1.0f32])\n dead = dropout(x, 0.0f32)\n value = dropout(x, 1.0f32)\n _ = print(\"after\")\n value\n}\nout = run()\n";
+    let error = eval_selected(request(source), &["out".into()]).unwrap_err();
+    assert_eq!(error.transcript, ["before"], "{error:?}");
+    assert_eq!(error.errors.len(), 1, "{error:?}");
+    assert_eq!(
+        error.errors[0].message,
+        "numeric trap: domain in dropout at f32"
     );
 }
 

@@ -1,4 +1,4 @@
-//! Actual CLI execution of [05-OP-37], without relabeling compiled dropout.
+//! CLI execution of [05-OP-37], without relabeling compiled dropout.
 use assert_cmd::Command;
 use serde_json::Value;
 

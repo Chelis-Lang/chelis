@@ -1,4 +1,4 @@
-//! Spec-derived unit-7 probes: [05-OP-37], [05-RNG-1], and spec/10 §3.2.
+//! IR plan probes: [05-OP-37], [05-RNG-1], and spec/10 §3.2.
 //! Baseline defects were first reproduced through the legacy Dag evaluator.
 //! These conformance probes now exercise the additive source-plan boundary;
 //! legacy APIs are intentionally not relabeled as repaired.
