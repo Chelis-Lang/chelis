@@ -213,6 +213,28 @@ def require_private_enum_owner(graph, identity, source):
     return tuple(result)
 
 
+def require_tensor_owner_choices(graph):
+    """Bind the closed owner choice to retained handles, not arbitrary numeric tags.
+
+    Handle fields, all constructor sites, deletion and current execution still
+    require their own proofs. These edges alone cannot issue transport authority.
+    """
+    choices = require_private_enum_owner(
+        graph, "chelis_python::TensorOwner", "crates/chelis-python/src/lib.rs",
+    )
+    _require(tuple(name for name, _ in choices) == ("Cpu", "Gpu"),
+             "native storage owner choices changed")
+    for name, fields in choices:
+        _require(len(fields) == 1, "native storage owner requires one retained handle")
+        container, arguments = _path(graph, "chelis_python", fields[0])
+        _require(container == "alloc::sync::Arc" and len(arguments) == 1,
+                 "native storage owner must retain its exact shared handle")
+        handle, arguments = _path(graph, "chelis_python", arguments[0])
+        _require(handle == f"chelis_python::{name}TensorHandle" and not arguments,
+                 "native storage owner has an unvalidated payload")
+    return tuple(name for name, _ in choices)
+
+
 def require_native_fields(graph, identity):
     """Validate an exact adapter's private field edges, without issuing authority."""
     def nominal(name, *arguments):
