@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "freeze_sha256": "890f5aceed5efc807b4d4da49f87909d70c34f12e20e1bbe5c0b38bfb49495e5",
+  "freeze_sha256": "1a073cf8e98626175ed0294676a30e061e4509f6415c61c0c92b1aea8dd2f013",
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -2166,11 +2166,7 @@
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_window_grad",
-      "sample": "for (int64_t __i = 0; __i < t{id}_size; __i++) {{ ((float*)t{id}_data)[__i] = 0.0f; }}"
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_window_grad_full_indices",
-      "sample": "int64_t full_indices[t{input}_rank > 0 ? t{input}_rank : 1];"
+      "sample": "for (int64_t i = 0; i < t{id}_size; i++) {{ ((float*)t{id}_data)[i] = 0.0f; }}"
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_shape",
@@ -3378,11 +3374,11 @@
     "release_reproducers": [
       {
         "name": "checked host metadata debug contract",
-        "command": "cargo nextest run -p chelis-runtime --features ownership-ledger --test checked_metadata --test metadata_compile --test checked_metadata_padding --test checked_c_metadata --test checked_c_indexing --test checked_c_movement --test checked_c_affine --test checked_c_reduction --test checked_c_sparse --test checked_c_matmul --test exact_tagged_c_abi --test op33_empty_tensor_axis_decomposition --test op33_tensor_validation --test op33_legal_domain_matrix --test dim_carrier_int64 --test tensor_repurpose --test tensor_write_guard"
+        "command": "cargo nextest run -p chelis-runtime --features ownership-ledger --test checked_metadata --test metadata_compile --test checked_metadata_padding --test checked_c_metadata --test checked_c_indexing --test checked_c_movement --test checked_c_affine --test checked_c_reduction --test checked_c_sparse --test checked_c_matmul --test checked_c_window --test exact_tagged_c_abi --test op33_empty_tensor_axis_decomposition --test op33_tensor_validation --test op33_legal_domain_matrix --test dim_carrier_int64 --test tensor_repurpose --test tensor_write_guard"
       },
       {
         "name": "checked host metadata release contract",
-        "command": "cargo nextest run --release -p chelis-runtime --features ownership-ledger --test checked_metadata --test metadata_compile --test checked_metadata_padding --test checked_c_metadata --test checked_c_indexing --test checked_c_movement --test checked_c_affine --test checked_c_reduction --test checked_c_sparse --test checked_c_matmul --test exact_tagged_c_abi --test op33_empty_tensor_axis_decomposition --test op33_tensor_validation --test op33_legal_domain_matrix --test dim_carrier_int64 --test tensor_repurpose --test tensor_write_guard"
+        "command": "cargo nextest run --release -p chelis-runtime --features ownership-ledger --test checked_metadata --test metadata_compile --test checked_metadata_padding --test checked_c_metadata --test checked_c_indexing --test checked_c_movement --test checked_c_affine --test checked_c_reduction --test checked_c_sparse --test checked_c_matmul --test checked_c_window --test exact_tagged_c_abi --test op33_empty_tensor_axis_decomposition --test op33_tensor_validation --test op33_legal_domain_matrix --test dim_carrier_int64 --test tensor_repurpose --test tensor_write_guard"
       },
       {
         "name": "checked C snapshot delegation and restoration mutations",
@@ -3399,6 +3395,18 @@
       {
         "name": "checked C reduction example parity",
         "command": "cargo nextest run -p chelis-cli --test parity --test issue_1294_standard_lowerings -E test(parity_count_bool_axes) | test(canonical_sum_) | test(scalar_and_fused_sums_) | test(hosted_matmul_preserves_the_canonical_reduction_tree) | test(hosted_matmul_empty_reductions_)"
+      },
+      {
+        "name": "checked C window delegation and bypass mutations",
+        "command": "cargo nextest run -p chelis-backend-c --test checked_c_window"
+      },
+      {
+        "name": "checked C window geometry and gradient optimized sanitizer execution",
+        "command": "cargo nextest run -p chelis-backend-c --test exec_compile --test issue_254_reduce_window_emit -E test(checked_windows_) | test(exec_reduce_window_) | binary(issue_254_reduce_window_emit)"
+      },
+      {
+        "name": "checked C window executable example parity",
+        "command": "cargo nextest run -p chelis-cli --test parity -E test(parity_checked_window_geometry) | test(parity_corpus_is_complete)"
       },
       {
         "name": "checked C BLAS submission delegation and bypass mutations",

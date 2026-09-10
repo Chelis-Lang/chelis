@@ -67,6 +67,169 @@ fn checked_indexing_run(source: &str, harness: &str) -> std::process::Output {
         .unwrap()
 }
 
+fn checked_window_dag(reducer: ReduceWindowKind, gradient: bool) -> Dag {
+    let mut dag = Dag::new();
+    let input = TensorType {
+        dims: ["batch", "height", "width"]
+            .into_iter()
+            .map(|n| DimInfo::Named(n.into(), None))
+            .collect(),
+        precision: Prim::F32,
+    };
+    let result = TensorType {
+        dims: vec![
+            DimInfo::Named("batch".into(), None),
+            DimInfo::Lit(2),
+            DimInfo::Lit(2),
+        ],
+        precision: Prim::F32,
+    };
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        input.clone(),
+        None,
+    );
+    if gradient {
+        let gty = TensorType {
+            dims: ["gb", "gh", "gw"]
+                .into_iter()
+                .map(|n| DimInfo::Named(n.into(), None))
+                .collect(),
+            precision: Prim::F32,
+        };
+        let g = dag.add_node(RiscOp::Load { name: "g".into() }, vec![], gty, None);
+        dag.add_node(
+            RiscOp::ReduceWindowGrad {
+                reducer,
+                window_shape: vec![2, 2],
+                strides: vec![2, 2],
+            },
+            vec![x, g],
+            input,
+            None,
+        );
+    } else {
+        dag.add_node(
+            RiscOp::ReduceWindow {
+                reducer,
+                window_shape: vec![2, 2],
+                strides: vec![2, 2],
+            },
+            vec![x],
+            result,
+            None,
+        );
+    }
+    dag
+}
+#[test]
+fn checked_windows_forward_and_gradient_execute_with_exact_geometry_under_sanitizers() {
+    for (kind, reducer) in [
+        ReduceWindowKind::Sum,
+        ReduceWindowKind::Mean,
+        ReduceWindowKind::Max,
+        ReduceWindowKind::Min,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for gradient in [false, true] {
+            let source = codegen(&checked_window_dag(reducer, gradient), "window_probe")
+                .unwrap()
+                .c_source;
+            for batch in [2, 0] {
+                let harness = format!(
+                    r#"
+#include "chelis_runtime.h"
+#include <stdio.h>
+extern void window_probe(chelis_tensor**, int, chelis_tensor**, int);
+int main(void) {{
+    int64_t xs[3] = {{{batch},5,5}}, gs[3] = {{{batch},2,2}};
+    chelis_tensor *x = chelis_alloc(3,xs,CHELIS_DTYPE_F32);
+    chelis_tensor *g = chelis_alloc(3,gs,CHELIS_DTYPE_F32);
+    chelis_tensor_write *w = chelis_tensor_begin_write(x);
+    float *xp = (float*)chelis_tensor_write_view(w).data;
+    for (int i=0;i<{batch}*25;i++) xp[i]=(float)(i+1);
+    chelis_tensor_end_write(w);
+    w = chelis_tensor_begin_write(g);
+    float *gp = (float*)chelis_tensor_write_view(w).data;
+    for (int i=0;i<{batch}*4;i++) gp[i]=(float)(4*(i+1));
+    chelis_tensor_end_write(w);
+    chelis_tensor *inputs[2]={{x,g}}, *out[1]={{0}};
+    window_probe(inputs,{ninputs},out,1);
+    if (chelis_tensor_numel(out[0]) != {batch}*{per_batch}) return 10;
+    if (chelis_tensor_shape(out[0],1) != {height} || chelis_tensor_shape(out[0],2) != {width}) return 11;
+    const float *actual=(const float*)chelis_tensor_read_view(out[0]).data;
+    float expected[60]={{0}};
+    for(int b=0;b<{batch};b++) for(int h=0;h<2;h++) for(int c=0;c<2;c++) {{
+        int first=b*25+h*10+c*2, group=b*4+h*2+c;
+        int slots[4]={{first,first+1,first+5,first+6}};
+        if ({gradient}) {{
+            for(int j=0;j<4;j++) if ({kind}<2 || ({kind}==2 && j==3) || ({kind}==3 && j==0)) expected[slots[j]]+=(float)(4*(group+1))/({kind}==1?4.0f:1.0f);
+        }} else {{
+            float value={kind}==2?(float)(first+7):{kind}==3?(float)(first+1):(float)(4*first+16);
+            expected[group]={kind}==1?value/4.0f:value;
+        }}
+    }}
+    for(int i=0;i<{batch}*{per_batch};i++) if(actual[i]!=expected[i]) {{ fprintf(stderr,"%d %g %g\n",i,actual[i],expected[i]);return 12; }}
+    chelis_tensor_release(out[0]);chelis_tensor_release(g);chelis_tensor_release(x);return 0;
+}}
+"#,
+                    ninputs = if gradient { 2 } else { 1 },
+                    per_batch = if gradient { 25 } else { 4 },
+                    height = if gradient { 5 } else { 2 },
+                    width = if gradient { 5 } else { 2 },
+                    gradient = usize::from(gradient)
+                );
+                let output = checked_indexing_run(&source, &harness);
+                assert!(
+                    output.status.success(),
+                    "{kind}/{gradient}/{batch}: {output:?}"
+                );
+            }
+        }
+    }
+}
+#[test]
+fn checked_windows_reject_incorrect_runtime_result_and_cotangent_shapes() {
+    for gradient in [false, true] {
+        let source = codegen(
+            &checked_window_dag(ReduceWindowKind::Sum, gradient),
+            "window_probe",
+        )
+        .unwrap()
+        .c_source;
+        let harness = format!(
+            r#"
+#include "chelis_runtime.h"
+extern void window_probe(chelis_tensor**,int,chelis_tensor**,int);
+int main(void) {{
+ int64_t xs[3]={{1,{height},5}},gs[3]={{1,1,4}};
+ chelis_tensor *x=chelis_alloc(3,xs,CHELIS_DTYPE_F32), *g=chelis_alloc(3,gs,CHELIS_DTYPE_F32);
+ chelis_tensor *inputs[2]={{x,g}},*out[1]={{0}};
+ window_probe(inputs,{ninputs},out,1);return 99;
+}}
+"#,
+            height = if gradient { 5 } else { 6 },
+            ninputs = if gradient { 2 } else { 1 }
+        );
+        let output = checked_indexing_run(&source, &harness);
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let op = if gradient {
+            "reduce_window_grad"
+        } else {
+            "reduce_window_sum"
+        };
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .any(|s| s == format!("numeric trap: domain in {op} at int64")),
+            "{output:?}"
+        );
+    }
+}
+
 fn checked_blas_dag(operand: Prim, output: Prim) -> Dag {
     use chelis_ir::dag::DimExpr;
     let ty = |names: &[&str], precision| TensorType {

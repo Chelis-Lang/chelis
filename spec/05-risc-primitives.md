@@ -2179,6 +2179,37 @@ exact ADT identity by [05-OP-34].
 > `Overflow`, with [04-NUM-9]'s canonical `matmul` identity at int64. There is no
 > cotangent or arithmetic accumulator for these metadata operations.
 >
+> `chelis_tensor_window_plan` snapshots the complete input and valid-padding
+> result metadata from [05-RWIN-1]'s positive trailing window and stride lists,
+> transported as equal-length arrays of exact tagged int64 values. The tagged
+> length is nonzero and does not exceed input rank; each input spatial extent
+> admits its window. Positive array lengths require complete non-null arrays.
+> Leading extents pass through unchanged, including zero extents. The independently
+> owned opaque plan checks result extents, rank, count, strides, bytes, and target
+> projection before return. It retains no source payload or ownership and remains
+> observable during a source write guard and after source release or repurpose.
+>
+> `chelis_window_extent` observes an axis of the closed `SOURCE` or `RESULT`
+> shape, with one-step negative normalization. `chelis_window_count` returns the
+> checked row-major window leaf count; an empty result returns zero without
+> evaluating an unused window product. `chelis_window_index` maps an in-range
+> result position and window leaf to the original input index, using checked
+> coordinate/stride arithmetic; either empty domain admits no index.
+> `chelis_window_check_tensor` requires a tensor's exact shape and dtype to match
+> the selected side. `chelis_window_check_target` requires a submitted rank and
+> complete shape, transported as canonical tagged int64 scalars, to match that
+> side before allocation or reuse. `chelis_window_plan_release` consumes the live
+> plan once; concurrent observations require the plan to remain live.
+>
+> The closed `chelis_window_op` selects the canonical diagnostic identity
+> `reduce_window_sum`, `reduce_window_mean`, `reduce_window_max`,
+> `reduce_window_min`, or `reduce_window_grad`. Invalid domains and malformed
+> carriers trap `Domain`; unrepresentable metadata or offsets trap `Overflow`,
+> using [04-NUM-9]'s selected identity at int64. These metadata operations have
+> no cotangent or arithmetic accumulator and do not select or alter OP39's
+> arithmetic algorithm or dtype admission. An invalid operation selector or null
+> plan traps `Domain` with identity `reduce_window`.
+>
 > `chelis_tensor_reshape` accepts a live, flat `List<int64>` of target extents
 > and an idle tensor of any active element dtype. It applies the same checked
 > reshape validation before allocating result storage, returns an independent
