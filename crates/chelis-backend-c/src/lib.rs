@@ -2078,7 +2078,7 @@ int main(void) {{
         dag.set_roots(vec![output]);
         let result = codegen(&dag, "checked_reshape").unwrap();
         let source = &result.c_source;
-        assert!(source.contains("chelis_tensor_stride("));
+        assert!(!source.contains("chelis_tensor_stride("));
         assert!(source.contains("chelis_tensor_byte_count("));
         assert!(!source.contains("__stride_"));
         let check = source

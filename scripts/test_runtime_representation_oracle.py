@@ -422,6 +422,14 @@ class ManifestTests(unittest.TestCase):
         self.assertTrue(any("chelis-backend-c" in command and "checked_c_indexing" in command for command in commands))
         self.assertTrue(any("exec_compile" in command and "test(checked_c_indexing_)" in command for command in commands))
 
+    def test_checked_snapshot_observation_and_allocation_have_execution_receipts(self) -> None:
+        commands = [leg.argv for leg in oracle.phase0_legs()]
+        for profile in ((), ("--release",)):
+            self.assertTrue(any("chelis-runtime" in command and "checked_c_alloc_like" in command and ("--release" in command) == bool(profile) for command in commands))
+        self.assertTrue(any("chelis-backend-c" in command and "checked_c_snapshot_metadata" in command for command in commands))
+        self.assertTrue(any("exec_compile" in command and "test(checked_snapshot_)" in command for command in commands))
+        self.assertTrue(any("runtime_extent_slice_a" in command and "test(vmap_shape_bound_with_concrete_batch_emits_c_without_to_end_ice)" in command for command in commands))
+
     def test_checked_c_movement_has_delegation_mutations_and_native_execution(self) -> None:
         commands = [leg.argv for leg in oracle.phase0_legs()]
         self.assertTrue(any("chelis-backend-c" in command and "checked_c_movement" in command for command in commands))
