@@ -56,7 +56,7 @@ def private_owner_fixture():
     artifact.doc["index"][str(field)]["visibility"] = {
         "restricted": {"parent": 2, "path": "::native_tensor"},
     }
-    artifact.external(30, "chelis_abi::metadata::CheckedTensorMetadata")
+    artifact.external(30, "chelis_abi::metadata::ShapeMetadata")
     artifact.struct(20, "ValidatedTensor", [field], public=False)
     artifact.doc["paths"]["20"]["path"] = ["chelis_python", "native_tensor", "ValidatedTensor"]
     artifact.doc["index"]["20"]["span"] = {
@@ -66,6 +66,26 @@ def private_owner_fixture():
 
 
 class NativeBoundaryObligations(unittest.TestCase):
+    def test_registered_receiver_fields_are_private_to_the_actual_crate_root(self):
+        artifact, field = private_owner_fixture()
+        artifact.doc["paths"]["20"]["path"] = ["chelis_python", "NativeTensor"]
+        artifact.doc["index"]["20"]["name"] = "NativeTensor"
+        artifact.doc["index"]["20"]["span"]["filename"] = "crates/chelis-python/src/lib.rs"
+        artifact.doc["index"]["2"]["inner"]["module"]["items"] = []
+        artifact.doc["index"][str(field)]["visibility"] = {
+            "restricted": {"parent": 0, "path": "::"},
+        }
+        identity = "chelis_python::NativeTensor"
+        source = "crates/chelis-python/src/lib.rs"
+        self.assertEqual(require_private_owner(RustdocGraph([artifact.doc]), identity, source),
+                         (("metadata", reference(30)),))
+        for visibility in ("public", "crate", {"restricted": {"parent": 2, "path": "::"}},
+                           {"restricted": {"parent": 0, "path": "::native_tensor"}}):
+            changed = copy.deepcopy(artifact.doc)
+            changed["index"][str(field)]["visibility"] = visibility
+            with self.subTest(visibility=visibility), self.assertRaises(GraphError):
+                require_private_owner(RustdocGraph([changed]), identity, source)
+
     def test_dynamic_input_authority_is_scoped_to_the_registered_payload_slot(self):
         artifact, types = input_fixture()
         graph = RustdocGraph([artifact.doc])
