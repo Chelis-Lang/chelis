@@ -1389,9 +1389,8 @@ fn call_first_pipe_stage_bodies_that_cannot_carry_the_sugar_fail_closed() {
         ),
         // The same capture nested inside an operand.
         //
-        // Both capture cases name an operator callee because that is the path
-        // this test owns. An ordinary callee reaches the older strip arm, which
-        // still frees a repeated parameter; that residue is chelis#1246.
+        // These controls exercise operator callees; ordinary callees and
+        // callee capture have their own controls below.
         concat!(
             "(pipe {} (var {} x) (fn {surf_pipe_stage: \"call-first\"} (params {} p) ",
             "(app {} (var {} add) (var {} p) (app {} (var {} neg) (var {} p)))))",
@@ -1422,6 +1421,97 @@ fn call_first_pipe_stage_bodies_that_cannot_carry_the_sugar_fail_closed() {
             "unexpected diagnostic for {deep_source}: {error}",
         );
     }
+}
+
+// spec/02 §0.1 and spec/03 §6.3.1 forbid emitting a different program.
+// These markers cannot be represented by the call-first sugar: rejecting
+// them must not fall through to a less restrictive binder-stripping path.
+fn assert_call_first_rejected(param: &str, body: &str) {
+    let source = format!(
+        "(pipe {{}} (var {{}} x) (fn {{surf_pipe_stage: \"call-first\"}} \
+         (params {{}} {param}) {body}))"
+    );
+    let deep = parse_deep(&source).expect("Deep fixture parses");
+    let error = resugar_expression(&deep[0]).expect_err(&source);
+    assert!(
+        matches!(
+            error,
+            chelis_surf::resugar::ResugarError::InvalidChild {
+                tag: "fn",
+                index: 1,
+                ..
+            }
+        ),
+        "expected a rejected call-first body: {error}"
+    );
+}
+
+#[test]
+fn call_first_pipe_lone_argument_does_not_become_a_nullary_call() {
+    for callee in ["g", "neg"] {
+        assert_call_first_rejected("p", &format!("(app {{}} (var {{}} {callee}) (var {{}} p))"));
+    }
+}
+
+#[test]
+fn call_first_pipe_free_parameter_does_not_escape_its_binder() {
+    for (param, body) in [
+        ("p", "(app {} (var {} p) (var {} p) (var {} y))"),
+        ("p", "(app {} (var {} f) (var {} p) (var {} p))"),
+        (
+            "p",
+            "(app {} (var {} f) (var {} p) (app {} (var {} g) (var {} p)))",
+        ),
+        (
+            "p",
+            "(app {} (var {} f) (var {} p) (fn {} (params {} q) (var {} p)))",
+        ),
+        (
+            "mul",
+            "(app {} (var {} f) (var {} mul) (app {} (var {} mul) (var {} a) (var {} b)))",
+        ),
+        (
+            "neg",
+            "(app {} (var {} f) (var {} neg) (app {} (var {} neg) (var {} a)))",
+        ),
+    ] {
+        assert_call_first_rejected(param, body);
+    }
+}
+
+#[test]
+fn call_first_pipe_safe_ordinary_stages_preserve_the_roundtrip() {
+    for source in [
+        "result = x |> f(y)\n",
+        "result = x |> f(y, z)\n",
+        "result = x |> f(g(y))\n",
+        "result = x |> f(fn (__chelis_pipe) -> __chelis_pipe)\n",
+        "result = x |> f(y |> g(z))\n",
+        "result = x |> realize |> copy |> cast(f32)\n",
+    ] {
+        let deep = desugar_program(&parse_str(source).expect("safe stage parses"));
+        let rendered = format_program(&resugar_program(&deep).expect("safe stage resugars"));
+        assert_eq!(
+            format_source(&rendered).expect("emitted Surf reparses"),
+            rendered
+        );
+        let roundtrip = desugar_program(&parse_str(&rendered).unwrap());
+        assert_eq!(
+            print_canonical(&normalize_deep_for_surface_roundtrip(&deep).unwrap()),
+            print_canonical(&normalize_deep_for_surface_roundtrip(&roundtrip).unwrap()),
+            "call-stage rewrite changed {source}"
+        );
+    }
+
+    // Unlike an outer free occurrence, a name rebound by this inner lambda
+    // stays bound when the outer call-first stage loses its own parameter.
+    assert_eq!(
+        resugar_one(concat!(
+            "(pipe {} (var {} x) (fn {surf_pipe_stage: \"call-first\"} (params {} p) ",
+            "(app {} (var {} f) (var {} p) (fn {} (params {} p) (var {} p)))))"
+        )),
+        "x |> f(fn (p) -> p)"
+    );
 }
 
 #[test]
