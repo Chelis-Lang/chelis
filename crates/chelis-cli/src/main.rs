@@ -1529,6 +1529,17 @@ fn require_build_manifest_inputs(
     if let Some(entry) = manifest
         .entries
         .iter()
+        .find(|entry| entry.ty.tag() == Some(DeepTag::TFn))
+    {
+        return Err(build_unavailable_root_error(
+            entry,
+            target,
+            "function values have no observation representation; select a concrete call result",
+        ));
+    }
+    if let Some(entry) = manifest
+        .entries
+        .iter()
         .find(|entry| !entry.required_inputs.is_empty())
     {
         return Err(build_unavailable_root_error(

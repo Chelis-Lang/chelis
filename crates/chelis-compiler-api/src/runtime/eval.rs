@@ -269,7 +269,19 @@ impl<'a> EvalContext<'a> {
             return Err(format!("cyclic top-level runtime definition `{name}`"));
         }
         self.resolving_top_levels.push(resolved_name.clone());
-        let value = self.eval_expr(&expr);
+        // A checked function alias carries the callable, including a nullary
+        // one. Evaluating its bare var as a value thunk would replace that
+        // callable with its result before the alias is ever invoked.
+        let value = if self
+            .type_env
+            .get(&resolved_name)
+            .is_some_and(|ty| ty.tag() == Some(DeepTag::TFn))
+            && let Some(alias) = var_name(&expr)
+        {
+            self.resolve_top_level(alias)
+        } else {
+            self.eval_expr(&expr)
+        };
         self.resolving_top_levels.pop();
         let value = stamp_def_closure(value?, &resolved_name, &expr);
         self.bindings.insert(resolved_name.clone(), value.clone());
@@ -1028,12 +1040,17 @@ impl<'a> EvalContext<'a> {
         // `resolve_top_level` (eval.rs eval_var), so `eval_expr(func)` here would
         // hand back the folded Tensor and `apply_*` would reject it as "value is
         // not callable". Going through `resolve_top_level` bypasses only the
-        // tensor_bindings shadow — a local binding (checked here) still wins, and
-        // a bare non-applied `(var f)` keeps today's eval_var behavior.
+        // tensor_bindings shadow — a local binding (checked here) still wins.
+        // Checked function aliases need the same direct resolution; applying
+        // eval_var's nullary-thunk rule to an alias here would call it twice.
         let callable = if let Some(callee) = var_name(func)
             && !self.bindings.contains_key(callee)
             && let Some((resolved, def_expr)) = self.lookup_top_level_def(callee)
-            && matches!(&def_expr, Expr::List(def_list, _) if tag(def_list) == Some(DeepTag::Fn))
+            && (matches!(&def_expr, Expr::List(def_list, _) if tag(def_list) == Some(DeepTag::Fn))
+                || self
+                    .type_env
+                    .get(&resolved)
+                    .is_some_and(|ty| ty.tag() == Some(DeepTag::TFn)))
         {
             self.resolve_top_level(&resolved)?
         } else {
