@@ -5663,14 +5663,21 @@ fn lower_host_expr_kind(
             })?;
             let value = lower_host_expr(child, program, scope, tensor_helpers)?;
 
-            // chelis#1110: the lexical carrier is f64, but the checker-stamped
-            // `lit` node owns the literal's declared width. Preserve that
-            // semantic operation explicitly in HostExpr so an enclosing cast
-            // cannot widen the unfinalized lexical decimal. This is the host
-            // counterpart of static DAG leaf finalization in `lower.rs`.
-            if matches!(value.kind, HostExprKind::Float(_))
-                && let Some(precision) = expr_scalar_float_precision(expr)
-                && precision != chelis_types::types::Prim::F64
+            // The lexical carriers are i64/f64, but the checked `lit` owns
+            // the value's width ([04-LIT-1]). Finalize before any return,
+            // binding or enclosing cast: otherwise ownership sees an int64
+            // return from an int32 function (#1732), or widening observes an
+            // unfinalized decimal (#1110). A marked integer-source float
+            // likewise casts directly from the exact integer, never via f64.
+            let lexical_precision = match &value.kind {
+                HostExprKind::Int(_) => Some(chelis_types::types::Prim::Int64),
+                HostExprKind::Float(_) => Some(chelis_types::types::Prim::F64),
+                _ => None,
+            };
+            if let Some(lexical_precision) = lexical_precision
+                && let Some(precision) = expr_scalar_primitive(expr)
+                && (precision.is_integer() || precision.is_float())
+                && precision != lexical_precision
             {
                 HostExpr::new(HostExprKind::Builtin {
                     name: "cast".to_string(),
@@ -12883,8 +12890,12 @@ fn infer_app_expr_host_type(
 /// dispatch and the consuming tensor-helper Load both share, so the
 /// write and read sides stay consistent even in the fallback.
 fn expr_scalar_float_precision(expr: &Expr) -> Option<chelis_types::types::Prim> {
+    expr_scalar_primitive(expr).filter(|prim| prim.is_float())
+}
+
+fn expr_scalar_primitive(expr: &Expr) -> Option<chelis_types::types::Prim> {
     if let Expr::MetaExpr(meta, _) = expr {
-        return expr_scalar_float_precision(&meta.expr);
+        return expr_scalar_primitive(&meta.expr);
     }
     let (node_tag, meta, kids) = stamped_parts(expr)?;
     let prim_of_t_prim = |type_expr: &Expr| -> Option<chelis_types::types::Prim> {
@@ -12898,13 +12909,13 @@ fn expr_scalar_float_precision(expr: &Expr) -> Option<chelis_types::types::Prim>
     if let Some(type_expr) = meta.ty().map(|ty| ty.expression())
         && let Some(prim) = prim_of_t_prim(type_expr)
     {
-        return prim.is_float().then_some(prim);
+        return Some(prim);
     }
     if node_tag == DeepTag::Cast
         && let Some(target) = kids.get(1)
         && let Some(prim) = prim_of_t_prim(target)
     {
-        return prim.is_float().then_some(prim);
+        return Some(prim);
     }
     None
 }
@@ -13910,9 +13921,9 @@ fn infer_builtin_host_type(name: &str, args: &[HostExpr]) -> Option<HostTypeTerm
                 .collect::<Option<Vec<_>>>()?;
             infer_einsum_tensor_type(equation, &tensors).map(HostTypeTerm::Tensor)
         }
-        "tuple-get" => match (arg_tys.first(), args.get(1).map(|e| &e.kind)) {
-            (Some(HostTypeTerm::Tuple(items)), Some(HostExprKind::Int(index))) => items
-                .get(*index as usize)
+        "tuple-get" => match (arg_tys.first(), args.get(1).and_then(host_expr_int_literal)) {
+            (Some(HostTypeTerm::Tuple(items)), Some(index)) => items
+                .get(index as usize)
                 .cloned()
                 .or(Some(fresh_host_inference())),
             _ => Some(fresh_host_inference()),
@@ -16840,6 +16851,30 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
                 precision: Prim::F32,
             }))),
         );
+    }
+
+    #[test]
+    fn tuple_projection_retains_a_typed_literal_index() {
+        let pair = HostExpr::new(HostExprKind::Var(
+            "pair".to_string(),
+            HostTypeTerm::Tuple(vec![
+                HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int32)),
+                HostTypeTerm::Bool,
+            ]),
+        ));
+        for index in [1, -1, 2] {
+            let index_expr = HostExpr::new(HostExprKind::Builtin {
+                name: "cast".to_string(),
+                args: vec![HostExpr::new(HostExprKind::Int(index))],
+                ty: HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int32)),
+            });
+            let result = infer_builtin_host_type("tuple-get", &[pair.clone(), index_expr]);
+            if index == 1 {
+                assert_eq!(result, Some(HostTypeTerm::Bool));
+            } else {
+                assert!(result.is_some_and(|ty| ty.is_unresolved()));
+            }
+        }
     }
 
     #[test]
