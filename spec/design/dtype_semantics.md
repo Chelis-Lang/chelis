@@ -1414,7 +1414,17 @@ an additional serialization surface kind extends §C6's enumerators in the same
 change that introduces it.
 
 The derived identity includes role-discriminating serde attributes and codec
-shape, not just field type spellings. A custom serializer requires an explicit
+shape, not just field type spellings. Its codec identity retains the exact
+serde trait, derived/custom mode, source file and method identities. Incidental
+implementation and method line/column coordinates do not alter that structural
+identity. The execution witness still binds the complete current rustdoc
+artifacts, including those spans, and the actual source bytes and compiled
+artifacts; structural equality cannot reuse a stale witness. Relocation-only
+controls must preserve graph identity while rejecting the old artifact proof,
+and changed source ownership, codecs, methods or numeric shapes must remain
+rejected or change the structural identity. This distinction repairs
+[#1722](https://github.com/Chelis-Lang/chelis/issues/1722) without authorizing a changed
+numeric surface. A custom serializer requires an explicit
 wire-shape adapter checked against executions of the actual serializer and
 decoder. Unsupported custom serialization is an error. The artifact owns the
 discovered shape; a hand-maintained expected list cannot stand in for discovery.

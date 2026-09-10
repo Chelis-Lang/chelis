@@ -15,6 +15,9 @@ from capacity_census_wire_runner import build_and_run_rust_test, run_python_test
 ROOT = Path(__file__).resolve().parent.parent
 
 MUTATION_CONTROLS = (
+    "test_capacity_census_wire_adapters.CodecIdentityControls.test_codec_line_and_column_movement_preserves_structural_identity",
+    "test_capacity_census_wire_adapters.CodecIdentityControls.test_codec_provenance_and_implementation_mode_still_reject",
+    "test_capacity_census_wire_adapters.CodecIdentityControls.test_changed_method_or_numeric_shape_cannot_reuse_identity",
     "test_capacity_census_wire_schema.SchemaCases.test_required_span_decoder_is_confined_to_its_exact_optional_text_field",
     "test_capacity_census_wire_invocation_owners.CodecSpecializations.test_specializations_bind_owner_payload_and_serializer_shapes",
     "test_capacity_census_wire_invocation_owners.CodecSpecializations.test_specializations_reject_missing_duplicate_or_replaced_templates",
