@@ -196,7 +196,7 @@ fn compiled_kernels(model: &str) -> String {
             })
             .collect::<Vec<_>>()
             .join(", ");
-        output.push_str(&format!("namespace compiled_{index} {{\n{source}\nstatic void launch(unsigned int grid, unsigned int block, void **arguments) {{\nblockDim.x = block; for (blockIdx.x = 0; blockIdx.x < grid; ++blockIdx.x) for (threadIdx.x = 0; threadIdx.x < block; ++threadIdx.x) {name}({arguments});\n}}\n}}\n"));
+        output.push_str(&format!("namespace compiled_{index} {{\n{source}\nstatic void launch(unsigned int grid, unsigned int block, void **arguments) {{\nint64_t shape[] = {{ INT64_C(4294967297) }}, strides[] = {{ INT64_C(4294967296) }}, coordinate[] = {{ 0 }}; chelis_flat_to_indices(INT64_C(4294967296), shape, 1, coordinate); if (coordinate[0] != INT64_C(4294967296)) abort(); coordinate[0] = 1; if (chelis_indices_to_flat(coordinate, strides, 1) != INT64_C(4294967296) || chelis_logical_offset(1, shape, strides, 1) != INT64_C(4294967296)) abort();\nblockDim.x = block; for (blockIdx.x = 0; blockIdx.x < grid; ++blockIdx.x) for (threadIdx.x = 0; threadIdx.x < block; ++threadIdx.x) {name}({arguments});\n}}\n}}\n"));
     }
     output.push_str("extern \"C\" Launch fixture_kernel(const char *name) {\n");
     for (index, (name, _)) in kernels.iter().enumerate() {
@@ -250,6 +250,11 @@ fn compile_source(
     if mutation == Some("rank-eight") {
         assert!(source.contains("int64_t indices[33]"));
         source = source.replace("int64_t indices[33]", "int64_t indices[8]");
+    }
+    if mutation == Some("flat-index-int32") {
+        let old = "chelis_flat_to_indices(int64_t flat";
+        assert!(source.contains(old));
+        source = source.replace(old, "chelis_flat_to_indices(int flat");
     }
     if mutation == Some("flat-sparse-indices") {
         let old = "indices[chelis_logical_offset(index_pos, idx_sh, idx_s, idx_ndim)]";
@@ -415,6 +420,11 @@ fn generated_entry_mutations_cannot_return_borrows_or_truncate_kernel_coordinate
         false,
     );
     run(&compile(33, false, Some("rank-eight")), "positive", false);
+    run(
+        &compile(1, false, Some("flat-index-int32")),
+        "positive",
+        false,
+    );
     run(
         &compile(33, false, Some("missing-argument")),
         "positive",

@@ -147,13 +147,6 @@ struct MatmulEmitSpec {
     accumulator: Prim,
 }
 
-struct StridedBatchedMatmulPlan {
-    batch_count_expr: String,
-    a_batch_stride: usize,
-    b_batch_stride: usize,
-    out_batch_stride: usize,
-}
-
 /// Selected matmul-dispatch wrapper. Determined by the
 /// `(operand_dtype, accumulator)` pair, not by operand alone — see the
 /// dispatch table in `emit_blas_matmul`. The wrapper names mirror the
@@ -2754,6 +2747,7 @@ impl HipEmitter {
     }
 
     fn emit_materialize_into_slot(&mut self, id: usize, source: usize) {
+        self.line(&format!("if (d_t{id}->count != d_t{source}->count) chelis_numeric_trap(\"numeric trap: domain in materialize at int64\");"));
         self.line("{");
         self.indent += 1;
         self.emit_stride_vars(id, "copy", source);
@@ -2771,6 +2765,22 @@ impl HipEmitter {
         );
         self.indent -= 1;
         self.line("}");
+    }
+
+    fn emit_sparse_geometry(&mut self, id: usize, axis: usize, ty: &TensorType) {
+        let plan = format!("sparse_geometry{id}");
+        self.emit_metadata_plan(&plan, ty, None, "0");
+        self.line(&format!(
+            "int64_t t{id}_axis_size = chelis_metadata_plan_shape({plan})[{axis}];"
+        ));
+        self.line(&format!(
+            "int64_t t{id}_after = chelis_metadata_plan_strides({plan})[{axis}];"
+        ));
+        // An empty source admits no logical read. Avoid dividing by its zero
+        // extent/stride; the bounds check rejects any attempted index into it.
+        self.line(&format!("int64_t t{id}_before = 0;"));
+        self.line(&format!("if (chelis_metadata_plan_count({plan}) != 0) t{id}_before = chelis_metadata_plan_count({plan}) / t{id}_axis_size / t{id}_after;"));
+        self.line(&format!("chelis_metadata_plan_release({plan});"));
     }
 
     fn emit_gather_launch(
@@ -2801,9 +2811,6 @@ impl HipEmitter {
                 indices_ty.precision.name()
             );
         }
-        let before = Self::dim_product_expr(&values_ty.dims[..axis]);
-        let axis_size = Self::emit_dim_info(&values_ty.dims[axis]);
-        let after = Self::dim_product_expr(&values_ty.dims[axis + 1..]);
         let elem = Self::elem_kind(ty)?;
         let kernel_name = match indices_ty.precision {
             Prim::Int32 => format!("kernel_gather_i32_{}", elem.suffix()),
@@ -2814,9 +2821,7 @@ impl HipEmitter {
         self.emit_slot_wrapper(id, ty);
         self.line("{");
         self.indent += 1;
-        self.line(&format!("int64_t t{id}_before = {before};"));
-        self.line(&format!("int64_t t{id}_axis_size = {axis_size};"));
-        self.line(&format!("int64_t t{id}_after = {after};"));
+        self.emit_sparse_geometry(id, axis, values_ty);
         self.line(&format!("int64_t t{id}_index_count = d_t{indices}->count;"));
         self.line(&format!("int64_t t{id}_total = d_t{id}->count;"));
         let values_metadata = self.emit_logical_metadata_args(id, "values", values);
@@ -2868,9 +2873,6 @@ impl HipEmitter {
                 indices_ty.precision.name()
             );
         }
-        let before = Self::dim_product_expr(&target_ty.dims[..axis]);
-        let axis_size = Self::emit_dim_info(&target_ty.dims[axis]);
-        let after = Self::dim_product_expr(&target_ty.dims[axis + 1..]);
         let elem = Self::elem_kind(ty)?;
         let kernel_name = match indices_ty.precision {
             Prim::Int32 => format!("kernel_scatter_add_i32_{}", elem.suffix()),
@@ -2882,9 +2884,7 @@ impl HipEmitter {
         self.line("{");
         self.indent += 1;
         self.emit_materialize_into_slot(id, target);
-        self.line(&format!("int64_t t{id}_before = {before};"));
-        self.line(&format!("int64_t t{id}_axis_size = {axis_size};"));
-        self.line(&format!("int64_t t{id}_after = {after};"));
+        self.emit_sparse_geometry(id, axis, target_ty);
         self.line(&format!("int64_t t{id}_index_count = d_t{indices}->count;"));
         self.line(&format!("int64_t t{id}_total = d_t{updates}->count;"));
         let indices_metadata = self.emit_logical_metadata_args(id, "idx", indices);
@@ -2942,9 +2942,6 @@ impl HipEmitter {
                 indices_ty.precision.name()
             );
         }
-        let before = Self::dim_product_expr(&target_ty.dims[..axis]);
-        let axis_size = Self::emit_dim_info(&target_ty.dims[axis]);
-        let after = Self::dim_product_expr(&target_ty.dims[axis + 1..]);
         let kernel_name = match indices_ty.precision {
             Prim::Int32 => "kernel_scatter_replace_i32",
             Prim::Int64 => "kernel_scatter_replace_i64",
@@ -2955,9 +2952,7 @@ impl HipEmitter {
         self.line("{");
         self.indent += 1;
         self.emit_materialize_into_slot(id, target);
-        self.line(&format!("int64_t t{id}_before = {before};"));
-        self.line(&format!("int64_t t{id}_axis_size = {axis_size};"));
-        self.line(&format!("int64_t t{id}_after = {after};"));
+        self.emit_sparse_geometry(id, axis, target_ty);
         self.line(&format!("int64_t t{id}_index_count = d_t{indices}->count;"));
         self.line(&format!("int64_t t{id}_total = d_t{updates}->count;"));
         let indices_metadata = self.emit_logical_metadata_args(id, "idx", indices);
@@ -3260,7 +3255,7 @@ impl HipEmitter {
         self.emit_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
             &kernel_name,
-            &format!("(t{id}_out_size + 255) / 256"),
+            &format!("t{id}_out_size / 256 + (t{id}_out_size % 256 != 0)"),
             "256",
             "args",
         );
@@ -3322,7 +3317,7 @@ impl HipEmitter {
         self.emit_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
             &kernel_name,
-            &format!("(t{id}_out_size + 255) / 256"),
+            &format!("t{id}_out_size / 256 + (t{id}_out_size % 256 != 0)"),
             "256",
             "args",
         );
@@ -3400,7 +3395,7 @@ impl HipEmitter {
         self.emit_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
             &kernel_name,
-            &format!("(t{id}_out_size + 255) / 256"),
+            &format!("t{id}_out_size / 256 + (t{id}_out_size % 256 != 0)"),
             "256",
             "args",
         );
@@ -3424,9 +3419,10 @@ impl HipEmitter {
         // accumulator dtype before this function is called.
         let a = spec.a.0;
         let b = spec.b.0;
-        let m_expr = Self::emit_dim_expr(&spec.m);
-        let n_expr = Self::emit_dim_expr(&spec.n);
-        let k_expr = Self::emit_dim_expr(&spec.k);
+        let matrix_axis = ty.dims.len() - 2;
+        let m_expr = format!("d_t{id}->shape[{matrix_axis}]");
+        let n_expr = format!("d_t{id}->shape[{}]", matrix_axis + 1);
+        let k_expr = format!("d_t{a}->shape[d_t{a}->rank - 1]");
         // F1 footgun fix (WS-A3): dispatch by `(operand, accumulator)`
         // pair, not by operand alone. The original implementation
         // unconditionally called `hipblasSgemm` regardless of the
@@ -3496,12 +3492,14 @@ impl HipEmitter {
         // (the WS-A0 RT-1 F1 footgun was destructure-and-ignore).
         let _ = (operand_prec, declared_acc);
 
+        self.line(&format!("if (d_t{id}->count != 0) {{"));
+        self.indent += 1;
         if spec.batch_dims.is_empty() {
             self.line(&format!(
                 "{call}(d_t{a}, d_t{b}, d_t{id}, {m_expr}, {n_expr}, {k_expr});",
                 call = wrapper.row_major_call_name(),
             ));
-        } else if let Some(plan) = Self::strided_batched_hipblas_plan(dag, spec, ty) {
+        } else if Self::strided_batched_hipblas_plan(dag, spec, ty).is_some() {
             // Batched/strided-batched bf16/f16 wrappers are not yet
             // present (would need `hipblasGemmStridedBatchedEx`
             // plumbing). For this cycle, batched matmul is
@@ -3510,13 +3508,11 @@ impl HipEmitter {
                 "WS-A3: batched bf16/f16 matmul is not yet wired (would require \
                  `hipblasGemmStridedBatchedEx`); rank-2 only in this cycle",
             );
+            let last_batch_axis = matrix_axis - 1;
             self.line(&format!(
-                "{call}(d_t{a}, d_t{b}, d_t{id}, {m_expr}, {n_expr}, {k_expr}, {batch_count}, {a_stride}LL, {b_stride}LL, {out_stride}LL);",
-                batch_count = plan.batch_count_expr,
-                a_stride = plan.a_batch_stride,
-                b_stride = plan.b_batch_stride,
-                out_stride = plan.out_batch_stride,
+                "int64_t t{id}_batch_count = d_t{id}->count / {m_expr} / {n_expr};"
             ));
+            self.line(&format!("{call}(d_t{a}, d_t{b}, d_t{id}, {m_expr}, {n_expr}, {k_expr}, t{id}_batch_count, d_t{a}->strides[{last_batch_axis}], d_t{b}->strides[{last_batch_axis}], d_t{id}->strides[{last_batch_axis}]);"));
         } else {
             let call = wrapper.batched_row_major_call_name().expect(
                 "WS-A3: batched bf16/f16 matmul is not yet wired (would require \
@@ -3526,6 +3522,8 @@ impl HipEmitter {
                 "{call}(d_t{a}, d_t{b}, d_t{id}, {m_expr}, {n_expr}, {k_expr});"
             ));
         }
+        self.indent -= 1;
+        self.line("}");
     }
 
     // ------------------------------------------------------------------
@@ -3945,7 +3943,7 @@ impl HipEmitter {
         dag: VerifiedDagView<'_>,
         spec: &MatmulEmitSpec,
         ty: &TensorType,
-    ) -> Option<StridedBatchedMatmulPlan> {
+    ) -> Option<()> {
         if spec.batch_dims.is_empty()
             || !matches!(ty.precision, Prim::F32 | Prim::F64)
             || !spec.batch_dims.iter().all(Self::is_simple_runtime_dim)
@@ -3953,9 +3951,9 @@ impl HipEmitter {
             return None;
         }
 
-        let m = spec.m.as_concrete()?;
-        let n = spec.n.as_concrete()?;
-        let k = spec.k.as_concrete()?;
+        spec.m.as_concrete()?;
+        spec.n.as_concrete()?;
+        spec.k.as_concrete()?;
         let batch_rank = spec.batch_dims.len();
         if ty.dims.len() != batch_rank + 2 {
             return None;
@@ -4009,44 +4007,11 @@ impl HipEmitter {
             return None;
         }
 
-        Some(StridedBatchedMatmulPlan {
-            batch_count_expr: Self::batch_count_expr(&spec.batch_dims),
-            a_batch_stride: m * k,
-            b_batch_stride: k * n,
-            out_batch_stride: m * n,
-        })
+        Some(())
     }
 
     fn is_simple_runtime_dim(expr: &DimExpr) -> bool {
         matches!(expr, DimExpr::Concrete(_) | DimExpr::Sym(_))
-    }
-
-    fn batch_count_expr(batch_dims: &[DimExpr]) -> String {
-        batch_dims
-            .iter()
-            .map(Self::emit_dim_expr)
-            .reduce(|lhs, rhs| format!("({lhs} * {rhs})"))
-            .unwrap_or_else(|| "1".to_string())
-    }
-
-    fn dim_product_expr(dims: &[DimInfo]) -> String {
-        dims.iter()
-            .map(Self::emit_dim_info)
-            .reduce(|lhs, rhs| format!("({lhs} * {rhs})"))
-            .unwrap_or_else(|| "1".to_string())
-    }
-
-    #[allow(dead_code)]
-    fn supports_staged_scalar_reduction(
-        node: &DagNode,
-        input_node: &DagNode,
-        axis: usize,
-        dag: VerifiedDagView<'_>,
-    ) -> bool {
-        Self::total_size(&node.output_type) == 1
-            && input_node.output_type.dims.len() <= 1
-            && axis == 0
-            && Self::node_is_statically_contiguous(dag, input_node.id)
     }
 
     /// The [05-OP-6] rung has no guarded device kernel, so it never
@@ -4238,42 +4203,6 @@ impl HipEmitter {
             DimInfo::Lit(n) => n.to_string(),
             DimInfo::Named(_, Some(n)) => n.to_string(),
             DimInfo::Named(name, None) => name.clone(),
-        }
-    }
-
-    fn emit_dim_expr(expr: &DimExpr) -> String {
-        match expr {
-            DimExpr::Concrete(n) => n.to_string(),
-            DimExpr::Sym(name) => name.clone(),
-            DimExpr::Mul(lhs, rhs) => {
-                format!(
-                    "({} * {})",
-                    Self::emit_dim_expr(lhs),
-                    Self::emit_dim_expr(rhs)
-                )
-            }
-            DimExpr::Div(lhs, rhs) => {
-                format!(
-                    "({} / {})",
-                    Self::emit_dim_expr(lhs),
-                    Self::emit_dim_expr(rhs)
-                )
-            }
-        }
-    }
-
-    #[allow(dead_code)]
-    fn total_size(ty: &TensorType) -> usize {
-        if ty.dims.is_empty() {
-            1
-        } else {
-            ty.dims
-                .iter()
-                .map(|dim| {
-                    Self::known_dim_size(dim)
-                        .unwrap_or_else(|| panic!("unsized named dimension in static total_size"))
-                })
-                .product()
         }
     }
 

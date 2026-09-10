@@ -1661,6 +1661,15 @@ fn sparse_scatter_add_i32_emits_atomic_add_kernel() {
     );
     assert!(result.c_source.contains("kernel_materialize_"));
     assert!(!result.c_source.contains("hipMemcpyDeviceToDevice"));
+    assert!(
+        result
+            .c_source
+            .contains("chelis_metadata_plan_strides(sparse_geometry")
+    );
+    assert!(
+        !result.c_source.contains("_after = ("),
+        "sparse suffixes must project checked geometry"
+    );
 }
 
 #[test]
@@ -1691,8 +1700,8 @@ fn s15_batched_matmul_emits_hipblas_strided_batched_helper_and_link_flag() {
         "eligible rank-4 batched matmul should lower to the hipBLAS strided-batched helper"
     );
     assert!(
-        result.c_source.contains(", 20LL, 30LL, 24LL);"),
-        "strided-batched helper call should pass concrete row-major per-batch strides"
+        result.c_source.contains("->strides[1]"),
+        "strided-batched helper must project canonical per-matrix strides"
     );
     assert!(
         !result
@@ -1761,8 +1770,8 @@ fn s15_batched_matmul_symbolic_batch_emits_strided_batched_helper() {
         "symbolic batch with concrete matrix dimensions should use strided-batched hipBLAS"
     );
     assert!(
-        result.c_source.contains(", batch, 20LL, 30LL, 24LL);"),
-        "runtime symbolic batch count should be passed with concrete matrix strides"
+        result.c_source.contains("_batch_count = d_t") && result.c_source.contains("->strides[0]"),
+        "runtime batch count and matrix strides must project admitted metadata"
     );
 }
 
@@ -1829,7 +1838,7 @@ fn s15_batched_matmul_symbolic_matrix_dim_uses_helper_loop_fallback() {
 }
 
 #[test]
-fn s15_batched_matmul_noncontiguous_batch_layout_uses_helper_loop_fallback() {
+fn s15_batched_matmul_materializes_noncontiguous_batch_layout_before_blas() {
     let mut dag = Dag::new();
     let base_a = dag.add_node(
         RiscOp::synth_const(mat_f32(4, 5).precision, 1.0),
@@ -1868,16 +1877,14 @@ fn s15_batched_matmul_noncontiguous_batch_layout_uses_helper_loop_fallback() {
     let result = codegen_hip(&dag, "test_hipblas_noncontiguous_batch_loop_fallback").unwrap();
 
     assert!(
-        result
-            .c_source
-            .contains("chelis_hipblas_sgemm_batched_row_major"),
-        "non-contiguous leading batch layout should preserve the helper-loop fallback"
+        result.c_source.contains("kernel_realize_"),
+        "non-contiguous leading batch layout must be materialized into planned storage"
     );
     assert!(
-        !result
+        result
             .c_source
             .contains("chelis_hipblas_sgemm_strided_batched_row_major"),
-        "non-contiguous leading batch layout must not call strided-batched hipBLAS"
+        "the materialized canonical batch layout may call strided-batched hipBLAS"
     );
 }
 
