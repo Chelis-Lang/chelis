@@ -215,6 +215,43 @@ pub fn live(_: CompiledInputs) -> CompiledTensorResults {
         )
         self.assertEqual(calls_named(missing, "execute_checked"), [])
 
+    def test_conversion_closures_retain_exact_lexical_owners(self):
+        evidence = self.observe(
+            """
+struct Tensor(i64); struct Results(Vec<i64>);
+trait Export { fn export(self) -> Vec<Tensor>; }
+impl Export for Results {
+    fn export(self) -> Vec<Tensor> {
+        self.0.into_iter().map(|value| Tensor(value)).collect()
+    }
+}
+fn export(values: Vec<i64>) -> Vec<Tensor> {
+    values.into_iter().map(|value| Tensor(value)).collect()
+}
+pub fn live(values: Vec<i64>) -> Vec<Tensor> { Results(values).export() }
+"""
+        )
+        methods = [body for body in evidence.raw["bodies"] if named(body, "export")]
+        owned = next(body for body in methods if body["implementation"] is not None)
+        foreign = next(body for body in methods if body["implementation"] is None)
+        constructors = aggregates_named(evidence, "Tensor")
+        self.assertEqual(len(constructors), 2)
+        parents = []
+        for row in constructors:
+            caller = row["caller"]
+            self.assertEqual(caller["kind"], "Closure")
+            self.assertIsNone(caller["implementation"])
+            self.assertGreaterEqual(len(caller["ancestors"]), 2)
+            parents.append(caller["ancestors"][0])
+            body = next(body for body in evidence.raw["bodies"]
+                        if body["definition"] == caller["definition"])
+            self.assertEqual(body["kind"], caller["kind"])
+            self.assertEqual(body["ancestors"], caller["ancestors"])
+        self.assertCountEqual(parents, [owned["definition"], foreign["definition"]])
+        self.assertNotEqual(owned["definition"], foreign["definition"])
+        self.assertEqual(owned["kind"], "AssocFn")
+        self.assertEqual(foreign["kind"], "Fn")
+
     def test_every_local_aggregate_constructor_and_relocation_is_visible(self):
         baseline = self.observe(
             """
