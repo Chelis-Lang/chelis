@@ -1,4 +1,4 @@
-"""Typed compiler evidence for the compiled compiler-api serde boundary.
+"""Typed compiler evidence for compiled wire and Python boundaries.
 
 This module discovers obligations; it does not admit codec owners. Calls are
 selected by the defining serde traits and their elaborated bounds, not encoder
@@ -12,6 +12,11 @@ Deserialize-input proof. Only the supplied compiled configuration is covered.
 
 The driver uses the exact pinned rustc-private ABI and requires matching
 rustc-dev. It is compiled directly, never as a normal Cargo example.
+
+The distinct ``native-bindings`` scope is a collector rather than an authority
+verifier. It records every local MIR body, ADT construction, call and assignment
+flow so the native binding oracle can later prove its exact admission and
+conversion paths without trusting a helper name or parsing Rust a second time.
 """
 
 import ast
@@ -30,6 +35,11 @@ import tomllib
 
 COMPILER = "88d9e12ae178fab0fb5cc050a94da85685d449ea"
 DRIVER = "crates/chelis-compiler-api/examples/wire_calls/driver.rs"
+NATIVE_COLLECTOR_SOURCES = (
+    DRIVER,
+    "scripts/capacity_census_wire_calls.py",
+    "scripts/test_capacity_census_native_calls.py",
+)
 
 
 def record_process(prefix: Path, command, result) -> dict:
@@ -78,6 +88,13 @@ def _run(command, *, cwd, env=None, log_prefix=None):
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _native_collector_inputs(root: Path) -> list[dict]:
+    return [
+        {"path": str((root / path).resolve()), "sha256": _sha256(root / path)}
+        for path in NATIVE_COLLECTOR_SOURCES
+    ]
 
 
 def _runtime_library_environment(
@@ -322,7 +339,7 @@ class InvocationEvidence:
 
 
 def read_evidence(raw: dict) -> InvocationEvidence:
-    required = {
+    wire_required = {
         "format",
         "compiler",
         "crate",
@@ -342,10 +359,37 @@ def read_evidence(raw: dict) -> InvocationEvidence:
         "inputs",
     }
     compiler_json = isinstance(raw, dict) and raw.get("format") == 2
+    native = isinstance(raw, dict) and raw.get("format") == 3
+    if native:
+        required = {
+            "format",
+            "scope",
+            "compiler",
+            "crate",
+            "bodies",
+            "calls",
+            "aggregates",
+            "flows",
+            "errors",
+            "rustc_command",
+            "inputs",
+        }
+    else:
+        required = wire_required
     if compiler_json:
         required |= {"scope", "deserialize_trait", "conversion_traits", "reader_calls"}
-    if not isinstance(raw, dict) or set(raw) != required or raw["format"] not in (1, 2):
+    if (
+        not isinstance(raw, dict)
+        or set(raw) != required
+        or raw["format"] not in (1, 2, 3)
+    ):
         raise ValueError("incomplete compiler invocation evidence")
+    if native:
+        if raw["scope"] != "native-bindings":
+            raise ValueError("invalid native binding compiler evidence")
+        for key in ("bodies", "calls", "aggregates", "flows", "errors"):
+            if not isinstance(raw[key], list):
+                raise ValueError(f"invalid compiler {key} evidence")
     if compiler_json and (
         raw["scope"] != "compiler-json"
         or raw["deserialize_trait"].get("crate") != "serde_core"
@@ -356,25 +400,26 @@ def read_evidence(raw: dict) -> InvocationEvidence:
         raise ValueError("invalid compiler JSON reader evidence")
     if raw["compiler"] != COMPILER:
         raise ValueError("unrecognized compiler evidence")
-    for key in (
-        "bodies",
-        "calls",
-        "codec_calls",
-        "schema_calls",
-        "dynamic_returns",
-        "dynamic_carriers",
-        "errors",
-    ):
-        if not isinstance(raw[key], list):
-            raise ValueError(f"invalid compiler {key} evidence")
-    if type(raw["instances"]) is not int or raw["instances"] < 0:
-        raise ValueError("invalid compiler instance count")
-    for key, path in (
-        ("serialize_trait", "::ser::Serialize"),
-        ("serializer_trait", "::ser::Serializer"),
-    ):
-        if raw[key]["crate"] != "serde_core" or raw[key]["path"] != path:
-            raise ValueError("wrong defining serde trait identity")
+    if not native:
+        for key in (
+            "bodies",
+            "calls",
+            "codec_calls",
+            "schema_calls",
+            "dynamic_returns",
+            "dynamic_carriers",
+            "errors",
+        ):
+            if not isinstance(raw[key], list):
+                raise ValueError(f"invalid compiler {key} evidence")
+        if type(raw["instances"]) is not int or raw["instances"] < 0:
+            raise ValueError("invalid compiler instance count")
+        for key, path in (
+            ("serialize_trait", "::ser::Serialize"),
+            ("serializer_trait", "::ser::Serializer"),
+        ):
+            if raw[key]["crate"] != "serde_core" or raw[key]["path"] != path:
+                raise ValueError("wrong defining serde trait identity")
     # This parser checks shape; collect_library below binds the compiler process,
     # invocation and dependency artifacts. A parsed dictionary is never authority.
     identity = hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest()
@@ -388,15 +433,23 @@ def analyze_fixture(
     with tempfile.TemporaryDirectory(prefix="fixture-", dir=directory) as tmp:
         tmp = Path(tmp)
         input_path, output_path = tmp / "lib.rs", tmp / "report.json"
-        if scope not in (None, "compiler-json"):
+        if scope not in (None, "compiler-json", "native-bindings"):
             raise ValueError("unknown compiler fixture scope")
-        prefix = "" if scope else "extern crate serde; extern crate serde_json; extern crate bincode;\n"
+        prefix = (
+            "extern crate serde; extern crate serde_json; extern crate bincode;\n"
+            if scope is None
+            else ""
+        )
         input_path.write_text(prefix + source)
         command = [
             str(driver),
             "--edition=2024",
             "--crate-type=lib",
-            "--crate-name=chelis_python" if scope else "--crate-name=wire_fixture",
+            "--crate-name=chelis_python"
+            if scope == "compiler-json"
+            else "--crate-name=native_fixture"
+            if scope == "native-bindings"
+            else "--crate-name=wire_fixture",
             "-Zmir-opt-level=0",
             "-Zsrc-hash-algorithm=sha256",
             "-Copt-level=0",
@@ -424,7 +477,11 @@ def analyze_fixture(
         _run(command, **run_options)
         if not output_path.is_file():
             raise ValueError("compiler did not write invocation evidence")
-        return read_evidence(json.loads(output_path.read_text()))
+        evidence = read_evidence(json.loads(output_path.read_text()))
+        expected_format = {None: 1, "compiler-json": 2, "native-bindings": 3}[scope]
+        if evidence.raw["format"] != expected_format:
+            raise ValueError("compiler evidence does not match the requested fixture scope")
+        return evidence
 
 
 def fixture_externs(root: Path, target: Path, directory: Path) -> dict:
@@ -505,6 +562,25 @@ def _locked_registry_package(root: Path, name: str, package_id: str) -> bool:
     )
 
 
+def _compiler_definitions(value):
+    """Yield every compiler definition record nested in a native receipt."""
+    if isinstance(value, dict):
+        if {
+            "def_id",
+            "crate",
+            "item_name",
+            "stable_crate_id",
+            "path",
+            "def_path_hash",
+        } <= value.keys():
+            yield value
+        for child in value.values():
+            yield from _compiler_definitions(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _compiler_definitions(child)
+
+
 def collect_library(root: Path, target: Path, driver: Path, *, rustc_args=(), scope=None) -> dict:
     """Requires the project build slot. Fresh output forces the target callback.
 
@@ -513,7 +589,7 @@ def collect_library(root: Path, target: Path, driver: Path, *, rustc_args=(), sc
     call, codec implementation and dynamic-return obligation.
     """
     root, target = root.resolve(), target.resolve()
-    if scope not in (None, "compiler-json"):
+    if scope not in (None, "compiler-json", "native-bindings"):
         raise ValueError("unknown compiled boundary scope")
     if not target.is_relative_to(root / "target"):
         raise ValueError("invocation target must belong to this worktree")
@@ -521,12 +597,20 @@ def collect_library(root: Path, target: Path, driver: Path, *, rustc_args=(), sc
     # Keep its Cargo artifacts separate from the ordinary cache wrapper's
     # read-only outputs. This retained namespace uses the same source/config;
     # all provenance below comes from this invocation's own Cargo stream.
-    invocation_target = target / ("compiler-json-invocations/cargo" if scope else "wire-invocations/cargo")
+    namespace = {
+        None: "wire-invocations/cargo",
+        "compiler-json": "compiler-json-invocations/cargo",
+        "native-bindings": "native-bindings-invocations/cargo",
+    }[scope]
+    invocation_target = target / namespace
     if driver.resolve() != build_driver(root, driver.parent).resolve():
         raise ValueError("driver does not match the current source and compiler")
     binary_hash = hashlib.sha256(driver.read_bytes()).hexdigest()
     driver_source_hash = hashlib.sha256((root / DRIVER).read_bytes()).hexdigest()
     driver_build = _current_driver_receipt(driver)
+    native_collector_inputs = (
+        _native_collector_inputs(root) if scope == "native-bindings" else None
+    )
     with tempfile.TemporaryDirectory(
         prefix="wire-invocations-", dir=root / "target"
     ) as tmp:
@@ -561,7 +645,16 @@ def collect_library(root: Path, target: Path, driver: Path, *, rustc_args=(), sc
                 "WIRE_CALL_SCOPE": scope or "",
                 "WIRE_CALL_REPORT": str(output),
             },
-            log_prefix=invocation_target.parent / "compiler-json-cargo" if scope else None,
+            log_prefix=(
+                invocation_target.parent
+                / (
+                    "compiler-json-cargo"
+                    if scope == "compiler-json"
+                    else "native-bindings-cargo"
+                )
+                if scope
+                else None
+            ),
         )
         if hashlib.sha256(driver.read_bytes()).hexdigest() != binary_hash:
             raise ValueError("compiler driver executable changed during collection")
@@ -574,10 +667,16 @@ def collect_library(root: Path, target: Path, driver: Path, *, rustc_args=(), sc
             raise ValueError(
                 "compiler driver build provenance changed during collection"
             )
+        if (
+            native_collector_inputs is not None
+            and _native_collector_inputs(root) != native_collector_inputs
+        ):
+            raise ValueError("native compiler collector source changed during collection")
         if not output.is_file():
             raise ValueError("Cargo produced no fresh compiler invocation evidence")
         evidence = read_evidence(json.loads(output.read_text()))
-        if evidence.raw["format"] != (2 if scope else 1):
+        expected_format = {None: 1, "compiler-json": 2, "native-bindings": 3}[scope]
+        if evidence.raw["format"] != expected_format:
             raise ValueError("compiler evidence does not match the requested scope")
         for source in evidence.raw["inputs"]:
             if source["path"] is not None:
@@ -588,22 +687,34 @@ def collect_library(root: Path, target: Path, driver: Path, *, rustc_args=(), sc
                 ):
                     raise ValueError(f"compiler source changed or mismatched: {path}")
         provenance = []
-        definitions = [
-            evidence.raw["serialize_trait"],
-            evidence.raw["serializer_trait"],
-            *evidence.raw["dynamic_carriers"],
-            *evidence.raw["decoder_traits"],
-        ]
-        if scope:
+        if scope == "native-bindings":
+            local_crate = evidence.raw["crate"]["crate"]
+            definitions = [
+                item
+                for item in _compiler_definitions(evidence.raw)
+                if item["crate"] not in {local_crate, "core", "alloc", "std"}
+            ]
+        else:
+            definitions = [
+                evidence.raw["serialize_trait"],
+                evidence.raw["serializer_trait"],
+                *evidence.raw["dynamic_carriers"],
+                *evidence.raw["decoder_traits"],
+            ]
+        if scope == "compiler-json":
             definitions += [evidence.raw["deserialize_trait"], *evidence.raw["conversion_traits"]]
             definitions += [call["callee"] for call in evidence.raw["calls"] + evidence.raw["reader_calls"]]
-        if evidence.raw["schema_trait"] is not None:
+        if (
+            scope != "native-bindings"
+            and evidence.raw["schema_trait"] is not None
+        ):
             definitions.append(evidence.raw["schema_trait"])
-        definitions.extend(
-            call["callee"]
-            for call in evidence.raw["calls"]
-            if call["callee"]["crate"] == "bincode"
-        )
+        if scope != "native-bindings":
+            definitions.extend(
+                call["callee"]
+                for call in evidence.raw["calls"]
+                if call["callee"]["crate"] == "bincode"
+            )
         for name in sorted({d["crate"] for d in definitions}):
             artifacts = [
                 a
@@ -611,8 +722,9 @@ def collect_library(root: Path, target: Path, driver: Path, *, rustc_args=(), sc
                 if (a := json.loads(line)).get("reason") == "compiler-artifact"
                 and a["target"]["name"] == name
             ]
-            if len(artifacts) != 1 or not _locked_registry_package(
-                root, name, artifacts[0]["package_id"]
+            if len(artifacts) != 1 or (
+                scope != "native-bindings"
+                and not _locked_registry_package(root, name, artifacts[0]["package_id"])
             ):
                 raise ValueError(f"unresolved defining {name} Cargo origin")
             paths = [Path(p) for p in artifacts[0]["filenames"] if p.endswith(".rlib")]
@@ -643,7 +755,7 @@ def collect_library(root: Path, target: Path, driver: Path, *, rustc_args=(), sc
             "driver_build": driver_build,
             "binary_sha256": binary_hash,
         }
-        if scope:
+        if scope == "compiler-json":
             # Construction controls compile against the dependency artifacts
             # emitted by this same Cargo invocation, never a filesystem glob.
             externs = []
@@ -659,4 +771,17 @@ def collect_library(root: Path, target: Path, driver: Path, *, rustc_args=(), sc
                 externs.append({"name": name, "artifact": str(paths[0]), "sha256": _sha256(paths[0])})
             collected["fixture_externs"] = externs
             collected["process"] = json.loads((invocation_target.parent / "compiler-json-cargo.json").read_text())
+        elif scope == "native-bindings":
+            collected["collector_inputs"] = native_collector_inputs
+            collected["cargo_inputs"] = [
+                {"path": str(root / path), "sha256": _sha256(root / path)}
+                for path in (
+                    "Cargo.toml",
+                    "Cargo.lock",
+                    "crates/chelis-python/Cargo.toml",
+                )
+            ]
+            collected["process"] = json.loads(
+                (invocation_target.parent / "native-bindings-cargo.json").read_text()
+            )
         return collected
