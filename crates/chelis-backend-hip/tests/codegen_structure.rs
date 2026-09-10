@@ -772,13 +772,13 @@ fn s5_realize_materializes_with_kernel_not_view() {
 
     let result = codegen_hip(&dag, "test_realize").unwrap();
     assert!(
-        result.c_source.contains("kernel_cast"),
+        result.c_source.contains("kernel_realize_"),
         "Realize must materialize through a copy-style kernel launch"
     );
     assert!(
-        !result.c_source.contains(
-            "chelis_device_tensor_borrow(1, (int[]){ 3 }, CHELIS_DTYPE_F32, d_t1->data, d_t1->storage_size)"
-        ),
+        !result
+            .c_source
+            .contains("chelis_device_tensor_borrow(plan_t2, d_t1->data"),
         "Realize must not lower to a metadata-only view"
     );
 }

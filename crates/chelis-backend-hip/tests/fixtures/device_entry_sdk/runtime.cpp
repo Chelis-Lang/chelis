@@ -2,6 +2,7 @@
 // The memory checks make premature free, capacity overwrite and leaks observable.
 #include <hip/hip_runtime.h>
 #include <hip/hiprtc.h>
+#include <hipblas/hipblas.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -143,3 +144,34 @@ extern "C" hiprtcResult hiprtcDestroyProgram(hiprtcProgram *program) {
     delete (std::string *)*program; *program = nullptr; return HIPRTC_SUCCESS;
 }
 extern "C" const char *hiprtcGetErrorString(hiprtcResult) { return "CPU fixture"; }
+
+// A simple column-major GEMM transports the actual wrapper arguments. It is an
+// execution witness for layout/ownership only, not a vendor numerical oracle.
+extern "C" hipblasStatus_t hipblasCreate(hipblasHandle_t *handle) {
+    *handle = new int(current_device);
+    return HIPBLAS_STATUS_SUCCESS;
+}
+extern "C" hipblasStatus_t hipblasDestroy(hipblasHandle_t handle) {
+    REQUIRE(*(int *)handle == current_device);
+    delete (int *)handle;
+    return HIPBLAS_STATUS_SUCCESS;
+}
+extern "C" hipblasStatus_t hipblasSgemm_64(hipblasHandle_t handle, hipblasOperation_t trans_a,
+    hipblasOperation_t trans_b, int64_t m, int64_t n, int64_t k, const float *alpha,
+    const float *a, int64_t lda, const float *b, int64_t ldb, const float *beta,
+    float *out, int64_t ldc) {
+    REQUIRE(*(int *)handle == current_device);
+    REQUIRE(trans_a == HIPBLAS_OP_N && trans_b == HIPBLAS_OP_N);
+    REQUIRE(m > 0 && n > 0 && k > 0 && lda >= m && ldb >= k && ldc >= m);
+    REQUIRE(contains(a, (size_t)(lda * k) * sizeof(float)));
+    REQUIRE(contains(b, (size_t)(ldb * n) * sizeof(float)));
+    REQUIRE(contains(out, (size_t)(ldc * n) * sizeof(float)));
+    for (int64_t column = 0; column < n; ++column) {
+        for (int64_t row = 0; row < m; ++row) {
+            float sum = 0;
+            for (int64_t inner = 0; inner < k; ++inner) sum += a[row + inner * lda] * b[inner + column * ldb];
+            out[row + column * ldc] = *alpha * sum + (*beta == 0 ? 0 : *beta * out[row + column * ldc]);
+        }
+    }
+    return HIPBLAS_STATUS_SUCCESS;
+}

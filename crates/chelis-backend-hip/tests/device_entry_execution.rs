@@ -103,6 +103,42 @@ fn sparse_model(operation: usize, index_precision: Prim) -> String {
     support::codegen_hip(&dag, "entry_probe").unwrap().c_source
 }
 
+fn blas_model() -> String {
+    use chelis_ir::dag::DimExpr;
+    let mut dag = Dag::new();
+    let tensor = |rows, columns| TensorType {
+        dims: vec![DimInfo::Lit(rows), DimInfo::Lit(columns)],
+        precision: Prim::F32,
+    };
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        tensor(2, 3),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        tensor(3, 2),
+        None,
+    );
+    let output = dag.add_node(
+        RiscOp::BlasMatmul {
+            batch_dims: vec![],
+            m: DimExpr::Concrete(2),
+            n: DimExpr::Concrete(2),
+            k: DimExpr::Concrete(3),
+            accumulator: Prim::F32,
+        },
+        vec![a, b],
+        tensor(2, 2),
+        None,
+    );
+    dag.add_root(a);
+    dag.add_root(output);
+    support::codegen_hip(&dag, "entry_probe").unwrap().c_source
+}
+
 /// Decode the emitted C string literals, then compile those exact kernel bodies.
 /// Wrappers derive their parameter types from each kernel signature; the emitted
 /// host argument vector remains independent, so missing/wrong-width arguments
@@ -352,6 +388,23 @@ fn generated_sparse_mutations_cannot_flatten_indices_or_target_initialization() 
             false,
         );
     }
+}
+
+#[test]
+fn generated_blas_preparation_materializes_both_strided_operands_in_planned_storage() {
+    let executable = compile_source(blas_model(), "blas_main.cpp", &[], None);
+    run(&executable, "positive", true);
+    run(&executable, "wrong-second-device", false);
+    run(
+        &compile_source(
+            blas_model(),
+            "blas_main.cpp",
+            &[],
+            Some("flat-sparse-initialization"),
+        ),
+        "positive",
+        false,
+    );
 }
 
 #[test]

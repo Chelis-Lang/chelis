@@ -9,7 +9,7 @@ use chelis_ir::dag::{
     DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, NodeId, RiscOp, RtDim, TensorType,
 };
 use chelis_ir::ownership::{
-    HipStorageLane, VerifiedDagAction, VerifiedDagView, VerifiedStoragePlan,
+    HipStorageLane, StoragePlacement, VerifiedDagAction, VerifiedDagView, VerifiedStoragePlan,
 };
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
@@ -261,6 +261,38 @@ impl HipEmitter {
         let dag = storage_plan.emission();
         Self::reject_integer_abs(dag)?;
         Self::reject_count(dag)?;
+        // Device input ownership proves its admitted strides, not a row-major
+        // layout. Only a planned, emitter-materialized slot authorizes GEMM.
+        // Production preparation inserts Realize before ownership is verified.
+        for node in dag.nodes() {
+            let operands = if matches!(node.op, RiscOp::BlasMatmul { .. }) {
+                Some([node.inputs[0], node.inputs[1]])
+            } else if let Some(matmul) = blas::detect_matmul_pattern(dag, node.id)
+                && Self::supports_static_hipblas_matmul(dag, &matmul, &node.output_type)
+            {
+                Some([matmul.a, matmul.b])
+            } else {
+                None
+            };
+            if let Some(operands) = operands {
+                for operand in operands {
+                    if !matches!(
+                        storage_plan.placement(operand),
+                        Some(StoragePlacement::OwnedSlot { .. })
+                    ) {
+                        return Err(unsupported_storage_plan(
+                            chelis_ir::ownership::OwnershipError::LoweringInvariant {
+                                unit: "hip-blas-layout".into(),
+                                detail: format!(
+                                    "BLAS operand {} needs prepare_dag_for_codegen before ownership lowering; borrowed or view storage does not prove contiguous materialization",
+                                    operand.0
+                                ),
+                            },
+                        ));
+                    }
+                }
+            }
+        }
         // F1 (WS-A0 RT-1 fixup, tactical) — lifted by WS-A2 (HIP f32/f64)
         // and WS-A3 (HIP bf16/f16).
         //
@@ -1321,7 +1353,10 @@ impl HipEmitter {
                 "kernel_reshape_{}",
                 Self::dtype_macro(&node.output_type)
             )),
-            RiscOp::Realize => Some(Self::cast_kernel_name(node, dag)?),
+            RiscOp::Realize => Some(format!(
+                "kernel_realize_{}",
+                Self::dtype_macro(&node.output_type)
+            )),
             RiscOp::Cast { .. } => Some(Self::cast_kernel_name(node, dag)?),
             // Both `reject_unsupported_hip_ops` copies (chelis-cli and
             // chelis-compiler-api) gate this out before codegen; the
@@ -1657,7 +1692,7 @@ impl HipEmitter {
             }
             RiscOp::Const { .. } => kernels::fill(self.kernel_rank, name, elem_for_unary()?),
             RiscOp::ConstTensor { .. } => kernels::fill(self.kernel_rank, name, elem_for_unary()?),
-            RiscOp::Reshape { .. } => kernels::reshape_copy(
+            RiscOp::Reshape { .. } | RiscOp::Realize => kernels::reshape_copy(
                 self.kernel_rank,
                 name,
                 node.output_type
@@ -1666,7 +1701,6 @@ impl HipEmitter {
                     .expect("verified numeric representation")
                     .byte_width(),
             ),
-            RiscOp::Realize => self.cast_kernel_source(name, node, dag)?,
             RiscOp::Cast { .. } => self.cast_kernel_source(name, node, dag)?,
             RiscOp::CastTrunc { .. } => {
                 return Err(Self::cast_trunc_unsupported(node));
@@ -2124,11 +2158,11 @@ impl HipEmitter {
                     &node.output_type,
                 );
             }
-            RiscOp::Realize => self.emit_unary_launch(
+            RiscOp::Realize => self.emit_logical_copy(
                 id,
-                &resolved_kernel_name()?,
                 &node.inputs,
                 &node.output_type,
+                &resolved_kernel_name()?,
             ),
             RiscOp::Cast { .. } => self.emit_unary_launch(
                 id,
@@ -3499,9 +3533,20 @@ impl HipEmitter {
     // ------------------------------------------------------------------
 
     fn emit_reshape(&mut self, id: usize, inputs: &[NodeId], ty: &TensorType) {
+        let kernel_name = format!("kernel_reshape_{}", Self::dtype_macro(ty));
+        self.emit_logical_copy(id, inputs, ty, &kernel_name);
+    }
+
+    fn emit_logical_copy(
+        &mut self,
+        id: usize,
+        inputs: &[NodeId],
+        ty: &TensorType,
+        kernel_name: &str,
+    ) {
         let a = inputs[0].0;
         self.emit_slot_wrapper(id, ty);
-        let kernel_name = format!("kernel_reshape_{}", Self::dtype_macro(ty));
+        self.line(&format!("if (d_t{id}->count != d_t{a}->count) chelis_numeric_trap(\"numeric trap: domain in materialize at int64\");"));
         self.line("{");
         self.indent += 1;
         self.emit_stride_vars(id, "a", a);
@@ -3515,7 +3560,7 @@ impl HipEmitter {
         ));
         self.emit_kernel_launch_expr(
             &format!("mod_{kernel_name}"),
-            &kernel_name,
+            kernel_name,
             &format!("t{id}_size / 256 + (t{id}_size % 256 != 0)"),
             "256",
             "args",
@@ -4038,8 +4083,8 @@ impl HipEmitter {
     #[allow(dead_code)]
     fn node_is_statically_contiguous(dag: VerifiedDagView<'_>, id: NodeId) -> bool {
         match &dag.get(id).unwrap().op {
-            RiscOp::Load { .. }
-            | RiscOp::Const { .. }
+            RiscOp::Load { .. } => false,
+            RiscOp::Const { .. }
             | RiscOp::ConstTensor { .. }
             | RiscOp::Add
             | RiscOp::Sub
@@ -4081,6 +4126,7 @@ impl HipEmitter {
             | RiscOp::Argmin { .. }
             | RiscOp::OneHot { .. }
             | RiscOp::Realize
+            | RiscOp::Reshape { .. }
             | RiscOp::Cast { .. }
             | RiscOp::CastTrunc { .. }
             | RiscOp::FusedElem { .. }
@@ -4100,7 +4146,7 @@ impl HipEmitter {
             // [05-SHAPE-1], so this arm is only for classification completeness.
             | RiscOp::Shape { .. } | RiscOp::ExtentWitness { .. } | RiscOp::CheckedReshapeExtent { .. } | RiscOp::CheckedUnitAxis { .. } => true,
             RiscOp::Count { .. } => true,
-            RiscOp::Reshape { .. } | RiscOp::Store { .. } => {
+            RiscOp::Store { .. } => {
                 Self::node_is_statically_contiguous(dag, dag.get(id).unwrap().inputs[0])
             }
             RiscOp::Permute { .. } | RiscOp::Expand { .. } | RiscOp::Stride { .. } => false,
