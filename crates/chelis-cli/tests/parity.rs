@@ -460,6 +460,11 @@ fn parity_list_foundation() {
 }
 
 #[test]
+fn parity_ordered_extent_claims() {
+    drive_parity(&examples_root().join("ordered_extent_claims.ch"), true);
+}
+
+#[test]
 fn parity_literal_extent_claim() {
     drive_parity(&examples_root().join("literal_extent_claim.ch"), true);
 }
@@ -582,6 +587,7 @@ fn parity_corpus_is_complete() {
         "linreg.ch",
         "list_foundation.ch",
         "literal_extent_claim.ch",
+        "ordered_extent_claims.ch",
         "mnist.ch",
         "opaque_invariants.ch",
         "opaque_invariants_simplex.ch",

@@ -24,11 +24,11 @@ The following are merged mechanisms, not a claim of complete class coverage.
 | B1 | #1510 (`801f92c02`) | `output_axis_sources` and a production-path cardinality check; #1480 closed |
 | B2a | #1536 (`55ec86524`) | derived classes/witnesses and entry guards; signature scope is approximated by root reachability |
 | B2h | #1531 (`1253d7653`) | host def application on eval uses the kernel decision C uses; entry checks reach this route |
-| B2r | #1597 (`12c04c66a`) | reshape leaves the kernel keep-list; local carrier guards have C and eval consumers; #1375 closed |
+| B2r | #1597 (`12c04c66a`) | reshape leaves the kernel keep-list; local carrier guards have C and eval consumers; inlined #1375 residue belongs to #1686 |
 | expand/insert decision and implementation | #1532, #1547, #1590 (`c8a5f1a75`) | one meaning per primitive; same-rank unit-extent guards; the lowering override is removed |
 | S2c | #1605 (`42ce46cdc`) | deferral recorder, stores, executor, settlement registry, and source-ordinal index removed |
 | B2b-0 | #1616 (`f6cfd2d72`) | seven existing phase-B rows receive passing receipts; no guard mechanism changes |
-| B2b-0b broadcast preparation | #1658 (`3fbc1df49`) | anonymous broadcast axes retain their own sources; the 11-case #1619 exit passes |
+| B2b-0b broadcast preparation | #1658 (`3fbc1df49`) | anonymous broadcast axes retain their own sources; the 11-case broadcast attribution contract passes; inlined unit-check residue belongs to #1687 |
 | B2b-0b numeric local guards | #1662 (`5dde8373c`) | literal/resolved claims compare independent runtime carriers; the 32-lane local matrix passes |
 
 The extent carrier is no longer a display name, and sources/classes already
@@ -48,6 +48,10 @@ Current failure boundaries:
 - #1374/#1376: lowering may drop the argument whose axis witnesses the result
   claim. Root reachability cannot recover a signature that is no longer
   represented, and an unread argument still owes its signature check.
+- #1686: arithmetic reshape targets lose named/literal result checks after
+  inlining. This is original #1375 work omitted by its closing PR #1597.
+- #1687: non-unit broadcast operands lose their runtime checks after
+  inlining. This retains the original #597/#1619 negative exit.
 - #1397: checked function stamps now retain the declared result; movement
   execution still owes its guard and general wildcard-returning roots can
   disappear from eval and entry emission. #1378's public vmap witness remains
@@ -78,7 +82,7 @@ shape. B2b-1 owns preservation and enforcement of those scoped claims.
 The bounded acceptance command is `singleton_broadcast_contract` in C5.
 Literal call/inlining obligations, op-computed local guards, and scoped claim transport
 remain separate obligations below. In particular, an inlined call with a
-non-unit argument still loses its runtime unit guard; repairing #1619's
+non-unit argument still loses its runtime unit guard (#1687); repairing #1619's
 anonymous-output rewrite does not establish claim preservation through calls.
 
 ## Part I: implementation contracts
@@ -433,7 +437,7 @@ acceptance test, a clean checker, object-only output, or equal wrong answers
 on Eval/C is never a passing completion receipt. Missing compiler/toolchain
 prerequisites fail the suite rather than skip a lane.
 
-The #1619 exit is the unignored `singleton_broadcast_contract` test:
+The bounded #1619 attribution receipt is the unignored `singleton_broadcast_contract` test:
 
 ```sh
 cargo test -p chelis-cli --test runtime_extent_claim_preparation \
@@ -559,7 +563,7 @@ All are Slice B work under #1277 unless expressly separated.
 | owner | entry | deliverable and exit |
 |---|---|---|
 | B2b-0b: remaining local guards | merged B2r/S2b and #1658's broadcast preparation repair | guard literal and resolved numeric claims from independent local size sources; op-computed local extents; exact positive/negative C/Eval rows |
-| B2b-1: claim transport | C2 contract and red fixtures; integrates B2b-0b | scoped checked/lowered identities, explicit caller witnesses, multi-claim axes, rebuild/wire transport and migrated binding consumers; #1374/#1376/#1566, #1397's declaration-erasure half, with #1377's literal call/inlined-root exit established by the witness subset |
+| B2b-1: claim transport | C2 contract and red fixtures; integrates B2b-0b | declaring-signature helper guard order, then atomic computed-reshape and broadcast-unit transport (#1686/#1687); scoped checked/lowered identities, explicit caller witnesses, multi-claim axes, rebuild/wire transport and migrated binding consumers; #1374/#1376/#1566, #1397's declaration-erasure half, with #1377's literal call/inlined-root exit established by the witness subset |
 | B2b-root: root execution | can start independently; acceptance composes B2b-1 | #1397's general wildcard-root boundary; run or diagnose every accepted root; unlock and reverify #1378's exact public value witness |
 | B2b-2: sources and acceptance | guards and claim transport for every newly admitted row | finish declaration sources (#665/#1556), supply #1482's missing shape source, remove provenance restrictions (#1266/#569/#1379), then remove unused `shape_deps` |
 | B2b-3: phase exit | preceding host repairs and per-row platform dispositions | register actual passing receipts, correct measured stale baselines, retire phase c from final selection; phase b/final remain red until their named obligations pass |
@@ -576,6 +580,43 @@ public contracts.
 B2b-root is separately bounded within #1397 so a declaration fix cannot
 silently close its broader root failure. #1378 stays open until the public
 witness executes; its typed Slice A mechanism need not be reimplemented.
+
+The helper signature-order repair ships first. A helper lowered from a declared
+function receives tensor inputs in that function's parameter order, including
+shape-only parameters. A signatureless subexpression retains its assigned,
+deterministic ABI order. Pruning and rebuilding preserve relative input order;
+host callers continue mapping actual arguments by input label. A literal is
+its own canonical value: when its checked value is a folded input-axis read,
+class ordering uses the source input's signature slot and axis, not the later
+consumer node. Named classes retain their declaring canonical witnesses.
+A shared IR schedule orders individual checks across classes and claim kinds;
+Eval and the C prologue consume it without regrouping:
+a repeated literal cannot pull its later witness ahead of an intervening
+parameter. Canonical values and witness deduplication remain attached to their
+checks. The acceptance command is:
+
+```sh
+cargo nextest run -p chelis-cli --test runtime_extent_claim_preparation \
+  -E 'test(=helper_signature_guard_order_contract)'
+```
+
+This covers signature `b,z,a` with satisfied, individually failing and
+simultaneously failing claims through exported C, bindings and inlined main,
+plus interleaved named and mixed named/literal binding checks, repeated literal
+claims at nonadjacent parameters, nested discarded
+calls, aliases and both executable-example variants. Internal tests cover signatureless
+ABI order and reconstruction. These checks do not discharge the computed
+reshape or unit-precondition obligations.
+
+The subsequent checked-extent integration owns #1686/#1687 together. It captures
+scoped claims and declaring witnesses before substitution/folding; a checked
+scalar compares an independently computed reshape target before allocation,
+and a checked tensor enforces an operand-axis precondition before refining that
+axis. Their explicit dependencies retain nested/discarded checks through
+rewrites and wire/cache boundaries. The `omitted_extent_claim_contract` runner
+must assert declarations, actual shape/values and runtime Domain failures on
+exported calls, bindings and inlined main before either issue closes. HIP/Metal
+execution remains with the platform owners described below.
 
 The B2b-1 carrier is one atomic integration change because dropping scope,
 claims or witnesses at any checker/lowerer/rebuild/wire boundary loses the
