@@ -1870,6 +1870,7 @@ fn validate_canonical_host_strides(shape: &[usize], strides: &[usize]) -> PyResu
 /// order. Without it a checked fold rejects `[i64::MAX, i64::MAX, 0]` while
 /// accepting `[i64::MAX, 0, i64::MAX]`, though both describe the same empty
 /// array.
+#[cfg(test)]
 fn element_count(shape: &[usize]) -> PyResult<usize> {
     let shape = host_dims(shape)?;
     chelis_abi::metadata::ElementCount::from_extents(&shape)
@@ -1910,9 +1911,9 @@ impl TensorOwner {
                     .collect()
             },
             Self::Gpu(handle) => unsafe {
-                let tensor = handle.ptr.as_ref();
-                (0..tensor.ndim as usize)
-                    .map(|axis| tensor.shape[axis] as usize)
+                let tensor = &*(handle.api.view)(handle.ptr.as_ptr());
+                (0..tensor.rank as usize)
+                    .map(|axis| tensor.shape.add(axis).read() as usize)
                     .collect()
             },
         }
@@ -1922,9 +1923,9 @@ impl TensorOwner {
         match self {
             Self::Cpu(_) => contiguous_strides(&self.shape()),
             Self::Gpu(handle) => unsafe {
-                let tensor = handle.ptr.as_ref();
-                (0..tensor.ndim as usize)
-                    .map(|axis| tensor.strides[axis] as usize)
+                let tensor = &*(handle.api.view)(handle.ptr.as_ptr());
+                (0..tensor.rank as usize)
+                    .map(|axis| tensor.strides.add(axis).read() as usize)
                     .collect()
             },
         }
