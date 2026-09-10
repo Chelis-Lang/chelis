@@ -15,6 +15,7 @@ from capacity_census_native_bindings import (
     require_private_owner,
     native_input_role,
     require_native_fields,
+    require_export_abi_choices,
 )
 from test_capacity_census_graph import Artifact, primitive, reference
 
@@ -67,6 +68,80 @@ def private_owner_fixture():
 
 
 class NativeBoundaryObligations(unittest.TestCase):
+    def test_receivers_and_requests_retain_the_checked_owner_chain(self):
+        for name, module, edges in (
+            ("NativeTensor", "", (("tensor", reference(30)),)),
+            ("ValidatedTensor", "native_tensor", (("inner", reference(31, reference(32))),)),
+            ("DLPackRequest", "dlpack", (("tensor", reference(30)), ("abi", reference(33)))),
+        ):
+            artifact = Artifact("chelis_python")
+            parent = 2 if module else 0
+            if module:
+                artifact.add(2, module, {"module": {"items": [20], "is_stripped": False}},
+                             path=["chelis_python", module], visibility="crate")
+            else:
+                artifact.doc["index"]["0"]["inner"]["module"]["items"].append(20)
+            for item_id, identity in {
+                30: "chelis_python::native_tensor::ValidatedTensor", 31: "alloc::sync::Arc",
+                32: "chelis_python::native_tensor::ValidatedTensorInner",
+                33: "chelis_python::dlpack::ExportAbi",
+            }.items():
+                artifact.external(item_id, identity)
+            fields = []
+            for label, ty in edges:
+                field = artifact.field(label, ty)
+                artifact.doc["index"][str(field)]["visibility"] = {
+                    "restricted": {"parent": parent, "path": "::" + module},
+                }
+                fields.append(field)
+            artifact.struct(20, name, fields, public=False)
+            artifact.doc["paths"]["20"]["path"] = ["chelis_python", *([module] if module else []), name]
+            artifact.doc["index"]["20"]["span"] = {
+                "filename": f"crates/chelis-python/src/{module or 'lib'}.rs",
+            }
+            identity = "::".join(artifact.doc["paths"]["20"]["path"])
+            require_native_fields(RustdocGraph([artifact.doc]), identity)
+            for field in fields:
+                for replacement in (primitive("f64"), reference(31, primitive("i64")), reference(33)):
+                    if artifact.doc["index"][str(field)]["inner"]["struct_field"] == replacement:
+                        continue
+                    changed = copy.deepcopy(artifact.doc)
+                    changed["index"][str(field)]["inner"]["struct_field"] = replacement
+                    with self.subTest(owner=identity, field=field, replacement=replacement), self.assertRaises(GraphError):
+                        require_native_fields(RustdocGraph([changed]), identity)
+
+    def test_export_abi_is_only_the_closed_protocol_choice_without_payloads(self):
+        artifact = Artifact("chelis_python")
+        artifact.add(2, "dlpack", {"module": {"items": [20], "is_stripped": False}},
+                     path=["chelis_python", "dlpack"], visibility="crate")
+        for item_id, name in ((21, "Legacy"), (22, "Versioned")):
+            artifact.add(item_id, name, {"variant": {"kind": "plain", "discriminant": None}})
+        artifact.add(20, "ExportAbi", {"enum": {"generics": {"params": []},
+                     "variants": [21, 22], "has_stripped_variants": False}},
+                     path=["chelis_python", "dlpack", "ExportAbi"], visibility="crate")
+        artifact.doc["index"]["20"]["span"] = {"filename": "crates/chelis-python/src/dlpack.rs"}
+        self.assertEqual(require_export_abi_choices(RustdocGraph([artifact.doc])), ("Legacy", "Versioned"))
+        for mutation in ("payload", "new-choice", "missing", "stripped", "generic", "detached", "moved"):
+            changed = copy.deepcopy(artifact.doc)
+            body = changed["index"]["20"]["inner"]["enum"]
+            if mutation == "payload":
+                changed["index"]["21"]["inner"]["variant"]["kind"] = {"tuple": [200]}
+                changed["index"]["200"] = {"inner": {"struct_field": primitive("f64")}}
+            elif mutation == "new-choice":
+                changed["index"]["22"]["name"] = "TaggedNumber"
+            elif mutation == "missing":
+                body["variants"].pop()
+            elif mutation == "stripped":
+                body["has_stripped_variants"] = True
+            elif mutation == "generic":
+                body["generics"]["params"] = [{"name": "T", "kind": {"type": {}}}]
+            elif mutation == "detached":
+                changed["index"]["2"]["inner"]["module"]["items"] = []
+            else:
+                changed["index"]["20"]["span"]["filename"] = "arbitrary.rs"
+            with self.subTest(mutation=mutation), self.assertRaises(GraphError):
+                require_export_abi_choices(RustdocGraph([changed]))
+
     def test_adapters_retain_exact_owners_without_numeric_sibling_fields(self):
         examples = (
             ("CompiledTensorResults", "native_tensor", "tensors", "result-vector"),

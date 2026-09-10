@@ -166,3 +166,7 @@ def require_native_fields(graph, identity):
     actual = tuple((name, shape(ty)) for name, ty in fields)
     _require(actual == expected, "native adapter private field edges changed")
     return actual
+
+
+def require_export_abi_choices(graph):
+    raise NotImplementedError("verify the exact payload-free DLPack ABI choice")
