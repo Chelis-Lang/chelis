@@ -5,7 +5,7 @@
 //! registered callable signature can enter this inventory.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Command;
 
 use pyo3::prelude::*;
 use pyo3::types::{PyCFunction, PyModule, PyType};
@@ -14,6 +14,8 @@ use sha2::{Digest, Sha256};
 
 #[path = "../../../tests/support/capacity_census_authority.rs"]
 mod capacity_census_authority;
+#[path = "../../../tests/support/capacity_census_compiler_json.rs"]
+mod capacity_census_compiler_json;
 #[path = "../../../tests/support/managed_python.rs"]
 mod managed_python;
 #[path = "../../../tests/support/pyo3_registration.rs"]
@@ -21,6 +23,7 @@ mod pyo3_registration;
 #[path = "../../../tests/support/pyo3_registration_fixture.rs"]
 mod pyo3_registration_fixture;
 use capacity_census_authority::{AuthorityRegistries, StaticSurfaceDescriptor, SurfaceDescriptor};
+use capacity_census_compiler_json::{DiscoveredRow, VerifiedBindingCensus};
 
 const PERMANENT_BINDING_DISPOSITION: &str = "permanent-disposition(C6 registered PyO3 signature surface complete descriptor set ratified 2026-08-04)";
 const BINDING_CENSUS_FAMILY: &str = "pyo3-binding";
@@ -122,10 +125,6 @@ const FROZEN_BINDING_ROWS: &[FrozenSurfaceRow] = &[
 
 // Only these unchanged foundation rows retain the temporary admission path.
 const ACTIVE_LEGACY_IDS: &[&str] = &[
-    "chelis_python::check_json(py: Python<'_>, source: &str, source_kind: &str) -> PyResult<String>",
-    "chelis_python::compile_json(py: Python<'_>, source: &str, target: &str, source_kind: &str, entry_name: Option<String>) -> PyResult<String>",
-    "chelis_python::desugar_json(py: Python<'_>, source: &str) -> PyResult<String>",
-    "chelis_python::eval_json(py: Python<'_>, source: &str, bindings_json: &str, source_kind: &str, project_root: Option<&str>) -> PyResult<String>",
     "chelis_python::CompiledModel::__call__(self: &Self, py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyObject>",
     "chelis_python::NativeTensor::__dlpack__(self: &Self, py: Python<'_>, stream: Option<usize>, max_version: Option<&Bound<'_, PyAny>>, dl_device: Option<&Bound<'_, PyAny>>, copy: Option<bool>) -> PyResult<PyObject>",
     "chelis_python::NativeTensor::__dlpack_device__(self: &Self) -> (i32, i32)",
@@ -136,10 +135,6 @@ const ACTIVE_LEGACY_IDS: &[&str] = &[
 // Public-name equality cannot admit a renamed Rust implementation or a new
 // getter/setter/constructor kind into the frozen cohort.
 const ACTIVE_LEGACY_IMPLEMENTATIONS: &[&str] = &[
-    "chelis_python::check_json#function",
-    "chelis_python::compile_json#function",
-    "chelis_python::desugar_json#function",
-    "chelis_python::eval_json#function",
     "chelis_python::NativeCompiledModel::__call__#method",
     "chelis_python::NativeTensor::__dlpack__#method",
     "chelis_python::NativeTensor::__dlpack_device__#method",
@@ -217,7 +212,7 @@ struct Baseline {
     rows: Vec<BaselineRow>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BaselineRow {
     kind: String,
@@ -229,17 +224,8 @@ struct BaselineRow {
     authority: Option<String>,
     #[serde(default)]
     graph_identity: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct DiscoveredRow {
-    kind: String,
-    id: String,
-    flags: Vec<String>,
-    legacy_flags: Vec<String>,
-    identity: Option<String>,
-    problem: Option<String>,
-    implementation: String,
+    #[serde(default)]
+    contract: Option<String>,
 }
 
 #[pyfunction]
@@ -494,32 +480,13 @@ print('Eight compiled renamed implementations bound; seven direct numeric payloa
     );
 }
 
-fn run_typed_enumerator(surface: &RegisteredSurface) -> Output {
-    let root = workspace_root();
-    let python = managed_python::managed_python(&root).unwrap_or_else(|error| panic!("{error}"));
-    let mut command = Command::new(python);
-    let provenance = tempfile::NamedTempFile::new().expect("temporary registration provenance");
-    serde_json::to_writer(provenance.as_file(), &surface.provenance)
-        .expect("serialize registration provenance");
-    command
-        .arg(root.join("scripts/capacity_census_typed.py"))
-        // No `--target-dir`: see the wire census for why the enumerator owns
-        // that choice. Both censuses share one cargo target directory so the
-        // second one to run reuses the first's compiled dependency graph.
-        .arg("bindings-discovery")
-        .arg("--registered-provenance")
-        .arg(provenance.path())
-        .current_dir(&root);
-    for name in &surface.functions {
-        command.args(["--registered", name]);
-    }
-    for method in &surface.methods {
-        command.args(["--registered-method", method]);
-    }
-    for (name, identity) in &surface.classes {
-        command.args(["--registered-class", &format!("{name}={identity}")]);
-    }
-    command.output().expect("run typed PyO3 census enumerator")
+fn run_typed_enumerator(surface: &RegisteredSurface) -> Result<VerifiedBindingCensus, String> {
+    capacity_census_compiler_json::discover(
+        &surface.functions,
+        &surface.methods,
+        &surface.classes,
+        &surface.provenance,
+    )
 }
 
 fn baseline_bytes() -> Vec<u8> {
@@ -545,7 +512,10 @@ fn active_legacy_rows() -> Vec<SurfaceRow> {
         .collect()
 }
 
-fn current_authority_problem(current: &[SurfaceRow]) -> Option<String> {
+fn current_authority_problem(
+    current: &[SurfaceRow],
+    execution: Option<&VerifiedBindingCensus>,
+) -> Option<String> {
     let legacy = active_legacy_rows();
     let mut seen = std::collections::BTreeSet::new();
     for row in current {
@@ -561,6 +531,9 @@ fn current_authority_problem(current: &[SurfaceRow]) -> Option<String> {
             id: row.id.clone(),
             flags: row.flags.clone(),
         };
+        if execution.is_some_and(|witness| witness.permits(&surface)) {
+            continue;
+        }
         if let Err(problem) = capacity_census_authority::classify_final_authority(
             &surface,
             AuthorityRegistries {
@@ -596,11 +569,15 @@ fn baseline_problem(bytes: &[u8]) -> Option<String> {
             if row.citation.as_deref() != Some(PERMANENT_BINDING_DISPOSITION)
                 || row.authority.is_some()
                 || row.graph_identity.is_some()
+                || row.contract.is_some()
             {
                 return Some("changed legacy binding disposition".into());
             }
         } else if row.citation.is_some()
-            || row.authority.as_deref() != Some("nonnumeric")
+            || !matches!(
+                row.authority.as_deref(),
+                Some("nonnumeric" | "TaggedTransport")
+            )
             || !row
                 .graph_identity
                 .as_ref()
@@ -610,12 +587,62 @@ fn baseline_problem(bytes: &[u8]) -> Option<String> {
                 "final binding requires only its authority and current graph identity".into(),
             );
         }
+        if row.authority.as_deref() == Some("TaggedTransport") {
+            let contracts = ["check_json", "compile_json", "desugar_json", "eval_json"];
+            if !contracts.iter().any(|name| {
+                row.contract.as_deref()
+                    == Some(format!("compiler-json/chelis_python::{name}").as_str())
+                    && row.id.starts_with(&format!("chelis_python::{name}("))
+            }) || row.kind != "binding-pyfunction"
+                || row.flags.is_empty()
+            {
+                return Some(
+                    "invalid compiler JSON baseline shape; execution still required".into(),
+                );
+            }
+        } else if row.contract.is_some() {
+            return Some("unexpected binding transport contract".into());
+        }
         rows.push(surface);
     }
-    if let Some(problem) = current_authority_problem(&rows) {
+    // The persisted transport rows carry comparison data only. They cannot be
+    // handed to current_authority_problem as an admission registry.
+    let structural: Vec<_> = rows
+        .iter()
+        .filter(|surface| {
+            !baseline.rows.iter().any(|row| {
+                row.kind == surface.kind
+                    && row.id == surface.id
+                    && row.authority.as_deref() == Some("TaggedTransport")
+            })
+        })
+        .map(|row| SurfaceRow {
+            kind: row.kind.clone(),
+            id: row.id.clone(),
+            flags: row.flags.clone(),
+        })
+        .collect();
+    if let Some(problem) = current_authority_problem(&structural, None) {
         return Some(problem);
     }
-    if rows.len() != legacy.len() + NONNUMERIC_BINDINGS.len()
+    let transports = baseline
+        .rows
+        .iter()
+        .filter(|row| row.authority.as_deref() == Some("TaggedTransport"))
+        .count();
+    let transport_contracts: std::collections::BTreeSet<_> = baseline
+        .rows
+        .iter()
+        .filter(|row| row.authority.as_deref() == Some("TaggedTransport"))
+        .map(|row| row.contract.as_ref())
+        .collect();
+    let unique: std::collections::BTreeSet<_> =
+        rows.iter().map(|row| (&row.kind, &row.id)).collect();
+    if unique.len() != rows.len()
+        || transport_contracts.len() != transports
+        || transports
+            != FROZEN_BINDING_ROWS.len() - ACTIVE_LEGACY_IDS.len() - NONNUMERIC_BINDINGS.len()
+        || rows.len() != legacy.len() + NONNUMERIC_BINDINGS.len() + transports
         || legacy.iter().any(|row| !rows.contains(row))
         || NONNUMERIC_BINDINGS
             .iter()
@@ -626,7 +653,11 @@ fn baseline_problem(bytes: &[u8]) -> Option<String> {
     None
 }
 
-fn discovered_problem(discovered: &[DiscoveredRow], baseline: &Baseline) -> Option<String> {
+fn discovered_problem(
+    discovered: &[DiscoveredRow],
+    baseline: &Baseline,
+    execution: Option<&VerifiedBindingCensus>,
+) -> Option<String> {
     let legacy = active_legacy_rows();
     let mut current = Vec::new();
     for row in discovered {
@@ -670,12 +701,17 @@ fn discovered_problem(discovered: &[DiscoveredRow], baseline: &Baseline) -> Opti
         if !legacy.contains(&surface) && row.identity != expected.graph_identity {
             return Some(format!("changed reachable binding graph {}", row.id));
         }
+        if expected.authority.as_deref() == Some("TaggedTransport")
+            && (row.authority != expected.authority || row.contract != expected.contract)
+        {
+            return Some(format!("changed binding transport contract {}", row.id));
+        }
         current.push(surface);
     }
     if current.len() != baseline.rows.len() {
         return Some("binding inventory is not bijective".into());
     }
-    current_authority_problem(&current)
+    current_authority_problem(&current, execution)
 }
 
 #[test]
@@ -683,20 +719,53 @@ fn registered_pyfunctions_match_the_reviewed_rustdoc_signatures() {
     let bytes = baseline_bytes();
     assert_eq!(baseline_problem(&bytes), None);
     let baseline: Baseline = serde_json::from_slice(&bytes).unwrap();
-    let output = run_typed_enumerator(&registered_surface(false));
-    assert!(
-        output.status.success(),
-        "typed binding discovery failed:\n{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let current: Vec<DiscoveredRow> = serde_json::from_slice(&output.stdout).unwrap();
+    let execution =
+        run_typed_enumerator(&registered_surface(false)).unwrap_or_else(|error| panic!("{error}"));
+    let current = execution.rows();
     assert_eq!(
-        discovered_problem(&current, &baseline),
+        discovered_problem(current, &baseline, Some(&execution)),
         None,
         "only exact unchanged legacy rows may defer exposure proof; every final/new row requires complete discovery and authority\nactual discovery: {}",
-        String::from_utf8_lossy(&output.stdout)
+        serde_json::to_string(execution.evidence()).unwrap()
     );
+    let surfaces = current
+        .iter()
+        .filter(|row| row.authority.as_deref() == Some("TaggedTransport"))
+        .map(|row| SurfaceRow {
+            kind: row.kind.clone(),
+            id: row.id.clone(),
+            flags: row.flags.clone(),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(surfaces.len(), 4);
+    assert!(
+        current_authority_problem(&surfaces, None).is_some(),
+        "executed rows are comparison data; copying them supplies no witness"
+    );
+}
+
+#[test]
+fn verified_compiler_json_authority_cannot_be_replaced_by_descriptor_or_baseline() {
+    let allowed = &NONNUMERIC_BINDINGS[0];
+    assert_eq!(
+        current_authority_problem(
+            &[SurfaceRow {
+                kind: allowed.kind.into(),
+                id: allowed.id.into(),
+                flags: vec![]
+            }],
+            None
+        ),
+        None
+    );
+    for name in ["check_json", "compile_json", "desugar_json", "eval_json"] {
+        let descriptor = SurfaceRow {
+            kind: "binding-pyfunction".into(),
+            id: format!("chelis_python::{name}(typed) -> PyResult<compiler_json::Adapter>"),
+            flags: vec!["float-carrier".into(), "numeric-return".into()],
+        };
+        assert!(current_authority_problem(&[descriptor], None).is_some());
+    }
 }
 
 #[test]
@@ -705,20 +774,34 @@ fn retired_binding_rows_cannot_regain_legacy_admission() {
         .into_iter()
         .filter(|row| !active_legacy_rows().contains(row))
         .collect();
-    assert_eq!(retired.len(), 9);
+    assert_eq!(retired.len(), 13);
     for mut row in retired {
         row.flags = vec!["float-carrier".into()];
-        assert!(current_authority_problem(&[row]).is_some());
+        assert!(current_authority_problem(&[row], None).is_some());
     }
-    let mut baseline: serde_json::Value = serde_json::from_slice(&baseline_bytes()).unwrap();
-    let row = baseline["rows"]
-        .as_array_mut()
+    let baseline: serde_json::Value = serde_json::from_slice(&baseline_bytes()).unwrap();
+    let final_ids = baseline["rows"]
+        .as_array()
         .unwrap()
-        .iter_mut()
-        .find(|row| row.get("authority").is_some())
-        .unwrap();
-    row["citation"] = serde_json::json!(PERMANENT_BINDING_DISPOSITION);
-    assert!(baseline_problem(&serde_json::to_vec(&baseline).unwrap()).is_some());
+        .iter()
+        .filter(|row| row.get("authority").is_some())
+        .map(|row| row["id"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(final_ids.len(), 13);
+    for id in final_ids {
+        let mut mutation = baseline.clone();
+        let row = mutation["rows"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|row| row["id"].as_str() == Some(id.as_str()))
+            .unwrap();
+        row["citation"] = serde_json::json!(PERMANENT_BINDING_DISPOSITION);
+        assert!(
+            baseline_problem(&serde_json::to_vec(&mutation).unwrap()).is_some(),
+            "final binding regained legacy citation admission: {id}"
+        );
+    }
 }
 
 #[test]
@@ -739,7 +822,9 @@ fn copied_missing_and_duplicate_binding_registrations_fail() {
             "numeric" => {
                 let row = rows
                     .iter_mut()
-                    .find(|row| row.get("authority").is_some())
+                    .find(|row| {
+                        row.get("authority").and_then(|value| value.as_str()) == Some("nonnumeric")
+                    })
                     .unwrap();
                 row["flags"] = serde_json::json!(["numeric-return"]);
             }
@@ -765,6 +850,8 @@ fn final_bindings_require_successful_current_exposure() {
                 flags: row.flags.clone(),
                 legacy_flags: row.flags.clone(),
                 identity: row.graph_identity.clone(),
+                authority: row.authority.clone(),
+                contract: row.contract.clone(),
                 problem: None,
                 implementation: ACTIVE_LEGACY_IDS
                     .iter()
@@ -774,7 +861,33 @@ fn final_bindings_require_successful_current_exposure() {
             })
             .collect::<Vec<_>>()
     };
-    assert_eq!(discovered_problem(&make_current(), &baseline), None);
+    let structural_baseline = Baseline {
+        version: baseline.version,
+        rows: baseline
+            .rows
+            .iter()
+            .filter(|row| row.authority.as_deref() != Some("TaggedTransport"))
+            .cloned()
+            .collect(),
+    };
+    let structural_current: Vec<_> = make_current()
+        .into_iter()
+        .filter(|row| row.authority.as_deref() != Some("TaggedTransport"))
+        .collect();
+    assert_eq!(
+        discovered_problem(&structural_current, &structural_baseline, None),
+        None
+    );
+    if baseline
+        .rows
+        .iter()
+        .any(|row| row.authority.as_deref() == Some("TaggedTransport"))
+    {
+        assert!(
+            discovered_problem(&make_current(), &baseline, None).is_some(),
+            "baseline rows cannot issue compiler JSON authority"
+        );
+    }
     for implementation in [
         "chelis_python::renamed_numeric#function",
         "chelis_python::NativeTensor::shape#setter",
@@ -786,7 +899,7 @@ fn final_bindings_require_successful_current_exposure() {
             .unwrap();
         row.implementation = implementation.into();
         assert!(
-            discovered_problem(&current, &baseline)
+            discovered_problem(&current, &baseline, None)
                 .unwrap()
                 .contains("frozen registration provenance")
         );
@@ -809,7 +922,7 @@ fn final_bindings_require_successful_current_exposure() {
             _ => unreachable!(),
         }
         assert!(
-            discovered_problem(&current, &baseline).is_some(),
+            discovered_problem(&current, &baseline, None).is_some(),
             "{mutation}"
         );
     }
@@ -820,9 +933,7 @@ fn final_bindings_require_successful_current_exposure() {
 
 #[test]
 fn a_registered_pyfunction_with_a_raw_dtype_parameter_is_rejected() {
-    let output = run_typed_enumerator(&registered_surface(true));
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = run_typed_enumerator(&registered_surface(true)).unwrap_err();
     assert!(
         stderr.contains("reviewer_raw_dtype_probe")
             && stderr.contains("missing registration provenance"),

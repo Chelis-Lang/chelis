@@ -321,19 +321,41 @@ def resolve_target_dir(root: Path, requested: Path | None) -> Path:
 
 
 def main() -> int:
+    from capacity_census_graph import GraphError
+
     args = parse_args()
     root = Path(__file__).resolve().parent.parent
     target_dir = resolve_target_dir(root, args.target_dir)
     try:
         if args.mode == "wire":
-            if args.rustdoc_json or args.registered or args.registered_method:
+            if args.rustdoc_json or args.registered or args.registered_method or args.registered_class or args.registered_provenance:
                 raise CensusError("wire authority requires actual artifact and codec execution")
             from capacity_census_wire_verifier import verify_wire_census
 
             report = verify_wire_census(root, target_dir).execution_report()
             print(json.dumps(report, indent=2, sort_keys=True))
             return 0
-        if args.rustdoc_json:
+        compiler_json = None
+        if args.mode == "bindings-discovery":
+            if args.rustdoc_json:
+                raise CensusError("binding authority requires current compiled and wire execution")
+            if not args.registered_provenance:
+                raise CensusError("binding discovery requires registration provenance")
+            provenance = json.loads(args.registered_provenance.read_text())
+            # A missing registration is already a rejection. This is only an
+            # early failure check; live descriptor/source/typed ownership still
+            # runs below and no metadata can issue a transport witness.
+            declared = {row.get("python_name") for row in provenance.get("registrations", [])
+                        if row.get("owner") is None}
+            for name in args.registered:
+                if name not in declared:
+                    raise CensusError(f"{name}: missing registration provenance")
+            from capacity_census_compiler_json import verify_compiler_json_bindings
+
+            compiler_json = verify_compiler_json_bindings(root, target_dir)
+        if compiler_json is not None:
+            document = compiler_json.graph.documents["chelis_python"]
+        elif args.rustdoc_json:
             document = json.loads(args.rustdoc_json.read_text())
         else:
             document = generate_rustdoc_json(
@@ -351,26 +373,25 @@ def main() -> int:
                 if not separator or not name or not identity or name in classes:
                     raise CensusError("invalid or duplicate registered class identity")
                 classes[name] = identity
-            compiler_document = generate_rustdoc_json(
-                root=root,
-                package="chelis-compiler-api",
-                crate_name="chelis_compiler_api",
-                target_dir=target_dir,
-            )
             rows = discover_bindings(
-                [document, compiler_document], args.registered,
+                compiler_json.graph.documents.values(), args.registered,
                 args.registered_method, classes,
-                provenance=json.loads(args.registered_provenance.read_text())
-                if args.registered_provenance else None,
+                provenance=provenance,
+                compiler_json=compiler_json,
             )
             legacy = {row["id"]: row["flags"] for row in binding_rows(
                 document, args.registered, args.registered_method
             )}
             for row in rows:
                 row["legacy_flags"] = legacy.get(row["id"], row["flags"])
+            receipt = root / "target/capacity-census-compiler-json-execution.json"
+            report = {"version": 1, "rows": rows, "compiler_json": compiler_json.execution_report()}
+            receipt.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+            print(json.dumps(report, indent=2, sort_keys=True))
+            return 0
         else:
             rows = binding_rows(document, args.registered, args.registered_method)
-    except (CensusError, OSError, json.JSONDecodeError) as error:
+    except (CensusError, GraphError, OSError, json.JSONDecodeError) as error:
         print(f"capacity census typed enumerator failed: {error}", file=sys.stderr)
         return 1
     print(json.dumps(rows, indent=2, sort_keys=True))

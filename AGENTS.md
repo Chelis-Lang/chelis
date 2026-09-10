@@ -343,8 +343,9 @@ numeric data, whether or not you have read that document:
   private verifier requires current graph, codec/admission, cache, publication
   and mutation execution; neither a static descriptor nor a baseline grants
   wire authority. Nine source/name/path/vocabulary and opaque-handle bindings have final
-  nonnumeric authority; eight registered-PyO3 baseline rows remain a sealed legacy
-  cohort. That cohort confers no authorization
+  nonnumeric authority, and four compiler-JSON functions have final tagged-transport
+  authority. Four native registered-PyO3 baseline rows remain a sealed legacy cohort.
+  That cohort confers no authorization
   for a new, renamed, reclassified, or otherwise changed row, and a change touching one
   must move it to a final authority class rather than copy its disposition. A bare
   numeric carrier has no citation or maintainer-override path:
