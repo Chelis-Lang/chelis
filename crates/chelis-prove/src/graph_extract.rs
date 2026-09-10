@@ -508,7 +508,9 @@ const _: () = {
     // shape checks outside the float-envelope extraction above.
     // Version 9 moves all numeric operation payloads through the exact
     // stored-bit codec and admits fixed-width references and dimensions.
-    assert!(WIRE_DAG_SCHEMA_VERSION == 9);
+    // Version 10 adds discrete checked-extent carriers, outside this
+    // float-envelope extraction and classified explicitly above.
+    assert!(WIRE_DAG_SCHEMA_VERSION == 10);
 };
 
 #[cfg(test)]

@@ -87,10 +87,12 @@ pub fn vectorize_axis0(dag: &Dag, batch_dim: DimInfo) -> Result<Dag, String> {
             },
             RiscOp::Shape { axis } if shared => RiscOp::Shape { axis: axis + 1 },
             RiscOp::ExtentWitness {
+                site,
                 parameter,
                 axis: RtAxis::Lit(axis),
                 requirements,
             } => RiscOp::ExtentWitness {
+                site: *site,
                 parameter: parameter.clone(),
                 axis: RtAxis::Lit(axis.checked_add(1).expect("vmap axis fits int32")),
                 requirements: requirements.clone(),

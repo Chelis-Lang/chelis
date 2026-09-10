@@ -33,6 +33,7 @@ fn fixture() -> WireDag {
             WireDagNode {
                 id: 1,
                 op: WireRiscOp::ExtentWitness {
+                    site: WireExtentWitnessSite::Caller,
                     parameter: "x".into(),
                     axis: WireRtAxis::Lit { value: 0 },
                     requirements: vec![extent(4), extent(4), extent(9)],
@@ -72,6 +73,25 @@ fn witness_roundtrip_retains_claim_dependency_and_provenance() {
     assert_eq!(json["nodes"][2]["shape_deps"], serde_json::json!([1]));
     let decoded = WireDag::from_validated_json(&json.to_string()).unwrap();
     assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+}
+
+#[test]
+fn witness_site_is_explicit_and_survives_wire_transport() {
+    for (site, spelling) in [
+        (WireExtentWitnessSite::Caller, "caller"),
+        (WireExtentWitnessSite::LocalExpand, "local_expand"),
+    ] {
+        let mut dag = fixture();
+        if let WireRiscOp::ExtentWitness { site: target, .. } = &mut dag.nodes[1].op {
+            *target = site;
+        }
+        let mut json = serde_json::to_value(dag).unwrap();
+        assert_eq!(json["nodes"][1]["op"]["site"], spelling);
+        let decoded = WireDag::from_validated_json(&json.to_string()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+        json["nodes"][1]["op"]["site"] = serde_json::json!("inferred");
+        assert!(WireDag::from_validated_json(&json.to_string()).is_err());
+    }
 }
 
 #[test]
@@ -122,7 +142,7 @@ fn malformed_claims_and_invocation_edges_are_not_decoded_or_encoded() {
             "accepted malformed requirement {json}"
         );
     }
-    for field in ["requirements", "parameter", "axis"] {
+    for field in ["site", "requirements", "parameter", "axis"] {
         let mut json = serde_json::to_value(fixture()).unwrap();
         json["nodes"][1]["op"]
             .as_object_mut()

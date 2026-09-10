@@ -2268,10 +2268,21 @@ where
                 finalize_wide_int("shape", out_prim, vec![], vec![extent as i64])?
             }
             RiscOp::ExtentWitness {
+                site,
                 parameter,
                 axis,
                 requirements,
             } => {
+                let operation = match site {
+                    crate::dag::ExtentWitnessSite::Caller => "load",
+                    crate::dag::ExtentWitnessSite::LocalExpand => "expand",
+                };
+                let parameter = match site {
+                    crate::dag::ExtentWitnessSite::Caller => parameter.clone(),
+                    crate::dag::ExtentWitnessSite::LocalExpand => {
+                        format!("node {}", node.inputs[0].0)
+                    }
+                };
                 let crate::dag::RtAxis::Lit(axis) = axis;
                 let input = &values[&node.inputs[0]];
                 let observed = *input
@@ -2284,7 +2295,7 @@ where
                         .ok_or_else(|| "extent witness requires int64".to_string())?;
                     if i64::try_from(observed).ok() != Some(required) {
                         return Err(format!(
-                            "extent `{required}`: claimed = {required}, {parameter} axis {axis} = {observed}\nnumeric trap: domain in load at int64"
+                            "extent `{required}`: claimed = {required}, {parameter} axis {axis} = {observed}\nnumeric trap: domain in {operation} at int64"
                         ));
                     }
                 }

@@ -15,7 +15,7 @@ language rule and does not relax the numbered specs to match a baseline.
 
 ## Current state and remaining work
 
-The reference implementation state for the merged inventory is `fc1abe414`.
+The reference implementation state for the merged inventory is `4f3812e2f`.
 The following are merged mechanisms, not a claim of complete class coverage.
 
 | delivery | merged PR | established behavior |
@@ -30,6 +30,10 @@ The following are merged mechanisms, not a claim of complete class coverage.
 | B2b-0 | #1616 (`f6cfd2d72`) | seven existing phase-B rows receive passing receipts; no guard mechanism changes |
 | B2b-0b broadcast preparation | #1658 (`3fbc1df49`) | anonymous broadcast axes retain their own sources; the 11-case broadcast attribution contract passes; inlined unit-check residue belongs to #1687 |
 | B2b-0b numeric local guards | #1662 (`5dde8373c`) | literal/resolved claims compare independent runtime carriers; the 32-lane local matrix passes |
+| B2b-0b local guard order | #1666 (`e0fa5ccc0`) | multi-axis local reshape guards use declaration order on Eval and C |
+| B2b-1 literal claim transport | #1668 (`84ae9bd7f`) | explicit caller-axis witnesses and invocation dependencies retain literal claims through direct, nested and discarded calls |
+| exact wire migration | #1664 (`ad9b6c248`) | WireDag v9 uses exact numeric codecs and validated fixed-width references; stdlib/library/context caches are 16/12/18 |
+| helper guard order | #1688 (`4f3812e2f`) | declared helper input order and one shared IR comparison schedule; the 50-case exported/binding/main oracle passes |
 
 The extent carrier is no longer a display name, and sources/classes already
 exist. What remains is preservation of a claim and its caller witnesses,
@@ -276,7 +280,7 @@ claim migration still owns scoped binding identities, unread named witnesses,
 and #1374/#1376/#1566. Both changes retain the C2.3 distinction between a
 requirement and an independently observed extent.
 
-The literal transport uses `RiscOp::ExtentWitness { parameter, axis,
+The literal transport uses `RiscOp::ExtentWitness { site, parameter, axis,
 requirements }`. Its one tensor input is the actual argument; its result is
 the observed axis extent as a rank-zero `int64`. `parameter` is diagnostic
 text, `axis: RtAxis` selects the observed axis, and
@@ -330,13 +334,14 @@ fixtures preceded implementation and both runners now pass.
 `runtime_extent_literal_transport` checks independent requirements, invalid
 carriers, root liveness, CSE/folding, grad and vmap. `wire_extent_witness`
 checks exact claims, invocation edges and source provenance on roundtrip,
-plus rejection of missing fields and malformed claims/edges. WireDag v9
-adds these explicit fields; stdlib/library cache versions are 15/11.
+plus rejection of missing fields and malformed claims/edges. WireDag v8
+introduced these fields; #1664 moves their numeric transport to v9 and
+stdlib/library/context cache versions 16/12/18.
 The wider named-claim and op-computed-source exits remain separate. HIP and
 Metal retain their existing runtime scalar shape-read exclusions; these
 host execution receipts do not certify device execution.
 
-The next atomic host change owns #1686 and #1687. It adds two checked
+The checked-extent integration owns #1686 and #1687. It adds two checked
 carriers to the construction and consumer inventory above:
 
 - `CheckedReshapeExtent { claim, axis }` consumes two ordinary scalar `int64`
@@ -352,22 +357,68 @@ carriers to the construction and consumer inventory above:
   axis to refine to one. It forwards the tensor after the witness succeeds;
   `expand` then consumes that checked tensor without repeating the guard.
 
+`ExtentWitness.site` explicitly distinguishes `Caller` from `LocalExpand`.
+Caller failures retain the declaring parameter and `load` trap; a local
+broadcast retains the observed input node and `expand` trap. Rebuilding and
+vmap preserve the site while remapping the input and axis. Local unit
+refinements are reused only for the same input node and axis within the
+current activation; entering and leaving a call saves and restores that map.
+An inserted axis derived from a witness also retains a fresh runtime identity,
+so an independently known actual cannot make intermediate ownership validation
+preempt the witness's runtime check.
+
 Each activation owns fresh witness nodes. The lowering environment maps the
 signature's binders to these exact nodes and restores that map on return;
 ordinary graph edges, rather than spelling or reachability, carry identity
 through rebuilding and import. Every checked scalar and required witness is
 retained by the invocation's fresh return carrier, even when its result is
 discarded. CSE and folding preserve independent checks and call provenance.
-Grad retains primal checks; vmap shares scalar checks and shifts tensor-axis
+`LoweredLibrary.program_signatures` retains authored declarations separately
+from inferred function metadata. `ResolvedFunction` carries that declaration
+through callable aliases and transforms; local shadowing cannot select a
+same-spelled global declaration. Checker wildcard narrowing retains a named
+dimension only when that declaration binds it in a parameter. A shape-only
+argument remains a witness even when the body does not read its data.
+Eval composes the checked library and new program before imported kernel
+lookup, using the existing checked-library proof; an absent proof is an error.
+
+Grad retains primal checks and restores a unit operand's cotangent shape using
+its checked witness, so a known non-unit actual cannot make backward graph
+validation preempt the primal Domain failure. Vmap shares scalar checks and shifts tensor-axis
 witnesses and unit refinements together. The verifier and exact wire decoder
 reject missing claims, wrong arity or scalar types, and unsupported refinements.
-The public completion command for these two obligations is
-`cargo nextest run -p chelis-cli --test runtime_extent_claim_preparation -E
- 'test(=omitted_extent_claim_contract)'`; it executes 117 independently authored
-export/binding/main fixtures and three executable-example controls. Internal rewrite and wire mutation tests support
-that oracle. The recorded pre-implementation run executes all 90 fixtures and
-fails 42 contract assertions. These are pending implementation receipts, not
-acceptance. HIP/Metal execution remains with the documented platform handoff.
+WireDag v10 carries both checked operations. Stdlib/library/context cache
+versions 17/13/19 require the authored signature ledger and revalidate it
+against fresh lowering. Missing fields and a forged ledger with a valid
+checksum and unchanged proof identity reject at admission.
+
+The completion oracle for these two host obligations is:
+
+```sh
+cargo nextest run -p chelis-cli -p chelis-ir -p chelis-compiler-api --lib \
+  --test runtime_extent_claim_preparation --test runtime_extent_checked_transport \
+  --test wire_extent_witness --test disk_cache \
+  -E 'binary(runtime_extent_claim_preparation) | binary(runtime_extent_checked_transport) | binary(wire_extent_witness) | test(=cached_imports_preserve_computed_claims_and_unit_preconditions) | test(=previous_checked_extent_cache_is_rejected_before_payload_decode) | test(context_decode_rejects_missing_or_forged_authored_signatures)'
+```
+
+The new public matrix has 117 exported/binding/main fixtures, three executable
+example controls, 24 grad/vmap controls and 12 imported-call controls. Every
+case checks declarations independently of actual shape/value or required
+Domain failure. The same command retains the earlier literal and helper-order
+receipts, checks IR rewrites and malformed wire edges, and executes matching
+and mismatching calls from both disk and worker caches. The ignored full-class
+`claimed_extent_contract` is a separate, still-pending #1277 exit, not a receipt
+for these two issues. The named `insert` preparation cases now retain declared
+signatures and execute their roots, but their missing caller equality checks
+remain #1374/#1376 work; their measured negative failures remain in the baseline.
+
+`scripts/runtime_extent_cache_compatibility.py` supplies additional two-binary
+evidence: an actual previous producer reads its own cache, the current consumer
+rejects those bytes even at its own cache path, and current/current executes
+exact results or Domain failures without rewriting the cache. Its committed
+v18 fixture comes from that actual producer. The pre-implementation public run
+executed 90 fixtures and failed 42 contract assertions. HIP/Metal execution
+remains with the documented platform handoff.
 
 B2b-1 changes the checked-to-lowered claim carrier and every consumer together.
 Its PR must name the concrete type fields and all construction/rebuild/decode
@@ -614,7 +665,7 @@ B2b-root is separately bounded within #1397 so a declaration fix cannot
 silently close its broader root failure. #1378 stays open until the public
 witness executes; its typed Slice A mechanism need not be reimplemented.
 
-The helper signature-order repair ships first. A helper lowered from a declared
+The helper signature-order repair shipped in #1688. A helper lowered from a declared
 function receives tensor inputs in that function's parameter order, including
 shape-only parameters. A signatureless subexpression retains its assigned,
 deterministic ABI order. Pruning and rebuilding preserve relative input order;

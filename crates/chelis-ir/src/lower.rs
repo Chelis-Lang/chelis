@@ -4190,7 +4190,7 @@ fn extract_int_axis(expr: &Expr) -> Option<i64> {
 ///
 /// This is the structural recognizer behind the issue #318 fix: the
 /// shape-derived const-broadcast idiom
-/// `expand(scalar_to_tensor(c), 0, shape(&x, cast(0, int32)))` (and the
+/// `insert(scalar_to_tensor(c), 0, shape(&x, cast(0, int32)))` (and the
 /// fully-`cast`-wrapped `cast(shape(&x, ...), int32)` form) carries its
 /// broadcast extent as the runtime dimension of `operand` at `axis`. The
 /// type checker collapses the `expand` *output* dim to `Lit(1)` via
@@ -5174,6 +5174,7 @@ struct LowerCtx {
     /// Binder lookup exists only in the current signature activation. Once
     /// selected, ordinary node edges carry the declaring witness's identity.
     signature_witnesses: Vec<(String, NodeId)>,
+    local_unit_refinements: BTreeMap<(NodeId, usize), NodeId>,
     invocation_witnesses: Vec<NodeId>,
     local_callables: UnordMap<String, CallableExpr>,
     program_types: Arc<BTreeMap<String, TensorType>>,
@@ -5303,6 +5304,7 @@ impl LowerCtx {
             static_size_bindings: UnordMap::new(),
             binding_witnesses: UnordMap::new(),
             signature_witnesses: Vec::new(),
+            local_unit_refinements: BTreeMap::new(),
             invocation_witnesses: Vec::new(),
             local_callables: UnordMap::new(),
             program_types: program_types.into(),
@@ -5813,22 +5815,12 @@ impl LowerCtx {
                 .cloned(),
             RtDim::Node(slot) => {
                 let witness = self.dag.get(*inputs.get(*slot)?)?;
-                let RiscOp::ExtentWitness {
-                    axis: RtAxis::Lit(axis),
-                    ..
-                } = &witness.op
-                else {
-                    return None;
-                };
-                // Read the actual tensor axis, independently of the witness's
-                // requirements and the caller's declared result. Keeping the
-                // witness as the size input still retains its runtime checks.
-                self.dag
-                    .get(*witness.inputs.first()?)?
-                    .output_type
-                    .dims
-                    .get(usize::try_from(*axis).ok()?)
-                    .cloned()
+                matches!(witness.op, RiscOp::ExtentWitness { .. }).then(|| {
+                    // The scalar remains independently observed and checked.
+                    // Its source's pre-check literal is not the post-check
+                    // type of a newly inserted axis.
+                    DimInfo::Named(format!("_rt_dim_{}_0", witness.id.0), None)
+                })
             }
             RtDim::ToEnd | RtDim::Sym(_) => None,
         }
@@ -6392,6 +6384,7 @@ impl LowerCtx {
         }
         let saved = self.bindings.clone();
         let saved_witnesses = self.binding_witnesses.clone();
+        let saved_unit_refinements = self.local_unit_refinements.clone();
         let saved_signature_witnesses = self.signature_witnesses.clone();
         let saved_list_bindings = self.list_bindings.clone();
         let saved_shape_bindings = self.shape_bindings.clone();
@@ -6505,6 +6498,7 @@ impl LowerCtx {
         let result = self.retain_invocation_witnesses(result, witness_start);
         self.bindings = saved; // Restore scope
         self.binding_witnesses = saved_witnesses;
+        self.local_unit_refinements = saved_unit_refinements;
         self.signature_witnesses = saved_signature_witnesses;
         self.list_bindings = saved_list_bindings;
         self.shape_bindings = saved_shape_bindings;
@@ -7717,6 +7711,7 @@ impl LowerCtx {
         let saved = self.bindings.clone();
         let witness_start = self.invocation_witnesses.len();
         let saved_witnesses = self.binding_witnesses.clone();
+        let saved_unit_refinements = self.local_unit_refinements.clone();
         let saved_signature_witnesses = self.signature_witnesses.clone();
         let call_span = self.current_span_id.clone();
         let saved_list_bindings = self.list_bindings.clone();
@@ -7962,6 +7957,7 @@ impl LowerCtx {
         self.preserve_literal_result(&result, &declared_result);
         let result = self.retain_invocation_witnesses(result, witness_start);
         self.binding_witnesses = saved_witnesses;
+        self.local_unit_refinements = saved_unit_refinements;
         self.signature_witnesses = saved_signature_witnesses;
         self.inlining_active -= 1;
         if let Some(name) = &inlining_name
@@ -7994,6 +7990,7 @@ impl LowerCtx {
         body: &Expr,
     ) -> LoweredValue {
         let saved_witnesses = self.binding_witnesses.clone();
+        let saved_unit_refinements = self.local_unit_refinements.clone();
         let saved_signature = self.signature_witnesses.clone();
         let start = self.invocation_witnesses.len();
         let formal_types = params
@@ -8032,6 +8029,7 @@ impl LowerCtx {
         }
         let result = self.retain_invocation_witnesses(result, start);
         self.binding_witnesses = saved_witnesses;
+        self.local_unit_refinements = saved_unit_refinements;
         self.signature_witnesses = saved_signature;
         result
     }
@@ -9804,11 +9802,11 @@ impl LowerCtx {
                 //   1. A statically-extractable size (a bare int, `(lit
                 //      ...)`, a `cast`-wrapped int, or a symbolic dim
                 //      variable) — issue #288's literal/symbol form
-                //      `expand(scalar_to_tensor(c), 0, cast(2, int32))`.
+                //      `insert(scalar_to_tensor(c), 0, cast(2, int32))`.
                 //
                 //   2. A `shape(operand, axis)` application — issue #318's
                 //      shape-derived form
-                //      `expand(scalar_to_tensor(c), 0, shape(&x, 0))` that
+                //      `insert(scalar_to_tensor(c), 0, shape(&x, 0))` that
                 //      the canonical `tensor_full_like` / `tensor_full_1d`
                 //      helper emits. The extent is read from `operand`'s
                 //      already-lowered dim at `axis`, NOT from this expand
@@ -12099,6 +12097,7 @@ impl LowerCtx {
     ) {
         self.binding_witnesses.clear();
         self.signature_witnesses.clear();
+        self.local_unit_refinements.clear();
         for (name, formal_type) in params.iter().zip(formal_types) {
             let Some(input) = self
                 .bindings
@@ -12118,6 +12117,7 @@ impl LowerCtx {
             for axis in 0..rank {
                 let witness = self.dag.add_node(
                     RiscOp::ExtentWitness {
+                        site: crate::dag::ExtentWitnessSite::Caller,
                         parameter: name.clone(),
                         axis: RtAxis::Lit(i32::try_from(axis).expect("parameter rank fits int32")),
                         requirements: Vec::new(),
@@ -12172,14 +12172,27 @@ impl LowerCtx {
             .binding_witnesses_for_expr(expr)
             .and_then(|(_, witnesses)| witnesses.get(axis))
             .copied();
+        let local = existing.is_none()
+            && !matches!(
+                self.dag.get(input).expect("expand input").op,
+                RiscOp::Load { .. }
+            );
+        if local && let Some(checked) = self.local_unit_refinements.get(&(input, axis)) {
+            return *checked;
+        }
         let witness = match existing {
             Some(witness) => witness,
             None => {
                 let witness = self.dag.add_node(
                     RiscOp::ExtentWitness {
+                        site: if local {
+                            crate::dag::ExtentWitnessSite::LocalExpand
+                        } else {
+                            crate::dag::ExtentWitnessSite::Caller
+                        },
                         parameter: match &self.dag.get(input).expect("expand input").op {
                             RiscOp::Load { name } => name.as_str().to_owned(),
-                            _ => bare_var_name(expr).unwrap_or_else(|| "expand operand".into()),
+                            _ => "expand".into(),
                         },
                         axis: rt_axis.clone(),
                         requirements: Vec::new(),
@@ -12205,12 +12218,16 @@ impl LowerCtx {
             requirements.push(one);
         }
         *ty.dims.get_mut(axis).expect("checked expand axis") = DimInfo::Lit(1);
-        self.dag.add_node(
+        let checked = self.dag.add_node(
             RiscOp::CheckedUnitAxis { axis: rt_axis },
             vec![input, witness],
             ty,
             self.current_span_id.clone(),
-        )
+        );
+        if local {
+            self.local_unit_refinements.insert((input, axis), checked);
+        }
+        checked
     }
 
     fn required_extent_for_claim(&mut self, dim: &DimInfo) -> Option<NodeId> {
@@ -12342,7 +12359,7 @@ impl LowerCtx {
     ///
     /// ```text
     ///   len  = shape(x, 0)
-    ///   twos = expand(scalar_to_tensor(c), 0, cast(len, int32))
+    ///   twos = insert(scalar_to_tensor(c), 0, cast(len, int32))
     /// ```
     ///
     /// so the `expand` size argument is `cast(var len, int32)`, NOT a
@@ -13119,6 +13136,7 @@ impl LowerCtx {
         let saved = self.bindings.clone();
         let witness_start = self.invocation_witnesses.len();
         let saved_witnesses = self.binding_witnesses.clone();
+        let saved_unit_refinements = self.local_unit_refinements.clone();
         let saved_signature_witnesses = self.signature_witnesses.clone();
         let call_span = self.current_span_id.clone();
         let saved_list_bindings = self.list_bindings.clone();
@@ -13216,6 +13234,7 @@ impl LowerCtx {
         }
         let result = self.retain_invocation_witnesses(result, witness_start);
         self.binding_witnesses = saved_witnesses;
+        self.local_unit_refinements = saved_unit_refinements;
         self.signature_witnesses = saved_signature_witnesses;
         self.bindings = saved; // Restore scope
         self.list_bindings = saved_list_bindings;
@@ -14773,7 +14792,7 @@ mod tests {
     /// Issue #318: the SHAPE-DERIVED `expand` size `shape(&x, 0)` must
     /// recover the broadcast extent from `x`'s already-lowered dim, NOT
     /// default to size 1. This lowers the exact Deep the Surf idiom
-    /// produces — `expand(scalar_to_tensor(c), 0, cast(shape(&x,
+    /// produces — `insert(scalar_to_tensor(c), 0, cast(shape(&x,
     /// cast(0,int32)), int32))` — directly through the `expand` lowering
     /// arm (bypassing the host-routing gate that keeps a `shape`-bearing
     /// *def* out of standalone DAG lowering), with `x: tensor[2]` bound.
@@ -15001,7 +15020,7 @@ mod tests {
     #[test]
     fn issue_369_expand_let_bound_shape_recovers_extent() {
         // (let {} (bind {} len (shape x 0))
-        //   (expand (scalar_to_tensor 3.0) 0 (cast len int32)))
+        //   (insert (scalar_to_tensor 3.0) 0 (cast len int32)))
         let body = r#"
             (let {}
                  (bind {}
@@ -16399,7 +16418,7 @@ mod tests {
     }
 
     /// chelis#369 end-to-end: the `tensor_full_like` loss body — `len =
-    /// shape(x, 0); twos = expand(scalar_to_tensor(2.0), 0, cast(len,
+    /// shape(x, 0); twos = insert(scalar_to_tensor(2.0), 0, cast(len,
     /// int32)); sum(mul(x, twos), 0)` — must construct a valid backward DAG
     /// and eval to the analytic gradient. `loss(x) = sum(2*x)`, so `df/dx =
     /// [2, 2, 2]`. Before the fix the `let`-bound `len` defaulted the expand
@@ -16414,7 +16433,7 @@ mod tests {
 
         // `def loss(x: tensor[3, f32]) = {
         //    len  = shape(x, 0)
-        //    twos = expand(scalar_to_tensor(2.0), 0, cast(len, int32))
+        //    twos = insert(scalar_to_tensor(2.0), 0, cast(len, int32))
         //    sum(mul(x, twos), 0) }`  -- the exact `tensor_full_like` shape.
         let body = r#"
             (let {}

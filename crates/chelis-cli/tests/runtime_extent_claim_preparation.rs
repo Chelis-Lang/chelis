@@ -1514,6 +1514,16 @@ fn omitted_extent_claim_contract() {
         let observation = observe(case);
         println!("{}: {}", case.id, observation);
         failures.extend(contract_failures(case, &observation));
+        if case.id.starts_with("checked.example.") {
+            let expected = "(tensor[unit, f32], tensor[d0, f32]) -> tensor[2, 2, f32]";
+            let actual = &observation["check"]["signatures"]["pair_and_scale"];
+            if actual != expected {
+                failures.push(format!(
+                    "{}.signature: expected {expected}, observed {actual}",
+                    case.id
+                ));
+            }
+        }
         if let Some(expected) = main_signature {
             let observed = &observation["check"]["signatures"]["main"];
             if observed != expected {
@@ -1706,6 +1716,11 @@ fn checked_extent_transforms_contract() {
                             } else {
                                 "2, 3".to_owned()
                             }
+                        } else if family == "unit" {
+                            // A named dimension retains its declaring spelling
+                            // in the signature. Values and failures below use
+                            // independent actual singleton/nonunit arguments.
+                            "unit".to_owned()
                         } else {
                             input.dims[0].to_string()
                         };

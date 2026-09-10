@@ -440,6 +440,15 @@ pub enum FusedInput {
     PreviousStep(usize),
 }
 
+/// The semantic diagnostic owner of an extent observation. This is separate
+/// from the parameter's display name and from the witness's node identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtentWitnessSite {
+    Caller,
+    LocalExpand,
+}
+
 /// A RISC primitive operation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RiscOp {
@@ -705,6 +714,7 @@ pub enum RiscOp {
     /// The node is created at call entry, before the callee body, and
     /// its enclosing invocation retains required checks through `shape_deps`.
     ExtentWitness {
+        site: ExtentWitnessSite,
         parameter: String,
         axis: RtAxis,
         requirements: Vec<chelis_types::ScalarValue>,
@@ -3529,6 +3539,7 @@ mod tests {
         let mut discovery_cases = all.clone();
         discovery_cases.extend([
             RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::Caller,
                 parameter: "x".into(),
                 axis: RtAxis::Lit(0),
                 requirements: vec![chelis_types::scalar_from_i64("load", Prim::Int64, 4).unwrap()],

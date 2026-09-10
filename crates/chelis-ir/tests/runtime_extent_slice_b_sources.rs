@@ -615,7 +615,7 @@ fn unsupported_but_well_typed_mapping_yields_the_registered_receipt_not_an_ice()
 
 /// The number of `RiscOp` variants the table below must construct. Bumping
 /// it without adding a row makes the coverage assertion fail.
-const RISC_OP_VARIANTS: usize = 60;
+const RISC_OP_VARIANTS: usize = 62;
 
 /// Adding a `RiscOp` variant breaks this match, which is what forces the
 /// table in `every_risc_op_yields_exactly_one_source_per_output_axis` to
@@ -684,6 +684,8 @@ fn variant_index(op: &RiscOp) -> usize {
         RiscOp::Relu => 57,
         RiscOp::ReluAdjoint => 58,
         RiscOp::ExtentWitness { .. } => 59,
+        RiscOp::CheckedReshapeExtent { .. } => 60,
+        RiscOp::CheckedUnitAxis { .. } => 61,
     }
 }
 
@@ -982,6 +984,7 @@ fn every_risc_op_yields_exactly_one_source_per_output_axis() {
     nodes.push(add(
         &mut dag,
         RiscOp::ExtentWitness {
+            site: chelis_ir::dag::ExtentWitnessSite::Caller,
             parameter: "f".into(),
             axis: RtAxis::Lit(0),
             requirements: vec![chelis_types::scalar_from_i64("load", Prim::Int64, 2).unwrap()],
@@ -1006,6 +1009,44 @@ fn every_risc_op_yields_exactly_one_source_per_output_axis() {
         RiscOp::synth_const_tensor(Prim::F32, vec![0.0; 6]),
         vec![],
         f32_23(),
+    ));
+
+    let operand = load(&mut dag, "unit", vec![named("unit"), DimInfo::Lit(3)]);
+    let witness = add(
+        &mut dag,
+        RiscOp::ExtentWitness {
+            site: chelis_ir::dag::ExtentWitnessSite::Caller,
+            parameter: "unit".into(),
+            axis: RtAxis::Lit(0),
+            requirements: vec![chelis_types::scalar_from_i64("load", Prim::Int64, 1).unwrap()],
+        },
+        vec![operand],
+        scalar(Prim::Int64),
+    );
+    let required = add(
+        &mut dag,
+        RiscOp::Const {
+            value: chelis_types::scalar_from_i64("reshape", Prim::Int64, 1).unwrap(),
+        },
+        vec![],
+        scalar(Prim::Int64),
+    );
+    nodes.push(add(
+        &mut dag,
+        RiscOp::CheckedReshapeExtent {
+            claim: "unit".into(),
+            axis: RtAxis::Lit(0),
+        },
+        vec![witness, required],
+        scalar(Prim::Int64),
+    ));
+    nodes.push(add(
+        &mut dag,
+        RiscOp::CheckedUnitAxis {
+            axis: RtAxis::Lit(0),
+        },
+        vec![operand, witness],
+        ty(vec![DimInfo::Lit(1), DimInfo::Lit(3)], Prim::F32),
     ));
 
     // Backend specialization and sparse.

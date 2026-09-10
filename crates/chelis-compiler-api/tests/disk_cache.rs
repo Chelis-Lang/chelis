@@ -110,6 +110,32 @@ const SNIPPET: &str =
     "module App.Eval\nimport Mylib.Math (add)\n\ndef main_value() -> int32 = add(3, 4)\n";
 
 #[test]
+fn previous_checked_extent_cache_is_rejected_before_payload_decode() {
+    use sha2::{Digest, Sha256};
+    let bytes = include_bytes!("fixtures/checked_extent_cache_v18/context-v18.ctx");
+    let producer: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/checked_extent_cache_v18/producer.json"
+    ))
+    .unwrap();
+    assert_eq!(producer["magic"], "CHELIS_CTX_V18");
+    assert!(bytes.starts_with(b"CHELIS_CTX_V18\n"));
+    assert_eq!(
+        format!("{:x}", Sha256::digest(bytes)),
+        producer["context_sha256"]
+    );
+    assert_eq!(producer["old_result"]["exit"], 0);
+    assert!(
+        producer["old_result"]["stdout"]
+            .as_str()
+            .unwrap()
+            .contains("shape=[3, 2]")
+    );
+    let error =
+        CompiledContext::decode(bytes).expect_err("genuine old producer lacks checked claims");
+    assert!(error.contains("magic"), "{error}");
+}
+
+#[test]
 fn cached_imports_preserve_computed_claims_and_unit_preconditions() {
     use chelis_compiler_api::schema::ExecutionValue;
     for (definition, good_argument, bad_argument, shape, values, operation, context) in [
@@ -170,7 +196,11 @@ fn cached_imports_preserve_computed_claims_and_unit_preconditions() {
                 assert_eq!(actual, values);
                 let error = eval_in_context(cached, &source(bad_argument))
                     .expect_err("mismatching claim must fail after cache admission")
-                    .to_string();
+                    .errors
+                    .iter()
+                    .map(|diagnostic| diagnostic.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 assert!(
                     error.contains(&format!("numeric trap: domain in {operation} at int64")),
                     "{error}"

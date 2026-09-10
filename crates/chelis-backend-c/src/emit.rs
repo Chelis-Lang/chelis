@@ -797,19 +797,30 @@ impl CEmitter {
             RiscOp::ConstTensor { data } => self.emit_const_tensor(id, data, &node.output_type),
             RiscOp::Shape { axis } => self.emit_shape(id, *axis, &node.inputs, &node.output_type),
             RiscOp::ExtentWitness {
+                site,
                 parameter,
                 axis: RtAxis::Lit(axis),
                 requirements,
             } => {
+                let operation = match site {
+                    chelis_ir::dag::ExtentWitnessSite::Caller => "load",
+                    chelis_ir::dag::ExtentWitnessSite::LocalExpand => "expand",
+                };
                 let input = node.inputs[0].0;
-                let parameter =
-                    chelis_ir::span_sanitize::sanitize_for_format_string(parameter).to_string();
+                let parameter = match site {
+                    chelis_ir::dag::ExtentWitnessSite::Caller => {
+                        chelis_ir::span_sanitize::sanitize_for_format_string(parameter).to_string()
+                    }
+                    chelis_ir::dag::ExtentWitnessSite::LocalExpand => format!("node {input}"),
+                };
                 for required in requirements {
                     let required = required.as_i64_exact().expect("verified int64 requirement");
                     self.line(&format!("if (t{input}_shape[{axis}] != {required}) {{"));
                     self.indent += 1;
-                    self.line(&format!("fprintf(stderr, \"extent `{required}`: claimed = {required}, {parameter} axis {axis} = %lld\\n\", (long long)t{input}_shape[{axis}]);"));
-                    self.line("chelis_numeric_trap(\"numeric trap: domain in load at int64\");");
+                    self.line(&format!("fprintf(stderr, \"extent `{required}`: claimed = %lld, {parameter} axis {axis} = %lld\\n\", (long long){required}, (long long)t{input}_shape[{axis}]);"));
+                    self.line(&format!(
+                        "chelis_numeric_trap(\"numeric trap: domain in {operation} at int64\");"
+                    ));
                     self.indent -= 1;
                     self.line("}");
                 }

@@ -2834,6 +2834,13 @@ pub enum WireRtAxis {
     Lit { value: i32 },
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireExtentWitnessSite {
+    Caller,
+    LocalExpand,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WireRiscOp {
@@ -2956,6 +2963,7 @@ pub enum WireRiscOp {
         axis: i32,
     },
     ExtentWitness {
+        site: WireExtentWitnessSite,
         parameter: String,
         axis: WireRtAxis,
         requirements: Vec<NonnegativeExtent>,
@@ -3084,6 +3092,7 @@ mod tests {
     #[test]
     fn extent_witness_wire_requires_claims_and_roundtrips_exactly() {
         let witness = WireRiscOp::ExtentWitness {
+            site: WireExtentWitnessSite::Caller,
             parameter: "x".into(),
             axis: WireRtAxis::Lit { value: 0 },
             requirements: vec![NonnegativeExtent::new(4).unwrap()],

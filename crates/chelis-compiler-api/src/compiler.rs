@@ -40,12 +40,12 @@ use crate::schema::{
     LowerResult, ParseRequest, ParseResult, RenameRequest, RenameResult, ReplaceFunctionRequest,
     ReplaceFunctionResult, RootManifestEntryResult, RootManifestResult, SourceKind, Span,
     ValidateMode, ValidateRequest, ValidateResult, WireBinOp, WireDag, WireDagNode,
-    WireDagSchemaError, WireDimExpr, WireDimInfo, WireExtremaKind, WireExtremaOperand,
-    WireFusedInput, WireFusedStep, WireFusedStepOp, WireImportKind, WireLetBinding, WireLetPattern,
-    WireMatchArm, WireParam, WirePattern, WirePropertyOption, WireRecordExprField,
-    WireRecordPatternField, WireRecordTypeField, WireRiscOp, WireRtAxis, WireRtDim, WireSurfDecl,
-    WireSurfExpr, WireSurfTypeExpr, WireTensorType, WireTypeInvariant, WireUnaryOp, WireVariant,
-    WireVariantFields,
+    WireDagSchemaError, WireDimExpr, WireDimInfo, WireExtentWitnessSite, WireExtremaKind,
+    WireExtremaOperand, WireFusedInput, WireFusedStep, WireFusedStepOp, WireImportKind,
+    WireLetBinding, WireLetPattern, WireMatchArm, WireParam, WirePattern, WirePropertyOption,
+    WireRecordExprField, WireRecordPatternField, WireRecordTypeField, WireRiscOp, WireRtAxis,
+    WireRtDim, WireSurfDecl, WireSurfExpr, WireSurfTypeExpr, WireTensorType, WireTypeInvariant,
+    WireUnaryOp, WireVariant, WireVariantFields,
 };
 use crate::schema::{stage_error, stage_error_with_span, unsupported_stage_error};
 use crate::source_wire::{SourceWireResult, wire_deep_expr, wire_literal};
@@ -6212,10 +6212,17 @@ fn wire_op(op: &RiscOp, precision: Prim) -> WireResult<WireRiscOp> {
             axis: wire_axis(*axis)?,
         },
         RiscOp::ExtentWitness {
+            site,
             parameter,
             axis: chelis_ir::dag::RtAxis::Lit(axis),
             requirements,
         } => WireRiscOp::ExtentWitness {
+            site: match site {
+                chelis_ir::dag::ExtentWitnessSite::Caller => WireExtentWitnessSite::Caller,
+                chelis_ir::dag::ExtentWitnessSite::LocalExpand => {
+                    WireExtentWitnessSite::LocalExpand
+                }
+            },
             parameter: parameter.clone(),
             axis: WireRtAxis::Lit { value: *axis },
             requirements: requirements
@@ -6360,6 +6367,7 @@ mod tests {
             .collect();
         let witness = dag.add_node(
             RiscOp::ExtentWitness {
+                site: chelis_ir::dag::ExtentWitnessSite::Caller,
                 parameter: "x".into(),
                 axis: RtAxis::Lit(0),
                 requirements,
@@ -6393,7 +6401,7 @@ mod tests {
         let dag = native_wire_witness_fixture();
         let projected = wire_dag(&dag).unwrap();
         let json = serde_json::to_value(&projected).unwrap();
-        assert_eq!(json["schema_version"], 9);
+        assert_eq!(json["schema_version"], 10);
         assert_eq!(
             json["nodes"][1]["op"]["requirements"],
             serde_json::json!([4, 4, 9])

@@ -45,6 +45,7 @@ fn unit_axis(dag: &mut Dag) -> (NodeId, NodeId, NodeId) {
     );
     let witness = dag.add_node(
         RiscOp::ExtentWitness {
+            site: chelis_ir::dag::ExtentWitnessSite::Caller,
             parameter: "b".into(),
             axis: RtAxis::Lit(0),
             requirements: vec![scalar_from_i64("load", Prim::Int64, 1).unwrap()],
@@ -76,7 +77,7 @@ fn computed_claim_checks_independent_values_before_returning_a_scalar() {
         let result = eval_tensor_with(&dag, |_| None);
         if actual == 2 {
             let values = result.unwrap();
-            assert_eq!(values[&checked].shape, []);
+            assert!(values[&checked].shape.is_empty());
             assert_eq!(
                 values[&checked].storage().scalar_at(0).as_i64_exact(),
                 Some(2)
@@ -284,6 +285,54 @@ fn vectorization_transports_checked_shapes_and_shifts_observed_axes() {
             assert!(error.contains("claimed = 2, reshape axis 1 = 3"), "{error}");
             assert!(
                 error.contains("numeric trap: domain in reshape at int64"),
+                "{error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn vectorization_keeps_local_unit_failure_at_the_observed_node() {
+    for actual in [1, 2] {
+        let mut dag = Dag::new();
+        let (_, witness, checked) = unit_axis(&mut dag);
+        if let RiscOp::ExtentWitness { site, .. } = &mut dag.node_mut(witness).unwrap().op {
+            *site = chelis_ir::dag::ExtentWitnessSite::LocalExpand;
+        }
+        dag.add_root(checked);
+        let mapped = chelis_ir::vmap::vectorize_axis0(&dag, DimInfo::Lit(2)).unwrap();
+        assert!(chelis_ir::verify::verify(&mapped).is_empty());
+        let result = eval_tensor_with(&mapped, |_| {
+            Some(TensorValue::from_vec(
+                vec![2, actual],
+                vec![5.0; 2 * actual],
+            ))
+        });
+        if actual == 1 {
+            let values = result.unwrap();
+            assert_eq!(values[&mapped.roots()[0]].shape, [2, 1]);
+            assert_eq!(values[&mapped.roots()[0]].to_f64_lossy_vec(), [5.0, 5.0]);
+        } else {
+            let error = result.unwrap_err();
+            let witness = mapped
+                .nodes()
+                .iter()
+                .find(|node| {
+                    matches!(
+                        node.op,
+                        RiscOp::ExtentWitness {
+                            site: chelis_ir::dag::ExtentWitnessSite::LocalExpand,
+                            ..
+                        }
+                    )
+                })
+                .unwrap();
+            assert!(
+                error.contains(&format!("node {} axis 1 = 2", witness.inputs[0].0)),
+                "{error}"
+            );
+            assert!(
+                error.contains("numeric trap: domain in expand at int64"),
                 "{error}"
             );
         }

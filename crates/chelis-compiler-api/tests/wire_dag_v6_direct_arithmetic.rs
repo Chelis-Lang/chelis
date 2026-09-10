@@ -37,7 +37,7 @@ fn direct_sub_payload(version: Option<u32>) -> String {
 
 fn count_payload(axes: &[i32]) -> String {
     serde_json::json!({
-        "schema_version": 9,
+        "schema_version": 10,
         "nodes": [
             {
                 "id": 0,
@@ -99,13 +99,13 @@ fn assert_version_rejected_before_node_decode(payload: &str, expected: &str) {
 
 #[test]
 fn current_exact_wire_round_trips_direct_sub_identity() {
-    assert_eq!(WIRE_DAG_SCHEMA_VERSION, 9);
+    assert_eq!(WIRE_DAG_SCHEMA_VERSION, 10);
     let payload = direct_sub_payload(Some(9));
     let decoded = WireDag::from_validated_json(&payload).expect("exact current Sub must decode");
     assert!(matches!(decoded.nodes[2].op, WireRiscOp::Sub));
 
     let encoded = serde_json::to_value(&decoded).expect("exact current Sub must re-encode");
-    assert_eq!(encoded["schema_version"], 9);
+    assert_eq!(encoded["schema_version"], 10);
     assert_eq!(encoded["nodes"][2]["op"]["kind"], "sub");
 }
 
@@ -182,7 +182,7 @@ fn current_wire_has_no_legacy_pad_migration_or_raw_fill_spelling() {
     assert_version_rejected_before_node_decode(legacy, "4");
 
     let mut raw_current: serde_json::Value = serde_json::from_str(legacy).unwrap();
-    raw_current["schema_version"] = 9.into();
+    raw_current["schema_version"] = 10.into();
     raw_current["nodes"][0]["shape_deps"] = serde_json::json!([]);
     raw_current["nodes"][0]["span_id"] = serde_json::Value::Null;
     raw_current["nodes"][0]["merged_spans"] = serde_json::json!([]);
