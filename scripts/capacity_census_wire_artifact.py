@@ -29,7 +29,7 @@ def artifact_cases():
                 2 if version == 2 else None,
                 None if version == 2 else "artifact ABI version",
             )
-    for index, text in enumerate(("null", "true", '"1"', "-1", "1.0", "4294967296")):
+    for index, text in enumerate(("null", "true", '"2"', "-1", "2.0", "4294967296")):
         add("ArtifactAbiVersion", "json", f"invalid-{index}", text, None)
 
     base = {
@@ -63,6 +63,10 @@ def artifact_cases():
             expected,
         )
     add("CompiledArtifactManifest", "json", "empty", canonical(base), base)
+    add(
+        "CompiledArtifactManifest", "json", "legacy-valid-metadata",
+        canonical({**base, "abi_version": 1}), None, "artifact ABI version",
+    )
     optional = {**base, "device_entry_name": "device", "symbolic_dims": ["n"]}
     add("CompiledArtifactManifest", "json", "optional", canonical(optional), optional)
     for version in (0, 1, 3, 4294967295):
@@ -95,6 +99,8 @@ def artifact_cases():
             ',"abi_version":"2"',
             ',"abi_version":4294967295',
             ',"abi_version":2,"abi_version":2',
+            ',"abi_version":1,"abi_version":2',
+            ',"abi_version":2,"abi_version":1',
         )
     ):
         add(
