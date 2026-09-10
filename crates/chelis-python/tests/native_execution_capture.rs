@@ -117,7 +117,7 @@ fn actual_child_failure_preserves_command_status_and_both_streams() {
         serde_json::from_slice(&std::fs::read(directory.path().join("compiler.json")).unwrap())
             .unwrap();
     assert_eq!(record["returncode"], 7);
-    assert_eq!(record["command"][0], executable);
+    assert_eq!(record["command"][0], executable.as_str());
     assert!(!directory.path().join("completion.json").exists());
 }
 
