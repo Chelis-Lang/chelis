@@ -1697,6 +1697,16 @@ fn emit_function(
             ));
         }
     }
+    let entry = ownership_sites
+        .iter()
+        .find(|site| site.kind == chelis_ir::ownership::HostSiteKind::FunctionEntry)
+        .ok_or_else(|| {
+            invalid_abi_shape(
+                "verified host function has no FunctionEntry site".to_string(),
+                "verified C host ownership emission",
+            )
+        })?;
+    emitter.emit_entry_terminals(entry, authored)?;
     emitter.emit_expr_to_var(&function.body, "__result", &function.ret_ty)?;
     let terminal = ownership_sites
         .iter()
@@ -2951,6 +2961,37 @@ impl<'a> HostEmitter<'a> {
         let ty = Self::owner_abi_type(owner)?;
         if let Some(release) = release_call(&var, &ty) {
             self.lines.push(format!("{}{release}", self.indent));
+        }
+        Ok(())
+    }
+
+    fn emit_entry_terminals(
+        &mut self,
+        site: &ProjectedHostSite<'a>,
+        authored: bool,
+    ) -> Result<(), Unsupported> {
+        // The ABI wrapper implements the authored entry's clones and jump.
+        // Its target owners are bound to the body parameters above. Emit each
+        // projected terminal once here: an edge terminal and its Operation
+        // projection have the same identity, not two independent releases.
+        // Internal specializations have no adapter edge, but can have drops
+        // scheduled directly at block entry.
+        for action in &site.directives {
+            match action {
+                VerifiedHostAction::Operation(VerifiedHostOperation::Drop { owner, .. }) => {
+                    self.emit_owner_drop(owner.owner())?;
+                }
+                VerifiedHostAction::Operation(VerifiedHostOperation::Discard { .. }) => {}
+                VerifiedHostAction::Operation(VerifiedHostOperation::Clone { .. })
+                | VerifiedHostAction::Terminator(VerifiedHostTerminator::Jump { .. })
+                    if authored => {}
+                other => {
+                    return Err(invalid_abi_shape(
+                        format!("unexpected verified function-entry action {other:?}"),
+                        "verified C host ownership emission",
+                    ));
+                }
+            }
         }
         Ok(())
     }
