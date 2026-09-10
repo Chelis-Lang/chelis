@@ -39,7 +39,10 @@ fn hip_materialization_does_not_authorize_unimplemented_narrow_float_arithmetic(
         let error = reject_unsupported_hip_ops(&dag(precision, false))
             .expect_err("Realize support must not admit unimplemented arithmetic");
         assert!(
-            error.errors.iter().any(|diagnostic| diagnostic.message.contains("narrow-float compute")),
+            error
+                .errors
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("narrow-float compute")),
             "{error:?}"
         );
     }
