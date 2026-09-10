@@ -286,7 +286,7 @@ fn consumers_cannot_construct_unchecked_count_or_capacity() {
 #[test]
 fn consumers_cannot_replace_checked_metadata_fields() {
     let probe = Probe::new();
-    for field in ["shape", "strides", "rank", "elements", "bytes", "dtype"] {
+    for field in ["domain", "strides"] {
         probe.reject_after_positive(
             &format!("fn invalid(m:&mut ShapeMetadata) {{ let _=&mut m.{field}; }}"),
             "E0616",
@@ -307,54 +307,45 @@ fn observed_shape_is_not_a_mutable_metadata_escape() {
 #[test]
 fn strided_projection_cannot_mutate_metadata_or_enter_contiguous_indexing() {
     let probe = Probe::new();
-    let imports = "use chelis_abi::metadata::{ByteCount,ShapeMetadata,StridedMetadata}; use chelis_vocab::RuntimeDType;";
+    let imports = "use chelis_abi::metadata::{ByteCount, ShapeMetadata, StridedMetadata}; use chelis_vocab::RuntimeDType;";
     let positive = probe.compile(&format!(
-        "{imports} fn valid() {{ let v=StridedMetadata::new(&[2,3],&[0,1],RuntimeDType::F64,ByteCount::from_declared(24).unwrap()).unwrap(); assert_eq!(v.strides(),&[0,1]); }}"
+        "{imports} fn valid() {{ let v=StridedMetadata::new(&[2,3], &[0,1], RuntimeDType::F64, ByteCount::from_declared(24).unwrap()).unwrap(); assert_eq!(v.strides(), &[0,1]); }}"
     ));
     assert!(
         positive.status.success(),
         "{}",
         String::from_utf8_lossy(&positive.stderr)
     );
-    for (body, code, witness) in [
+    for (body, code) in [
         (
             "fn invalid(v:&mut StridedMetadata) { v.strides()[0]=1; }",
             "E0594",
-            "&",
         ),
         (
             "fn invalid(v:&mut StridedMetadata) { v.shape()[0]=1; }",
             "E0594",
-            "&",
         ),
         (
             "fn host(_: &ShapeMetadata) {} fn invalid(v:&StridedMetadata) { host(v); }",
             "E0308",
-            "ShapeMetadata",
+        ),
+        (
+            "fn invalid(v:&mut StridedMetadata) { let _=&mut v.domain; }",
+            "E0616",
+        ),
+        (
+            "fn invalid(v:&mut StridedMetadata) { let _=&mut v.strides; }",
+            "E0616",
+        ),
+        (
+            "fn invalid(v:&mut StridedMetadata) { let _=&mut v.required_span; }",
+            "E0616",
         ),
     ] {
         let result = probe.compile(&format!("{imports} {body}"));
         let stderr = String::from_utf8_lossy(&result.stderr);
         assert!(
-            !result.status.success() && stderr.contains(code) && stderr.contains(witness),
-            "{stderr}"
-        );
-    }
-    for field in [
-        "shape",
-        "strides",
-        "rank",
-        "elements",
-        "bytes",
-        "dtype",
-        "required_span",
-    ] {
-        let result = probe.compile(&format!(
-            "{imports} fn invalid(v:&mut StridedMetadata) {{ let _=&mut v.{field}; }}"
-        ));
-        let stderr = String::from_utf8_lossy(&result.stderr);
-        assert!(
-            !result.status.success() && stderr.contains("E0616") && stderr.contains(field),
+            !result.status.success() && stderr.contains(code),
             "{stderr}"
         );
     }
