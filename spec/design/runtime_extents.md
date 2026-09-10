@@ -354,8 +354,9 @@ carriers to the construction and consumer inventory above:
   target producer when only a discarded result's check remains live. Thus a
   later target's arithmetic failure precedes a reshape claim check, as §4.7.3
   requires. Existing static arithmetic folding is retained only when producing
-  literals or external literal axes checked at entry independently prove the
-  source extents. Folded source dependencies and the scalar claim carrier remain;
+  literals, external literal axes checked at entry, constant scalar dataflow,
+  or a prior checked scalar with a literal requirement independently establish
+  the source extents. Folded source dependencies and the scalar claim carrier remain;
   computed result metadata cannot supply a proof. Its computed axis has a fresh
   runtime identity; the declared requirement remains an explicit checked edge.
 - `CheckedUnitAxis { axis }` consumes the original tensor and that same
@@ -421,7 +422,7 @@ cargo nextest run -p chelis-cli -p chelis-ir -p chelis-compiler-api --lib \
 
 The new public matrix has 117 initial exported/binding/main fixtures, 69
 result-graph fixtures, 48 complete-shape-list scheduling fixtures,
-six folded-source caller-guard fixtures,
+six folded-source caller-contract fixtures and 24 producing-source expression fixtures,
 three executable example controls, 24 grad/vmap controls
 and 12 imported-call controls. Every
 case checks declarations independently of actual shape/value or required

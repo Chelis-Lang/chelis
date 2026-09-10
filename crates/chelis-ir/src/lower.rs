@@ -11823,8 +11823,9 @@ impl LowerCtx {
         })
     }
 
-    /// Resolve only a producing literal or an external axis whose literal
-    /// declaration is checked at entry. Computed result metadata is no proof.
+    /// Resolve a producing literal, an external literal axis checked at entry,
+    /// or a prior checked scalar's literal refinement. Result metadata alone
+    /// is no proof; every checked producer remains a dependency of the fold.
     fn independently_known_axis_extent(&self, id: NodeId, axis: usize) -> Option<i64> {
         use crate::axis_sources::AxisSource;
         match crate::axis_sources::output_axis_sources(&self.dag, id).get(axis)? {
@@ -11842,6 +11843,30 @@ impl LowerCtx {
                 *self.dag.get(id)?.inputs.get(*input)?,
                 usize::try_from(*axis).ok()?,
             ),
+            AxisSource::ScalarInput { input } => {
+                self.independently_known_scalar_extent(*self.dag.get(id)?.inputs.get(*input)?)
+            }
+            _ => None,
+        }
+    }
+
+    fn independently_known_scalar_extent(&self, id: NodeId) -> Option<i64> {
+        let node = self.dag.get(id)?;
+        if !node.output_type.dims.is_empty() || node.output_type.precision != Prim::Int64 {
+            return None;
+        }
+        match &node.op {
+            RiscOp::Const { value } if value.prim() == Prim::Int64 => {
+                value.as_i64_exact().filter(|value| *value >= 0)
+            }
+            RiscOp::Copy => self.independently_known_scalar_extent(*node.inputs.first()?),
+            // After all checks succeed, actual and required values agree.
+            // Retaining the producing tensor keeps every check executable,
+            // including when a known actual contradicts a known requirement.
+            RiscOp::CheckedReshapeExtent { .. } => node
+                .inputs
+                .iter()
+                .find_map(|input| self.independently_known_scalar_extent(*input)),
             _ => None,
         }
     }
@@ -11860,8 +11885,8 @@ impl LowerCtx {
     /// `symbolic_occurrences` ICE'd on.
     ///
     /// Exactness contract: folds ONLY when every leaf is independently static.
-    ///   - producing literal axes and literal external declarations checked at
-    ///     entry supply proof; computed result metadata does not,
+    ///   - producing literal axes, external declarations checked at entry, and
+    ///     prior checked scalar refinements supply proof; result metadata does not,
     ///   - a symbolic or computed operand axis returns `None`, preserving the
     ///     ordinary runtime scalar path and its checks,
     ///   - every folded shape source remains a dependency of the consumer,
@@ -11887,18 +11912,8 @@ impl LowerCtx {
         // in `shape_bindings`) of a statically-sized operand axis folds to
         // that extent; a symbolic extent fails the fold.
         if let Some((operand, axis)) = self.shape_app_operand_axis_resolved(expr) {
-            // Speculation must not lower a call and then lower it again when
-            // the fold declines. Inspect an already-bound source first; all
-            // other expressions stay on the ordinary runtime path.
-            let mut binding = &operand;
-            while let Some((DeepTag::Borrow, _, children)) = stamped_parts(binding) {
-                binding = children.first()?;
-            }
-            let name = bare_var_name(binding)?;
-            let bound = self.bindings.get(&name)?.as_single_node()?;
-            let value = self.independently_known_axis_extent(bound, axis)?;
-            // This bound read is idempotent and preserves its source spans.
             let operand_id = self.lower_expr(&operand).as_single_node()?;
+            let value = self.independently_known_axis_extent(operand_id, axis)?;
             if !sources.contains(&operand_id) {
                 sources.push(operand_id);
             }
@@ -14821,8 +14836,16 @@ mod tests {
         );
         assert_eq!(
             ctx.independently_known_axis_extent(reshape, 0),
+            Some(2),
+            "the actual scalar value, not result metadata, establishes the extent"
+        );
+        ctx.dag.node_mut(actual).unwrap().op = RiscOp::Load {
+            name: "size".into(),
+        };
+        assert_eq!(
+            ctx.independently_known_axis_extent(reshape, 0),
             None,
-            "an operation's result claim cannot certify a scalar target"
+            "an operation's result claim cannot certify an unknown scalar target"
         );
     }
 

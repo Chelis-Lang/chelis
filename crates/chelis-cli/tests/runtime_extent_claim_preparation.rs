@@ -508,10 +508,9 @@ fn observe_with_dependency(case: &Case, library: Option<&str>) -> Value {
         let c_path = out.join("fixture.c");
         let mut source = fs::read_to_string(&c_path).expect("generated C");
         let args = if let Some(inputs) = &case.exported {
-            assert!(
-                !source.contains("int main("),
-                "export fixture unexpectedly contains an entry"
-            );
+            // A nullary helper also creates an observation entry. Exercise
+            // f through the independent exported caller below.
+            source = source.replacen("int main(", "int fixture_generated_main(", 1);
             let header = fs::read_to_string(out.join("fixture.h")).expect("exported header");
             let (driver, args) = driver(inputs, &header);
             source.push_str(&driver);
@@ -1287,6 +1286,53 @@ fn helper_signature_guard_order_contract() {
 
 /// Result claims follow axis provenance, including an inferred helper result.
 /// Each call route checks the declared type independently of either runtime.
+#[test]
+fn static_reshape_folding_accepts_producing_source_expressions() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut cases = Vec::new();
+    for n in [2, 3] {
+        let source = literal(&vector(n));
+        for (kind, helper, operand) in [
+            ("literal", String::new(), source.clone()),
+            ("helper", format!("def g() = {source}\n"), "g()".to_owned()),
+            (
+                "checked_helper",
+                "def g(y: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(y, [floor_div(shape(y, 0i32), 2i64), 2i64])\n".to_owned(),
+                format!("g({})", literal(&vector(n * 2))),
+            ),
+            (
+                "inferred_computed_helper",
+                "def g(y: tensor[n, f32]) = reshape(y, [floor_div(shape(y, 0i32), 2i64), 2i64])\n".to_owned(),
+                format!("g({})", literal(&vector(n * 2))),
+            ),
+        ] {
+            call_matrix(
+                &mut cases,
+                &format!("static_reshape_expression.{kind}.x{n}"),
+                1686,
+                &format!("{helper}def f(x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [floor_div(shape({operand}, 0i32), 1i64), 2i64])"),
+                "(tensor[d0, f32]) -> tensor[2, 2, f32]",
+                vec![vector(4)],
+                if n == 2 { Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]) }
+                else { Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"]) },
+            );
+        }
+    }
+    assert_eq!(cases.len(), 24);
+    let mut failures = Vec::new();
+    for case in cases {
+        let observed = observe(&case);
+        println!("{}: {}", case.id, observed);
+        failures.extend(contract_failures(&case, &observed));
+        if case.source.contains("def main()")
+            && observed["check"]["signatures"]["main"] != "() -> tensor[2, 2, f32]"
+        {
+            failures.push(format!("{}: declared main shape changed", case.id));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 #[test]
 fn static_reshape_folding_preserves_declaring_input_contract() {
     assert!(gcc_available(), "C toolchain required; no lane may skip");
