@@ -158,7 +158,7 @@ fn json_object_serialization_is_recursive_canonical_unicode_order_in_eval_and_c(
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-import Std.Io.Json (JsonNull, JsonInt, JsonFloat, JsonObject, to_json)
+import Std.Io.Json (JsonNull, JsonInt, JsonFloat, JsonObject, parse_json, to_json)
 
 ba = to_json(JsonObject(dict_of([
   ("b", JsonInt(cast(1, int64))),
@@ -169,6 +169,7 @@ ab = to_json(JsonObject(dict_of([
   ("b", JsonInt(cast(1, int64)))
 ])))
 equal_mappings = eq(ba, ab)
+empty_object = to_json(parse_json("{}"))
 nested = to_json(JsonObject(dict_of([
   ("outer", JsonObject(dict_of([
     ("z", JsonInt(cast(3, int64))),
@@ -191,6 +192,7 @@ unicode_and_escaped = to_json(JsonObject(dict_of([
         "ba = {\"a\":2.0,\"b\":1}",
         "ab = {\"a\":2.0,\"b\":1}",
         "equal_mappings = true",
+        "empty_object = {}",
         "nested = {\"a\":null,\"outer\":{\"m\":4,\"z\":3}}",
         "unicode_and_escaped = {\"a\\\"\":1,\"a\\\\\":2,\"é\":3,\"😀\":4}",
     ] {

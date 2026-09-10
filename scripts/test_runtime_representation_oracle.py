@@ -427,6 +427,11 @@ class ManifestTests(unittest.TestCase):
         self.assertTrue(any("chelis-backend-c" in command and "checked_c_movement" in command for command in commands))
         self.assertTrue(any("exec_compile" in command and "test(checked_c_movement_)" in command for command in commands))
 
+    def test_checked_json_scratch_requires_lifetime_controls_and_native_execution(self) -> None:
+        commands = [leg.argv for leg in oracle.phase0_legs()]
+        self.assertTrue(any("chelis-backend-c" in command and "checked_c_json_scratch" in command for command in commands))
+        self.assertTrue(any("issue_1314_json_bigint" in command and "test(=json_object_serialization_is_recursive_canonical_unicode_order_in_eval_and_c)" in command for command in commands))
+
     def test_checked_windows_require_source_controls_and_native_execution(self) -> None:
         commands = [leg.argv for leg in oracle.phase0_legs()]
         self.assertTrue(any("chelis-backend-c" in command and "checked_c_window" in command for command in commands))
