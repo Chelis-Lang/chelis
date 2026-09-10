@@ -120,6 +120,16 @@ class SemanticAuthorityTests(unittest.TestCase):
         with self.assertRaisesRegex(registry.RegistryError, "ambiguous"):
             semantics.validate_semantics(self.rows, changed)
 
+    def test_sparse_diagnostic_references_do_not_confer_builtin_authority(self):
+        semantics.validate_semantics(self.rows, self.spec)
+        for operation in ("gather", "scatter", "scatter_replace", "scatter_elements"):
+            identity = next(name for name in self.rows if name.split(":")[1] == operation)
+            wrong = {**self.rows, identity: "[05-OP-33]"}
+            with self.subTest(operation=operation), self.assertRaisesRegex(
+                registry.RegistryError, "govern"
+            ):
+                semantics.validate_semantics(wrong, self.spec)
+
     def test_actual_contract_does_not_require_field_labels(self):
         import re
         changed = re.sub(r"\b(?:Signature|Domain|Result|Failure|Adjoint|Accumulator):", "", self.spec)
