@@ -2718,12 +2718,28 @@ fn repo_root() -> PathBuf {
 /// closure is followed by the real preprocessor, so an export added to a
 /// transitively-included header - or hidden behind a macro - is visible.
 fn preprocessed_headers(include_dir: &Path, roots: &[&str]) -> BTreeMap<String, String> {
+    preprocessed_headers_with_environment(
+        include_dir,
+        roots,
+        &c_preprocessor::Environment::native_c(),
+    )
+}
+
+/// Backend headers use explicit C++/Objective-C++ SDK lanes while retaining
+/// the primary census's attribution, type-word and context-invariance rules.
+fn preprocessed_headers_with_environment(
+    include_dir: &Path,
+    roots: &[&str],
+    environment: &c_preprocessor::Environment<'_>,
+) -> BTreeMap<String, String> {
     let sources = header_source_closure(include_dir, roots);
     assert_no_line_directives(&sources);
     assert_context_invariant_headers(include_dir, roots);
     let mut per_file: BTreeMap<String, String> = BTreeMap::new();
     for root in roots {
-        for (name, text) in preprocess_root(include_dir, root) {
+        let preprocessed = c_preprocessor::preprocess_root(include_dir, root, environment)
+            .unwrap_or_else(|error| panic!("{}{}{}", teaching_header(), error, teaching_footer()));
+        for (name, text) in preprocessed {
             if let Some(previous) = per_file.get(&name) {
                 let previous_rows = header_rows_local(&name, previous);
                 let current_rows = header_rows_local(&name, &text);
@@ -3503,18 +3519,6 @@ fn comment_stripping_respects_string_and_character_literals() {
         c_lexical::strip_c_comments("char c = '/'; // tail\n"),
         "char c = '/'; \n"
     );
-}
-
-/// Run the REAL C preprocessor over a root header and return its output
-/// attributed per header file via linemarkers, restricted to files under
-/// `include_dir` (system-header content is dropped). This is the
-/// compiled-artifact requirement made literal: `#define`-hidden spellings
-/// arrive expanded, so the re-red-team's macro evasion is visible. A
-/// missing C compiler fails LOUDLY - a skip here would be an evasion
-/// channel.
-fn preprocess_root(include_dir: &Path, root: &str) -> BTreeMap<String, String> {
-    c_preprocessor::preprocess_root(include_dir, root, &c_preprocessor::Environment::native_c())
-        .unwrap_or_else(|error| panic!("{}{}{}", teaching_header(), error, teaching_footer()))
 }
 
 /// Extract exported declarations and struct layouts from one preprocessed
