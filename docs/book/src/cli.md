@@ -148,6 +148,10 @@ Use this loop for project files and generated shell output. `fmt` makes the sour
 canonical, `lint --check` catches naming/style drift, and the later commands re-run the
 same gate before doing semantic work.
 
+When the compiled C program hits a runtime arithmetic trap, output from
+preceding effects is retained even when redirected to a pipe or file. The
+program still fails, and effects after the trap do not run.
+
 When `chelis eval --file` runs from inside a Reef package root, ad hoc
 snippet files can import package modules even if the snippet file
 itself lives outside `src/` and does not declare a top-level `module`.
