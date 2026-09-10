@@ -7,7 +7,7 @@ use std::process::Command;
 
 fn rendered_header() -> String {
     format!(
-        "{}\n{}",
+        "#include \"chelis_runtime_dtype.h\"\n{}\n{}",
         chelis_abi::render::host_views_header(),
         chelis_abi::render::device_descriptor_header()
     )
@@ -43,6 +43,8 @@ mod owner {
             let _: i64 = packet.count;
             let _: i64 = packet.byte_capacity;
             let _: u8 = packet.dtype;
+            let _: u8 = packet.ownership;
+            let _: [u8; 2] = packet.reserved;
         }
         let _ = (read_fields, write_fields, device_fields);
         vec![
@@ -54,6 +56,10 @@ mod owner {
             offset_of!(ReadView, reserved),
             size_of::<WriteView>(),
             align_of::<WriteView>(),
+            offset_of!(WriteView, data),
+            offset_of!(WriteView, count),
+            offset_of!(WriteView, dtype),
+            offset_of!(WriteView, reserved),
             size_of::<DeviceDescriptor>(),
             align_of::<DeviceDescriptor>(),
             offset_of!(DeviceDescriptor, data),
@@ -63,15 +69,26 @@ mod owner {
             offset_of!(DeviceDescriptor, count),
             offset_of!(DeviceDescriptor, byte_capacity),
             offset_of!(DeviceDescriptor, dtype),
+            offset_of!(DeviceDescriptor, ownership),
+            offset_of!(DeviceDescriptor, reserved),
         ]
+    }
+}
+
+struct ProbeDirectory(std::path::PathBuf);
+
+impl Drop for ProbeDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
 fn compile_and_run(header: &str, name: &str) -> std::process::Output {
     let directory = std::env::temp_dir().join(format!("chelis-abi-{}-{name}", std::process::id()));
     std::fs::create_dir(&directory).expect("unique probe directory");
-    let source = directory.join("probe.c");
-    let binary = directory.join("probe");
+    let directory = ProbeDirectory(directory);
+    let source = directory.0.join("probe.c");
+    let binary = directory.0.join("probe");
     let body = r#"
 #include <stdio.h>
 #include <stddef.h>
@@ -81,17 +98,24 @@ int main(void) {
     P(offsetof(chelis_read_view,data)); P(offsetof(chelis_read_view,count));
     P(offsetof(chelis_read_view,dtype)); P(offsetof(chelis_read_view,reserved));
     P(sizeof(chelis_write_view)); P(_Alignof(chelis_write_view));
+    P(offsetof(chelis_write_view,data)); P(offsetof(chelis_write_view,count));
+    P(offsetof(chelis_write_view,dtype)); P(offsetof(chelis_write_view,reserved));
     P(sizeof(chelis_gpu_tensor)); P(_Alignof(chelis_gpu_tensor));
     P(offsetof(chelis_gpu_tensor,data)); P(offsetof(chelis_gpu_tensor,shape));
     P(offsetof(chelis_gpu_tensor,strides)); P(offsetof(chelis_gpu_tensor,rank));
     P(offsetof(chelis_gpu_tensor,count)); P(offsetof(chelis_gpu_tensor,byte_capacity));
-    P(offsetof(chelis_gpu_tensor,dtype));
+    P(offsetof(chelis_gpu_tensor,dtype)); P(offsetof(chelis_gpu_tensor,ownership));
+    P(offsetof(chelis_gpu_tensor,reserved));
     return 0;
 }
 "#;
     std::fs::write(&source, format!("{header}\n{body}")).unwrap();
+    let runtime_include =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../chelis-runtime/include");
     let compile = Command::new("cc")
         .args(["-std=c11", "-Wall", "-Wextra", "-Werror"])
+        .arg("-I")
+        .arg(runtime_include)
         .arg(&source)
         .arg("-o")
         .arg(&binary)
@@ -105,7 +129,6 @@ int main(void) {
     let output = Command::new(&binary)
         .output()
         .expect("execute layout probe");
-    std::fs::remove_dir_all(&directory).expect("remove own completed probe");
     output
 }
 

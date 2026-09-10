@@ -1261,20 +1261,6 @@
     },
     {
       "kind": "header-struct",
-      "id": "chelis_runtime.h: typedef struct { const void * data ; int64_t count ; chelis_dtype dtype ; uint8_t reserved [ 7 ] ; } chelis_read_view",
-      "flags": [
-        "numeric-op"
-      ]
-    },
-    {
-      "kind": "header-struct",
-      "id": "chelis_runtime.h: typedef struct { void * data ; int64_t count ; chelis_dtype dtype ; uint8_t reserved [ 7 ] ; } chelis_write_view",
-      "flags": [
-        "numeric-op"
-      ]
-    },
-    {
-      "kind": "header-struct",
       "id": "chelis_runtime.h: typedef struct { void * handle ; } chelis_string",
       "flags": []
     },
@@ -1287,6 +1273,20 @@
       "kind": "header-struct",
       "id": "chelis_runtime_dtype.h: enum { CHELIS_DTYPE_F32 = 0 , CHELIS_DTYPE_F64 = 1 , CHELIS_DTYPE_I32 = 2 , CHELIS_DTYPE_BOOL = 3 , CHELIS_DTYPE_I64 = 4 , CHELIS_DTYPE_BF16 = 5 , CHELIS_DTYPE_F16 = 6 , CHELIS_DTYPE_I8 = 7 , CHELIS_DTYPE_I16 = 8 }",
       "flags": []
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime_views.h: typedef struct { const void * data ; int64_t count ; chelis_dtype dtype ; uint8_t reserved [ 7 ] ; } chelis_read_view",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime_views.h: typedef struct { void * data ; int64_t count ; chelis_dtype dtype ; uint8_t reserved [ 7 ] ; } chelis_write_view",
+      "flags": [
+        "numeric-op"
+      ]
     },
     {
       "kind": "std-adt-numeric",

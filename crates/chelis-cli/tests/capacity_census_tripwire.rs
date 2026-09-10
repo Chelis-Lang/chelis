@@ -669,13 +669,13 @@ const FINAL_TAGGED_TRANSPORT_ROWS: &[StaticSurfaceDescriptor] = &[
     StaticSurfaceDescriptor::new(
         PRIMARY_CENSUS_FAMILY,
         "header-struct",
-        "chelis_runtime.h: typedef struct { const void * data ; int64_t count ; chelis_dtype dtype ; uint8_t reserved [ 7 ] ; } chelis_read_view",
+        "chelis_runtime_views.h: typedef struct { const void * data ; int64_t count ; chelis_dtype dtype ; uint8_t reserved [ 7 ] ; } chelis_read_view",
         &["numeric-op"],
     ),
     StaticSurfaceDescriptor::new(
         PRIMARY_CENSUS_FAMILY,
         "header-struct",
-        "chelis_runtime.h: typedef struct { void * data ; int64_t count ; chelis_dtype dtype ; uint8_t reserved [ 7 ] ; } chelis_write_view",
+        "chelis_runtime_views.h: typedef struct { void * data ; int64_t count ; chelis_dtype dtype ; uint8_t reserved [ 7 ] ; } chelis_write_view",
         &["numeric-op"],
     ),
     StaticSurfaceDescriptor::new(
