@@ -5887,9 +5887,14 @@ fn lower_host_expr_kind(
             // raises the same fatal branded diagnostic as the IR-lane
             // `lower_cast` - the build lane previously typed it Unknown,
             // fell back to the inferred operand type, and shipped a
-            // working binary while eval rejected the same file. Only the
-            // `(t-prim {} name)` and bare-symbol spellings are validated;
-            // `t-var` targets (precision-polymorphic casts) stay legal.
+            // working binary while eval rejected the same file. Raw
+            // `(t-prim {} name)` and bare symbols retain name validation;
+            // `t-var` targets are legal once their checked identity has
+            // been actualized by the active specialization (#1418).
+            // The result metadata uses checker IDs, unlike the authored
+            // target spelling; expr_host_type applies the matching active
+            // substitution. Never select the target from the operand.
+            let ty = expr_host_type(expr, program, scope);
             let bogus_target_name =
                 match children(list).get(1) {
                     Some(Expr::List(tlist, _))
@@ -5907,7 +5912,19 @@ fn lower_host_expr_kind(
                     }
                     _ => None,
                 };
-            if let Some(bogus) = bogus_target_name {
+            let unresolved_target_name = ty.is_unresolved().then(|| {
+                children(list)
+                    .get(1)
+                    .and_then(|target| {
+                        symbol_name(target).or_else(|| {
+                            stamped_parts(target)
+                                .and_then(|(_, _, kids)| kids.first())
+                                .and_then(symbol_name)
+                        })
+                    })
+                    .unwrap_or("an unresolved cast target")
+            });
+            if let Some(bogus) = bogus_target_name.or(unresolved_target_name) {
                 let unsupported = chelis_types::unsupported::Unsupported::new(
                     chelis_types::unsupported::UnsupportedKind::Dtype(bogus.to_string()),
                     "a `cast` target in host lowering",
@@ -5930,7 +5947,6 @@ fn lower_host_expr_kind(
             let operand = children(list)
                 .first()
                 .ok_or_else(|| host_expr_lowering_error(expr, "a `cast` node has no operand"))?;
-            let ty = expr_host_type(expr, program, scope);
             let mut value = lower_host_expr(operand, program, scope, tensor_helpers)?;
             if binder_float_literal_keeps_f32_source(operand, &ty) {
                 value = HostExpr::new(HostExprKind::Builtin {
@@ -5939,7 +5955,6 @@ fn lower_host_expr_kind(
                     ty: HostTypeTerm::Float32,
                 });
             }
-            let inferred_ty = host_expr_type(&value);
             // The rung travels with the callable name so the host lane
             // and the DAG lane land on the same C guard ([05-OP-6]).
             let name = match chelis_deep::cast_mode_of(children(list)) {
@@ -5954,7 +5969,7 @@ fn lower_host_expr_kind(
             HostExpr::new(HostExprKind::Builtin {
                 name,
                 args: vec![value],
-                ty: if ty.is_unresolved() { inferred_ty } else { ty },
+                ty,
             })
         }
         Expr::List(list, _) if tag(list) == Some(DeepTag::App) => {
