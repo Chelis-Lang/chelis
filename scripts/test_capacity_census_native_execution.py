@@ -94,6 +94,39 @@ class RuntimeArtifactTests(unittest.TestCase):
             execution._runtime_artifact(self.root, self.target, [self.row])
 
 
+class SourceIdentityTests(unittest.TestCase):
+    def test_tracked_directory_symlink_and_actual_header_bytes_are_both_bound(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / "agent-skills").mkdir()
+            (root / "skills").symlink_to("agent-skills", target_is_directory=True)
+            header = root / "runtime.h"
+            header.write_bytes(b"current header")
+            def snapshot():
+                with mock.patch.object(execution.subprocess, "check_output",
+                                       side_effect=[b"current-head\n", b"runtime.h\0skills\0"]), \
+                     mock.patch.object(execution, "source_identity", return_value="common-source"):
+                    return execution._source_packet(root)
+            first = snapshot()
+            self.assertEqual(first["files"][1]["kind"], "symlink")
+            self.assertEqual(first["files"][1]["sha256"], hashlib.sha256(b"agent-skills").hexdigest())
+            header.write_bytes(b"changed header")
+            self.assertNotEqual(snapshot(), first)
+            (root / "other-skills").mkdir()
+            (root / "skills").unlink()
+            (root / "skills").symlink_to("other-skills", target_is_directory=True)
+            self.assertNotEqual(snapshot()["files"][1], first["files"][1])
+
+    def test_unsupported_tracked_directory_is_a_typed_source_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / "directory").mkdir()
+            with mock.patch.object(execution.subprocess, "check_output",
+                                   side_effect=[b"current-head\n", b"directory\0"]), \
+                 self.assertRaises(GraphError):
+                execution._source_packet(root)
+
+
 class RetainedCaptureTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
