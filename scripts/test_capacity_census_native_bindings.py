@@ -93,7 +93,7 @@ class NativeBoundaryObligations(unittest.TestCase):
         owners = {
             "chelis_python::CompiledModel::__call__": ("self", "py", "args", "kwargs"),
             "chelis_python::NativeTensor::__dlpack__":
-                ("self", "py", "stream", "max_version", "dl_device", "copy"),
+                ("self", "stream", "max_version", "dl_device", "copy"),
             "chelis_python::NativeTensor::__dlpack_device__": ("self",),
             "chelis_python::NativeTensor::shape": ("self",),
         }
@@ -119,7 +119,7 @@ class NativeBoundaryObligations(unittest.TestCase):
         slots = {
             "chelis_python::CompiledModel::__call__": ("self", "py", "args", "kwargs"),
             "chelis_python::NativeTensor::__dlpack__":
-                ("self", "py", "stream", "max_version", "dl_device", "copy"),
+                ("self", "stream", "max_version", "dl_device", "copy"),
             "chelis_python::NativeTensor::__dlpack_device__": ("self",),
             "chelis_python::NativeTensor::shape": ("self",),
         }
