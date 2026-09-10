@@ -831,7 +831,7 @@ impl<'a> EvalContext<'a> {
         if let Some(value) = self.tensor_bindings.get(name) {
             return Ok(RuntimeValue::Tensor(value.clone()));
         }
-        if self.lookup_top_level_def(name).is_some() {
+        if let Some((_, definition)) = self.lookup_top_level_def(name) {
             let value = self.resolve_top_level(name)?;
             // A zero-parameter top-level declaration is a value thunk when
             // referenced in expression position. Calls still resolve their
@@ -839,7 +839,11 @@ impl<'a> EvalContext<'a> {
             // and applies it exactly once; a bare `name` consumes its value.
             // This mirrors the checker/lowerer's nullary-def treatment and is
             // required when manifest routing selects the host evaluator.
-            if matches!(&value, RuntimeValue::Closure { params, .. } if params.is_empty()) {
+            // Function-valued aliases carry the callable through argument
+            // and local-binding positions; only a declaration is a thunk.
+            if definition.tag() == Some(DeepTag::Fn)
+                && matches!(&value, RuntimeValue::Closure { params, .. } if params.is_empty())
+            {
                 return self.apply_resolved_callable(value, Vec::new());
             }
             return Ok(value);

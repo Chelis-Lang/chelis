@@ -140,3 +140,27 @@ fn tensor_function_alias_preserves_concrete_call_result() {
             .any(|error| error.message.contains("unavailable root `alias`"))
     );
 }
+
+#[test]
+fn nullary_alias_remains_callable_as_an_argument_or_local_value() {
+    for body in ["invoke(alias)", "{\nlocal = alias\nlocal()\n}"] {
+        let source = format!(
+            "def anchor() -> int32 = 7\nalias = anchor\ndef invoke(f) -> int32 = f()\ndef user() -> int32 = {body}"
+        );
+        let checked = check(CheckRequest {
+            source_kind: SourceKind::Surf,
+            source: source.clone(),
+        })
+        .unwrap();
+        assert!(checked.errors.is_empty(), "{:?}", checked.errors);
+        let result = eval_selected(request(source.clone()), &["user".into()]).unwrap();
+        assert_eq!(result.roots[0].display.as_deref(), Some("7"));
+        let error = eval_selected(request(source), &["alias".into()]).unwrap_err();
+        assert!(
+            error
+                .errors
+                .iter()
+                .any(|error| error.message.contains("unavailable root `alias`"))
+        );
+    }
+}
