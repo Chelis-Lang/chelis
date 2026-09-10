@@ -9,6 +9,15 @@ typedef enum { hipMemcpyHostToHost, hipMemcpyHostToDevice, hipMemcpyDeviceToHost
 typedef void *hipModule_t;
 typedef void *hipFunction_t;
 typedef uintptr_t hipDeviceptr_t;
+typedef enum { hipMemoryTypeHost = 0, hipMemoryTypeDevice = 1 } hipMemoryType;
+typedef struct {
+    hipMemoryType type;
+    int device;
+    void *devicePointer;
+    void *hostPointer;
+    int isManaged;
+    unsigned int allocationFlags;
+} hipPointerAttribute_t;
 typedef struct {
     int warpSize;
     int maxGridSize[3];
@@ -24,6 +33,8 @@ hipError_t hipMemset(void *pointer, int value, size_t bytes);
 hipError_t hipMemcpy(void *destination, const void *source, size_t bytes, hipMemcpyKind kind);
 const char *hipGetErrorString(hipError_t error);
 hipError_t hipGetDevice(int *device);
+hipError_t hipSetDevice(int device);
+hipError_t hipPointerGetAttributes(hipPointerAttribute_t *attributes, const void *pointer);
 hipError_t hipGetDeviceProperties(hipDeviceProp_t *properties, int device);
 hipError_t hipModuleUnload(hipModule_t module);
 hipError_t hipModuleLoadData(hipModule_t *module, const void *code);

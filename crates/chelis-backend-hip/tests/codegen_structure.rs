@@ -975,16 +975,21 @@ fn s10_device_helpers_present() {
 }
 
 // ===========================================================================
-// S11: Kernel JIT uses static caching
+// S11: Kernel modules belong to the invocation's device context
 // ===========================================================================
 
 #[test]
-fn s11_static_module_caching() {
+fn s11_modules_are_created_and_released_in_the_invocation_context() {
     let dag = dag_add_consts();
     let result = codegen_hip(&dag, "test_cache").unwrap();
     assert!(
-        result.c_source.contains("static hipModule_t"),
-        "Kernel modules must be cached with 'static hipModule_t'"
+        !result.c_source.contains("static hipModule_t"),
+        "An unqualified static module cannot be reused across device contexts"
+    );
+    assert_eq!(
+        result.c_source.matches(" = chelis_compile_kernel(").count(),
+        result.c_source.matches("hipModuleUnload(").count(),
+        "Every invocation-owned module must be released"
     );
 }
 
@@ -1031,11 +1036,15 @@ fn s12_transfers_present() {
     let dag = dag_with_load();
     let result = codegen_hip(&dag, "test_transfer").unwrap();
     assert!(
-        result.c_source.contains("chelis_host_to_device"),
+        result
+            .c_source
+            .contains("chelis_device_tensor_copy_from_host"),
         "Input transfer (host→device) must be present"
     );
     assert!(
-        result.c_source.contains("chelis_device_to_host"),
+        result
+            .c_source
+            .contains("chelis_device_tensor_copy_to_host"),
         "Output transfer (device→host) must be present"
     );
 }
@@ -1045,11 +1054,15 @@ fn s12_transfer_order() {
     let dag = dag_with_load();
     let result = codegen_hip(&dag, "test_transfer_order").unwrap();
     let src = &result.c_source;
-    let h2d_pos = src.find("chelis_host_to_device").expect("h2d present");
-    let d2h_pos = src.find("chelis_device_to_host").expect("d2h present");
+    let h2d_pos = src
+        .find("chelis_device_tensor_copy_from_host")
+        .expect("h2d present");
+    let d2h_pos = src
+        .find("chelis_device_tensor_copy_to_host")
+        .expect("d2h present");
     assert!(
         h2d_pos < d2h_pos,
-        "host_to_device must come before device_to_host"
+        "Input transfer must precede output transfer"
     );
 }
 
@@ -1063,7 +1076,10 @@ fn s12_duplicate_load_transfers_once() {
 
     let result = codegen_hip(&dag, "test_dup_transfer_once").unwrap();
     assert_eq!(
-        result.c_source.matches("chelis_host_to_device").count(),
+        result
+            .c_source
+            .matches("chelis_device_tensor_copy_from_host")
+            .count(),
         1,
         "Repeated loads of the same input should share one host→device transfer"
     );
@@ -1142,13 +1158,17 @@ fn s12_symbolic_repeated_occurrences_check_every_non_canonical_input() {
     dag.add_root(xyz);
 
     let result = codegen_hip(&dag, "test_symbolic_repeats").unwrap();
-    assert!(result.c_source.contains("int batch = inputs[0]->shape[0];"));
+    assert!(
+        result
+            .c_source
+            .contains("int64_t batch = input_view_0->shape[0];")
+    );
     assert!(
         result.c_source.contains("input_view_1->shape[0] != batch"),
         "second occurrence must be checked against the canonical binding"
     );
     assert!(
-        result.c_source.contains("inputs[2]->shape[0] != batch"),
+        result.c_source.contains("input_view_2->shape[0] != batch"),
         "third occurrence must also be checked against the canonical binding"
     );
 }
@@ -1182,18 +1202,18 @@ fn s12_slot_backed_kernels_iterate_over_logical_size_after_dce() {
     let src = &result.c_source;
 
     assert!(
-        src.contains("int fill_size = d_t"),
+        src.contains("int64_t fill_size = d_t"),
         "Slot-backed fill kernels must iterate over logical size"
     );
     assert!(
         !src.lines().any(|line| {
             let trimmed = line.trim_start();
-            trimmed.starts_with("int fill_size =") && trimmed.contains("->storage_size;")
+            trimmed.starts_with("int64_t fill_size =") && trimmed.contains("->byte_capacity")
         }),
         "Fill kernels must not iterate over slot capacity"
     );
     assert!(
-        src.contains("_size = d_t") && src.contains("->size;"),
+        src.contains("_size = d_t") && src.contains("->count;"),
         "Elementwise outputs must use logical size even when backed by a reused slot"
     );
 }
@@ -1639,7 +1659,8 @@ fn sparse_scatter_add_i32_emits_atomic_add_kernel() {
             .c_source
             .contains("atomicAdd(&out[dst], updates[chelis_logical_offset(i, updates_sh, updates_s, updates_ndim)]);")
     );
-    assert!(result.c_source.contains("hipMemcpyDeviceToDevice"));
+    assert!(result.c_source.contains("kernel_materialize_"));
+    assert!(!result.c_source.contains("hipMemcpyDeviceToDevice"));
 }
 
 #[test]

@@ -15,34 +15,43 @@
 
 using Launch = void (*)(unsigned int, unsigned int, void **);
 extern "C" Launch fixture_kernel(const char *name);
-static std::map<void *, size_t> allocations;
+struct Allocation { size_t bytes; int device; };
+static std::map<void *, Allocation> allocations;
+static int current_device = 0;
+struct Module { Launch launch; int device; };
+static std::map<void *, Module> modules;
 static const unsigned char guard = 0xa7;
 
 static bool contains(const void *pointer, size_t bytes) {
     const uintptr_t address = (uintptr_t)pointer;
     for (const auto &allocation : allocations) {
         const uintptr_t start = (uintptr_t)allocation.first;
-        if (address >= start && address - start <= allocation.second
-            && bytes <= allocation.second - (address - start)) return true;
+        if (address >= start && address - start <= allocation.second.bytes
+            && bytes <= allocation.second.bytes - (address - start)) {
+            REQUIRE(allocation.second.device == current_device);
+            return true;
+        }
     }
     return false;
 }
 
 extern "C" size_t fixture_live_allocations() { return allocations.size(); }
+extern "C" size_t fixture_live_modules() { return modules.size(); }
 extern "C" hipError_t hipMalloc(void **pointer, size_t bytes) {
     REQUIRE(bytes <= 1024 * 1024);
     *pointer = malloc(bytes + 32);
     REQUIRE(*pointer != nullptr);
     memset((unsigned char *)*pointer + bytes, guard, 32);
-    REQUIRE(allocations.emplace(*pointer, bytes).second);
+    REQUIRE(allocations.emplace(*pointer, Allocation{bytes, current_device}).second);
     return hipSuccess;
 }
 extern "C" hipError_t hipFree(void *pointer) {
     if (!pointer) return hipSuccess;
     auto entry = allocations.find(pointer);
     REQUIRE(entry != allocations.end());
+    REQUIRE(entry->second.device == current_device);
     for (size_t i = 0; i < 32; ++i)
-        REQUIRE(((const unsigned char *)pointer)[entry->second + i] == guard);
+        REQUIRE(((const unsigned char *)pointer)[entry->second.bytes + i] == guard);
     allocations.erase(entry);
     free(pointer);
     return hipSuccess;
@@ -62,7 +71,23 @@ extern "C" hipError_t hipMemcpy(void *destination, const void *source, size_t by
     return hipSuccess;
 }
 extern "C" const char *hipGetErrorString(hipError_t) { return "CPU fixture HIP error"; }
-extern "C" hipError_t hipGetDevice(int *device) { *device = 0; return hipSuccess; }
+extern "C" hipError_t hipGetDevice(int *device) { *device = current_device; return hipSuccess; }
+extern "C" hipError_t hipSetDevice(int device) {
+    REQUIRE(device == 0 || device == 1);
+    current_device = device;
+    return hipSuccess;
+}
+extern "C" hipError_t hipPointerGetAttributes(hipPointerAttribute_t *attributes, const void *pointer) {
+    const uintptr_t address = (uintptr_t)pointer;
+    for (const auto &allocation : allocations) {
+        const uintptr_t start = (uintptr_t)allocation.first;
+        if (address >= start && address - start < allocation.second.bytes) {
+            *attributes = {hipMemoryTypeDevice, allocation.second.device, allocation.first, nullptr, 0, 0};
+            return hipSuccess;
+        }
+    }
+    return hipErrorInvalidValue;
+}
 extern "C" hipError_t hipGetDeviceProperties(hipDeviceProp_t *properties, int) {
     *properties = {64, {INT_MAX, 65535, 65535}, {1024, 1024, 64}, 1024};
     return hipSuccess;
@@ -71,13 +96,21 @@ extern "C" hipError_t hipDeviceSynchronize() { return hipSuccess; }
 
 // The actual source was compiled alongside this fixture. Module lookup only
 // selects that compiled function; it does not interpret or replace its work.
-extern "C" hipError_t hipModuleUnload(hipModule_t) { return hipSuccess; }
+extern "C" hipError_t hipModuleUnload(hipModule_t module) {
+    auto found = modules.find(module);
+    REQUIRE(found != modules.end() && found->second.device == current_device);
+    modules.erase(found);
+    free(module);
+    return hipSuccess;
+}
 extern "C" hipError_t hipModuleLoadData(hipModule_t *module, const void *code) {
-    *module = (void *)fixture_kernel((const char *)code);
+    *module = malloc(1);
     REQUIRE(*module != nullptr);
+    REQUIRE(modules.emplace(*module, Module{fixture_kernel((const char *)code), current_device}).second);
     return hipSuccess;
 }
 extern "C" hipError_t hipModuleGetFunction(hipFunction_t *function, hipModule_t module, const char *) {
+    REQUIRE(modules.at(module).device == current_device);
     *function = module;
     return hipSuccess;
 }
@@ -87,7 +120,9 @@ extern "C" hipError_t hipModuleLaunchKernel(hipFunction_t function,
     unsigned int, void *, void **arguments, void **) {
     REQUIRE(gy == 1 && gz == 1 && by == 1 && bz == 1);
     REQUIRE(gx <= 16 && bx <= 256);
-    ((Launch)function)(gx, bx, arguments);
+    const auto &module = modules.at(function);
+    REQUIRE(module.device == current_device);
+    module.launch(gx, bx, arguments);
     return hipSuccess;
 }
 extern "C" hiprtcResult hiprtcCreateProgram(hiprtcProgram *program, const char *, const char *name,

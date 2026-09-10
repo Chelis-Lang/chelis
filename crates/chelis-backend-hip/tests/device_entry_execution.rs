@@ -52,6 +52,57 @@ fn model(rank: usize, matrix: bool) -> String {
     support::codegen_hip(&dag, "entry_probe").unwrap().c_source
 }
 
+fn sparse_model(operation: usize, index_precision: Prim) -> String {
+    let mut dag = Dag::new();
+    let tensor = |dims: &[usize], precision| TensorType {
+        dims: dims.iter().copied().map(DimInfo::Lit).collect(),
+        precision,
+    };
+    let target = dag.add_node(
+        RiscOp::Load {
+            name: "target".into(),
+        },
+        vec![],
+        tensor(&[3, 2], Prim::F32),
+        None,
+    );
+    let indices = dag.add_node(
+        RiscOp::Load {
+            name: "indices".into(),
+        },
+        vec![],
+        tensor(if operation == 3 { &[2, 2] } else { &[4] }, index_precision),
+        None,
+    );
+    let mut inputs = vec![target, indices];
+    if operation != 0 {
+        inputs.push(dag.add_node(
+            RiscOp::Load {
+                name: "updates".into(),
+            },
+            vec![],
+            tensor(if operation == 3 { &[2, 2] } else { &[4, 2] }, Prim::F32),
+            None,
+        ));
+    }
+    let op = match operation {
+        0 => RiscOp::Gather { axis: 0 },
+        1 => RiscOp::ScatterAdd { axis: 0 },
+        2 => RiscOp::Scatter { axis: 0 },
+        3 => RiscOp::ScatterElements { axis: 0 },
+        _ => unreachable!(),
+    };
+    let output = dag.add_node(
+        op,
+        inputs,
+        tensor(if operation == 0 { &[4, 2] } else { &[3, 2] }, Prim::F32),
+        None,
+    );
+    dag.add_root(target);
+    dag.add_root(output);
+    support::codegen_hip(&dag, "entry_probe").unwrap().c_source
+}
+
 /// Decode the emitted C string literals, then compile those exact kernel bodies.
 /// Wrappers derive their parameter types from each kernel signature; the emitted
 /// host argument vector remains independent, so missing/wrong-width arguments
@@ -84,7 +135,7 @@ fn compiled_kernels(model: &str) -> String {
         "must execute at least one generated kernel"
     );
     let mut output = String::from(
-        "#include <stdint.h>\n#include <cmath>\n#include <cstring>\n#include <cstdlib>\n#include <hip/hip_runtime.h>\n#define __device__\n#define __global__\n#define CHELIS_DEBUG_BOUNDS 0\nstatic dim3 blockIdx, blockDim, threadIdx;\nusing Launch = void (*)(unsigned int, unsigned int, void **);\n",
+        "#include <stdint.h>\n#include <cmath>\n#include <cstring>\n#include <cstdlib>\n#include <hip/hip_runtime.h>\n#define __device__\n#define __global__\n#define CHELIS_DEBUG_BOUNDS 0\nstatic dim3 blockIdx, blockDim, threadIdx;\ntemplate<class T> static T atomicAdd(T *address, T value) { T old = *address; *address += value; return old; }\nusing Launch = void (*)(unsigned int, unsigned int, void **);\n",
     );
     for (index, (name, source)) in kernels.iter().enumerate() {
         let signature = format!("void {name}(");
@@ -126,12 +177,28 @@ struct Executable {
     binary: PathBuf,
 }
 fn compile(rank: usize, matrix: bool, mutation: Option<&str>) -> Executable {
+    compile_source(
+        model(rank, matrix),
+        "main.cpp",
+        &[
+            format!("-DTEST_RANK={rank}"),
+            format!("-DTEST_MATRIX={}", usize::from(matrix)),
+        ],
+        mutation,
+    )
+}
+
+fn compile_source(
+    mut source: String,
+    main: &str,
+    defines: &[String],
+    mutation: Option<&str>,
+) -> Executable {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let archive = env::var_os("CHELIS_RUNTIME_LIB").map(PathBuf::from)
         .expect("CHELIS_RUNTIME_LIB must identify the exact-head owned archive; this fixture never starts Cargo");
     assert!(archive.is_absolute() && archive.is_file());
     let directory = tempfile::tempdir().unwrap();
-    let mut source = model(rank, matrix);
     if mutation == Some("return-borrow") {
         let old = "outputs[0] = chelis_device_tensor_clone(inputs[0]);";
         assert!(source.contains(old));
@@ -147,6 +214,16 @@ fn compile(rank: usize, matrix: bool, mutation: Option<&str>) -> Executable {
     if mutation == Some("rank-eight") {
         assert!(source.contains("int64_t indices[33]"));
         source = source.replace("int64_t indices[33]", "int64_t indices[8]");
+    }
+    if mutation == Some("flat-sparse-indices") {
+        let old = "indices[chelis_logical_offset(index_pos, idx_sh, idx_s, idx_ndim)]";
+        assert!(source.contains(old));
+        source = source.replace(old, "indices[index_pos]");
+    }
+    if mutation == Some("flat-sparse-initialization") {
+        let old = "a[source * 4 + byte]";
+        assert!(source.contains(old));
+        source = source.replace(old, "a[i * 4 + byte]");
     }
     fs::write(directory.path().join("model.cpp"), &source).unwrap();
     fs::write(
@@ -166,8 +243,7 @@ fn compile(rank: usize, matrix: bool, mutation: Option<&str>) -> Executable {
             "-fsanitize=address,undefined",
             "-fno-sanitize-recover=all",
         ])
-        .arg(format!("-DTEST_RANK={rank}"))
-        .arg(format!("-DTEST_MATRIX={}", usize::from(matrix)))
+        .args(defines)
         .arg("-I")
         .arg(&sdk)
         .arg("-I")
@@ -178,7 +254,7 @@ fn compile(rank: usize, matrix: bool, mutation: Option<&str>) -> Executable {
         .arg(directory.path().join("kernels.cpp"))
         .arg(root.join("runtime/chelis_device_owner.cpp"))
         .arg(sdk.join("runtime.cpp"))
-        .arg(sdk.join("main.cpp"))
+        .arg(sdk.join(main))
         .arg(archive)
         .args(["-lpthread", "-lm"]);
     if cfg!(target_os = "macos") {
@@ -213,6 +289,17 @@ fn run(executable: &Executable, mode: &str, success: bool) {
     );
     if success {
         assert_eq!(output.stdout, b"DEVICE ENTRY CPU EXECUTION: PASS\n");
+    } else if mode.starts_with("wrong-") {
+        let expected = if mode == "wrong-rank" {
+            "expected rank"
+        } else {
+            "numeric trap: domain"
+        };
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(expected),
+            "{mode} failed for the wrong reason: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
 
@@ -223,11 +310,48 @@ fn generated_entry_executes_strided_inputs_scalar_empty_and_dynamic_rank_with_ow
         run(&executable, "positive", true);
         run(&executable, "wrong-rank", false);
         run(&executable, "wrong-dtype", false);
+        run(&executable, "wrong-device", false);
+        run(&executable, "alternate-devices", true);
         if rank > 0 {
             run(&executable, "empty", true);
         }
     }
     run(&compile(2, true, None), "positive", true);
+}
+
+#[test]
+fn generated_sparse_entries_preserve_supplied_strides_and_duplicate_update_order() {
+    for operation in 0..4 {
+        for precision in [Prim::Int32, Prim::Int64] {
+            let executable = compile_source(
+                sparse_model(operation, precision),
+                "sparse_main.cpp",
+                &[
+                    format!("-DTEST_SPARSE={operation}"),
+                    format!("-DTEST_INDEX64={}", usize::from(precision == Prim::Int64)),
+                ],
+                None,
+            );
+            run(&executable, "positive", true);
+            run(&executable, "wrong-second-device", false);
+        }
+    }
+}
+
+#[test]
+fn generated_sparse_mutations_cannot_flatten_indices_or_target_initialization() {
+    for mutation in ["flat-sparse-indices", "flat-sparse-initialization"] {
+        run(
+            &compile_source(
+                sparse_model(1, Prim::Int64),
+                "sparse_main.cpp",
+                &["-DTEST_SPARSE=1".into(), "-DTEST_INDEX64=1".into()],
+                Some(mutation),
+            ),
+            "positive",
+            false,
+        );
+    }
 }
 
 #[test]
