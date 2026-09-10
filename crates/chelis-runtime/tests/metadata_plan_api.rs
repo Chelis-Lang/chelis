@@ -3,13 +3,13 @@ use chelis_runtime::*;
 use std::{env, process::Command, ptr};
 
 fn tagged(value: i64) -> chelis_scalar {
-    unsafe { chelis_scalar_from_bits(CHELIS_DTYPE_I64, value as u64) }
+    chelis_scalar_from_bits(CHELIS_DTYPE_I64, value as u64)
 }
 fn dimensions(values: &[i64]) -> Vec<chelis_scalar> {
     values.iter().map(|&value| tagged(value)).collect()
 }
 fn exemplar(dtype: chelis_dtype) -> chelis_scalar {
-    unsafe { chelis_scalar_from_bits(dtype, 0) }
+    chelis_scalar_from_bits(dtype, 0)
 }
 
 #[test]

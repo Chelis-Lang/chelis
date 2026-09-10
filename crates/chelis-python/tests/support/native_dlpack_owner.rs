@@ -20,12 +20,9 @@ fn mismatched_dlpack_request_rejects_and_releases_only_its_retained_owner() {
         globals
             .set_item("artifact_root", directory.path().to_str().unwrap())
             .unwrap();
-        let run = |source: &str| {
-            py.run(&CString::new(source).unwrap(), Some(&globals), None)
-        };
+        let run = |source: &str| py.run(&CString::new(source).unwrap(), Some(&globals), None);
         let outcome = (|| -> PyResult<()> {
-            run(
-                r#"
+            run(r#"
 import gc
 import weakref
 from pathlib import Path
@@ -39,8 +36,7 @@ input_a_ref = weakref.ref(input_a)
 input_b_ref = weakref.ref(input_b)
 first = model(input_a)
 second = model(input_b)
-"#,
-            )?;
+"#)?;
             let first = globals
                 .get_item("first")?
                 .expect("first actual output")
@@ -62,15 +58,13 @@ second = model(input_b)
             assert!(error.is_instance_of::<PyBufferError>(py));
             assert!(error.to_string().contains("belongs to another tensor"));
             drop(error);
-            run(
-                r#"
+            run(r#"
 assert np.from_dlpack(first).tolist() == [3, 4]
 assert np.from_dlpack(second).tolist() == [8, 9]
 del first, input_a
 gc.collect()
 assert input_a_ref() is not None, 'live Rust wrapper lost its input owner'
-"#,
-            )?;
+"#)?;
             drop(first);
             run("gc.collect()\nassert input_a_ref() is None, 'rejected request leaked its owner'")?;
 
@@ -81,8 +75,7 @@ assert input_a_ref() is not None, 'live Rust wrapper lost its input owner'
             globals.set_item("capsule", &capsule)?;
             drop(capsule);
             drop(second);
-            run(
-                r#"
+            run(r#"
 del second, input_b, model
 gc.collect()
 assert input_b_ref() is not None, 'unconsumed capsule lost its owner'
@@ -99,8 +92,7 @@ assert consumer.tolist() == [8, 9]
 del consumer
 gc.collect()
 assert input_b_ref() is None, 'consumer deletion leaked the retained input'
-"#,
-            )?;
+"#)?;
             Ok(())
         })();
         // Keep unsendable model teardown on its creating thread on failures too.
