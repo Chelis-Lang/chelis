@@ -636,7 +636,7 @@ fn every_local_member_of_one_class_is_guarded_at_its_operation_on_c() {
     }
     assert_eq!(
         emitted
-            .matches(&format!("{}\");", domain_trap_line("expand")))
+            .matches(&format!("{}\");", domain_trap_line("insert")))
             .count(),
         guarded_sites.len(),
         "each local guard renders [04-NUM-9] naming its operation"
