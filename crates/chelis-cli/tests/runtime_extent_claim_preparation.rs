@@ -31,7 +31,11 @@ struct Case {
 #[derive(Clone)]
 enum Expected {
     Tensor(Vec<usize>, Vec<f64>),
+    TensorF32Bits(Vec<usize>, Vec<u32>),
     Domain(&'static str, &'static [&'static str]),
+    TargetDivisionByZero,
+    ExactTargetDivisionByZero,
+    EntryShapeMismatch(&'static str),
     Reject(&'static str),
 }
 
@@ -67,7 +71,7 @@ fn call_matrix(
     inputs: Vec<Input>,
     result: Expected,
 ) {
-    let good = matches!(result, Expected::Tensor(..));
+    let good = matches!(result, Expected::Tensor(..) | Expected::TensorF32Bits(..));
     let call = format!(
         "f({})",
         inputs.iter().map(literal).collect::<Vec<_>>().join(", ")
@@ -342,7 +346,7 @@ fn receipt(stage: &str, output: &std::process::Output) -> Value {
         "stderr":String::from_utf8_lossy(&output.stderr).trim()})
 }
 
-fn driver(inputs: &[Input]) -> (String, Vec<String>) {
+fn driver(inputs: &[Input], header: &str) -> (String, Vec<String>) {
     let mut text = String::from(
         "\n#include <stdio.h>\n#include <stdlib.h>\nint main(int argc, char **argv) {\n(void)argc;\n(void)argv;\n",
     );
@@ -371,7 +375,25 @@ fn driver(inputs: &[Input]) -> (String, Vec<String>) {
         .map(|i| format!("a{i}"))
         .collect::<Vec<_>>()
         .join(",");
-    text.push_str(&format!("chelis_tensor *result = f({args});\n"));
+    if header
+        .lines()
+        .any(|line| line.starts_with("chelis_tensor* f("))
+    {
+        text.push_str(&format!("chelis_tensor *result = f({args});\n"));
+    } else {
+        // A single pure tensor definition is exported through the named
+        // kernel ABI. Exercise that public entry rather than inventing a
+        // host wrapper which the compiler did not emit.
+        assert_eq!(
+            header.trim(),
+            "void fixture(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);",
+            "unknown exported fixture ABI"
+        );
+        text.push_str(&format!(
+            "chelis_tensor *inputs[] = {{{args}}};\nchelis_tensor *result = NULL;\nfixture(inputs, {}, &result, 1);\n",
+            inputs.len()
+        ));
+    }
     text.push_str(
         r#"printf("out = tensor(shape=[");
 for (int32_t axis = 0; axis < chelis_tensor_rank(result); ++axis) {
@@ -395,8 +417,38 @@ return 0;
 }
 
 fn observe(case: &Case) -> Value {
+    observe_with_dependency(case, None)
+}
+
+fn observe_with_dependency(case: &Case, library: Option<&str>) -> Value {
+    observe_host_lane(case, library, "c", false)
+}
+
+fn observe_host_lane(case: &Case, library: Option<&str>, target: &str, api: bool) -> Value {
     let dir = tempdir().expect("fixture directory");
-    let path = dir.path().join("fixture.ch");
+    if let Some(library) = library {
+        let version = chelis_compiler_api::COMPILER_VERSION;
+        fs::create_dir_all(dir.path().join("mylib/src")).unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(
+            dir.path().join("src/placeholder.ch"),
+            "module App.Placeholder\ndef placeholder() -> int32 = 0i32\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("reef.toml"), format!("[package]\nname = \"app\"\nversion = \"0.1.0\"\ncompiler = \"={version}\"\nmodule_prefix = \"App\"\n[dependencies]\nmylib = {{ path = \"./mylib\" }}\n")).unwrap();
+        fs::write(dir.path().join("mylib/reef.toml"), format!("[package]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"={version}\"\nmodule_prefix = \"Mylib\"\n")).unwrap();
+        fs::write(
+            dir.path().join("mylib/src/claims.ch"),
+            format!("module Mylib.Claims\nexport (f)\n{library}\n"),
+        )
+        .unwrap();
+        fs::write(dir.path().join("reef.lock"), format!("[package]\nname = \"app\"\nversion = \"0.1.0\"\n[[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\ncompiler = \"={version}\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n[dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n")).unwrap();
+    }
+    let path = dir.path().join(if library.is_some() {
+        "src/fixture.ch"
+    } else {
+        "fixture.ch"
+    });
     fs::write(&path, &case.source).expect("write fixture");
     let binary = Path::new(env!("CARGO_BIN_EXE_chelis"));
     let check = run(
@@ -450,7 +502,7 @@ fn observe(case: &Case) -> Value {
             "build",
             path.to_str().unwrap(),
             "--target",
-            "c",
+            if api { "c" } else { target },
             "-o",
             out.to_str().unwrap(),
         ],
@@ -459,14 +511,70 @@ fn observe(case: &Case) -> Value {
     let compiled = if !build.status.success() {
         receipt("build", &build)
     } else {
-        let c_path = out.join("fixture.c");
-        let mut source = fs::read_to_string(&c_path).expect("generated C");
-        let args = if let Some(inputs) = &case.exported {
+        let generated = if api {
+            use chelis_compiler_api::schema::{CompileRequest, CompileTarget, SourceKind};
+            // The CLI invocation above supplies runtime headers/archive only.
+            // Every compiled source byte below comes from the API artifact.
+            match chelis_compiler_api::compiler::compile(CompileRequest {
+                source_kind: SourceKind::Surf,
+                source: case.source.clone(),
+                target: CompileTarget::Hip,
+                entry_name: None,
+            }) {
+                Ok(artifact) => {
+                    let source = artifact
+                        .files
+                        .iter()
+                        .find(|f| f.path.ends_with("_hip.cpp"))
+                        .expect("HIP source")
+                        .contents
+                        .clone();
+                    let header = artifact
+                        .files
+                        .iter()
+                        .find(|f| f.path.ends_with("_hip.h"))
+                        .expect("HIP header")
+                        .contents
+                        .clone();
+                    for file in artifact.files {
+                        fs::write(out.join(file.path), file.contents).unwrap();
+                    }
+                    Ok((source, header))
+                }
+                Err(error) => Err(format!("{error:?}")),
+            }
+        } else {
+            let (source, header) = if target == "hip" {
+                ("fixture_hip.cpp", "fixture_hip.h")
+            } else {
+                ("fixture.c", "fixture.h")
+            };
+            Ok((
+                fs::read_to_string(out.join(source)).expect("generated source"),
+                fs::read_to_string(out.join(header)).expect("generated header"),
+            ))
+        };
+        let (mut source, header) = match generated {
+            Ok(files) => files,
+            Err(error) => {
+                return json!({"issue":case.issue, "check":checker, "eval":eval,
+                "c":{"stage":"build", "success":false, "stdout":"", "stderr":error}});
+            }
+        };
+        if target == "hip" {
             assert!(
-                !source.contains("int main("),
-                "export fixture unexpectedly contains an entry"
+                !source.contains("__global__") && !source.contains("hipLaunchKernelGGL"),
+                "{} must retain host C",
+                case.id
             );
-            let (driver, args) = driver(inputs);
+        }
+        let c_path = out.join("fixture.c");
+        fs::write(&c_path, &source).expect("write selected host source");
+        let args = if let Some(inputs) = &case.exported {
+            // A nullary helper also creates an observation entry. Exercise
+            // f through the independent exported caller below.
+            source = source.replacen("int main(", "int fixture_generated_main(", 1);
+            let (driver, args) = driver(inputs, &header);
             source.push_str(&driver);
             fs::write(&c_path, &source).expect("append exported runtime caller");
             args
@@ -630,6 +738,52 @@ fn contract_failures(case: &Case, observation: &Value) -> Vec<String> {
                         .iter()
                         .all(|record| context_has_record(stderr, record))
             }
+            Expected::TensorF32Bits(shape, bits) => {
+                run["stage"] == "execute"
+                    && run["success"] == true
+                    && tensor(
+                        stdout,
+                        if case.source.contains("def main()") {
+                            "main"
+                        } else {
+                            "out"
+                        },
+                    )
+                    .is_some_and(|(actual_shape, data)| {
+                        actual_shape == *shape
+                            && data
+                                .iter()
+                                .map(|value| (*value as f32).to_bits())
+                                .collect::<Vec<_>>()
+                                == *bits
+                    })
+            }
+            Expected::TargetDivisionByZero => {
+                // The existing C integer helper uses its older diagnostic.
+                // Assert each lane's arithmetic failure independently: an
+                // earlier reshape claim failure does not satisfy this case.
+                run["stage"] == "execute"
+                    && run["success"] == false
+                    && stderr.lines().any(|line| {
+                        line.strip_prefix("error: ").unwrap_or(line)
+                            == if lane == "eval" {
+                                "numeric trap: division by zero in floor_div at int64"
+                            } else {
+                                "integer division or remainder by zero"
+                            }
+                    })
+            }
+            Expected::ExactTargetDivisionByZero => {
+                run["stage"] == "execute"
+                    && run["success"] == false
+                    && stderr.lines().any(|line| {
+                        line.strip_prefix("error: ").unwrap_or(line)
+                            == "numeric trap: division by zero in floor_div at int64"
+                    })
+            }
+            Expected::EntryShapeMismatch(context) => {
+                run["stage"] == "execute" && run["success"] == false && stderr.contains(context)
+            }
             Expected::Reject(_) => unreachable!(),
         };
         if !satisfied {
@@ -678,7 +832,14 @@ fn current_observations_are_explicit_and_do_not_claim_acceptance() {
     assert!(
         changed.is_empty()
             && observed.as_object().unwrap().len() == expected.as_object().unwrap().len(),
-        "behavior changed in {changed:?}: compare each cell with its contract before updating the issue-owned baseline"
+        "behavior changed in {changed:?}: compare each cell with its contract before updating the issue-owned baseline. Observations: {}",
+        serde_json::to_string_pretty(
+            &changed
+                .iter()
+                .map(|id| ((*id).clone(), observed[*id].clone()))
+                .collect::<serde_json::Map<_, _>>()
+        )
+        .unwrap()
     );
     assert!(
         !failures.is_empty(),
@@ -1210,5 +1371,1429 @@ fn helper_signature_guard_order_contract() {
         failures.extend(contract_failures(case, &observed));
     }
     assert_eq!(fixtures.len(), 50);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Result claims follow axis provenance, including an inferred helper result.
+/// Each call route checks the declared type independently of either runtime.
+#[test]
+fn static_reshape_folding_accepts_producing_source_expressions() {
+    producing_source_expression_contract("floor_div", 1);
+}
+
+#[test]
+fn remainder_reshape_claims_preserve_producing_source_expressions() {
+    producing_source_expression_contract("mod", 4);
+}
+
+fn producing_source_expression_contract(op: &str, divisor: i64) {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut cases = Vec::new();
+    for n in [2, 3] {
+        let source = literal(&vector(n));
+        for (kind, helper, operand) in [
+            ("literal", String::new(), source.clone()),
+            ("helper", format!("def g() = {source}\n"), "g()".to_owned()),
+            (
+                "checked_helper",
+                "def g(y: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(y, [floor_div(shape(y, 0i32), 2i64), 2i64])\n".to_owned(),
+                format!("g({})", literal(&vector(n * 2))),
+            ),
+            (
+                "inferred_computed_helper",
+                "def g(y: tensor[n, f32]) = reshape(y, [floor_div(shape(y, 0i32), 2i64), 2i64])\n".to_owned(),
+                format!("g({})", literal(&vector(n * 2))),
+            ),
+        ] {
+            call_matrix(
+                &mut cases,
+                &format!("static_reshape_expression.{op}.{kind}.x{n}"),
+                1686,
+                &format!("{helper}def f(x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [{op}(shape({operand}, 0i32), {divisor}i64), 2i64])"),
+                "(tensor[d0, f32]) -> tensor[2, 2, f32]",
+                vec![vector(4)],
+                if n == 2 { Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]) }
+                else { Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"]) },
+            );
+        }
+    }
+    assert_eq!(cases.len(), 24);
+    let mut failures = Vec::new();
+    for case in cases {
+        let observed = observe(&case);
+        println!("{}: {}", case.id, observed);
+        failures.extend(contract_failures(&case, &observed));
+        if case.source.contains("def main()")
+            && observed["check"]["signatures"]["main"] != "() -> tensor[2, 2, f32]"
+        {
+            failures.push(format!("{}: declared main shape changed", case.id));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn remainder_reshape_claims_preserve_dynamic_target() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut cases = Vec::new();
+    for n in [2, 3] {
+        call_matrix(
+            &mut cases,
+            &format!("remainder_reshape_dynamic.x{n}"),
+            1686,
+            "def f(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [mod(shape(source, 0i32), 4i64), 2i64])",
+            "(tensor[d0, f32], tensor[d1, f32]) -> tensor[2, 2, f32]",
+            vec![vector(n), vector(n * 2)],
+            if n == 2 {
+                Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])
+            } else {
+                Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"])
+            },
+        );
+    }
+    assert_eq!(cases.len(), 6);
+    let mut failures = Vec::new();
+    for case in cases {
+        let observed = observe(&case);
+        println!("{}: {}", case.id, observed);
+        failures.extend(contract_failures(&case, &observed));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Spec/04 §4.7.3 admits any correctly typed int64 target producer. A host
+/// boundary must retain the claim just as the tensor-DAG boundary does.
+#[test]
+fn host_produced_reshape_targets_preserve_declared_claims() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut cases = Vec::new();
+    for (producer, declarations, target) in [
+        ("bitwise", "", "bitand(shape(source, 0i32), 3i64)"),
+        ("metadata", "", "numel(source)"),
+        ("list", "", "len(to_list(source))"),
+        (
+            "helper",
+            "def size(y: tensor[m, f32]) -> int64 = numel(y)\n",
+            "size(source)",
+        ),
+        (
+            "scalar_branch",
+            "",
+            "if eq(shape(source, 0i32), 2i64) then 2i64 else 3i64",
+        ),
+    ] {
+        for n in [2, 3] {
+            for (wrapper, body) in [
+                ("direct", format!("reshape(x, [{target}, 2i64])")),
+                (
+                    "bound_copy",
+                    format!(
+                        "{{\n  size = {target}\n  value = reshape(x, [size, 2i64])\n  copy(value)\n}}"
+                    ),
+                ),
+            ] {
+                call_matrix(
+                    &mut cases,
+                    &format!("host_target.{producer}.{wrapper}.x{n}"),
+                    1686,
+                    &format!(
+                        "{declarations}def f(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = {body}"
+                    ),
+                    "(tensor[d0, f32], tensor[d1, f32]) -> tensor[2, 2, f32]",
+                    vec![vector(n), vector(n * 2)],
+                    if n == 2 {
+                        Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])
+                    } else {
+                        Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"])
+                    },
+                );
+            }
+        }
+    }
+    assert_eq!(cases.len(), 60);
+    let mut failures = Vec::new();
+    for case in cases {
+        let observed = observe(&case);
+        println!("{}: {}", case.id, observed);
+        failures.extend(contract_failures(&case, &observed));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn staged_reshape_sources_preserve_captures_and_order() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut cases = Vec::new();
+    for n in [2, 3] {
+        for (kind, declarations, body) in [
+            (
+                "local_list",
+                "",
+                "{\n  items = to_list(source)\n  size = len(items)\n  reshape(x, [size, 2i64])\n}",
+            ),
+            (
+                "tensor_capture",
+                "",
+                "{\n  doubled = add(source, source)\n  reshape(x, [bitand(numel(doubled), 3i64), 2i64])\n}",
+            ),
+            (
+                "scalar_capture_shadow",
+                "def g(source: int64, x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [bitand(source, 3i64), 2i64])\n",
+                "g(shape(source, 0i32), x)",
+            ),
+            (
+                "scalar_helper_alias",
+                "def extent(y: tensor[m, f32]) -> int64 = numel(y)\n",
+                "{\n  target = extent\n  reshape(x, [target(source), 2i64])\n}",
+            ),
+            (
+                "scalar_helper_alias_nested",
+                "def extent(y: tensor[m, f32]) -> int64 = numel(y)\n",
+                "{\n  target = extent\n  reshape(x, [bitand(target(source), 3i64), 2i64])\n}",
+            ),
+            (
+                "scalar_helper_alias_shadow",
+                "def extent(y: tensor[m, f32]) -> int64 = numel(y)\n",
+                "{\n  target = extent\n  extent = to_list(source)\n  reshape(x, [bitand(target(source), len(extent)), 2i64])\n}",
+            ),
+            (
+                "repeated_calls",
+                "def g(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [bitand(numel(source), 3i64), 2i64])\n",
+                "{\n  first = g(source, x)\n  second = g(source, x)\n  copy(first)\n}",
+            ),
+        ] {
+            call_matrix(
+                &mut cases,
+                &format!("staged_source.{kind}.x{n}"),
+                1686,
+                &format!(
+                    "{declarations}def f(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = {body}"
+                ),
+                "(tensor[d0, f32], tensor[d1, f32]) -> tensor[2, 2, f32]",
+                vec![vector(n), vector(n * 2)],
+                if n == 2 {
+                    Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])
+                } else {
+                    Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"])
+                },
+            );
+        }
+        call_matrix(
+            &mut cases,
+            &format!("staged_source.untaken_failure.x{n}"),
+            1686,
+            "def f(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [if eq(numel(source), 2i64) then 2i64 else floor_div(numel(source), sub(numel(source), numel(source))), 2i64])",
+            "(tensor[d0, f32], tensor[d1, f32]) -> tensor[2, 2, f32]",
+            vec![vector(n), vector(n * 2)],
+            if n == 2 {
+                Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])
+            } else {
+                Expected::ExactTargetDivisionByZero
+            },
+        );
+        call_matrix(
+            &mut cases,
+            &format!("staged_source.discarded.x{n}"),
+            1686,
+            "def g(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [bitand(numel(source), 3i64), 2i64])\ndef f(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[n, f32] = {\n  ignored = g(source, x)\n  x\n}",
+            "(tensor[d0, f32], tensor[d1, f32]) -> tensor[d1, f32]",
+            vec![vector(n), vector(n * 2)],
+            if n == 2 {
+                Expected::Tensor(vec![4], vec![1.0, 2.0, 3.0, 4.0])
+            } else {
+                Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"])
+            },
+        );
+    }
+    for (kind, targets) in [
+        (
+            "host_then_dag",
+            "bitand(shape(source, 0i32), 3i64), floor_div(shape(x, 0i32), sub(shape(x, 0i32), shape(x, 0i32)))",
+        ),
+        (
+            "dag_then_host",
+            "floor_div(shape(x, 0i32), sub(shape(x, 0i32), shape(x, 0i32))), bitand(shape(source, 0i32), 3i64)",
+        ),
+    ] {
+        call_matrix(
+            &mut cases,
+            &format!("staged_source.{kind}"),
+            1686,
+            &format!(
+                "def f(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [{targets}])"
+            ),
+            "(tensor[d0, f32], tensor[d1, f32]) -> tensor[2, 2, f32]",
+            vec![vector(3), vector(6)],
+            Expected::TargetDivisionByZero,
+        );
+    }
+    assert_eq!(cases.len(), 60);
+    let mut failures = Vec::new();
+    for case in cases {
+        let observed = observe(&case);
+        println!("{}: {}", case.id, observed);
+        failures.extend(contract_failures(&case, &observed));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Spec/04 §4.7.3 and [05-OP-50]: packing a local tuple and changing a
+/// rank-zero value's scalar surface must preserve its actual extent source.
+#[test]
+fn staged_sources_preserve_tuple_captures() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut cases = Vec::new();
+    for n in [4, 6] {
+        for (kind, body) in [
+            (
+                "tuple",
+                "{\n  sizes = (floor_div(numel(x), 2i64), 2i64)\n  reshape(x, [sizes.0, sizes.1])\n}",
+            ),
+            (
+                "nested_tuple",
+                "{\n  sizes = ((floor_div(numel(x), 2i64), 2i64), x)\n  dims = sizes.0\n  reshape(sizes.1, [dims.0, dims.1])\n}",
+            ),
+            (
+                "tuple_host_consumer",
+                "{\n  sizes = (floor_div(numel(x), 2i64), 2i64)\n  reshape(x, [bitand(sizes.0, 3i64), sizes.1])\n}",
+            ),
+        ] {
+            call_matrix(
+                &mut cases,
+                &format!("staged_source.{kind}.x{n}"),
+                1686,
+                &format!("def f(x: tensor[n, f32]) -> tensor[2, 2, f32] = {body}"),
+                "(tensor[d0, f32]) -> tensor[2, 2, f32]",
+                vec![vector(n)],
+                if n == 4 {
+                    Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])
+                } else {
+                    Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"])
+                },
+            );
+        }
+    }
+    assert_eq!(cases.len(), 18);
+    let mut failures = Vec::new();
+    for case in cases {
+        let observed = observe(&case);
+        println!("{}: {}", case.id, observed);
+        failures.extend(contract_failures(&case, &observed));
+        if case.source.contains("def main()")
+            && observed["check"]["signatures"]["main"] != "() -> tensor[2, 2, f32]"
+        {
+            failures.push(format!("{}: declared main shape changed", case.id));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn staged_sources_preserve_scalar_and_tensor_views() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut cases = Vec::new();
+    for n in [4, 6] {
+        let mut input = vector(n);
+        if n == 6 {
+            input.values[5] = 8.0; // sum 23; 23 & 3 is the incompatible extent 3.
+        }
+        for (kind, body) in [
+            (
+                "scalar_view",
+                "{\n  total = tensor_to_scalar(sum(x, 0i32))\n  size = bitand(cast(total, int64), 3i64)\n  reshape(x, [size, 2i64])\n}",
+            ),
+            (
+                "retained_views",
+                "{\n  tensor_total = sum(x, 0i32)\n  total = tensor_to_scalar(tensor_total)\n  tensor_again = scalar_to_tensor(total)\n  size = mul(bitand(cast(total, int64), 3i64), mul(numel(tensor_total), numel(tensor_again)))\n  reshape(x, [size, 2i64])\n}",
+            ),
+        ] {
+            call_matrix(
+                &mut cases,
+                &format!("staged_source.{kind}.x{n}"),
+                1686,
+                &format!("def f(x: tensor[n, f32]) -> tensor[2, 2, f32] = {body}"),
+                "(tensor[d0, f32]) -> tensor[2, 2, f32]",
+                vec![input.clone()],
+                if n == 4 {
+                    Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])
+                } else {
+                    Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"])
+                },
+            );
+        }
+    }
+    assert_eq!(cases.len(), 12);
+    let mut failures = Vec::new();
+    for case in cases {
+        let observed = observe(&case);
+        println!("{}: {}", case.id, observed);
+        failures.extend(contract_failures(&case, &observed));
+        if case.source.contains("def main()")
+            && observed["check"]["signatures"]["main"] != "() -> tensor[2, 2, f32]"
+        {
+            failures.push(format!("{}: declared main shape changed", case.id));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn staged_sources_preserve_native_lists_and_host_literals() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut cases = Vec::new();
+    for n in [4, 6] {
+        for (kind, body, axis) in [
+            ("tuple_list", "{\n  sizes = ([1i64, 2i64], numel(x))\n  reshape(x, [len(sizes.0), floor_div(sizes.1, 2i64)])\n}".to_owned(), 1),
+            ("list_capture", "{\n  sizes = [1i64, 2i64]\n  reshape(x, [len(sizes), floor_div(numel(x), 2i64)])\n}".to_owned(), 1),
+            ("nested_list", "{\n  sizes = ([[1i64], [2i64]], numel(x))\n  reshape(x, [len(sizes.0), floor_div(sizes.1, 2i64)])\n}".to_owned(), 1),
+            ("string_literal", format!("{{\n  text = \"{}\"\n  reshape(x, [string_len(text), 2i64])\n}}", if n == 4 { "aa" } else { "aaa" }), 0),
+        ] {
+            call_matrix(
+                &mut cases,
+                &format!("staged_source.{kind}.x{n}"),
+                1686,
+                &format!("def f(x: tensor[n, f32]) -> tensor[2, 2, f32] = {body}"),
+                "(tensor[d0, f32]) -> tensor[2, 2, f32]",
+                vec![vector(n)],
+                if n == 4 { Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]) }
+                else if axis == 0 { Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"]) }
+                else { Expected::Domain("reshape", &["claimed = 2", "reshape axis 1 = 3"]) },
+            );
+        }
+    }
+    assert_eq!(cases.len(), 24);
+    let mut failures = Vec::new();
+    for case in cases {
+        let observed = observe(&case);
+        println!("{}: {}", case.id, observed);
+        failures.extend(contract_failures(&case, &observed));
+        if case.source.contains("def main()")
+            && observed["check"]["signatures"]["main"] != "() -> tensor[2, 2, f32]"
+        {
+            failures.push(format!("{}: declared main shape changed", case.id));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn staged_graph_segments_preserve_eager_sources() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut cases = Vec::new();
+    for n in [2, 3] {
+        call_matrix(
+            &mut cases,
+            &format!("staged_source.eager_unused.x{n}"),
+            1686,
+            "def f(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = {\n  unused = floor_div(shape(x, 0i32), sub(3i64, shape(source, 0i32)))\n  reshape(x, [bitand(numel(source), 3i64), 2i64])\n}",
+            "(tensor[d0, f32], tensor[d1, f32]) -> tensor[2, 2, f32]",
+            vec![vector(n), vector(n * 2)],
+            if n == 2 {
+                Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])
+            } else {
+                Expected::TargetDivisionByZero
+            },
+        );
+    }
+    let mut failures = Vec::new();
+    for case in cases {
+        let observed = observe(&case);
+        println!("{}: {}", case.id, observed);
+        failures.extend(contract_failures(&case, &observed));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn staged_reshape_sources_preserve_signature_witnesses() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut cases = Vec::new();
+    for n in [2, 3] {
+        call_matrix(
+            &mut cases,
+            &format!("staged_source.signature_scope.x{n}"),
+            1686,
+            "def g(source: tensor[rows, f32], x: tensor[n, f32]) -> tensor[rows, 2, f32] = reshape(x, [bitand(numel(source), 3i64), 2i64])\ndef f(unread: tensor[rows, f32], source: tensor[m, f32], x: tensor[n, f32]) -> tensor[rows, 2, f32] = copy(g(source, x))",
+            // The checked type expresses the equality required by the nested
+            // result. The original parameters must still supply two witnesses.
+            "(tensor[rows, f32], tensor[rows, f32], tensor[d0, f32]) -> tensor[rows, 2, f32]",
+            vec![vector(2), vector(n), vector(n * 2)],
+            if n == 2 {
+                Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])
+            } else {
+                Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"])
+            },
+        );
+    }
+    let mut failures = Vec::new();
+    for case in cases {
+        let observed = observe(&case);
+        println!("{}: {}", case.id, observed);
+        failures.extend(contract_failures(&case, &observed));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn staged_sources_preserve_handled_random_progress() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut cases = Vec::new();
+    for seed in [42u64, 43] {
+        for n in [2, 3] {
+            for (kind, bindings, target, draw) in [
+                ("native", "", "bitand(numel(source), 3i64)", 1u64),
+                (
+                    "mixed",
+                    "",
+                    "if eq(numel(source), 2i64) then floor_div(numel(uniform_like(x, 2.0f32, 5.0f32)), 2i64) else 3i64",
+                    2u64,
+                ),
+                (
+                    "tuple_capture",
+                    "  sizes = (numel(source), first)\n",
+                    "bitand(sizes.0, 3i64)",
+                    1u64,
+                ),
+            ] {
+                let expected = if n == 2 {
+                    // Reference the numeric sampler directly, independently of
+                    // either compiler lane's staging, seed and draw scheduling.
+                    let effective_seed = seed ^ draw.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                    Expected::TensorF32Bits(
+                        vec![2, 2],
+                        (0..4)
+                            .map(|index| {
+                                (chelis_types::uniform_sample(
+                                    chelis_types::types::Prim::F32,
+                                    2.0,
+                                    5.0,
+                                    effective_seed,
+                                    index,
+                                )
+                                .unwrap()
+                                .as_f64_lossy() as f32)
+                                    .to_bits()
+                            })
+                            .collect(),
+                    )
+                } else {
+                    Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"])
+                };
+                call_matrix(
+                    &mut cases,
+                    &format!("staged_source.random.{kind}.seed{seed}.x{n}"),
+                    1686,
+                    &format!(
+                        "def g(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] ! {{ Random }} = {{\n  first = uniform_like(x, 2.0f32, 5.0f32)\n{bindings}  size = {target}\n  second = uniform_like(x, 2.0f32, 5.0f32)\n  reshape(second, [size, 2i64])\n}}\ndef f(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = with seed({seed}i64) {{ g(source, x) }}"
+                    ),
+                    "(tensor[d0, f32], tensor[d1, f32]) -> tensor[2, 2, f32]",
+                    vec![vector(n), vector(n * 2)],
+                    expected,
+                );
+            }
+        }
+    }
+    let mut failures = Vec::new();
+    for case in cases {
+        let observed = observe(&case);
+        println!("{}: {}", case.id, observed);
+        failures.extend(contract_failures(&case, &observed));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn remainder_claims_preserve_hip_host_cli_and_api_execution() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut cases = Vec::new();
+    for n in [2, 3] {
+        call_matrix(
+            &mut cases,
+            &format!("remainder_hip_host.x{n}"),
+            1686,
+            "def f(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [mod(shape(source, 0i32), 4i64), 2i64])",
+            "(tensor[d0, f32], tensor[d1, f32]) -> tensor[2, 2, f32]",
+            vec![vector(n), vector(n * 2)],
+            if n == 2 {
+                Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])
+            } else {
+                Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"])
+            },
+        );
+    }
+    let mut failures = Vec::new();
+    for case in cases {
+        for api in [false, true] {
+            let observed = observe_host_lane(&case, None, "hip", api);
+            println!("{} api={api}: {}", case.id, observed);
+            failures.extend(
+                contract_failures(&case, &observed)
+                    .into_iter()
+                    .map(|f| format!("api={api}: {f}")),
+            );
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn staged_claims_preserve_hip_host_cli_and_api_execution() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut cases = Vec::new();
+    for n in [2, 3] {
+        call_matrix(
+            &mut cases,
+            &format!("staged_hip_host.x{n}"),
+            1686,
+            "def f(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [bitand(numel(source), 3i64), 2i64])",
+            "(tensor[d0, f32], tensor[d1, f32]) -> tensor[2, 2, f32]",
+            vec![vector(n), vector(n * 2)],
+            if n == 2 {
+                Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])
+            } else {
+                Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"])
+            },
+        );
+    }
+    let mut failures = Vec::new();
+    for case in cases {
+        for api in [false, true] {
+            let observed = observe_host_lane(&case, None, "hip", api);
+            println!("{} api={api}: {}", case.id, observed);
+            failures.extend(contract_failures(&case, &observed));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn static_reshape_folding_preserves_declaring_input_contract() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut cases = Vec::new();
+    for n in [2, 3] {
+        call_matrix(
+            &mut cases,
+            &format!("static_reshape_source.x{n}"),
+            1686,
+            "def f(unread: tensor[2, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [mod(shape(unread, 0i32), 4i64), 2i64])",
+            "(tensor[2, f32], tensor[d0, f32]) -> tensor[2, 2, f32]",
+            vec![vector(n), vector(4)],
+            if n == 2 {
+                Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])
+            } else {
+                Expected::Domain("load", &["claimed = 2", "unread axis 0 = 3"])
+            },
+        );
+    }
+    assert_eq!(cases.len(), 6);
+    let mut failures = Vec::new();
+    for mut case in cases {
+        if case.id.contains("x3.") {
+            case.expected = if case.exported.is_some() {
+                Expected::EntryShapeMismatch("input `unread` axis 0 expected 2, got 3")
+            } else {
+                // Concrete incompatible arguments are static type errors;
+                // only the externally supplied input reaches an ABI check.
+                Expected::Reject("dimension mismatch")
+            };
+        }
+        let observed = observe(&case);
+        println!("{}: {}", case.id, observed);
+        failures.extend(contract_failures(&case, &observed));
+        if !matches!(case.expected, Expected::Reject(_))
+            && case.source.contains("def main()")
+            && observed["check"]["signatures"]["main"] != "() -> tensor[2, 2, f32]"
+        {
+            failures.push(format!("{}: declared main shape changed", case.id));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn computed_claim_complete_shape_list_precedes_guards() {
+    // Spec/04 §4.7 places local guards at the introducing operation;
+    // §4.7.3 requires the complete shape list to evaluate first. Both a
+    // matching and mismatching first axis must reach a later target failure.
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut fixtures = Vec::new();
+    for (kind, claim, second, n, divisor, denominator, signature, expected) in [
+        (
+            "literal_later_trap",
+            "4",
+            2,
+            4,
+            2,
+            "sub(shape(x, 0i32), 4i64)",
+            "(tensor[d0, f32]) -> tensor[4, 2, f32]",
+            Expected::TargetDivisionByZero,
+        ),
+        (
+            "literal_positive",
+            "4",
+            2,
+            8,
+            2,
+            "sub(shape(x, 0i32), 4i64)",
+            "(tensor[d0, f32]) -> tensor[4, 2, f32]",
+            Expected::Tensor(vec![4, 2], (1..=8).map(f64::from).collect()),
+        ),
+        (
+            "literal_claim",
+            "4",
+            2,
+            6,
+            2,
+            "sub(shape(x, 0i32), 4i64)",
+            "(tensor[d0, f32]) -> tensor[4, 2, f32]",
+            Expected::Domain("reshape", &["claimed = 4", "reshape axis 0 = 3"]),
+        ),
+        (
+            "named_bad_first_later_trap",
+            "n",
+            2,
+            4,
+            2,
+            "sub(shape(x, 0i32), 4i64)",
+            "(tensor[d0, f32]) -> tensor[d0, 2, f32]",
+            Expected::TargetDivisionByZero,
+        ),
+        (
+            "named_good_first_later_trap",
+            "n",
+            2,
+            4,
+            1,
+            "sub(shape(x, 0i32), 4i64)",
+            "(tensor[d0, f32]) -> tensor[d0, 2, f32]",
+            Expected::TargetDivisionByZero,
+        ),
+        (
+            "named_positive",
+            "n",
+            1,
+            4,
+            1,
+            "shape(x, 0i32)",
+            "(tensor[d0, f32]) -> tensor[d0, 1, f32]",
+            Expected::Tensor(vec![4, 1], vec![1.0, 2.0, 3.0, 4.0]),
+        ),
+        (
+            "named_claim",
+            "n",
+            1,
+            4,
+            2,
+            "shape(x, 0i32)",
+            "(tensor[d0, f32]) -> tensor[d0, 1, f32]",
+            Expected::Domain("reshape", &["claimed = 4", "reshape axis 0 = 2"]),
+        ),
+    ] {
+        let reshape = format!(
+            "reshape(x, [floor_div(shape(x, 0i32), {divisor}i64), floor_div(shape(x, 0i32), {denominator})])"
+        );
+        for (wrapper, body) in [
+            ("direct", reshape.clone()),
+            ("copy", format!("copy({reshape})")),
+        ] {
+            let mut routes = Vec::new();
+            call_matrix(
+                &mut routes,
+                &format!("complete_shape_list.{kind}.{wrapper}"),
+                1686,
+                &format!("def f(x: tensor[n, f32]) -> tensor[{claim}, {second}, f32] = {body}"),
+                signature,
+                vec![vector(n)],
+                expected.clone(),
+            );
+            for case in routes {
+                let rows = if claim == "n" { n } else { 4 };
+                let main = case
+                    .source
+                    .contains("def main()")
+                    .then(|| format!("() -> tensor[{rows}, {second}, f32]"));
+                fixtures.push((case, main));
+            }
+        }
+    }
+    // Only the first result axis is claimed. If the result is discarded,
+    // retaining that claim must also retain the later unclaimed target's
+    // computation, including a possible arithmetic failure.
+    for n in [4, 8] {
+        let mut routes = Vec::new();
+        call_matrix(
+            &mut routes,
+            &format!("complete_shape_list.discarded.x{n}"),
+            1686,
+            "def g(x: tensor[n, f32]) -> tensor[4, *, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), floor_div(shape(x, 0i32), sub(shape(x, 0i32), 4i64))])\ndef f(x: tensor[n, f32]) -> tensor[f32] = {\n  discarded = g(x)\n  scalar_to_tensor(9.0f32)\n}",
+            "(tensor[d0, f32]) -> tensor[f32]",
+            vec![vector(n)],
+            if n == 4 {
+                Expected::TargetDivisionByZero
+            } else {
+                Expected::Tensor(vec![], vec![9.0])
+            },
+        );
+        for case in routes {
+            let main = case
+                .source
+                .contains("def main()")
+                .then(|| "() -> tensor[f32]".to_owned());
+            fixtures.push((case, main));
+        }
+    }
+    assert_eq!(fixtures.len(), 48);
+    let mut failures = Vec::new();
+    for (case, main_signature) in fixtures {
+        let observed = observe(&case);
+        println!("{}: {}", case.id, observed);
+        failures.extend(contract_failures(&case, &observed));
+        if let Some(signature) = main_signature
+            && observed["check"]["signatures"]["main"] != signature
+        {
+            failures.push(format!(
+                "{} main signature: {} != {signature}",
+                case.id, observed["check"]["signatures"]["main"]
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn computed_claim_result_graph_contract() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut fixtures = Vec::new();
+    for (kind, claim, divisor, n, signature, expected) in [
+        (
+            "literal",
+            "2",
+            2,
+            4,
+            "(tensor[d0, f32]) -> tensor[2, 2, f32]",
+            Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]),
+        ),
+        (
+            "literal",
+            "2",
+            2,
+            6,
+            "(tensor[d0, f32]) -> tensor[2, 2, f32]",
+            Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"]),
+        ),
+        (
+            "named",
+            "n",
+            1,
+            4,
+            "(tensor[d0, f32]) -> tensor[d0, 1, f32]",
+            Expected::Tensor(vec![4, 1], vec![1.0, 2.0, 3.0, 4.0]),
+        ),
+        (
+            "named",
+            "n",
+            2,
+            4,
+            "(tensor[d0, f32]) -> tensor[d0, 2, f32]",
+            Expected::Domain("reshape", &["claimed = 4", "reshape axis 0 = 2"]),
+        ),
+    ] {
+        let reshape =
+            format!("reshape(x, [floor_div(shape(x, 0i32), {divisor}i64), {divisor}i64])");
+        for (form, helper, body) in [
+            ("copy", String::new(), format!("copy({reshape})")),
+            ("neg", String::new(), format!("neg({reshape})")),
+            (
+                "static_if",
+                String::new(),
+                format!("if true then {reshape} else {reshape}"),
+            ),
+            (
+                "helper",
+                format!("def g(x: tensor[n, f32]) = {reshape}\n"),
+                "g(x)".to_owned(),
+            ),
+            (
+                "alias_helper",
+                format!("def g(x: tensor[n, f32]) = copy({reshape})\n"),
+                "{\n  r = g(x)\n  alias = r\n  neg(neg(alias))\n}".to_owned(),
+            ),
+        ] {
+            let expected = match (&expected, form) {
+                (Expected::Tensor(dims, values), "neg") => {
+                    Expected::Tensor(dims.clone(), values.iter().map(|v| -v).collect())
+                }
+                _ => expected.clone(),
+            };
+            let mut routes = Vec::new();
+            call_matrix(
+                &mut routes,
+                &format!("result_graph.{kind}.{form}.{divisor}.x{n}"),
+                1686,
+                &format!(
+                    "{helper}def f(x: tensor[n, f32]) -> tensor[{claim}, {divisor}, f32] = {body}"
+                ),
+                signature,
+                vec![vector(n)],
+                expected,
+            );
+            for case in routes {
+                let main_claim = if kind == "literal" { 2 } else { n };
+                let main = case
+                    .source
+                    .contains("def main()")
+                    .then(|| format!("() -> tensor[{main_claim}, {divisor}, f32]"));
+                fixtures.push((case, main));
+            }
+        }
+    }
+    // The inner n witnesses x; the outer n witnesses an unread argument.
+    // The inferred helper must not resolve the outer requirement in its own scope.
+    for (rows, cols, expected) in [
+        (2, 4, Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])),
+        (
+            3,
+            4,
+            Expected::Domain("reshape", &["claimed = 3", "reshape axis 0 = 2"]),
+        ),
+    ] {
+        let mut routes = Vec::new();
+        call_matrix(
+            &mut routes,
+            &format!("result_graph.distinct_witnesses.{rows}.{cols}"),
+            1686,
+            "def g(x: tensor[n, f32]) = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])\ndef f(unread: tensor[n, f32], x: tensor[m, f32]) -> tensor[n, 2, f32] = copy(g(x))",
+            "(tensor[d0, f32], tensor[d1, f32]) -> tensor[d0, 2, f32]",
+            vec![vector(rows), vector(cols)],
+            expected,
+        );
+        for case in routes {
+            let main = case
+                .source
+                .contains("def main()")
+                .then(|| format!("() -> tensor[{rows}, 2, f32]"));
+            fixtures.push((case, main));
+        }
+    }
+    // Static branch pruning must not attach a claim to the unexecuted producer.
+    let mut routes = Vec::new();
+    call_matrix(
+        &mut routes,
+        "result_graph.untaken",
+        1686,
+        "def bad(x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])\ndef f(x: tensor[n, f32]) -> tensor[2, 2, f32] = if false then bad(x) else to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]])",
+        "(tensor[d0, f32]) -> tensor[2, 2, f32]",
+        vec![vector(6)],
+        Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]),
+    );
+    for case in routes {
+        let main = case
+            .source
+            .contains("def main()")
+            .then(|| "() -> tensor[2, 2, f32]".to_owned());
+        fixtures.push((case, main));
+    }
+    assert_eq!(fixtures.len(), 69);
+    let mut failures = Vec::new();
+    for (case, main_signature) in fixtures {
+        let observed = observe(&case);
+        println!("{}: {}", case.id, observed);
+        failures.extend(contract_failures(&case, &observed));
+        if let Some(signature) = main_signature
+            && observed["check"]["signatures"]["main"] != signature
+        {
+            failures.push(format!(
+                "{} main signature: {} != {signature}",
+                case.id, observed["check"]["signatures"]["main"]
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// #1686/#1687 retain the original #1375/#597/#1619 host exits. These
+/// expectations come from section 4.7 and [05-MOV-1], never from lane agreement.
+#[test]
+fn omitted_extent_claim_contract() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut fixtures = Vec::new();
+    {
+        let mut add =
+            |family: &str, issue, def: &str, signature, inputs, expected, main_signature: &str| {
+                let mut routes = Vec::new();
+                call_matrix(&mut routes, family, issue, def, signature, inputs, expected);
+                for case in routes {
+                    let main = case
+                        .source
+                        .contains("def main()")
+                        .then(|| main_signature.to_owned());
+                    fixtures.push((case, main));
+                }
+            };
+        for (kind, claim, signature) in [
+            ("named", "n", "(tensor[d0, f32]) -> tensor[d0, 2, f32]"),
+            ("literal", "2", "(tensor[d0, f32]) -> tensor[2, 2, f32]"),
+        ] {
+            for n in [4, 6] {
+                let expected = match (kind, n) {
+                    ("literal", 4) => Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]),
+                    ("literal", 6) => Expected::Domain("reshape", &["claimed = 2", "axis 0 = 3"]),
+                    ("named", 4) => Expected::Domain("reshape", &["claimed = 4", "axis 0 = 2"]),
+                    ("named", 6) => Expected::Domain("reshape", &["claimed = 6", "axis 0 = 3"]),
+                    _ => unreachable!(),
+                };
+                let main_extent = if kind == "literal" { 2 } else { n };
+                for (form, body) in [
+                    (
+                        "direct",
+                        "reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])",
+                    ),
+                    (
+                        "alias",
+                        "{\n  k = floor_div(shape(x, 0i32), 2i64)\n  target = k\n  reshape(x, [target, 2i64])\n}",
+                    ),
+                    (
+                        "result_alias",
+                        "{\n  result = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])\n  alias = result\n  alias\n}",
+                    ),
+                ] {
+                    add(
+                        &format!("omitted.reshape.{kind}.{form}.x{n}"),
+                        1686,
+                        &format!("def f(x: tensor[n, f32]) -> tensor[{claim}, 2, f32] = {body}"),
+                        signature,
+                        vec![vector(n)],
+                        expected.clone(),
+                        &format!("() -> tensor[{main_extent}, 2, f32]"),
+                    );
+                }
+                let g = format!(
+                    "def g(x: tensor[n, f32]) -> tensor[{claim}, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])"
+                );
+                add(
+                    &format!("omitted.reshape.{kind}.nested.x{n}"),
+                    1686,
+                    &format!("{g}\ndef f(x: tensor[n, f32]) -> tensor[{claim}, 2, f32] = g(x)"),
+                    signature,
+                    vec![vector(n)],
+                    expected.clone(),
+                    &format!("() -> tensor[{main_extent}, 2, f32]"),
+                );
+                add(
+                    &format!("omitted.reshape.{kind}.discarded.x{n}"),
+                    1686,
+                    &format!(
+                        "{g}\ndef f(x: tensor[n, f32]) -> tensor[n, f32] = {{\n  _ = g(x)\n  x\n}}"
+                    ),
+                    "(tensor[d0, f32]) -> tensor[d0, f32]",
+                    vec![vector(n)],
+                    if kind == "literal" && n == 4 {
+                        Expected::Tensor(vec![4], vec![1.0, 2.0, 3.0, 4.0])
+                    } else {
+                        expected
+                    },
+                    &format!("() -> tensor[{n}, f32]"),
+                );
+            }
+        }
+        // A named claim can agree with independently computed arithmetic.
+        // Retain the operation, rather than replacing it with a literal reshape.
+        for n in [4, 6] {
+            add(
+                &format!("omitted.reshape.named.match.x{n}"),
+                1686,
+                "def f(x: tensor[n, f32]) -> tensor[n, 1, f32] = reshape(x, [floor_div(shape(x, 0i32), 1i64), 1i64])",
+                "(tensor[d0, f32]) -> tensor[d0, 1, f32]",
+                vec![vector(n)],
+                Expected::Tensor(vec![n, 1], (1..=n).map(|v| v as f64).collect()),
+                &format!("() -> tensor[{n}, 1, f32]"),
+            );
+        }
+        for good in [true, false] {
+            let b = Input {
+                dims: vec![if good { 1 } else { 2 }],
+                values: if good { vec![5.0] } else { vec![5.0, 6.0] },
+            };
+            let mismatch = Expected::Domain("load", &["claimed = 1", "b axis 0 = 2"]);
+            for (form, body) in [
+                ("literal", "expand(b, 0i32, 3i64)"),
+                ("let", "{\n  k = 3i64\n  expand(b, 0i32, k)\n}"),
+                (
+                    "alias",
+                    "{\n  operand = b\n  alias = operand\n  expand(alias, 0i32, 3i64)\n}",
+                ),
+            ] {
+                add(
+                    &format!("omitted.unit.{form}"),
+                    1687,
+                    &format!("def f(b: tensor[unit, f32]) -> tensor[3, f32] = {body}"),
+                    "(tensor[unit, f32]) -> tensor[3, f32]",
+                    vec![b.clone()],
+                    if good {
+                        Expected::Tensor(vec![3], vec![5.0; 3])
+                    } else {
+                        mismatch.clone()
+                    },
+                    "() -> tensor[3, f32]",
+                );
+            }
+            let g = "def g(b: tensor[unit, f32], xs: tensor[n, f32]) -> tensor[n, f32] = mul(xs, expand(b, 0i32, shape(xs, 0i32)))";
+            for (form, def, discarded) in [
+                ("shape", g.replace("def g(", "def f("), false),
+                (
+                    "nested",
+                    format!(
+                        "{g}\ndef f(b: tensor[unit, f32], xs: tensor[n, f32]) -> tensor[n, f32] = g(b, xs)"
+                    ),
+                    false,
+                ),
+                (
+                    "discarded",
+                    format!(
+                        "{g}\ndef f(b: tensor[unit, f32], xs: tensor[n, f32]) -> tensor[n, f32] = {{\n  _ = g(b, xs)\n  xs\n}}"
+                    ),
+                    true,
+                ),
+            ] {
+                add(
+                    &format!("omitted.unit.{form}"),
+                    1687,
+                    &def,
+                    "(tensor[unit, f32], tensor[d0, f32]) -> tensor[d0, f32]",
+                    vec![b.clone(), vector(3)],
+                    if good {
+                        Expected::Tensor(
+                            vec![3],
+                            if discarded {
+                                vec![1.0, 2.0, 3.0]
+                            } else {
+                                vec![5.0, 10.0, 15.0]
+                            },
+                        )
+                    } else {
+                        mismatch.clone()
+                    },
+                    "() -> tensor[3, f32]",
+                );
+            }
+        }
+        for (rows, cols, expected) in [
+            (2, 4, Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])),
+            (
+                3,
+                4,
+                Expected::Domain("reshape", &["claimed = 3", "reshape axis 0 = 2"]),
+            ),
+            (
+                2,
+                6,
+                Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"]),
+            ),
+        ] {
+            add(
+                &format!("omitted.unread.{rows}.{cols}"),
+                1686,
+                "def f(unread: tensor[rows, f32], x: tensor[cols, f32]) -> tensor[rows, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])",
+                "(tensor[rows, f32], tensor[cols, f32]) -> tensor[rows, 2, f32]",
+                vec![vector(rows), vector(cols)],
+                expected,
+                "() -> tensor[rows, 2, f32]",
+            );
+        }
+        for divisor in [1, 2] {
+            let definition = format!(
+                "def g(x: tensor[n, f32]) -> tensor[n, 1, f32] = reshape(x, [floor_div(shape(x, 0i32), 1i64), 1i64])\ndef h(x: tensor[n, f32]) -> tensor[n, {divisor}, f32] = reshape(x, [floor_div(shape(x, 0i32), {divisor}i64), {divisor}i64])\ndef f(a: tensor[left, f32], b: tensor[right, f32]) -> tensor[f32] = add(sum(sum(g(a), 1i32), 0i32), sum(sum(h(b), 1i32), 0i32))"
+            );
+            add(
+                &format!("omitted.separate_scopes.{divisor}"),
+                1686,
+                &definition,
+                "(tensor[left, f32], tensor[right, f32]) -> tensor[f32]",
+                vec![vector(4), vector(6)],
+                if divisor == 1 {
+                    Expected::Tensor(vec![], vec![31.0])
+                } else {
+                    Expected::Domain("reshape", &["claimed = 6", "reshape axis 0 = 3"])
+                },
+                "() -> tensor[f32]",
+            );
+        }
+    }
+    assert_eq!(
+        fixtures.len(),
+        117,
+        "three routes for every positive/negative operation form"
+    );
+    let example = include_str!("../../../examples/checked_runtime_extents.ch");
+    for (id, source, expected) in [
+        (
+            "match",
+            example.to_owned(),
+            Expected::Tensor(vec![2, 2], vec![2.0, 4.0, 6.0, 8.0]),
+        ),
+        (
+            "unit",
+            example.replace("to_tensor([2.0f32])", "to_tensor([2.0f32, 3.0f32])"),
+            Expected::Domain("load", &["claimed = 1", "b axis 0 = 2"]),
+        ),
+        (
+            "reshape",
+            example.replace("3.0f32, 4.0f32])", "3.0f32, 4.0f32, 5.0f32, 6.0f32])"),
+            Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"]),
+        ),
+    ] {
+        fixtures.push((
+            Case {
+                id: format!("checked.example.{id}"),
+                issue: 1277,
+                source,
+                signature: None,
+                expected,
+                exported: None,
+            },
+            Some("() -> tensor[2, 2, f32]".to_owned()),
+        ));
+    }
+    assert_eq!(fixtures.len(), 120);
+    let mut failures = Vec::new();
+    for (case, main_signature) in &fixtures {
+        let observation = observe(case);
+        println!("{}: {}", case.id, observation);
+        failures.extend(contract_failures(case, &observation));
+        if case.id.starts_with("checked.example.") {
+            let expected = "(tensor[unit, f32], tensor[d0, f32]) -> tensor[2, 2, f32]";
+            let actual = &observation["check"]["signatures"]["pair_and_scale"];
+            if actual != expected {
+                failures.push(format!(
+                    "{}.signature: expected {expected}, observed {actual}",
+                    case.id
+                ));
+            }
+        }
+        if let Some(expected) = main_signature {
+            let observed = &observation["check"]["signatures"]["main"];
+            if observed != expected {
+                failures.push(format!(
+                    "{}.main.signature: expected {expected}, observed {observed}",
+                    case.id
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn imported_checked_extent_contract() {
+    let mut failures = Vec::new();
+    for good in [true, false] {
+        for (family, library, arguments, expected) in [
+            (
+                "staged",
+                "def f(x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [bitand(floor_div(numel(x), 2i64), 3i64), 2i64])",
+                literal(&vector(if good { 4 } else { 6 })),
+                if good {
+                    Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])
+                } else {
+                    Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"])
+                },
+            ),
+            (
+                "reshape",
+                "def f(x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])",
+                literal(&vector(if good { 4 } else { 6 })),
+                if good {
+                    Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])
+                } else {
+                    Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"])
+                },
+            ),
+            (
+                "unit",
+                "def f(b: tensor[unit, f32]) -> tensor[3, f32] = expand(b, 0i32, 3i64)",
+                if good {
+                    "to_tensor([5.0f32])".into()
+                } else {
+                    "to_tensor([5.0f32, 6.0f32])".into()
+                },
+                if good {
+                    Expected::Tensor(vec![3], vec![5.0; 3])
+                } else {
+                    Expected::Domain("load", &["claimed = 1", "b axis 0 = 2"])
+                },
+            ),
+            (
+                "literal",
+                "def f(x: tensor[n, f32]) -> tensor[4, f32] = insert(scalar_to_tensor(7.0f32), 0i32, shape(x, 0i32))",
+                literal(&vector(if good { 4 } else { 5 })),
+                if good {
+                    Expected::Tensor(vec![4], vec![7.0; 4])
+                } else {
+                    Expected::Domain("load", &["claimed = 4", "x axis 0 = 5"])
+                },
+            ),
+        ] {
+            for (form, prefix) in [("binding", "out ="), ("main", "def main() =")] {
+                let case = Case {
+                    id: format!("import.{family}.{form}.{good}"),
+                    issue: 1277,
+                    source: format!(
+                        "module App.Fixture\nimport Mylib.Claims (f)\n{prefix} f({arguments})\n"
+                    ),
+                    signature: None,
+                    expected: expected.clone(),
+                    exported: None,
+                };
+                let observation = observe_with_dependency(&case, Some(library));
+                println!("{}: {}", case.id, observation);
+                failures.extend(contract_failures(&case, &observation));
+                let (signature, result) = match family {
+                    "reshape" | "staged" => ("(tensor[d0, f32]) -> tensor[2, 2, f32]", "2, 2"),
+                    "unit" => ("(tensor[unit, f32]) -> tensor[3, f32]", "3"),
+                    "literal" => ("(tensor[d0, f32]) -> tensor[4, f32]", "4"),
+                    _ => unreachable!(),
+                };
+                for (name, expected) in [
+                    ("pkg__mylib__Mylib__Claims__f", signature.to_owned()),
+                    (
+                        "pkg__app__App__Fixture__main",
+                        format!("() -> tensor[{result}, f32]"),
+                    ),
+                ] {
+                    if name.ends_with("__main") && form != "main" {
+                        continue;
+                    }
+                    let actual = &observation["check"]["signatures"][name];
+                    if actual != &expected {
+                        failures.push(format!(
+                            "{}.signature {name}: expected {expected}, observed {actual}",
+                            case.id
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn checked_extent_transforms_contract() {
+    let mut failures = Vec::new();
+    let mut count = 0;
+    for family in ["reshape", "unit"] {
+        for good in [true, false] {
+            let (definition, signature, input, matrix, mapped, gradient, domain) = if family
+                == "reshape"
+            {
+                (
+                    "def f(x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])",
+                    "(tensor[d0, f32]) -> tensor[2, 2, f32]",
+                    vector(if good { 4 } else { 6 }),
+                    if good {
+                        "to_tensor([[1.0f32, 2.0f32, 3.0f32, 4.0f32], [5.0f32, 6.0f32, 7.0f32, 8.0f32]])"
+                    } else {
+                        "to_tensor([[1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32], [7.0f32, 8.0f32, 9.0f32, 10.0f32, 11.0f32, 12.0f32]])"
+                    },
+                    Expected::Tensor(vec![2, 2, 2], (1..=8).map(f64::from).collect()),
+                    Expected::Tensor(vec![4], vec![1.0; 4]),
+                    Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"]),
+                )
+            } else {
+                (
+                    "def f(b: tensor[unit, f32]) -> tensor[3, f32] = expand(b, 0i32, 3i64)",
+                    "(tensor[unit, f32]) -> tensor[3, f32]",
+                    Input {
+                        dims: vec![if good { 1 } else { 2 }],
+                        values: if good { vec![5.0] } else { vec![5.0, 6.0] },
+                    },
+                    if good {
+                        "to_tensor([[5.0f32], [7.0f32]])"
+                    } else {
+                        "to_tensor([[5.0f32, 6.0f32], [7.0f32, 8.0f32]])"
+                    },
+                    Expected::Tensor(vec![2, 3], vec![5.0, 5.0, 5.0, 7.0, 7.0, 7.0]),
+                    Expected::Tensor(vec![1], vec![3.0]),
+                    Expected::Domain("load", &["claimed = 1", "b axis 0 = 2"]),
+                )
+            };
+            for transform in ["vmap", "grad", "masked_grad"] {
+                let (extra, call, expected) = if transform == "vmap" {
+                    (
+                        String::new(),
+                        format!("vmap(f)({matrix})"),
+                        if good {
+                            mapped.clone()
+                        } else if family == "reshape" {
+                            Expected::Domain("reshape", &["claimed = 2", "reshape axis 1 = 3"])
+                        } else {
+                            Expected::Domain("load", &["claimed = 1", "b axis 1 = 2"])
+                        },
+                    )
+                } else {
+                    let reduction = if family == "reshape" {
+                        "sum(sum(f(x), 1i32), 0i32)"
+                    } else {
+                        "sum(f(x), 0i32)"
+                    };
+                    let body = if transform == "masked_grad" {
+                        format!("mul({reduction}, scalar_to_tensor(0.0f32))")
+                    } else {
+                        reduction.into()
+                    };
+                    let extra = format!("\ndef loss(x: tensor[n, f32]) -> tensor[f32] = {body}\n");
+                    let positive = if transform == "masked_grad" {
+                        Expected::Tensor(input.dims.clone(), vec![0.0; input.values.len()])
+                    } else {
+                        gradient.clone()
+                    };
+                    (
+                        extra,
+                        format!("grad(loss)({})", literal(&input)),
+                        if good { positive } else { domain.clone() },
+                    )
+                };
+                for (form, prefix) in [("binding", "out ="), ("main", "def main() =")] {
+                    let case = Case {
+                        id: format!("transform.{family}.{transform}.{form}.{good}"),
+                        issue: 1277,
+                        source: format!("{definition}\n{extra}{prefix} {call}\n"),
+                        signature: Some(signature),
+                        expected: expected.clone(),
+                        exported: None,
+                    };
+                    let observation = observe(&case);
+                    println!("{}: {}", case.id, observation);
+                    failures.extend(contract_failures(&case, &observation));
+                    if form == "main" {
+                        let dims = if transform == "vmap" {
+                            if family == "reshape" {
+                                "2, 2, 2".to_owned()
+                            } else {
+                                "2, 3".to_owned()
+                            }
+                        } else if family == "unit" {
+                            // A named dimension retains its declaring spelling
+                            // in the signature. Values and failures below use
+                            // independent actual singleton/nonunit arguments.
+                            "unit".to_owned()
+                        } else {
+                            input.dims[0].to_string()
+                        };
+                        let expected = format!("() -> tensor[{dims}, f32]");
+                        let actual = &observation["check"]["signatures"]["main"];
+                        if actual != &expected {
+                            failures.push(format!(
+                                "{}.main.signature: expected {expected}, observed {actual}",
+                                case.id
+                            ));
+                        }
+                    }
+                    count += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(count, 24);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

@@ -319,6 +319,7 @@ fn agreement_op_for_risc(op: &RiscOp) -> AgreementOp {
         | RiscOp::Div
         | RiscOp::FloorDiv
         | RiscOp::TruncDiv
+        | RiscOp::Mod
         | RiscOp::CmpLt
         | RiscOp::MaxElem
         | RiscOp::MinElem
@@ -351,6 +352,8 @@ fn agreement_op_for_risc(op: &RiscOp) -> AgreementOp {
         | RiscOp::Stride { .. }
         | RiscOp::Shape { .. }
         | RiscOp::ExtentWitness { .. }
+        | RiscOp::CheckedReshapeExtent { .. }
+        | RiscOp::CheckedUnitAxis { .. }
         | RiscOp::Const { .. }
         | RiscOp::ConstTensor { .. }
         | RiscOp::Load { .. }

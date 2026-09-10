@@ -23,26 +23,54 @@ before consuming any package or symbol metadata.
 
 ## 3. Compiler API Wire Contract
 
-WireDag JSON is an exact-version contract. Schema version 9 is explicitly
+WireDag JSON is an exact-version contract. Schema version 10 is explicitly
 present in every payload and is the only accepted version. A missing version,
-versions 1 through 8, and every future version are decode errors before any IR
+versions 1 through 9, and every future version are decode errors before any IR
 node is consumed. There is no versionless default, legacy migration, additive-
 variant tolerance, or best-effort compatibility path.
 
-`WireRiscOp::ExtentWitness { parameter, axis, requirements }` preserves a
+`WireRiscOp::ExtentWitness { site, parameter, axis, requirements }` preserves a
 call's shape observation and its literal requirements separately. It has one
 tensor input and a rank-zero `int64` output. The normalized `int32` axis must
 be within that input's rank. Every requirement uses the exact
 `NonnegativeExtent` adapter over a nonnegative `int64`; an absent vector,
 non-integer or negative requirement,
 invalid axis, arity, or output type is an encoding and decoding error.
-`parameter` is diagnostic text, not dimension identity. The node's source
+`site` is mandatory and is exactly `caller` or `local_expand`. It preserves
+whether failure belongs to call entry (`load`, with parameter context) or a
+local broadcast (`expand`, with the observed input node context); missing or
+unknown sites are decoding errors. `parameter` is diagnostic text, not dimension identity. The node's source
 provenance and invocation dependencies survive transport as ordinary node
 fields and edges. Requirement order and duplicates are preserved; an empty
 requirements vector is valid. `WireDagNode.shape_deps` contains exact u64 node
 references to strictly earlier nodes. It does not carry shape numbers.
 `shape_deps`, `span_id` (explicitly null when absent), and `merged_spans` are
 mandatory fields, including when their lists are empty.
+
+`WireRiscOp::Mod` preserves the exact signed-remainder identity of [05-OP-64].
+It has exactly two earlier input nodes, each with its output's integer dtype
+and dimension list. Other arities, dtypes or shapes are encoding and decoding
+errors.
+
+`WireRiscOp::CheckedReshapeExtent { claims, axis }` has an earlier rank-zero
+`int64` input for the independently computed target extent, followed by one
+earlier scalar `int64` input per requirement. The nonempty `claims` list contains
+diagnostic labels in the same order as those requirement inputs. Its rank-zero
+`int64` output carries the computed extent after all equality checks, in list
+order. Labels are diagnostic text; input edges identify requirements, including
+each declaring signature's shape witness. The normalized
+`int32` result-axis position is nonnegative. Missing fields, invalid references,
+wrong arity, or non-scalar/non-`int64` inputs or output are encoding and decoding
+errors. A resolved result-type dimension does not substitute for either input.
+
+`WireRiscOp::CheckedUnitAxis { axis }` has two earlier inputs: a tensor and an
+`ExtentWitness` reading exactly that tensor at the same normalized axis, with
+an explicit requirement of one. Its output preserves the input's dtype, rank
+and all other dimensions, refining only that axis to literal one. A different
+tensor, axis, witness operation, missing unit requirement, or unrelated type
+refinement is an encoding and decoding error. These checked operations preserve
+their source provenance and invocation dependencies through the mandatory node
+fields and edges above; discarded data results do not erase their checks.
 
 `WireRiscOp::Count { axes }` carries the complete
 non-empty vector of unique normalized original-axis positions in strictly
@@ -76,7 +104,7 @@ int64 node. The decoder enforces the owner matrix from
 `spec/05-risc-primitives.md` §2.4.1, the source rank and dtype, the normalized
 axis range, and the exact input cardinality before IR construction.
 
-Every tagged variant must be known to the version 9 decoder. `OneHot` remains only a transient
+Every tagged variant must be known to the version 10 decoder. `OneHot` remains only a transient
 IR/specialization marker and backends must not receive it after specialization.
 
 Execution-value envelopes carry the independently required exact

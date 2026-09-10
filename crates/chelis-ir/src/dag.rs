@@ -440,6 +440,15 @@ pub enum FusedInput {
     PreviousStep(usize),
 }
 
+/// The semantic diagnostic owner of an extent observation. This is separate
+/// from the parameter's display name and from the witness's node identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtentWitnessSite {
+    Caller,
+    LocalExpand,
+}
+
 /// A RISC primitive operation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RiscOp {
@@ -471,6 +480,9 @@ pub enum RiscOp {
     /// `Std.Decimal` arithmetic relies on. Non-differentiable;
     /// `grad` rejects it. See `spec/05-risc-primitives.md` §2.1.
     TruncDiv,
+    /// Exact signed remainder, with DivZero traps at the stored width
+    /// and dividend-sign semantics under [05-OP-64].
+    Mod,
     CmpLt,
     MaxElem,
     /// Direct element-wise minimum selection. This identity preserves the
@@ -705,9 +717,26 @@ pub enum RiscOp {
     /// The node is created at call entry, before the callee body, and
     /// its enclosing invocation retains required checks through `shape_deps`.
     ExtentWitness {
+        site: ExtentWitnessSite,
         parameter: String,
         axis: RtAxis,
         requirements: Vec<chelis_types::ScalarValue>,
+    },
+    /// Checks an independently computed reshape target (input 0) against
+    /// its declaring witnesses or literal requirements (inputs 1..). Every
+    /// input and the result is scalar int64. The nonempty `claims` labels
+    /// correspond one-to-one to requirement edges, checked in order. Labels
+    /// are diagnostic only; edges identify each activation's requirement.
+    CheckedReshapeExtent {
+        claims: Vec<String>,
+        axis: RtAxis,
+    },
+    /// Refines one tensor axis to one after its exact ExtentWitness has
+    /// checked that obligation. Inputs are the original tensor and witness.
+    /// Verification ties the witness to that tensor and axis; metadata alone
+    /// cannot authorize the refinement. All other dimensions are unchanged.
+    CheckedUnitAxis {
+        axis: RtAxis,
     },
 
     // --- Memory ---
@@ -851,6 +880,7 @@ pub enum RiscAtomIdentity {
     Div,
     FloorDiv,
     TruncDiv,
+    Mod,
     CmpLt,
     MaxElem,
     Neg,
@@ -908,6 +938,7 @@ impl RiscAtomIdentity {
         Self::Div,
         Self::FloorDiv,
         Self::TruncDiv,
+        Self::Mod,
         Self::CmpLt,
         Self::MaxElem,
         Self::Neg,
@@ -965,6 +996,7 @@ impl RiscAtomIdentity {
             Self::Div => "div",
             Self::FloorDiv => "floor_div",
             Self::TruncDiv => "trunc_div",
+            Self::Mod => "mod",
             Self::CmpLt => "cmplt",
             Self::MaxElem => "max_elem",
             Self::Neg => "neg",
@@ -1038,6 +1070,7 @@ impl RiscOp {
             Self::Div => Semantic(Id::Div),
             Self::FloorDiv => Semantic(Id::FloorDiv),
             Self::TruncDiv => Semantic(Id::TruncDiv),
+            Self::Mod => Semantic(Id::Mod),
             Self::CmpLt => Semantic(Id::CmpLt),
             Self::MaxElem => Semantic(Id::MaxElem),
             Self::Neg => Semantic(Id::Neg),
@@ -1082,11 +1115,13 @@ impl RiscOp {
             Self::ScatterAdd { .. } => Semantic(Id::Scatter),
             Self::Scatter { .. } => Semantic(Id::ScatterReplace),
             Self::ScatterElements { .. } => Semantic(Id::ScatterElements),
-            // ExtentWitness is the compiler's call-boundary requirement
-            // carrier under [04-NUM-9], not a callable Table-A operation.
+            // Extent witnesses and checks carry the compiler's operation
+            // preconditions under [04-NUM-9], not callable Table-A operations.
             // Its tagged requirements and shape-only dependency are checked
             // by the IR verifier and the runtime-extent oracle.
             Self::ExtentWitness { .. }
+            | Self::CheckedReshapeExtent { .. }
+            | Self::CheckedUnitAxis { .. }
             | Self::OneHot { .. }
             | Self::Const { .. }
             | Self::ConstTensor { .. }
@@ -1409,7 +1444,7 @@ impl RiscOp {
             // `Floor`/`Ceil`/`Round` they have a step-function envelope,
             // but the integer-quotient semantics are not part of the
             // pinned real-valued forward-bound surface today.
-            RiscOp::FloorDiv | RiscOp::TruncDiv => false,
+            RiscOp::FloorDiv | RiscOp::TruncDiv | RiscOp::Mod => false,
 
             // [05-OP-6] `cast_trunc` is the same shape as the integer
             // quotients above: piecewise constant with an integer output,
@@ -1429,7 +1464,10 @@ impl RiscOp {
             // input's real-valued data (its output is constant w.r.t. the
             // element values). Like the arg-reductions it is outside the
             // real-valued forward-bound story (chelis#513 / chelis#558).
-            RiscOp::Shape { .. } | RiscOp::ExtentWitness { .. } => false,
+            RiscOp::Shape { .. }
+            | RiscOp::ExtentWitness { .. }
+            | RiscOp::CheckedReshapeExtent { .. }
+            | RiscOp::CheckedUnitAxis { .. } => false,
 
             // Sparse gather/scatter index data movement; no real-valued
             // transformer is pinned, and `Scatter` / `ScatterElements`
@@ -3336,6 +3374,7 @@ mod tests {
             RiscOp::Div,
             RiscOp::FloorDiv,
             RiscOp::TruncDiv,
+            RiscOp::Mod,
             RiscOp::CmpLt,
             RiscOp::MaxElem,
             RiscOp::Neg,
@@ -3440,8 +3479,8 @@ mod tests {
         // identities so they cannot inherit a verifier disposition.
         assert_eq!(
             all.len(),
-            55,
-            "one_of_every_risc_op must list all 55 classified samples"
+            56,
+            "one_of_every_risc_op must list all 56 classified samples"
         );
 
         // The classifier returns a definite bool for every variant (no
@@ -3453,18 +3492,19 @@ mod tests {
         // (5 binary/cmp + 13 unary, including `round`), 5 reductions, 6
         // movement, 4 memory/blas value nodes (Const, ConstTensor, Load,
         // BlasMatmul), and Cast are targetable (34); stochastic (2),
-        // arg-reductions (2), integer floor/trunc division (2), `cast_trunc`
-        // (1, chelis#759), one_hot (1), the `Shape` metadata read (1), sparse
-        // gather/scatter (4, including element-wise `ScatterElements`),
-        // linearity/lifecycle markers + store (4), reduce-window-grad (1),
-        // fused-elem (1), and the dedicated ReLU identity/adjoint (2) are
-        // excluded (21) until Beacon registers their own transformers.
+        // arg-reductions (2), integer floor/trunc division and remainder (3),
+        // `cast_trunc` (1, chelis#759), one_hot (1), the `Shape` metadata read
+        // (1), sparse gather/scatter (4, including element-wise
+        // `ScatterElements`), linearity/lifecycle markers + store (4),
+        // reduce-window-grad (1), fused-elem (1), and the dedicated ReLU
+        // identity/adjoint (2) are excluded (22) until Beacon registers their
+        // own transformers.
         assert_eq!(
             targetable, 34,
             "targetable op count drifted from the pinned WI-2 subset"
         );
         assert_eq!(
-            excluded, 21,
+            excluded, 22,
             "excluded op count drifted from the pinned WI-2 subset"
         );
 
@@ -3499,6 +3539,10 @@ mod tests {
             "cast_trunc is piecewise constant with an integer output; it has \
              no real-valued envelope, unlike the checked `cast`"
         );
+        assert!(
+            !RiscOp::Mod.is_verifier_targetable(),
+            "integer remainder is discrete and has no real-valued envelope"
+        );
     }
 
     #[test]
@@ -3509,6 +3553,7 @@ mod tests {
         let mut discovery_cases = all.clone();
         discovery_cases.extend([
             RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::Caller,
                 parameter: "x".into(),
                 axis: RtAxis::Lit(0),
                 requirements: vec![chelis_types::scalar_from_i64("load", Prim::Int64, 4).unwrap()],

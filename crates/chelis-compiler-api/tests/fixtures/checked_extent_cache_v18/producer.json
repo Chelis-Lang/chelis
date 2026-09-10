@@ -1,0 +1,13 @@
+{
+  "producer_head": "77988d22dd0548797c394ce584b07f6314ecc5e3",
+  "producer_binary_sha256": "7ec1c44470c0a86da4ea535dddd5dd98b602d5f77beeefc2fd7f64792cdf45aa",
+  "context_sha256": "21b741953ec9fe501f5116ca6a17c6f9bc8f2ddeb8faf63670a47c665200cf88",
+  "magic": "CHELIS_CTX_V18",
+  "source": "module App.Main\nimport Mylib.Claims (f)\ndef main() = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]))\n",
+  "dependency": "module Mylib.Claims\nexport (f)\ndef f(x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [floor_div(shape(x, 0i32), 2i64), 2i64])\n",
+  "old_result": {
+    "exit": 0,
+    "stdout": "main = tensor(shape=[3, 2], data=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])",
+    "stderr": ""
+  }
+}

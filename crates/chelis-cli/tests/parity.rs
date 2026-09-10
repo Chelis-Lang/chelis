@@ -470,6 +470,11 @@ fn parity_list_foundation() {
 }
 
 #[test]
+fn parity_checked_runtime_extents() {
+    drive_parity(&examples_root().join("checked_runtime_extents.ch"), true);
+}
+
+#[test]
 fn parity_ordered_extent_claims() {
     drive_parity(&examples_root().join("ordered_extent_claims.ch"), true);
 }
@@ -600,6 +605,7 @@ fn parity_corpus_is_complete() {
         "list_foundation.ch",
         "literal_extent_claim.ch",
         "ordered_extent_claims.ch",
+        "checked_runtime_extents.ch",
         "mnist.ch",
         "opaque_invariants.ch",
         "opaque_invariants_simplex.ch",

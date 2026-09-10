@@ -15,7 +15,7 @@ language rule and does not relax the numbered specs to match a baseline.
 
 ## Current state and remaining work
 
-The reference implementation state for the merged inventory is `fc1abe414`.
+The reference implementation state for the merged inventory is `4f3812e2f`.
 The following are merged mechanisms, not a claim of complete class coverage.
 
 | delivery | merged PR | established behavior |
@@ -30,6 +30,10 @@ The following are merged mechanisms, not a claim of complete class coverage.
 | B2b-0 | #1616 (`f6cfd2d72`) | seven existing phase-B rows receive passing receipts; no guard mechanism changes |
 | B2b-0b broadcast preparation | #1658 (`3fbc1df49`) | anonymous broadcast axes retain their own sources; the 11-case broadcast attribution contract passes; inlined unit-check residue belongs to #1687 |
 | B2b-0b numeric local guards | #1662 (`5dde8373c`) | literal/resolved claims compare independent runtime carriers; the 32-lane local matrix passes |
+| B2b-0b local guard order | #1666 (`e0fa5ccc0`) | multi-axis local reshape guards use declaration order on Eval and C |
+| B2b-1 literal claim transport | #1668 (`84ae9bd7f`) | explicit caller-axis witnesses and invocation dependencies retain literal claims through direct, nested and discarded calls |
+| exact wire migration | #1664 (`ad9b6c248`) | WireDag v9 uses exact numeric codecs and validated fixed-width references; stdlib/library/context caches are 16/12/18 |
+| helper guard order | #1688 (`4f3812e2f`) | declared helper input order and one shared IR comparison schedule; the 50-case exported/binding/main oracle passes |
 
 The extent carrier is no longer a display name, and sources/classes already
 exist. What remains is preservation of a claim and its caller witnesses,
@@ -44,18 +48,17 @@ old `symbolic_bindings` path still supplies evaluator bindings and declaration
 consumers. Passing a test of one grouping does not test the other.
 
 The eval before/after-effect rows in `runtime_extent_slice_b` assert actual
-transcript bytes across failure (#1585); C's buffered-output repair remains
-separately owned by #1591.
+transcript bytes across failure (#1585); C now flushes observable output before
+its traps (#1591).
 
-Current failure boundaries:
+The checked transport in C2.4 implements the restored #1686/#1687 host
+obligations: computed reshape claims and broadcast unit preconditions survive
+inlining, graph rewrites and cache transport. Their bounded oracle retains
+independent declaration, value and failure assertions. Remaining failure boundaries:
 
 - #1374/#1376: lowering may drop the argument whose axis witnesses the result
   claim. Root reachability cannot recover a signature that is no longer
   represented, and an unread argument still owes its signature check.
-- #1686: arithmetic reshape targets lose named/literal result checks after
-  inlining. This is original #1375 work omitted by its closing PR #1597.
-- #1687: non-unit broadcast operands lose their runtime checks after
-  inlining. This retains the original #597/#1619 negative exit.
 - #1397: checked function stamps now retain the declared result; movement
   execution still owes its guard and general wildcard-returning roots can
   disappear from eval and entry emission. #1378's public vmap witness remains
@@ -85,9 +88,9 @@ shape. B2b-1 owns preservation and enforcement of those scoped claims.
 
 The bounded acceptance command is `singleton_broadcast_contract` in C5.
 Literal call/inlining obligations, op-computed local guards, and scoped claim transport
-remain separate obligations below. In particular, an inlined call with a
-non-unit argument still loses its runtime unit guard (#1687); repairing #1619's
-anonymous-output rewrite does not establish claim preservation through calls.
+have separate receipts below. C2.4's checked transport closes the inlined
+non-unit host obligation (#1687); #1658's anonymous-output rewrite alone did
+not establish that claim preservation through calls.
 
 ## Part I: implementation contracts
 
@@ -280,7 +283,7 @@ claim migration still owns scoped binding identities, unread named witnesses,
 and #1374/#1376/#1566. Both changes retain the C2.3 distinction between a
 requirement and an independently observed extent.
 
-The literal transport uses `RiscOp::ExtentWitness { parameter, axis,
+The literal transport uses `RiscOp::ExtentWitness { site, parameter, axis,
 requirements }`. Its one tensor input is the actual argument; its result is
 the observed axis extent as a rank-zero `int64`. `parameter` is diagnostic
 text, `axis: RtAxis` selects the observed axis, and
@@ -334,11 +337,185 @@ fixtures preceded implementation and both runners now pass.
 `runtime_extent_literal_transport` checks independent requirements, invalid
 carriers, root liveness, CSE/folding, grad and vmap. `wire_extent_witness`
 checks exact claims, invocation edges and source provenance on roundtrip,
-plus rejection of missing fields and malformed claims/edges. WireDag v9
-adds these explicit fields; stdlib/library cache versions are 15/11.
+plus rejection of missing fields and malformed claims/edges. WireDag v8
+introduced these fields; #1664 moves their numeric transport to v9 and
+stdlib/library/context cache versions 16/12/18.
 The wider named-claim and op-computed-source exits remain separate. HIP and
 Metal retain their existing runtime scalar shape-read exclusions; these
 host execution receipts do not certify device execution.
+
+The checked-extent integration owns #1686 and #1687. It adds two checked
+carriers to the construction and consumer inventory above:
+
+- `CheckedReshapeExtent { claims, axis }` consumes an ordinary scalar `int64`
+  input for the independently computed target and one for each required value.
+  Each requirement is a tagged literal constant or the declaring parameter's
+  `ExtentWitness`, selected within the current signature activation before
+  substitution. The nonempty `claims` list contains ordered diagnostic labels,
+  not identities. Each requirement is checked in list order. The checked scalar
+  becomes the reshape target before allocation. All shape-list expressions
+  lower before any of its check carriers; existing `shape_deps` retain every
+  target producer when only a discarded result's check remains live. Thus a
+  later target's arithmetic failure precedes a reshape claim check, as §4.7.3
+  requires. Existing static arithmetic folding is retained only when producing
+  literals, external literal axes checked at entry, constant scalar dataflow,
+  or a prior checked scalar with a literal requirement independently establish
+  the source extents. Folded source dependencies and the scalar claim carrier remain;
+  computed result metadata cannot supply a proof. Its computed axis has a fresh
+  runtime identity; the declared requirement remains an explicit checked edge.
+- `CheckedUnitAxis { axis }` consumes the original tensor and that same
+  tensor-axis witness carrying requirement one. Verification requires both
+  edges to agree, requires the unit obligation, and permits only the checked
+  axis to refine to one. It forwards the tensor after the witness succeeds;
+  `expand` then consumes that checked tensor without repeating the guard.
+
+`ExtentWitness.site` explicitly distinguishes `Caller` from `LocalExpand`.
+Caller failures retain the declaring parameter and `load` trap; a local
+broadcast retains the observed input node and `expand` trap. Rebuilding and
+vmap preserve the site while remapping the input and axis. Local unit
+refinements are reused only for the same input node and axis within the
+current activation; entering and leaving a call saves and restores that map.
+An inserted axis derived from a witness also retains a fresh runtime identity,
+so an independently known actual cannot make intermediate ownership validation
+preempt the witness's runtime check.
+
+Result requirements are resolved before entering the body. After lowering,
+the returned tensor's per-axis source derivation attaches them to unique
+computed reshape scalar carriers. This follows aliases, shape-preserving
+operations and helper results without forwarding raw binders through syntax.
+A scalar starts as an identity carrier and becomes checked before its consuming
+reshape; inner and outer requirements remain distinct input edges. A claim
+introduced after a value was already produced executes at that call boundary.
+Literal-condition host functions use existing DAG branch pruning while retaining
+their full declaring signature; dynamic host control flow keeps its existing route.
+
+Host-sourced extents use a shared staged function plan. A supported scalar
+`int64` expression that cannot execute in the tensor DAG keeps its checked
+source expression and captures the current activation's
+values explicitly. Its result supplies a fresh typed scalar input in the logical
+DAG. Lowering attaches result claims through that complete graph before splitting
+it into executable helpers; a helper's result metadata cannot reconstruct the
+lost provenance after a split. Existing native arithmetic lowering remains in
+place where it already carries the source correctly.
+
+Stages execute at their original source positions. The preceding graph segment
+executes eager expressions even when their values are unused and exports only
+values required after the cut. A completion dependency retains that execution
+without exporting every intermediate tensor. It materializes each capture once;
+the existing host evaluator or host C lowering evaluates the scalar expression
+once, and the following segment consumes its
+tagged result. Complete shape-list evaluation precedes checked reshape carriers
+and allocation, including mixed host/DAG producers and discarded results. The
+same plan drives Eval and C; host C emitted for HIP follows it too. Scalar control
+inside a source expression stays within that expression. The plan does not move
+a source out of a tensor branch or make tensor control flow eager.
+
+Plan validation requires exactly one producer for each staged input, available
+captures, matching types, and no unresolved placeholders in executable helpers.
+After cache admission, the plan is regenerated from the checked program and
+mandatory authored-signature ledger before definition execution. Any admitted
+transform must preserve stage/value mapping and execution multiplicity. These
+obligations are not discharged by the
+native remainder path: the active `host_produced_reshape_targets_preserve_declared_claims`
+fixture covers bitwise, metadata, list, helper and scalar-conditional producers,
+with direct and bound/copied results. Non-tensor locals retain typed host values;
+capture identity is keyed by the producing node or host value, never the binder
+spelling. Scalar/tensor conversions receive distinct view nodes before partition,
+so both aliases retain their host surfaces. Native aggregates retain their checked host type and constructor metadata beside
+their field graph. Captures reconstruct that typed structure from already evaluated
+leaves, including nested lists and tuples; tensor consumers retain the original
+leaf graph. Packing does not replay arithmetic or effects. Host literals use typed
+source values. Once a source is selected, capture failure cannot fall back to
+unclaimed execution.
+Static function aliases retain their resolved definition at the binding
+position: Eval captures the existing function value, and C projects that same
+identity into direct calls while respecting nested binders. Later shadowing cannot
+retarget the call. Calls into staged definitions retain the shared plan instead of
+re-extracting a tensor-only helper. Host control boundaries are an explicit
+planner result, so a fallback cannot silently retry whole-function DAG lowering.
+Random handlers retain host scope, each tensor segment consumes the live handled
+stream, and CSE preserves distinct activated draws.
+
+Each activation owns fresh witness nodes. The lowering environment maps the
+signature's binders to these exact nodes and restores that map on return;
+ordinary graph edges, rather than spelling or reachability, carry identity
+through rebuilding and import. Every checked scalar and required witness is
+retained by the invocation's fresh return carrier, even when its result is
+discarded. CSE and folding preserve independent checks and call provenance.
+`LoweredLibrary.program_signatures` retains authored declarations separately
+from inferred function metadata. `ResolvedFunction` carries that declaration
+through callable aliases and transforms; local shadowing cannot select a
+same-spelled global declaration. Checker wildcard narrowing retains a named
+dimension only when that declaration binds it in a parameter. A shape-only
+argument remains a witness even when the body does not read its data.
+Eval composes the checked library and new program before imported kernel
+lookup, using the existing checked-library proof; an absent proof is an error.
+
+Grad retains primal checks and restores a unit operand's cotangent shape using
+its checked witness, so a known non-unit actual cannot make backward graph
+validation preempt the primal Domain failure. Vmap shares scalar checks and shifts tensor-axis
+witnesses and unit refinements together. The verifier and exact wire decoder
+reject missing claims, wrong arity or scalar types, and unsupported refinements.
+The admitted extent arithmetic includes signed remainder. `RiscOp::Mod` uses
+the existing `Numeric:mod:TableA` registration under [05-OP-64] and exact tagged
+integer kernels. It stays materialized through fusion, preserves its inputs
+through rebuilding, and uses checked C arithmetic. Integer zero-divisors retain DivZero; remainder
+by -1 is exactly zero without forming an unrepresentable quotient. This closes the host-route
+claim bypass for remainder targets: selecting `mod` cannot discard the authored
+reshape obligation. HIP entry selection retains the checked realizability lane
+through helper extraction on both CLI and API paths. The host C artifact is
+executed independently in the oracle; genuine tensor roots still select device
+emission. HIP device execution remains with the platform owners.
+WireDag v10 carries both checked operations and integer remainder. Stdlib/library/context cache
+versions 17/13/19 require the authored signature ledger and revalidate it
+against fresh lowering. Missing fields and a forged ledger with a valid
+checksum and unchanged proof identity reject at admission.
+
+The completion oracle for these two host obligations is:
+
+```sh
+cargo nextest run -p chelis-cli -p chelis-ir -p chelis-compiler-api -p chelis-backend-c --lib \
+  --test runtime_extent_claim_preparation --test runtime_extent_checked_transport \
+  --test wire_extent_witness --test disk_cache \
+  --test issue_513_symbolic_axis_adjoints --test exec_compile \
+  --test runtime_extent_slice_b --test issue_912_root_boundary --test cli \
+  -E 'binary(runtime_extent_claim_preparation) | binary(runtime_extent_checked_transport) | binary(wire_extent_witness) | test(=cached_imports_preserve_computed_claims_and_unit_preconditions) | test(=previous_checked_extent_cache_is_rejected_before_payload_decode) | test(context_decode_rejects_missing_or_forged_authored_signatures) | binary(issue_513_symbolic_axis_adjoints) | test(static_reshape_folding_requires_independent_axis_sources) | test(checked_remainder) | test(staged_plan_) | test(cse_preserves_executed_random_draws) | test(=a_local_unit_extent_claim_is_guarded_on_the_hip_host_lowering) | test(=hip_tensor_root_uses_the_manifest_to_emit_a_gpu_executable) | test(=build_hip_executes_host_reduce_window_with_exact_shape_and_values) | test(=build_hip_host_rejects_unimplemented_window_dtype_cleanly)'
+```
+
+The new public matrix has 117 initial exported/binding/main fixtures, 69
+result-graph fixtures, 48 complete-shape-list scheduling fixtures,
+six folded-source caller-contract fixtures, 48 producing-source expression fixtures,
+six dynamic remainder fixtures and 12 HIP host CLI/API executions,
+three executable example controls, 24 grad/vmap controls
+and 16 imported-call controls. The staged-source coverage adds 60 producer
+fixtures, 60 capture/order fixtures, six eager-source fixtures, six scoped-witness
+fixtures, 12 HIP host CLI/API executions and 36 handled-Random fixtures. Thirty tuple and scalar/tensor-view fixtures
+cover structured captures and both aliases at a stage cut. Twenty-four native-list
+and host-literal fixtures retain constructor types and claims. These
+583 public fixture variants check declarations independently of actual
+shape/value or required failure. Random values are checked at exact f32 bits. Two integration controls execute a
+checked HIP host window entry with exact shape/data and require a clean error
+for its unimplemented bf16 cell. Current [05-RWIN-2] permits the operation;
+these controls distinguish the selected host implementation from device support.
+Claim mismatches require Domain/reshape/int64. Scheduling fixtures
+independently require Eval's division-by-zero/floor_div/int64 diagnostic and
+the C integer helper's existing division-by-zero failure; they do not certify
+that helper's diagnostic parity. The same command retains the earlier literal and helper-order
+receipts and the existing reshape arithmetic gradient/finite-difference controls,
+checks independent static-source proofs, IR rewrites and malformed wire edges, and executes matching
+and mismatching calls from both disk and worker caches. The ignored full-class
+`claimed_extent_contract` is a separate, still-pending #1277 exit, not a receipt
+for these two issues. The named `insert` preparation cases now retain declared
+signatures and execute their roots, but their missing caller equality checks
+remain #1374/#1376 work; their measured negative failures remain in the baseline.
+
+`scripts/runtime_extent_cache_compatibility.py` supplies additional two-binary
+evidence: an actual previous producer reads its own cache, the current consumer
+rejects those bytes even at its own cache path, and current/current executes
+exact results or Domain failures without rewriting the cache. Its committed
+v18 fixture comes from that actual producer. The pre-implementation public run
+executed 90 fixtures and failed 42 contract assertions. HIP/Metal execution
+remains with the documented platform handoff.
 
 B2b-1 changes the checked-to-lowered claim carrier and every consumer together.
 Its PR must name the concrete type fields and all construction/rebuild/decode
@@ -510,9 +687,12 @@ existing value after a discarded call, alias chains, borrows and shadowing.
 All 40 cases pass.
 Phase B attaches the direct public runner to its two inlined-root rows and
 adds `claim.literal.nested_and_unused.eval_c`. The 55-case preparation
-baseline now has 51 unmet cells: 24 declared signatures are preserved and
-two formerly silent #1377 inlined failures trap. The remaining 18 repaired
-signature cells belong to #1374/#1376/#1397; their execution gaps stay open.
+baseline at that delivery had 51 unmet cells: 24 declared signatures were
+preserved and two formerly silent #1377 inlined failures trapped. C2.4's
+checked transport reduces the same preparation baseline to 35 unmet cells.
+The preserved named `insert` declarations and executable roots do not prove
+caller equality or attribution; #1374/#1376 and #1397's general root gaps
+remain open.
 
 The suite's rows distinguish:
 
@@ -567,7 +747,7 @@ All are Slice B work under #1277 unless expressly separated.
 | owner | entry | deliverable and exit |
 |---|---|---|
 | B2b-0b: remaining local guards | merged B2r/S2b and #1658's broadcast preparation repair | guard literal and resolved numeric claims from independent local size sources; op-computed local extents; exact positive/negative C/Eval rows |
-| B2b-1: claim transport | C2 contract and red fixtures; integrates B2b-0b | declaring-signature helper guard order, then atomic computed-reshape and broadcast-unit transport (#1686/#1687); scoped checked/lowered identities, explicit caller witnesses, multi-claim axes, rebuild/wire transport and migrated binding consumers; #1374/#1376/#1566, #1397's declaration-erasure half, with #1377's literal call/inlined-root exit established by the witness subset |
+| B2b-1: claim transport | C2 contract and red fixtures; integrates B2b-0b | preserve the shipped helper-order and C2.4 checked-reshape/unit receipts (#1686/#1687); finish general scoped checked/lowered identities, explicit caller witnesses, multi-claim axes, rebuild/wire transport and migrated binding consumers; #1374/#1376/#1566, #1397's declaration-erasure half, with #1377's literal call/inlined-root exit established by the witness subset |
 | B2b-root: root execution | can start independently; acceptance composes B2b-1 | #1397's general wildcard-root boundary; run or diagnose every accepted root; unlock and reverify #1378's exact public value witness |
 | B2b-2: sources and acceptance | guards and claim transport for every newly admitted row | finish declaration sources (#665/#1556), supply #1482's missing shape source, remove provenance restrictions (#1266/#569/#1379), then remove unused `shape_deps` |
 | B2b-3: phase exit | preceding host repairs and per-row platform dispositions | register actual passing receipts, correct measured stale baselines, retire phase c from final selection; phase b/final remain red until their named obligations pass |
@@ -585,7 +765,7 @@ B2b-root is separately bounded within #1397 so a declaration fix cannot
 silently close its broader root failure. #1378 stays open until the public
 witness executes; its typed Slice A mechanism need not be reimplemented.
 
-The helper signature-order repair ships first. A helper lowered from a declared
+The helper signature-order repair shipped in #1688. A helper lowered from a declared
 function receives tensor inputs in that function's parameter order, including
 shape-only parameters. A signatureless subexpression retains its assigned,
 deterministic ABI order. Pruning and rebuilding preserve relative input order;
@@ -617,7 +797,14 @@ scoped claims and declaring witnesses before substitution/folding; a checked
 scalar compares an independently computed reshape target before allocation,
 and a checked tensor enforces an operand-axis precondition before refining that
 axis. Their explicit dependencies retain nested/discarded checks through
-rewrites and wire/cache boundaries. The `omitted_extent_claim_contract` runner
+rewrites and wire/cache boundaries. `computed_claim_result_graph_contract` adds
+69 exact-type/value/failure cases for copy, negation, static conditionals, inferred
+helpers, aliases, same-spelled binders in different signatures and an untaken
+invalid branch, each across exports, bindings and inlined main.
+`computed_claim_complete_shape_list_precedes_guards` adds 48 cases covering
+later target-expression failures, first-axis matching/mismatching controls,
+exact positive values, wrappers and discarded results on those same routes.
+The `omitted_extent_claim_contract` runner
 must assert declarations, actual shape/values and runtime Domain failures on
 exported calls, bindings and inlined main before either issue closes. HIP/Metal
 execution remains with the platform owners described below.

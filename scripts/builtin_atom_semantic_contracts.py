@@ -37,7 +37,7 @@ CLAUSES = {
     40: ("selection, not arithmetic", "first NaN in operand order", "first operand on every equality"),
     41: ("exact mathematical difference", "It never lowers through `neg`", "`(g, neg(g))`"),
     43: ("positive zero otherwise", "including at `x = 0`", "Non-float operands are type errors"),
-    64: ("Integer zero divisors trap Domain", "without introducing intermediate overflow", "-g*(x/y)/y"),
+    64: ("Integer zero divisors trap DivZero", "Remainder of signed minimum by -1 is zero", "without introducing intermediate overflow", "-g*(x/y)/y"),
     46: ("Floor, ceil, and round are exact identities on integers", "-g*y*y using the forward y=1/x", "including zero for x=0 and NaN"),
     47: ("nonnegative counts at or above w yield zero", "zero for nonnegative x and -1 for negative x", "Counts are never implicitly masked", "shift amount must be non-negative, got N", "right shift is arithmetic", "structurally reject differentiation"),
     48: ("All active float dtypes", "no clipping, default distribution, or hidden epsilon", "canonical balanced tree"),

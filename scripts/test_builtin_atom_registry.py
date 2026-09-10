@@ -130,6 +130,18 @@ class SemanticAuthorityTests(unittest.TestCase):
             ):
                 semantics.validate_semantics(wrong, self.spec)
 
+    def test_integer_remainder_boundary_contract_cannot_drift(self):
+        for before, after in (
+            ("Integer zero divisors trap DivZero", "Integer zero divisors trap Domain"),
+            ("by -1 is zero", "by -1 traps Overflow"),
+        ):
+            changed = self.spec.replace(before, after)
+            self.assertNotEqual(changed, self.spec)
+            with self.subTest(clause=before), self.assertRaisesRegex(
+                registry.RegistryError, "lost semantic obligation"
+            ):
+                semantics.validate_semantics(self.rows, changed)
+
     def test_window_diagnostic_references_do_not_confer_builtin_authority(self):
         semantics.validate_semantics(self.rows, self.spec)
         for operation in ("reduce_window_sum", "reduce_window_mean", "reduce_window_max", "reduce_window_min"):

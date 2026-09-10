@@ -87,13 +87,27 @@ pub fn vectorize_axis0(dag: &Dag, batch_dim: DimInfo) -> Result<Dag, String> {
             },
             RiscOp::Shape { axis } if shared => RiscOp::Shape { axis: axis + 1 },
             RiscOp::ExtentWitness {
+                site,
                 parameter,
                 axis: RtAxis::Lit(axis),
                 requirements,
             } => RiscOp::ExtentWitness {
+                site: *site,
                 parameter: parameter.clone(),
                 axis: RtAxis::Lit(axis.checked_add(1).expect("vmap axis fits int32")),
                 requirements: requirements.clone(),
+            },
+            RiscOp::CheckedReshapeExtent {
+                claims,
+                axis: RtAxis::Lit(axis),
+            } => RiscOp::CheckedReshapeExtent {
+                claims: claims.clone(),
+                axis: RtAxis::Lit(axis + 1),
+            },
+            RiscOp::CheckedUnitAxis {
+                axis: RtAxis::Lit(axis),
+            } => RiscOp::CheckedUnitAxis {
+                axis: RtAxis::Lit(axis.checked_add(1).expect("vmap axis fits int32")),
             },
             RiscOp::Load { name } => RiscOp::Load { name: name.clone() },
             other => other.clone(),
@@ -251,6 +265,12 @@ fn bound_input_slots(op: &RiscOp) -> UnordSet<usize> {
             }
         }
         RiscOp::Stride { strides } => strides.iter().for_each(add),
+        RiscOp::CheckedUnitAxis { .. } => {
+            slots.insert(1);
+        }
+        RiscOp::CheckedReshapeExtent { claims, .. } => {
+            slots.extend(0..=claims.len());
+        }
         _ => {}
     }
     slots
@@ -261,6 +281,9 @@ fn shared_bound_nodes(dag: &Dag) -> Result<UnordSet<NodeId>, String> {
     for owner in dag.nodes() {
         if matches!(owner.op, RiscOp::ExtentWitness { .. }) {
             shared.insert(owner.id);
+        }
+        if matches!(owner.op, RiscOp::CheckedReshapeExtent { .. }) {
+            mark_shared_bound(dag, owner.id, &mut shared)?;
         }
         // Operand-slot order is the IR's canonical order for this dependency walk.
         for slot in bound_input_slots(&owner.op).into_sorted() {
@@ -299,7 +322,8 @@ fn shared_bound_nodes(dag: &Dag) -> Result<UnordSet<NodeId>, String> {
 fn shared_scalar_op(op: &RiscOp) -> bool {
     matches!(
         op,
-        RiscOp::Cast { .. }
+        RiscOp::CheckedReshapeExtent { .. }
+            | RiscOp::Cast { .. }
             | RiscOp::CastTrunc { .. }
             | RiscOp::Copy
             | RiscOp::Realize
@@ -310,6 +334,7 @@ fn shared_scalar_op(op: &RiscOp) -> bool {
             | RiscOp::Mul
             | RiscOp::FloorDiv
             | RiscOp::TruncDiv
+            | RiscOp::Mod
             | RiscOp::MaxElem
             | RiscOp::MinElem
     )
@@ -348,11 +373,13 @@ fn mark_shared_bound(dag: &Dag, id: NodeId, shared: &mut UnordSet<NodeId>) -> Re
                 mark_shared_bound(dag, *input, shared)?;
             }
         }
-        RiscOp::Add
+        RiscOp::CheckedReshapeExtent { .. }
+        | RiscOp::Add
         | RiscOp::Sub
         | RiscOp::Mul
         | RiscOp::FloorDiv
         | RiscOp::TruncDiv
+        | RiscOp::Mod
         | RiscOp::MaxElem
         | RiscOp::MinElem => {
             for input in &node.inputs {

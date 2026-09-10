@@ -738,12 +738,15 @@ fn is_local_registry_hash_gap(err: &CompilerError) -> bool {
 /// bincode is positional and a V8 file of either lineage would decode to a
 /// wrong shape; the magic check rejects it before any decode. A V6, V7, or
 /// either V8 file is stale.
-const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V18\n";
+const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V19\n";
 
 /// On-disk format version for the cache envelope. Bumping this tells
 /// `load_if_fresh` to reject older cache files with
 /// [`CacheError::UnsupportedVersion`] rather than risk a "successful but
 /// wrong" decode.
+///
+/// V19 retains authored program signatures and checked extent carriers.
+/// Older caches cannot reconstruct these call obligations.
 ///
 /// V18 encodes sealed numeric scalar/storage payloads using exact dtype-tagged
 /// bit codecs. Prior positional payloads must be regenerated.
@@ -760,7 +763,7 @@ const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V18\n";
 /// V15: that ledger carried a `DeferredShapeObligation` enum rather than a
 /// bare expand constraint, so a comparison result could mirror its operand's
 /// open choice.
-const CACHE_FORMAT_VERSION: u32 = 18;
+const CACHE_FORMAT_VERSION: u32 = 19;
 
 /// On-disk envelope for the Phase I cache. The full file layout is:
 ///
@@ -1350,13 +1353,13 @@ mod tests {
 
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes_and_nominal_kinds() {
-        assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V18\n");
-        assert_eq!(CACHE_FORMAT_VERSION, 18);
+        assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V19\n");
+        assert_eq!(CACHE_FORMAT_VERSION, 19);
     }
 
     #[test]
     fn cache_format_version_tracks_the_deferred_ledger_removal() {
-        assert_eq!(CACHE_FORMAT_VERSION, 18);
+        assert_eq!(CACHE_FORMAT_VERSION, 19);
     }
 
     /// chelis#1156: the cache identity must distinguish two BUILDS, not
@@ -1576,6 +1579,44 @@ mod tests {
         let mut bytes = CACHE_MAGIC.to_vec();
         bytes.extend(bincode::serialize(&envelope).expect("test envelope encodes"));
         bytes
+    }
+
+    #[test]
+    fn context_decode_rejects_missing_or_forged_authored_signatures() {
+        let (_dir, root) = path_dep_fixture();
+        let context = compile_reef_context(Path::new("/tmp/x"), &root).expect("context");
+        let lowered = serde_json::to_value(context.library_dag.raw()).unwrap();
+        assert!(
+            !lowered["program_signatures"]
+                .as_object()
+                .unwrap()
+                .is_empty()
+        );
+        let mut missing = lowered.clone();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("program_signatures");
+        assert!(serde_json::from_value::<IrLoweredLibrary>(missing).is_err());
+
+        let mut forged = lowered;
+        forged["program_signatures"] = serde_json::json!({});
+        let wire = CompiledContextWire {
+            source_hash: context.source_hash,
+            identity: context.identity.clone(),
+            reef_state: context.reef_state.clone(),
+            type_env: context.checked_library().type_env().clone(),
+            library_checked: context.library_checked().clone(),
+            library_dag: serde_json::from_value(forged).unwrap(),
+        };
+        assert_eq!(
+            wire.library_dag.library_proof_id(),
+            context.library_checked().library_proof_id()
+        );
+        // A valid checksum and the original proof id cannot authorize an
+        // erased signature ledger. Admission must compare fresh lowering.
+        let error = CompiledContext::decode(&encode_unchecked_context_wire(&wire)).unwrap_err();
+        assert!(error.contains("lowered library"), "{error}");
     }
 
     #[test]

@@ -253,4 +253,3 @@ jobs:
 
       - name: Require every macOS workspace shard
         run: python3 scripts/ci_require_success.py macos-workspace-shard=${{ needs.macos-workspace-shard.result }}
-

@@ -184,16 +184,16 @@ def dag_cases():
                 )
             )
 
-    empty = {"schema_version": 9, "nodes": [], "roots": []}
+    empty = {"schema_version": 10, "nodes": [], "roots": []}
     add("empty", empty, True)
-    for version in (None, 8, 10):
+    for version in (None, 9, 11):
         value = {**empty, "schema_version": version}
         if version is None:
             del value["schema_version"]
         add("version-" + str(version), value, False)
     scalar = {"dtype": "f64", "bits": "8000000000000000"}
     const = {
-        "schema_version": 9,
+        "schema_version": 10,
         "nodes": [
             {
                 "shape_deps": [],
@@ -229,7 +229,7 @@ def dag_cases():
 
     def graph(op):
         return {
-            "schema_version": 9,
+            "schema_version": 10,
             "nodes": [
                 copy.deepcopy(load),
                 {
@@ -298,7 +298,7 @@ def dag_cases():
     witness_node["op"]["name"] = "witness"
     witness_node["output_type"]["dims"] = [{"kind": "lit", "size": 4}]
     reference_graph = {
-        "schema_version": 9,
+        "schema_version": 10,
         "nodes": [
             value_node,
             witness_node,
@@ -401,7 +401,7 @@ def dag_cases():
             add(f"owner-{owner}-to-end", changed, False, "forbids the to_end carrier")
 
     witness = {
-        "schema_version": 9,
+        "schema_version": 10,
         "nodes": [
             copy.deepcopy(load),
             {
@@ -411,6 +411,7 @@ def dag_cases():
                 "id": 1,
                 "op": {
                     "kind": "extent_witness",
+                    "site": "caller",
                     "parameter": "x",
                     "axis": {"axis": "lit", "value": 0},
                     "requirements": [4, 4, 9],
@@ -478,7 +479,7 @@ def result_reference_cases():
 
     cases = []
     dag = {
-        "schema_version": 9,
+        "schema_version": 10,
         "nodes": [
             {
                 "shape_deps": [],
@@ -532,7 +533,7 @@ def result_reference_cases():
                             "outside the owning DAG",
                         )
                     )
-        for version in (8, 10):
+        for version in (9, 11):
             bad = copy.deepcopy(good)
             bad["dag"]["schema_version"] = version
             cases.append(

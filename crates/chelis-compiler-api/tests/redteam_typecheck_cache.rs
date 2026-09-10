@@ -425,7 +425,7 @@ fn load_if_fresh_never_panics_on_adversarial_byte_patterns() {
 
     let patterns: Vec<Vec<u8>> = vec![
         vec![],                                               // empty
-        b"CHELIS_CTX_V18\n".to_vec(),                         // current magic only, no envelope
+        b"CHELIS_CTX_V19\n".to_vec(),                         // current magic only, no envelope
         b"CHELIS_CTX_V9\n".to_vec(),                          // stale-version magic only
         b"not a cache file at all".to_vec(),                  // no magic
         vec![0u8; 4096],                                      // all zeros
@@ -433,7 +433,7 @@ fn load_if_fresh_never_panics_on_adversarial_byte_patterns() {
         (0..4096).map(|i| ((i * 31) ^ 0x5a) as u8).collect(), // pseudo-random
         {
             // valid (current) magic followed by garbage
-            let mut v = b"CHELIS_CTX_V18\n".to_vec();
+            let mut v = b"CHELIS_CTX_V19\n".to_vec();
             v.extend((0..512).map(|i| (i % 256) as u8));
             v
         },
@@ -485,18 +485,18 @@ fn truncation_at_every_prefix_length_never_silently_loads() {
 
 #[test]
 fn a_forged_stale_magic_file_is_rejected_not_decoded() {
-    // The current magic is `CHELIS_CTX_V18\n`. A leftover file carries a
+    // The current magic is `CHELIS_CTX_V19\n`. A leftover file carries a
     // `CHELIS_CTX_V17\n` (or older) magic. Forge one from a real V18 payload.
     // load_if_fresh must reject it (the magic no longer matches), never
     // attempt to decode the stale-shaped envelope.
     let (_dir, cache_path, _ctx, bytes) = save_ctx("rt-stale-magic", TRIVIAL_MAIN);
     assert!(
-        bytes.starts_with(b"CHELIS_CTX_V18\n"),
+        bytes.starts_with(b"CHELIS_CTX_V19\n"),
         "fixture must be written with the current V18 magic"
     );
 
     let mut forged = b"CHELIS_CTX_V17\n".to_vec();
-    forged.extend_from_slice(&bytes[b"CHELIS_CTX_V18\n".len()..]);
+    forged.extend_from_slice(&bytes[b"CHELIS_CTX_V19\n".len()..]);
     fs::write(&cache_path, &forged).expect("write forged stale-magic file");
 
     let outcome =
@@ -524,11 +524,11 @@ fn a_bumped_envelope_version_byte_is_rejected_as_unsupported() {
     // envelope `version` field is the first field after the magic, so it
     // sits at bytes [magic.len() .. magic.len()+4].
     let (_dir, cache_path, _ctx, bytes) = save_ctx("rt-envver", TRIVIAL_MAIN);
-    let magic_len = b"CHELIS_CTX_V18\n".len();
+    let magic_len = b"CHELIS_CTX_V19\n".len();
     assert!(bytes.len() > magic_len + 4);
 
     let mut forged = bytes.clone();
-    // bincode encodes a u32 little-endian; bump the low byte well past 18.
+    // bincode encodes a u32 little-endian; bump the low byte well past 19.
     forged[magic_len] = forged[magic_len].wrapping_add(99);
     fs::write(&cache_path, &forged).expect("write bumped-version file");
 
@@ -538,8 +538,8 @@ fn a_bumped_envelope_version_byte_is_rejected_as_unsupported() {
         Ok(Some(_)) => panic!("a bumped envelope version must NEVER load as Ok(Some(_))"),
         Ok(None) => { /* tolerated: the envelope may fail to decode first */ }
         Err(CacheError::UnsupportedVersion { stored, expected }) => {
-            assert_eq!(expected, 18, "the running binary expects format version 18");
-            assert_ne!(stored, 18, "the forged version must differ from 18");
+            assert_eq!(expected, 19, "the running binary expects format version 19");
+            assert_ne!(stored, 19, "the forged version must differ from 19");
         }
         Err(CacheError::Corrupt(_) | CacheError::Decode(_)) => {
             // Also acceptable: bumping a byte can break the bincode shape
@@ -626,14 +626,14 @@ fn stdlib_cache_key_folds_the_compiler_version() {
     let real = stdlib_cache_key(&decls, REDTEAM_STDLIB_SOURCE_DIGEST);
 
     // Byte-for-byte mirror of `stdlib_cache_key`, parameterized on the
-    // compiler-version string. STDLIB_CACHE_FORMAT_VERSION is 16 (exact source-number
-    // carriers with retained declared results and extent witnesses); the
+    // compiler-version string. STDLIB_CACHE_FORMAT_VERSION is 17 (authored signatures
+    // and checked extent transport); the
     // mirror is only valid while that holds, which assertion (a) below
     // verifies.
     let recompute = |compiler_version: &str| -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"chelis_std_typecheck_v");
-        hasher.update(16u32.to_le_bytes());
+        hasher.update(17u32.to_le_bytes());
         hasher.update(b"compiler_version");
         hasher.update((compiler_version.len() as u64).to_le_bytes());
         hasher.update(compiler_version.as_bytes());

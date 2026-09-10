@@ -2005,7 +2005,10 @@ pub struct WireRecordPatternField {
 ///   numeric domains, and references validated in their declared owners.
 ///   Shape dependencies are exact u64 node identities and literal-witness
 ///   requirements use the fixed int64 extent carrier.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 9;
+/// - `10`: checked reshape scalars and checked unit-axis refinements retain
+///   independent actual/required values through graph transport; integer remainder
+///   targets use the explicit `Mod` operation.
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 10;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
@@ -2164,6 +2167,134 @@ impl WireDag {
         dag_domains::validate(self)?;
         for (index, node) in self.nodes.iter().enumerate() {
             match &node.op {
+                WireRiscOp::Mod => {
+                    if node.inputs.len() != 2
+                        || !Prim::parse_name(&node.output_type.precision)
+                            .is_some_and(|prim| prim.is_integer())
+                        || node.inputs.iter().any(|id| {
+                            self.nodes[..index]
+                                .iter()
+                                .find(|input| input.id == *id)
+                                .is_none_or(|input| {
+                                    input.output_type.precision != node.output_type.precision
+                                        || input.output_type.dims.len()
+                                            != node.output_type.dims.len()
+                                        || input
+                                            .output_type
+                                            .dims
+                                            .iter()
+                                            .zip(&node.output_type.dims)
+                                            .any(|(actual, expected)| {
+                                                !wire_dim_info_equal(actual, expected)
+                                            })
+                                })
+                        })
+                    {
+                        return Err(WireDagContractError::new(format!(
+                            "WireDag Mod node {} requires two earlier inputs with its integer dtype and shape",
+                            node.id
+                        )));
+                    }
+                }
+                WireRiscOp::CheckedReshapeExtent {
+                    axis: WireRtAxis::Lit { value: axis },
+                    claims,
+                } => {
+                    let scalar =
+                        |ty: &WireTensorType| ty.dims.is_empty() && ty.precision == "int64";
+                    if *axis < 0
+                        || claims.is_empty()
+                        || node.inputs.len() != claims.len() + 1
+                        || !scalar(&node.output_type)
+                        || node.inputs.iter().any(|id| {
+                            usize::try_from(*id)
+                                .ok()
+                                .and_then(|id| self.nodes.get(id))
+                                .is_none_or(|input| !scalar(&input.output_type))
+                        })
+                    {
+                        return Err(WireDagContractError::new(format!(
+                            "WireDag CheckedReshapeExtent node {} requires an earlier scalar int64 actual, one earlier scalar int64 input per nonempty claim, and a scalar int64 output",
+                            node.id
+                        )));
+                    }
+                }
+                WireRiscOp::CheckedUnitAxis {
+                    axis: WireRtAxis::Lit { value: axis },
+                } => {
+                    let valid = (|| {
+                        let [input_id, witness_id] = node.inputs.as_slice() else {
+                            return None;
+                        };
+                        if *input_id >= host_index(index) || *witness_id >= host_index(index) {
+                            return None;
+                        }
+                        let input = self.nodes.get(usize::try_from(*input_id).ok()?)?;
+                        let witness = self.nodes.get(usize::try_from(*witness_id).ok()?)?;
+                        let WireRiscOp::ExtentWitness {
+                            axis:
+                                WireRtAxis::Lit {
+                                    value: observed_axis,
+                                },
+                            requirements,
+                            ..
+                        } = &witness.op
+                        else {
+                            return None;
+                        };
+                        if input.id != *input_id
+                            || witness.id != *witness_id
+                            || witness.inputs.as_slice() != [*input_id]
+                            || observed_axis != axis
+                            || !requirements.iter().any(|value| value.get() == 1)
+                        {
+                            return None;
+                        }
+                        let axis = usize::try_from(*axis).ok()?;
+                        if axis >= input.output_type.dims.len()
+                            || input.output_type.precision != node.output_type.precision
+                            || input.output_type.dims.len() != node.output_type.dims.len()
+                        {
+                            return None;
+                        }
+                        input
+                            .output_type
+                            .dims
+                            .iter()
+                            .zip(&node.output_type.dims)
+                            .enumerate()
+                            .all(|(index, (input, output))| {
+                                if index == axis {
+                                    return matches!(output, WireDimInfo::Lit { size } if size.get() == 1);
+                                }
+                                match (input, output) {
+                                    (
+                                        WireDimInfo::Lit { size: lhs },
+                                        WireDimInfo::Lit { size: rhs },
+                                    ) => lhs == rhs,
+                                    (
+                                        WireDimInfo::Named {
+                                            name: lhs,
+                                            size: lhs_size,
+                                        },
+                                        WireDimInfo::Named {
+                                            name: rhs,
+                                            size: rhs_size,
+                                        },
+                                    ) => lhs == rhs && lhs_size == rhs_size,
+                                    _ => false,
+                                }
+                            })
+                            .then_some(())
+                    })()
+                    .is_some();
+                    if !valid {
+                        return Err(WireDagContractError::new(format!(
+                            "WireDag CheckedUnitAxis node {} requires its own tensor-axis witness with requirement one and only that axis refined",
+                            node.id
+                        )));
+                    }
+                }
                 WireRiscOp::Expand { size, .. } => {
                     validate_wire_rt_dim(&self.nodes, index, node, size, false, true, "Expand")?;
                     let expected_inputs = match size {
@@ -2742,6 +2873,13 @@ pub enum WireRtAxis {
     Lit { value: i32 },
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireExtentWitnessSite {
+    Caller,
+    LocalExpand,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WireRiscOp {
@@ -2751,6 +2889,7 @@ pub enum WireRiscOp {
     Div,
     FloorDiv,
     TruncDiv,
+    Mod,
     CmpLt,
     MaxElem,
     MinElem,
@@ -2864,9 +3003,17 @@ pub enum WireRiscOp {
         axis: i32,
     },
     ExtentWitness {
+        site: WireExtentWitnessSite,
         parameter: String,
         axis: WireRtAxis,
         requirements: Vec<NonnegativeExtent>,
+    },
+    CheckedReshapeExtent {
+        claims: Vec<String>,
+        axis: WireRtAxis,
+    },
+    CheckedUnitAxis {
+        axis: WireRtAxis,
     },
     Load {
         name: String,
@@ -2985,6 +3132,7 @@ mod tests {
     #[test]
     fn extent_witness_wire_requires_claims_and_roundtrips_exactly() {
         let witness = WireRiscOp::ExtentWitness {
+            site: WireExtentWitnessSite::Caller,
             parameter: "x".into(),
             axis: WireRtAxis::Lit { value: 0 },
             requirements: vec![NonnegativeExtent::new(4).unwrap()],
