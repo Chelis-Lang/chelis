@@ -21,9 +21,9 @@ mod element;
 mod ieee_narrow;
 mod metadata;
 use metadata::{
-    AllocationBytes, AxisDecomposition, ByteCount, ElementCount, IterationSpace, MatmulDimension,
-    MatmulMetadata, MatmulPart, MetadataError, MovementMetadata, MovementOp, ReductionMetadata,
-    ShapeMetadata, SparseMetadata, WindowMetadata,
+    axis_decomposition, AllocationBytes, AxisDecomposition, ByteCount, ElementCount,
+    IterationSpace, MatmulDimension, MatmulMetadata, MatmulPart, MetadataError, MovementMetadata,
+    MovementOp, ReductionMetadata, ShapeMetadata, SparseMetadata, WindowMetadata,
 };
 mod ownership_ledger;
 
@@ -902,23 +902,8 @@ pub struct chelis_tensor_write {
     tensor: *mut chelis_tensor,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct chelis_read_view {
-    pub data: *const libc::c_void,
-    pub count: i64,
-    pub dtype: chelis_dtype,
-    pub reserved: [u8; 7],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct chelis_write_view {
-    pub data: *mut libc::c_void,
-    pub count: i64,
-    pub dtype: chelis_dtype,
-    pub reserved: [u8; 7],
-}
+chelis_abi::define_read_view!(pub chelis_read_view, public_fields);
+chelis_abi::define_write_view!(pub chelis_write_view, public_fields);
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -5453,7 +5438,7 @@ pub unsafe extern "C" fn chelis_tensor_cumsum(
         return out;
     }
     let iteration = metadata_or_fail(
-        (*tensor).metadata.axis_decomposition(axis_i),
+        axis_decomposition(&(*tensor).metadata, axis_i),
         "chelis_tensor_cumsum",
     );
     // Cumsum is numeric only; dispatch on dtype outside the loops so
@@ -5534,7 +5519,7 @@ pub unsafe extern "C" fn chelis_tensor_sort(
         return chelis_tuple_from_values(items.as_ptr(), 2);
     }
     let iteration = metadata_or_fail(
-        (*tensor).metadata.axis_decomposition(axis_i),
+        axis_decomposition(&(*tensor).metadata, axis_i),
         "chelis_tensor_sort",
     );
     // RT-4 F1 sibling: indices is allocated as CHELIS_DTYPE_I32, so writes
@@ -5734,7 +5719,7 @@ pub unsafe extern "C" fn chelis_tensor_trace(
         return out;
     }
     let iteration = metadata_or_fail(
-        (*diag).metadata.axis_decomposition(reduce_axis),
+        axis_decomposition(&(*diag).metadata, reduce_axis),
         "chelis_tensor_trace",
     );
     // Trace is diagonal followed by [05-OP-30]'s canonical adjacent-pair

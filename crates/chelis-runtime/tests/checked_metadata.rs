@@ -6,9 +6,9 @@ mod metadata;
 
 use chelis_vocab::RuntimeDType;
 use metadata::{
-    ByteCount, ElementCount, IterationSpace, MatmulDimension, MatmulMetadata, MatmulPart,
-    MetadataError, MovementMetadata, MovementOp, ReductionMetadata, ShapeMetadata, SparseMetadata,
-    WindowMetadata,
+    axis_decomposition, ByteCount, ElementCount, IterationSpace, MatmulDimension, MatmulMetadata,
+    MatmulPart, MetadataError, MovementMetadata, MovementOp, ReductionMetadata, ShapeMetadata,
+    SparseMetadata, WindowMetadata,
 };
 
 #[test]
@@ -596,7 +596,7 @@ fn checked_indexing_and_byte_ranges_reject_out_of_bounds_before_access() {
 #[test]
 fn axis_decomposition_checks_axis_and_preserves_empty_short_circuit() {
     let metadata = ShapeMetadata::contiguous(&[2, 3, 4], RuntimeDType::I8).unwrap();
-    let axis = metadata.axis_decomposition(1).unwrap();
+    let axis = axis_decomposition(&metadata, 1).unwrap();
     assert_eq!(
         (axis.outer().get(), axis.extent().get(), axis.inner().get()),
         (2, 3, 4)
@@ -609,11 +609,11 @@ fn axis_decomposition_checks_axis_and_preserves_empty_short_circuit() {
     assert!(axis.reduced_index(2, 0).is_err());
     assert!(axis.reduced_index(0, 4).is_err());
     assert!(matches!(
-        metadata.axis_decomposition(3),
+        axis_decomposition(&metadata, 3),
         Err(MetadataError::Domain(_))
     ));
     let empty = ShapeMetadata::contiguous(&[i64::MAX, i64::MAX, 0], RuntimeDType::I8).unwrap();
-    let axis = empty.axis_decomposition(2).unwrap();
+    let axis = axis_decomposition(&empty, 2).unwrap();
     assert_eq!(axis.outer().get(), 0);
     assert_eq!(axis.inner().get(), 0);
 }
