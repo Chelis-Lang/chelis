@@ -27,11 +27,118 @@ impl Environment<'_> {
 }
 
 pub fn preprocess_root(
-    _include_dir: &Path,
-    _root: &str,
-    _environment: &Environment<'_>,
+    include_dir: &Path,
+    root: &str,
+    environment: &Environment<'_>,
 ) -> Result<BTreeMap<String, String>, String> {
-    Err("preprocessor not implemented".into())
+    let include_dir = include_dir
+        .canonicalize()
+        .map_err(|error| format!("published include directory: {error}"))?;
+    let input = include_dir
+        .join(root)
+        .canonicalize()
+        .map_err(|error| format!("published root {root}: {error}"))?;
+    if !input.starts_with(&include_dir) {
+        return Err(format!(
+            "published root {root} escapes its include directory"
+        ));
+    }
+    let mut command = std::process::Command::new(environment.compiler);
+    if environment.hermetic {
+        let path = std::env::var_os("PATH").ok_or("preprocessor requires PATH")?;
+        command.env_clear().env("PATH", path);
+    }
+    command.args(["-E", "-x", environment.language]);
+    command.args(environment.arguments);
+    for directory in environment.include_dirs {
+        command.arg("-I").arg(directory);
+    }
+    let output = command
+        .arg("-I")
+        .arg(&include_dir)
+        .arg(&input)
+        .output()
+        .map_err(|error| {
+            format!(
+                "preprocessor compiler {} did not run: {error}",
+                environment.compiler
+            )
+        })?;
+    if !output.status.success() {
+        return Err(format!(
+            "{} preprocessing failed for {root}: {}",
+            environment.compiler,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let text = String::from_utf8(output.stdout)
+        .map_err(|error| format!("non-UTF-8 preprocessor output: {error}"))?;
+    let mut per_file: BTreeMap<String, String> = BTreeMap::new();
+    let mut current = None;
+    let mut root_seen = false;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("# ") {
+            let file = marker_file(rest)?;
+            if file.starts_with('<') && file.ends_with('>') {
+                current = None;
+                continue;
+            }
+            let path = Path::new(&file)
+                .canonicalize()
+                .map_err(|error| format!("unresolved preprocessor attribution {file}: {error}"))?;
+            root_seen |= path == input;
+            current = match path.strip_prefix(&include_dir) {
+                Ok(relative) => Some(
+                    relative
+                        .to_str()
+                        .ok_or("non-UTF-8 published header identity")?
+                        .to_string(),
+                ),
+                Err(_) => None,
+            };
+            continue;
+        }
+        if let Some(name) = &current {
+            let output = per_file.entry(name.clone()).or_default();
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    if !root_seen {
+        return Err(format!("preprocessor omitted attribution for root {root}"));
+    }
+    Ok(per_file)
+}
+
+/// Decode the compiler's quoted filename, never match an arbitrary suffix.
+fn marker_file(marker: &str) -> Result<String, String> {
+    let (number, quoted) = marker
+        .split_once(' ')
+        .ok_or("malformed preprocessor linemarker")?;
+    if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("invalid preprocessor line number".into());
+    }
+    let mut chars = quoted
+        .trim_start()
+        .strip_prefix('"')
+        .ok_or("missing quoted preprocessor filename")?
+        .chars();
+    let mut file = String::new();
+    while let Some(character) = chars.next() {
+        match character {
+            '"' => return Ok(file),
+            '\\' => match chars.next() {
+                Some('"') => file.push('"'),
+                Some('\\') => file.push('\\'),
+                Some('n') => file.push('\n'),
+                Some('r') => file.push('\r'),
+                Some('t') => file.push('\t'),
+                _ => return Err("unsupported preprocessor filename escape".into()),
+            },
+            other => file.push(other),
+        }
+    }
+    Err("unterminated preprocessor filename".into())
 }
 
 #[cfg(test)]
@@ -68,19 +175,31 @@ mod tests {
     #[test]
     fn transitive_macro_declarations_keep_their_full_owned_header_path() {
         let fixture = Fixture::new();
-        fixture.write("root.h", "#include <first/value.h>\n#include \"second/value.h\"\n");
-        fixture.write("first/value.h", "#define PAYLOAD double\nPAYLOAD first_value(void);\n");
+        fixture.write(
+            "root.h",
+            "#include <first/value.h>\n#include \"second/value.h\"\n",
+        );
+        fixture.write(
+            "first/value.h",
+            "#define PAYLOAD double\nPAYLOAD first_value(void);\n",
+        );
         fixture.write("second/value.h", "long long second_value(void);\n");
         let rows = preprocess_root(&fixture.0, "root.h", &Environment::native_c()).unwrap();
         assert!(rows["first/value.h"].contains("double first_value(void)"));
         assert!(rows["second/value.h"].contains("long long second_value(void)"));
-        assert!(!rows.contains_key("value.h"), "same basenames cannot collapse identities");
+        assert!(
+            !rows.contains_key("value.h"),
+            "same basenames cannot collapse identities"
+        );
     }
 
     #[test]
     fn external_same_basename_is_not_attributed_to_the_owned_root() {
         let fixture = Fixture::new();
-        fixture.write("owned/root.h", "#include <root.h>\nint owned_value(void);\n");
+        fixture.write(
+            "owned/root.h",
+            "#include <root.h>\nint owned_value(void);\n",
+        );
         fixture.write("sdk/root.h", "double external_value(void);\n");
         // Include search order is explicit. The owned root uses an absolute path.
         let includes = [fixture.0.join("sdk")];
@@ -96,10 +215,13 @@ mod tests {
     #[test]
     fn declared_cxx_and_objective_cxx_lanes_use_the_real_preprocessor() {
         let fixture = Fixture::new();
-        fixture.write("root.h", concat!(
-            "#ifdef __cplusplus\nint cxx_surface(void);\n#endif\n",
-            "#ifdef __OBJC__\nint objc_surface(void);\n#endif\n"
-        ));
+        fixture.write(
+            "root.h",
+            concat!(
+                "#ifdef __cplusplus\nint cxx_surface(void);\n#endif\n",
+                "#ifdef __OBJC__\nint objc_surface(void);\n#endif\n"
+            ),
+        );
         let c = preprocess_root(&fixture.0, "root.h", &Environment::native_c()).unwrap();
         assert!(!c.values().any(|text| text.contains("cxx_surface")));
         for language in ["c++", "objective-c++"] {
@@ -111,7 +233,10 @@ mod tests {
             };
             let rows = preprocess_root(&fixture.0, "root.h", &environment).unwrap();
             assert!(rows["root.h"].contains("cxx_surface"));
-            assert_eq!(rows["root.h"].contains("objc_surface"), language == "objective-c++");
+            assert_eq!(
+                rows["root.h"].contains("objc_surface"),
+                language == "objective-c++"
+            );
         }
     }
 
@@ -124,9 +249,16 @@ mod tests {
             compiler: "/nonexistent/chelis-census-compiler",
             ..Environment::native_c()
         };
-        assert!(preprocess_root(&fixture.0, "root.h", &missing).unwrap_err().contains("compiler"));
+        assert!(
+            preprocess_root(&fixture.0, "root.h", &missing)
+                .unwrap_err()
+                .contains("compiler")
+        );
         fixture.write("root.h", "#error rejected owned header\n");
-        assert!(preprocess_root(&fixture.0, "root.h", &Environment::native_c())
-            .unwrap_err().contains("rejected owned header"));
+        assert!(
+            preprocess_root(&fixture.0, "root.h", &Environment::native_c())
+                .unwrap_err()
+                .contains("rejected owned header")
+        );
     }
 }

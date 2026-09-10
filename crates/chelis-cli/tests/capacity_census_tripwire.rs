@@ -42,6 +42,9 @@ mod stdlib_closure_tests;
 #[path = "../../../tests/support/c_lexical.rs"]
 mod c_lexical;
 
+#[path = "../../../tests/support/c_preprocessor.rs"]
+mod c_preprocessor;
+
 #[path = "../../../tests/support/capacity_census_authority.rs"]
 mod capacity_census_authority;
 use capacity_census_authority::{
@@ -3507,51 +3510,8 @@ fn comment_stripping_respects_string_and_character_literals() {
 /// missing C compiler fails LOUDLY - a skip here would be an evasion
 /// channel.
 fn preprocess_root(include_dir: &Path, root: &str) -> BTreeMap<String, String> {
-    let out = std::process::Command::new("cc")
-        .arg("-E")
-        .arg("-x")
-        .arg("c")
-        .arg("-I")
-        .arg(include_dir)
-        .arg(include_dir.join(root))
-        .output()
-        .unwrap_or_else(|e| {
-            panic!(
-                "{}the capacity census requires a C compiler (`cc`) on PATH to \
-                 preprocess the published headers; none ran: {e}{}",
-                teaching_header(),
-                teaching_footer()
-            )
-        });
-    assert!(
-        out.status.success(),
-        "cc -E failed for {root}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let text = String::from_utf8_lossy(&out.stdout).to_string();
-    let dir_str = include_dir.to_string_lossy().to_string();
-    let mut per_file: BTreeMap<String, String> = BTreeMap::new();
-    let mut current: Option<String> = None;
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("# ") {
-            // Linemarker: `# <num> "<file>" <flags...>`.
-            if let Some(file) = rest.split('"').nth(1) {
-                current = if file.contains(&dir_str) || file.ends_with(root) {
-                    Path::new(file)
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                } else {
-                    None
-                };
-            }
-            continue;
-        }
-        if let Some(name) = &current {
-            per_file.entry(name.clone()).or_default().push_str(line);
-            per_file.entry(name.clone()).or_default().push('\n');
-        }
-    }
-    per_file
+    c_preprocessor::preprocess_root(include_dir, root, &c_preprocessor::Environment::native_c())
+        .unwrap_or_else(|error| panic!("{}{}{}", teaching_header(), error, teaching_footer()))
 }
 
 /// Extract exported declarations and struct layouts from one preprocessed
