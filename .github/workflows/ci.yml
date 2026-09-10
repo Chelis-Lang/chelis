@@ -242,7 +242,7 @@ jobs:
         run: python3 scripts/ci_setup_uv_python.py
 
       # cargo-nextest is intentionally absent, so the expensive structural
-      # profile oracle self-skips here and runs once on workspace shard 1.
+      # profile oracle self-skips here and runs on the full nightly worker.
       - name: Install shared-skill validator dependency
         run: uv pip install --python .venv/bin/python PyYAML==6.0.3
 

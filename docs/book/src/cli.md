@@ -439,6 +439,9 @@ CHB digest.
 - Treat `--allow-style-violations` as a local escape hatch, not part of a package build.
 - In pipe-stage Surf, `x |> f(y)` means `f(x, y)`. Use
   `x |> fn (v) -> f(y, v)` when the piped value belongs later.
+- `chelis surf` rejects a Deep `surf_pipe_stage: "call-first"` marker when
+  removing its parameter would leave a zero-argument call or a free reference
+  to that parameter. It reports the stage error without emitting Surf.
 
 For exact CLI semantics, use the numbered specs plus the CLI
 integration tests in the repo (notably
