@@ -296,16 +296,26 @@ pub(super) fn execute_checked(py: Python<'_>, admitted: &CompiledInputs) -> RawO
                     .collect(),
                 output_ptrs: vec![std::ptr::null_mut(); admitted.output_count],
             };
+            // Device owners are unique, unlike retainable host handles. Intern
+            // foreign pointers once, including existing input borrows, so an
+            // invalid repeated/input output can be rejected without double free.
+            let mut handles = inputs
+                .iter()
+                .map(|input| (input.handle.ptr.as_ptr().addr(), Arc::clone(&input.handle)))
+                .collect::<std::collections::BTreeMap<_, _>>();
             py.allow_threads(move || execution.run())
                 .0
                 .into_iter()
                 .map(|pointer| {
                     NonNull::new(pointer).map(|ptr| {
-                        TensorOwner::Gpu(Arc::new(GpuTensorHandle {
-                            ptr,
-                            api: *api,
-                            _library: Arc::clone(&admitted.library),
-                        }))
+                        let handle = handles.entry(ptr.as_ptr().addr()).or_insert_with(|| {
+                            Arc::new(GpuTensorHandle {
+                                ptr,
+                                api: *api,
+                                _library: Arc::clone(&admitted.library),
+                            })
+                        });
+                        TensorOwner::Gpu(Arc::clone(handle))
                     })
                 })
                 .collect()
@@ -327,6 +337,16 @@ impl CompiledTensorResults {
             return Err(PyRuntimeError::new_err(
                 "compiled output count disagrees with its manifest",
             ));
+        }
+        let mut device_owners = std::collections::BTreeSet::new();
+        for owner in outputs.owners.iter().flatten() {
+            if let TensorOwner::Gpu(handle) = owner
+                && !device_owners.insert(handle.ptr.as_ptr().addr())
+            {
+                return Err(PyValueError::new_err(
+                    "device outputs repeat a unique owner handle",
+                ));
+            }
         }
         let tensors = manifest
             .outputs

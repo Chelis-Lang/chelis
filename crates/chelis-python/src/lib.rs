@@ -313,7 +313,7 @@ struct CpuInputTensor {
 
 struct GpuInputTensor {
     // Release imported metadata before its borrowed Python allocation.
-    handle: GpuTensorHandle,
+    handle: Arc<GpuTensorHandle>,
     _owner: Py<PyAny>,
 }
 
@@ -1776,11 +1776,11 @@ fn gpu_input_tensor(
     };
     let ptr = NonNull::new(unsafe { (api.import)(&packet) })
         .ok_or_else(|| PyRuntimeError::new_err("device import returned a NULL owner"))?;
-    let handle = GpuTensorHandle {
+    let handle = Arc::new(GpuTensorHandle {
         ptr,
         api,
         _library: Arc::clone(library),
-    };
+    });
     if unsafe { (api.device)(ptr.as_ptr()) } != device {
         return Err(PyValueError::new_err(
             "imported owner device disagrees with admitted input",
