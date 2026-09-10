@@ -27,7 +27,7 @@ ROOT = phase0.REPO_ROOT
 OracleFailure = phase0.OracleFailure
 PROFILE = 'runtime-representation'
 MANIFEST = ROOT / 'spec/design/runtime_representation_phase1_tests.json'
-MANIFEST_SHA256 = 'e9d5f3453fe8c7485f90b2de23dda7e9ab5413469ffd49bdbf3ac42cc53c1f22'
+MANIFEST_SHA256 = 'ebbf0fc5c246e6b79617fc2f92f166771b01cd0950c75c1d558643de76c26d42'
 MANUAL_TEST = 'an_allocation_above_int32_elements_reports_its_true_extent'
 
 
