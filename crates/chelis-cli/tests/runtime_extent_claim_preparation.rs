@@ -1406,13 +1406,13 @@ fn computed_claim_result_graph_contract() {
         let observed = observe(&case);
         println!("{}: {}", case.id, observed);
         failures.extend(contract_failures(&case, &observed));
-        if let Some(signature) = main_signature {
-            if observed["check"]["signatures"]["main"] != signature {
-                failures.push(format!(
-                    "{} main signature: {} != {signature}",
-                    case.id, observed["check"]["signatures"]["main"]
-                ));
-            }
+        if let Some(signature) = main_signature
+            && observed["check"]["signatures"]["main"] != signature
+        {
+            failures.push(format!(
+                "{} main signature: {} != {signature}",
+                case.id, observed["check"]["signatures"]["main"]
+            ));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
