@@ -10,6 +10,8 @@
 //! covered depend on which features are linked; the always-present dispatcher
 //! pseudo-discharges (no-fit / exhausted) are checked unconditionally.
 
+mod support;
+
 use chelis_prove::engine_registry::exhausted_discharge;
 use chelis_prove::solver::{CmpOp, SmtExpr, SmtSort};
 use chelis_prove::{Discharge, Goal, SmtProperty, no_fit_discharge};
@@ -52,12 +54,14 @@ fn assert_canonical_attribution(discharge: &Discharge, expected: &str) {
 
 #[test]
 fn no_fit_discharge_uses_canonical_engine_key() {
+    crate::support::isolate();
     let discharge = no_fit_discharge(&trivial_smt_goal());
     assert_canonical_attribution(&discharge, "no_fit");
 }
 
 #[test]
 fn exhausted_discharge_uses_canonical_engine_key() {
+    crate::support::isolate();
     let discharge = exhausted_discharge(&trivial_smt_goal(), None);
     assert_canonical_attribution(&discharge, "exhausted_fallthrough");
 }
@@ -65,6 +69,7 @@ fn exhausted_discharge_uses_canonical_engine_key() {
 #[cfg(not(feature = "smt"))]
 #[test]
 fn solve_property_engine_uses_canonical_engine_key() {
+    crate::support::isolate();
     use chelis_prove::SolvePropertyEngine;
     let discharge = SolvePropertyEngine::new().discharge(&trivial_smt_goal(), 1_000);
     assert_canonical_attribution(&discharge, "solve_property");
@@ -73,6 +78,7 @@ fn solve_property_engine_uses_canonical_engine_key() {
 #[cfg(feature = "smt")]
 #[test]
 fn cvc5_engine_uses_canonical_engine_key() {
+    crate::support::isolate();
     use chelis_prove::Cvc5Engine;
     let discharge = Cvc5Engine::new().discharge(&trivial_smt_goal(), 5_000);
     assert_canonical_attribution(&discharge, "cvc5");
@@ -81,6 +87,7 @@ fn cvc5_engine_uses_canonical_engine_key() {
 #[cfg(feature = "z3")]
 #[test]
 fn z3_engine_uses_canonical_engine_key() {
+    crate::support::isolate();
     use chelis_prove::Z3Engine;
     let discharge = Z3Engine::new().discharge(&trivial_smt_goal(), 5_000);
     assert_canonical_attribution(&discharge, "z3");
@@ -89,6 +96,7 @@ fn z3_engine_uses_canonical_engine_key() {
 #[cfg(feature = "clarabel")]
 #[test]
 fn clarabel_sos_engine_uses_canonical_engine_key() {
+    crate::support::isolate();
     use chelis_prove::clarabel_sos::ClarabelSosEngine;
     // The trivial `x == x` goal is not a poly-nonneg-on-interval shape, so the
     // engine returns an honest Unknown -- which still routes its evidence
