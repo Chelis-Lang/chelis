@@ -1658,8 +1658,7 @@ pub(crate) fn try_lower_subexpr_evaluation_with_ordered_inputs(
             scoped_types,
             context,
             result_claim,
-            state.seed,
-            state.counter,
+            state,
             false,
             Some(&mut metadata),
         );
@@ -1730,8 +1729,10 @@ pub(crate) fn try_lower_subexpr_program_with_context_and_controls(
             scoped_tensor_types.into_sorted(),
             context,
             None,
-            None,
-            0,
+            crate::host::RandomLoweringState {
+                seed: None,
+                counter: 0,
+            },
             true,
             None,
         );
@@ -1780,8 +1781,10 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs(
             scoped_bindings,
             context,
             result_claim,
-            random_seed,
-            random_counter,
+            crate::host::RandomLoweringState {
+                seed: random_seed,
+                counter: random_counter,
+            },
             false,
             None,
         );
@@ -1893,8 +1896,7 @@ fn lower_subexpr_program_inner_impl(
     scoped_bindings: Vec<(String, TensorType)>,
     context: &SubexprLoweringContext,
     result_claim: Option<&TensorType>,
-    random_seed: Option<u64>,
-    random_counter: u64,
+    random: crate::host::RandomLoweringState,
     include_list_controls: bool,
     execution_out: Option<&mut Option<crate::evaluation::ExecutionMetadata>>,
 ) -> (Dag, u64, usize, Vec<RuntimeListCheckDescriptor>) {
@@ -1904,10 +1906,10 @@ fn lower_subexpr_program_inner_impl(
         context.program_signatures.clone(),
         LinearityInfo::default(),
     );
-    ctx.random_seed = random_seed;
-    ctx.random_counter = random_counter;
+    ctx.random_seed = random.seed;
+    ctx.random_counter = random.counter;
     if execution_out.is_some() {
-        ctx.execution = Some(crate::evaluation::ExecutionMetadata::new(random_seed));
+        ctx.execution = Some(crate::evaluation::ExecutionMetadata::new(random.seed));
     }
     // Pre-create every scoped input before body lowering. Declared helpers
     // supply signature order; signatureless entries supply their assigned ABI
