@@ -871,9 +871,8 @@ impl<'tcx> NativeDiscovery<'tcx> {
             let mut formal_inputs = "null".into();
             let mut formal_result = "null".into();
             let mut kind = "indirect";
-            if let ty::FnDef(def, call_args) = function.kind() {
-                self.enqueue(*def, call_args);
-                let signature = tcx.fn_sig(*def).instantiate(tcx, call_args).skip_binder();
+            if function.is_fn() {
+                let signature = function.fn_sig(tcx).skip_binder();
                 formal_inputs =
                     array(signature.inputs().iter().map(|value| {
                         native_typ(tcx, self.normalize(owner, substitutions, *value))
@@ -882,6 +881,9 @@ impl<'tcx> NativeDiscovery<'tcx> {
                     tcx,
                     self.normalize(owner, substitutions, signature.output()),
                 );
+            }
+            if let ty::FnDef(def, call_args) = function.kind() {
+                self.enqueue(*def, call_args);
                 let env = if substitutions.has_non_region_param() {
                     ty::TypingEnv::post_analysis(tcx, owner)
                 } else {
