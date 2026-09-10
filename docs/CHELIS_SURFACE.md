@@ -174,12 +174,22 @@ broadcast axis). The named-axis and four-argument anchored forms belong to `inse
 |---|---|---|
 | `const` | `(value, shape...) -> tensor[shape,p]` | zero gradient |
 | `load` | `(source, shape...) -> tensor[shape,p]` | zero gradient |
-| `dropout` | `(&tensor[D,f32], rate: f32) -> tensor[D,f32]` | differentiable (mask fixed wrt seed); introduces `Random`. **Eval-only — not codegen'd by C/HIP/Metal build yet.** |
+| `dropout` | `(&tensor[D,p_float], rate: p_float) -> tensor[D,p_float]` | all active float dtypes; fixed-control input AD replays its forward mask; introduces `Random`. **Eval-only — not codegen'd by C/HIP/Metal build yet.** |
 | `uniform_like` | `(&tensor[D,p], lo: f32, hi: f32) -> tensor[D,p]` | active float `p`; zero gradient; introduces `Random`; seeded via `with seed(Ni64) { }` |
 
 Internal-only `RiscOp`s not directly callable from Surf: `Store`, `Copy`, `Drop`,
 `Realize`, `Cast`, `FusedElem`, `OneHot`, `BlasMatmul` (the `matmul` specialization
 target), `Gather`/`ScatterAdd`/`Scatter` (the sparse nodes below).
+
+Fixed-control source evaluation carries a non-serialized execution plan through
+ordinary, prepared, contextual, helper, and input-AD paths. Dropout validates its
+same-dtype rate before drawing; accepted empty/zero-rate and dead-value calls
+still consume an ordinal. Nested handlers restore their parent on errors, and
+backward keyed replay consumes no new ordinal. Runtime-rate/rate AD, higher-order
+AD, random vmap, resource scopes, dynamic control, and general UniformLike arithmetic remain
+outside this repair. Legacy bare-Dag Rust evaluators and baked-seed wire/cache
+projections are unchanged; cloning a plan's inspection DAG loses execution
+metadata and is not a supported conversion back to the repaired source path.
 
 ### 1.7 Sparse tensor-lane nodes — `spec/05` §3.5
 

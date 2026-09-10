@@ -1689,6 +1689,24 @@ the generated tensor and Python/DLPack wrapper implementation. A wire
 registration proves none of those runtime exits. The respective non-regression
 oracles remain required whenever their boundary is touched.
 
+**Bounded dropout evaluator adoption.** Fixed-control source evaluation and
+first-order input AD now carry an opaque, non-serialized execution plan through
+lowering, normalization, AD replay, selected declarations, host helpers, and
+ordinary/prepared/contextual evaluation. [05-OP-37] uses arithmetic-width unit
+rounding and finalized sub/div at every active float dtype. The selected source
+spine retains dead draws and preceding local failures independently of value
+liveness. Scope identities distinguish equal-seed handlers; invocation-local
+forward keys authorize backward replay without another ambient draw. The host
+counter remains wrapping u64, not an unbounded proof event count.
+
+This is not completion of #1295 or #1297. Explicitly excluded runtime rates,
+rate cotangents, higher-order AD, random vmap, resource scopes, dynamic/recursive control, and
+general UniformLike numerics keep their compatibility boundary. Legacy Dag-only
+Rust entrypoints and serialized lowered libraries do not carry this plan; their
+baked-seed projection remains an adoption dependency. No new mask tensor owner,
+public wire field, compiled-dropout support, or native effect certificate is
+implied by the evaluator's private key table.
+
 ---
 
 # Part II - process rules that hold at every phase boundary

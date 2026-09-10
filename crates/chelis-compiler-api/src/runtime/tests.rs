@@ -44,6 +44,109 @@ fn checked_surf(source: &str) -> CheckedProgram {
     chelis_types::check_ir_program(&exprs).expect("ir check")
 }
 
+#[test]
+fn dropout_entered_error_prefix_and_nested_handler_unwind_preserve_parent() {
+    let checked = checked_surf(
+        "def bad(x: tensor[0, f32]) -> tensor[0, f32] = {\n dead = dropout(x, 0.0f32)\n dropout(x, 1.0f32)\n}\ndef invalid_loss(x: tensor[0, f32]) -> tensor[f32] = sum(bad(x), 0)\ndef nested(x: tensor[0, f32]) = with seed(7i64) { bad(x) }\ndef draw(x: tensor[0, f32]) -> tensor[0, f32] = dropout(x, 0.0f32)\n",
+    );
+    let empty_tensors = UnordMap::new();
+    let mut definitions = UnordMap::new();
+    register_top_level_defs(
+        checked.exprs(),
+        &BTreeMap::new(),
+        None,
+        &mut definitions,
+        &mut Vec::new(),
+        false,
+    );
+    let mut signatures = UnordMap::new();
+    register_declared_signatures(checked.exprs(), &mut signatures);
+    let mut ctx = EvalContext {
+        bindings: UnordMap::new(),
+        binding_types: UnordMap::new(),
+        precision_bindings: UnordMap::new(),
+        named_axis_route_cache: UnordMap::new(),
+        named_axis_route_visiting: UnordSet::new(),
+        top_level_defs: definitions,
+        declared_signatures: signatures,
+        type_env: checked
+            .type_env()
+            .iter()
+            .map(|(name, ty)| (name.clone(), ty.clone()))
+            .collect(),
+        adt_fields: UnordMap::new(),
+        adt_registry: checked.adt_registry().clone(),
+        tensor_bindings: &empty_tensors,
+        program: Some(&checked),
+        def_kernels: UnordMap::new(),
+        transcript: Vec::new(),
+        resolving_top_levels: Vec::new(),
+        random_seed: Some(42),
+        random_counter: 5,
+        execution_exclusion: None,
+        cancel: None,
+    };
+    let argument = RuntimeValue::Tensor(RuntimeTensorValue::new(IrTensorValue::from_storage(
+        vec![0],
+        chelis_types::dtype_semantics::tensor_from_scalars(Prim::F32, &[]),
+    )));
+    let bad = ctx.resolve_top_level("bad").unwrap();
+    let error = ctx
+        .apply_resolved_callable(bad, vec![argument.clone()])
+        .unwrap_err();
+    assert_eq!(error, "numeric trap: domain in dropout at f32");
+    assert_eq!(
+        ctx.random_counter, 6,
+        "the earlier accepted dead call entered before failure"
+    );
+    let nested = ctx.resolve_top_level("nested").unwrap();
+    assert!(
+        ctx.apply_resolved_callable(nested, vec![argument.clone()])
+            .unwrap_err()
+            .contains("numeric trap: domain in dropout at f32")
+    );
+    assert_eq!(ctx.random_seed, Some(42));
+    assert_eq!(
+        ctx.random_counter, 6,
+        "nested handler unwinds even on an error"
+    );
+    let draw = ctx.resolve_top_level("draw").unwrap();
+    ctx.apply_resolved_callable(draw, vec![argument.clone()])
+        .unwrap();
+    assert_eq!(
+        ctx.random_counter, 7,
+        "parent continues at its preserved next ordinal"
+    );
+    let gradient = chelis_deep::parser::parse_str("(grad {} (var {} invalid_loss))")
+        .unwrap()
+        .pop()
+        .unwrap();
+    let error = ctx
+        .apply_transform(
+            TransformKind::Grad,
+            &gradient,
+            UnordMap::new(),
+            vec![argument.clone()],
+        )
+        .unwrap_err();
+    assert_eq!(error, "numeric trap: domain in dropout at f32");
+    assert_eq!(
+        ctx.random_counter, 8,
+        "transform failure commits the entered prefix, not the lowering's predicted total"
+    );
+    ctx.bindings.insert("argument".into(), argument);
+    let nested_gradient = chelis_deep::parser::parse_str("(handle-effect {effect: random} (lit {type: (t-prim {} int64)} 7) (app {} (grad {} (var {} invalid_loss)) (var {} argument)))").unwrap().pop().unwrap();
+    assert_eq!(
+        ctx.eval_expr(&nested_gradient).unwrap_err(),
+        "numeric trap: domain in dropout at f32"
+    );
+    assert_eq!(ctx.random_seed, Some(42));
+    assert_eq!(
+        ctx.random_counter, 8,
+        "nested transform failure restores the parent state"
+    );
+}
+
 fn manifest_entry_with_path(
     name: &str,
     def_name: &str,
@@ -860,6 +963,7 @@ fn eval_deep_with_bindings(
         resolving_top_levels: Vec::new(),
         random_seed: None,
         random_counter: 0,
+        execution_exclusion: None,
         cancel: None,
     };
     for (name, value) in args {

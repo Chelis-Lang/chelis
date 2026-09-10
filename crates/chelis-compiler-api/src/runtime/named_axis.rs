@@ -293,17 +293,45 @@ impl<'a> EvalContext<'a> {
                  (spec/05-risc-primitives.md SS3.6)"
             )));
         }
-        let dag = try_lower_subexpr_program(
-            routed_expr,
-            scoped_types,
-            self.type_env.clone(),
-            program_defs,
-        )
-        .map_err(|diagnostic| {
-            NamedAxisRouteError::NotLowerable(format!(
+        let profile = self.execution_profile(routed_expr, &program_defs);
+        let mut execution_plan = None;
+        let lowered = if profile == chelis_ir::evaluation::EvaluationProfile::FixedControl {
+            let context = chelis_ir::evaluation::RandomExecutionContext::new(
+                chelis_ir::host::RandomLoweringState {
+                    seed: self.random_seed,
+                    counter: self.random_counter,
+                },
+            );
+            chelis_ir::lower::try_lower_subexpr_evaluation_plan(
+                routed_expr,
+                scoped_types,
+                self.type_env.clone(),
+                program_defs,
+                &context,
+            )
+            .map(|plan| {
+                let dag = plan.dag_for_inspection().clone();
+                execution_plan = Some(plan);
+                dag
+            })
+        } else {
+            try_lower_subexpr_program(
+                routed_expr,
+                scoped_types,
+                self.type_env.clone(),
+                program_defs,
+            )
+        };
+        let dag = lowered.map_err(|diagnostic| {
+            let message = format!(
                 "host runtime could not lower the named-axis `{context_label}` call for \
                  evaluation (chelis#338): {diagnostic}"
-            ))
+            );
+            if profile == chelis_ir::evaluation::EvaluationProfile::FixedControl {
+                NamedAxisRouteError::Fatal(message)
+            } else {
+                NamedAxisRouteError::NotLowerable(message)
+            }
         })?;
         let roots: Vec<NodeId> = dag.roots().to_vec();
         if roots.is_empty() {
@@ -313,7 +341,7 @@ impl<'a> EvalContext<'a> {
         }
         let tensor_bindings = self.tensor_bindings;
         let host_bindings = &self.bindings;
-        let values = chelis_ir::eval::eval_tensor_roots_with_strict(&dag, &roots, |name| {
+        let load = |name: &str| {
             staged_inputs
                 .get(name)
                 .cloned()
@@ -322,8 +350,24 @@ impl<'a> EvalContext<'a> {
                     Some(RuntimeValue::Tensor(t)) => Some(t.value.clone()),
                     _ => None,
                 })
-        })
-        .map_err(|err| {
+        };
+        let result = if let Some(plan) = &execution_plan {
+            let mut context = chelis_ir::evaluation::RandomExecutionContext::new(
+                chelis_ir::host::RandomLoweringState {
+                    seed: self.random_seed,
+                    counter: self.random_counter,
+                },
+            );
+            let result = chelis_ir::eval::eval_tensor_plan_with_strict(plan, &mut context, load);
+            self.random_counter = context.state().counter;
+            result
+        } else {
+            chelis_ir::eval::eval_tensor_roots_with_strict(&dag, &roots, load)
+        };
+        let values = result.map_err(|err| {
+            if execution_plan.is_some() {
+                return NamedAxisRouteError::Fatal(err);
+            }
             NamedAxisRouteError::Fatal(format!(
                 "host runtime named-axis `{context_label}` evaluation failed: {err}"
             ))

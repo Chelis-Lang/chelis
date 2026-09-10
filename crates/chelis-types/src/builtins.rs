@@ -2269,15 +2269,17 @@ pub fn builtin_env() -> (Env, VarGen) {
     }
 
     fn tensor_with_rate(name: &str, env: &mut Env, vg: &mut VarGen) {
-        let input = vg.fresh_tvar();
+        let precision = vg.fresh_tvar();
+        let rank = vg.fresh_rvar();
+        let input = Type::Tensor(vec![Dim::Rank(rank)], TensorPrec::Var(precision));
         let scheme = Scheme {
-            tvars: vec![input],
-            tvar_restrictions: vec![],
+            tvars: vec![precision],
+            tvar_restrictions: vec![(precision, TypeVarRestriction::ActiveFloat)],
             dvars: vec![],
-            rvars: vec![],
+            rvars: vec![rank],
             body: Type::Fn(
-                vec![borrowed(Type::Var(input)), Type::Prim(Prim::F32)],
-                Box::new(Type::Var(input)),
+                vec![borrowed(input.clone()), Type::Var(precision)],
+                Box::new(input),
             ),
         };
         env.bind(name.to_string(), scheme);

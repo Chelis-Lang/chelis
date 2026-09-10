@@ -6,7 +6,8 @@ use chelis_deep::ast::{Atom, Expr, List};
 use chelis_deep::{Span, decode_effect_kind};
 use chelis_ir::dag::{DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::TensorValue as IrTensorValue;
-use chelis_ir::host::{HostDefKernel, RandomLoweringState, host_def_kernel};
+use chelis_ir::evaluation::RandomExecutionContext;
+use chelis_ir::host::{HostDefKernel, RandomLoweringState, host_def_evaluation_plan};
 use chelis_ir::tier2;
 use chelis_types::{
     CompareOp, ElementRef, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, StorageView, types::Prim,
@@ -241,6 +242,35 @@ fn render_shape(shape: &[usize]) -> String {
 }
 
 impl<'a> EvalContext<'a> {
+    pub(super) fn execution_profile(
+        &self,
+        expr: &Expr,
+        defs: &UnordMap<String, Expr>,
+    ) -> chelis_ir::evaluation::EvaluationProfile {
+        self.execution_exclusion.map_or_else(
+            || chelis_ir::lower::evaluation_profile(expr, defs),
+            chelis_ir::evaluation::EvaluationProfile::Legacy,
+        )
+    }
+
+    fn admit_execution_profile(&mut self, expr: &Expr, bound: &[String]) {
+        use chelis_ir::evaluation::{EvaluationProfile, LegacyEvaluationReason};
+        let defs = self
+            .top_level_defs
+            .to_sorted()
+            .into_iter()
+            .filter(|(name, _)| !bound.contains(name))
+            .map(|(name, expr)| (name.clone(), expr.clone()))
+            .collect();
+        if let EvaluationProfile::Legacy(reason) = self.execution_profile(expr, &defs)
+            && !matches!(
+                reason,
+                LegacyEvaluationReason::NoDropout | LegacyEvaluationReason::LegacyApi
+            )
+        {
+            self.execution_exclusion = Some(reason);
+        }
+    }
     /// Resolve a builtin only when ordinary lexical lookup did not select a
     /// runtime binding of the same name (spec/04-type-system.md §8.6,
     /// chelis#1076). Every evaluator builtin fast path goes through this
@@ -269,7 +299,10 @@ impl<'a> EvalContext<'a> {
             return Err(format!("cyclic top-level runtime definition `{name}`"));
         }
         self.resolving_top_levels.push(resolved_name.clone());
+        let saved_exclusion = self.execution_exclusion;
+        self.admit_execution_profile(&expr, &[]);
         let value = self.eval_expr(&expr);
+        self.execution_exclusion = saved_exclusion;
         self.resolving_top_levels.pop();
         let value = stamp_def_closure(value?, &resolved_name, &expr);
         self.bindings.insert(resolved_name.clone(), value.clone());
@@ -289,7 +322,31 @@ impl<'a> EvalContext<'a> {
     /// lowering fails is the evaluation's error, never a fall-through to the
     /// interpreter (the C lane's fall-through is chelis#1515 and is not
     /// inherited here).
-    pub(super) fn def_kernel(&mut self, name: &str) -> Result<Option<Arc<HostDefKernel>>, String> {
+    pub(super) fn def_kernel(
+        &mut self,
+        name: &str,
+    ) -> Result<Option<Arc<DefEvaluationKernel>>, String> {
+        if self.execution_exclusion.is_some() {
+            return self
+                .program
+                .map(|program| {
+                    chelis_ir::host::host_def_kernel(
+                        program,
+                        name,
+                        Some(RandomLoweringState {
+                            seed: self.random_seed,
+                            counter: self.random_counter,
+                        }),
+                    )
+                })
+                .transpose()
+                .map(|kernel| {
+                    kernel
+                        .flatten()
+                        .map(|kernel| Arc::new(DefEvaluationKernel::Legacy(kernel)))
+                })
+                .map_err(|diagnostic| diagnostic.to_string());
+        }
         if let Some(cached) = self.def_kernels.get(name) {
             return Ok(cached.clone());
         }
@@ -300,12 +357,12 @@ impl<'a> EvalContext<'a> {
             seed: self.random_seed,
             counter: self.random_counter,
         };
-        let kernel = host_def_kernel(program, name, Some(random))
+        let kernel = host_def_evaluation_plan(program, name, &RandomExecutionContext::new(random))
             .map_err(|diagnostic| diagnostic.to_string())?
-            .map(Arc::new);
+            .map(|plan| Arc::new(DefEvaluationKernel::Planned(plan)));
         if !kernel
             .as_ref()
-            .is_some_and(|kernel| kernel_draws_random(kernel))
+            .is_some_and(|kernel| kernel_draws_random(kernel.kernel_for_inspection()))
         {
             self.def_kernels.insert(name.to_string(), kernel.clone());
         }
@@ -322,10 +379,12 @@ impl<'a> EvalContext<'a> {
     fn apply_def_kernel(
         &mut self,
         name: &str,
-        kernel: &HostDefKernel,
+        kernel: &DefEvaluationKernel,
         params: &[String],
         args: Vec<RuntimeValue>,
     ) -> Result<RuntimeValue, String> {
+        let execution_plan = kernel.plan();
+        let kernel = kernel.kernel_for_inspection();
         if params.len() != args.len() {
             return Err(format!(
                 "closure expected {} args, got {}",
@@ -388,6 +447,25 @@ impl<'a> EvalContext<'a> {
         let starting_counter = self.random_counter;
         let tensor_bindings = self.tensor_bindings;
         let host_bindings = &self.bindings;
+        if let Some(plan) = execution_plan {
+            let mut context = RandomExecutionContext::new(RandomLoweringState {
+                seed: self.random_seed,
+                counter: self.random_counter,
+            });
+            let result =
+                chelis_ir::eval::eval_tensor_plan_with_strict(plan, &mut context, |load| {
+                    staged
+                        .get(load)
+                        .cloned()
+                        .or_else(|| tensor_bindings.get(load).map(|t| t.value.clone()))
+                        .or_else(|| match host_bindings.get(load) {
+                            Some(RuntimeValue::Tensor(t)) => Some(t.value.clone()),
+                            _ => None,
+                        })
+                });
+            self.random_counter = context.state().counter;
+            return pack_dag_roots(&kernel.dag, &roots, &result?, name);
+        }
         let (values, executed_counter) =
             chelis_ir::eval::eval_tensor_roots_with_strict_random_progress(
                 &kernel.dag,
@@ -901,6 +979,21 @@ impl<'a> EvalContext<'a> {
             .first()
             .ok_or_else(|| "app missing function".to_string())?;
 
+        // Fixed-rate dropout is not in the legacy host builtin table. Admit
+        // only its named fixed-control source profile, stage the operand once,
+        // and use the same lowering/plan core as named-axis primitives. An
+        // excluded runtime-rate call keeps its previous dispatch unchanged.
+        if var_name(func) == Some("dropout")
+            && self.active_builtin_symbol("dropout")
+            && self.execution_exclusion.is_none()
+            && chelis_ir::lower::evaluation_profile(
+                &Expr::List(list.clone(), Span::new(0, 0)),
+                &self.top_level_defs,
+            ) == chelis_ir::evaluation::EvaluationProfile::FixedControl
+        {
+            return self.eval_named_axis_reduction_app("dropout", kids);
+        }
+
         // chelis#338 site A: a reduction whose axis argument is a bare
         // `(var name)` names a *dimension* of the operand, not a runtime
         // value (spec/04-type-system.md SS4.5.3); the checker admits only
@@ -1288,6 +1381,27 @@ impl<'a> EvalContext<'a> {
     /// declared param type wins; `arg_type_exprs` fills the gap for
     /// synthesized params with no annotation (e.g. `__chelis_pipe`).
     fn apply_resolved_callable_with_arg_types(
+        &mut self,
+        callable: RuntimeValue,
+        args: Vec<RuntimeValue>,
+        arg_type_exprs: &[Option<Expr>],
+        result_type_expr: Option<&Expr>,
+    ) -> Result<RuntimeValue, String> {
+        let saved_exclusion = self.execution_exclusion;
+        if let RuntimeValue::Closure { body, params, .. } = &callable {
+            self.admit_execution_profile(body, params);
+        }
+        let result = self.apply_resolved_callable_with_arg_types_impl(
+            callable,
+            args,
+            arg_type_exprs,
+            result_type_expr,
+        );
+        self.execution_exclusion = saved_exclusion;
+        result
+    }
+
+    fn apply_resolved_callable_with_arg_types_impl(
         &mut self,
         callable: RuntimeValue,
         args: Vec<RuntimeValue>,

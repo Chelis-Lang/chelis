@@ -59,6 +59,38 @@ pub fn lower_checked(
     finish_isolated_lowering(checked, mode, lower_result)
 }
 
+/// Additive evaluator products derived from the same sealed checked source.
+/// Ordinary lowering/cache carriers remain unchanged and cannot stand in for
+/// this non-serialized execution transport.
+pub fn lower_checked_for_evaluation(
+    checked: &CheckedCompilation,
+) -> Result<chelis_ir::lower::EvaluationProgram, CoreLowerError> {
+    chelis_ir::lower::try_lower_program_to_evaluation_library(checked.program())
+        .map(|library| library.program().clone())
+        .map_err(CoreLowerError::Lower)
+}
+
+pub fn lower_checked_with_evaluation_context(
+    checked: &ContextCheckedCompilation<'_>,
+    evaluation: &chelis_ir::lower::EvaluationLibrary,
+) -> Result<chelis_ir::lower::EvaluationProgram, CoreLowerError> {
+    if evaluation.library_for_inspection().library_proof_id()
+        != checked.library().program().library_proof_id()
+    {
+        return Err(CoreLowerError::Lower(LowerDiagnostic {
+            message: "the evaluation library does not match its checked context".into(),
+            span: None,
+            span_id: None,
+            fatal: true,
+        }));
+    }
+    chelis_ir::lower::try_lower_program_with_evaluation_context(
+        evaluation,
+        checked.extension().program(),
+    )
+    .map_err(CoreLowerError::Lower)
+}
+
 struct LoweredProgram {
     dag: Dag,
     rootless_defs: BTreeSet<String>,
