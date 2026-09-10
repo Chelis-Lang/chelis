@@ -5650,6 +5650,14 @@ impl<'a> HostEmitter<'a> {
                 "{}{target} = chelis_tuple_from_values({}, {});",
                 self.indent, values_name, root_count
             ));
+            // The tuple retains its fields; release each helper output's
+            // temporary boxed owner, just as for an ordinary tuple literal.
+            for index in 0..root_count {
+                self.lines.push(format!(
+                    "{}chelis_value_release({values_name}[{index}]);",
+                    self.indent
+                ));
+            }
         } else {
             self.lines
                 .push(format!("{}{target} = {}[0];", self.indent, outputs_name));
