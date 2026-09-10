@@ -56,6 +56,10 @@ name = "issue_394_f64_literal_eval_roundtrip"
 
 [[target]]
 package = "chelis-cli"
+name = "issue_1732_integer_host_literals"
+
+[[target]]
+package = "chelis-cli"
 name = "test_command_smoke"
 
 [[target]]

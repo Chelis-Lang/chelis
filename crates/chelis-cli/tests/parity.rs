@@ -490,6 +490,11 @@ fn parity_literal_extent_claim() {
 }
 
 #[test]
+fn parity_integer_functions() {
+    drive_parity(&examples_root().join("integer_functions.ch"), true);
+}
+
+#[test]
 fn parity_recursive_generic() {
     // chelis#1158: recursive generic host calls compile via bounded
     // memoized monomorphization; both lanes print the same value.
@@ -605,6 +610,7 @@ fn parity_corpus_is_complete() {
         "hash_order_determinism.ch",
         "hello_tensor.ch",
         "induction_bond.ch",
+        "integer_functions.ch",
         "iter_foundation.ch",
         "kinded_nominal_dimensions.ch",
         "linreg.ch",
