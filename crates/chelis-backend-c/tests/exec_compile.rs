@@ -32,7 +32,12 @@ fn checked_indexing_run(source: &str, harness: &str) -> std::process::Output {
     let dir = probe.path();
     fs::write(dir.join("kernel.c"), source).unwrap();
     fs::write(dir.join("main.c"), harness).unwrap();
-    let toolchain = chelis_backend_c::toolchain::test_toolchain(Default::default());
+    let toolchain = chelis_backend_c::toolchain::test_toolchain(
+        chelis_backend_c::toolchain::CodegenRequirements {
+            needs_blas: source.contains("#include \"chelis_blas.h\""),
+            ..Default::default()
+        },
+    );
     let binary = dir.join("probe");
     let compiled = Command::new(toolchain.compiler)
         .args([
@@ -60,6 +65,1586 @@ fn checked_indexing_run(source: &str, harness: &str) -> std::process::Output {
         .env("ASAN_OPTIONS", "detect_leaks=0")
         .output()
         .unwrap()
+}
+
+fn checked_literal_dag(storage: chelis_types::TensorStorage, extent: usize, output: Prim) -> Dag {
+    let mut dag = Dag::new();
+    dag.add_node(
+        RiscOp::ConstTensor { data: storage },
+        vec![],
+        TensorType {
+            dims: vec![DimInfo::Lit(extent)],
+            precision: output,
+        },
+        None,
+    );
+    dag
+}
+#[test]
+fn checked_literals_preserve_every_storage_width_and_reject_count_mismatch() {
+    use chelis_types::{RawTensor, StorageView, finalize_tensor};
+    for dtype in [
+        Prim::F32,
+        Prim::F64,
+        Prim::F16,
+        Prim::Bf16,
+        Prim::Int8,
+        Prim::Int16,
+        Prim::Int32,
+        Prim::Int64,
+        Prim::Bool,
+    ] {
+        let raw = if dtype.is_float() {
+            RawTensor::Float(vec![-0.0, 1.5, f64::INFINITY, f64::NAN])
+        } else if dtype == Prim::Bool {
+            RawTensor::Int(vec![0, 1, 1, 0])
+        } else if dtype == Prim::Int64 {
+            RawTensor::Int(vec![i64::MIN, 9007199254740993, -1, i64::MAX])
+        } else {
+            RawTensor::Int(vec![-1, 0, 1, 127])
+        };
+        let storage = finalize_tensor("const", dtype, raw).unwrap();
+        let expected: Vec<u8> = match storage.view() {
+            StorageView::F64(v) => v.iter().flat_map(|x| x.to_bits().to_ne_bytes()).collect(),
+            StorageView::F32(v) => v.iter().flat_map(|x| x.to_bits().to_ne_bytes()).collect(),
+            StorageView::F16(v) => v.iter().flat_map(|x| x.to_bits().to_ne_bytes()).collect(),
+            StorageView::Bf16(v) => v.iter().flat_map(|x| x.to_bits().to_ne_bytes()).collect(),
+            StorageView::I64(v) => v.iter().flat_map(|x| x.to_ne_bytes()).collect(),
+            StorageView::I32(v) => v.iter().flat_map(|x| x.to_ne_bytes()).collect(),
+            StorageView::I16(v) => v.iter().flat_map(|x| x.to_ne_bytes()).collect(),
+            StorageView::I8(v) => v.iter().map(|x| *x as u8).collect(),
+            StorageView::Bool(v) => v.to_vec(),
+        };
+        for extent in [4, 3, 0] {
+            let source = codegen(
+                &checked_literal_dag(storage.clone(), extent, dtype),
+                "literal_probe",
+            )
+            .unwrap()
+            .c_source;
+            let bytes = expected
+                .iter()
+                .map(u8::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            let harness = format!(
+                r#"
+#include "chelis_runtime.h"
+#include <string.h>
+extern void literal_probe(chelis_tensor**,int,chelis_tensor**,int);
+int main(void) {{
+ chelis_tensor *out[1]={{0}};literal_probe(0,0,out,1);
+ unsigned char expected[]={{{bytes}}};
+ chelis_read_view v=chelis_tensor_read_view(out[0]);
+ if(v.dtype!={dtype} || v.count!=4 || memcmp(v.data,expected,sizeof expected))return 10;
+ chelis_tensor_release(out[0]);return 0;
+}}
+"#,
+                dtype = dtype.runtime_dtype().unwrap().c_macro()
+            );
+            let out = checked_indexing_run(&source, &harness);
+            if extent == 4 {
+                assert!(out.status.success(), "{dtype:?}: {out:?}");
+            } else {
+                assert_eq!(out.status.code(), Some(1), "{dtype:?}/{extent}: {out:?}");
+                assert!(
+                    String::from_utf8_lossy(&out.stderr)
+                        .lines()
+                        .any(|s| s == "numeric trap: domain in const at int64"),
+                    "{out:?}"
+                );
+            }
+        }
+        let empty = storage.reuse_gather(&[]);
+        let source = codegen(&checked_literal_dag(empty, 0, dtype), "literal_probe")
+            .unwrap()
+            .c_source;
+        let harness = r#"#include "chelis_runtime.h"
+extern void literal_probe(chelis_tensor**,int,chelis_tensor**,int);
+int main(void){chelis_tensor *out[1]={0};literal_probe(0,0,out,1);if(chelis_tensor_numel(out[0])!=0)return 1;chelis_tensor_release(out[0]);return 0;}"#;
+        let out = checked_indexing_run(&source, harness);
+        assert!(out.status.success(), "{dtype:?} empty: {out:?}");
+    }
+}
+#[test]
+fn checked_literals_reject_inconsistent_ir_storage_dtype() {
+    let value = chelis_types::finalize_tensor(
+        "const",
+        Prim::F32,
+        chelis_types::RawTensor::Float(vec![1.0]),
+    )
+    .unwrap();
+    let result = codegen(&checked_literal_dag(value, 1, Prim::Int32), "literal_probe");
+    assert!(
+        result.is_err(),
+        "inconsistent literal storage dtype must reject"
+    );
+}
+
+fn checked_window_dag(reducer: ReduceWindowKind, gradient: bool) -> Dag {
+    let mut dag = Dag::new();
+    let input = TensorType {
+        dims: ["batch", "height", "width"]
+            .into_iter()
+            .map(|n| DimInfo::Named(n.into(), None))
+            .collect(),
+        precision: Prim::F32,
+    };
+    let result = TensorType {
+        dims: vec![
+            DimInfo::Named("batch".into(), None),
+            DimInfo::Lit(2),
+            DimInfo::Lit(2),
+        ],
+        precision: Prim::F32,
+    };
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        input.clone(),
+        None,
+    );
+    if gradient {
+        let gty = TensorType {
+            dims: ["gb", "gh", "gw"]
+                .into_iter()
+                .map(|n| DimInfo::Named(n.into(), None))
+                .collect(),
+            precision: Prim::F32,
+        };
+        let g = dag.add_node(RiscOp::Load { name: "g".into() }, vec![], gty, None);
+        dag.add_node(
+            RiscOp::ReduceWindowGrad {
+                reducer,
+                window_shape: vec![2, 2],
+                strides: vec![2, 2],
+            },
+            vec![x, g],
+            input,
+            None,
+        );
+    } else {
+        dag.add_node(
+            RiscOp::ReduceWindow {
+                reducer,
+                window_shape: vec![2, 2],
+                strides: vec![2, 2],
+            },
+            vec![x],
+            result,
+            None,
+        );
+    }
+    dag
+}
+#[test]
+fn checked_windows_forward_and_gradient_execute_with_exact_geometry_under_sanitizers() {
+    for (kind, reducer) in [
+        ReduceWindowKind::Sum,
+        ReduceWindowKind::Mean,
+        ReduceWindowKind::Max,
+        ReduceWindowKind::Min,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for gradient in [false, true] {
+            let source = codegen(&checked_window_dag(reducer, gradient), "window_probe")
+                .unwrap()
+                .c_source;
+            for batch in [2, 0] {
+                let harness = format!(
+                    r#"
+#include "chelis_runtime.h"
+#include <stdio.h>
+extern void window_probe(chelis_tensor**, int, chelis_tensor**, int);
+int main(void) {{
+    int64_t xs[3] = {{{batch},5,5}}, gs[3] = {{{batch},2,2}};
+    chelis_tensor *x = chelis_alloc(3,xs,CHELIS_DTYPE_F32);
+    chelis_tensor *g = chelis_alloc(3,gs,CHELIS_DTYPE_F32);
+    chelis_tensor_write *w = chelis_tensor_begin_write(x);
+    float *xp = (float*)chelis_tensor_write_view(w).data;
+    for (int i=0;i<{batch}*25;i++) xp[i]=(float)(i+1);
+    chelis_tensor_end_write(w);
+    w = chelis_tensor_begin_write(g);
+    float *gp = (float*)chelis_tensor_write_view(w).data;
+    for (int i=0;i<{batch}*4;i++) gp[i]=(float)(4*(i+1));
+    chelis_tensor_end_write(w);
+    chelis_tensor *inputs[2]={{x,g}}, *out[1]={{0}};
+    window_probe(inputs,{ninputs},out,1);
+    if (chelis_tensor_numel(out[0]) != {batch}*{per_batch}) return 10;
+    if (chelis_tensor_shape(out[0],1) != {height} || chelis_tensor_shape(out[0],2) != {width}) return 11;
+    const float *actual=(const float*)chelis_tensor_read_view(out[0]).data;
+    float expected[60]={{0}};
+    for(int b=0;b<{batch};b++) for(int h=0;h<2;h++) for(int c=0;c<2;c++) {{
+        int first=b*25+h*10+c*2, group=b*4+h*2+c;
+        int slots[4]={{first,first+1,first+5,first+6}};
+        if ({gradient}) {{
+            for(int j=0;j<4;j++) if ({kind}<2 || ({kind}==2 && j==3) || ({kind}==3 && j==0)) expected[slots[j]]+=(float)(4*(group+1))/({kind}==1?4.0f:1.0f);
+        }} else {{
+            float value={kind}==2?(float)(first+7):{kind}==3?(float)(first+1):(float)(4*first+16);
+            expected[group]={kind}==1?value/4.0f:value;
+        }}
+    }}
+    for(int i=0;i<{batch}*{per_batch};i++) if(actual[i]!=expected[i]) {{ fprintf(stderr,"%d %g %g\n",i,actual[i],expected[i]);return 12; }}
+    chelis_tensor_release(out[0]);chelis_tensor_release(g);chelis_tensor_release(x);return 0;
+}}
+"#,
+                    ninputs = if gradient { 2 } else { 1 },
+                    per_batch = if gradient { 25 } else { 4 },
+                    height = if gradient { 5 } else { 2 },
+                    width = if gradient { 5 } else { 2 },
+                    gradient = usize::from(gradient)
+                );
+                let output = checked_indexing_run(&source, &harness);
+                assert!(
+                    output.status.success(),
+                    "{kind}/{gradient}/{batch}: {output:?}"
+                );
+            }
+        }
+    }
+}
+#[test]
+fn checked_windows_reject_incorrect_runtime_result_and_cotangent_shapes() {
+    for gradient in [false, true] {
+        let source = codegen(
+            &checked_window_dag(ReduceWindowKind::Sum, gradient),
+            "window_probe",
+        )
+        .unwrap()
+        .c_source;
+        let harness = format!(
+            r#"
+#include "chelis_runtime.h"
+extern void window_probe(chelis_tensor**,int,chelis_tensor**,int);
+int main(void) {{
+ int64_t xs[3]={{1,{height},5}},gs[3]={{1,1,4}};
+ chelis_tensor *x=chelis_alloc(3,xs,CHELIS_DTYPE_F32), *g=chelis_alloc(3,gs,CHELIS_DTYPE_F32);
+ chelis_tensor *inputs[2]={{x,g}},*out[1]={{0}};
+ window_probe(inputs,{ninputs},out,1);return 99;
+}}
+"#,
+            height = if gradient { 5 } else { 6 },
+            ninputs = if gradient { 2 } else { 1 }
+        );
+        let output = checked_indexing_run(&source, &harness);
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let op = if gradient {
+            "reduce_window_grad"
+        } else {
+            "reduce_window_sum"
+        };
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .any(|s| s == format!("numeric trap: domain in {op} at int64")),
+            "{output:?}"
+        );
+    }
+}
+
+fn checked_blas_dag(operand: Prim, output: Prim) -> Dag {
+    use chelis_ir::dag::DimExpr;
+    let ty = |names: &[&str], precision| TensorType {
+        dims: names
+            .iter()
+            .map(|n| DimInfo::Named((*n).into(), None))
+            .collect(),
+        precision,
+    };
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        ty(&["batch0", "batch1", "m", "k"], operand),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        ty(&["batch0", "batch1", "k", "n"], operand),
+        None,
+    );
+    let node = dag.add_node(
+        RiscOp::BlasMatmul {
+            batch_dims: vec![DimExpr::Sym("batch0".into()), DimExpr::Sym("batch1".into())],
+            m: DimExpr::Sym("m".into()),
+            n: DimExpr::Sym("n".into()),
+            k: DimExpr::Sym("k".into()),
+            accumulator: if operand == Prim::F64 {
+                Prim::F64
+            } else {
+                Prim::F32
+            },
+        },
+        vec![a, b],
+        ty(&["batch0", "batch1", "m", "n"], output),
+        None,
+    );
+    dag.add_root(node);
+    dag
+}
+
+#[test]
+fn blas_vendor_dimension_contract_matches_actual_function_prototypes() {
+    let source = codegen_with_options(
+        &checked_blas_dag(Prim::F32, Prim::F32),
+        "vendor_contract",
+        CodegenOptions {
+            use_blas: true,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .c_source;
+    let preamble = source
+        .split("/* CHELIS_UNIFORM_HELPERS_BEGIN */")
+        .next()
+        .unwrap();
+    let contract = &preamble[preamble.find("#ifndef CHELIS_C_BLAS_CONTRACT").unwrap()..];
+    let probe = common::probe_dir("blas_dimension_contract");
+    let compiler = chelis_backend_c::toolchain::c_compiler();
+    let compile = |text: &str| {
+        fs::write(probe.path().join("contract.c"), text).unwrap();
+        Command::new(&compiler)
+            .args(["-std=c11", "-Werror", "-c", "-I"])
+            .arg(runtime_include_dir())
+            .arg(probe.path().join("contract.c"))
+            .arg("-o")
+            .arg(probe.path().join("contract.o"))
+            .output()
+            .unwrap()
+    };
+    let actual = compile(preamble);
+    assert!(
+        actual.status.success(),
+        "{}",
+        String::from_utf8_lossy(&actual.stderr)
+    );
+    if cfg!(target_os = "macos") {
+        let ilp64 = compile(&format!("#define ACCELERATE_LAPACK_ILP64 1\n{preamble}"));
+        assert!(
+            ilp64.status.success(),
+            "{}",
+            String::from_utf8_lossy(&ilp64.stderr)
+        );
+    }
+    for openblas in [false, true] {
+        for (declared, argument, want) in [
+            ("int32_t", "int32_t", None),
+            ("int64_t", "int64_t", None),
+            ("int32_t", "int64_t", Some("dimension contract mismatch")),
+            ("int64_t", "int32_t", Some("dimension contract mismatch")),
+            ("uint32_t", "uint32_t", Some("dimensions must be signed")),
+            (
+                "int16_t",
+                "int16_t",
+                Some("unsupported CBLAS dimension width"),
+            ),
+        ] {
+            let layout = if openblas {
+                "CBLAS_ORDER"
+            } else {
+                "CBLAS_LAYOUT"
+            };
+            let selector = if openblas {
+                format!("#define OPENBLAS_VERSION 1\ntypedef {declared} blasint;\n")
+            } else {
+                format!("#define CBLAS_INT {declared}\n")
+            };
+            let declarations=[("s","float"),("d","double")].iter().map(|(prefix,element)|format!("void cblas_{prefix}gemm(enum {layout}, enum CBLAS_TRANSPOSE, enum CBLAS_TRANSPOSE, {argument}, {argument}, {argument}, {element}, const {element}*, {argument}, const {element}*, {argument}, {element}, {element}*, {argument});\n")).collect::<String>();
+            let fake = format!(
+                "#include <stdint.h>\n#undef __APPLE__\n{selector}typedef enum {layout} {{ CblasRowMajor=101 }} {layout};\nenum CBLAS_TRANSPOSE {{ CblasNoTrans=111 }};\n{declarations}{contract}"
+            );
+            let result = compile(&fake);
+            if let Some(reason) = want {
+                assert!(!result.status.success(), "{openblas}/{declared}/{argument}");
+                assert!(
+                    String::from_utf8_lossy(&result.stderr).contains(reason),
+                    "{}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
+            } else {
+                assert!(
+                    result.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn checked_blas_batches_scratch_and_empty_domains_execute_under_sanitizers() {
+    for (operand, output) in [
+        (Prim::F32, Prim::F32),
+        (Prim::F64, Prim::F64),
+        (Prim::F16, Prim::F16),
+        (Prim::Bf16, Prim::Bf16),
+        (Prim::F16, Prim::F32),
+        (Prim::Bf16, Prim::F32),
+    ] {
+        let source = codegen_with_options(
+            &checked_blas_dag(operand, output),
+            "checked_blas",
+            CodegenOptions {
+                use_blas: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .c_source;
+        // Existing selected nodes require their ABI declarations even when the
+        // caller did not request another specialization pass.
+        let default_options = codegen(&checked_blas_dag(operand, output), "checked_blas").unwrap();
+        assert!(default_options.requirements.needs_blas);
+        assert_eq!(default_options.c_source, source);
+        let mut sources = vec![source];
+        if operand == Prim::F32 && output == Prim::F32 {
+            use chelis_ir::dag::DimExpr;
+            use chelis_ir::host::{
+                HostBlasMatmulSummary, HostTensorHelper, HostTensorInput, HostTensorSpecialization,
+            };
+            let dag = checked_blas_dag(operand, output);
+            let a_ty = dag.nodes()[0].output_type.clone();
+            let b_ty = dag.nodes()[1].output_type.clone();
+            let out_ty = dag.nodes()[2].output_type.clone();
+            let inputs = vec![
+                HostTensorInput {
+                    name: "a".into(),
+                    ty: a_ty.clone(),
+                },
+                HostTensorInput {
+                    name: "b".into(),
+                    ty: b_ty.clone(),
+                },
+            ];
+            let params = inputs
+                .iter()
+                .map(|input| HostParam {
+                    name: input.name.clone(),
+                    ty: HostType::Tensor(input.ty.clone()),
+                })
+                .collect::<Vec<_>>();
+            let summary = HostBlasMatmulSummary {
+                lhs_input: 0,
+                rhs_input: 1,
+                input_tys: vec![a_ty, b_ty],
+                output: out_ty.clone(),
+                batch_dims: vec![DimExpr::Sym("batch0".into()), DimExpr::Sym("batch1".into())],
+                m: DimExpr::Sym("m".into()),
+                n: DimExpr::Sym("n".into()),
+                k: DimExpr::Sym("k".into()),
+            };
+            let body = HostExpr::new(HostExprKind::TensorCall {
+                helper: 0,
+                args: params
+                    .iter()
+                    .map(|p| HostExpr::new(HostExprKind::Var(p.name.clone(), p.ty.clone())))
+                    .collect(),
+                ty: HostType::Tensor(out_ty.clone()),
+            });
+            let helper = HostTensorHelper {
+                name: "matmul_helper".into(),
+                dag,
+                inputs,
+                output: out_ty.clone(),
+                specialization: Some(HostTensorSpecialization::BlasMatmul(summary)),
+                summary_rejection: None,
+            };
+            let program = HostProgram {
+                globals: vec![],
+                global_tensor_helpers: vec![],
+                summary_rejections: vec![],
+                functions: vec![HostFunction {
+                    name: "host_blas".into(),
+                    params,
+                    ret_ty: HostType::Tensor(out_ty),
+                    body,
+                    tensor_helpers: vec![helper],
+                    origin: HostFunctionOrigin::Authored,
+                    specialization: None,
+                    summary_rejections: vec![],
+                }],
+            };
+            let mut host_source =
+                support::emit_selected_host_program(program, "host_blas_probe").unwrap();
+            assert!(
+                host_source.contains("blas_plan_"),
+                "summary must execute instead of its helper"
+            );
+            host_source.push_str("\nvoid checked_blas(chelis_tensor **in,int n_in,chelis_tensor **out,int n_out) { (void)n_in; (void)n_out; out[0]=host_blas(in[0],in[1]); }\n");
+            sources.push(host_source);
+        }
+        let input_dtype = operand.runtime_dtype().unwrap().c_macro();
+        let output_dtype = output.runtime_dtype().unwrap().c_macro();
+        let store = match operand {
+            Prim::F32 => "((float*)v.data)[i]=value;",
+            Prim::F64 => "((double*)v.data)[i]=value;",
+            Prim::F16 => "((uint16_t*)v.data)[i]=chelis_f32_to_f16(value);",
+            Prim::Bf16 => "((uint16_t*)v.data)[i]=chelis_f32_to_bf16(value);",
+            _ => unreachable!(),
+        };
+        let read = match output {
+            Prim::F32 => "((const float*)v.data)[i]",
+            Prim::F64 => "((const double*)v.data)[i]",
+            Prim::F16 => "chelis_f16_to_f32(((const uint16_t*)v.data)[i])",
+            Prim::Bf16 => "chelis_bf16_to_f32(((const uint16_t*)v.data)[i])",
+            _ => unreachable!(),
+        };
+        for (batches, k) in [(2, 2), (0, 2), (2, 0)] {
+            let harness = format!(
+                r#"
+#include "chelis_runtime.h"
+void checked_blas(chelis_tensor **, int, chelis_tensor **, int);
+static void fill(chelis_tensor *t) {{
+    chelis_tensor_write *g=chelis_tensor_begin_write(t); chelis_write_view v=chelis_tensor_write_view(g);
+    for(int64_t i=0;i<v.count;++i) {{ float value=(float)(i%3+1); {store} }}
+    chelis_tensor_end_write(g);
+}}
+int main(void) {{
+    chelis_tensor *a=chelis_alloc(4,(int64_t[]){{{batches},2,3,{k}}},{input_dtype});
+    chelis_tensor *b=chelis_alloc(4,(int64_t[]){{{batches},2,{k},4}},{input_dtype});
+    fill(a); fill(b); chelis_tensor *in[]={{a,b}},*out[1]={{0}};
+    checked_blas(in,2,out,1);
+    chelis_read_view v=chelis_tensor_read_view(out[0]);
+    if(v.count!={batches}*2*3*4 || v.dtype!={output_dtype}) return 2;
+    int64_t shape[4]={{{batches},2,3,4}};
+    for(int axis=0;axis<4;++axis) if(chelis_tensor_shape(out[0],axis)!=shape[axis]) return 3;
+    for(int64_t i=0;i<v.count;++i) {{
+        int64_t batch=i/12,row=(i%12)/4,col=i%4; double expected=0;
+        for(int64_t t=0;t<{k};++t) expected+=(double)((batch*3*{k}+row*{k}+t)%3+1)*(double)((batch*{k}*4+t*4+col)%3+1);
+        if ((double)({read})!=expected) return 4;
+    }}
+    chelis_tensor_release(out[0]); chelis_tensor_release(a); chelis_tensor_release(b);
+    puts("MATMUL PASS"); return 0;
+}}
+"#
+            );
+            for source in &sources {
+                let result = checked_indexing_run(source, &harness);
+                assert!(
+                    result.status.success(),
+                    "{operand:?}/{output:?} {batches}/{k}: {}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
+                assert_eq!(result.stdout, b"MATMUL PASS\n");
+            }
+        }
+    }
+}
+
+#[test]
+fn checked_c_sparse_mappings_preserve_stored_bits_under_sanitizers() {
+    for (prim, dtype, seed) in [
+        (Prim::F32, "CHELIS_DTYPE_F32", 0x3f800000_u64),
+        (Prim::F64, "CHELIS_DTYPE_F64", 0x3ff0000000000000),
+        (Prim::F16, "CHELIS_DTYPE_F16", 0x3c00),
+        (Prim::Bf16, "CHELIS_DTYPE_BF16", 0x3f80),
+        (Prim::Int8, "CHELIS_DTYPE_I8", 10),
+        (Prim::Int16, "CHELIS_DTYPE_I16", 100),
+        (Prim::Int32, "CHELIS_DTYPE_I32", 100),
+        (Prim::Int64, "CHELIS_DTYPE_I64", 9_007_199_254_740_993),
+        (Prim::Bool, "CHELIS_DTYPE_BOOL", 0),
+    ] {
+        for (index_prim, index_dtype, index_type) in [
+            (Prim::Int32, "CHELIS_DTYPE_I32", "int32_t"),
+            (Prim::Int64, "CHELIS_DTYPE_I64", "int64_t"),
+        ] {
+            for (op, base_shape, output_shape, selected, map) in [
+                (
+                    RiscOp::Gather { axis: 1 },
+                    vec![2, 3, 2],
+                    vec![2, 2, 2, 2],
+                    "2,0,1,2",
+                    "4,5,0,1,2,3,4,5,10,11,6,7,8,9,10,11",
+                ),
+                // Negative map entries select unchanged base cells (-index-1).
+                (
+                    RiscOp::Scatter { axis: 1 },
+                    vec![2, 3, 2],
+                    vec![2, 3, 2],
+                    "2,0,2,0",
+                    "6,7,-3,-4,4,5,14,15,-9,-10,12,13",
+                ),
+                (
+                    RiscOp::ScatterElements { axis: 1 },
+                    vec![2, 3],
+                    vec![2, 3],
+                    "2,0,1,1",
+                    "1,-2,0,-4,3,-6",
+                ),
+            ] {
+                let gather = matches!(op, RiscOp::Gather { .. });
+                let elements = matches!(op, RiscOp::ScatterElements { .. });
+                let ty = |shape: &[usize], precision| TensorType {
+                    dims: shape.iter().copied().map(DimInfo::Lit).collect(),
+                    precision,
+                };
+                let mut dag = Dag::new();
+                let base = dag.add_node(
+                    RiscOp::Load {
+                        name: "base".into(),
+                    },
+                    vec![],
+                    ty(&base_shape, prim),
+                    None,
+                );
+                let indices = dag.add_node(
+                    RiscOp::Load {
+                        name: "indices".into(),
+                    },
+                    vec![],
+                    ty(&[2, 2], index_prim),
+                    None,
+                );
+                let mut inputs = vec![base, indices];
+                let update_shape = if elements {
+                    vec![2, 2]
+                } else {
+                    vec![2, 2, 2, 2]
+                };
+                if !gather {
+                    inputs.push(dag.add_node(
+                        RiscOp::Load {
+                            name: "updates".into(),
+                        },
+                        vec![],
+                        ty(&update_shape, prim),
+                        None,
+                    ));
+                }
+                let output = dag.add_node(op, inputs, ty(&output_shape, prim), None);
+                dag.add_root(output);
+                let generated = codegen(&dag, "checked_sparse").unwrap();
+                let dimensions =
+                    |s: &[usize]| s.iter().map(usize::to_string).collect::<Vec<_>>().join(",");
+                let base_dims = dimensions(&base_shape);
+                let update_dims = dimensions(&update_shape);
+                let output_dims = dimensions(&output_shape);
+                let base_rank = base_shape.len();
+                let update_rank = update_shape.len();
+                let output_rank = output_shape.len();
+                let input_count = if gather { 2 } else { 3 };
+                let gather = usize::from(gather);
+                let harness = format!(
+                    r#"
+#include "chelis_runtime.h"
+#include <string.h>
+void checked_sparse(chelis_tensor **, int, chelis_tensor **, int);
+static uint64_t bits(int64_t index, int update) {{
+    return {dtype} == CHELIS_DTYPE_BOOL ? (uint64_t)(((index/2+index)%2)^update) : UINT64_C({seed}) + (uint64_t)index + (update ? 32 : 0);
+}}
+static void fill(chelis_tensor *t, int update) {{
+    chelis_tensor_write *g = chelis_tensor_begin_write(t);
+    chelis_write_view v = chelis_tensor_write_view(g);
+    for (int64_t i=0;i<v.count;++i) {{ uint64_t value=bits(i,update); memcpy((unsigned char*)v.data+i*chelis_dtype_size({dtype}), &value, chelis_dtype_size({dtype})); }}
+    chelis_tensor_end_write(g);
+}}
+int main(void) {{
+    chelis_tensor *base=chelis_alloc({base_rank},(int64_t[]){{{base_dims}}},{dtype});
+    chelis_tensor *indices=chelis_alloc(2,(int64_t[]){{2,2}},{index_dtype});
+    chelis_tensor *updates=chelis_alloc({update_rank},(int64_t[]){{{update_dims}}},{dtype});
+    fill(base,0); fill(updates,1);
+    chelis_tensor_write *g=chelis_tensor_begin_write(indices);
+    {index_type} values[4]={{{selected}}};
+    memcpy(chelis_tensor_write_view(g).data,values,sizeof values); chelis_tensor_end_write(g);
+    chelis_tensor *in[]={{base,indices,updates}}, *out[1]={{0}};
+    checked_sparse(in,{input_count},out,1);
+    int64_t shape[]={{{output_dims}}}; int expected[]={{{map}}};
+    if (chelis_tensor_rank(out[0])!={output_rank}) return 2;
+    for (int a=0;a<{output_rank};++a) if(chelis_tensor_shape(out[0],a)!=shape[a]) return 3;
+    chelis_read_view v=chelis_tensor_read_view(out[0]);
+    if (v.count != sizeof expected / sizeof expected[0]) return 4;
+    for(int64_t i=0;i<v.count;++i) {{
+        uint64_t got=0; memcpy(&got,(const unsigned char*)v.data+i*chelis_dtype_size({dtype}),chelis_dtype_size({dtype}));
+        int index=expected[i]; uint64_t want=bits(index<0 ? -index-1 : index, !{gather} && index>=0);
+        if(got!=want) return 5;
+    }}
+    chelis_tensor_release(out[0]); chelis_tensor_release(base); chelis_tensor_release(indices); chelis_tensor_release(updates);
+    puts("SPARSE PASS"); return 0;
+}}
+"#
+                );
+                let result = checked_indexing_run(&generated.c_source, &harness);
+                assert!(
+                    result.status.success(),
+                    "{prim:?}/{index_prim:?}: {}\n{}",
+                    String::from_utf8_lossy(&result.stderr),
+                    generated.c_source
+                );
+                assert_eq!(result.stdout, b"SPARSE PASS\n");
+            }
+        }
+    }
+}
+
+#[test]
+fn checked_c_sparse_empty_and_invalid_domains_execute_under_sanitizers() {
+    let ty = |shape: &[usize], precision| TensorType {
+        dims: shape.iter().copied().map(DimInfo::Lit).collect(),
+        precision,
+    };
+    for (op, diagnostic) in [
+        (RiscOp::Gather { axis: 1 }, "gather"),
+        (RiscOp::ScatterAdd { axis: 1 }, "scatter"),
+        (RiscOp::Scatter { axis: 1 }, "scatter_replace"),
+        (RiscOp::ScatterElements { axis: 1 }, "scatter_elements"),
+    ] {
+        for (empty, selected) in [(true, 0), (false, -1), (false, 3), (false, 2)] {
+            let gather = matches!(op, RiscOp::Gather { .. });
+            let elements = matches!(op, RiscOp::ScatterElements { .. });
+            let n = if empty { 0 } else { 2 };
+            let index_shape = if elements { vec![2, n] } else { vec![n] };
+            let output_shape = if gather { vec![2, n] } else { vec![2, 3] };
+            let mut dag = Dag::new();
+            let base = dag.add_node(
+                RiscOp::Load {
+                    name: "base".into(),
+                },
+                vec![],
+                ty(&[2, 3], Prim::F32),
+                None,
+            );
+            let indices = dag.add_node(
+                RiscOp::Load {
+                    name: "indices".into(),
+                },
+                vec![],
+                ty(&index_shape, Prim::Int64),
+                None,
+            );
+            let mut inputs = vec![base, indices];
+            if !gather {
+                inputs.push(dag.add_node(
+                    RiscOp::Load {
+                        name: "updates".into(),
+                    },
+                    vec![],
+                    ty(&[2, n], Prim::F32),
+                    None,
+                ));
+            }
+            let output = dag.add_node(op.clone(), inputs, ty(&output_shape, Prim::F32), None);
+            dag.add_root(output);
+            let source = codegen(&dag, "sparse_boundary").unwrap().c_source;
+            let index_rank = index_shape.len();
+            let index_dims = index_shape
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            let input_count = if gather { 2 } else { 3 };
+            let check = if empty && gather {
+                "if (v.count != 0 || chelis_tensor_shape(out[0],0)!=2 || chelis_tensor_shape(out[0],1)!=0) return 2;".to_string()
+            } else {
+                let expected = if empty {
+                    "0,1,2,3,4,5"
+                } else if gather {
+                    "2,2,5,5"
+                } else if diagnostic == "scatter" {
+                    "0,1,5,3,4,12"
+                } else {
+                    "0,1,2,3,4,4"
+                };
+                format!(
+                    "float expected[]={{{expected}}}; if(v.count != sizeof expected / sizeof expected[0]) return 2; for(int64_t i=0;i<v.count;++i) if(((const float*)v.data)[i]!=expected[i]) return 3;"
+                )
+            };
+            let harness = format!(
+                r#"
+#include "chelis_runtime.h"
+void sparse_boundary(chelis_tensor **,int,chelis_tensor **,int);
+int main(void) {{
+    chelis_tensor *base=chelis_alloc(2,(int64_t[]){{2,3}},CHELIS_DTYPE_F32);
+    chelis_tensor *indices=chelis_alloc({index_rank},(int64_t[]){{{index_dims}}},CHELIS_DTYPE_I64);
+    chelis_tensor *updates=chelis_alloc(2,(int64_t[]){{2,{n}}},CHELIS_DTYPE_F32);
+    chelis_tensor_write *g=chelis_tensor_begin_write(base); chelis_write_view w=chelis_tensor_write_view(g);
+    for(int64_t i=0;i<w.count;++i) ((float*)w.data)[i]=(float)i; chelis_tensor_end_write(g);
+    g=chelis_tensor_begin_write(indices); w=chelis_tensor_write_view(g);
+    for(int64_t i=0;i<w.count;++i) ((int64_t*)w.data)[i]={selected}; chelis_tensor_end_write(g);
+    g=chelis_tensor_begin_write(updates); w=chelis_tensor_write_view(g);
+    for(int64_t i=0;i<w.count;++i) ((float*)w.data)[i]=(float)(i+1); chelis_tensor_end_write(g);
+    chelis_tensor *in[]={{base,indices,updates}},*out[1]={{0}}; sparse_boundary(in,{input_count},out,1);
+    chelis_read_view v=chelis_tensor_read_view(out[0]); {check}
+    chelis_tensor_release(out[0]); chelis_tensor_release(base); chelis_tensor_release(indices); chelis_tensor_release(updates);
+    puts("SPARSE BOUNDARY PASS"); return 0;
+}}
+"#
+            );
+            let mut sources = vec![source];
+            if diagnostic == "scatter" {
+                use chelis_ir::host::{
+                    HostTensorHelper, HostTensorInput, summarize_sparse_helper_for_test,
+                };
+                let inputs = vec![
+                    HostTensorInput {
+                        name: "base".into(),
+                        ty: ty(&[2, 3], Prim::F32),
+                    },
+                    HostTensorInput {
+                        name: "indices".into(),
+                        ty: ty(&index_shape, Prim::Int64),
+                    },
+                    HostTensorInput {
+                        name: "updates".into(),
+                        ty: ty(&[2, n], Prim::F32),
+                    },
+                ];
+                let output = ty(&output_shape, Prim::F32);
+                let specialization = summarize_sparse_helper_for_test(&dag, &inputs, &output);
+                assert!(matches!(
+                    specialization,
+                    Some(chelis_ir::host::HostTensorSpecialization::SparseScatterAdd(
+                        _
+                    ))
+                ));
+                let params = inputs
+                    .iter()
+                    .map(|input| HostParam {
+                        name: input.name.clone(),
+                        ty: HostType::Tensor(input.ty.clone()),
+                    })
+                    .collect::<Vec<_>>();
+                let body = HostExpr::new(HostExprKind::TensorCall {
+                    helper: 0,
+                    args: params
+                        .iter()
+                        .map(|param| {
+                            HostExpr::new(HostExprKind::Var(param.name.clone(), param.ty.clone()))
+                        })
+                        .collect(),
+                    ty: HostType::Tensor(output.clone()),
+                });
+                let helper = HostTensorHelper {
+                    name: "sparse_add_helper".into(),
+                    dag: dag.clone(),
+                    inputs,
+                    output: output.clone(),
+                    specialization,
+                    summary_rejection: None,
+                };
+                let program = HostProgram {
+                    globals: vec![],
+                    global_tensor_helpers: vec![],
+                    summary_rejections: vec![],
+                    functions: vec![HostFunction {
+                        name: "host_sparse_add".into(),
+                        params,
+                        ret_ty: HostType::Tensor(output),
+                        body,
+                        tensor_helpers: vec![helper],
+                        origin: HostFunctionOrigin::Authored,
+                        specialization: None,
+                        summary_rejections: vec![],
+                    }],
+                };
+                let mut host_source = emit_host_program(&program, "host_sparse_boundary").unwrap();
+                assert!(host_source.contains("CHELIS_SPARSE_ADD"));
+                host_source.push_str("\nvoid sparse_boundary(chelis_tensor **in,int n_in,chelis_tensor **out,int n_out) { (void)n_in; (void)n_out; out[0]=host_sparse_add(in[0],in[1],in[2]); }\n");
+                sources.push(host_source);
+            }
+            for source in sources {
+                let result = checked_indexing_run(&source, &harness);
+                if !empty && selected != 2 {
+                    assert!(!result.status.success());
+                    let stderr = String::from_utf8_lossy(&result.stderr);
+                    assert!(
+                        stderr.contains(&format!("numeric trap: domain in {diagnostic} at int64")),
+                        "{stderr}"
+                    );
+                    assert!(
+                        !stderr.contains("AddressSanitizer") && !stderr.contains("runtime error:"),
+                        "{stderr}"
+                    );
+                } else {
+                    assert!(
+                        result.status.success(),
+                        "{diagnostic}, empty={empty}: {}",
+                        String::from_utf8_lossy(&result.stderr)
+                    );
+                    assert_eq!(result.stdout, b"SPARSE BOUNDARY PASS\n");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn checked_c_reduction_nontrailing_kernels_execute_under_sanitizers() {
+    let ty = |dims: &[usize], precision| TensorType {
+        dims: dims.iter().copied().map(DimInfo::Lit).collect(),
+        precision,
+    };
+    for (op, precision, expected) in [
+        (
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: Prim::F32,
+            },
+            Prim::F32,
+            "9,12,27,30",
+        ),
+        (RiscOp::MaxReduce { axis: 1 }, Prim::F32, "5,6,11,12"),
+        (RiscOp::MinReduce { axis: 1 }, Prim::F32, "1,2,7,8"),
+        (RiscOp::ProdReduce { axis: 1 }, Prim::F32, "15,48,693,960"),
+        (RiscOp::Argmax { axis: 1 }, Prim::Int64, "2,2,2,2"),
+        (RiscOp::Argmin { axis: 1 }, Prim::Int64, "0,0,0,0"),
+    ] {
+        let mut dag = Dag::new();
+        let input = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty(&[2, 3, 2], Prim::F32),
+            None,
+        );
+        let output = dag.add_node(op, vec![input], ty(&[2, 2], precision), None);
+        dag.add_root(output);
+        let generated = codegen(&dag, "checked_reduce").unwrap();
+        let native = if precision == Prim::Int64 {
+            "int64_t"
+        } else {
+            "float"
+        };
+        let harness = format!(
+            r#"
+#include "chelis_runtime.h"
+#include <stdio.h>
+void checked_reduce(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    int64_t shape[] = {{2,3,2}};
+    chelis_tensor *x = chelis_alloc(3, shape, CHELIS_DTYPE_F32);
+    chelis_tensor_write *guard = chelis_tensor_begin_write(x);
+    float *data = (float*)chelis_tensor_write_view(guard).data;
+    for (int i=0;i<12;i++) data[i]=(float)(i+1);
+    chelis_tensor_end_write(guard);
+    chelis_tensor *inputs[]={{x}}, *outputs[]={{NULL}};
+    checked_reduce(inputs,1,outputs,1);
+    {native} expected[]={{ {expected} }};
+    const {native} *got = (const {native}*)chelis_tensor_read_view(outputs[0]).data;
+    if (chelis_tensor_numel(outputs[0]) != 4) return 2;
+    for (int i=0;i<4;i++) if(got[i]!=expected[i]) return 3;
+    chelis_tensor_release(outputs[0]); chelis_tensor_release(x);
+    puts("REDUCTION PASS"); return 0;
+}}
+"#
+        );
+        let result = checked_indexing_run(&generated.c_source, &harness);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(result.stdout, b"REDUCTION PASS\n");
+    }
+}
+
+#[test]
+fn checked_c_reduction_sum_and_count_preserve_empty_groups_under_sanitizers() {
+    for count in [false, true] {
+        for (shape, result_shape, expected_count) in [
+            (vec![2, 0, 3], vec![2, 3], 6),
+            (vec![0, 3, 2], vec![0, 2], 0),
+        ] {
+            let mut dag = Dag::new();
+            let precision = if count { Prim::Bool } else { Prim::F64 };
+            let result_precision = if count { Prim::Int64 } else { Prim::F64 };
+            let input = dag.add_node(
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                TensorType {
+                    dims: shape.iter().copied().map(DimInfo::Lit).collect(),
+                    precision,
+                },
+                None,
+            );
+            let op = if count {
+                RiscOp::Count { axes: vec![1] }
+            } else {
+                RiscOp::Sum {
+                    axis: 1,
+                    accumulator: Prim::F64,
+                }
+            };
+            let output = dag.add_node(
+                op,
+                vec![input],
+                TensorType {
+                    dims: result_shape.iter().copied().map(DimInfo::Lit).collect(),
+                    precision: result_precision,
+                },
+                None,
+            );
+            dag.add_root(output);
+            let generated = codegen(&dag, "checked_empty_reduce").unwrap();
+            let dtype = if count {
+                "CHELIS_DTYPE_BOOL"
+            } else {
+                "CHELIS_DTYPE_F64"
+            };
+            let native = if count { "int64_t" } else { "double" };
+            let dimensions = shape
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            let harness = format!(
+                r#"
+#include "chelis_runtime.h"
+void checked_empty_reduce(chelis_tensor **,int,chelis_tensor **,int);
+int main(void) {{
+    int64_t shape[]={{ {dimensions} }};
+    chelis_tensor *x=chelis_alloc(3,shape,{dtype}), *inputs[]={{x}}, *outputs[]={{NULL}};
+    checked_empty_reduce(inputs,1,outputs,1);
+    if (chelis_tensor_numel(outputs[0])!={expected_count}) return 2;
+    const {native} *values=(const {native}*)chelis_tensor_read_view(outputs[0]).data;
+    for(int i=0;i<{expected_count};i++) if(values[i]!=0) return 3;
+    chelis_tensor_release(outputs[0]); chelis_tensor_release(x); return 0;
+}}
+"#
+            );
+            let result = checked_indexing_run(&generated.c_source, &harness);
+            assert!(
+                result.status.success(),
+                "count={count}, shape={shape:?}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+    }
+}
+
+#[test]
+fn checked_c_movement_permute_and_expand_preserve_bits_under_sanitizers() {
+    use chelis_ir::dag::RtDim;
+    // Each expected map is explicit, independent of the production coordinate helpers.
+    let cases = [
+        // A three-cycle distinguishes a permutation from its inverse.
+        (
+            vec![2, 2, 2],
+            vec![2, 2, 2],
+            RiscOp::Permute {
+                axes: vec![1, 2, 0],
+            },
+            vec![0, 4, 1, 5, 2, 6, 3, 7],
+        ),
+        (
+            vec![2, 3],
+            vec![3, 2],
+            RiscOp::Permute { axes: vec![1, 0] },
+            vec![0, 3, 1, 4, 2, 5],
+        ),
+        (
+            vec![2, 1],
+            vec![2, 3],
+            RiscOp::Expand {
+                axis: 1,
+                size: RtDim::Lit(3),
+            },
+            vec![0, 0, 0, 1, 1, 1],
+        ),
+        (
+            vec![2],
+            vec![3, 2],
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::Lit(3),
+            },
+            vec![0, 1, 0, 1, 0, 1],
+        ),
+        (vec![], vec![], RiscOp::Permute { axes: vec![] }, vec![0]),
+        (
+            vec![],
+            vec![3],
+            RiscOp::Expand {
+                axis: 0,
+                size: RtDim::Lit(3),
+            },
+            vec![0, 0, 0],
+        ),
+        (
+            vec![2, 0, 3],
+            vec![3, 2, 0],
+            RiscOp::Permute {
+                axes: vec![2, 0, 1],
+            },
+            vec![],
+        ),
+        (
+            vec![2, 1],
+            vec![2, 0],
+            RiscOp::Expand {
+                axis: 1,
+                size: RtDim::Lit(0),
+            },
+            vec![],
+        ),
+        (
+            vec![2, 1, 1, 1, 1, 1, 1, 1, 3],
+            vec![3, 1, 1, 1, 1, 1, 1, 1, 2],
+            RiscOp::Permute {
+                axes: (0..9).rev().collect(),
+            },
+            vec![0, 3, 1, 4, 2, 5],
+        ),
+    ];
+    for (prim, dtype, seed) in [
+        (Prim::F32, "CHELIS_DTYPE_F32", 0x3f80_0000_u64),
+        (Prim::F64, "CHELIS_DTYPE_F64", 0x3ff0_0000_0000_0000),
+        (Prim::F16, "CHELIS_DTYPE_F16", 0x3c00),
+        (Prim::Bf16, "CHELIS_DTYPE_BF16", 0x3f80),
+        (Prim::Int64, "CHELIS_DTYPE_I64", 9_007_199_254_740_993),
+        (Prim::Int32, "CHELIS_DTYPE_I32", 100),
+        (Prim::Int16, "CHELIS_DTYPE_I16", 100),
+        (Prim::Int8, "CHELIS_DTYPE_I8", 100),
+        (Prim::Bool, "CHELIS_DTYPE_BOOL", 0),
+    ] {
+        for (input_shape, output_shape, op, expected) in &cases {
+            let ty = |shape: &[usize]| TensorType {
+                dims: shape.iter().copied().map(DimInfo::Lit).collect(),
+                precision: prim,
+            };
+            let mut dag = Dag::new();
+            let input = dag.add_node(
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                ty(input_shape),
+                None,
+            );
+            let output = dag.add_node(op.clone(), vec![input], ty(output_shape), None);
+            dag.add_root(output);
+            let generated = codegen(&dag, "checked_movement").unwrap();
+            assert!(generated.c_source.contains("chelis_movement_index("));
+            assert!(generated.c_source.contains("chelis_movement_plan_release("));
+            let spell = |values: &[usize]| {
+                if values.is_empty() {
+                    "0".into()
+                } else {
+                    values
+                        .iter()
+                        .map(usize::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            };
+            let input_dims = spell(input_shape);
+            let output_dims = spell(output_shape);
+            let map = spell(expected);
+            let rank_in = input_shape.len();
+            let rank_out = output_shape.len();
+            let count_in = input_shape.iter().product::<usize>();
+            let count_out = expected.len();
+            let bits = if prim == Prim::Bool {
+                "(uint64_t)(i % 2)".into()
+            } else {
+                format!("UINT64_C({seed}) + (uint64_t)i")
+            };
+            let harness = format!(
+                r#"
+#include "chelis_runtime.h"
+#include <string.h>
+void checked_movement(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    int64_t in_dims[] = {{ {input_dims} }}, out_dims[] = {{ {output_dims} }}, map[] = {{ {map} }};
+    chelis_tensor *x = chelis_alloc({rank_in}, in_dims, {dtype});
+    chelis_tensor_write *guard = chelis_tensor_begin_write(x);
+    unsigned char *data = (unsigned char *)chelis_tensor_write_view(guard).data;
+    size_t width = (size_t)chelis_dtype_size({dtype});
+    for (int64_t i = 0; i < {count_in}; ++i) {{
+        uint64_t bits = {bits}; memcpy(data + (size_t)i * width, &bits, width);
+    }}
+    chelis_tensor_end_write(guard);
+    chelis_tensor *inputs[] = {{x}}, *outputs[1] = {{NULL}};
+    checked_movement(inputs, 1, outputs, 1);
+    chelis_read_view in = chelis_tensor_read_view(x), out = chelis_tensor_read_view(outputs[0]);
+    if (out.count != {count_out} || out.dtype != {dtype} || chelis_tensor_rank(outputs[0]) != {rank_out}) return 2;
+    for (int32_t axis = 0; axis < {rank_out}; ++axis)
+        if (chelis_tensor_shape(outputs[0], axis) != out_dims[axis]) return 3;
+    for (int64_t i = 0; i < out.count; ++i)
+        if (memcmp((const unsigned char *)out.data + (size_t)i * width,
+            (const unsigned char *)in.data + (size_t)map[i] * width, width)) return 4;
+    chelis_tensor_release(outputs[0]); chelis_tensor_release(x);
+    puts("CHECKED MOVEMENT PASS"); return 0;
+}}
+"#
+            );
+            let run = checked_indexing_run(&generated.c_source, &harness);
+            assert!(
+                run.status.success(),
+                "{prim:?} {op:?}: {}",
+                String::from_utf8_lossy(&run.stderr)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&run.stdout),
+                "CHECKED MOVEMENT PASS\n"
+            );
+            if prim == Prim::Int64
+                && (input_shape == &[2, 3] || input_shape == &[2, 1] && count_out > 0)
+            {
+                let check = generated
+                    .c_source
+                    .lines()
+                    .find(|line| line.contains("chelis_movement_check_target("))
+                    .unwrap();
+                let allocation = generated
+                    .c_source
+                    .lines()
+                    .find(|line| line.contains("chelis_tensor *t1 = chelis_alloc("))
+                    .unwrap();
+                assert!(
+                    generated.c_source.find(check).unwrap()
+                        < generated.c_source.find(allocation).unwrap()
+                );
+                let invalid = check.replace("CHELIS_DTYPE_I64, 3)", "CHELIS_DTYPE_I64, 4)");
+                assert_ne!(invalid, check);
+                // Observe the real allocation site without allocating: malformed metadata
+                // must trap first. Removing or moving validation exposes that site.
+                let marker = format!("exit(78); /* allocation reached */\n{allocation}");
+                let instrumented = generated.c_source.replace(allocation, &marker);
+                let rejected =
+                    checked_indexing_run(&instrumented.replace(check, &invalid), &harness);
+                assert!(!rejected.status.success());
+                assert!(String::from_utf8_lossy(&rejected.stderr).contains("Domain"));
+                for replacement in [String::new(), invalid.clone()] {
+                    let bypass = instrumented.replace(check, "");
+                    let bypass = bypass.replace(&marker, &format!("{marker}\n{replacement}"));
+                    let run = checked_indexing_run(&bypass, &harness);
+                    assert_eq!(
+                        run.status.code(),
+                        Some(78),
+                        "missing or late validation reached allocation"
+                    );
+                }
+            }
+            if prim == Prim::Int64 && input_shape == &[2, 2, 2] {
+                let axis_line = generated
+                    .c_source
+                    .lines()
+                    .find(|line| line.contains("t1_axes[3]"))
+                    .unwrap();
+                let inverse = generated.c_source.replace(axis_line,
+                    "chelis_scalar t1_axes[3] = {chelis_scalar_from_bits(CHELIS_DTYPE_I64, 2), chelis_scalar_from_bits(CHELIS_DTYPE_I64, 0), chelis_scalar_from_bits(CHELIS_DTYPE_I64, 1)};");
+                assert_ne!(inverse, generated.c_source);
+                let run = checked_indexing_run(&inverse, &harness);
+                assert_eq!(
+                    run.status.code(),
+                    Some(4),
+                    "inverse permutation must corrupt the exact result"
+                );
+            }
+            if prim == Prim::Int64 && input_shape == &[2, 3] {
+                let anchor = "chelis_movement_index(t1_movement, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)i))";
+                assert!(generated.c_source.contains(anchor));
+                let mutant = generated
+                    .c_source
+                    .replace(anchor, "0 /* unchecked coordinate bypass */");
+                let run = checked_indexing_run(&mutant, &harness);
+                assert_eq!(
+                    run.status.code(),
+                    Some(4),
+                    "coordinate bypass must corrupt the exact result"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn checked_c_movement_affine_maps_preserve_bits_under_sanitizers() {
+    use chelis_ir::dag::RtDim;
+    for (prim, dtype, seed, fill_bits) in [
+        (
+            Prim::F32,
+            "CHELIS_DTYPE_F32",
+            0x3f80_0000_u64,
+            0x3f80_0000_u64,
+        ),
+        (
+            Prim::F64,
+            "CHELIS_DTYPE_F64",
+            0x3ff0_0000_0000_0000,
+            0x3ff0_0000_0000_0000,
+        ),
+        (Prim::F16, "CHELIS_DTYPE_F16", 0x3c00, 0x3c00),
+        (Prim::Bf16, "CHELIS_DTYPE_BF16", 0x3f80, 0x3f80),
+        (Prim::Int64, "CHELIS_DTYPE_I64", 9_007_199_254_740_993, 1),
+        (Prim::Int32, "CHELIS_DTYPE_I32", 100, 1),
+        (Prim::Int16, "CHELIS_DTYPE_I16", 100, 1),
+        (Prim::Int8, "CHELIS_DTYPE_I8", 100, 1),
+        (Prim::Bool, "CHELIS_DTYPE_BOOL", 0, 1),
+    ] {
+        let pairs = |v: &[(usize, usize)]| {
+            v.iter()
+                .map(|&(a, b)| (RtDim::Lit(a), RtDim::Lit(b)))
+                .collect()
+        };
+        let fill = chelis_types::scalar_from_i64("pad", prim, 1).unwrap();
+        let mut padded = vec![-1_i64; 18];
+        for (input, output) in [8, 9, 10, 14, 15, 16].into_iter().enumerate() {
+            padded[output] = input as i64;
+        }
+        let cases = [
+            (
+                vec![2, 3],
+                vec![3, 6],
+                RiscOp::Pad {
+                    padding: pairs(&[(1, 0), (2, 1)]),
+                    fill,
+                },
+                padded,
+            ),
+            (
+                vec![3, 4],
+                vec![2, 3],
+                RiscOp::Shrink {
+                    bounds: pairs(&[(1, 3), (1, 4)]),
+                },
+                vec![5, 6, 7, 9, 10, 11],
+            ),
+            (
+                vec![3, 5],
+                vec![2, 2],
+                RiscOp::Stride {
+                    strides: vec![RtDim::Lit(2), RtDim::Lit(3)],
+                },
+                vec![0, 3, 10, 13],
+            ),
+            (
+                vec![0, 3],
+                vec![1, 3],
+                RiscOp::Pad {
+                    padding: pairs(&[(0, 1), (0, 0)]),
+                    fill,
+                },
+                vec![-1; 3],
+            ),
+            (
+                vec![2, 3],
+                vec![0, 3],
+                RiscOp::Shrink {
+                    bounds: pairs(&[(1, 1), (0, 3)]),
+                },
+                vec![],
+            ),
+            (
+                vec![2, 0],
+                vec![1, 0],
+                RiscOp::Stride {
+                    strides: vec![RtDim::Lit(2), RtDim::Lit(1)],
+                },
+                vec![],
+            ),
+            (
+                vec![],
+                vec![],
+                RiscOp::Pad {
+                    padding: vec![],
+                    fill,
+                },
+                vec![0],
+            ),
+            (
+                vec![1; 9],
+                vec![1; 9],
+                RiscOp::Stride {
+                    strides: vec![RtDim::Lit(2); 9],
+                },
+                vec![0],
+            ),
+        ];
+        for (input_shape, output_shape, op, expected) in cases {
+            let ty = |shape: &[usize]| TensorType {
+                dims: shape.iter().copied().map(DimInfo::Lit).collect(),
+                precision: prim,
+            };
+            let mut dag = Dag::new();
+            let x = dag.add_node(
+                RiscOp::Load { name: "x".into() },
+                vec![],
+                ty(&input_shape),
+                None,
+            );
+            let y = dag.add_node(op.clone(), vec![x], ty(&output_shape), None);
+            dag.add_root(y);
+            let generated = codegen(&dag, "affine_movement").unwrap();
+            let spell = |values: Vec<i64>| {
+                if values.is_empty() {
+                    "0".into()
+                } else {
+                    values
+                        .iter()
+                        .map(i64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                }
+            };
+            let input_dims = spell(input_shape.iter().map(|&n| n as i64).collect());
+            let output_dims = spell(output_shape.iter().map(|&n| n as i64).collect());
+            let map = spell(expected.clone());
+            let input_rank = input_shape.len();
+            let output_rank = output_shape.len();
+            let input_count: usize = input_shape.iter().product();
+            let output_count = expected.len();
+            let bits = if prim == Prim::Bool {
+                "(uint64_t)(i % 2)".into()
+            } else {
+                format!("UINT64_C({seed}) + (uint64_t)i")
+            };
+            let harness = format!(
+                r#"
+#include "chelis_runtime.h"
+#include <string.h>
+void affine_movement(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    int64_t input_shape[] = {{{input_dims}}}, output_shape[] = {{{output_dims}}}, map[] = {{{map}}};
+    chelis_tensor *x = chelis_alloc({input_rank}, input_shape, {dtype});
+    chelis_tensor_write *guard = chelis_tensor_begin_write(x);
+    unsigned char *data = chelis_tensor_write_view(guard).data;
+    size_t width = (size_t)chelis_dtype_size({dtype});
+    for (int64_t i=0; i<{input_count}; ++i) {{uint64_t bits = {bits}; memcpy(data + i*width, &bits, width);}}
+    chelis_tensor_end_write(guard);
+    chelis_tensor *inputs[] = {{x}}, *outputs[] = {{NULL}};
+    affine_movement(inputs, 1, outputs, 1);
+    chelis_read_view in = chelis_tensor_read_view(x), out = chelis_tensor_read_view(outputs[0]);
+    if (out.count != {output_count} || out.dtype != {dtype} || chelis_tensor_rank(outputs[0]) != {output_rank}) return 2;
+    for (int axis=0; axis<{output_rank}; ++axis) if (chelis_tensor_shape(outputs[0], axis) != output_shape[axis]) return 3;
+    uint64_t fill = UINT64_C({fill_bits});
+    for (int64_t i=0; i<out.count; ++i) {{
+        const void *expected = map[i] < 0 ? (const void*)&fill : (const unsigned char*)in.data + map[i]*width;
+        if (memcmp((const unsigned char*)out.data + i*width, expected, width)) return 4;
+    }}
+    chelis_tensor_release(outputs[0]); chelis_tensor_release(x);
+    puts("AFFINE PASS"); return 0;
+}}
+"#
+            );
+            let run = checked_indexing_run(&generated.c_source, &harness);
+            assert!(
+                run.status.success(),
+                "{prim:?} {op:?}: {}",
+                String::from_utf8_lossy(&run.stderr)
+            );
+            assert_eq!(run.stdout, b"AFFINE PASS\n");
+        }
+    }
+}
+
+#[test]
+fn checked_c_movement_runtime_affine_bounds_reject_before_allocation() {
+    use chelis_ir::dag::RtDim;
+    for (name, op, cases) in [
+        (
+            "pad",
+            RiscOp::Pad {
+                padding: vec![(RtDim::Node(1), RtDim::Lit(0))],
+                fill: chelis_types::scalar_from_i64("pad", Prim::Int64, 1).unwrap(),
+            },
+            vec![(2, Some(5)), (-1, None), (i64::MAX, None)],
+        ),
+        (
+            "shrink",
+            RiscOp::Shrink {
+                bounds: vec![(RtDim::Lit(0), RtDim::Node(1))],
+            },
+            vec![(2, Some(2)), (0, None), (-1, None), (4, None)],
+        ),
+        (
+            "stride",
+            RiscOp::Stride {
+                strides: vec![RtDim::Node(1)],
+            },
+            vec![(2, Some(2)), (i64::MAX, Some(1)), (0, None), (-1, None)],
+        ),
+    ] {
+        let ty = |dims| TensorType {
+            dims,
+            precision: Prim::Int64,
+        };
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty(vec![DimInfo::Lit(3)]),
+            None,
+        );
+        let n = dag.add_node(RiscOp::Load { name: "n".into() }, vec![], ty(vec![]), None);
+        let y = dag.add_node(
+            op,
+            vec![x, n],
+            ty(vec![DimInfo::Named("result".into(), None)]),
+            None,
+        );
+        dag.add_root(y);
+        let generated = codegen(&dag, "dynamic_affine").unwrap();
+        for (bound, expected) in cases {
+            let expected_count = expected.unwrap_or(0);
+            let padding = name == "pad";
+            let harness = format!(
+                r#"
+#include "chelis_runtime.h"
+void dynamic_affine(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    int64_t shape[] = {{3}};
+    chelis_tensor *x = chelis_alloc(1, shape, CHELIS_DTYPE_I64), *n = chelis_alloc(0, NULL, CHELIS_DTYPE_I64);
+    chelis_tensor_write *guard = chelis_tensor_begin_write(x);
+    chelis_fill_scalar(guard, chelis_scalar_from_bits(CHELIS_DTYPE_I64, 7)); chelis_tensor_end_write(guard);
+    guard = chelis_tensor_begin_write(n);
+    chelis_fill_scalar(guard, chelis_scalar_from_bits(CHELIS_DTYPE_I64, UINT64_C({bits}))); chelis_tensor_end_write(guard);
+    chelis_tensor *inputs[] = {{x,n}}, *outputs[] = {{NULL}};
+    dynamic_affine(inputs,2,outputs,1);
+    chelis_read_view out = chelis_tensor_read_view(outputs[0]);
+    if (out.count != {expected_count}) return 4;
+    for (int64_t i=0; i<out.count; ++i) if (((const int64_t*)out.data)[i] != ({pad} && i < {bound} ? 1 : 7)) return 5;
+    chelis_tensor_release(outputs[0]); chelis_tensor_release(x); chelis_tensor_release(n);
+    puts("DYNAMIC AFFINE PASS"); return 0;
+}}
+"#,
+                bits = bound as u64,
+                pad = i32::from(padding)
+            );
+            let source = if expected.is_none() {
+                let allocation = generated
+                    .c_source
+                    .lines()
+                    .find(|line| line.contains(" = chelis_alloc("))
+                    .expect("output allocation");
+                generated.c_source.replacen(
+                    allocation,
+                    &format!("exit(78); /* allocation reached */\n{allocation}"),
+                    1,
+                )
+            } else {
+                generated.c_source.clone()
+            };
+            let run = checked_indexing_run(&source, &harness);
+            if expected.is_some() {
+                assert!(
+                    run.status.success(),
+                    "{name} {bound}: {}",
+                    String::from_utf8_lossy(&run.stderr)
+                );
+                assert_eq!(run.stdout, b"DYNAMIC AFFINE PASS\n");
+            } else {
+                assert!(!run.status.success(), "{name} {bound}: {run:?}");
+                assert_ne!(
+                    run.status.code(),
+                    Some(78),
+                    "allocation preceded rejection: {name} {bound}"
+                );
+                let class = if bound == i64::MAX {
+                    "overflow"
+                } else {
+                    "domain"
+                };
+                assert!(
+                    String::from_utf8_lossy(&run.stderr)
+                        .ends_with(&format!("numeric trap: {class} in {name} at int64\n")),
+                    "{run:?}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -738,13 +2323,12 @@ int main() {{
     );
 }
 
-// ---- Test 10: ReduceSum calls chelis_sum_f32 and produces correct result ----
+// ---- Test 10: Scalar ReduceSum preserves the canonical tree ----
 
 #[test]
 fn exec_reduce_sum_correct_output() {
     // Use TensorType::scalar_f32() (dims=[]) for the output — that is the correct
     // output type for a full-axis reduction producing a scalar.
-    // Using vec_f32(1) (dims=[Lit(1)]) is wrong and bypasses the chelis_sum_f32 fast path.
     let scalar_ty = TensorType::scalar_f32();
     let mut dag = Dag::new();
     let a = dag.add_node(
@@ -768,8 +2352,8 @@ fn exec_reduce_sum_correct_output() {
     let src = &result.c_source;
 
     assert!(
-        src.contains("chelis_sum_f32("),
-        "ReduceSum must call chelis_sum_f32 for contiguous n=100 tensor:\n{src}"
+        !src.contains("chelis_sum_f32("),
+        "Scalar Sum must preserve the canonical tree, including contiguous input:\n{src}"
     );
 
     let harness = format!(
@@ -2134,17 +3718,15 @@ fn ws_a1_exec_f64_reduce_sum_matches_reference() {
         "f64 reduce_sum must allocate an f64 output tensor:\n{src}"
     );
     assert!(
-        src.contains(
-            "chelis_fill_scalar(t1_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_F64,"
-        ),
-        "f64 reduce_sum must zero through an exact tagged f64 scalar:\n{src}"
+        src.contains("__sum_level_"),
+        "f64 sum needs a tree at its accumulator width: {src}"
     );
     assert!(
         !src.contains("chelis_fill_f32(") && !src.contains("chelis_fill_f64("),
         "f64 reduce_sum must not retain dtype-specific compatibility fills:\n{src}"
     );
     assert!(
-        src.contains("double acc"),
+        src.contains("double *__sum_level_"),
         "f64 reduce_sum accumulator must be a double, not float:\n{src}"
     );
     assert!(
@@ -2225,11 +3807,11 @@ fn ws_a1_exec_i32_reduce_sum_produces_integer_result_no_float_cast() {
         "i32 reduce_sum must allocate an i32 output tensor:\n{src}"
     );
     assert!(
-        src.contains("int32_t acc"),
+        src.contains("int32_t *__sum_level_"),
         "i32 reduce_sum accumulator must be int32_t (integer-exact), not float:\n{src}"
     );
     assert!(
-        !src.contains("float acc"),
+        !src.contains("float *__sum_level_"),
         "i32 reduce_sum must NOT use a float accumulator (silent precision change):\n{src}"
     );
     assert!(
@@ -2508,11 +4090,11 @@ fn ws_a1_exec_mixed_f64_tensors_and_i32_indices_compile_and_run() {
         "mixed-dtype program must use CHELIS_DTYPE_I32 for i32 tensors:\n{src}"
     );
     assert!(
-        src.contains("double acc"),
+        src.contains("double *__sum_level_"),
         "mixed-dtype program must use a double accumulator for the f64 sum:\n{src}"
     );
     assert!(
-        src.contains("int32_t acc"),
+        src.contains("int32_t *__sum_level_"),
         "mixed-dtype program must use an int32_t accumulator for the i32 sum:\n{src}"
     );
 
@@ -2933,7 +4515,7 @@ fn exec_i8_reduce_sum_promotes_to_i32() {
     // this catches a regression where the codegen silently picks the
     // operand precision (the F1 footgun class for reductions).
     assert!(
-        src.contains("int32_t acc"),
+        src.contains("int32_t *__sum_level_"),
         "i8 reduce_sum must accumulate in int32_t (per spec §5.7.1); got:\n{src}"
     );
     assert!(
@@ -2992,7 +4574,7 @@ fn exec_i16_reduce_sum_promotes_to_i32() {
     let src = &result.c_source;
 
     assert!(
-        src.contains("int32_t acc"),
+        src.contains("int32_t *__sum_level_"),
         "i16 reduce_sum must accumulate in int32_t (per spec §5.7.1); got:\n{src}"
     );
 
@@ -4011,9 +5593,10 @@ fn direct_fused_reduction_runtime_shape_guard_case(reduce_kind: &str) {
     );
     assert_eq!(
         function_body.matches("chelis_alloc(").count(),
-        1,
-        "reduction-inlined FusedElem must not allocate an intermediate:\n{src}"
+        if reduce_kind == "sum" { 2 } else { 1 },
+        "fused reduction allocates its result and Sum's checked tree scratch:\n{src}"
     );
+    assert!(!function_body.contains(&format!("chelis_tensor *t{} =", fused_node.id.0)));
 
     let expected = if reduce_kind == "sum" {
         "29.0f, 110.0f"
@@ -5508,7 +7091,7 @@ fn a_local_class_guards_at_its_operation_and_renders_the_numeric_trap() {
     assert!(
         result
             .c_source
-            .contains("chelis_numeric_trap(\"numeric trap: domain in expand at int64\")"),
+            .contains("chelis_numeric_trap(\"numeric trap: domain in insert at int64\")"),
         "and `<op>` names the operation introducing the extent: {}",
         result.c_source
     );
@@ -5539,11 +7122,11 @@ int main() {{
     };
 
     // `stride(x, 2)` yields `ceil(n / 2)`, so the claim `n` and the extent
-    // the `expand` actually reads agree only at n = 1.
+    // the rank-inserting operation actually reads agree only at n = 1.
     let (ok, out) = run("local_guard", 3);
     assert!(!ok, "ceil(3/2) = 2 is not the claimed 3: {out}");
     assert!(
-        out.contains("numeric trap: domain in expand at int64"),
+        out.contains("numeric trap: domain in insert at int64"),
         "the local guard renders [04-NUM-9]: {out}"
     );
     assert!(
@@ -5691,7 +7274,7 @@ fn numeric_local_extent_claims_execute_exactly() {
                     };
                     let name =
                         format!("numeric_local_{resolved_name}_{reshape}_{tensor_size}_{good}");
-                    let op = if reshape { "reshape" } else { "expand" };
+                    let op = if reshape { "reshape" } else { "insert" };
                     let trap = format!("numeric trap: domain in {op} at int64");
                     let context = format!("node {} axis 0 = {observed}", root.0);
                     let expected = if reshape {
@@ -5987,7 +7570,7 @@ int main() {{
     assert!(!ok, "the local literal claim must trap: {out}");
     assert!(
         out.lines()
-            .any(|line| line == "numeric trap: domain in expand at int64")
+            .any(|line| line == "numeric trap: domain in insert at int64")
             && out.contains("claimed = 4")
             && out.contains("node 2 axis 0 = 5")
             && !out.contains("NO TRAP"),

@@ -117,6 +117,15 @@ fail-fast = false
 # changing their selection contract.
 path = "junit.xml"
 
+# The #1294 oracle runs inside integration support. Its nested nextest must
+# not overwrite the workspace shard's ci/ci-full execution receipts.
+[profile.builtin-atom-closure]
+inherits = "default"
+fail-fast = false
+
+[profile.builtin-atom-closure.junit]
+path = "junit.xml"
+
 [profile.nightly]
 fail-fast = false
 # The `Heavy E2E` workflow runs `cargo nextest run --profile nightly`. This

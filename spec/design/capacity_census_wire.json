@@ -1,57 +1,36 @@
 {
-  "version": 1,
-  "citation": "permanent-disposition(C6 dtype-tagged wire schema complete descriptor set ratified 2026-08-04)",
+  "version": 2,
   "rows": [
     {
+      "authority": "TaggedTransport",
+      "contract": "source-byte-coordinate",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::ChangeSignatureResult.rewritten_calls: usize",
+      "id": "chelis_compiler_api::schema::DiagnosticSpan::Point.offset: u64",
       "kind": "wire-schema-numeric-field"
     },
     {
-      "flags": [
-        "float-carrier"
-      ],
-      "id": "chelis_compiler_api::schema::CheckResult.score: f64",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
+      "authority": "TaggedTransport",
+      "contract": "source-byte-coordinate",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::CheckResult.total_nodes: usize",
+      "id": "chelis_compiler_api::schema::DiagnosticSpan::Range.len: u64",
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "TaggedTransport",
+      "contract": "source-byte-coordinate",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::CheckResult.typed_nodes: usize",
+      "id": "chelis_compiler_api::schema::DiagnosticSpan::Range.offset: u64",
       "kind": "wire-schema-numeric-field"
     },
     {
-      "flags": [
-        "numeric-field"
-      ],
-      "id": "chelis_compiler_api::schema::CheckResult.untyped_nodes: usize",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "flags": [
-        "numeric-field"
-      ],
-      "id": "chelis_compiler_api::schema::CompileResult.peak_device_bytes_estimate: Option<usize>",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "flags": [
-        "float-carrier"
-      ],
-      "id": "chelis_compiler_api::schema::Diagnostic.severity: f64",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
+      "authority": "TaggedTransport",
+      "contract": "execution-version",
       "flags": [
         "numeric-field"
       ],
@@ -59,216 +38,80 @@
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "TaggedTransport",
+      "contract": "opaque-evaluated-node",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::EvaluatedRoot.node_id: usize",
+      "id": "chelis_compiler_api::schema::EvaluatedRoot.node_id: u64",
       "kind": "wire-schema-numeric-field"
     },
     {
-      "flags": [
-        "float-carrier"
-      ],
-      "id": "chelis_compiler_api::schema::ExecutionValue::Bfloat16.value: f64",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "flags": [
-        "float-carrier"
-      ],
-      "id": "chelis_compiler_api::schema::ExecutionValue::Float16.value: f64",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "flags": [
-        "float-carrier"
-      ],
-      "id": "chelis_compiler_api::schema::ExecutionValue::Float32.value: f32",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "flags": [
-        "float-carrier"
-      ],
-      "id": "chelis_compiler_api::schema::ExecutionValue::Float64.value: f64",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
+      "authority": "TaggedTransport",
+      "contract": "grad-result-node",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::ExecutionValue::Int16.value: i16",
+      "id": "chelis_compiler_api::schema::GradResult.forward_nodes_by_name: u64",
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "TaggedTransport",
+      "contract": "grad-result-node",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::ExecutionValue::Int32.value: i32",
+      "id": "chelis_compiler_api::schema::GradResult.grad_nodes_by_name: u64",
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "TaggedTransport",
+      "contract": "grad-result-node",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::ExecutionValue::Int64.value: i64",
+      "id": "chelis_compiler_api::schema::GradResult.output_node: u64",
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "TaggedTransport",
+      "contract": "lower-result-node",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::ExecutionValue::Int8.value: i8",
+      "id": "chelis_compiler_api::schema::LowerResult.named_roots: u64",
       "kind": "wire-schema-numeric-field"
     },
     {
-      "flags": [
-        "float-carrier"
-      ],
-      "id": "chelis_compiler_api::schema::FitnessComponents.names: f64",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "flags": [
-        "float-carrier"
-      ],
-      "id": "chelis_compiler_api::schema::FitnessComponents.parse: f64",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "flags": [
-        "float-carrier"
-      ],
-      "id": "chelis_compiler_api::schema::FitnessComponents.structure: f64",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "flags": [
-        "float-carrier"
-      ],
-      "id": "chelis_compiler_api::schema::FitnessComponents.types: f64",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
+      "authority": "TaggedTransport",
+      "contract": "source-byte-coordinate",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::GradResult.forward_nodes_by_name: std::collections::BTreeMap<String, usize>",
+      "id": "chelis_compiler_api::schema::Span.len: u64",
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "TaggedTransport",
+      "contract": "source-byte-coordinate",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::GradResult.grad_nodes_by_name: std::collections::BTreeMap<String, usize>",
+      "id": "chelis_compiler_api::schema::Span.offset: u64",
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "TaggedTransport",
+      "contract": "dag-root",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::GradResult.output_node: usize",
+      "id": "chelis_compiler_api::schema::WireDag.roots: u64",
       "kind": "wire-schema-numeric-field"
     },
     {
-      "flags": [
-        "numeric-field"
-      ],
-      "id": "chelis_compiler_api::schema::LowerResult.named_roots: std::collections::BTreeMap<String, usize>",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "flags": [
-        "numeric-field"
-      ],
-      "id": "chelis_compiler_api::schema::RenameResult.renamed_references: usize",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "flags": [
-        "numeric-field"
-      ],
-      "id": "chelis_compiler_api::schema::Span.len: usize",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "flags": [
-        "numeric-field"
-      ],
-      "id": "chelis_compiler_api::schema::Span.offset: usize",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "flags": [
-        "float-carrier"
-      ],
-      "id": "chelis_compiler_api::schema::TensorElements::Bf16.0: Vec<f64>",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "flags": [
-        "float-carrier"
-      ],
-      "id": "chelis_compiler_api::schema::TensorElements::F16.0: Vec<f64>",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "flags": [
-        "float-carrier"
-      ],
-      "id": "chelis_compiler_api::schema::TensorElements::F32.0: Vec<f32>",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "flags": [
-        "float-carrier"
-      ],
-      "id": "chelis_compiler_api::schema::TensorElements::F64.0: Vec<f64>",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "flags": [
-        "numeric-field"
-      ],
-      "id": "chelis_compiler_api::schema::TensorElements::Int16.0: Vec<i16>",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "flags": [
-        "numeric-field"
-      ],
-      "id": "chelis_compiler_api::schema::TensorElements::Int32.0: Vec<i32>",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "flags": [
-        "numeric-field"
-      ],
-      "id": "chelis_compiler_api::schema::TensorElements::Int64.0: Vec<i64>",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "flags": [
-        "numeric-field"
-      ],
-      "id": "chelis_compiler_api::schema::TensorElements::Int8.0: Vec<i8>",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "flags": [
-        "numeric-field"
-      ],
-      "id": "chelis_compiler_api::schema::TensorValue.shape: Vec<usize>",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "flags": [
-        "numeric-field"
-      ],
-      "id": "chelis_compiler_api::schema::WireDag.roots: Vec<usize>",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
+      "authority": "TaggedTransport",
+      "contract": "dag-version",
       "flags": [
         "numeric-field"
       ],
@@ -276,76 +119,89 @@
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "TaggedTransport",
+      "contract": "dag-root",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::WireDagNode.id: usize",
+      "id": "chelis_compiler_api::schema::WireDagFields.roots: u64",
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "TaggedTransport",
+      "contract": "dag-version",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::WireDagNode.inputs: Vec<usize>",
+      "id": "chelis_compiler_api::schema::WireDagFields.schema_version: u32",
       "kind": "wire-schema-numeric-field"
     },
     {
-      "flags": [
-        "float-carrier"
-      ],
-      "id": "chelis_compiler_api::schema::WireDeepAtom::Float.value: f64",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
+      "authority": "TaggedTransport",
+      "contract": "dag-root",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::WireDeepAtom::Int.value: i64",
+      "id": "chelis_compiler_api::schema::WireDagFieldsRef.roots: u64",
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "TaggedTransport",
+      "contract": "dag-version",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::WireDimExpr::Concrete.value: usize",
+      "id": "chelis_compiler_api::schema::WireDagFieldsRef.schema_version: u32",
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "TaggedTransport",
+      "contract": "dag-position",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::WireDimInfo::Lit.size: usize",
+      "id": "chelis_compiler_api::schema::WireDagNode.id: u64",
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "TaggedTransport",
+      "contract": "earlier-dag-node",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::WireDimInfo::Named.size: Option<usize>",
+      "id": "chelis_compiler_api::schema::WireDagNode.inputs: u64",
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "TaggedTransport",
+      "contract": "earlier-shape-dependency",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::WireFusedInput::External.index: usize",
+      "id": "chelis_compiler_api::schema::WireDagNode.shape_deps: u64",
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "TaggedTransport",
+      "contract": "fused-external-input",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::WireFusedInput::PreviousStep.index: usize",
+      "id": "chelis_compiler_api::schema::WireFusedInput::External.index: u64",
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "TaggedTransport",
+      "contract": "earlier-fused-step",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::WireInferredDim::Lit.size: i64",
+      "id": "chelis_compiler_api::schema::WireFusedInput::PreviousStep.index: u64",
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "TaggedTransport",
+      "contract": "inferred-rank-variable",
       "flags": [
         "numeric-field"
       ],
@@ -353,6 +209,8 @@
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "TaggedTransport",
+      "contract": "inferred-dimension-variable",
       "flags": [
         "numeric-field"
       ],
@@ -360,6 +218,17 @@
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "TaggedTransport",
+      "contract": "inferred-parameter-position",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::WireInferredParameter.index: u64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "inferred-precision-variable",
       "flags": [
         "numeric-field"
       ],
@@ -367,6 +236,8 @@
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "TaggedTransport",
+      "contract": "inferred-type-variable",
       "flags": [
         "numeric-field"
       ],
@@ -374,55 +245,35 @@
       "kind": "wire-schema-numeric-field"
     },
     {
-      "flags": [
-        "float-carrier"
-      ],
-      "id": "chelis_compiler_api::schema::WireLiteral::Float.value: f64",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
+      "authority": "NumericOperation",
+      "contract": "[05-OP-15]",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::WireLiteral::Int.value: i64",
+      "id": "chelis_compiler_api::schema::WireRiscOp::Argmax.axis: i32",
       "kind": "wire-schema-numeric-field"
     },
     {
-      "flags": [
-        "float-carrier"
-      ],
-      "id": "chelis_compiler_api::schema::WireLiteral::TypedFloat.value: f64",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
+      "authority": "NumericOperation",
+      "contract": "[05-OP-16]",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::WireLiteral::TypedInt.value: i64",
+      "id": "chelis_compiler_api::schema::WireRiscOp::Argmin.axis: i32",
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "NumericOperation",
+      "contract": "[05-OP-29]",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::WireRiscOp::Argmax.axis: usize",
+      "id": "chelis_compiler_api::schema::WireRiscOp::Count.axes: i32",
       "kind": "wire-schema-numeric-field"
     },
     {
-      "flags": [
-        "numeric-field"
-      ],
-      "id": "chelis_compiler_api::schema::WireRiscOp::Argmin.axis: usize",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "flags": [
-        "float-carrier"
-      ],
-      "id": "chelis_compiler_api::schema::WireRiscOp::Dropout.rate: f64",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
+      "authority": "NumericOperation",
+      "contract": "[05-OP-37]",
       "flags": [
         "numeric-field"
       ],
@@ -430,132 +281,107 @@
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "NumericOperation",
+      "contract": "[05-OP-65]",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::WireRiscOp::Expand.axis: usize",
+      "id": "chelis_compiler_api::schema::WireRiscOp::Expand.axis: i32",
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "NumericOperation",
+      "contract": "[05-OP-66]",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::WireRiscOp::Gather.axis: usize",
+      "id": "chelis_compiler_api::schema::WireRiscOp::Gather.axis: i32",
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "NumericOperation",
+      "contract": "[05-OP-12]",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::WireRiscOp::MaxReduce.axis: usize",
+      "id": "chelis_compiler_api::schema::WireRiscOp::MaxReduce.axis: i32",
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "NumericOperation",
+      "contract": "[05-OP-13]",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::WireRiscOp::MinReduce.axis: usize",
+      "id": "chelis_compiler_api::schema::WireRiscOp::MinReduce.axis: i32",
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "NumericOperation",
+      "contract": "[05-OP-65]",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::WireRiscOp::OneHot.vocab: usize",
+      "id": "chelis_compiler_api::schema::WireRiscOp::Permute.axes: i32",
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "NumericOperation",
+      "contract": "[05-OP-14]",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::WireRiscOp::Permute.axes: Vec<usize>",
+      "id": "chelis_compiler_api::schema::WireRiscOp::ProdReduce.axis: i32",
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "NumericOperation",
+      "contract": "[05-OP-66]",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::WireRiscOp::ProdReduce.axis: usize",
+      "id": "chelis_compiler_api::schema::WireRiscOp::Scatter.axis: i32",
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "NumericOperation",
+      "contract": "[05-OP-66]",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::WireRiscOp::ReduceWindow.strides: Vec<usize>",
+      "id": "chelis_compiler_api::schema::WireRiscOp::ScatterAdd.axis: i32",
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "NumericOperation",
+      "contract": "[05-OP-66]",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::WireRiscOp::ReduceWindow.window_shape: Vec<usize>",
+      "id": "chelis_compiler_api::schema::WireRiscOp::ScatterElements.axis: i32",
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "NumericOperation",
+      "contract": "[05-OP-7]",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::WireRiscOp::ReduceWindowGrad.strides: Vec<usize>",
+      "id": "chelis_compiler_api::schema::WireRiscOp::Shape.axis: i32",
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "NumericOperation",
+      "contract": "[05-OP-30]",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::WireRiscOp::ReduceWindowGrad.window_shape: Vec<usize>",
+      "id": "chelis_compiler_api::schema::WireRiscOp::Sum.axis: i32",
       "kind": "wire-schema-numeric-field"
     },
     {
-      "flags": [
-        "numeric-field"
-      ],
-      "id": "chelis_compiler_api::schema::WireRiscOp::Scatter.axis: usize",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "flags": [
-        "numeric-field"
-      ],
-      "id": "chelis_compiler_api::schema::WireRiscOp::ScatterAdd.axis: usize",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "flags": [
-        "numeric-field"
-      ],
-      "id": "chelis_compiler_api::schema::WireRiscOp::ScatterElements.axis: usize",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "flags": [
-        "numeric-field"
-      ],
-      "id": "chelis_compiler_api::schema::WireRiscOp::Shape.axis: usize",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "flags": [
-        "numeric-field"
-      ],
-      "id": "chelis_compiler_api::schema::WireRiscOp::Sum.axis: usize",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "flags": [
-        "float-carrier"
-      ],
-      "id": "chelis_compiler_api::schema::WireRiscOp::UniformLike.high: f64",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "flags": [
-        "float-carrier"
-      ],
-      "id": "chelis_compiler_api::schema::WireRiscOp::UniformLike.low: f64",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
+      "authority": "NumericOperation",
+      "contract": "[05-OP-8]",
       "flags": [
         "numeric-field"
       ],
@@ -563,31 +389,480 @@
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "NumericOperation",
+      "contract": "[05-OP-7]",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::WireRtDim::Lit.value: usize",
+      "id": "chelis_compiler_api::schema::WireRtAxis::Lit.value: i32",
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "TaggedTransport",
+      "contract": "owning-input-axis-slot",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::WireRtDim::Node.input: usize",
+      "id": "chelis_compiler_api::schema::WireRtDim::InputAxis.tensor: u64",
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "TaggedTransport",
+      "contract": "owning-input-extent-slot",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::WireSurfExpr::TupleGet.index: i64",
+      "id": "chelis_compiler_api::schema::WireRtDim::Node.input: u64",
       "kind": "wire-schema-numeric-field"
     },
     {
+      "authority": "TaggedTransport",
+      "contract": "artifact-abi-version",
       "flags": [
         "numeric-field"
       ],
-      "id": "chelis_compiler_api::schema::WireSurfExpr::Vmap.axis: Option<i64>",
+      "id": "chelis_compiler_api::schema::artifact::ArtifactAbiVersion.$version: u32",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "execution-version",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::envelopes::ExecutionFields.schema_version: u32",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "execution-version",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::envelopes::ExecutionFieldsRef.schema_version: u32",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "grad-result-node",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::envelopes::GradFields.forward_nodes_by_name: u64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "grad-result-node",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::envelopes::GradFields.grad_nodes_by_name: u64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "grad-result-node",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::envelopes::GradFields.output_node: u64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "grad-result-node",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::envelopes::GradFieldsRef.forward_nodes_by_name: u64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "grad-result-node",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::envelopes::GradFieldsRef.grad_nodes_by_name: u64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "grad-result-node",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::envelopes::GradFieldsRef.output_node: u64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "lower-result-node",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::envelopes::LowerFields.named_roots: u64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "lower-result-node",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::envelopes::LowerFieldsRef.named_roots: u64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "execution-version-header",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::envelopes::VersionHeader.schema_version: u32",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "checked-tensor-shape",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::execution::TensorWire.shape: i64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "fixed-number/byte-estimate,edit-count,report-count",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::numbers::NonnegativeCount.$number: i64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "fixed-number/extent,literal-witness-requirement,window-extent",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::numbers::NonnegativeExtent.$number: i64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "fixed-number/source-float",
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_compiler_api::schema::numbers::SourceFloat.$number: f64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "fixed-number/source-integer",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_compiler_api::schema::numbers::SourceInteger.$number: i64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "fixed-number/diagnostic-severity,fitness-component,report-score",
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_compiler_api::schema::numbers::UnitInterval.$number: f64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "stored-value/bf16",
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_types::dtype_semantics::wire_codec::BinaryScalarWire::Bf16.bits: bf16",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "stored-value/f16",
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_types::dtype_semantics::wire_codec::BinaryScalarWire::F16.bits: f16",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "stored-value/f32",
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_types::dtype_semantics::wire_codec::BinaryScalarWire::F32.bits: f32",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "stored-value/f64",
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_types::dtype_semantics::wire_codec::BinaryScalarWire::F64.bits: f64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "stored-value/i16",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_types::dtype_semantics::wire_codec::BinaryScalarWire::I16.value: i16",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "stored-value/i32",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_types::dtype_semantics::wire_codec::BinaryScalarWire::I32.value: i32",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "stored-value/i64",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_types::dtype_semantics::wire_codec::BinaryScalarWire::I64.value: i64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "stored-value/i8",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_types::dtype_semantics::wire_codec::BinaryScalarWire::I8.value: i8",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "stored-value/bf16",
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_types::dtype_semantics::wire_codec::BinaryStorageWire::Bf16.bits: bf16",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "stored-value/f16",
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_types::dtype_semantics::wire_codec::BinaryStorageWire::F16.bits: f16",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "stored-value/f32",
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_types::dtype_semantics::wire_codec::BinaryStorageWire::F32.bits: f32",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "stored-value/f64",
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_types::dtype_semantics::wire_codec::BinaryStorageWire::F64.bits: f64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "stored-value/i16",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_types::dtype_semantics::wire_codec::BinaryStorageWire::I16.values: i16",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "stored-value/i32",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_types::dtype_semantics::wire_codec::BinaryStorageWire::I32.values: i32",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "stored-value/i64",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_types::dtype_semantics::wire_codec::BinaryStorageWire::I64.values: i64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "stored-value/i8",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_types::dtype_semantics::wire_codec::BinaryStorageWire::I8.values: i8",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "stored-value/bf16",
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_types::dtype_semantics::wire_codec::ScalarWire::Bf16.bits: bf16",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "stored-value/f16",
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_types::dtype_semantics::wire_codec::ScalarWire::F16.bits: f16",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "stored-value/f32",
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_types::dtype_semantics::wire_codec::ScalarWire::F32.bits: f32",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "stored-value/f64",
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_types::dtype_semantics::wire_codec::ScalarWire::F64.bits: f64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "stored-value/i16",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_types::dtype_semantics::wire_codec::ScalarWire::I16.value: i16",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "stored-value/i32",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_types::dtype_semantics::wire_codec::ScalarWire::I32.value: i32",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "stored-value/i64",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_types::dtype_semantics::wire_codec::ScalarWire::I64.value: i64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "stored-value/i8",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_types::dtype_semantics::wire_codec::ScalarWire::I8.value: i8",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "stored-value/bf16",
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_types::dtype_semantics::wire_codec::StorageWire::Bf16.bits: bf16",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "stored-value/f16",
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_types::dtype_semantics::wire_codec::StorageWire::F16.bits: f16",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "stored-value/f32",
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_types::dtype_semantics::wire_codec::StorageWire::F32.bits: f32",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "stored-value/f64",
+      "flags": [
+        "float-carrier"
+      ],
+      "id": "chelis_types::dtype_semantics::wire_codec::StorageWire::F64.bits: f64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "stored-value/i16",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_types::dtype_semantics::wire_codec::StorageWire::I16.values: i16",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "stored-value/i32",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_types::dtype_semantics::wire_codec::StorageWire::I32.values: i32",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "stored-value/i64",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_types::dtype_semantics::wire_codec::StorageWire::I64.values: i64",
+      "kind": "wire-schema-numeric-field"
+    },
+    {
+      "authority": "TaggedTransport",
+      "contract": "stored-value/i8",
+      "flags": [
+        "numeric-field"
+      ],
+      "id": "chelis_types::dtype_semantics::wire_codec::StorageWire::I8.values: i8",
       "kind": "wire-schema-numeric-field"
     }
   ]

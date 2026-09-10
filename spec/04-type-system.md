@@ -750,7 +750,7 @@ Standard Algorithm W with extensions for tensor types. The flow:
 The replay requirement applies to every operation whose result or admission
 depends on the resolved operand shape, not to a hand-maintained exception for
 one builtin. In particular, a `matmul`, reduction, `expand`, `insert`,
-`layer_norm`, `conv2d`, or `scatter_elements` reached through a bare lambda
+`layer_norm`, `conv`, or `scatter_elements` reached through a bare lambda
 parameter is
 checked again after the parameter binds. The check used on replay is the
 operation's ordinary typing rule, so immediate and deferred applications
@@ -992,6 +992,29 @@ The gradient payload shape is:
 - explicit `wrt` on a non-differentiable parameter => type error
 
 The forward value is not bundled into the `grad(...)` result.
+
+#### Operand decisions on an unresolved operand
+
+An operation's operand type is not always known where the operation is
+checked. When the operand is still an unresolved type variable — a lambda
+parameter awaiting its argument, a signature hole, or a binding that takes its
+type from one of those — the operation has not been shown to be ill-typed,
+only to be undecided. In that case the decision is **deferred**: it is settled
+when the variable is bound, and reaches the verdict the operation would have
+reached had the operand carried that type when the operation was first
+checked. An operand whose outer type constructor is already known is not such
+a case, and is decided immediately whatever remains unresolved inside it; a
+tensor with unresolved dimension variables is decided at once.
+
+The deferral is sound only because a variable that is never bound is still
+rejected. After a function body's inference completes, every deferred operand
+decision that has not settled is rejected with the same diagnostic as an
+operand of a concretely inadmissible type. Deferral never admits an operand
+the operation would otherwise reject, and the verdict never depends on the
+order in which inference reaches the operand.
+
+(Not every operation implements this yet; the remaining ones are tracked on
+[#1489](https://github.com/Chelis-Lang/chelis/issues/1489).)
 
 ---
 

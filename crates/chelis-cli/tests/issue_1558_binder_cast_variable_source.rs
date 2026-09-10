@@ -181,7 +181,7 @@ fn unbounded_cast_target_is_rejected_for_every_variable_source_form() {
             format!("cast target `{binder}` in `{owner}` does not name an active primitive");
         for (label, json) in [("surf", &surf), ("deep", &deep)] {
             assert_ne!(
-                json["score"], 1,
+                json["score"], 1.0,
                 "{module} must not check clean at the {label} ingress: {json}"
             );
             assert!(
@@ -238,7 +238,7 @@ fn a_concrete_or_bounded_cast_target_still_checks_clean() {
         let (surf, deep) = check_both_ingresses(dir.path(), &module, body);
         for (label, json) in [("surf", &surf), ("deep", &deep)] {
             assert_eq!(
-                json["score"], 1,
+                json["score"], 1.0,
                 "{module} must check clean at the {label} ingress: {json}"
             );
             assert!(

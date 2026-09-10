@@ -23,11 +23,26 @@ before consuming any package or symbol metadata.
 
 ## 3. Compiler API Wire Contract
 
-WireDag JSON is an exact-version contract. Schema version 8 is explicitly
+WireDag JSON is an exact-version contract. Schema version 9 is explicitly
 present in every payload and is the only accepted version. A missing version,
-versions 1 through 7, and every future version are decode errors before any IR
+versions 1 through 8, and every future version are decode errors before any IR
 node is consumed. There is no versionless default, legacy migration, additive-
 variant tolerance, or best-effort compatibility path.
+
+`WireRiscOp::ExtentWitness { parameter, axis, requirements }` preserves a
+call's shape observation and its literal requirements separately. It has one
+tensor input and a rank-zero `int64` output. The normalized `int32` axis must
+be within that input's rank. Every requirement uses the exact
+`NonnegativeExtent` adapter over a nonnegative `int64`; an absent vector,
+non-integer or negative requirement,
+invalid axis, arity, or output type is an encoding and decoding error.
+`parameter` is diagnostic text, not dimension identity. The node's source
+provenance and invocation dependencies survive transport as ordinary node
+fields and edges. Requirement order and duplicates are preserved; an empty
+requirements vector is valid. `WireDagNode.shape_deps` contains exact u64 node
+references to strictly earlier nodes. It does not carry shape numbers.
+`shape_deps`, `span_id` (explicitly null when absent), and `merged_spans` are
+mandatory fields, including when their lists are empty.
 
 `WireRiscOp::Count { axes }` carries the complete
 non-empty vector of unique normalized original-axis positions in strictly
@@ -61,16 +76,18 @@ int64 node. The decoder enforces the owner matrix from
 `spec/05-risc-primitives.md` §2.4.1, the source rank and dtype, the normalized
 axis range, and the exact input cardinality before IR construction.
 
-Every tagged variant must be known to the version 8 decoder. `OneHot` remains only a transient
+Every tagged variant must be known to the version 9 decoder. `OneHot` remains only a transient
 IR/specialization marker and backends must not receive it after specialization.
 
 Execution-value envelopes carry the independently required exact
 `schema_version: 3`. Missing, older, and future execution versions are rejected
 before decoding values. An execution version never substitutes for WireDag
 version validation, or conversely. Tensor bindings in requests use the same
-execution-value carrier grammar. A cache containing these objects validates
-its enclosing compatibility identity before decoding them; it cannot provide
-an alternate legacy decoder for a usable value.
+execution-value carrier grammar. A cache or compiled-context worker handoff
+containing these objects validates its enclosing format and compiler-build
+compatibility identity before decoding them; it cannot provide an alternate
+legacy decoder for a usable value. The worker handoff preserves the complete
+checked context and rejects an incompatible or corrupted payload before use.
 
 (These wire requirements are not fully implemented; see chelis#1288.)
 
@@ -152,6 +169,10 @@ grammar, not private alternate encodings. `UniformLike.low`, `UniformLike.high`,
 and `Dropout.rate` use scalar carriers of the exact active float dtype of the
 template/input. Their value-domain checks remain [05-OP-8/37], before Random
 consumption; the codec neither inserts casts nor implements an adjoint.
+`UniformLike.inputs` contains its template followed by at most one rank-zero
+Bool path activation; `Dropout.inputs` contains exactly its data input.
+Both operations preserve the first input's exact shape and dtype. The optional
+activation is an earlier-node reference under §3.4, not another template.
 Their `seed` fields are exact uint64 JSON integers holding [05-RNG-1]'s
 two's-complement image of a signed int64 seed. Every seed bit is significant;
 zero is a seed, not absence, and there is no default seed.
@@ -198,7 +219,7 @@ specifies u32. A decoder never narrows a reference to fit a host index.
 
 | fields | scope and admission |
 |---|---|
-| `WireDagNode.id`, `WireDagNode.inputs`, `WireDag.roots` | Node IDs are unique zero-based positions in the owning ordered DAG; inputs refer to earlier nodes and roots to existing nodes. Zero is an ordinary node ID. |
+| `WireDagNode.id`, `WireDagNode.inputs`, `WireDagNode.shape_deps`, `WireDag.roots` | Node IDs are unique zero-based positions in the owning ordered DAG; inputs and shape dependencies refer to earlier nodes and roots to existing nodes. Zero is an ordinary node ID. Shape dependencies identify nodes, not extents. |
 | `LowerResult.named_roots`, `GradResult.output_node`, `GradResult.grad_nodes_by_name`, `GradResult.forward_nodes_by_name` | IDs select nodes in that result's DAG; a name never changes the owning DAG. |
 | `EvaluatedRoot.node_id` | Identity in the evaluated graph associated with that result; without that graph it remains an opaque result identity and cannot be dereferenced. |
 | `WireFusedInput.External.index` | Zero-based slot in the owning fused node's external inputs. |
@@ -206,12 +227,19 @@ specifies u32. A decoder never narrows a reference to fit a host index.
 | `WireRtDim.Node.input`, `WireRtDim.InputAxis.tensor` | Absolute nonzero slot in the owning operation's input vector, subject to §3's owner/source/axis checks. |
 | `WireInferredType.Var.id`, `WireInferredPrecision.Var.id` | Exact u32 identity in the owning inference product's type-variable namespace. |
 | `WireInferredDim.Var.id`, `WireInferredDim.Rank.id` | Exact u32 identities in that inference product's distinct dimension-variable and rank-variable namespaces. |
+| `WireInferredParameter.index` | Zero-based u64 position in the owning inferred function signature's ordered parameter list. Every parameter's index equals its position in that list; names do not change this scope. |
 | `WireDag.schema_version`, `EvalResult.schema_version` | Exact u32 version discriminants governed by §3, with no missing-value default. |
 
 `WireDimInfo.Lit.size`, `WireDimInfo.Named.size` when present,
-`WireInferredDim.Lit.size`, `WireDimExpr.Concrete.value`, and
-`WireRtDim.Lit.value` are nonnegative exact int64 JSON integers. An absent
-named size is unresolved, not zero. Multiplication and division expression
+`WireInferredDim.Lit.size`, `ExecutionDim.size` when present,
+`WireDimExpr.Concrete.value`, and
+`WireRtDim.Lit.value` and every `WireRiscOp::ExtentWitness.requirements` item
+are nonnegative exact int64 JSON integers. An absent
+named size is unresolved, not zero. Observed extents use a fixed-int64
+JSON-number adapter over the canonical sealed numeric carrier; construction
+and decode reject a different dtype or a negative value. These are numeric
+quantities, not structural reference identities, and their bounds alone do
+not confer transport authority. Multiplication and division expression
 structure is preserved; exact intermediate products and partial division
 validity are not replaced by saturated machine integers. A transported
 expression or observed runtime equality does not prove capacity equality.
@@ -227,6 +255,14 @@ authorize the transient operation to reach a backend. `WireRtDim.ToEnd` and
 `Sym` remain distinct variants with the owner restrictions of [05-MOV-1];
 numeric sentinel values cannot stand for them. Literal bounds and extents
 retain their operation-specific zero/positivity/range rules.
+
+The shared IR `WireRiscOp::Expand` represents both singleton broadcasting
+(`expand`) and axis insertion (`insert`). Equal input/output ranks select
+broadcasting, whose axis is less than the input rank. An output rank exactly
+one greater selects insertion, whose axis may equal the input rank, including
+axis zero on a rank-zero input. Every other rank relationship is invalid.
+These wire layouts preserve the distinct source operations of [05-MOV-1];
+they do not discharge the operations' extent claims or runtime guards.
 
 ### 3.5 Fixed-Dtype Report Numbers
 

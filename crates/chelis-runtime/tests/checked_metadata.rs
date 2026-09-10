@@ -5,7 +5,407 @@
 mod metadata;
 
 use chelis_vocab::RuntimeDType;
-use metadata::{ByteCount, ElementCount, IterationSpace, MetadataError, ShapeMetadata};
+use metadata::{
+    ByteCount, ElementCount, IterationSpace, MatmulDimension, MatmulMetadata, MatmulPart,
+    MetadataError, MovementMetadata, MovementOp, ReductionMetadata, ShapeMetadata, SparseMetadata,
+    WindowMetadata,
+};
+
+#[test]
+fn movement_plans_project_checked_domains_without_coordinate_scratch() {
+    let shape = |s: &[i64], dtype| ShapeMetadata::contiguous(s, dtype).unwrap();
+    for dtype in RuntimeDType::ALL {
+        let source = shape(&[2, 3], dtype);
+        let permute = MovementMetadata::permuted(&source, &[-1, 0]).unwrap();
+        assert_eq!(permute.result().shape(), &[3, 2]);
+        for i in 0..6 {
+            assert_eq!(permute.index(i).unwrap(), (i % 2) * 3 + i / 2);
+        }
+        let insert = MovementMetadata::expanded(&source, 1, 4, true).unwrap();
+        let expand = MovementMetadata::expanded(&shape(&[2, 1, 3], dtype), 1, 4, false).unwrap();
+        for plan in [&insert, &expand] {
+            assert_eq!(plan.result().shape(), &[2, 4, 3]);
+            assert_eq!(plan.count().get(), 24);
+            for i in 0..24 {
+                assert_eq!(plan.index(i).unwrap(), i / 12 * 3 + i % 3);
+            }
+        }
+        let pad = MovementMetadata::affine(&source, &[1, 2], &[0, 1], MovementOp::Pad).unwrap();
+        assert_eq!(pad.result().shape(), &[3, 6]);
+        assert_eq!(pad.count().get(), 6);
+        for i in 0..6 {
+            assert_eq!(pad.index(i).unwrap(), (i / 3 + 1) * 6 + i % 3 + 2);
+        }
+        let larger = shape(&[3, 5], dtype);
+        let shrink =
+            MovementMetadata::affine(&larger, &[1, 2], &[3, 5], MovementOp::Shrink).unwrap();
+        let stride = MovementMetadata::affine(&larger, &[2, 2], &[], MovementOp::Stride).unwrap();
+        for plan in [&shrink, &stride] {
+            assert_eq!(plan.result().shape(), &[2, 3]);
+        }
+        for i in 0..6 {
+            assert_eq!(shrink.index(i).unwrap(), (i / 3 + 1) * 5 + i % 3 + 2);
+            assert_eq!(stride.index(i).unwrap(), i / 3 * 2 * 5 + i % 3 * 2);
+        }
+        for plan in [permute, insert, expand, pad, shrink, stride] {
+            assert_eq!(plan.input().dtype(), dtype);
+            assert_eq!(plan.result().dtype(), dtype);
+            for i in [-1, plan.count().get()] {
+                assert!(matches!(plan.index(i), Err(MetadataError::Domain(_))));
+            }
+        }
+    }
+}
+
+#[test]
+fn movement_plans_reject_bad_geometry_and_preserve_rank_zero_empty_and_int64() {
+    let shape = |s: &[i64]| ShapeMetadata::contiguous(s, RuntimeDType::I8).unwrap();
+    let input = shape(&[2, 3]);
+    for axes in [vec![0], vec![0, 0], vec![0, 2], vec![-3, 1]] {
+        assert!(MovementMetadata::permuted(&input, &axes).is_err());
+    }
+    for (axis, size, insert) in [(0, 3, false), (2, 3, false), (3, 3, true), (0, -1, true)] {
+        assert!(MovementMetadata::expanded(&input, axis, size, insert).is_err());
+    }
+    for (first, second, op) in [
+        (vec![-1, 0], vec![0, 0], MovementOp::Pad),
+        (vec![0], vec![0], MovementOp::Pad),
+        (vec![i64::MAX, 0], vec![0, 0], MovementOp::Pad),
+        (vec![0, 0], vec![3, 3], MovementOp::Shrink),
+        (vec![0, 0], vec![1, -1], MovementOp::Shrink),
+        (vec![0, 1], vec![], MovementOp::Stride),
+        (vec![1], vec![], MovementOp::Stride),
+    ] {
+        assert!(MovementMetadata::affine(&input, &first, &second, op).is_err());
+    }
+    let scalar = shape(&[]);
+    assert_eq!(
+        MovementMetadata::permuted(&scalar, &[])
+            .unwrap()
+            .index(0)
+            .unwrap(),
+        0
+    );
+    for op in [MovementOp::Pad, MovementOp::Shrink, MovementOp::Stride] {
+        assert_eq!(
+            MovementMetadata::affine(&scalar, &[], &[], op)
+                .unwrap()
+                .index(0)
+                .unwrap(),
+            0
+        );
+    }
+    let inserted = MovementMetadata::expanded(&scalar, 0, 2, true).unwrap();
+    assert_eq!(inserted.index(1).unwrap(), 0);
+    let high_rank = shape(&[1; 9]);
+    assert_eq!(
+        MovementMetadata::permuted(&high_rank, &[8, 7, 6, 5, 4, 3, 2, 1, 0])
+            .unwrap()
+            .index(0)
+            .unwrap(),
+        0
+    );
+    let empty = MovementMetadata::affine(&shape(&[0]), &[1], &[1], MovementOp::Pad).unwrap();
+    assert_eq!(empty.result().shape(), &[2]);
+    assert_eq!(empty.count().get(), 0);
+    assert!(empty.index(0).is_err());
+    let huge = shape(&[i64::MAX]);
+    let stride = MovementMetadata::affine(&huge, &[2], &[], MovementOp::Stride).unwrap();
+    assert_eq!(
+        stride.index(stride.count().get() - 1).unwrap(),
+        i64::MAX - 1
+    );
+    assert!(MovementMetadata::expanded(&shape(&[2]), 0, i64::MAX, true).is_err());
+}
+
+#[test]
+fn window_metadata_binds_valid_padding_and_row_major_source_indices() {
+    let shape = |s: &[i64], dtype| ShapeMetadata::contiguous(s, dtype).unwrap();
+    for dtype in RuntimeDType::ALL {
+        let input = shape(&[2, 5, 6], dtype);
+        let plan = WindowMetadata::new(&input, &[2, 3], &[2, 2]).unwrap();
+        assert_eq!(plan.input().shape(), &[2, 5, 6]);
+        assert_eq!(plan.result().shape(), &[2, 2, 2]);
+        assert_eq!(plan.result().dtype(), dtype);
+        assert_eq!(plan.count().get(), 6);
+        for group in 0..8 {
+            for leaf in 0..6 {
+                let expected = (group / 4) * 30
+                    + ((group % 4) / 2 * 2 + leaf / 3) * 6
+                    + (group % 2 * 2 + leaf % 3);
+                assert_eq!(plan.index(group, leaf).unwrap(), expected);
+            }
+        }
+        for (group, leaf) in [(-1, 0), (8, 0), (0, -1), (0, 6)] {
+            assert!(matches!(
+                plan.index(group, leaf),
+                Err(MetadataError::Domain(_))
+            ));
+        }
+        drop(input);
+        assert_eq!(plan.index(7, 5).unwrap(), 52);
+    }
+    let f = RuntimeDType::F32;
+    for (input, windows, steps) in [
+        (&[4][..], &[][..], &[][..]),
+        (&[4], &[2], &[]),
+        (&[4], &[1, 1], &[1, 1]),
+        (&[4], &[0], &[1]),
+        (&[4], &[-1], &[1]),
+        (&[4], &[2], &[0]),
+        (&[4], &[2], &[-1]),
+        (&[4], &[5], &[2]),
+        (&[0], &[1], &[1]),
+    ] {
+        assert!(matches!(
+            WindowMetadata::new(&shape(input, f), windows, steps),
+            Err(MetadataError::Domain(_))
+        ));
+    }
+    let empty = WindowMetadata::new(&shape(&[0, i64::MAX], f), &[i64::MAX], &[1]).unwrap();
+    assert_eq!(empty.result().shape(), &[0, 1]);
+    assert_eq!(empty.count().get(), 0);
+    assert!(empty.index(0, 0).is_err());
+    let huge = WindowMetadata::new(&shape(&[i64::MAX], RuntimeDType::I8), &[2], &[2]).unwrap();
+    assert_eq!(huge.result().shape(), &[i64::MAX / 2]);
+    assert_eq!(huge.index(i64::MAX / 2 - 1, 1).unwrap(), i64::MAX - 2);
+    let whole =
+        WindowMetadata::new(&shape(&[i64::MAX], RuntimeDType::I8), &[i64::MAX], &[1]).unwrap();
+    assert_eq!(whole.count().get(), i64::MAX);
+    assert_eq!(whole.index(0, i64::MAX - 1).unwrap(), i64::MAX - 1);
+}
+
+#[test]
+fn matmul_metadata_binds_matrix_spans_and_vendor_projection_without_storage() {
+    let shape = |s: &[i64], dtype| ShapeMetadata::contiguous(s, dtype).unwrap();
+    for dtype in RuntimeDType::ALL {
+        let a = shape(&[2, 3, 4], dtype);
+        let b = shape(&[2, 4, 5], dtype);
+        let p = MatmulMetadata::new(&a, &b, dtype).unwrap();
+        assert_eq!(p.result().shape(), &[2, 3, 5]);
+        assert_eq!(p.result().dtype(), dtype);
+        assert_eq!(p.dimension(MatmulDimension::Rows), 3);
+        assert_eq!(p.dimension(MatmulDimension::Columns), 5);
+        assert_eq!(p.dimension(MatmulDimension::Reduction), 4);
+        assert_eq!(p.batches().get(), 2);
+        for (part, n) in [
+            (MatmulPart::Left, 12),
+            (MatmulPart::Right, 20),
+            (MatmulPart::Result, 15),
+        ] {
+            assert_eq!(p.matrix_count(part).get(), n);
+            for batch in 0..2 {
+                for element in 0..n {
+                    assert_eq!(p.index(part, batch, element).unwrap(), batch * n + element);
+                }
+            }
+            assert!(p.index(part, -1, 0).is_err());
+            assert!(p.index(part, 2, 0).is_err());
+            assert!(p.index(part, 0, -1).is_err());
+            assert!(p.index(part, 0, n).is_err());
+            p.matrix_count(part)
+                .bytes(RuntimeDType::F64)
+                .unwrap()
+                .allocation()
+                .unwrap();
+        }
+        p.check_vendor(i64::from(i32::MAX)).unwrap();
+        assert!(matches!(p.check_vendor(4), Err(MetadataError::Overflow(_))));
+        assert!(matches!(p.check_vendor(0), Err(MetadataError::Domain(_))));
+        drop(a);
+        drop(b);
+        assert_eq!(p.index(MatmulPart::Right, 1, 19).unwrap(), 39);
+    }
+    let f = RuntimeDType::F32;
+    for (a, b) in [
+        (&[3][..], &[3, 4][..]),
+        (&[2, 3, 4], &[4, 5]),
+        (&[2, 3, 4], &[3, 4, 5]),
+        (&[2, 3, 4], &[2, 6, 5]),
+    ] {
+        assert!(matches!(
+            MatmulMetadata::new(&shape(a, f), &shape(b, f), f),
+            Err(MetadataError::Domain(_))
+        ));
+    }
+    assert!(
+        MatmulMetadata::new(&shape(&[3, 4], f), &shape(&[4, 5], RuntimeDType::F64), f).is_err()
+    );
+    let empty =
+        MatmulMetadata::new(&shape(&[0, i64::MAX, 0], f), &shape(&[0, 0, 1], f), f).unwrap();
+    assert_eq!(empty.result().shape(), &[0, i64::MAX, 1]);
+    assert_eq!(empty.batches().get(), 0);
+    assert_eq!(empty.matrix_count(MatmulPart::Result).get(), 0);
+    empty.check_vendor(i64::from(i32::MAX)).unwrap();
+    assert!(empty.index(MatmulPart::Result, 0, 0).is_err());
+    let zero_k = MatmulMetadata::new(&shape(&[3, 0], f), &shape(&[0, 5], f), f).unwrap();
+    assert_eq!(zero_k.batches().get(), 1);
+    assert_eq!(zero_k.matrix_count(MatmulPart::Result).get(), 15);
+    assert_eq!(zero_k.matrix_count(MatmulPart::Left).get(), 0);
+    zero_k.check_vendor(1).unwrap();
+    let huge = i64::from(i32::MAX) + 1;
+    let large = MatmulMetadata::new(
+        &shape(&[huge, 1], RuntimeDType::I8),
+        &shape(&[1, 1], RuntimeDType::I8),
+        RuntimeDType::I8,
+    )
+    .unwrap();
+    assert_eq!(
+        large.index(MatmulPart::Result, 0, huge - 1).unwrap(),
+        huge - 1
+    );
+    assert!(large.check_vendor(i64::from(i32::MAX)).is_err());
+    large.check_vendor(i64::MAX).unwrap();
+    // Operand storage may fit while f32 conversion scratch does not. Exercise
+    // that boundary virtually without asking the allocator for huge buffers.
+    for (extent, fits) in [(i64::MAX / 4, true), (i64::MAX / 4 + 1, false)] {
+        let p = MatmulMetadata::new(
+            &shape(&[extent, 1], RuntimeDType::F16),
+            &shape(&[1, 1], RuntimeDType::F16),
+            RuntimeDType::F16,
+        )
+        .unwrap();
+        let bytes = p
+            .matrix_count(MatmulPart::Left)
+            .bytes(RuntimeDType::F32)
+            .and_then(ByteCount::allocation);
+        assert_eq!(bytes.is_ok(), fits);
+    }
+    let x = shape(&[1_i64 << 32, 1], RuntimeDType::I8);
+    let y = shape(&[1, 1_i64 << 32], RuntimeDType::I8);
+    assert!(matches!(
+        MatmulMetadata::new(&x, &y, RuntimeDType::I8),
+        Err(MetadataError::Overflow(_))
+    ));
+}
+
+#[test]
+fn sparse_metadata_binds_indices_to_exact_hyperplane_and_elementwise_domains() {
+    let shape = |s: &[i64], dtype| ShapeMetadata::contiguous(s, dtype).unwrap();
+    for dtype in RuntimeDType::ALL {
+        let base = shape(&[2, 3, 2], dtype);
+        let indices = shape(&[2, 2], RuntimeDType::I8);
+        let plan = SparseMetadata::new(&base, &indices, -2, false).unwrap();
+        assert_eq!(plan.base().shape(), &[2, 3, 2]);
+        assert_eq!(plan.base().extent_at(-1).unwrap(), 2);
+        assert_eq!(plan.domain().shape(), &[2, 2, 2, 2]);
+        assert_eq!(plan.domain().dtype(), dtype);
+        let selected = [2, 0, 1, 2];
+        let expected = [4, 5, 0, 1, 2, 3, 4, 5, 10, 11, 6, 7, 8, 9, 10, 11];
+        for (linear, expected) in expected.into_iter().enumerate() {
+            let slot = plan.index_slot(linear as i64).unwrap();
+            assert_eq!(slot, (linear as i64 / 2) % 4);
+            assert_eq!(
+                plan.data_index(linear as i64, selected[slot as usize])
+                    .unwrap(),
+                expected
+            );
+        }
+        for bad in [-1, 16] {
+            assert!(plan.index_slot(bad).is_err());
+            assert!(plan.data_index(bad, 0).is_err());
+        }
+        for bad in [-1, 3] {
+            assert!(plan.data_index(0, bad).is_err());
+        }
+        assert!(SparseMetadata::new(&base, &indices, 3, false).is_err());
+        assert!(SparseMetadata::new(&base, &indices, -4, false).is_err());
+        let base = shape(&[2, 3], dtype);
+        let plan = SparseMetadata::new(&base, &indices, 1, true).unwrap();
+        assert_eq!(plan.domain().shape(), &[2, 2]);
+        for (linear, (selected, expected)) in
+            [(2, 2), (0, 0), (1, 4), (2, 5)].into_iter().enumerate()
+        {
+            assert_eq!(plan.index_slot(linear as i64).unwrap(), linear as i64);
+            assert_eq!(plan.data_index(linear as i64, selected).unwrap(), expected);
+        }
+        assert!(SparseMetadata::new(&base, &shape(&[3, 2], RuntimeDType::I8), 1, true).is_err());
+        assert!(SparseMetadata::new(&base, &shape(&[2], RuntimeDType::I8), 1, true).is_err());
+    }
+    let base = shape(&[0, 3, 2], RuntimeDType::I64);
+    let indices = shape(&[4], RuntimeDType::I32);
+    let empty = SparseMetadata::new(&base, &indices, 1, false).unwrap();
+    assert_eq!(empty.domain().elements().get(), 0);
+    assert!(empty.index_slot(0).is_err());
+    assert!(empty.data_index(0, 0).is_err());
+    let base = shape(&[2, 0, 3], RuntimeDType::I8);
+    let no_valid_index = SparseMetadata::new(&base, &indices, 1, false).unwrap();
+    assert_eq!(no_valid_index.domain().elements().get(), 24);
+    assert!(no_valid_index.data_index(0, 0).is_err());
+    let large = shape(&[i64::MAX, 0], RuntimeDType::I64);
+    assert!(matches!(
+        SparseMetadata::new(&large, &indices, 1, false),
+        Err(MetadataError::Overflow(_))
+    ));
+    let base = shape(&[1, i64::MAX], RuntimeDType::I8);
+    let scalar_index = shape(&[], RuntimeDType::I64);
+    let large = SparseMetadata::new(&base, &scalar_index, 0, false).unwrap();
+    assert_eq!(large.domain().elements().get(), i64::MAX);
+    assert_eq!(large.index_slot(i64::MAX - 1).unwrap(), 0);
+    assert_eq!(large.data_index(i64::MAX - 1, 0).unwrap(), i64::MAX - 1);
+}
+
+#[test]
+fn reduction_metadata_binds_grouping_to_checked_input_and_result_domains() {
+    for dtype in RuntimeDType::ALL {
+        let plan = ReductionMetadata::new(&[2, 3], &[1], dtype).unwrap();
+        assert_eq!(plan.result().dtype(), dtype);
+        assert_eq!(plan.result().bytes().get(), 2 * dtype.byte_width() as i64);
+        assert_eq!(
+            plan.leaves().bytes(dtype).unwrap().get(),
+            3 * dtype.byte_width() as i64
+        );
+        let large = ReductionMetadata::new(&[i64::MAX, 0], &[1], dtype);
+        assert_eq!(large.is_err(), dtype.byte_width() > 1);
+    }
+    let plan = ReductionMetadata::new(&[2, 3, 2], &[-1, -3], RuntimeDType::I64).unwrap();
+    assert_eq!(plan.result().shape(), &[3]);
+    assert_eq!(plan.extent(-1).unwrap(), 3);
+    assert!(plan.extent(-2).is_err());
+    assert_eq!(plan.leaves().get(), 4);
+    for (outer, indices) in [[0, 1, 6, 7], [2, 3, 8, 9], [4, 5, 10, 11]]
+        .iter()
+        .enumerate()
+    {
+        for (leaf, expected) in indices.iter().enumerate() {
+            assert_eq!(plan.index(outer as i64, leaf as i64).unwrap(), *expected);
+        }
+    }
+    for (outer, leaf) in [(-1, 0), (3, 0), (0, -1), (0, 4)] {
+        assert!(matches!(
+            plan.index(outer, leaf),
+            Err(MetadataError::Domain(_))
+        ));
+    }
+    for axes in [
+        vec![],
+        vec![1, 1],
+        vec![0, 1],
+        vec![-4],
+        vec![3],
+        vec![2, -1],
+    ] {
+        assert!(matches!(
+            ReductionMetadata::new(&[2, 3, 2], &axes, RuntimeDType::I64),
+            Err(MetadataError::Domain(_))
+        ));
+    }
+    assert!(matches!(
+        ReductionMetadata::new(&[i64::MAX, 0], &[1], RuntimeDType::I64),
+        Err(MetadataError::Overflow(_))
+    ));
+    assert!(matches!(
+        ReductionMetadata::new(&[0, i64::MAX, i64::MAX, 0], &[3], RuntimeDType::I8),
+        Err(MetadataError::Overflow(_))
+    ));
+    let empty =
+        ReductionMetadata::new(&[0, i64::MAX, i64::MAX], &[2, 1], RuntimeDType::I64).unwrap();
+    assert_eq!(empty.leaves().get(), 0);
+    assert!(empty.index(0, 0).is_err());
+    let huge = ReductionMetadata::new(&[i64::MAX], &[0], RuntimeDType::I64).unwrap();
+    assert!(huge.leaves().bytes(RuntimeDType::I64).is_err());
+    assert_eq!(huge.index(0, i64::MAX - 1).unwrap(), i64::MAX - 1);
+}
 
 #[test]
 fn checked_iteration_steps_preserve_exact_large_domains_without_storage() {
@@ -261,4 +661,87 @@ fn scratch_lengths_and_rank_projections_are_checked_before_allocation() {
         ShapeMetadata::checked_rank(i32::MAX as usize + 1),
         Err(MetadataError::Overflow(_))
     ));
+}
+
+#[test]
+fn checked_movement_relations_reject_invalid_bijections_and_bystanders() {
+    let shape = |dims: &[i64]| ShapeMetadata::contiguous(dims, RuntimeDType::I8).unwrap();
+    let input = shape(&[2, 3]);
+    assert!(input
+        .require_permutation(&shape(&[3, 2]), &[-1, -2])
+        .is_ok());
+    assert!(input.require_permutation(&shape(&[2, 2]), &[0, 0]).is_err());
+    assert!(input.require_permutation(&shape(&[2, 3]), &[1, 0]).is_err());
+    assert!(input.require_permutation(&shape(&[3, 2]), &[1]).is_err());
+    assert!(input.require_permutation(&shape(&[3, 2]), &[1, 2]).is_err());
+    let unit = shape(&[2, 1]);
+    assert!(unit.require_expansion(&shape(&[2, 3]), -1).is_ok());
+    assert!(unit.require_expansion(&shape(&[4, 2, 1]), 0).is_ok());
+    assert!(input.require_expansion(&shape(&[2, 4]), 1).is_err());
+    assert!(unit.require_expansion(&shape(&[3, 4]), 1).is_err());
+    assert!(unit.require_expansion(&shape(&[4, 3, 1]), 0).is_err());
+    assert!(unit.require_expansion(&shape(&[2]), 0).is_err());
+    let other = ShapeMetadata::contiguous(&[2, 3], RuntimeDType::I16).unwrap();
+    assert!(input.require_permutation(&other, &[0, 1]).is_err());
+    assert!(unit.require_expansion(&other, 1).is_err());
+}
+
+#[test]
+fn checked_movement_coordinates_preserve_exact_large_indices_without_storage() {
+    let extent = 9_007_199_254_740_995;
+    let metadata = ShapeMetadata::contiguous(&[2, extent], RuntimeDType::I8).unwrap();
+    let mut coordinates = [0, 0];
+    let linear = extent * 2 - 1;
+    metadata
+        .unravel_into(linear, |axis, value| coordinates[axis] = value)
+        .unwrap();
+    assert_eq!(coordinates, [1, extent - 1]);
+    assert_eq!(
+        metadata.flat_index_by(|axis| coordinates[axis]).unwrap(),
+        linear as usize
+    );
+    assert!(metadata
+        .unravel_into(extent * 2, |_, _| panic!("invalid index must not write"))
+        .is_err());
+    assert!(metadata.flat_index_by(|_| -1).is_err());
+}
+
+#[test]
+fn affine_metadata_checks_exact_extents_and_offsets_without_storage() {
+    let extent = 9_007_199_254_740_995;
+    let large = ShapeMetadata::contiguous(&[extent], RuntimeDType::I8).unwrap();
+    assert_eq!(
+        large.strided(&[2]).unwrap().shape(),
+        &[4_503_599_627_370_498]
+    );
+    assert_eq!(
+        large
+            .affine_index_by(|_| (4_503_599_627_370_496, 1, 2))
+            .unwrap(),
+        9_007_199_254_740_993_usize
+    );
+    assert_eq!(large.padded(&[1], &[2]).unwrap().shape(), &[extent + 3]);
+    assert_eq!(
+        large.shrunk(&[extent], &[extent]).unwrap().elements().get(),
+        0
+    );
+    assert!(matches!(
+        large.padded(&[i64::MAX], &[0]),
+        Err(MetadataError::Overflow(_))
+    ));
+    assert!(large.padded(&[-1], &[0]).is_err());
+    assert!(large.shrunk(&[0], &[extent + 1]).is_err());
+    assert!(large.strided(&[0]).is_err());
+    assert!(large.strided(&[]).is_err());
+    assert!(matches!(
+        large.affine_index_by(|_| (i64::MAX, 1, 2)),
+        Err(MetadataError::Overflow(_))
+    ));
+    assert!(large.affine_index_by(|_| (extent, 0, 1)).is_err());
+    let empty = ShapeMetadata::contiguous(&[0, i64::MAX], RuntimeDType::I8).unwrap();
+    assert!(empty.padded(&[0, 0], &[0, 1]).is_err());
+    assert!(empty.strided(&[1, -1]).is_err());
+    assert!(empty.affine_index_by(|_| (0, 0, 1)).is_err());
+    let wide = ShapeMetadata::contiguous(&[1], RuntimeDType::F64).unwrap();
+    assert!(wide.padded(&[0], &[i64::MAX / 8]).is_err());
 }

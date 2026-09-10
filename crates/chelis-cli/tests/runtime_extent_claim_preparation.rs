@@ -407,7 +407,7 @@ fn observe(case: &Case) -> Value {
     let report: Value = serde_json::from_slice(&check.stdout)
         .expect("checker JSON, not a style/parse transport failure");
     assert_eq!(
-        report["components"]["parse"], 1,
+        report["components"]["parse"], 1.0,
         "fixture must parse: {}: {report}",
         case.id
     );
@@ -585,7 +585,7 @@ fn contract_failures(case: &Case, observation: &Value) -> Vec<String> {
         }
         return failures;
     }
-    if check["success"] != true || check["score"] != 1 || check["errors"] != json!([]) {
+    if check["success"] != true || check["score"] != 1.0 || check["errors"] != json!([]) {
         failures.push(format!("{}.check: expected score 1 and no errors", case.id));
     }
     if let Some(signature) = case.signature
@@ -700,7 +700,6 @@ fn claimed_extent_contract() {
 
 /// #1377: a literal result claim retains its required failure after inlining.
 #[test]
-#[ignore = "manual pending acceptance: B2b-1 declaration and call-claim transport"]
 fn literal_result_claim_contract() {
     assert!(gcc_available(), "C toolchain required; no lane may skip");
     let fixtures: Vec<_> = cases()
@@ -708,6 +707,131 @@ fn literal_result_claim_contract() {
         .filter(|case| case.issue == 1377)
         .collect();
     assert_eq!(fixtures.len(), 6, "export/binding/root, satisfied/mismatch");
+    let failures: Vec<_> = fixtures
+        .iter()
+        .flat_map(|case| contract_failures(case, &observe(case)))
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Independent expected-value and rejection evidence for the executable example.
+#[test]
+fn literal_extent_example_contract() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let source = include_str!("../../../examples/literal_extent_claim.ch");
+    for good in [true, false] {
+        let source = if good {
+            source.to_owned()
+        } else {
+            let changed = source.replace("3.0f32, 4.0f32]", "3.0f32, 4.0f32, 5.0f32]");
+            assert_ne!(
+                source, changed,
+                "negative example must change the actual extent"
+            );
+            changed
+        };
+        let case = Case {
+            id: format!("literal.example.{good}"),
+            issue: 1377,
+            source,
+            signature: None,
+            exported: None,
+            expected: if good {
+                Expected::Tensor(vec![4], vec![7.0; 4])
+            } else {
+                Expected::Domain("load", &["claimed = 4", "x axis 0 = 5"])
+            },
+        };
+        let observation = observe(&case);
+        assert_eq!(
+            observation["check"]["signatures"]["fill_four"],
+            "(tensor[f32], tensor[rows, f32]) -> tensor[4, f32]"
+        );
+        let failures = contract_failures(&case, &observation);
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+}
+
+/// [04] §4.7 and [06] §5.2: a call's runtime obligation survives another
+/// inlining boundary and remains observable when its result is discarded.
+#[test]
+fn literal_claim_transport_survives_nested_and_unused_calls() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut fixtures = Vec::new();
+    for good in [true, false] {
+        let x = vector(if good { 4 } else { 5 });
+        let seed = Input {
+            dims: vec![],
+            values: vec![7.0],
+        };
+        let definitions = "def g(b: tensor[f32], x: tensor[rows, f32]) -> tensor[4, f32] = insert(b, 0i32, shape(x, 0i32))\ndef f(b: tensor[f32], x: tensor[rows, f32]) -> tensor[4, f32] = g(b, x)";
+        call_matrix(
+            &mut fixtures,
+            "literal.nested",
+            1377,
+            definitions,
+            "(tensor[f32], tensor[rows, f32]) -> tensor[4, f32]",
+            vec![seed.clone(), x.clone()],
+            if good {
+                Expected::Tensor(vec![4], vec![7.0; 4])
+            } else {
+                Expected::Domain("load", &["claimed = 4", "x axis 0 = 5"])
+            },
+        );
+        fixtures.push(Case {
+            id: format!("literal.unused.{}", if good { "satisfied" } else { "mismatch" }),
+            issue: 1377,
+            source: format!("{definitions}\ndef main() -> tensor[1, f32] = {{\n  _ = f({}, {})\n  to_tensor([9.0f32])\n}}\n", literal(&seed), literal(&x)),
+            signature: Some("(tensor[f32], tensor[rows, f32]) -> tensor[4, f32]"),
+            exported: None,
+            expected: if good { Expected::Tensor(vec![1], vec![9.0]) }
+            else { Expected::Domain("load", &["claimed = 4", "x axis 0 = 5"]) },
+        });
+        fixtures.push(Case {
+            id: format!("literal.unused_existing.{}", if good { "satisfied" } else { "mismatch" }),
+            issue: 1377,
+            source: format!("{definitions}\ndef main() -> tensor[f32] = {{\n  b = {}\n  _ = f(b, {})\n  b\n}}\n", literal(&seed), literal(&x)),
+            signature: Some("(tensor[f32], tensor[rows, f32]) -> tensor[4, f32]"),
+            exported: None,
+            expected: if good { Expected::Tensor(vec![], vec![7.0]) }
+            else { Expected::Domain("load", &["claimed = 4", "x axis 0 = 5"]) },
+        });
+        for (id, bindings, source) in [
+            ("literal.tensor_alias", "y = x", "y"),
+            ("literal.tensor_alias_chain", "y = x\n  z = y", "z"),
+            ("literal.tensor_alias_borrow", "y = x", "&y"),
+        ] {
+            call_matrix(
+                &mut fixtures,
+                id,
+                1377,
+                &format!(
+                    "def f(b: tensor[f32], x: tensor[rows, f32]) -> tensor[4, f32] = {{\n  {bindings}\n  insert(b, 0i32, shape({source}, 0i32))\n}}"
+                ),
+                "(tensor[f32], tensor[rows, f32]) -> tensor[4, f32]",
+                vec![seed.clone(), x.clone()],
+                if good {
+                    Expected::Tensor(vec![4], vec![7.0; 4])
+                } else {
+                    Expected::Domain("load", &["claimed = 4", "x axis 0 = 5"])
+                },
+            );
+        }
+        call_matrix(
+            &mut fixtures,
+            "literal.tensor_alias_shadow",
+            1377,
+            "def f(b: tensor[f32], x: tensor[rows, f32], z: tensor[cols, f32]) -> tensor[4, f32] = {\n  y = x\n  y = z\n  insert(b, 0i32, shape(y, 0i32))\n}",
+            "(tensor[f32], tensor[rows, f32], tensor[cols, f32]) -> tensor[4, f32]",
+            vec![seed, vector(if good { 5 } else { 4 }), x],
+            if good {
+                Expected::Tensor(vec![4], vec![7.0; 4])
+            } else {
+                Expected::Domain("load", &["claimed = 4", "z axis 0 = 5"])
+            },
+        );
+    }
+    assert_eq!(fixtures.len(), 34);
     let failures: Vec<_> = fixtures
         .iter()
         .flat_map(|case| contract_failures(case, &observe(case)))
@@ -783,7 +907,7 @@ fn acceptance_cannot_be_satisfied_by_equal_wrong_answers_or_missing_roots() {
         exported: None,
     };
     let run = json!({"stage":"execute", "success":true, "stdout":"out = tensor(shape=[5], data=[7, 7, 7, 7, 7])", "stderr":""});
-    let mut observed = json!({"check":{"success":true,"score":1,"errors":[]},"eval":run,"c":run});
+    let mut observed = json!({"check":{"success":true,"score":1.0,"errors":[]},"eval":run,"c":run});
     assert_eq!(contract_failures(&case, &observed).len(), 2);
     for lane in ["eval", "c"] {
         observed[lane]["stdout"] = "out = tensor(shape=[4], data=[7, 7, 7, 7])".into();
@@ -806,7 +930,7 @@ fn claims_and_traps_require_their_own_evidence() {
         exported: None,
     };
     let ok = json!({"stage":"execute", "success":true, "stdout":"out = tensor(shape=[4], data=[7, 7, 7, 7])", "stderr":""});
-    let mut observed = json!({"check":{"success":true,"score":1,"errors":[],"signatures":{"f":"() -> tensor[*, f32]"}},"eval":ok,"c":ok});
+    let mut observed = json!({"check":{"success":true,"score":1.0,"errors":[],"signatures":{"f":"() -> tensor[*, f32]"}},"eval":ok,"c":ok});
     assert_eq!(
         contract_failures(&case, &observed).len(),
         1,
@@ -874,4 +998,217 @@ fn trap_context_keeps_source_axis_and_signed_value_together() {
         contract_failures(&case, &observed).is_empty(),
         "context punctuation and record order are not normative"
     );
+}
+
+#[test]
+fn helper_signature_guard_order_contract() {
+    let mut fixtures = Vec::new();
+    let seed = Input {
+        dims: vec![],
+        values: vec![7.0],
+    };
+    for (z, a, expected) in [
+        (4, 3, Expected::Tensor(vec![4, 3], vec![7.0; 12])),
+        (
+            5,
+            3,
+            Expected::Domain("load", &["claimed = 4", "z axis 0 = 5"]),
+        ),
+        (
+            5,
+            6,
+            Expected::Domain("load", &["claimed = 4", "z axis 0 = 5"]),
+        ),
+        (
+            4,
+            6,
+            Expected::Domain("load", &["claimed = 3", "a axis 0 = 6"]),
+        ),
+    ] {
+        call_matrix(
+            &mut fixtures,
+            &format!("helper_order.multi.{z}.{a}"),
+            1277,
+            "def f(b: tensor[f32], z: tensor[rows, f32], a: tensor[cols, f32]) -> tensor[4, 3, f32] = insert(insert(b, 0i32, shape(a, 0i32)), 0i32, shape(z, 0i32))",
+            "(tensor[f32], tensor[rows, f32], tensor[cols, f32]) -> tensor[4, 3, f32]",
+            vec![seed.clone(), vector(z), vector(a)],
+            expected,
+        );
+    }
+    for (x, z, expected) in [
+        (4, 4, Expected::Tensor(vec![], vec![7.0])),
+        (
+            4,
+            5,
+            Expected::Domain("load", &["claimed = 4", "x axis 0 = 5"]),
+        ),
+        (
+            5,
+            6,
+            Expected::Domain("load", &["claimed = 4", "x axis 0 = 5"]),
+        ),
+    ] {
+        call_matrix(
+            &mut fixtures,
+            &format!("helper_order.repeated.{x}.{z}"),
+            1277,
+            "def g(b: tensor[f32], x: tensor[n, f32]) -> tensor[4, f32] = insert(b, 0i32, shape(x, 0i32))\ndef f(b: tensor[f32], x: tensor[rows, f32], z: tensor[cols, f32]) -> tensor[f32] = {\n  _ = g(b, x)\n  _ = g(b, z)\n  b\n}",
+            "(tensor[f32], tensor[rows, f32], tensor[cols, f32]) -> tensor[f32]",
+            vec![seed.clone(), vector(x), vector(z)],
+            expected,
+        );
+    }
+    for (actual, expected) in [
+        (4, Expected::Tensor(vec![4], vec![7.0; 4])),
+        (
+            5,
+            Expected::Domain("load", &["claimed = 4", "x axis 0 = 5"]),
+        ),
+    ] {
+        call_matrix(
+            &mut fixtures,
+            &format!("helper_order.scalar_alias.{actual}"),
+            1277,
+            "def f(b: tensor[f32], x: tensor[rows, f32]) -> tensor[4, f32] = {\n  n = shape(x, 0i32)\n  m = n\n  insert(b, 0i32, m)\n}",
+            "(tensor[f32], tensor[rows, f32]) -> tensor[4, f32]",
+            vec![seed.clone(), vector(actual)],
+            expected,
+        );
+    }
+    for (z, a, q, expected) in [
+        (2, 3, 2, Expected::Tensor(vec![2, 3, 2], vec![7.0; 12])),
+        (
+            5,
+            6,
+            5,
+            Expected::Domain("load", &["claimed = 2", "z axis 0 = 5"]),
+        ),
+        (
+            2,
+            6,
+            5,
+            Expected::Domain("load", &["claimed = 3", "a axis 0 = 6"]),
+        ),
+        (
+            2,
+            6,
+            2,
+            Expected::Domain("load", &["claimed = 3", "a axis 0 = 6"]),
+        ),
+        (
+            2,
+            3,
+            5,
+            Expected::Domain("load", &["claimed = 2", "q axis 0 = 5"]),
+        ),
+    ] {
+        call_matrix(
+            &mut fixtures,
+            &format!("interleaved.{z}.{a}.{q}"),
+            1277,
+            "def f(b: tensor[f32], z: tensor[rows, f32], a: tensor[cols, f32], q: tensor[depth, f32]) -> tensor[2, 3, 2, f32] = insert(insert(insert(b, 0i32, shape(q, 0i32)), 0i32, shape(a, 0i32)), 0i32, shape(z, 0i32))",
+            "(tensor[f32], tensor[rows, f32], tensor[cols, f32], tensor[depth, f32]) -> tensor[2, 3, 2, f32]",
+            vec![
+                Input {
+                    dims: vec![],
+                    values: vec![7.0],
+                },
+                vector(z),
+                vector(a),
+                vector(q),
+            ],
+            expected,
+        );
+    }
+    let start = fixtures.len();
+    for (q, r, expected) in [
+        (3, 2, Expected::Tensor(vec![], vec![18.0])),
+        (
+            4,
+            5,
+            Expected::Domain("load", &["a axis 0 = 3", "q axis 0 = 4"]),
+        ),
+        (
+            3,
+            5,
+            Expected::Domain("load", &["z axis 0 = 2", "r axis 0 = 5"]),
+        ),
+    ] {
+        call_matrix(
+            &mut fixtures,
+            &format!("helper_order.named.{q}.{r}"),
+            1277,
+            "def f(z: tensor[rows, f32], a: tensor[cols, f32], q: tensor[cols, f32], r: tensor[rows, f32]) -> tensor[f32] = add(sum(add(z, r), 0i32), sum(add(a, q), 0i32))",
+            "(tensor[rows, f32], tensor[cols, f32], tensor[cols, f32], tensor[rows, f32]) -> tensor[f32]",
+            vec![vector(2), vector(3), vector(q), vector(r)],
+            expected,
+        );
+    }
+    for (a, q, expected) in [
+        (
+            3,
+            2,
+            Expected::Tensor(vec![2, 3], vec![2.0, 2.0, 2.0, 4.0, 4.0, 4.0]),
+        ),
+        (
+            6,
+            5,
+            Expected::Domain("load", &["claimed = 3", "a axis 0 = 6"]),
+        ),
+        (
+            3,
+            5,
+            Expected::Domain("load", &["z axis 0 = 2", "q axis 0 = 5"]),
+        ),
+    ] {
+        call_matrix(
+            &mut fixtures,
+            &format!("helper_order.mixed.{a}.{q}"),
+            1277,
+            "def f(z: tensor[rows, f32], a: tensor[cols, f32], q: tensor[rows, f32]) -> tensor[rows, 3, f32] = insert(add(z, q), 1i32, shape(a, 0i32))",
+            "(tensor[rows, f32], tensor[cols, f32], tensor[rows, f32]) -> tensor[rows, 3, f32]",
+            vec![vector(2), vector(a), vector(q)],
+            expected,
+        );
+    }
+    let bindings = fixtures
+        .drain(start..)
+        .filter(|case| case.exported.is_none() && !case.source.contains("def main()"))
+        .collect::<Vec<_>>();
+    fixtures.extend(bindings);
+    let example = include_str!("../../../examples/ordered_extent_claims.ch");
+    for (id, source, expected) in [
+        (
+            "match",
+            example.to_owned(),
+            Expected::Tensor(vec![4, 3], vec![7.0; 12]),
+        ),
+        (
+            "mismatch",
+            example
+                .replace("3.0f32, 4.0f32])", "3.0f32, 4.0f32, 5.0f32])")
+                .replace(
+                    "2.0f32, 3.0f32]))",
+                    "2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]))",
+                ),
+            Expected::Domain("load", &["claimed = 4", "z axis 0 = 5"]),
+        ),
+    ] {
+        fixtures.push(Case {
+            id: format!("helper_order.example.{id}"),
+            issue: 1277,
+            source,
+            signature: None,
+            expected,
+            exported: None,
+        });
+    }
+    let mut failures = Vec::new();
+    for case in &fixtures {
+        let observed = observe(case);
+        println!("{}: {}", case.id, observed);
+        failures.extend(contract_failures(case, &observed));
+    }
+    assert_eq!(fixtures.len(), 50);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

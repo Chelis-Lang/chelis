@@ -6,7 +6,7 @@
 //! (shrink, stride, pad, permute, expand). The R3 sibling-sweep audit
 //! identified 13 additional infer-time int-literal extractors in
 //! `crates/chelis-types/src/infer.rs` that share the same cast-bypass
-//! antipattern in different domains: reductions, conv2d helpers,
+//! antipattern in different domains: reductions, conv helpers,
 //! gather/scatter, shape lookup, split, softmax, vmap.
 //!
 //! Each test in this file pins one cast-wrapped form that MUST trip the
@@ -319,39 +319,39 @@ def f(m: tensor[4, 4, f32]) -> tensor[4, f32] = diagonal(m, cast(0, int32), cast
 }
 
 // ---------------------------------------------------------------------------
-// conv2d stride/padding (validator + derived-output-type + concrete-spatial).
-// Sites: `extract_typed_scalar_literal` (~line 5874), used by the conv2d
-// validator (~line 5413); `derive_conv2d_output_type` (~lines 5720, 5721);
-// `compute_concrete_conv2d_spatial` (~lines 11722, 11723).
+// conv stride/padding (validator + derived-output-type + concrete-spatial).
+// Sites: `extract_typed_scalar_literal` (~line 5874), used by the conv
+// validator (~line 5413); `derive_conv_output_type` (~lines 5720, 5721);
+// `compute_concrete_conv_spatial` (~lines 11722, 11723).
 // Spec: spec/05 §471-483 -- stride must be positive; padding non-negative.
 // ---------------------------------------------------------------------------
 
-/// EXPECT: `conv2d(&x, &k, cast(0, int32), 0)` is rejected with the
-/// conv2d positive-stride diagnostic. Without the cast-aware fix the
+/// EXPECT: `conv(&x, &k, [cast(0i64, int64), cast(0i64, int64)], [(0i64, 0i64), (0i64, 0i64)])` is rejected with the
+/// conv positive-stride diagnostic. Without the cast-aware fix the
 /// cast(0, int32) was rejected with the WRONG diagnostic
 /// (`requires a literal integer stride`) because `extract_int_literal`
 /// returned None on the cast wrapper. After the swap to
 /// `extract_int_for_dim`, the cast peels to 0 and the actual
 /// `positive stride` check fires.
 #[test]
-fn issue216_conv2d_cast_wrapped_zero_stride_is_error() {
+fn issue216_conv_cast_wrapped_zero_stride_is_error() {
     let src = r#"
 def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
-  conv2d(&x, &k, cast(0, int32), 0)
+  conv(&x, &k, [cast(0i64, int64), cast(0i64, int64)], [(0i64, 0i64), (0i64, 0i64)])
 "#;
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
-    let rep = res.expect_err("expected check to fail on cast-wrapped zero conv2d stride");
+    let rep = res.expect_err("expected check to fail on cast-wrapped zero conv stride");
     // Lock the post-fix diagnostic: "requires a positive stride, got 0".
     // Pre-fix the message was "requires a literal integer stride", which
     // is the wrong layer (the cast was a literal int, just wrapped).
     assert!(
         rep.errors
             .iter()
-            .any(|e| e.message.to_lowercase().contains("conv2d")
+            .any(|e| e.message.to_lowercase().contains("conv")
                 && e.message.contains("positive")
                 && e.message.contains("stride")),
-        "expected the conv2d positive-stride diagnostic (post-fix), got {:?}",
+        "expected the conv positive-stride diagnostic (post-fix), got {:?}",
         rep.errors
             .iter()
             .map(|e| e.message.clone())
@@ -359,25 +359,25 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
     );
 }
 
-/// EXPECT: `conv2d(&x, &k, 1, cast(-1, int32))` is rejected with the
-/// conv2d non-negative-padding diagnostic. Same pre-vs-post-fix story
+/// EXPECT: `conv(&x, &k, [1i64, 1i64], [(cast(-1i64, int64), cast(-1i64, int64)), (cast(-1i64, int64), cast(-1i64, int64))])` is rejected with the
+/// conv non-negative-padding diagnostic. Same pre-vs-post-fix story
 /// as the zero-stride case.
 #[test]
-fn issue216_conv2d_cast_wrapped_negative_padding_is_error() {
+fn issue216_conv_cast_wrapped_negative_padding_is_error() {
     let src = r#"
 def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
-  conv2d(&x, &k, 1, cast(-1, int32))
+  conv(&x, &k, [1i64, 1i64], [(cast(-1i64, int64), cast(-1i64, int64)), (cast(-1i64, int64), cast(-1i64, int64))])
 "#;
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
-    let rep = res.expect_err("expected check to fail on cast-wrapped negative conv2d padding");
+    let rep = res.expect_err("expected check to fail on cast-wrapped negative conv padding");
     assert!(
         rep.errors
             .iter()
-            .any(|e| e.message.to_lowercase().contains("conv2d")
+            .any(|e| e.message.to_lowercase().contains("conv")
                 && e.message.contains("non-negative")
                 && e.message.contains("padding")),
-        "expected the conv2d non-negative-padding diagnostic (post-fix), got {:?}",
+        "expected the conv non-negative-padding diagnostic (post-fix), got {:?}",
         rep.errors
             .iter()
             .map(|e| e.message.clone())
@@ -385,14 +385,14 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
     );
 }
 
-/// Positive control: `conv2d(&x, &k, cast(1, int32), cast(0, int32))`
+/// Positive control: `conv(&x, &k, [cast(1i64, int64), cast(1i64, int64)], [(cast(0i64, int64), cast(0i64, int64)), (cast(0i64, int64), cast(0i64, int64))])`
 /// type-checks cleanly. Locks the swap is the cast-peeling itself, not
 /// a regression on well-formed cast-wrapped stride/padding.
 #[test]
-fn issue216_conv2d_cast_wrapped_wellformed_typechecks() {
+fn issue216_conv_cast_wrapped_wellformed_typechecks() {
     let src = r#"
 def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6, 6, f32] =
-  conv2d(&x, &k, cast(1, int32), cast(0, int32))
+  conv(&x, &k, [cast(1i64, int64), cast(1i64, int64)], [(cast(0i64, int64), cast(0i64, int64)), (cast(0i64, int64), cast(0i64, int64))])
 "#;
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
@@ -401,7 +401,7 @@ def f(x: tensor[1, 3, 8, 8, f32], k: tensor[8, 3, 3, 3, f32]) -> tensor[1, 8, 6,
             eprintln!("unexpected error: {:?}: {}", err.kind, err.message);
         }
         panic!(
-            "expected clean check for cast-wrapped well-formed conv2d, got {} error(s)",
+            "expected clean check for cast-wrapped well-formed conv, got {} error(s)",
             rep.errors.len()
         );
     }

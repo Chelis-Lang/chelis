@@ -35,6 +35,19 @@ pub fn specialize_for_blas(dag: &Dag) -> Dag {
     crate::optimize::dead_code_eliminate(&specialized)
 }
 
+/// Preserve primitive arithmetic while applying the structural rewrites.
+///
+/// [05-OP-30] and section 4.1 pin the contraction tree and stored-width
+/// product. Recognizing its shape does not prove that a vendor GEMM has
+/// those bits, so exact C preparation cannot synthesize `BlasMatmul`.
+/// Existing explicit backend nodes are not constructed by this pass.
+pub fn specialize_for_exact_arithmetic(dag: &Dag) -> Dag {
+    let cleaned = eliminate_closed_list_noops(dag);
+    let gathered = replace_dense_gather_patterns(&cleaned);
+    let lowered = lower_unmatched_one_hot(&gathered);
+    crate::optimize::dead_code_eliminate(&lowered)
+}
+
 /// Eliminate only the M1 closed-list no-ops:
 /// identity Cast, identity Reshape, and identity Permute.
 pub fn eliminate_closed_list_noops(dag: &Dag) -> Dag {
@@ -126,7 +139,14 @@ fn replace_matmul_patterns(dag: &Dag) -> Dag {
     let mut id_map: UnordMap<NodeId, NodeId> = UnordMap::new();
 
     for node in dag.nodes() {
-        if let Some(info) = detect_matmul_pattern(dag, node.id) {
+        if let Some(info) = detect_matmul_pattern(dag, node.id)
+            // Empty contractions (including [05-OP-51]'s zero-channel
+            // convolution) retain their RISC zero/empty result. BlasMatmul's
+            // verified domain requires positive matrix dimensions.
+            && [&info.m, &info.n, &info.k]
+                .into_iter()
+                .all(|dimension| dimension.as_concrete() != Some(0))
+        {
             let a = id_map[&info.a];
             let b = id_map[&info.b];
             // The matmul-pattern detector recognizes the
@@ -134,17 +154,13 @@ fn replace_matmul_patterns(dag: &Dag) -> Dag {
             // The accumulator on the synthesized BlasMatmul follows the
             // accumulator pinned on the source `Sum` node so the WS-A0
             // §5.7.1 default propagates through specialization.
-            let accumulator = match &dag.get(node.id).map(|n| &n.op) {
-                Some(RiscOp::Sum { accumulator, .. }) => *accumulator,
-                _ => node.output_type.precision,
-            };
             let new_id = out.add_node(
                 RiscOp::BlasMatmul {
                     batch_dims: info.batch_dims.clone(),
                     m: info.m.clone(),
                     n: info.n.clone(),
                     k: info.k.clone(),
-                    accumulator,
+                    accumulator: info.accumulator,
                 },
                 vec![a, b],
                 node.output_type.clone(),
@@ -395,6 +411,8 @@ struct MatmulInfo {
     m: DimExpr,
     n: DimExpr,
     k: DimExpr,
+    sum: NodeId,
+    accumulator: Prim,
     mul: NodeId,
     expand_a: NodeId,
     expand_b: NodeId,
@@ -565,10 +583,29 @@ fn expand_extent_matches_inserted_axis(dag: &Dag, node: &DagNode, axis: usize) -
     }
 }
 
-fn detect_matmul_pattern(dag: &Dag, sum_id: NodeId) -> Option<MatmulInfo> {
-    let sum_node = dag.get(sum_id)?;
-    let sum_axis = match &sum_node.op {
-        RiscOp::Sum { axis, .. } => *axis,
+fn detect_matmul_pattern(dag: &Dag, output_id: NodeId) -> Option<MatmulInfo> {
+    let output_node = dag.get(output_id)?;
+    // Low-precision matmul now represents its f32 accumulator faithfully:
+    // Cast(Sum(Mul(...))) restores operand storage after the reduction.
+    // Accelerator selection consumes that complete graph, never an invalid
+    // low-precision Sum whose result disagrees with its accumulator.
+    let sum_node = match &output_node.op {
+        RiscOp::Cast { new_precision }
+            if matches!(new_precision, Prim::Bf16 | Prim::F16) && output_node.inputs.len() == 1 =>
+        {
+            let input = dag.get(output_node.inputs[0])?;
+            if input.output_type.precision != Prim::F32
+                || input.output_type.dims != output_node.output_type.dims
+                || *new_precision != output_node.output_type.precision
+            {
+                return None;
+            }
+            input
+        }
+        _ => output_node,
+    };
+    let (sum_axis, accumulator) = match &sum_node.op {
+        RiscOp::Sum { axis, accumulator } => (*axis, *accumulator),
         _ => return None,
     };
     if sum_node.inputs.len() != 1 || sum_node.output_type.dims.len() < 2 {
@@ -581,7 +618,7 @@ fn detect_matmul_pattern(dag: &Dag, sum_id: NodeId) -> Option<MatmulInfo> {
     // here. Other precisions (F8e4m3) fall through to the generic
     // expand+mul+sum path until a backend lift covers them.
     if !matches!(
-        sum_node.output_type.precision,
+        output_node.output_type.precision,
         Prim::F32 | Prim::F64 | Prim::Bf16 | Prim::F16
     ) {
         return None;
@@ -623,12 +660,12 @@ fn detect_matmul_pattern(dag: &Dag, sum_id: NodeId) -> Option<MatmulInfo> {
     }
     let a_ty = &dag.get(a)?.output_type;
     let b_ty = &dag.get(b)?.output_type;
-    // Operand precisions must match the sum (BLAS dispatch is by
-    // accumulator dtype) and must be in the BLAS-admitted set
-    // (sum_node.output_type.precision is already filtered to that set
-    // above).
-    if a_ty.precision != sum_node.output_type.precision
-        || b_ty.precision != sum_node.output_type.precision
+    // The backend result and operands share storage precision. The Sum
+    // independently pins arithmetic width; low-precision storage is restored
+    // only by the explicit final Cast matched above.
+    if a_ty.precision != output_node.output_type.precision
+        || b_ty.precision != output_node.output_type.precision
+        || mul_node.output_type.precision != a_ty.precision
     {
         return None;
     }
@@ -658,6 +695,8 @@ fn detect_matmul_pattern(dag: &Dag, sum_id: NodeId) -> Option<MatmulInfo> {
         m,
         n,
         k,
+        sum: sum_node.id,
+        accumulator,
         mul: mul_id,
         expand_a: expand_a_id,
         expand_b: expand_b_id,
@@ -761,6 +800,7 @@ fn node_has_contiguous_matrix_slices(dag: &Dag, id: NodeId, matrix_rank: usize) 
         // never matrix data, so it is not a contiguous-matrix-slice source
         // (chelis#513/#558).
         | RiscOp::Shape { .. }
+        | RiscOp::ExtentWitness { .. }
         | RiscOp::Count { .. } => false,
     }
 }
@@ -773,7 +813,10 @@ fn append_consumed_provenance(
     info: &MatmulInfo,
 ) {
     append_node_provenance(out, target, sum_node);
-    for id in [info.mul, info.expand_a, info.expand_b] {
+    for id in [info.sum, info.mul, info.expand_a, info.expand_b] {
+        if id == sum_node.id {
+            continue;
+        }
         if let Some(node) = dag.get(id) {
             append_node_provenance(out, target, node);
         }

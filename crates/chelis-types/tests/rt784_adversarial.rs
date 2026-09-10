@@ -2,9 +2,9 @@
 //!
 //! Two properties of the #784 hotfix guard (`shape_override_operand_error`):
 //!
-//!  A. GUARD BREADTH — the annotation-writeback clobber the conv2d test pins
+//!  A. GUARD BREADTH — the annotation-writeback clobber the conv test pins
 //!     must not reproduce for the *other* guarded shape-computed builtins.
-//!     Same shape as the conv2d fixture (three top-level defs; the operands
+//!     Same shape as the conv fixture (three top-level defs; the operands
 //!     are separate defs and thus unbound → `Error` in the consuming def's
 //!     body-annotation scope), for `matmul`, `sum`, and 3-arg `expand`: the
 //!     app node's written-back `type:` must stay the concrete `t-tensor`,
@@ -16,7 +16,7 @@
 //!     builtin fed one unbound (reported-error) operand in normal position
 //!     must STILL be rejected (never check clean) with EXACTLY ONE diagnostic
 //!     (the unbound var), and never ICE. Covers all five signature checkers:
-//!     matmul, conv2d, a reduction (sum), expand, layer_norm.
+//!     matmul, conv, a reduction (sum), expand, layer_norm.
 
 use chelis_deep::parser::parse_str;
 use chelis_deep::{Atom, Expr};
@@ -239,20 +239,20 @@ fn matmul_unbound_operand_single_diagnostic_no_accept() {
 }
 
 #[test]
-fn conv2d_unbound_operand_rejected_no_accept_no_ice() {
-    // conv2d additionally carries a pre-existing IR-fitness validator
-    // (`validate_conv2d`, issue #186) that fires on non-concrete argument
+fn conv_unbound_operand_rejected_no_accept_no_ice() {
+    // conv additionally carries a pre-existing IR-fitness validator
+    // (`validate_conv`, issue #186) that fires on non-concrete argument
     // metadata, independent of and untouched by the #784 guard. So the
     // correct rejection here is TWO diagnostics: the unbound var plus the
-    // conv2d metadata validator. Not a flood, not a silent accept, no ICE.
+    // conv metadata validator. Not a flood, not a silent accept, no ICE.
     let msgs = reject_messages(
-        "def driver(k: tensor[1, 1, 1, 1, f32]) -> f32 = {\n  y = conv2d(missing_x, k, 1, 0)\n  cast(0.0, f32)\n}\n",
-        "conv2d main-pass",
+        "def driver(k: tensor[1, 1, 1, 1, f32]) -> f32 = {\n  y = conv(missing_x, k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])\n  cast(0.0, f32)\n}\n",
+        "conv main-pass",
     );
     assert!(
         msgs.iter()
             .any(|m| m.contains("unbound variable") && m.contains("missing_x")),
-        "conv2d main-pass: must report the unbound var; got {msgs:?}",
+        "conv main-pass: must report the unbound var; got {msgs:?}",
     );
     let non_unbound: Vec<_> = msgs
         .iter()
@@ -261,15 +261,15 @@ fn conv2d_unbound_operand_rejected_no_accept_no_ice() {
     assert!(
         non_unbound
             .iter()
-            .all(|m| m.contains("conv2d") && m.contains("concrete tensor argument metadata")),
-        "conv2d main-pass: the only non-unbound diagnostic must be the #186 metadata \
+            .all(|m| m.contains("conv") && m.contains("concrete tensor argument metadata")),
+        "conv main-pass: the only non-unbound diagnostic must be the #186 metadata \
          validator (no flood, no leaked bare-var cascade); got {msgs:?}",
     );
     assert!(
         !msgs
             .iter()
             .any(|m| m.to_lowercase().contains("internal compiler error")),
-        "conv2d main-pass: never an ICE; got {msgs:?}",
+        "conv main-pass: never an ICE; got {msgs:?}",
     );
 }
 
@@ -309,7 +309,7 @@ fn expand_error_size_operand_single_diagnostic_no_accept() {
 #[test]
 fn layer_norm_unbound_operand_single_diagnostic_no_accept() {
     assert_single_unbound(
-        "def driver(g: tensor[4, f32], b: tensor[4, f32]) -> f32 = {\n  y = layer_norm(missing_x, g, b)\n  cast(0.0, f32)\n}\n",
+        "def driver(g: tensor[4, f32], b: tensor[4, f32]) -> f32 = {\n  y = layer_norm(missing_x, g, b, 0.00001f32)\n  cast(0.0, f32)\n}\n",
         "missing_x",
         "layer_norm main-pass",
     );

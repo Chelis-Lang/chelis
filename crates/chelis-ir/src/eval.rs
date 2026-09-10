@@ -1933,74 +1933,6 @@ fn live_mask_for_roots(dag: &Dag, roots: &[NodeId]) -> Vec<bool> {
     live
 }
 
-/// The eval lane's entry guards: for each `Entry`-placed class, the claim
-/// name and the two input-tensor axes a guard compares, named by input label
-/// so the caller's own bindings answer them.
-///
-/// One derivation, three lanes (C2.7): this reads the same
-/// `derive_runtime_dim_classes` and the same `member_load_axis` the C and HIP
-/// emitters read, so a claim cannot be identified one way for a compiled
-/// program and another way for an evaluated one.
-type EntryDimGuard = (String, (String, usize), (String, usize));
-
-/// The unit-extent claims this graph checks at entry, as
-/// `(input label, axis)` pairs to read.
-///
-/// The claimed value is the literal 1, so unlike [`EntryDimGuard`] there is no
-/// canonical witness to carry: the guard compares one read against a constant.
-/// Everything else is shared with the class path, `derive_unit_extent_claims`
-/// and `member_load_axis` included, so a claim cannot be identified one way
-/// for a compiled program and another way for an evaluated one.
-fn entry_unit_extent_guards(dag: &Dag) -> Vec<(String, usize)> {
-    let label = |id: NodeId| match dag.get(id).map(|node| &node.op) {
-        Some(RiscOp::Load { name }) => Some(name.as_str().to_string()),
-        _ => None,
-    };
-    let mut guards = Vec::new();
-    for claim in crate::axis_sources::derive_unit_extent_claims(dag) {
-        if claim.placement(dag) != crate::axis_sources::GuardPlacement::Entry {
-            continue;
-        }
-        let Some((load, axis)) = crate::axis_sources::member_load_axis(dag, &claim.member()) else {
-            continue;
-        };
-        let Some(name) = label(load) else {
-            continue;
-        };
-        guards.push((name, axis));
-    }
-    guards
-}
-
-fn entry_dim_guards(dag: &Dag) -> Vec<EntryDimGuard> {
-    let label = |id: NodeId| match dag.get(id).map(|node| &node.op) {
-        Some(RiscOp::Load { name }) => Some(name.as_str().to_string()),
-        _ => None,
-    };
-    let mut guards = Vec::new();
-    for class in crate::axis_sources::derive_runtime_dim_classes(dag) {
-        if class.placement(dag) != crate::axis_sources::GuardPlacement::Entry {
-            continue;
-        }
-        let crate::axis_sources::DimClaim::Name(name) = &class.claim else {
-            continue;
-        };
-        let mut witnesses = class.members.iter().filter_map(|member| {
-            let (load, axis) = crate::axis_sources::member_load_axis(dag, member)?;
-            Some((label(load)?, axis))
-        });
-        let Some(canonical) = witnesses.next() else {
-            continue;
-        };
-        for witness in witnesses {
-            if witness != canonical {
-                guards.push((name.clone(), canonical.clone(), witness));
-            }
-        }
-    }
-    guards
-}
-
 fn eval_tensor_internal<F>(
     dag: &Dag,
     live: Option<&[bool]>,
@@ -2078,54 +2010,12 @@ where
         &symbolic_dim_load_inputs,
         &mut load_input,
     )?;
-    // chelis#1277 B2h: both entry guards run BEFORE symbolic-binding
-    // inference. `infer_symbolic_bindings_from_inputs` rejects two `Load`s
-    // that disagree on one binder with its own wording, so with the guards
-    // after it a `Load`/`Load` class on one binder never reached [04-NUM-9]'s
-    // line on eval while the C kernel's prologue rendered it (C2.7). The
-    // inference check remains the backstop for a binder no class covers.
-    // chelis#1277 C1.3: the eval lane's entry guards, from the same scoped
-    // grouping the C and HIP lanes read. Both derivations call
-    // `axis_sources::split_by_scope`: the prologues read
-    // `derive_dim_witnesses`, the guard sites and this lane read
-    // `derive_runtime_dim_classes`, and one scoping serves both. Round 2 found
-    // the scoping in the first alone, which is two derivations that can
-    // disagree. `spec/04-type-system.md` section 4.7 evaluates
-    // a class whose operands are all interface values "at function entry, in
-    // declared signature order, before any other operation of the function",
-    // so they run here, once every input is resolved and before the first
-    // node evaluates.
-    //
-    // The classes come from `dag`, not `bound_dag`: binding substitutes each
-    // resolved symbol into the types, so on the bound graph the claims are
-    // literals and no `Name` class survives to guard. The EXTENTS come from
-    // `resolved_inputs`, which is the point - a claim is checked against what
-    // the caller actually passed, and reading the inputs rather than the
-    // evaluated `values` keeps the guard independent of the live mask. A
-    // witness the caller did not supply is skipped: chelis#991 makes a dead
-    // generic declaration's input not a requirement of the selected root, and
-    // an absent witness cannot disagree with anything.
-    // chelis#1277 B2h: a declared LITERAL input extent is checked here too,
-    // in declared signature order, before any class guard and before the
-    // first node evaluates. The C lane checks it in the kernel's ABI
-    // preamble (`emit.rs`, the `known_dim_size` arm), which
-    // `spec/design/runtime_extents.md` Slice B narrows to exactly this
-    // complement: an axis whose literal came from a genuine declaration and
-    // that no class covers, because `is_member` keeps an external `Load`
-    // axis out of a `Literal` claim rather than mint a class per
-    // literal-shaped input. A literal result claim propagates onto the input
-    // it reads through inference (chelis#1377's `f(b, x: tensor[n]) ->
-    // tensor[4]` lowers `x` as `[4]`), so on both lanes the disagreement
-    // between the claim and the caller's tensor is visible only here. Before
-    // host-lane def applications were routed through this evaluator no
-    // caller could reach a literal-declared `Load` with a disagreeing
-    // extent; now `chelis eval` does, and without this check it printed the
-    // caller's extent where C traps. The rendering is C's: section 4.7's
-    // context line, then [04-NUM-9]'s complete line with `<op>` = `load`.
-    // The rank check mirrors the same preamble's `expected rank` abort for a
-    // declaration that names every axis; an empty `dims` is skipped because
-    // it is also the lowerer's untyped placeholder (`default_type()`), which
-    // an API binding of any rank legitimately fills.
+    // Guard claims come from the unbound DAG; observed extents come from
+    // actual caller inputs. Both host lanes consume the same individual
+    // schedule before symbolic inference or dependent operations. Missing
+    // inputs belonging only to an unrelated root remain optional (#991).
+    let entry_guards = crate::axis_sources::entry_extent_guards(dag);
+    // Rank and literal ABI checks remain the complement of the claim schedule.
     for node in dag.nodes() {
         let RiscOp::Load { name } = &node.op else {
             continue;
@@ -2149,6 +2039,13 @@ where
             let DimInfo::Lit(declared) = dim else {
                 continue;
             };
+            if entry_guards.iter().any(|guard| {
+                matches!(guard,
+                crate::axis_sources::EntryExtentGuard::Literal { required, observed }
+                    if *required == *declared && *observed == (node.id, axis))
+            }) {
+                continue;
+            }
             let Some(observed) = value.shape.get(axis).copied() else {
                 continue;
             };
@@ -2161,59 +2058,44 @@ where
         }
     }
 
-    for (name, canonical, member) in entry_dim_guards(dag) {
-        let extent = |witness: (&str, usize)| {
-            resolved_inputs
-                .get(witness.0)
-                .and_then(|value| value.shape.get(witness.1).copied())
+    for guard in entry_guards {
+        use crate::axis_sources::EntryExtentGuard;
+        let read = |(load, axis): (NodeId, usize)| {
+            let RiscOp::Load { name } = &dag.get(load)?.op else {
+                return None;
+            };
+            let extent = *resolved_inputs.get(name.as_str())?.shape.get(axis)?;
+            Some((name.as_str(), axis, extent))
         };
-        let (Some(left), Some(right)) = (
-            extent((canonical.0.as_str(), canonical.1)),
-            extent((member.0.as_str(), member.1)),
-        ) else {
-            continue;
+        let context = match guard {
+            EntryExtentGuard::Named {
+                claim,
+                canonical,
+                observed,
+            } => {
+                let (Some((left_label, left_axis, left)), Some((right_label, right_axis, right))) =
+                    (read(canonical), read(observed))
+                else {
+                    continue;
+                };
+                if left == right {
+                    continue;
+                }
+                format!(
+                    "extent `{claim}`: {left_label} axis {left_axis} = {left}, {right_label} axis {right_axis} = {right}"
+                )
+            }
+            EntryExtentGuard::Literal { required, observed } => {
+                let Some((label, axis, actual)) = read(observed) else {
+                    continue;
+                };
+                if actual == required {
+                    continue;
+                }
+                format!("extent `{required}`: claimed = {required}, {label} axis {axis} = {actual}")
+            }
         };
-        if left == right {
-            continue;
-        }
-        // [04-NUM-9]'s complete line, no prefix and no suffix. `<op>` is
-        // `load` because section 4.7 fixes it for a guard whose operands are
-        // all interface values: "the `load` primitive of the later witness in
-        // signature order". The context is its own line, as the same
-        // paragraph requires, and carries the disagreeing names, the axis and
-        // each observed value.
-        return Err(format!(
-            "extent `{name}`: {} axis {} = {left}, {} axis {} = {right}\n\
-             numeric trap: domain in load at int64",
-            canonical.0, canonical.1, member.0, member.1,
-        ));
-    }
-
-    // The same-rank `expand`'s unit-extent claim, at the same point and by the
-    // same reading of the inputs as the class guard above.
-    // `spec/05-risc-primitives.md` section 2.4.1 makes the operation "a claim
-    // that the operand's extent at `axis` is 1" and sends a symbolic or
-    // runtime extent other than 1 to this guard.
-    //
-    // Order matters and B2h fixed it: the literal-extent check, then the class
-    // guard, then this, and only then `infer_symbolic_bindings_from_inputs`.
-    // The inference is a backstop that reports a targeted error for a symbol
-    // it cannot bind; running a claim guard after it would report the
-    // inference's message for a program whose real fault is a refuted claim.
-    for (label, axis) in entry_unit_extent_guards(dag) {
-        let Some(observed) = resolved_inputs
-            .get(&label)
-            .and_then(|value| value.shape.get(axis).copied())
-        else {
-            continue;
-        };
-        if observed == 1 {
-            continue;
-        }
-        return Err(format!(
-            "extent `1`: claimed = 1, {label} axis {axis} = {observed}\n\
-             numeric trap: domain in load at int64",
-        ));
+        return Err(format!("{context}\nnumeric trap: domain in load at int64"));
     }
 
     let mut prebound_dims: UnordMap<String, usize> = UnordMap::new();
@@ -2384,6 +2266,34 @@ where
                     )
                 })?;
                 finalize_wide_int("shape", out_prim, vec![], vec![extent as i64])?
+            }
+            RiscOp::ExtentWitness {
+                parameter,
+                axis,
+                requirements,
+            } => {
+                let crate::dag::RtAxis::Lit(axis) = axis;
+                let input = &values[&node.inputs[0]];
+                let observed = *input
+                    .shape
+                    .get(*axis as usize)
+                    .ok_or_else(|| format!("extent witness axis {axis} out of bounds"))?;
+                for required in requirements {
+                    let required = required
+                        .as_i64_exact()
+                        .ok_or_else(|| "extent witness requires int64".to_string())?;
+                    if i64::try_from(observed).ok() != Some(required) {
+                        return Err(format!(
+                            "extent `{required}`: claimed = {required}, {parameter} axis {axis} = {observed}\nnumeric trap: domain in load at int64"
+                        ));
+                    }
+                }
+                finalize_wide_int(
+                    "shape",
+                    out_prim,
+                    vec![],
+                    vec![i64::try_from(observed).map_err(|_| "extent exceeds int64")?],
+                )?
             }
             RiscOp::Load { name } => match resolved_inputs.get(name.as_str()) {
                 Some(value) => ingress_to_declared(name.as_str(), out_prim, value)?,
@@ -3123,7 +3033,7 @@ pub fn eval_scalar(dag: &Dag, inputs: &UnordMap<String, f64>) -> UnordMap<NodeId
 mod tests {
     use super::*;
     use crate::dag::RiscOp;
-    use crate::lower::lower_program;
+    use crate::lower::{LoweredLibrary, lower_program_to_library};
     use chelis_deep::parser::parse_str;
     use chelis_types::types::Prim;
 
@@ -4113,6 +4023,10 @@ mod tests {
     }
 
     fn lower(src: &str) -> Dag {
+        lower_library(src).dag().clone()
+    }
+
+    fn lower_library(src: &str) -> LoweredLibrary {
         let exprs = parse_str(src).expect("parse failed");
         let checked = chelis_types::check_ir_program(&exprs)
             .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors));
@@ -4120,7 +4034,7 @@ mod tests {
             .unwrap_or_else(|errors| panic!("effect check failed: {errors:?}"));
         let checked = chelis_types::check_linearity(&checked)
             .unwrap_or_else(|errors| panic!("linearity check failed: {errors:?}"));
-        lower_program(&checked)
+        lower_program_to_library(&checked)
     }
 
     #[test]
@@ -4249,7 +4163,7 @@ mod tests {
             (def {} beta (var {type: (t-tensor {} (d-lit {} 2) (t-prim {} f32))} beta))
             (def {} y
               (app {type: (t-tensor {} (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))}
-                   (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta)))
+                   (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta) (lit {type: (t-prim {} f32)} 0.00001)))
         "#;
         let dag = lower(src);
         let mut inputs = UnordMap::new();
@@ -4274,15 +4188,16 @@ mod tests {
     }
 
     #[test]
-    fn lowered_conv2d_1x1_has_correct_numeric_result() {
+    fn lowered_conv_1x1_has_correct_numeric_result() {
         let src = r#"
             (def {} x (var {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))} x))
             (def {} k (var {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 1) (d-lit {} 1) (t-prim {} f32))} k))
             (def {} y
               (app {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))}
-                   (var {} conv2d) (var {} x) (var {} k) (lit {} 1) (lit {} 0)))
+                   (var {} conv) (var {} x) (var {} k) (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 1) (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 1) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 0) (lit {type: (t-prim {} int64)} 0)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 0) (lit {type: (t-prim {} int64)} 0)) (var {} Nil)))))
         "#;
-        let dag = lower(src);
+        let library = lower_library(src);
+        let dag = library.dag();
         let mut inputs = UnordMap::new();
         inputs.insert(
             "x".into(),
@@ -4292,8 +4207,12 @@ mod tests {
             "k".into(),
             TensorValue::from_vec(vec![1, 1, 1, 1], vec![2.0]),
         );
-        let vals = eval_tensor(&dag, &inputs).unwrap();
-        let last = vals.get(dag.roots().last().expect("DAG root")).unwrap();
+        let vals = eval_tensor(dag, &inputs).unwrap();
+        let root = library
+            .symbol_table()
+            .get("y")
+            .expect("named convolution result is lowered");
+        let last = vals.get(root).unwrap();
         assert_eq!(
             *last,
             TensorValue::from_vec(vec![1, 1, 2, 2], vec![2.0, 4.0, 6.0, 8.0])
@@ -4301,15 +4220,16 @@ mod tests {
     }
 
     #[test]
-    fn lowered_conv2d_2x2_has_correct_numeric_result() {
+    fn lowered_conv_2x2_has_correct_numeric_result() {
         let src = r#"
             (def {} x (var {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 3) (d-lit {} 3) (t-prim {} f32))} x))
             (def {} k (var {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))} k))
             (def {} y
               (app {type: (t-tensor {} (d-lit {} 1) (d-lit {} 1) (d-lit {} 2) (d-lit {} 2) (t-prim {} f32))}
-                   (var {} conv2d) (var {} x) (var {} k) (lit {} 1) (lit {} 0)))
+                   (var {} conv) (var {} x) (var {} k) (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 1) (app {} (var {} Cons) (lit {type: (t-prim {} int64)} 1) (var {} Nil))) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 0) (lit {type: (t-prim {} int64)} 0)) (app {} (var {} Cons) (tuple {} (lit {type: (t-prim {} int64)} 0) (lit {type: (t-prim {} int64)} 0)) (var {} Nil)))))
         "#;
-        let dag = lower(src);
+        let library = lower_library(src);
+        let dag = library.dag();
         let mut inputs = UnordMap::new();
         inputs.insert(
             "x".into(),
@@ -4322,8 +4242,12 @@ mod tests {
             "k".into(),
             TensorValue::from_vec(vec![1, 1, 2, 2], vec![1.0, 1.0, 1.0, 1.0]),
         );
-        let vals = eval_tensor(&dag, &inputs).unwrap();
-        let last = vals.get(dag.roots().last().expect("DAG root")).unwrap();
+        let vals = eval_tensor(dag, &inputs).unwrap();
+        let root = library
+            .symbol_table()
+            .get("y")
+            .expect("named convolution result is lowered");
+        let last = vals.get(root).unwrap();
         assert_eq!(
             *last,
             TensorValue::from_vec(vec![1, 1, 2, 2], vec![12.0, 16.0, 24.0, 28.0])

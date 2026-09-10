@@ -325,6 +325,80 @@ int64_t chelis_tensor_stride(const chelis_tensor *tensor, int32_t axis);
 int64_t chelis_tensor_byte_count(const chelis_tensor *tensor);
 int64_t chelis_tensor_elementwise_index_step(const chelis_tensor *input, const chelis_tensor *domain);
 int64_t chelis_tensor_elementwise_index_step_for_shape(const chelis_tensor *input, chelis_scalar rank, const chelis_scalar *shape);
+void chelis_tensor_unravel_index(const chelis_tensor *tensor, chelis_scalar index, chelis_scalar *coordinates);
+int64_t chelis_tensor_flat_index(const chelis_tensor *tensor, const chelis_scalar *coordinates);
+void chelis_tensor_check_permute(const chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *shape, const chelis_scalar *axes);
+void chelis_tensor_check_expand(const chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *shape, int32_t axis);
+void chelis_tensor_pad_shape(const chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *before, const chelis_scalar *after, chelis_scalar *shape);
+void chelis_tensor_shrink_shape(const chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *start, const chelis_scalar *end, chelis_scalar *shape);
+void chelis_tensor_stride_shape(const chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *steps, chelis_scalar *shape);
+int64_t chelis_tensor_affine_index(const chelis_tensor *tensor, const chelis_scalar *coordinates, const chelis_scalar *offsets, const chelis_scalar *steps);
+
+typedef enum {
+    CHELIS_REDUCE_SUM = 0, CHELIS_REDUCE_COUNT = 1, CHELIS_REDUCE_MAX = 2,
+    CHELIS_REDUCE_MIN = 3, CHELIS_REDUCE_PROD = 4, CHELIS_REDUCE_ARGMAX = 5,
+    CHELIS_REDUCE_ARGMIN = 6
+} chelis_reduction_op;
+typedef struct chelis_reduction_plan chelis_reduction_plan;
+typedef enum {
+    CHELIS_SPARSE_GATHER = 0, CHELIS_SPARSE_ADD = 1,
+    CHELIS_SPARSE_REPLACE = 2, CHELIS_SPARSE_ELEMENTS = 3
+} chelis_sparse_op;
+void chelis_tensor_check_literal(chelis_scalar rank, const chelis_scalar *shape, chelis_scalar exemplar, chelis_scalar count);
+void chelis_tensor_write_literal(chelis_tensor_write *guard, chelis_scalar count, const chelis_scalar *values);
+
+// Checked valid-padding geometry; plans retain no tensor storage.
+typedef enum { CHELIS_WINDOW_SUM = 0, CHELIS_WINDOW_MEAN = 1, CHELIS_WINDOW_MAX = 2, CHELIS_WINDOW_MIN = 3, CHELIS_WINDOW_GRAD = 4 } chelis_window_op;
+typedef enum { CHELIS_WINDOW_SOURCE = 0, CHELIS_WINDOW_RESULT = 1 } chelis_window_side;
+typedef struct chelis_movement_plan chelis_movement_plan;
+typedef enum { CHELIS_MOVEMENT_EXPAND = 0, CHELIS_MOVEMENT_INSERT = 1, CHELIS_MOVEMENT_PAD = 2, CHELIS_MOVEMENT_SHRINK = 3, CHELIS_MOVEMENT_STRIDE = 4 } chelis_movement_op;
+typedef enum { CHELIS_MOVEMENT_SOURCE = 0, CHELIS_MOVEMENT_RESULT = 1 } chelis_movement_side;
+chelis_movement_plan *chelis_tensor_permute_plan(const chelis_tensor *input, chelis_scalar rank, const chelis_scalar *axes);
+chelis_movement_plan *chelis_tensor_expand_plan(const chelis_tensor *input, chelis_scalar axis, chelis_scalar size, chelis_movement_op operation);
+chelis_movement_plan *chelis_tensor_affine_plan(const chelis_tensor *input, chelis_scalar rank, const chelis_scalar *first, const chelis_scalar *second, chelis_movement_op operation);
+int64_t chelis_movement_extent(const chelis_movement_plan *plan, chelis_movement_side side, chelis_scalar axis);
+int64_t chelis_movement_count(const chelis_movement_plan *plan);
+int64_t chelis_movement_index(const chelis_movement_plan *plan, chelis_scalar linear);
+void chelis_movement_check_target(const chelis_movement_plan *plan, chelis_scalar rank, const chelis_scalar *shape);
+void chelis_movement_plan_release(chelis_movement_plan *plan);
+typedef struct chelis_window_plan chelis_window_plan;
+chelis_window_plan *chelis_tensor_window_plan(const chelis_tensor *input, chelis_scalar count, const chelis_scalar *window, const chelis_scalar *steps, chelis_window_op operation);
+int64_t chelis_window_extent(const chelis_window_plan *plan, chelis_window_side side, chelis_scalar axis);
+int64_t chelis_window_count(const chelis_window_plan *plan);
+int64_t chelis_window_index(const chelis_window_plan *plan, chelis_scalar group, chelis_scalar leaf);
+void chelis_window_check_tensor(const chelis_window_plan *plan, const chelis_tensor *tensor, chelis_window_side side);
+void chelis_window_check_target(const chelis_window_plan *plan, chelis_window_side side, chelis_scalar rank, const chelis_scalar *shape);
+void chelis_window_plan_release(chelis_window_plan *plan);
+
+typedef enum { CHELIS_MATMUL_LEFT = 0, CHELIS_MATMUL_RIGHT = 1, CHELIS_MATMUL_RESULT = 2 } chelis_matmul_part;
+typedef enum { CHELIS_MATMUL_ROWS = 0, CHELIS_MATMUL_COLUMNS = 1, CHELIS_MATMUL_REDUCTION = 2 } chelis_matmul_dimension_kind;
+typedef struct chelis_matmul_plan chelis_matmul_plan;
+chelis_matmul_plan *chelis_tensor_matmul_plan(const chelis_tensor *left, const chelis_tensor *right, chelis_scalar exemplar);
+int64_t chelis_matmul_extent(const chelis_matmul_plan *plan, chelis_scalar axis);
+int64_t chelis_matmul_dimension(const chelis_matmul_plan *plan, chelis_matmul_dimension_kind dimension);
+int64_t chelis_matmul_batch_count(const chelis_matmul_plan *plan);
+int64_t chelis_matmul_matrix_count(const chelis_matmul_plan *plan, chelis_matmul_part part);
+int64_t chelis_matmul_index(const chelis_matmul_plan *plan, chelis_matmul_part part, chelis_scalar batch, chelis_scalar element);
+void chelis_matmul_check_target(const chelis_matmul_plan *plan, chelis_scalar rank, const chelis_scalar *shape);
+void chelis_matmul_check_scratch(const chelis_matmul_plan *plan, chelis_matmul_part part, chelis_scalar exemplar);
+void chelis_matmul_check_vendor(const chelis_matmul_plan *plan, chelis_scalar maximum);
+void chelis_matmul_plan_release(chelis_matmul_plan *plan);
+typedef struct chelis_sparse_plan chelis_sparse_plan;
+chelis_sparse_plan *chelis_tensor_sparse_plan(const chelis_tensor *base, const chelis_tensor *indices, const chelis_tensor *updates, chelis_scalar axis, chelis_sparse_op operation);
+int64_t chelis_sparse_extent(const chelis_sparse_plan *plan, chelis_scalar axis);
+int64_t chelis_sparse_count(const chelis_sparse_plan *plan);
+int64_t chelis_sparse_index_slot(const chelis_sparse_plan *plan, chelis_scalar linear);
+int64_t chelis_sparse_data_index(const chelis_sparse_plan *plan, chelis_scalar linear, chelis_scalar selected);
+void chelis_sparse_check_target(const chelis_sparse_plan *plan, chelis_scalar rank, const chelis_scalar *shape);
+void chelis_sparse_plan_release(chelis_sparse_plan *plan);
+chelis_reduction_plan *chelis_tensor_reduction_plan(const chelis_tensor *tensor, chelis_scalar axis_count, const chelis_scalar *axes, chelis_scalar exemplar, chelis_reduction_op operation);
+chelis_reduction_plan *chelis_shape_reduction_plan(chelis_scalar rank, const chelis_scalar *shape, chelis_scalar axis_count, const chelis_scalar *axes, chelis_scalar exemplar, chelis_reduction_op operation);
+int64_t chelis_reduction_count(const chelis_reduction_plan *plan);
+int64_t chelis_reduction_extent(const chelis_reduction_plan *plan, chelis_scalar axis);
+int64_t chelis_reduction_index(const chelis_reduction_plan *plan, chelis_scalar outer, chelis_scalar leaf);
+void chelis_reduction_check_target(const chelis_reduction_plan *plan, chelis_scalar rank, const chelis_scalar *shape);
+void chelis_reduction_check_scratch(const chelis_reduction_plan *plan, chelis_scalar exemplar);
+void chelis_reduction_plan_release(chelis_reduction_plan *plan);
 void chelis_tensor_check_reshape(const chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *shape);
 chelis_tensor *chelis_tensor_reshape(const chelis_tensor *tensor, const chelis_list *shape);
 

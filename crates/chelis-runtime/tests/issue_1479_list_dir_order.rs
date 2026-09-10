@@ -88,8 +88,6 @@ fn list_dir_names(dir: &Path) -> Vec<String> {
             names.push(
                 CStr::from_ptr(chelis_string_data(text))
                     .to_str()
-                    // Lossy conversion already replaced any invalid byte with
-                    // U+FFFD, which is a real scalar, so this is always valid UTF-8.
                     .expect("entry name round-trips as UTF-8")
                     .to_string(),
             );
@@ -145,35 +143,44 @@ fn chelis_list_dir_orders_dotfiles_and_digits_by_byte_sequence() {
     );
 }
 
-/// [05-HOST-4] fixes the order on the host's names *before* any conversion to
-/// `string`, and the compiled lane owes that clause as much as the evaluator.
-/// Every other case here is ASCII, where a raw-byte sort and a sort of the
-/// converted strings agree, so none of them separates the two.
-///
-/// `to_string_lossy` maps each invalid byte to U+FFFD, so `b"\x80z"` and
-/// `b"\x81a"` convert to two distinct strings whose order is the reverse of
-/// their byte order: `0x80 < 0x81` puts the first name first, while
-/// `"\u{FFFD}z"` sorts after `"\u{FFFD}a"`. The twin case is
-/// `crates/chelis-compiler-api/tests/issue_1479_list_dir_order.rs`.
-///
-/// Linux only: the default macOS filesystem rejects a non-UTF-8 filename with
-/// `EILSEQ`, so the fixture cannot be created there.
+/// Actual invalid-name filesystem coverage runs on Linux; the pure conversion
+/// controls also exercise these cases on macOS without creating host files.
 #[cfg(target_os = "linux")]
 #[test]
-fn chelis_list_dir_orders_non_utf8_names_before_the_lossy_conversion() {
+fn chelis_list_dir_rejects_non_utf8_names_in_host_order() {
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
+    use std::process::Command;
 
+    const CHILD_PATH: &str = "CHELIS_1479_INVALID_DIRECTORY";
+    if let Some(path) = std::env::var_os(CHILD_PATH) {
+        let _ = list_dir_names(Path::new(&path));
+        panic!("invalid names returned a successful list");
+    }
     let dir = TempDir::new();
-    // Created in the forbidden order.
-    for raw in [b"\x81a".as_slice(), b"\x80z".as_slice()] {
+    for raw in [
+        b"a\xff".as_slice(),
+        b"a\xfe".as_slice(),
+        b"0-valid".as_slice(),
+    ] {
         fs::write(dir.path().join(OsStr::from_bytes(raw)), b"x").expect("write fixture entry");
     }
-
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "chelis_list_dir_rejects_non_utf8_names_in_host_order",
+            "--nocapture",
+        ])
+        .env(CHILD_PATH, dir.path())
+        .output()
+        .expect("run FFI failure child");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
     assert_eq!(
-        list_dir_names(dir.path()),
-        vec!["\u{FFFD}z", "\u{FFFD}a"],
-        "entries must order by the host's name bytes, not by the converted strings"
+        String::from_utf8(output.stderr).unwrap(),
+        format!(
+            "IO trap in list_dir: directory b\"{}\", entry b\"a\\xfe\": name is not valid UTF-8\n",
+            dir.path().as_os_str().as_encoded_bytes().escape_ascii()
+        )
     );
 }
 

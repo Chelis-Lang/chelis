@@ -93,8 +93,12 @@ use crate::schema::{Diagnostic, GeneralKind};
 /// the serialized `Subst`: under `spec/04-type-system.md` section 4.7.2
 /// nothing is deferred, so a V12 entry carries two fields where the
 /// following ones are now expected.
-// Opaque producer annotations use an explicit data wire variant.
-const STDLIB_CACHE_FORMAT_VERSION: u32 = 14;
+// V14: opaque producer annotations use an explicit data wire variant.
+// V15: declared literal results and call-witness payloads are retained.
+// V16: scalar/storage payloads use the exact dtype-tagged bit codecs;
+// the changed key rejects previous positional payloads before decode.
+const STDLIB_CACHE_FORMAT_VERSION: u32 =
+    <StdLibContext as cache_envelope::CachePayload>::FORMAT_VERSION;
 
 /// The typechecked + lowered chelis-std library sub-context.
 ///
@@ -288,7 +292,7 @@ fn visit_stdlib_cache_key_inputs(
     format_version: u32,
     mut append: impl FnMut(&[u8]),
 ) {
-    append(b"chelis_std_typecheck_v");
+    append(<StdLibContext as cache_envelope::CachePayload>::KEY_DOMAIN);
     append(&format_version.to_le_bytes());
     // Compiler build identity. `STDLIB_CACHE_FORMAT_VERSION` only guards
     // the on-disk struct SHAPE; it does not change when the compiler's
@@ -511,20 +515,15 @@ fn library_rejection_to_compiler_error(
     rejection: crate::pipeline::LibraryRejection,
 ) -> CompilerError {
     match rejection {
-        crate::pipeline::LibraryRejection::Type { report } => CompilerError {
-            stage: "check".to_string(),
-            errors: report
-                .errors
-                .iter()
-                .map(crate::compiler::check_error_diagnostic)
-                .collect(),
-        },
+        crate::pipeline::LibraryRejection::Type { report } => {
+            crate::compiler::check_errors_to_compiler_error("check", &report.errors)
+        }
         crate::pipeline::LibraryRejection::ContextMismatch => CompilerError {
             stage: "check".to_string(),
             errors: vec![Diagnostic::general(
                 GeneralKind::Other,
                 "the library type environment does not match its checked program".to_string(),
-                1.0,
+                crate::schema::numbers::UnitInterval::new(1.0).expect("constant severity"),
             )],
         },
         crate::pipeline::LibraryRejection::Effects { errors } => {
@@ -548,30 +547,30 @@ mod tests {
 
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes() {
-        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 14);
+        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 16);
     }
 
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes_and_nominal_kinds() {
-        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 14);
+        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 16);
     }
 
     #[test]
-    fn preceding_payload_version_is_a_clean_cache_miss() {
-        let decls = sample_decls("preceding_version");
+    fn different_format_key_is_a_clean_cache_miss() {
+        let decls = sample_decls("different_key");
         let current_key = stdlib_cache_key(&decls, TEST_SOURCE_DIGEST);
-        let preceding_key = stdlib_cache_key_at_version(&decls, TEST_SOURCE_DIGEST, 13);
+        let preceding_key = stdlib_cache_key_at_version(&decls, TEST_SOURCE_DIGEST, 15);
         assert_ne!(current_key, preceding_key);
 
         let dir = tempfile::tempdir().expect("tempdir");
         let context = build_stdlib_context(&decls).expect("sample context must build");
         let preceding_path = stdlib_cache_path(dir.path(), preceding_key);
         cache_envelope::save(&preceding_path, preceding_key, &context)
-            .expect("preceding-version fixture must save");
+            .expect("different-key fixture must save");
 
         let current_path = stdlib_cache_path(dir.path(), current_key);
         let loaded: Option<StdLibContext> = cache_envelope::load(&current_path, current_key)
-            .expect("a preceding-version fixture must be a clean miss");
+            .expect("a different-key fixture must be a clean miss");
         assert!(loaded.is_none());
         assert!(
             preceding_path.exists(),

@@ -126,6 +126,52 @@ pub struct Subst {
     /// serialized: transient per-pass bookkeeping.
     #[serde(skip)]
     deferred_opaque_uses: Mutex<Vec<(TypeVar, DeferredOpaqueUse)>>,
+    /// chelis#1489 suspended-operand ledger. A set of checked sites rejected
+    /// an unresolved `Type::Var` outright, which made them sensitive to WHEN
+    /// inference resolved a variable rather than to whether the program was
+    /// well typed: 0.18.6 changed that timing and they fired ~50x more often
+    /// on an unchanged corpus.
+    ///
+    /// What suspends here is `copy`, `cast`, and the ten csv host-lane slots
+    /// — ~97% of the measured occurrences. `round_to` is NOT among them: see
+    /// `unify_host_slot_eager`.
+    ///
+    /// `gather`, `scatter`, `scatter_replace`, `diagonal`, `trace` and
+    /// `concat` do NOT record: their results are shape functions of the
+    /// operand, a deferral there must reproduce more than one helper call, and
+    /// they are pinned to keep rejecting by
+    /// `the_shape_computing_routes_still_reject_an_unresolved_operand`.
+    ///
+    /// Recording rather than tolerating is deliberate. The ~71 sibling gates
+    /// return on an unresolved operand and forget it, which is sound for them
+    /// but not here: measured, a tolerant `cast` lets
+    /// `def go[t](x: t) -> int32 = cast(x, int32)` check at 1.0 and BUILD,
+    /// with the backend choosing a dtype for the never-resolved `t`. A
+    /// variable that is never bound is still rejected.
+    ///
+    /// The `Copy` and `Cast` entries carry the result variable their call
+    /// returned, and discharge unifies the eager arm's own answer into it;
+    /// `HostSlot` carries no result and discharge unifies its expected type
+    /// against the operand instead. Both are load-bearing: a
+    /// revision that returned the OPERAND's variable made a deferred
+    /// `copy(&t)` type as `&tensor` where an eager one is `tensor`, so the
+    /// expression's type depended on when the operand resolved — the very
+    /// sensitivity this ledger exists to delete.
+    ///
+    /// Not serialized: transient per-pass bookkeeping.
+    #[serde(skip)]
+    deferred_tensor_operands: Mutex<Vec<(TypeVar, DeferredOperandGate)>>,
+    /// Verdicts from suspended operand constraints that discharged badly
+    /// (chelis#1489).
+    ///
+    /// Discharge happens inside unification, which has no `DiagnosticSink`, so
+    /// the failure is recorded here and rendered by the per-def reporting pass.
+    /// Only failures land here; a constraint that discharges cleanly leaves no
+    /// trace beyond the unification it performed.
+    ///
+    /// Not serialized: transient per-pass bookkeeping.
+    #[serde(skip)]
+    operand_gate_failures: Mutex<Vec<OperandGateFailure>>,
     /// Current lexical generalization level. Serialized because a cloned
     /// checking context must preserve in-flight transactional state.
     #[serde(default)]
@@ -144,6 +190,190 @@ pub struct Subst {
     /// always level zero in the resumed check.
     #[serde(default)]
     resume_floors: VarWatermarks,
+}
+
+/// A suspended operand constraint that discharged to a rejection
+/// (chelis#1489).
+///
+/// Carries the data the diagnostic needs and none of the rendering: discharge
+/// runs inside unification, and the per-def reporting pass is what turns this
+/// into a `CheckError` (it is also what holds the declared type-parameter
+/// names the message may want).
+#[derive(Debug, Clone)]
+pub enum OperandGateFailure {
+    /// The operand settled to something the gate does not accept.
+    Rejected {
+        gate: DeferredOperandGate,
+        resolved: Type,
+    },
+    /// The gate accepted the operand, but the result the call had already
+    /// handed its consumer cannot be the result the settled operand produces.
+    ResultMismatch {
+        gate: DeferredOperandGate,
+        expected: Type,
+        settled: Type,
+    },
+    /// The gate's own decision function rejected the settled operand with a
+    /// specific error -- an unsupported cast precision, say -- rather than a
+    /// generic "wrong shape of type".
+    Decision { error: crate::errors::CheckError },
+}
+
+/// Which operand constraint suspended its decision (chelis#1489), and what it
+/// needs to decide once the operand is bound.
+///
+/// Not `Copy`: the host-slot arm carries the expected type and the producer's
+/// own slot wording, so discharge can re-decide without re-running the call.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DeferredOperandGate {
+    /// `copy` with an unresolved operand. Carries the result variable the call
+    /// returned: `copy(&t)` yields `t`, not `&t`, so discharge must unify the
+    /// eager arm's own answer into it rather than let the operand's type stand.
+    Copy { result: Box<Type> },
+    /// `cast`/`cast_trunc` whose SOURCE was unresolved. Carries the target
+    /// precision, the mode, and the result variable the call returned, which
+    /// discharge unifies against once `cast`'s own decision function is called
+    /// with the settled source type.
+    Cast {
+        target: crate::types::Prim,
+        mode: chelis_deep::CastMode,
+        result: Box<Type>,
+    },
+    /// A host-lane slot that unifies against a fixed expected type:
+    /// the ten csv routes, which funnel through `unify_host_slot`. Carries
+    /// what the slot expected so discharge can re-decide without re-running
+    /// the call.
+    ///
+    /// `round_to` deliberately does NOT reach here. This variant carries ONE
+    /// expected type, and `round_to` accepts more than one; routing it here
+    /// made a later-bound operand reject against the single type this carries.
+    /// It is on `unify_host_slot_eager` instead.
+    HostSlot {
+        fname: String,
+        description: String,
+        expected: Box<Type>,
+    },
+}
+
+impl DeferredOperandGate {
+    /// Settle this constraint against the type its operand was just bound to
+    /// (chelis#1489).
+    ///
+    /// Every arm calls the SAME decision function its eager counterpart calls
+    /// -- `copy_result_from_source`, `cast_result_from_settled_source`, or the
+    /// slot unification -- so there is no second implementation of any gate to
+    /// disagree with the first. The unification of `result` is what stops the
+    /// fresh variable the eager call handed its consumer from staying
+    /// unconstrained.
+    ///
+    /// `resolved` is never a `Type::Var`: the caller only discharges a bound
+    /// variable, and re-aliases instead when a variable was bound to another.
+    fn discharge(self, resolved: &Type, subst: &mut Subst) {
+        match self {
+            Self::Copy { ref result } => {
+                match crate::infer::expr::copy_result_from_source(resolved) {
+                    Some(settled) => {
+                        if unify(result.as_ref(), &settled, subst).is_err() {
+                            let expected = subst.apply(result.as_ref());
+                            subst.record_operand_gate_failure(OperandGateFailure::ResultMismatch {
+                                gate: self.clone(),
+                                expected,
+                                settled,
+                            });
+                        }
+                    }
+                    None => subst.record_operand_gate_failure(OperandGateFailure::Rejected {
+                        gate: self.clone(),
+                        resolved: resolved.clone(),
+                    }),
+                }
+            }
+            Self::Cast {
+                target,
+                mode,
+                ref result,
+            } => {
+                match crate::infer::expr_record::cast_result_from_settled_source(
+                    resolved.clone(),
+                    target,
+                    mode,
+                ) {
+                    Ok(settled) => {
+                        if unify(result.as_ref(), &settled, subst).is_err() {
+                            let expected = subst.apply(result.as_ref());
+                            subst.record_operand_gate_failure(OperandGateFailure::ResultMismatch {
+                                gate: self.clone(),
+                                expected,
+                                settled,
+                            });
+                        }
+                    }
+                    Err(error) => subst.record_operand_gate_failure(OperandGateFailure::Decision {
+                        error: *error,
+                    }),
+                }
+            }
+            Self::HostSlot { ref expected, .. } => {
+                if unify(expected.as_ref(), resolved, subst).is_err() {
+                    subst.record_operand_gate_failure(OperandGateFailure::Rejected {
+                        gate: self.clone(),
+                        resolved: resolved.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    /// The rejection this gate emits once the operand is known to be wrong.
+    ///
+    /// The wording each gate used when it decided eagerly, with two
+    /// exceptions. The eager host-slot rejection appends macro provenance ("in
+    /// expansion of ...") from the node, and discharge has no node, so a
+    /// host-slot rejection inside a macro expansion loses that suffix. And
+    /// `subject_for` substitutes a backticked declared type-parameter name
+    /// (``got `t` ``) where the eager arm printed the internal identity --
+    /// that one is [04-FIT-9] and is asserted by
+    /// `a_never_resolved_declared_parameter_is_named_not_numbered`.
+    pub fn message(&self, subject: &str) -> String {
+        match self {
+            Self::Copy { .. } => format!("copy requires tensor input, got {subject}"),
+            Self::Cast { .. } => format!("cast requires tensor or prim type, got {subject}"),
+            Self::HostSlot {
+                fname, description, ..
+            } => format!("{fname} expects {description}, got {subject}"),
+        }
+    }
+
+    /// What to call this constraint's call in a diagnostic.
+    pub fn noun(&self) -> &str {
+        match self {
+            Self::Copy { .. } => "copy",
+            Self::Cast { .. } => "cast",
+            Self::HostSlot { fname, .. } => fname,
+        }
+    }
+
+    /// The diagnostic kind the gate emitted when it decided eagerly.
+    ///
+    /// Deferring must not change the kind: a published vocabulary identity is
+    /// something consumers count by name (chelis#1334 tallies these), so
+    /// collapsing gates onto a different kind would be a wire change smuggled
+    /// in behind a timing fix.
+    pub fn kind(&self) -> crate::errors::CheckErrorKind {
+        use crate::errors::CheckErrorKind as Kind;
+        match self {
+            Self::Cast { .. } => Kind::CastNonTensor,
+            Self::Copy { .. } | Self::HostSlot { .. } => Kind::TypeMismatch,
+        }
+    }
+
+    /// The repair hint, where the eager path carried one.
+    pub fn suggestions(&self) -> Vec<String> {
+        match self {
+            Self::Copy { .. } => vec!["Wrap only tensor values in copy".to_string()],
+            _ => Vec::new(),
+        }
+    }
 }
 
 /// Which deferred use shape registered a ledger entry (determines the
@@ -172,6 +402,18 @@ impl Clone for Subst {
                 self.deferred_borrow_vars
                     .lock()
                     .expect("subst.deferred_borrow_vars poisoned")
+                    .clone(),
+            ),
+            deferred_tensor_operands: Mutex::new(
+                self.deferred_tensor_operands
+                    .lock()
+                    .expect("subst.deferred_tensor_operands poisoned")
+                    .clone(),
+            ),
+            operand_gate_failures: Mutex::new(
+                self.operand_gate_failures
+                    .lock()
+                    .expect("subst.operand_gate_failures poisoned")
                     .clone(),
             ),
             deferred_opaque_uses: Mutex::new(
@@ -578,6 +820,89 @@ impl Subst {
             }
         }
         vec![Dim::Rank(current)]
+    }
+
+    /// Suspend an operand decision on the variable that has to be bound
+    /// before it can be made (chelis#1489). Unification discharges it at that
+    /// binding; see the `deferred_tensor_operands` field doc.
+    pub fn record_deferred_tensor_operand(&self, v: TypeVar, gate: DeferredOperandGate) {
+        self.deferred_tensor_operands
+            .lock()
+            .expect("subst.deferred_tensor_operands poisoned")
+            .push((v, gate));
+    }
+
+    /// Record a discharge failure for the per-def reporting pass
+    /// (chelis#1489).
+    pub fn record_operand_gate_failure(&self, failure: OperandGateFailure) {
+        self.operand_gate_failures
+            .lock()
+            .expect("subst.operand_gate_failures poisoned")
+            .push(failure);
+    }
+
+    /// Drain the discharge failures. Called once per def body, with
+    /// [`Self::take_deferred_tensor_operands`], by the reporting pass.
+    pub fn take_operand_gate_failures(&self) -> Vec<OperandGateFailure> {
+        std::mem::take(
+            &mut *self
+                .operand_gate_failures
+                .lock()
+                .expect("subst.operand_gate_failures poisoned"),
+        )
+    }
+
+    /// Take every constraint suspended on `v`, leaving the rest of the ledger
+    /// in place (chelis#1489).
+    ///
+    /// Discharge removes a constraint BEFORE deciding it, so a decision that
+    /// unifies -- and therefore re-enters this -- cannot rediscover the
+    /// constraint it is in the middle of discharging.
+    ///
+    /// The ledger does NOT strictly shrink: binding a variable to another
+    /// VARIABLE re-suspends the obligation on the target, so an entry can be
+    /// removed and re-added. Termination rests on the alias chain being
+    /// acyclic -- `bind_tvar_inner` rejects self-binding and `occurs_in`
+    /// rejects cycles -- not on a shrinking count.
+    fn take_operand_gates_on(&self, v: TypeVar) -> Vec<DeferredOperandGate> {
+        let mut ledger = self
+            .deferred_tensor_operands
+            .lock()
+            .expect("subst.deferred_tensor_operands poisoned");
+        let mut taken = Vec::new();
+        ledger.retain(|(tv, gate)| {
+            if *tv == v {
+                taken.push(gate.clone());
+                false
+            } else {
+                true
+            }
+        });
+        taken
+    }
+
+    /// Re-suspend `gate` on `target` because `v` was bound to it rather than
+    /// to a concrete type (chelis#1489).
+    ///
+    /// Identifying two variables must carry the obligation across, exactly as
+    /// the shape ledgers' `merge_alias` does; dropping it here would silently
+    /// un-defer the constraint.
+    fn realias_operand_gate(&self, target: TypeVar, gate: DeferredOperandGate) {
+        self.deferred_tensor_operands
+            .lock()
+            .expect("subst.deferred_tensor_operands poisoned")
+            .push((target, gate));
+    }
+
+    /// Drain the deferred tensor-operand ledger. Called once per def body's
+    /// inference so one def's deferrals cannot leak into the next.
+    pub fn take_deferred_tensor_operands(&self) -> Vec<(TypeVar, DeferredOperandGate)> {
+        std::mem::take(
+            &mut *self
+                .deferred_tensor_operands
+                .lock()
+                .expect("subst.deferred_tensor_operands poisoned"),
+        )
     }
 
     /// Issue #256: record a borrow site whose inner type was still an
@@ -1478,7 +1803,52 @@ pub fn unify_dim(d1: &Dim, d2: &Dim, subst: &mut Subst) -> Result<(), TypeError>
     }
 }
 
+/// Bind `v`, then settle every operand constraint that was waiting on it
+/// (chelis#1489).
+///
+/// The wrapper exists so discharge cannot be skipped: `bind_tvar_inner` has
+/// more than one success path, and an earlier design that decided these
+/// constraints in a separate end-of-inference pass was order-dependent in
+/// exactly the way this issue is about. Binding a variable is the event that
+/// makes a suspended decision decidable, so that is where the decision is
+/// made, and nothing schedules it.
 fn bind_tvar(v: TypeVar, ty: &Type, subst: &mut Subst) -> Result<(), TypeError> {
+    bind_tvar_inner(v, ty, subst)?;
+    discharge_operand_gates(v, subst);
+    Ok(())
+}
+
+/// Settle the constraints suspended on `v`, now that it is bound.
+///
+/// Reached only from [`bind_tvar`]. Records failures rather than returning
+/// them: a discharge failure is a diagnostic about the program, not a
+/// unification error, and turning it into one would abort the surrounding
+/// unification and lose every other constraint waiting on this binding.
+fn discharge_operand_gates(v: TypeVar, subst: &mut Subst) {
+    let gates = subst.take_operand_gates_on(v);
+    if gates.is_empty() {
+        return;
+    }
+    let resolved = subst.apply(&Type::Var(v));
+    for gate in gates {
+        // Still a variable: `v` was identified with another variable rather
+        // than given a type. Carry the obligation across so it discharges when
+        // THAT variable binds.
+        if let Type::Var(target) = resolved {
+            if target != v {
+                subst.realias_operand_gate(target, gate);
+                continue;
+            }
+            // Bound to itself is not a binding; leave it suspended for the
+            // per-def pass to report as never-resolved.
+            subst.realias_operand_gate(v, gate);
+            continue;
+        }
+        gate.discharge(&resolved, subst);
+    }
+}
+
+fn bind_tvar_inner(v: TypeVar, ty: &Type, subst: &mut Subst) -> Result<(), TypeError> {
     if let Type::Var(v2) = ty
         && *v2 == v
     {

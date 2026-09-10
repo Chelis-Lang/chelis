@@ -103,7 +103,7 @@ fn diagnostic_kind_oracle_literal() -> crate::schema::Diagnostic {
     crate::schema::Diagnostic {
         kind: "unsupported_feature".to_owned(),
         message: "forged".to_owned(),
-        severity: 1.0,
+        severity: crate::schema::numbers::UnitInterval::new(1.0).expect("valid severity"),
         expected: None,
         got: None,
         suggestions: Vec::new(),

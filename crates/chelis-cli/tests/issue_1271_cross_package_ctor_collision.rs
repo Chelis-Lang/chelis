@@ -346,7 +346,7 @@ fn assert_app_checks_clean(collider: Option<&Package<'_>>, library: &Package<'_>
         .expect("run chelis check");
     let json: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("check output must be json");
-    assert_eq!(json["score"], 1, "app must check clean: {json}");
+    assert_eq!(json["score"], 1.0, "app must check clean: {json}");
     assert!(
         json["errors"].as_array().expect("errors array").is_empty(),
         "app must check with no errors: {json}"
@@ -725,7 +725,10 @@ fn module_qualified_constructors_in_one_package_keep_their_own_field_order() {
         .expect("run chelis check");
     let report: serde_json::Value =
         serde_json::from_slice(&checked.stdout).expect("check output must be json");
-    assert_eq!(report["score"], 1, "the package must check clean: {report}");
+    assert_eq!(
+        report["score"], 1.0,
+        "the package must check clean: {report}"
+    );
 
     let evaluated = Command::cargo_bin("chelis")
         .expect("binary")

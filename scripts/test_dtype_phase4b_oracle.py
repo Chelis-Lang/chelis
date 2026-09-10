@@ -65,17 +65,20 @@ class ContractValidationTests(unittest.TestCase):
 
     def test_wire_binding_decisions_have_positive_and_negative_freeze_controls(self) -> None:
         cases = (
-            ("spec/10-serialization.md", "Schema version 8 is explicitly\npresent", "wire v8 presence"),
+            ("spec/10-serialization.md", "Schema version 9 is explicitly\npresent", "wire v9 presence"),
             ("spec/10-serialization.md", "`schema_version: 3`", "execution v3 exactness"),
             ("spec/10-serialization.md", "f64: 16; f32: 8; f16: 4; bf16: 4", "wire IEEE bit widths"),
             ("spec/10-serialization.md", "No codec normalizes a NaN payload or a signed zero.", "wire bit preservation"),
             ("spec/10-serialization.md", "A raw source DTO is not an admitted executable AST.", "wire raw-source admission"),
             ("spec/10-serialization.md", "A reference is resolved only in its declared owner and namespace.", "wire reference scope"),
+            ("spec/10-serialization.md", "Every requirement uses the exact\n`NonnegativeExtent` adapter over a nonnegative `int64`", "wire literal-witness requirement carrier"),
+            ("spec/10-serialization.md", "`WireDagNode.shape_deps` contains exact u64 node\nreferences to strictly earlier nodes", "wire shape-dependency references"),
+            ("spec/10-serialization.md", "`shape_deps`, `span_id` (explicitly null when absent), and `merged_spans` are\nmandatory fields", "wire mandatory invocation fields"),
             ("spec/10-serialization.md", "Bounds alone never establish transport authority.", "wire report numeric authority"),
             ("spec/04-type-system.md", "untyped_nodes = total_nodes - typed_nodes", "fitness counter consistency"),
             ("spec/11-ffi.md", "Dynamic Python object types do not establish nonnumeric capacity.", "binding dynamic capacity"),
             ("spec/11-ffi.md", "DLPack keywords are validated, never ignored.", "binding DLPack keyword admission"),
-            ("spec/design/dtype_semantics.md", "No partial WireDag v8 is published.", "wire atomic cutover"),
+            ("spec/design/dtype_semantics.md", "No partial WireDag v9 is published.", "wire atomic cutover"),
         )
         for relative, required, label in cases:
             with self.subTest(label=label):
@@ -517,7 +520,7 @@ class ContractValidationTests(unittest.TestCase):
     def test_host_numeric_builtin_manifest_has_no_specialized_compatibility_identities(self) -> None:
         block = self.repository_atom("05-OP-38")
         for identity in (
-            "`tensor_scan` | `(T,((T,int64)->T!E),int64)->tensor[n,T]!E`",
+            "`tensor_scan` | `(T,((T,int64)->T!E),int64)->tensor[n,..state_shape(T),element(T)]!E`",
             "`process_run` | `(string,List[string])->(int64,string,string)!{IO}`",
             "`test_assert_eq` | `(Q,Q,string)->unit!{Test}`",
         ):
@@ -2186,6 +2189,20 @@ class ContractValidationTests(unittest.TestCase):
                 finally:
                     path.write_text(original, encoding="utf-8")
 
+    def test_reduction_metadata_declarations_cannot_disappear(self) -> None:
+        path = self.root / "spec/registry/c_tensor_runtime.md"
+        original = path.read_text(encoding="utf-8")
+        rows = [row for row in oracle.EXPECTED_OP_MANIFESTS["05-OP-33"] if "checked reduction" in row]
+        self.assertEqual(len(rows), 8)
+        for row in rows:
+            with self.subTest(row=row):
+                self.assertIn(row, original)
+                path.write_text(original.replace(row + "\n", "", 1), encoding="utf-8")
+                try:
+                    self.assert_contract_fails("05-OP-33.*exact manifest")
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
     def test_exact_op_manifest_row_deletion_fails(self) -> None:
         for atom, rows in oracle.EXPECTED_OP_MANIFESTS.items():
             relative = oracle.OP_MANIFEST_REGISTRY_FILES.get(
@@ -2227,7 +2244,7 @@ class ContractValidationTests(unittest.TestCase):
             ),
             "05-OP-35": ("(p_float)->p_float", "(f32)->f32"),
             "05-OP-38": (
-                "(T,((T,int64)->T!E),int64)->tensor[n,T]!E",
+                "(T,((T,int64)->T!E),int64)->tensor[n,..state_shape(T),element(T)]!E",
                 "(f32,((f32,int64)->f32),int64)->tensor[n,f32]",
             ),
         }
@@ -2771,12 +2788,8 @@ class ContractValidationTests(unittest.TestCase):
     def test_plain_prose_after_extrema_atom_cannot_contradict_it(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),
-            "> adjoint reverses that composition. Integer operands are forward-only and\n"
-            "> `grad` rejects them.\n>\n"
             "> **[05-OP-13]**",
-            "> adjoint reverses that composition. Integer operands are forward-only and\n"
-            "> `grad` rejects them.\n\n"
-            "An implementation MAY instead route the full non-NaN `max_reduce` "
+            "\nAn implementation MAY instead route the full non-NaN `max_reduce` "
             "cotangent to only the last element equal to the selected maximum.\n\n"
             "> **[05-OP-13]**",
         )
@@ -4503,14 +4516,14 @@ class FrozenContractChangeTests(unittest.TestCase):
 
     def test_unchanged_tree_passes(self) -> None:
         report = self.check()
-        self.assertIn("0 of 30 contract files changed", report[0])
+        self.assertIn("0 of 31 contract files changed", report[0])
 
     def test_every_contract_file_is_watched(self) -> None:
         # The converted whole-file-digest test. Contradictory prose prepended
         # to any contract file must fail, and the failure must name the file.
         # The watched set is now all 30 CONTRACT_FILES, a superset of the 22
         # that carried a whole-file digest.
-        self.assertEqual(len(CONTRACT_FILES), 30)
+        self.assertEqual(len(CONTRACT_FILES), 31)
         for relative in oracle.CONTRACT_FILES:
             with self.subTest(relative=relative):
                 path = self.root / relative
@@ -4603,7 +4616,7 @@ class FrozenContractChangeTests(unittest.TestCase):
     def test_an_acknowledged_change_passes(self) -> None:
         self.append("spec/11-ffi.md", "\nA reviewed sentence.\n")
         report = self.check(acknowledgements=("spec/11-ffi.md",))
-        self.assertIn("1 of 30 contract files changed", report[0])
+        self.assertIn("1 of 31 contract files changed", report[0])
         self.assertIn("  ok  Frozen-contract-change: spec/11-ffi.md", report)
 
     def test_a_body_line_acknowledges_the_change(self) -> None:
@@ -4708,7 +4721,7 @@ class FrozenContractChangeTests(unittest.TestCase):
         report = self.check(
             acknowledgements=("spec/10-serialization.md",)
         )
-        self.assertIn("1 of 30 contract files changed", report[0])
+        self.assertIn("1 of 31 contract files changed", report[0])
 
     def test_an_unreadable_baseline_blob_is_an_error_not_an_absence(self) -> None:
         # Round 1 F3. Reading a failed `git show` as "absent at the merge base"

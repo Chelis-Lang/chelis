@@ -460,14 +460,14 @@ fn write_symbolic_row_sum_program(path: &Path) {
 fn write_symbolic_layer_norm_program(path: &Path) {
     write_file(
         path,
-        "def f(x: tensor[batch, 128, f32], gamma: tensor[128, f32], beta: tensor[128, f32]) -> tensor[batch, 128, f32] = (layer_norm(x, gamma, beta) : tensor[batch, 128, f32])\n",
+        "def f(x: tensor[batch, 128, f32], gamma: tensor[128, f32], beta: tensor[128, f32]) -> tensor[batch, 128, f32] = (layer_norm(x, gamma, beta, 0.00001f32) : tensor[batch, 128, f32])\n",
     );
 }
 
 fn write_symbolic_hidden_layer_norm_program(path: &Path) {
     write_file(
         path,
-        "def f(x: tensor[batch, hidden, f32], gamma: tensor[hidden, f32], beta: tensor[hidden, f32]) -> tensor[batch, hidden, f32] = (layer_norm(x, gamma, beta) : tensor[batch, hidden, f32])\n",
+        "def f(x: tensor[batch, hidden, f32], gamma: tensor[hidden, f32], beta: tensor[hidden, f32]) -> tensor[batch, hidden, f32] = (layer_norm(x, gamma, beta, 0.00001f32) : tensor[batch, hidden, f32])\n",
     );
 }
 
@@ -876,8 +876,9 @@ fn eval_json_emits_int64_scalar() {
     let json = run_eval_json_expr("mod(cast(17, int64), cast(5, int64))");
     let roots = json["roots"].as_array().expect("roots array");
     assert_eq!(roots.len(), 1);
-    assert_eq!(roots[0]["value"]["type"], "int64");
-    assert_eq!(roots[0]["value"]["value"], 2);
+    assert_eq!(roots[0]["value"]["type"], "scalar");
+    assert_eq!(roots[0]["value"]["value"]["dtype"], "int64");
+    assert_eq!(roots[0]["value"]["value"]["value"], 2);
 }
 
 // A tensor expression yields a `tensor` value carrying shape + data.
@@ -893,9 +894,13 @@ fn eval_json_emits_tensor_shape_and_data() {
         &vec![Value::from(3)]
     );
     assert_eq!(
-        // Execution wire v2 (chelis#729): tagged per-dtype payload.
-        value["value"]["data"]["values"].as_array().expect("data"),
-        &vec![Value::from(1.0), Value::from(2.0), Value::from(3.0)]
+        // Execution wire v3 (chelis#729): tagged per-dtype payload.
+        value["value"]["data"]["bits"].as_array().expect("data"),
+        &vec![
+            Value::from("3f800000"),
+            Value::from("40000000"),
+            Value::from("40400000")
+        ]
     );
 }
 
@@ -914,10 +919,12 @@ fn eval_json_emits_tuple_of_int64() {
     assert_eq!(tuple["type"], "tuple");
     let elems = tuple["value"].as_array().expect("tuple elements");
     assert_eq!(elems.len(), 2);
-    assert_eq!(elems[0]["type"], "int64");
-    assert_eq!(elems[0]["value"], 7);
-    assert_eq!(elems[1]["type"], "int64");
-    assert_eq!(elems[1]["value"], 8);
+    assert_eq!(elems[0]["type"], "scalar");
+    assert_eq!(elems[0]["value"]["dtype"], "int64");
+    assert_eq!(elems[0]["value"]["value"], 7);
+    assert_eq!(elems[1]["type"], "scalar");
+    assert_eq!(elems[1]["value"]["dtype"], "int64");
+    assert_eq!(elems[1]["value"]["value"], 8);
 }
 
 // A top-level tuple binding splits into per-component roots. This pins
@@ -954,8 +961,9 @@ fn eval_json_file_form_emits_json() {
         .iter()
         .find(|r| r["name"] == "answer")
         .expect("answer root");
-    assert_eq!(answer["value"]["type"], "int64");
-    assert_eq!(answer["value"]["value"], 2);
+    assert_eq!(answer["value"]["type"], "scalar");
+    assert_eq!(answer["value"]["value"]["dtype"], "int64");
+    assert_eq!(answer["value"]["value"]["value"], 2);
 }
 
 // Empty-roots input (only `def` declarations) emits valid JSON
@@ -978,11 +986,11 @@ fn eval_json_def_only_emits_empty_roots_json() {
         .expect("run chelis eval --json --file");
     assert!(output.status.success(), "def-only eval --json exits 0");
     let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
-    // Execution wire v2 (chelis#729): EvalResult stamps its payload
+    // Execution wire v3 (chelis#729): EvalResult stamps its payload
     // version.
     assert_eq!(
         stdout.trim(),
-        r#"{"schema_version":2,"roots":[],"manifest":{"target":"Eval","entries":[],"requires_main":false}}"#
+        r#"{"schema_version":3,"roots":[],"manifest":{"target":"Eval","entries":[],"requires_main":false}}"#
     );
     let json: Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
     assert_eq!(json["roots"].as_array().expect("roots").len(), 0);
@@ -5351,9 +5359,12 @@ fn build_c_emits_sparse_gather_loop_for_int32_indices() {
         .success();
 
     let c_src = fs::read_to_string(out_dir.join("gather_c.c")).expect("c source");
-    assert!(c_src.contains("const int32_t *"));
-    assert!(c_src.contains("values_data"));
-    assert!(c_src.contains("_out_data"));
+    assert!(c_src.contains("chelis_tensor_sparse_plan("));
+    assert!(c_src.contains("chelis_sparse_index_slot("));
+    assert!(c_src.contains("chelis_sparse_data_index("));
+    assert!(c_src.contains("chelis_sparse_check_target("));
+    assert!(c_src.contains("chelis_sparse_plan_release("));
+    assert!(c_src.contains("CHELIS_DTYPE_I32"));
     assert!(!c_src.contains("chelis_tensor_gather("));
     assert!(
         !c_src.contains("(int64_t[]){ 64, 1000, 128 }"),

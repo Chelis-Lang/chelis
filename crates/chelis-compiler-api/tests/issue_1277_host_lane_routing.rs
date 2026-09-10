@@ -12,11 +12,14 @@
 //! a `shape`-reading def a named root. Both facts are locked below so the
 //! routing change is measured against them rather than inferred.
 
+#[path = "../../../tests/support/wire_values.rs"]
+mod wire_values;
+
 use std::collections::BTreeMap;
 
 use chelis_compiler_api::compiler::{eval, eval_selected};
 use chelis_compiler_api::schema::{
-    EvalRequest, EvalResult, ExecutionValue, SourceKind, TensorElements, TensorValue,
+    EvalRequest, EvalResult, ExecutionValue, SourceKind, TensorValue,
 };
 use chelis_types::types::Lane;
 
@@ -33,12 +36,15 @@ const HOST_APPLIED_1376: &str = "def f(x: tensor[n, f32], y: tensor[m, f32]) -> 
 
 fn f32_tensor(shape: &[usize], data: &[f32]) -> TensorValue {
     TensorValue {
-        shape: shape.to_vec(),
-        data: TensorElements::F32(data.to_vec()),
+        shape: shape
+            .iter()
+            .map(|value| i64::try_from(*value).unwrap())
+            .collect(),
+        data: wire_values::storage_f32(data.to_vec()),
     }
 }
 
-fn root_shape(result: &EvalResult, name: &str) -> Vec<usize> {
+fn root_shape(result: &EvalResult, name: &str) -> Vec<i64> {
     let root = result
         .roots
         .iter()
@@ -60,20 +66,12 @@ fn lane_of(result: &EvalResult, name: &str) -> Lane {
         .lane
 }
 
-/// The API binding path does NOT reach the DAG evaluator for a `shape`-reading
-/// def either. With `x` and `y` bound and `f` selected, `manifested_program_for_eval`
-/// finds no named root for `f` (the lowerer's syntactic map classifies a body
-/// that applies `shape` as host, `lower.rs:2749`), classifies the selected
-/// callable `Lane::Host` with reason `selected-callable-result`, and the host
-/// lane cannot serve bound inputs, so the evaluation fails as an unavailable
-/// root.
-///
-/// EVIDENTIARY STATUS on `801f92c02`: disposition lock, measured. It records
-/// that the only evaluator a claim-carrying user def can reach from
-/// `chelis eval` is the host interpreter, which is why B2h routes the host
-/// application of such a def through the kernel C emits for it.
+/// Selecting a parameterized shape-reading entry still cannot supply these
+/// bindings through the Host root (#1397). Preserve the actual host-call
+/// argument error rather than replacing it with an unavailable-root wrapper.
+/// This is a diagnostic disposition lock, not an execution receipt.
 #[test]
-fn bound_parameterized_entry_does_not_reach_the_dag_evaluator() {
+fn bound_parameterized_entry_preserves_its_host_call_error() {
     let mut bindings = BTreeMap::new();
     bindings.insert("x".to_string(), f32_tensor(&[2], &[1.0, 2.0]));
     bindings.insert("y".to_string(), f32_tensor(&[3], &[3.0, 4.0, 5.0]));
@@ -92,11 +90,10 @@ fn bound_parameterized_entry_does_not_reach_the_dag_evaluator() {
         .map(|diagnostic| diagnostic.message.clone())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(
-        messages.contains("unavailable root `f` on Host lane"),
-        "{messages}"
+    assert_eq!(
+        messages,
+        "kernel `f` parameter `x` expects a tensor or scalar argument, got ()"
     );
-    assert!(messages.contains("selected-callable-result"), "{messages}");
 }
 
 /// The CLI form: `main` is a nullary fn root, which realizability assigns to

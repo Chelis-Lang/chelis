@@ -15,7 +15,7 @@ kernel behavior. It proves three things and nothing more:
 
 The inventory's completeness claim is over `INVENTORY_SOURCES`: an explicit,
 reviewed list of the repository files that can carry a representation seam.
-Sixty-four are Rust and seven are C or Objective-C headers. A completeness
+Sixty-five are Rust and seven are C or Objective-C headers. A completeness
 claim stated over a *language* instead cannot be discharged, because a reviewer
 can always name one more construct; stated over a file list it is decidable,
 and `_assert_source_list_current` proves the list still equals the tracked
@@ -62,7 +62,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "978f9fcdec0efb941fa778e66893c32a530f01765594d04dcf01c13c1ee78498"
+FREEZE_SHA256 = "cd6df6e3821f800b648c849e34719d8c7cc385741b8c5fb3c996c6e03c20b69f"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -145,6 +145,7 @@ INVENTORY_SOURCES: tuple[str, ...] = (
     "crates/chelis-ir/src/verify.rs",
     "crates/chelis-ir/src/vmap.rs",
     "crates/chelis-python/src/lib.rs",
+    "crates/chelis-python/src/source_json.rs",
     "crates/chelis-runtime/include/chelis_blas.h",
     "crates/chelis-runtime/include/chelis_math.h",
     "crates/chelis-runtime/include/chelis_runtime.h",
@@ -1668,7 +1669,8 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
                 "--features", "ownership-ledger",
                 "--test", "checked_metadata", "--test", "metadata_compile",
                 "--test", "checked_metadata_padding", "--test", "checked_c_metadata",
-                "--test", "checked_c_indexing",
+                "--test", "checked_c_indexing", "--test", "checked_c_movement", "--test", "checked_c_movement_plans", "--test", "checked_c_affine",
+                "--test", "checked_c_reduction", "--test", "checked_c_sparse", "--test", "checked_c_matmul", "--test", "checked_c_window", "--test", "checked_c_literal",
                 "--test", "exact_tagged_c_abi",
                 "--test", "op33_empty_tensor_axis_decomposition",
                 "--test", "op33_tensor_validation",
@@ -1681,6 +1683,81 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
             ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_metadata"),
         ),
         OracleLeg(
+            "checked C reduction delegation and bypass mutations",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_reduction"),
+        ),
+        OracleLeg(
+            "checked C reductions and Count optimized sanitizer execution",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "exec_compile",
+             "--test", "fused_compile", "-E", "binary(fused_compile) | test(checked_c_reduction_) | test(exec_count_) | test(exec_reduce_sum_) | test(ws_a1_exec_f64_reduce_sum) | test(ws_a1_exec_i32_reduce_sum) | test(exec_i8_reduce_sum) | test(exec_i16_reduce_sum) | test(direct_fused_sum_runtime_shape) | test(direct_fused_max_reduce_runtime_shape)"),
+        ),
+        OracleLeg(
+            "checked C reduction example parity",
+            ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "parity",
+             "--test", "issue_1294_standard_lowerings", "-E",
+             "test(parity_count_bool_axes) | test(canonical_sum_) | test(scalar_and_fused_sums_) | test(hosted_matmul_preserves_the_canonical_reduction_tree) | test(hosted_matmul_empty_reductions_)"),
+        ),
+        OracleLeg(
+            "checked C JSON ordering scratch delegation and lifetime controls",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_json_scratch"),
+        ),
+        OracleLeg(
+            "checked C JSON ordering scratch recursive and empty execution",
+            ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "issue_1314_json_bigint",
+             "-E", "test(=json_object_serialization_is_recursive_canonical_unicode_order_in_eval_and_c)"),
+        ),
+        OracleLeg(
+            "checked C JSON scratch ownership ledger and skipped-cleanup mutations",
+            ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "issue_1314_json_bigint",
+             "-E", "test(=json_scratch_execution_detects_skipped_cleanup)"),
+        ),
+        OracleLeg(
+            "checked C literal ingress delegation controls",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_host_metadata"),
+        ),
+        OracleLeg(
+            "checked C literal storage optimized sanitizer execution",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "exec_compile",
+             "-E", "test(checked_literals_)"),
+        ),
+        OracleLeg(
+            "checked C window delegation and bypass mutations",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_window"),
+        ),
+        OracleLeg(
+            "checked C window geometry and gradient optimized sanitizer execution",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "exec_compile",
+             "--test", "issue_254_reduce_window_emit", "-E", "test(checked_windows_) | test(exec_reduce_window_) | binary(issue_254_reduce_window_emit)"),
+        ),
+        OracleLeg(
+            "checked C window executable example parity",
+            ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "parity",
+             "-E", "test(parity_checked_window_geometry) | test(parity_corpus_is_complete)"),
+        ),
+        OracleLeg(
+            "checked C BLAS submission delegation and bypass mutations",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_blas"),
+        ),
+        OracleLeg(
+            "checked C BLAS optimized submission and vendor prototype execution",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "exec_compile",
+             "-E", "test(checked_blas_) | test(blas_vendor_dimension_contract)"),
+        ),
+        OracleLeg(
+            "checked C sparse delegation and bypass mutations",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_sparse"),
+        ),
+        OracleLeg(
+            "checked C sparse optimized sanitizer execution",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "exec_compile",
+             "-E", "test(checked_c_sparse_)"),
+        ),
+        OracleLeg(
+            "checked C sparse host summary execution and rejection",
+            ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "cross_library_sparse_summaries",
+             "--test", "parity", "-E", "binary(cross_library_sparse_summaries) | test(parity_checked_sparse_axes)"),
+        ),
+        OracleLeg(
             "checked C shared indexing cohort and restoration mutations",
             ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_indexing"),
         ),
@@ -1688,6 +1765,27 @@ def phase0_legs() -> tuple[OracleLeg, ...]:
             "checked C shared indexing optimized sanitizer execution",
             ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "exec_compile",
              "-E", "test(checked_c_indexing_)"),
+        ),
+        OracleLeg(
+            "checked C movement delegation and restoration mutations",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "checked_c_movement", "--test", "checked_c_movement_plans"),
+        ),
+        OracleLeg(
+            "movement local extent CLI parity and primitive diagnostics",
+            ("cargo", "nextest", "run", "-p", "chelis-cli", "--test", "issue_616_runtime_movement_c_parity"),
+        ),
+        OracleLeg(
+            "verified expansion primitive identity and local guards",
+            ("cargo", "nextest", "run", "-p", "chelis-ir", "--test", "movement_expansion_kind"),
+        ),
+        OracleLeg(
+            "verified expansion primitive identity and local guards in release",
+            ("cargo", "nextest", "run", "--release", "-p", "chelis-ir", "--test", "movement_expansion_kind"),
+        ),
+        OracleLeg(
+            "checked C movement optimized sanitizer execution",
+            ("cargo", "nextest", "run", "-p", "chelis-backend-c", "--test", "exec_compile",
+             "-E", "test(checked_c_movement_) | test(a_local_class_guards) | test(a_literal_claim_on_a_symbolic_input) | test(numeric_local_extent_claims)"),
         ),
         OracleLeg(
             "checked C shared indexing dtype dispatch and storage reuse",

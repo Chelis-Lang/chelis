@@ -596,7 +596,7 @@ fn ir_rejects_symbolic_normalized_axis_for_layer_norm() {
         "(def {} x (lit {type: (t-tensor {} (d-name {} batch) (d-name {} hidden) (t-prim {} f32))} 0))
          (def {} gamma (lit {type: (t-tensor {} (d-name {} hidden) (t-prim {} f32))} 0))
          (def {} beta (lit {type: (t-tensor {} (d-name {} hidden) (t-prim {} f32))} 0))
-         (def {} y (app {} (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta)))",
+         (def {} y (app {} (var {} layer_norm) (var {} x) (var {} gamma) (var {} beta) (lit {type: (t-prim {} f32)} 0.00001)))",
     )
     .unwrap();
     let err = check_ir_program(&exprs).expect_err("symbolic hidden axis should be rejected");

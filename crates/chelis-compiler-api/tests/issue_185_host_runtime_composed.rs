@@ -1,6 +1,6 @@
 //! Issue #185 host-runtime acceptance (Group E — Composed Tier 2).
 //!
-//! `BUILTIN_NAMES` accepts `mean`, `layer_norm`, and `conv2d` but the
+//! `BUILTIN_NAMES` accepts `mean`, `layer_norm`, and `conv` but the
 //! host runtime evaluator did not dispatch them. These ops decompose
 //! into RISC primitives via `tier2::lower_*`; the host runtime
 //! delegates by constructing a small DAG with the appropriate tier2
@@ -29,7 +29,7 @@ fn eval_surf(source: &str) -> chelis_compiler_api::schema::EvalResult {
 /// (`crates/chelis-cli/src/main.rs::try_eval`) — without this filter,
 /// the eval pipeline tries to forward-evaluate EVERY top-level
 /// binding including function-body closures whose tensor inputs are
-/// formal parameters with no bound value. For `conv2d` specifically
+/// formal parameters with no bound value. For `conv` specifically
 /// this would surface as "missing required input `x`" even though
 /// the user-visible `out` binding has the conv result.
 fn eval_surf_selected(source: &str, roots: &[&str]) -> chelis_compiler_api::schema::EvalResult {
@@ -88,7 +88,7 @@ out = mean(&make, 0)
     let expected = [2.0, 5.0, 3.0];
     for (i, &want) in expected.iter().enumerate() {
         assert_close(
-            out.data.element_as_f64_lossy(i),
+            out.data.element_f64_lossy(i),
             want,
             1e-6,
             &format!("mean[{i}]"),
@@ -106,13 +106,8 @@ out = mean(&make, 1)
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![2], "mean axis-1 shape");
-    assert_close(out.data.element_as_f64_lossy(0), 7.0 / 3.0, 1e-6, "mean[0]");
-    assert_close(
-        out.data.element_as_f64_lossy(1),
-        13.0 / 3.0,
-        1e-6,
-        "mean[1]",
-    );
+    assert_close(out.data.element_f64_lossy(0), 7.0 / 3.0, 1e-6, "mean[0]");
+    assert_close(out.data.element_f64_lossy(1), 13.0 / 3.0, 1e-6, "mean[1]");
 }
 
 // ---------------------------------------------------------------------------
@@ -135,7 +130,7 @@ fn issue185_layer_norm_runs_and_matches_ir_eval() {
 x = pad_sequences([[1.0, 2.0, 3.0, 4.0]], 0.0)
 g = to_tensor([1.0, 1.0, 1.0, 1.0])
 b = to_tensor([0.0, 0.0, 0.0, 0.0])
-out = layer_norm(&x, &g, &b)
+out = layer_norm(&x, &g, &b, 0.00001f32)
 "#;
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
@@ -148,7 +143,7 @@ out = layer_norm(&x, &g, &b)
     let expected = [-1.5 / denom, -0.5 / denom, 0.5 / denom, 1.5 / denom];
     for (i, &want) in expected.iter().enumerate() {
         assert_close(
-            out.data.element_as_f64_lossy(i),
+            out.data.element_f64_lossy(i),
             want,
             1e-5,
             &format!("layer_norm[{i}]"),
@@ -157,42 +152,42 @@ out = layer_norm(&x, &g, &b)
 }
 
 // ---------------------------------------------------------------------------
-// conv2d: 2D convolution. Pinned on a small 1x1x2x2 input with a 1x1x2x2
+// conv: 2D convolution. Pinned on a small 1x1x2x2 input with a 1x1x2x2
 // kernel (stride=1, padding=0). The output is a 1x1x1x1 scalar tensor
 // equal to the elementwise dot product.
 //
-// `conv2d`'s typer requires concrete d-lit tensor argument metadata at the
+// `conv`'s typer requires concrete d-lit tensor argument metadata at the
 // call site (`crates/chelis-types/src/infer.rs::
-// conv2d_input_dims_concrete_modulo_batch`), which only flows in via
+// conv_input_dims_concrete_modulo_batch`), which only flows in via
 // explicitly-typed function parameters. The fixture therefore wraps the
-// call in `def run_conv2d(x: tensor[1, 1, 2, 2, f32], k: tensor[1, 1, 2,
+// call in `def run_conv(x: tensor[1, 1, 2, 2, f32], k: tensor[1, 1, 2,
 // 2, f32]) -> ...` so the param-type metadata propagates onto the
-// conv2d call's args.
+// conv call's args.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn issue185_conv2d_runs_and_matches_ir_eval() {
+fn issue185_conv_runs_and_matches_ir_eval() {
     // input  = [[[[1.0, 2.0], [3.0, 4.0]]]]   shape [1, 1, 2, 2]
     // kernel = [[[[0.5, 1.0], [1.5, 2.0]]]]   shape [1, 1, 2, 2]
     // output = 1*0.5 + 2*1.0 + 3*1.5 + 4*2.0 = 0.5 + 2 + 4.5 + 8 = 15.0
     //
-    // `chelis test` / `chelis eval` lower `out = run_conv2d(...)` as a
+    // `chelis test` / `chelis eval` lower `out = run_conv(...)` as a
     // tensor-result top-level binding and route it through DAG eval
-    // (since `run_conv2d` returns a tensor). The host runtime is hit
+    // (since `run_conv` returns a tensor). The host runtime is hit
     // only when the test wraps the value in a non-tensor surface;
     // wrapping the assertion in a Test-effect fn forces the host
-    // runtime to invoke the lowered conv2d on the DAG-evaluated input
+    // runtime to invoke the lowered conv on the DAG-evaluated input
     // and then call `tensor_to_scalar` to read out a single value.
     let src = r#"
-def run_conv2d(x: tensor[1, 1, 2, 2, f32], k: tensor[1, 1, 2, 2, f32]) -> tensor[1, 1, 1, 1, f32] = conv2d(&x, &k, 1, 0)
+def run_conv(x: tensor[1, 1, 2, 2, f32], k: tensor[1, 1, 2, 2, f32]) -> tensor[1, 1, 1, 1, f32] = conv(&x, &k, [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])
 def make_x() -> tensor[1, 1, 2, 2, f32] = to_tensor([[[[cast(1.0, f32), cast(2.0, f32)], [cast(3.0, f32), cast(4.0, f32)]]]])
 def make_k() -> tensor[1, 1, 2, 2, f32] = to_tensor([[[[cast(0.5, f32), cast(1.0, f32)], [cast(1.5, f32), cast(2.0, f32)]]]])
-out = run_conv2d(make_x(), make_k())
+out = run_conv(make_x(), make_k())
 "#;
     let result = eval_surf_selected(src, &["out"]);
     let out = root_tensor(&result, "out");
-    assert_eq!(out.shape, vec![1, 1, 1, 1], "conv2d shape");
-    assert_close(out.data.element_as_f64_lossy(0), 15.0, 1e-5, "conv2d[0]");
+    assert_eq!(out.shape, vec![1, 1, 1, 1], "conv shape");
+    assert_close(out.data.element_f64_lossy(0), 15.0, 1e-5, "conv[0]");
 }
 
 // ---------------------------------------------------------------------------
@@ -220,15 +215,15 @@ fn issue185_mean_rejects_string_input() {
 #[test]
 fn issue185_layer_norm_rejects_string_input() {
     check_rejects(
-        r#"out = layer_norm("nope", "nope", "nope")"#,
+        r#"out = layer_norm("nope", "nope", "nope", 0.00001f32)"#,
         "layer_norm string input",
     );
 }
 
 #[test]
-fn issue185_conv2d_rejects_string_input() {
+fn issue185_conv_rejects_string_input() {
     check_rejects(
-        r#"out = conv2d("nope", "nope", 1, 0)"#,
-        "conv2d string input",
+        r#"out = conv("nope", "nope", [1i64, 1i64], [(0i64, 0i64), (0i64, 0i64)])"#,
+        "conv string input",
     );
 }

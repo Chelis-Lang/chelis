@@ -35,6 +35,17 @@ _CONTAINERS = {
 _ATOMIC_TYPES = {"alloc::string::String"}
 _NONNUMERIC = {"bool", "char", "str"}
 _TYPE_KINDS = {"struct", "enum", "type_alias"}
+_NON_TYPE_EXPORTS = {
+    "function",
+    "constant",
+    "static",
+    "trait",
+    "trait_alias",
+    "macro",
+    "proc_attribute",
+    "proc_derive",
+    "variant",
+}
 _SERDE_VALUES = {"tag", "content", "rename", "rename_all"}
 _SERDE_FLAGS = {"deny_unknown_fields"}
 _RENAME_RULES = {
@@ -77,7 +88,9 @@ def _attributes(item: dict) -> tuple[str, ...]:
     return tuple(result)
 
 
-def _serde(item: dict) -> tuple[tuple[str, str | bool], ...]:
+def _serde(
+    item: dict, *, flags: set[str] = _SERDE_FLAGS, values: set[str] = _SERDE_VALUES
+) -> tuple[tuple[str, str | bool], ...]:
     options: dict[str, str | bool] = {}
     for attr in _attributes(item):
         if not re.match(r"#\[\s*serde\b", attr):
@@ -95,9 +108,9 @@ def _serde(item: dict) -> tuple[tuple[str, str | bool], ...]:
             key, raw, _ = part.groups()
             if key in options:
                 raise GraphError(f"duplicate serde option {key}")
-            if key in _SERDE_FLAGS and raw is None:
+            if key in flags and raw is None:
                 value: str | bool = True
-            elif key in _SERDE_VALUES and raw is not None:
+            elif key in values and raw is not None:
                 value = json.loads(raw)
                 if key == "rename_all" and value not in _RENAME_RULES:
                     raise GraphError(f"unsupported serde rename rule {value}")
@@ -132,6 +145,7 @@ class Definition:
     layout: tuple
     edges: tuple[Edge, ...]
     codec: str
+    parameter_kinds: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -148,9 +162,10 @@ class DiscoveredGraph:
 class RustdocGraph:
     """Resolve a bundle of rustdoc-v60 defining artifacts.
 
-    Supported generic parameters are explicit type parameters. Const parameters,
-    associated types, opaque types and custom serializers require later explicit
-    support; none is treated as an empty/nonnumeric node. Concrete array lengths
+    Supported generics are explicit type parameters and nondefault usize const
+    parameters with decimal literals or declared-parameter substitutions.
+    Computed consts, associated/opaque types and custom serializers require
+    explicit support; none is treated as an empty/nonnumeric node. Arrays
     and borrowed containers are supported. The finite summary loses multiplicity
     and recursive path length, but preserves every declaration leaf and width.
     """
@@ -233,6 +248,9 @@ class RustdocGraph:
                     use = inner["use"]
                     if use.get("id") is None:
                         raise GraphError("unresolved public reexport")
+                    record = self.documents[owner].get("paths", {}).get(str(use["id"]))
+                    if record and record.get("kind") in _NON_TYPE_EXPORTS:
+                        continue
                     target_crate, target_id, _ = self._resolve(owner, use["id"])
                     target = self._item(target_crate, target_id)
                     export_name = use["name"]
@@ -266,6 +284,71 @@ class RustdocGraph:
         visit(crate, self.documents[crate]["root"], crate, frozenset())
         return exports
 
+    def serialization_candidates(self, crate: str) -> dict[str, dict]:
+        """Public serde types and aliases, across every exported module.
+
+        Publication is a separate ownership obligation. This inventory neither
+        selects JSON roots nor exempts cache types. New candidates require an
+        explicit owner; unsupported custom codecs remain candidates and fail
+        graph discovery until an execution-backed adapter exists.
+        """
+        candidates = {}
+        for name, ty in self.public_exports(crate).items():
+            owner, item_id = ty["graph_export"]
+            item = self._item(owner, item_id)
+            kind = next(iter(_TYPE_KINDS & item["inner"].keys()))
+            if kind == "type_alias":
+                # An alias can expose a primitive/container with serde through
+                # its underlying type; absence of nominal impls is not a skip.
+                candidates[name] = ty
+                continue
+            if self._has_serde(owner, item["inner"][kind]):
+                candidates[name] = ty
+        return candidates
+
+    def _has_serde(self, crate: str, body: dict) -> bool:
+        identities = {
+            f"{module}::{name}"
+            for module, name in (
+                ("serde_core::ser", "Serialize"),
+                ("serde_core::de", "Deserialize"),
+                ("serde::ser", "Serialize"),
+                ("serde::de", "Deserialize"),
+                ("serde", "Serialize"),
+                ("serde", "Deserialize"),
+            )
+        }
+        found = False
+        for impl_id in body.get("impls", []):
+            impl = self._item(crate, impl_id).get("inner", {}).get("impl", {})
+            trait = impl.get("trait")
+            if not trait:
+                continue
+            record = self.documents[crate].get("paths", {}).get(str(trait.get("id")))
+            if record is None:
+                raise GraphError("unresolved serde candidate trait identity")
+            found |= "::".join(record.get("path", [])) in identities
+        return found
+
+    def serialization_definitions(self, crate: str) -> dict[str, dict]:
+        """Nominal serde definitions, including private module declarations.
+
+        Unlike public candidates, aliases do not define a local serde codec.
+        Function-local types absent from rustdoc still require source-entry
+        discovery; this inventory does not assert their absence.
+        """
+        if crate not in self.documents:
+            raise GraphError(f"missing crate artifact {crate}")
+        result = {}
+        for (owner, item_id), identity in sorted(self.names.items()):
+            if owner != crate:
+                continue
+            item = self._item(owner, item_id)
+            kinds = {"struct", "enum"} & item["inner"].keys()
+            if kinds and self._has_serde(owner, item["inner"][next(iter(kinds))]):
+                result[identity] = {"graph_export": (owner, item_id)}
+        return result
+
     def discover_exports(self, crate: str) -> DiscoveredGraph:
         exports = self.public_exports(crate)
         if not exports:
@@ -277,7 +360,15 @@ class RustdocGraph:
     def discover(self, crate: str, root_type: dict) -> DiscoveredGraph:
         return self._discover([(crate, "$root", root_type)])
 
-    def _type(self, crate: str, ty: Any, parameters: tuple[str, ...]) -> tuple:
+    @staticmethod
+    def _const(expression: str, parameters: dict[str, str]) -> tuple:
+        if re.fullmatch(r"[0-9]+", expression):
+            return ("const", str(int(expression)))
+        if parameters.get(expression) == "usize":
+            return ("const_generic", expression)
+        raise GraphError(f"unresolved or unsupported const expression {expression}")
+
+    def _type(self, crate: str, ty: Any, parameters: dict[str, str]) -> tuple:
         if not isinstance(ty, dict) or len(ty) != 1:
             raise GraphError("unsupported rustdoc type shape")
         kind, body = next(iter(ty.items()))
@@ -290,7 +381,7 @@ class RustdocGraph:
                 raise GraphError(f"unknown primitive {body}")
             return ("primitive", body)
         if kind == "generic":
-            if body not in parameters:
+            if parameters.get(body) != "type":
                 raise GraphError(f"unresolved generic {body}")
             return ("generic", body)
         if kind == "resolved_path":
@@ -309,16 +400,22 @@ class RustdocGraph:
             for arg in raw_args:
                 if set(arg) == {"type"}:
                     args.append(self._type(crate, arg["type"], parameters))
+                elif set(arg) == {"const"}:
+                    args.append(self._const(arg["const"]["expr"], parameters))
                 elif set(arg) != {"lifetime"}:
-                    raise GraphError("unsupported const generic argument")
+                    raise GraphError("unsupported generic argument")
             defining_crate, item_id, identity = self._resolve(crate, body["id"])
             if identity in _ATOMIC_TYPES:
                 if args:
                     raise GraphError(f"unexpected generic arguments for {identity}")
                 return ("atomic", identity)
             if identity in _CONTAINERS:
-                if len(args) != _CONTAINERS[identity]:
-                    raise GraphError(f"wrong generic arity for {identity}")
+                if len(args) != _CONTAINERS[identity] or any(
+                    arg[0] in {"const", "const_generic"} for arg in args
+                ):
+                    raise GraphError(
+                        f"wrong generic arity or argument kind for {identity}"
+                    )
                 return ("container", identity, tuple(args))
             self._definition(defining_crate, item_id, identity)
             # During recursion the declaration itself may still be assembling.
@@ -329,15 +426,19 @@ class RustdocGraph:
                 raise GraphError(
                     f"unresolved or excess generic arguments for {identity}"
                 )
+            for parameter_kind, argument in zip(
+                self._parameter_kinds(inner), args, strict=True
+            ):
+                is_const = argument[0] in {"const", "const_generic"}
+                if is_const != (parameter_kind == "usize"):
+                    raise GraphError(f"wrong generic argument kind for {identity}")
             return ("reference", identity, tuple(args))
         if kind == "tuple":
             return ("tuple", tuple(self._type(crate, t, parameters) for t in body))
         if kind == "slice":
             return ("slice", self._type(crate, body, parameters))
         if kind == "array":
-            length = str(body["len"])
-            if not re.fullmatch(r"[0-9]+", length):
-                raise GraphError(f"unsupported array length {length}")
+            length = self._const(str(body["len"]), parameters)
             return ("array", length, self._type(crate, body["type"], parameters))
         if kind == "borrowed_ref":
             return (
@@ -349,18 +450,35 @@ class RustdocGraph:
         raise GraphError(f"unsupported rustdoc type {kind}")
 
     @staticmethod
-    def _parameters(inner: dict) -> tuple[str, ...]:
-        names = []
+    def _parameter_kinds(inner: dict) -> tuple[str, ...]:
+        kinds = []
         for parameter in inner.get("generics", {}).get("params", []):
             kind = parameter["kind"]
             if "lifetime" in kind:
                 continue
-            if set(kind) != {"type"} or kind["type"].get("default") is not None:
+            if set(kind) == {"type"} and kind["type"].get("default") is None:
+                kinds.append("type")
+            elif (
+                set(kind) == {"const"}
+                and kind["const"].get("default") is None
+                and kind["const"].get("type") == {"primitive": "usize"}
+            ):
+                kinds.append("usize")
+            else:
                 raise GraphError("unsupported generic parameter or default")
-            names.append(parameter["name"])
+        return tuple(kinds)
+
+    @classmethod
+    def _parameters(cls, inner: dict) -> tuple[str, ...]:
+        cls._parameter_kinds(inner)
+        names = tuple(
+            parameter["name"]
+            for parameter in inner.get("generics", {}).get("params", [])
+            if "lifetime" not in parameter["kind"]
+        )
         if len(set(names)) != len(names):
             raise GraphError("duplicate generic parameter")
-        return tuple(names)
+        return names
 
     def _codec(self, crate: str, inner: dict) -> str:
         found = set()
@@ -387,7 +505,18 @@ class RustdocGraph:
                     "custom serializer/decoder requires an execution-backed shape adapter"
                 )
             found.add(path)
-        return "serde-derived" if found == {"Serialize", "Deserialize"} else "unproven"
+        return {
+            frozenset(): "unproven",
+            frozenset({"Serialize"}): "serde-derived-serialize",
+            frozenset({"Deserialize"}): "serde-derived-deserialize",
+            frozenset({"Serialize", "Deserialize"}): "serde-derived",
+        }[frozenset(found)]
+
+    def _serde(self, item: dict):
+        return _serde(item)
+
+    def _validate_field_serde(self, options: tuple, ty: tuple):
+        """Additional adapters may validate supported field omission rules."""
 
     def _definition(self, crate: str, item_id: str, identity: str):
         if identity in self.definitions:
@@ -399,7 +528,9 @@ class RustdocGraph:
         kind = next(iter(kinds))
         inner = item["inner"][kind]
         parameters = self._parameters(inner)
-        serde = _serde(item)
+        parameter_kinds = self._parameter_kinds(inner)
+        context = dict(zip(parameters, parameter_kinds, strict=True))
+        serde = self._serde(item)
         codec = self._codec(crate, inner)
         self.definitions[identity] = None
         edges = []
@@ -427,10 +558,11 @@ class RustdocGraph:
                 name = field.get("name") or f"${position}"
                 if shape_kind == "tuple":
                     name = f"${position}"
-                field_serde = _serde(field)
+                field_serde = self._serde(field)
                 if "struct_field" not in field.get("inner", {}):
                     raise GraphError(f"invalid field in {identity}")
-                ty = self._type(crate, field["inner"]["struct_field"], parameters)
+                ty = self._type(crate, field["inner"]["struct_field"], context)
+                self._validate_field_serde(field_serde, ty)
                 edge = Edge(f"{prefix}.{name}", ty, field_serde)
                 if edge.path in {e.path for e in edges}:
                     raise GraphError(f"duplicate field {edge.path}")
@@ -442,7 +574,7 @@ class RustdocGraph:
             edges.append(
                 Edge(
                     identity + ".$alias",
-                    self._type(crate, inner["type"], parameters),
+                    self._type(crate, inner["type"], context),
                     (),
                 )
             )
@@ -461,14 +593,21 @@ class RustdocGraph:
                 layout.append(
                     (
                         name,
-                        _serde(variant),
+                        self._serde(variant),
                         fields(
                             variant["inner"]["variant"]["kind"], f"{identity}::{name}"
                         ),
                     )
                 )
         self.definitions[identity] = Definition(
-            identity, kind, parameters, serde, tuple(layout), tuple(edges), codec
+            identity,
+            kind,
+            parameters,
+            serde,
+            tuple(layout),
+            tuple(edges),
+            codec,
+            parameter_kinds,
         )
 
     def _evaluate(
@@ -479,7 +618,7 @@ class RustdocGraph:
             return {Leaf(origin, expr[1])} if expr[1] in NUMERIC_PRIMITIVES else set()
         if kind == "generic":
             return {Leaf(origin, "$" + expr[1])}
-        if kind == "atomic":
+        if kind in {"atomic", "const", "const_generic"}:
             return set()
         if kind == "reference":
             declaration = self.definitions[expr[1]]
@@ -499,7 +638,9 @@ class RustdocGraph:
         children = (
             expr[2]
             if kind == "container"
-            else expr[1] if kind == "tuple" else (expr[-1],)
+            else expr[1]
+            if kind == "tuple"
+            else (expr[-1],)
         )
         return set().union(
             *(self._evaluate(child, origin, summaries) for child in children)
@@ -542,7 +683,7 @@ class RustdocGraph:
 
     def _discover(self, roots) -> DiscoveredGraph:
         self.definitions = {}
-        parsed = tuple((name, self._type(crate, ty, ())) for crate, name, ty in roots)
+        parsed = tuple((name, self._type(crate, ty, {})) for crate, name, ty in roots)
         self._alias_cycles()
         summaries: dict[str, set[Leaf]] = {name: set() for name in self.definitions}
         iterations = 0
@@ -575,6 +716,7 @@ class RustdocGraph:
                     d.identity,
                     d.kind,
                     d.parameters,
+                    d.parameter_kinds,
                     d.serde,
                     d.layout,
                     [(e.path, e.type, e.serde) for e in d.edges],

@@ -2541,32 +2541,17 @@ fn reduce_sum_group(
     input: &TensorStorage,
     group: &[usize],
     accumulator: Prim,
-    stride4: bool,
 ) -> Result<ScalarValue, NumericKernelError> {
     let zero = reduction_seed(op, accumulator, 0, 0.0)?;
-    if !stride4 {
-        let mut acc = zero;
-        for &index in group {
-            acc = reduction_add(
-                op,
-                acc,
-                scalar_at_reduction_width(op, input, index, accumulator)?,
-            )?;
-        }
-        return Ok(acc);
-    }
-
-    let mut lanes = [zero; 4];
-    for (position, &index) in group.iter().enumerate() {
-        lanes[position & 3] = reduction_add(
+    let mut acc = zero;
+    for &index in group {
+        acc = reduction_add(
             op,
-            lanes[position & 3],
+            acc,
             scalar_at_reduction_width(op, input, index, accumulator)?,
         )?;
     }
-    let left = reduction_add(op, lanes[0], lanes[1])?;
-    let right = reduction_add(op, lanes[2], lanes[3])?;
-    reduction_add(op, left, right)
+    Ok(acc)
 }
 
 fn reduce_group(
@@ -2576,10 +2561,20 @@ fn reduce_group(
     accumulator: Prim,
 ) -> Result<ScalarValue, NumericKernelError> {
     match op {
-        TensorReduceOp::Sum { .. } => reduce_sum_group(op, input, group, accumulator, true),
-        TensorReduceOp::ReduceWindowSum => reduce_sum_group(op, input, group, accumulator, false),
+        TensorReduceOp::Sum { .. } => {
+            let leaves = group
+                .iter()
+                .map(|&index| scalar_at_reduction_width(op, input, index, accumulator))
+                .collect::<Result<Vec<_>, _>>()?;
+            match checked_adjacent_pair_fold(leaves, |left, right| reduction_add(op, left, right))?
+            {
+                Some(value) => Ok(value),
+                None => reduction_seed(op, accumulator, 0, 0.0),
+            }
+        }
+        TensorReduceOp::ReduceWindowSum => reduce_sum_group(op, input, group, accumulator),
         TensorReduceOp::ReduceWindowMean => {
-            let sum = reduce_sum_group(op, input, group, accumulator, false)?;
+            let sum = reduce_sum_group(op, input, group, accumulator)?;
             let divisor = reduction_seed(op, accumulator, group.len() as i64, group.len() as f64)?;
             reduction_div_float(op, sum, divisor)
         }
@@ -3333,178 +3328,9 @@ fn assert_float_trunc_source(op: &'static str, src: Prim) {
     }
 }
 
-// ---------------------------------------------------------------------
-// Serialization (chelis#729 rework: the FIFTH storage layer). The IR
-// constant payloads (`RiscOp::Const`/`ConstTensor`) embed the sealed
-// types, and `RiscOp` derives serde for the on-disk context/stdlib
-// caches and the `WireDag` surface. The privacy contract survives the
-// wire: `Deserialize` routes every inbound value through finalize
-// (finalize-on-decode), and the reduced-width float images are
-// round-trip-validated, so a corrupt or hand-forged payload is a LOUD
-// decode error, never a silently renormalized value. Integer families
-// travel exact at width; f16/bf16 travel as their exact f64 images
-// (every half value is exactly representable in f64).
-// ---------------------------------------------------------------------
-
-/// Wire mirror of [`ScalarValue`]. Private: the only way in or out is
-/// the serde impls below.
-#[derive(serde::Serialize, serde::Deserialize)]
-enum ScalarWire {
-    F64(f64),
-    F32(f32),
-    /// Exact f64 image of the stored half value.
-    F16(f64),
-    /// Exact f64 image of the stored bfloat value.
-    Bf16(f64),
-    I64(i64),
-    I32(i32),
-    I16(i16),
-    I8(i8),
-    Bool(bool),
-}
-
-impl serde::Serialize for ScalarValue {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let wire = match self.bits {
-            Bits::F64(v) => ScalarWire::F64(v),
-            Bits::F32(v) => ScalarWire::F32(v),
-            Bits::F16(v) => ScalarWire::F16(f64::from(v)),
-            Bits::Bf16(v) => ScalarWire::Bf16(f64::from(v)),
-            Bits::I64(v) => ScalarWire::I64(v),
-            Bits::I32(v) => ScalarWire::I32(v),
-            Bits::I16(v) => ScalarWire::I16(v),
-            Bits::I8(v) => ScalarWire::I8(v),
-            Bits::Bool(v) => ScalarWire::Bool(v),
-        };
-        wire.serialize(serializer)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for ScalarValue {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        use serde::de::Error;
-        let wire = ScalarWire::deserialize(deserializer)?;
-        let value = match wire {
-            ScalarWire::F64(v) => ScalarValue { bits: Bits::F64(v) },
-            ScalarWire::F32(v) => ScalarValue { bits: Bits::F32(v) },
-            ScalarWire::F16(image) => {
-                let half = f16_from_f64_rne(image);
-                if f64::from(half) != image && !image.is_nan() {
-                    return Err(D::Error::custom(format!(
-                        "f16 wire image {image} is not an exact f16 value; \
-                         refusing to renormalize a corrupt payload \
-                         (chelis#729 section C3 finalize-on-decode)"
-                    )));
-                }
-                ScalarValue {
-                    bits: Bits::F16(half),
-                }
-            }
-            ScalarWire::Bf16(image) => {
-                let half = bf16_from_f64_rne(image);
-                if f64::from(half) != image && !image.is_nan() {
-                    return Err(D::Error::custom(format!(
-                        "bf16 wire image {image} is not an exact bf16 value; \
-                         refusing to renormalize a corrupt payload \
-                         (chelis#729 section C3 finalize-on-decode)"
-                    )));
-                }
-                ScalarValue {
-                    bits: Bits::Bf16(half),
-                }
-            }
-            ScalarWire::I64(v) => ScalarValue { bits: Bits::I64(v) },
-            ScalarWire::I32(v) => ScalarValue { bits: Bits::I32(v) },
-            ScalarWire::I16(v) => ScalarValue { bits: Bits::I16(v) },
-            ScalarWire::I8(v) => ScalarValue { bits: Bits::I8(v) },
-            ScalarWire::Bool(v) => ScalarValue {
-                bits: Bits::Bool(v),
-            },
-        };
-        Ok(value)
-    }
-}
-
-/// Wire mirror of [`TensorStorage`]. Private, same discipline as
-/// [`ScalarWire`].
-#[derive(serde::Serialize, serde::Deserialize)]
-enum StorageWire {
-    F64(Vec<f64>),
-    F32(Vec<f32>),
-    /// Exact f64 images of the stored half values.
-    F16(Vec<f64>),
-    /// Exact f64 images of the stored bfloat values.
-    Bf16(Vec<f64>),
-    I64(Vec<i64>),
-    I32(Vec<i32>),
-    I16(Vec<i16>),
-    I8(Vec<i8>),
-    Bool(Vec<bool>),
-}
-
-impl serde::Serialize for TensorStorage {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let wire = match &self.buf {
-            Buf::F64(v) => StorageWire::F64(v.clone()),
-            Buf::F32(v) => StorageWire::F32(v.clone()),
-            Buf::F16(v) => StorageWire::F16(v.iter().map(|&h| f64::from(h)).collect()),
-            Buf::Bf16(v) => StorageWire::Bf16(v.iter().map(|&h| f64::from(h)).collect()),
-            Buf::I64(v) => StorageWire::I64(v.clone()),
-            Buf::I32(v) => StorageWire::I32(v.clone()),
-            Buf::I16(v) => StorageWire::I16(v.clone()),
-            Buf::I8(v) => StorageWire::I8(v.clone()),
-            Buf::Bool(v) => StorageWire::Bool(v.iter().map(|&b| b != 0).collect()),
-        };
-        wire.serialize(serializer)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for TensorStorage {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        use serde::de::Error;
-        let wire = StorageWire::deserialize(deserializer)?;
-        let buf = match wire {
-            StorageWire::F64(v) => Buf::F64(v),
-            StorageWire::F32(v) => Buf::F32(v),
-            StorageWire::F16(images) => {
-                let mut out = Vec::with_capacity(images.len());
-                for image in images {
-                    let half = f16_from_f64_rne(image);
-                    if f64::from(half) != image && !image.is_nan() {
-                        return Err(D::Error::custom(format!(
-                            "f16 wire image {image} is not an exact f16 value; \
-                             refusing to renormalize a corrupt payload \
-                             (chelis#729 section C3 finalize-on-decode)"
-                        )));
-                    }
-                    out.push(half);
-                }
-                Buf::F16(out)
-            }
-            StorageWire::Bf16(images) => {
-                let mut out = Vec::with_capacity(images.len());
-                for image in images {
-                    let half = bf16_from_f64_rne(image);
-                    if f64::from(half) != image && !image.is_nan() {
-                        return Err(D::Error::custom(format!(
-                            "bf16 wire image {image} is not an exact bf16 value; \
-                             refusing to renormalize a corrupt payload \
-                             (chelis#729 section C3 finalize-on-decode)"
-                        )));
-                    }
-                    out.push(half);
-                }
-                Buf::Bf16(out)
-            }
-            StorageWire::I64(v) => Buf::I64(v),
-            StorageWire::I32(v) => Buf::I32(v),
-            StorageWire::I16(v) => Buf::I16(v),
-            StorageWire::I8(v) => Buf::I8(v),
-            StorageWire::Bool(v) => Buf::Bool(v.into_iter().map(u8::from).collect()),
-        };
-        Ok(TensorStorage { buf })
-    }
-}
+// Stored-value serialization is a checked bit transport, separate from arithmetic
+// finalization. The private child module retains access to the sealed carriers.
+mod wire_codec;
 
 /// Bulk finalize: one monomorphized loop per dtype, never per-element
 /// dynamic dispatch (the section C5 performance contract). Traps on the
@@ -4931,7 +4757,7 @@ mod tests {
     }
 
     #[test]
-    fn global_sum_uses_explicit_accumulator_and_stride4_order() {
+    fn global_sum_uses_explicit_accumulator_and_canonical_order() {
         let int8 = finalize_tensor(
             "test",
             Prim::Int8,
@@ -4970,6 +4796,42 @@ mod tests {
                 prim: Prim::Int32,
             }))
         );
+    }
+
+    #[test]
+    fn global_sum_traps_only_at_canonical_adjacent_pairs() {
+        for prim in [Prim::Int32, Prim::Int64] {
+            let (_, max) = prim.integer_range().unwrap();
+            let op = TensorReduceOp::Sum {
+                accumulator: prim,
+                result: prim,
+            };
+            let trapping = finalize_tensor(
+                "test",
+                prim,
+                RawTensor::Int(vec![max, 1, 0, 0, -max, -1, 0, 0]),
+            )
+            .unwrap();
+            assert_eq!(
+                reduce_tensor_groups(op, &trapping, &one_group(8)),
+                Err(NumericKernelError::Trap(NumericTrap::Overflow {
+                    op: "sum",
+                    prim
+                }))
+            );
+            let valid = finalize_tensor(
+                "test",
+                prim,
+                RawTensor::Int(vec![max, -max, 0, 0, 1, -1, 0, 0]),
+            )
+            .unwrap();
+            assert_eq!(
+                reduce_tensor_groups(op, &valid, &one_group(8))
+                    .unwrap()
+                    .to_i64_exact_vec(),
+                Some(vec![0])
+            );
+        }
     }
 
     #[test]

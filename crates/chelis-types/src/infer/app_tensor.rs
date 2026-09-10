@@ -12,8 +12,8 @@ pub(super) fn check_layer_norm_signature(
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) -> Type {
-    if arg_tys.len() != 3 {
-        return report_builtin_arity_bare(errors, "layer_norm", "3 arguments", arg_tys.len());
+    if arg_tys.len() != 4 {
+        return report_builtin_arity_bare(errors, "layer_norm", "4 arguments", arg_tys.len());
     }
 
     let x_ty = type_for_readonly_check(&arg_tys[0], subst);
@@ -117,7 +117,34 @@ pub(super) fn check_layer_norm_signature(
         );
     }
 
+    if let TensorPrec::Concrete(prim) = x_prec {
+        if !prim.is_float() {
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::PrecisionMismatch,
+                    "layer_norm requires one active float dtype".to_string(),
+                    vec![],
+                ),
+            );
+        }
+        let epsilon_ty = type_for_readonly_check(&arg_tys[3], subst);
+        if let Err(error) = unify(&epsilon_ty, &Type::Prim(prim), subst) {
+            return report(errors, error.into());
+        }
+    }
+
     let hidden_dim = x_dims.last().cloned().expect("checked non-empty");
+    if subst.apply_dim(&hidden_dim) == Dim::Lit(0) {
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                "layer_norm requires a positive hidden extent".to_string(),
+                vec![],
+            ),
+        );
+    }
     if let Err(te) = unify_dim(&hidden_dim, &gamma_dims[0], subst) {
         return report(errors, te.into());
     }
@@ -135,62 +162,83 @@ pub(super) fn check_layer_norm_signature(
     subst.apply(&canonical)
 }
 
-/// If `arg_exprs[2]` and `arg_exprs[3]` are integer literals and the
-/// input/kernel spatial dims (axes 2, 3) resolve to concrete
-/// `Dim::Lit` values after substitution, return the computed output
-/// spatial extents `(out_h, out_w)`. Returns `None` if any of the
-/// inputs are non-literal or non-concrete; the caller falls back to
-/// fresh dim-vars in that case.
-///
-/// `extract_int_literal` already handles the canonical
-/// `(lit {type: ...} N)` Deep shape used for stride/padding literals.
-pub(super) fn compute_concrete_conv2d_spatial(
+/// Literal per-axis metadata. Unknown values remain shape obligations; malformed
+/// literal values are errors, never defaults. The declared scheme owns types.
+pub(super) type ConvAxisParameters = (i64, i64, i64);
+
+pub(super) fn conv_parameters(
+    strides: &deep::Expr,
+    padding: &deep::Expr,
+    rank: usize,
+) -> Result<Option<Vec<ConvAxisParameters>>, String> {
+    let strides = collect_shape_list_elements(strides);
+    let padding = collect_shape_list_elements(padding);
+    if strides.as_ref().is_some_and(|xs| xs.len() != rank)
+        || padding.as_ref().is_some_and(|xs| xs.len() != rank)
+    {
+        return Err(format!(
+            "conv requires exactly {rank} stride and padding entries"
+        ));
+    }
+    let (Some(strides), Some(padding)) = (strides, padding) else {
+        return Ok(None);
+    };
+    let mut result = Vec::with_capacity(rank);
+    let mut concrete = true;
+    for (axis, (stride, pair)) in strides.into_iter().zip(padding).enumerate() {
+        let pair = stamped_parts(pair)
+            .filter(|(tag, _, kids)| *tag == DeepTag::Tuple && kids.len() == 2)
+            .map(|(_, _, kids)| kids);
+        let stride = extract_int_for_dim(stride);
+        let low = pair.and_then(|xs| extract_int_for_dim(&xs[0]));
+        let high = pair.and_then(|xs| extract_int_for_dim(&xs[1]));
+        if stride.is_some_and(|s| s <= 0) {
+            return Err(format!(
+                "conv requires a positive stride, got {} (spatial axis {axis})",
+                stride.expect("known nonpositive stride")
+            ));
+        }
+        if low.is_some_and(|p| p < 0) || high.is_some_and(|p| p < 0) {
+            return Err(format!(
+                "conv requires non-negative padding at spatial axis {axis}"
+            ));
+        }
+        if let (Some(stride), Some(low), Some(high)) = (stride, low, high) {
+            result.push((stride, low, high));
+        } else {
+            concrete = false;
+        }
+    }
+    Ok(concrete.then_some(result))
+}
+
+pub(super) fn compute_concrete_conv_spatial(
     arg_exprs: &[deep::Expr],
     input_dims: &[Dim],
     kernel_dims: &[Dim],
     subst: &Subst,
-) -> Option<(i64, i64)> {
-    // Issue #216: cast-aware so cast-wrapped stride/padding still
-    // resolve the concrete spatial output dims at infer time.
-    let stride = arg_exprs.get(2).and_then(extract_int_for_dim)?;
-    let padding = arg_exprs.get(3).and_then(extract_int_for_dim)?;
-    if stride <= 0 || padding < 0 {
+) -> Option<Vec<i64>> {
+    let rank = input_dims.len().checked_sub(2)?;
+    if rank == 0 || kernel_dims.len() != input_dims.len() {
         return None;
     }
-    let in_h = match subst.apply_dim(input_dims.get(2)?) {
-        Dim::Lit(v) => v,
-        _ => return None,
-    };
-    let in_w = match subst.apply_dim(input_dims.get(3)?) {
-        Dim::Lit(v) => v,
-        _ => return None,
-    };
-    let k_h = match subst.apply_dim(kernel_dims.get(2)?) {
-        Dim::Lit(v) => v,
-        _ => return None,
-    };
-    let k_w = match subst.apply_dim(kernel_dims.get(3)?) {
-        Dim::Lit(v) => v,
-        _ => return None,
-    };
-    // `conv2d_output_extent` returns None on i64 overflow (RT-205
-    // round-2 F1); fall back to fresh dim-vars in that case so the
-    // validator's arm reports the overflow with a precise diagnostic
-    // rather than us computing here with saturating math and
-    // producing a confusing dim-lit-vs-dim-lit mismatch.
-    let out_h = conv2d_output_extent(in_h, k_h, stride, padding)?;
-    let out_w = conv2d_output_extent(in_w, k_w, stride, padding)?;
-    if out_h <= 0 || out_w <= 0 {
-        // Let the validator's arm emit the diagnostic; here we just
-        // fall back to fresh dim-vars so the inference pass produces
-        // a useful (declared-vs-fresh) mismatch instead of failing
-        // here with a confusing dim-lit-vs-dim-lit unify error.
-        return None;
-    }
-    Some((out_h, out_w))
+    let params = conv_parameters(arg_exprs.get(2)?, arg_exprs.get(3)?, rank).ok()??;
+    input_dims[2..]
+        .iter()
+        .zip(&kernel_dims[2..])
+        .zip(params)
+        .map(|((input, kernel), (stride, low, high))| {
+            let (Dim::Lit(input), Dim::Lit(kernel)) =
+                (subst.apply_dim(input), subst.apply_dim(kernel))
+            else {
+                return None;
+            };
+            conv_output_extent(input, kernel, stride, low, high)
+        })
+        .collect()
 }
 
-pub(super) fn check_conv2d_signature(
+pub(super) fn check_conv_signature(
     arg_exprs: &[deep::Expr],
     arg_tys: &[Type],
     result_ty: &Type,
@@ -198,62 +246,35 @@ pub(super) fn check_conv2d_signature(
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
 ) -> Type {
-    if arg_tys.len() < 2 {
-        return report_builtin_arity_bare(errors, "conv2d", "at least 2 arguments", arg_tys.len());
+    if arg_tys.len() != 4 {
+        return report_builtin_arity_bare(errors, "conv", "4 arguments", arg_tys.len());
     }
-
-    let input_ty = type_for_readonly_check(&arg_tys[0], subst);
-    let kernel_ty = type_for_readonly_check(&arg_tys[1], subst);
-
-    let (input_dims, input_prec) = match input_ty {
-        Type::Tensor(dims, prec) => (dims, prec),
-        Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
-        other => {
+    let input = type_for_readonly_check(&arg_tys[0], subst);
+    let kernel = type_for_readonly_check(&arg_tys[1], subst);
+    let (input_dims, input_prec, kernel_dims, kernel_prec) = match (&input, &kernel) {
+        (Type::Var(_) | Type::Error(_), _) | (_, Type::Var(_) | Type::Error(_)) => {
+            return subst.apply(result_ty);
+        }
+        (Type::Tensor(ds, p), Type::Tensor(ks, q)) => (ds, p, ks, q),
+        _ => {
             return report(
                 errors,
                 CheckError::new(
                     CheckErrorKind::TypeMismatch,
-                    format!("conv2d expects tensor input, got {other}"),
+                    "conv requires tensor input and kernel".to_string(),
                     vec![],
                 ),
             );
         }
     };
-    let (kernel_dims, kernel_prec) = match kernel_ty {
-        Type::Tensor(dims, prec) => (dims, prec),
-        Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
-        other => {
-            return report(
-                errors,
-                CheckError::new(
-                    CheckErrorKind::TypeMismatch,
-                    format!("conv2d expects tensor kernel, got {other}"),
-                    vec![],
-                ),
-            );
-        }
-    };
-
-    if input_dims.len() != 4 {
+    if input_dims.len() < 3 || kernel_dims.len() != input_dims.len() {
         return report(
             errors,
             CheckError::new(
                 CheckErrorKind::DimensionMismatch,
                 format!(
-                    "conv2d expects rank-4 input tensor, got rank {}",
-                    input_dims.len()
-                ),
-                vec![],
-            ),
-        );
-    }
-    if kernel_dims.len() != 4 {
-        return report(
-            errors,
-            CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                format!(
-                    "conv2d expects rank-4 kernel tensor, got rank {}",
+                    "conv requires equal input/kernel ranks of at least 3, got {} and {}",
+                    input_dims.len(),
                     kernel_dims.len()
                 ),
                 vec![],
@@ -265,83 +286,41 @@ pub(super) fn check_conv2d_signature(
             errors,
             CheckError::new(
                 CheckErrorKind::PrecisionMismatch,
-                format!(
-                    "conv2d requires matching input/kernel precision, got {} and {}",
-                    input_prec.name(),
-                    kernel_prec.name()
-                ),
-                vec!["Insert explicit cast".to_string()],
+                "conv requires matching input/kernel precision".to_string(),
+                vec![],
             ),
         );
     }
-    if let Err(te) = unify_dim(&input_dims[1], &kernel_dims[1], subst) {
-        return report(errors, te.into());
+    if let TensorPrec::Concrete(p) = input_prec
+        && !p.is_float()
+    {
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::PrecisionMismatch,
+                "conv requires an active float dtype".to_string(),
+                vec![],
+            ),
+        );
     }
-
-    // RT-205 F8: when stride/padding are integer literals and the
-    // input/kernel spatial dims are concrete Dim::Lit values, compute
-    // the output spatial dims via the canonical formula
-    // (`floor((in + 2 * padding - kernel) / stride) + 1`) and place
-    // concrete `Dim::Lit` values into the output template. Without
-    // this the placeholders are fresh dim-vars that unify with any
-    // positive declared spatial dim, so an explicit but WRONG
-    // declared output (e.g. `tensor[1, 8, 100, 100]` for the
-    // canonical 8x8 input + 3x3 kernel case whose real output is
-    // 6x6) silently type-checks.
-    let computed_spatial =
-        compute_concrete_conv2d_spatial(arg_exprs, &input_dims, &kernel_dims, subst);
-    let (out_h_dim, out_w_dim) = match computed_spatial {
-        Some((h, w)) => (Dim::Lit(h), Dim::Lit(w)),
-        None => (Dim::Var(vg.fresh_dvar()), Dim::Var(vg.fresh_dvar())),
-    };
-    let output_template = Type::Tensor(
-        vec![
-            subst.apply_dim(&input_dims[0]),
-            subst.apply_dim(&kernel_dims[0]),
-            out_h_dim,
-            out_w_dim,
-        ],
-        input_prec.clone(),
-    );
-    if let Err(te) = unify(result_ty, &output_template, subst) {
-        return report(errors, te.into());
+    if let Err(error) = unify_dim(&input_dims[1], &kernel_dims[1], subst) {
+        return report(errors, error.into());
     }
-
-    let resolved_output = subst.apply(&output_template);
-    if let Type::Tensor(out_dims, out_prec) = &resolved_output {
-        if out_dims.len() != 4 {
-            return report(
-                errors,
-                CheckError::new(
-                    CheckErrorKind::DimensionMismatch,
-                    format!("conv2d result must be rank 4, got rank {}", out_dims.len()),
-                    vec![],
-                ),
-            );
-        }
-        if *out_prec != input_prec {
-            return report(
-                errors,
-                CheckError::new(
-                    CheckErrorKind::PrecisionMismatch,
-                    format!(
-                        "conv2d result precision must match input/kernel precision {}, got {}",
-                        input_prec.name(),
-                        out_prec.name()
-                    ),
-                    vec!["Insert explicit cast".to_string()],
-                ),
-            );
-        }
-        if let Err(te) = unify_dim(&out_dims[0], &input_dims[0], subst) {
-            return report(errors, te.into());
-        }
-        if let Err(te) = unify_dim(&out_dims[1], &kernel_dims[0], subst) {
-            return report(errors, te.into());
-        }
+    let rank = input_dims.len() - 2;
+    let spatial = compute_concrete_conv_spatial(arg_exprs, input_dims, kernel_dims, subst);
+    let mut output_dims = vec![
+        subst.apply_dim(&input_dims[0]),
+        subst.apply_dim(&kernel_dims[0]),
+    ];
+    output_dims.extend(match spatial {
+        Some(dims) => dims.into_iter().map(Dim::Lit).collect::<Vec<_>>(),
+        None => (0..rank).map(|_| Dim::Var(vg.fresh_dvar())).collect(),
+    });
+    let output = Type::Tensor(output_dims, input_prec.clone());
+    if let Err(error) = unify(result_ty, &output, subst) {
+        return report(errors, error.into());
     }
-
-    subst.apply(&output_template)
+    subst.apply(&output)
 }
 
 pub(super) fn check_matmul_signature(

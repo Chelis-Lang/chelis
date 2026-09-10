@@ -218,8 +218,8 @@ and AD so its zero-boundary rule cannot be confused with `max_elem`'s tie rule.
 | `matmul` | `expand`+`mul`+`sum`, pattern-matched to BLAS (`spec/05` §4.1); optional `accumulator` | differentiable |
 | `mean` | `div(sum(x,axis), axis extent)` | differentiable |
 | `softmax` | max-shift + `exp` + `sum` + `div` (`spec/05` §4.2) | differentiable |
-| `layer_norm` | mean/var normalize + affine (`spec/05` §4.4) | differentiable |
-| `conv2d` | `im2col` → `matmul` → `reshape` (`spec/05` §4.5) | differentiable |
+| `layer_norm` | explicit epsilon plus mean/var normalize + affine (`spec/05` §4.4) | differentiable |
+| `conv` | N-dimensional padded window gather → one matrix contraction → reshape/permute; explicit per-axis int64 strides and `(low,high)` padding pairs (`spec/05` §4.5) | differentiable |
 
 The derived activations and arithmetic also have a host-lane C-emit path
 (`host_emit.rs`) used when they appear inside the host lane — i.e. they are
@@ -227,12 +227,13 @@ effectively `DAG+Host`, but their canonical lowering is the DAG.
 
 **Documented composite lowerings** that are spec-level recipes, not builtins in the
 closed vocabulary (provided via desugaring or `chelis-std`/shell libraries):
-`linear`, `cross_entropy`, `embedding`, `multi_head_attention`, `im2col`, `argmax`
-(`spec/05` §3.5, §4.3–4.7).
+`linear`, `cross_entropy`, `embedding`, `multi_head_attention`, `argmax`
+(`spec/05` §3.5, §4.3–4.7). Window matrix extraction in §4.5 is a
+convolution lowering step, not a separate callable.
 
-> **`normalize`** is accepted by the type checker but has **no specified lowering**
-> (`spec/05` §3.4 note). Do **not** treat it as a stable builtin until the spec and IR
-> lowering are aligned.
+`normalize` is an ordinary user-defined name, not a builtin. An undeclared
+call is an unbound-variable error under `spec/05` §3.4.
+`examples/explicit_normalization.ch` defines an explicit formula.
 
 ---
 
@@ -264,10 +265,11 @@ capability.
 
 | Name | Signature | Notes |
 |---|---|---|
-| `tensor_scan` | `(initial: T, fn: (T,int64)->T, n: int64) -> tensor[n, T]` | **host-only**, no AD; **`chelis build` (C/HIP) rejects it whole-program**; `grad`/`vmap` over a body reaching it are rejected (reachability-scoped). The sanctioned init-time per-index tensor constructor (`T` scalar; accumulator is f64-backed, exact to 2^53). |
+| `tensor_scan` | `(initial: T, fn: (T,int64)->T ! E, n: int64) -> tensor[n,..state_shape(T),element(T)] ! E` | [05-OP-38] admits scalar or fixed-shape tensor state. The runtime currently implements scalar state with exact tagged values; tensor state, compiled execution, and transforms remain implementation gaps recorded in `spec/design/dtype_semantics.md`. |
 
-**`tensor_scan` (tensor lane, init-only) ≠ `scan` (list combinator, §3.3).** Don't
-put `tensor_scan` in a loss, forward, or anything `grad`/`build` must reach.
+`tensor_scan` stacks successive states into a tensor; `scan` (§3.3) returns
+a List. The normative scan contract includes float-state AD and callback
+effects even where an execution lane has not implemented them.
 
 ### 3.3 Higher-order list / sequence combinators
 
@@ -296,8 +298,18 @@ The host lane is eager (no lazy list fusion).
 
 | Name | Signature | Notes |
 |---|---|---|
-| `list_dir` | `string -> List[string]` | Entry names, not paths. Ordered by the entry name's byte sequence, per [05-HOST-4]. |
+| `list_dir` | `string -> List[string]` | Entry names, not paths. Ordered by host-name bytes; strict UTF-8 conversion under [05-HOST-4]. An invalid name traps `IO` for the complete call. |
 | `process_run` | `(cmd: string, args: List[string]) -> (int64, string, string)` | argv, no shell. **Eval/test-only** — C/HIP/Metal build reject it (chelis#267). |
+
+String-valued path APIs cannot directly name non-UTF-8 files. `list_dir`
+preserves valid names exactly, without normalization; on conversion failure its
+diagnostic identifies the directory and first invalid entry in host-name order
+using reversible byte escapes. A byte-preserving path API is not provided by
+this contract.
+
+The executable [directory listing example](../examples/io/list_directory.ch)
+prints names in that order. Its fixture-based eval/C coverage is
+`crates/chelis-cli/tests/issue_1479_list_dir_lane_parity.rs`.
 
 ### 3.6 Diagnostics & test — `Test` effect on asserts
 
@@ -374,7 +386,7 @@ Tier-1 DAG:   add sub mul div floor_div trunc_div max_elem min_elem cmplt neg re
               reduce_window_mean reshape permute expand insert pad shrink stride
               uniform_like gather scatter_replace scatter_elements
 Tier-2 DAG:   eq neq lt gt lte gte and or not relu sigmoid tanh silu gelu
-              softmax normalize mean matmul layer_norm conv2d
+              softmax mean matmul layer_norm conv
 Host lane:    cumsum sort einsum diagonal trace where clamp concat split scatter
               pad_sequences pad_sequences_to tensor_scan
               map filter fold scan partition flat_map flatten zip enumerate chunk
@@ -394,9 +406,6 @@ Host lane:    cumsum sort einsum diagonal trace where clamp concat split scatter
               test_assert_eq_tensor
               mod bitand bitor bitxor shl shr
 ```
-
-`normalize` is listed because it is in `BUILTIN_NAMES`, but it has **no specified
-lowering** (`spec/05` §3.4) — treat it as unstable, not a stable builtin (see §2).
 
 Prelude ADTs/constructors (also in scope): `Option`/`Some`/`None`,
 `List`/`Cons`/`Nil`, and `MappedFile`.

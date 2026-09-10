@@ -615,7 +615,8 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("cancelled", err)
         # The lease taken by --local is released in main's finally.
         self.assertEqual(summary["lease"]["mode"], "held")
-        self.assertEqual([p.name for p in lease_paths], ["gate.lock"])
+        self.assertEqual(sorted(p.name for p in lease_paths),
+                         ["gate.lock", "gate.lock.queue", "gate.lock.queue.lock"])
         self.assertIn("USER-CANCEL", out)
 
     def test_summary_written_on_git_failure(self):
@@ -642,7 +643,8 @@ class SummaryTests(unittest.TestCase):
         self.assertIsNone(summary["lease"]["holder_seen"])
         self.assertEqual(len(launched), len(gate.local_command_list(["chelis-surf"])))
         # Lock file persists (it is just an inode to flock); the sidecar is gone.
-        self.assertEqual([p.name for p in lease_paths], ["gate.lock"])
+        self.assertEqual(sorted(p.name for p in lease_paths),
+                         ["gate.lock", "gate.lock.queue", "gate.lock.queue.lock"])
         self.assertEqual(summary["files_changed_by_run"], [])
 
     def test_stage_runs_get_a_summary_but_no_preflight_or_lease(self):
@@ -942,14 +944,23 @@ class LeaseTests(unittest.TestCase):
         # A holder between its flock and its sidecar write, or a --fast peek
         # holding LOCK_SH for microseconds, blocks the first attempt with no
         # readable sidecar. One short retry must settle it silently.
-        attempts = iter([False, True])
         out = io.StringIO()
         sleeps: list[float] = []
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / gate.LEASE_FILE_NAME
             lease = self._lease(path, wait=True, output=out, sleep=sleeps.append)
+            real_try = gate.GateLease._try_flock
+            blocked = False
+
+            def transient_main_lock(fd, operation=gate.fcntl.LOCK_EX):
+                nonlocal blocked
+                if fd == lease._fd and not blocked:
+                    blocked = True
+                    return False
+                return real_try(fd, operation)
+
             with mock.patch.object(
-                gate.GateLease, "_try_flock", staticmethod(lambda fd, operation=gate.fcntl.LOCK_EX: next(attempts))
+                gate.GateLease, "_try_flock", staticmethod(transient_main_lock)
             ):
                 lease.acquire()
             lease.release()

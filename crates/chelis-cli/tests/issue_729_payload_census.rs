@@ -8,10 +8,11 @@
 //! vocabulary (`chelis-ir/src/dag.rs`) and its wire mirror
 //! (`chelis-compiler-api/src/schema.rs`, the `WireRiscOp` block) - and
 //! pins the exact set of remaining raw `f64`/`Vec<f64>` payload fields.
-//! Growing a new numeric payload field without a census entry (a sealed
-//! type, or a citation here) is a RED TEST, not a review catch.
+//! The wire mirror permits no raw float payload. Its exact carrier and field
+//! authority is verified by `capacity_census_wire`; this small tripwire also
+//! rejects reintroducing the retired raw random-parameter fields.
 //!
-//! The cited allowlist:
+//! The remaining native IR list (separate from wire authority):
 //!
 //! * `UniformLike { low, high }` and `Dropout { rate }` - float-only op
 //!   PARAMETERS (RNG bounds and a probability). Their f32-domain values
@@ -126,17 +127,10 @@ fn wire_risc_op_mirror_has_no_unsealed_numeric_payload_beyond_the_census() {
     let block = enum_block(&source, "WireRiscOp");
 
     let fields = raw_float_payload_fields(block);
-    assert_eq!(
-        fields,
-        vec![
-            // Float-only operation parameters.
-            "high: f64".to_string(),
-            "low: f64".to_string(),
-            "rate: f64".to_string(),
-        ],
-        "a raw float payload field entered or left `WireRiscOp` without \
-         a census entry (wire v4 carries constants as sealed dtype-tagged \
-         payloads; see the WIRE_DAG_SCHEMA_VERSION history)."
+    assert!(
+        fields.is_empty(),
+        "WireRiscOp has no raw float exception path: {fields:?}; numeric \
+         values require their exact sealed carrier and executed wire authority"
     );
 
     assert!(
@@ -151,4 +145,22 @@ fn wire_risc_op_mirror_has_no_unsealed_numeric_payload_beyond_the_census() {
         block.contains("fill: ScalarValue"),
         "WireRiscOp::Pad must carry the sealed dtype-tagged payload (wire v5)"
     );
+}
+
+#[test]
+fn retired_wire_random_parameters_cannot_regain_raw_float_admission() {
+    let source =
+        std::fs::read_to_string(repo_root().join("crates/chelis-compiler-api/src/schema.rs"))
+            .expect("schema.rs readable");
+    let block = enum_block(&source, "WireRiscOp");
+    assert!(raw_float_payload_fields(block).is_empty());
+    for field in ["low", "high", "rate"] {
+        let sealed = format!("{field}: ScalarValue");
+        assert_eq!(block.matches(&sealed).count(), 1, "{sealed}");
+        for raw in ["f32", "f64", "Vec<f32>", "Vec<f64>"] {
+            let unsealed = format!("{field}: {raw}");
+            let mutation = block.replace(&sealed, &unsealed);
+            assert_eq!(raw_float_payload_fields(&mutation), [unsealed]);
+        }
+    }
 }

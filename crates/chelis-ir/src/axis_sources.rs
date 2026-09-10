@@ -45,6 +45,41 @@ use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 
 use crate::dag::{Dag, DagNode, DimInfo, NodeId, RiscOp, RtAxis, RtDim};
 
+/// The two distinct primitives represented by a verified `RiscOp::Expand`.
+/// Spec/10 section 3.4 selects the form by the verified input/output rank relation;
+/// mutable runtime metadata supplies no source-operation authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpansionKind {
+    Expand,
+    Insert,
+}
+impl ExpansionKind {
+    pub fn primitive_name(self) -> &'static str {
+        match self {
+            Self::Expand => "expand",
+            Self::Insert => "insert",
+        }
+    }
+}
+/// An invalid or non-expansion node has no form; verification rejects invalid ranks.
+pub fn expansion_kind(dag: &Dag, id: NodeId) -> Option<ExpansionKind> {
+    let node = dag.get(id)?;
+    if !matches!(node.op, RiscOp::Expand { .. }) {
+        return None;
+    }
+    let input = dag.get(*node.inputs.first()?)?;
+    match node
+        .output_type
+        .dims
+        .len()
+        .checked_sub(input.output_type.dims.len())
+    {
+        Some(0) => Some(ExpansionKind::Expand),
+        Some(1) => Some(ExpansionKind::Insert),
+        _ => None,
+    }
+}
+
 /// Where one realized output axis gets its extent.
 ///
 /// The variant set is C4's, and it is deliberately closed: an extent is a
@@ -434,7 +469,7 @@ pub fn output_axis_sources(dag: &Dag, node: NodeId) -> Vec<AxisSource> {
             .collect(),
 
         // --- Shape query: a rank-0 scalar has no output axis ---
-        RiscOp::Shape { .. } => Vec::new(),
+        RiscOp::Shape { .. } | RiscOp::ExtentWitness { .. } => Vec::new(),
 
         // --- Memory ---
         RiscOp::Const { .. } | RiscOp::ConstTensor { .. } => declared_shape_sources(dag, node),
@@ -920,10 +955,10 @@ fn member_is_interface(dag: &Dag, member: &ClassMember) -> bool {
 ///
 /// Both lowering paths land on this one key. `lower_fn` registers parameter
 /// `Load`s in declared order, so first occurrence IS declared signature
-/// order there; the subexpression path pre-creates them in a deliberately
-/// name-sorted order and declares no signature, so the ABI branch governs and
-/// that order is the assigned one. It is also exactly what the C emitter's
-/// `input_labels` assigns, so a guard's order here and its slot there cannot
+/// order there. Helpers extracted from a declared function receive that same
+/// parameter order. Only signatureless subexpressions assign name-sorted
+/// slots, so the ABI branch governs those entries. This is also what the C
+/// emitter's `input_labels` assigns, so a guard's order here and its slot there cannot
 /// disagree.
 fn abi_input_slot(dag: &Dag, load: NodeId) -> Option<usize> {
     let name = match &dag.get(load)?.op {
@@ -1210,18 +1245,14 @@ pub fn derive_dim_witnesses(dag: &Dag) -> Vec<RuntimeDimClass> {
                 continue;
             }
             let claim = DimClaim::Name(name.clone());
-            let entry = OrderedMember {
-                slot: match source {
-                    AxisSource::ExternalAxis { load, .. } => abi_input_slot(dag, *load),
-                    _ => None,
-                },
-                node: node.id.0,
-                member: ClassMember {
+            let entry = OrderedMember::new(
+                dag,
+                ClassMember {
                     node: node.id,
                     axis,
                     source: source.clone(),
                 },
-            };
+            );
             match grouped.iter_mut().find(|(existing, _)| *existing == claim) {
                 Some((_, members)) => members.push(entry),
                 None => grouped.push((claim, vec![entry])),
@@ -1260,22 +1291,54 @@ pub fn derive_dim_witnesses(dag: &Dag) -> Vec<RuntimeDimClass> {
 /// The sort key C2.4 rule 1 defines: interface members before local ones,
 /// interface members by assigned ABI input slot, every remaining tie by node
 /// position.
-type OrderKey = (bool, Option<usize>, usize);
+type OrderKey = (bool, Option<(usize, usize)>, usize);
 
 /// A member together with the key that orders it.
 ///
-/// `slot` is the declaring `Load`'s assigned ABI input slot for an interface
+/// `slot` is the declaring `Load`'s assigned ABI input slot and axis for an interface
 /// member and `None` for a local one, so sorting on `(slot.is_none(), slot,
 /// node)` puts every interface member ahead of every local one, orders the
 /// interface group by assigned slot, and breaks every remaining tie by node
 /// position. That is C2.4 rule 1 in one key.
 struct OrderedMember {
-    slot: Option<usize>,
+    slot: Option<(usize, usize)>,
     node: usize,
     member: ClassMember,
 }
 
 impl OrderedMember {
+    fn new(dag: &Dag, member: ClassMember) -> Self {
+        // A named class takes its canonical value from an axis declaring
+        // that name, not from a foreign value that merely claims equality.
+        let slot = match member.source {
+            AxisSource::ExternalAxis { load, axis } => {
+                abi_input_slot(dag, load).map(|slot| (slot, axis))
+            }
+            _ => None,
+        };
+        Self {
+            slot,
+            node: member.node.0,
+            member,
+        }
+    }
+
+    fn literal_guard_key(&self, dag: &Dag) -> OrderKey {
+        // A literal is its own canonical value. Its guard order therefore
+        // follows the input being checked, even when a later operation
+        // consumes a folded shape read or scalar parameter from that input.
+        let input_axis = member_load_axis(dag, &self.member).or_else(|| {
+            if let AxisSource::ScalarInput { input } = self.member.source {
+                load_through_casts(dag, self.member.node, input).map(|load| (load, 0))
+            } else {
+                None
+            }
+        });
+        let slot =
+            input_axis.and_then(|(load, axis)| abi_input_slot(dag, load).map(|slot| (slot, axis)));
+        (slot.is_none(), slot, self.node)
+    }
+
     fn key(&self) -> OrderKey {
         (self.slot.is_none(), self.slot, self.node)
     }
@@ -1298,18 +1361,14 @@ pub fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass> {
             if !is_member(&node.op, axis, &claim, source) {
                 continue;
             }
-            let entry = OrderedMember {
-                slot: match source {
-                    AxisSource::ExternalAxis { load, .. } => abi_input_slot(dag, *load),
-                    _ => None,
-                },
-                node: node.id.0,
-                member: ClassMember {
+            let entry = OrderedMember::new(
+                dag,
+                ClassMember {
                     node: node.id,
                     axis,
                     source: source.clone(),
                 },
-            };
+            );
             match grouped.iter_mut().find(|(existing, _)| *existing == claim) {
                 Some((_, members)) => members.push(entry),
                 None => grouped.push((claim, vec![entry])),
@@ -1319,7 +1378,11 @@ pub fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass> {
 
     let mut classes: Vec<(OrderKey, RuntimeDimClass)> = Vec::new();
     for (claim, mut members) in split_by_scope(dag, grouped) {
-        members.sort_by_key(OrderedMember::key);
+        let order_key = |member: &OrderedMember| match claim {
+            DimClaim::Literal(_) => member.literal_guard_key(dag),
+            DimClaim::Name(_) => member.key(),
+        };
+        members.sort_by_key(order_key);
         // A `Name` class needs two witnesses: one has nothing to disagree
         // with. A `Literal` class needs one, because C2.4 makes the literal
         // the canonical VALUE rather than a first member, so a single
@@ -1331,7 +1394,7 @@ pub fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass> {
         if members.len() < needed {
             continue;
         }
-        let order = members[0].key();
+        let order = order_key(&members[0]);
         classes.push((
             order,
             RuntimeDimClass {
@@ -1340,8 +1403,8 @@ pub fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass> {
             },
         ));
     }
-    // Classes run in their canonical members' order, so an all-interface
-    // class's entry guards fire in assigned-slot order.
+    // Class order preserves canonical witness identity. Individual entry
+    // comparisons are scheduled separately by `entry_extent_guards`.
     classes.sort_by_key(|(order, _)| *order);
     classes.into_iter().map(|(_, class)| class).collect()
 }
@@ -1475,6 +1538,101 @@ pub fn derive_unit_extent_claims(dag: &Dag) -> Vec<UnitExtentClaim> {
         });
     }
     claims
+}
+
+/// One interface comparison, independent of the class that established its
+/// witnesses. Both host lanes consume this schedule without regrouping it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntryExtentGuard {
+    /// Compare two actual input axes from the same scoped claim.
+    Named {
+        claim: String,
+        canonical: (NodeId, usize),
+        observed: (NodeId, usize),
+    },
+    /// Compare an actual input axis with its literal claim or unit precondition.
+    Literal {
+        required: usize,
+        observed: (NodeId, usize),
+    },
+}
+
+/// Section 4.7's individual entry checks in assigned input-slot/axis order.
+/// A named check becomes due at the later of its two witnesses; its canonical
+/// witness remains the declaring one even when that declaration is later.
+/// Literal and unit checks become due at the observed input. Equal-position
+/// checks retain derivation order. Exact duplicate comparisons are emitted once.
+pub fn entry_extent_guards(dag: &Dag) -> Vec<EntryExtentGuard> {
+    let position = |(load, axis)| {
+        (
+            abi_input_slot(dag, load).expect("entry witness is an input"),
+            axis,
+        )
+    };
+    let mut guards = Vec::new();
+    // This is the same interface projection used by symbolic bindings: local
+    // members do not prevent two input witnesses from disagreeing at entry.
+    for class in derive_dim_witnesses(dag) {
+        let DimClaim::Name(claim) = class.claim else {
+            continue;
+        };
+        let mut reads = class
+            .members
+            .iter()
+            .filter_map(|member| member_load_axis(dag, member));
+        let Some(canonical) = reads.next() else {
+            continue;
+        };
+        for observed in reads {
+            if position(canonical) != position(observed) {
+                guards.push(EntryExtentGuard::Named {
+                    claim: claim.clone(),
+                    canonical,
+                    observed,
+                });
+            }
+        }
+    }
+    for class in derive_runtime_dim_classes(dag) {
+        if class.placement(dag) != GuardPlacement::Entry {
+            continue;
+        }
+        let DimClaim::Literal(required) = class.claim else {
+            continue;
+        };
+        for observed in class
+            .members
+            .iter()
+            .filter_map(|member| member_load_axis(dag, member))
+        {
+            guards.push(EntryExtentGuard::Literal { required, observed });
+        }
+    }
+    for claim in derive_unit_extent_claims(dag) {
+        if claim.placement(dag) == GuardPlacement::Entry
+            && let Some(observed) = member_load_axis(dag, &claim.member())
+        {
+            guards.push(EntryExtentGuard::Literal {
+                required: 1,
+                observed,
+            });
+        }
+    }
+    guards.sort_by_key(|guard| match guard {
+        EntryExtentGuard::Named {
+            canonical,
+            observed,
+            ..
+        } => position(*canonical).max(position(*observed)),
+        EntryExtentGuard::Literal { observed, .. } => position(*observed),
+    });
+    let mut unique = Vec::new();
+    for guard in guards {
+        if !unique.contains(&guard) {
+            unique.push(guard);
+        }
+    }
+    unique
 }
 
 /// A local guard's position: the node that introduces the extent, and the
@@ -1646,6 +1804,16 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
             // [04-NUM-9]'s `<op>` names the operation that introduces the
             // guarded extent, in the same vocabulary every other trap on this
             // lane uses.
+            let op = if matches!(node.op, RiscOp::Expand { .. }) {
+                // A malformed unverified node supplies no operation claim. The
+                // verifier owns rejecting it; every executable node has a form.
+                let Some(kind) = expansion_kind(dag, member.node) else {
+                    continue;
+                };
+                kind.primitive_name()
+            } else {
+                crate::grad::risc_op_name(&node.op)
+            };
             sites.push((
                 (member.node.0, member.axis),
                 LocalGuardClaim {
@@ -1654,7 +1822,7 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
                         Some(value) => CanonicalExtent::Resolved(value),
                         None => CanonicalExtent::Binder(name.clone()),
                     },
-                    op: crate::grad::risc_op_name(&node.op),
+                    op,
                     observed: LocalGuardObservation::Carrier(carrier.clone()),
                 },
             ));

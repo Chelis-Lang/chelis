@@ -613,9 +613,13 @@ fn a_stamp_rejection_points_at_the_offending_form_not_the_whole_input() {
     // The lenient ingress re-wrapped every stamp failure as a parse error at
     // offset 0, so the caller could not locate the offending form. The
     // stamped ingress carries the real span.
-    let expected = BARE_NAME_BODY_MODULE
-        .find("unwrapped_name")
-        .expect("fixture contains the offending name");
+    let expected = u64::try_from(
+        BARE_NAME_BODY_MODULE
+            .find("unwrapped_name")
+            .expect("fixture contains the offending name"),
+    )
+    .unwrap();
+    let expected_len = u64::try_from("unwrapped_name".len()).unwrap();
     let error = compiler::parse(ParseRequest {
         source_kind: SourceKind::Deep,
         source: BARE_NAME_BODY_MODULE.to_string(),
@@ -637,14 +641,14 @@ fn a_stamp_rejection_points_at_the_offending_form_not_the_whole_input() {
         span,
         DiagnosticSpan::Range {
             offset: expected,
-            len: "unwrapped_name".len(),
+            len: expected_len,
         },
         "a measured stamp rejection reports a range covering the form: {}",
         error.errors[0].message
     );
     assert_eq!(
         span.extent(),
-        Some("unwrapped_name".len()),
+        Some(expected_len),
         "the extent is the one the stamp measured, not an invented width"
     );
     assert!(

@@ -103,7 +103,7 @@ fn arm_pattern_binders_shadow_top_level_references_and_call_edges() {
         preimage_sha256: None,
     })
     .expect("rename preserves pattern-local shadowing");
-    assert_eq!(renamed.renamed_references, 1);
+    assert_eq!(renamed.renamed_references.get(), 1);
     assert!(renamed.module_deep.contains("(def {} renamed"));
     assert!(renamed.module_deep.contains("(arm {} (pat-var {} target)"));
     assert_eq!(renamed.module_deep.matches("(var {} target)").count(), 2);
@@ -132,7 +132,7 @@ fn later_let_rhs_sees_prior_binding_for_references_call_graph_and_rename() {
         preimage_sha256: None,
     })
     .expect("rename preserves the prior local binding");
-    assert_eq!(renamed.renamed_references, 0, "{renamed:#?}");
+    assert_eq!(renamed.renamed_references.get(), 0, "{renamed:#?}");
     assert!(renamed.module_deep.contains("(def {} renamed"));
     assert!(renamed.module_deep.contains("(app {} (var {} target)"));
 }
@@ -159,7 +159,7 @@ fn earlier_let_rhs_still_sees_top_level_before_shadowing_binding() {
         preimage_sha256: None,
     })
     .expect("rename updates the unshadowed earlier RHS");
-    assert_eq!(renamed.renamed_references, 1, "{renamed:#?}");
+    assert_eq!(renamed.renamed_references.get(), 1, "{renamed:#?}");
     assert!(renamed.module_deep.contains("(app {} (var {} renamed)"));
     assert!(
         renamed.module_deep.contains("target"),

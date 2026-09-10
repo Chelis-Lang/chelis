@@ -72,8 +72,8 @@ out = tensor_scan(
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![20000]);
-    assert_eq!(out.data.element_as_f64_lossy(0), 1.0);
-    assert_eq!(out.data.element_as_f64_lossy(19999), 20000.0);
+    assert_eq!(out.data.element_f64_lossy(0), 1.0);
+    assert_eq!(out.data.element_f64_lossy(19999), 20000.0);
 }
 
 #[test]
@@ -90,8 +90,8 @@ out = tensor_scan(
     let result = eval_surf(src);
     let out = root_tensor(&result, "out");
     assert_eq!(out.shape, vec![40000]);
-    assert_eq!(out.data.element_as_f64_lossy(0), 1.0);
-    assert_eq!(out.data.element_as_f64_lossy(39999), 40000.0);
+    assert_eq!(out.data.element_f64_lossy(0), 1.0);
+    assert_eq!(out.data.element_f64_lossy(39999), 40000.0);
 }
 
 // ---------------------------------------------------------------------------

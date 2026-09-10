@@ -46,6 +46,23 @@ pub fn codegen_host_program(
     program: ConcreteHostProgram,
     name: &str,
 ) -> Result<CodegenResult, Unsupported> {
+    codegen_host_fixture(program, name, true)
+}
+
+/// Exercise an already selected internal summary without re-running algorithm
+/// selection. Production preparation intentionally clears shape-only BLAS hints.
+pub fn emit_selected_host_program(
+    program: ConcreteHostProgram,
+    name: &str,
+) -> Result<String, Unsupported> {
+    Ok(codegen_host_fixture(program, name, false)?.c_source)
+}
+
+fn codegen_host_fixture(
+    program: ConcreteHostProgram,
+    name: &str,
+    prepare: bool,
+) -> Result<CodegenResult, Unsupported> {
     let mut source = String::new();
     for function in &program.functions {
         let params = function
@@ -92,7 +109,11 @@ pub fn codegen_host_program(
         },
         chelis_types::types::Target::C,
     );
-    let selected = chelis_backend_c::prepare_host_program_for_codegen(program)?;
+    let selected = if prepare {
+        chelis_backend_c::prepare_host_program_for_codegen(program)?
+    } else {
+        program
+    };
     let lowered = chelis_ir::ownership::lower_host_ownership(&manifested, selected)
         .expect("backend test host payload must lower ownership");
     let verified = chelis_ir::ownership::verify_ownership(lowered)

@@ -914,6 +914,38 @@ it does not establish empty-list dtype preservation in eval, whose pre-existing
 fallback is tracked in #1650. The definition guard retains executable admission
 and the corpus entry.
 
+PR #1299 adds `explicit_normalization.ch` and `parity_explicit_normalization`
+to the frozen inventory. The independently reviewed `issue_1294_normalize`
+suite requires the authored example to check and evaluate to exactly
+`result = 2.0`, and rejects undeclared `normalize` with `UnboundVariable`.
+The parity row additionally compiles and executes generated C and compares
+its output with eval. Corpus membership retains every existing example;
+mutation controls reject deleting or emptying the new row, changing it to
+library-only parity, or removing its corpus entry.
+
+PR #1668 adds `literal_extent_claim.ch` and `parity_literal_extent_claim`
+to the frozen inventory. The independent `literal_extent_example_contract`
+test requires its declared result type, exact shape `[4]` and four sevens on
+Eval/C, and a domain trap when the input has five elements. The 40-call literal
+claim matrix separately covers exported calls, top-level bindings, inlined
+roots, aliases, and discarded calls. Guard mutations reject deleting or emptying
+the new parity row, making it library-only, or removing its corpus entry.
+
+PR #1692 adds `checked_sparse_axes.ch` and `parity_checked_sparse_axes`
+to the frozen inventory. Independent native stored-bit and checked-boundary
+controls cover non-trailing Gather indices, exact wide integers, duplicates,
+empty domains, and invalid-index diagnostics. The example's parity row executes
+both evaluator and generated C. Guard mutations reject deleting or emptying the
+row, making it library-only, or removing its corpus entry; every previous corpus
+entry remains required.
+
+The checked-window metadata delivery adds `checked_window_geometry.ch` and
+`parity_checked_window_geometry`, preserving every prior corpus entry. Four f32
+forward reducers execute on a leading-axis input with valid padding and stride
+two. Empty/deleted/library-only parity rows and corpus removal remain rejected.
+Independent native tests cover gradient geometry and invalid runtime target or
+cotangent shapes; this example does not claim window arithmetic remediation.
+
 Three digest-locked behavioral canaries perturb the compiled observation before
 the shared comparator, drive the shared `assert_expected` helper with a
 known-wrong expected value, and present an adjacent f32 result while the

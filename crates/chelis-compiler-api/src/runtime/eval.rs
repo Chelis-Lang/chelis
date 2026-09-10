@@ -4,7 +4,7 @@ use std::fs;
 
 use chelis_deep::ast::{Atom, Expr, List};
 use chelis_deep::{Span, decode_effect_kind};
-use chelis_ir::dag::{DimInfo, NodeId, RiscOp};
+use chelis_ir::dag::{DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::host::{HostDefKernel, RandomLoweringState, host_def_kernel};
 use chelis_ir::tier2;
@@ -18,6 +18,27 @@ use super::host_ops::*;
 use super::named_axis::*;
 use super::transforms::*;
 use super::*;
+
+/// [05-HOST-4]: choose the first invalid host name in the declared order.
+/// Complete validation precedes construction of language/runtime list values.
+fn list_dir_names_to_strings(
+    mut names: Vec<std::ffi::OsString>,
+    path: &str,
+) -> Result<Vec<String>, String> {
+    names.sort_by(|a, b| a.as_encoded_bytes().cmp(b.as_encoded_bytes()));
+    names
+        .into_iter()
+        .map(|name| {
+            name.into_string().map_err(|name| {
+                format!(
+                    "IO trap in list_dir: directory b\"{}\", entry b\"{}\": name is not valid UTF-8",
+                    path.as_bytes().escape_ascii(),
+                    name.as_encoded_bytes().escape_ascii()
+                )
+            })
+        })
+        .collect()
+}
 
 fn close_at_f32_width(actual: f32, expected: f32, tolerance: f32) -> bool {
     if actual.is_nan() || expected.is_nan() {
@@ -2427,16 +2448,10 @@ impl<'a> EvalContext<'a> {
                         entry.map_err(|err| format!("list_dir failed for `{path}`: {err}"))?;
                     names.push(entry.file_name());
                 }
-                // [05-HOST-4]: order by the host's own name bytes, before the
-                // lossy conversion below. `to_string_lossy` maps every invalid
-                // UTF-8 sequence to U+FFFD, so two distinct names can collapse
-                // to one string; sorting after it would leave those tie-broken
-                // by directory order, which is the order the atom forbids.
-                names.sort_by(|a, b| a.as_encoded_bytes().cmp(b.as_encoded_bytes()));
                 Ok(RuntimeValue::List(
-                    names
+                    list_dir_names_to_strings(names, &path)?
                         .into_iter()
-                        .map(|name| RuntimeValue::String(name.to_string_lossy().into_owned()))
+                        .map(RuntimeValue::String)
                         .collect(),
                 ))
             }
@@ -2941,27 +2956,63 @@ impl<'a> EvalContext<'a> {
                 let x = expect_tensor_arg(args, 0)?;
                 let gamma = expect_tensor_arg(args, 1)?;
                 let beta = expect_tensor_arg(args, 2)?;
+                let epsilon = match args.get(3) {
+                    Some(RuntimeValue::Scalar(value)) if value.dtype() == x.precision => {
+                        value.value()
+                    }
+                    Some(RuntimeValue::Tensor(value))
+                        if value.precision == x.precision && value.value.shape.is_empty() =>
+                    {
+                        value.value.storage().scalar_at(0)
+                    }
+                    _ => {
+                        return Err(
+                            "layer_norm epsilon must be a scalar of the operand dtype".to_string()
+                        );
+                    }
+                };
                 eval_composed_triop(&x, &gamma, &beta, |dag, x_id, gamma_id, beta_id, tys| {
+                    let epsilon_id = dag.add_node(
+                        RiscOp::Const { value: epsilon },
+                        vec![],
+                        TensorType {
+                            dims: vec![],
+                            precision: epsilon.prim(),
+                        },
+                        None,
+                    );
                     tier2::lower_layer_norm(
-                        dag, x_id, gamma_id, beta_id, tys.0, tys.1, tys.2, 1e-5, None,
+                        dag, x_id, gamma_id, beta_id, tys.0, tys.1, tys.2, epsilon_id, None,
                     )
                 })
                 .map(RuntimeValue::Tensor)
             }
-            "conv2d" => {
+            "conv" => {
                 let input = expect_tensor_arg(args, 0)?;
                 let kernel = expect_tensor_arg(args, 1)?;
-                let stride = expect_int_arg(args, 2)?;
-                let padding = expect_int_arg(args, 3)?;
-                if stride < 1 {
-                    return Err(format!("conv2d stride must be >= 1, got {stride}"));
-                }
-                if padding < 0 {
-                    return Err(format!("conv2d padding must be >= 0, got {padding}"));
-                }
-                let stride = stride as usize;
-                let padding = padding as usize;
-                conv2d_host(&input, &kernel, stride, padding).map(RuntimeValue::Tensor)
+                let raw_strides = expect_list_arg(args, 2)?;
+                let raw_padding = expect_list_arg(args, 3)?;
+                let strides = expect_int_list(&raw_strides, "conv")?;
+                let padding = raw_padding
+                    .iter()
+                    .map(|value| {
+                        let RuntimeValue::Tuple(pair) = value else {
+                            return Err("conv padding requires (low,high) tuples".to_string());
+                        };
+                        if pair.len() != 2 {
+                            return Err("conv padding requires two entries per pair".to_string());
+                        }
+                        let low = expect_int_arg(pair, 0)?;
+                        let high = expect_int_arg(pair, 1)?;
+                        Ok((
+                            usize::try_from(low)
+                                .map_err(|_| "conv padding must be non-negative")?,
+                            usize::try_from(high)
+                                .map_err(|_| "conv padding must be non-negative")?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                conv_host(&input, &kernel, &strides, &padding).map(RuntimeValue::Tensor)
             }
             // Movement primitives that take parameterized window args. Both
             // delegate to the same arithmetic the IR evaluator at
@@ -3207,5 +3258,62 @@ fn stage_kernel_argument(
             "kernel `{def}` parameter `{param}` expects a tensor or scalar argument, got {}",
             describe_value(other)
         )),
+    }
+}
+
+#[cfg(test)]
+mod list_dir_conversion_tests {
+    use super::list_dir_names_to_strings;
+    use std::ffi::OsString;
+
+    #[test]
+    fn list_dir_conversion_preserves_unicode_and_empty_lists() {
+        let names = ["替", "\u{fffd}", "é", "e\u{301}", "a\n\"\\z"];
+        let mut expected = names.to_vec();
+        expected.sort();
+        assert_eq!(
+            list_dir_names_to_strings(names.into_iter().map(OsString::from).collect(), "/dir"),
+            Ok(expected.into_iter().map(str::to_owned).collect())
+        );
+        assert_eq!(list_dir_names_to_strings(vec![], "/dir"), Ok(vec![]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_dir_conversion_rejects_collisions_and_selects_first_raw_name() {
+        use std::os::unix::ffi::OsStringExt;
+        // In-memory host names exercise the production conversion on macOS,
+        // including filesystems that cannot create an invalid-name fixture.
+        for names in [
+            vec![b"a\xff".to_vec(), b"a\xfe".to_vec()],
+            vec![b"a\xfe".to_vec(), b"a\xff".to_vec()],
+        ] {
+            let mut names: Vec<_> = names.into_iter().map(OsString::from_vec).collect();
+            names.push(OsString::from("0-valid"));
+            assert_eq!(
+                list_dir_names_to_strings(names, "/dir"),
+                Err("IO trap in list_dir: directory b\"/dir\", entry b\"a\\xfe\": name is not valid UTF-8".to_owned())
+            );
+        }
+        // Raw order and replacement-string order disagree for these names.
+        let names = vec![
+            OsString::from_vec(b"\x81a".to_vec()),
+            OsString::from_vec(b"\x80z".to_vec()),
+        ];
+        assert_eq!(
+            list_dir_names_to_strings(names, "/dir"),
+            Err("IO trap in list_dir: directory b\"/dir\", entry b\"\\x80z\": name is not valid UTF-8".to_owned())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_dir_conversion_escapes_directory_and_offending_entry_reversibly() {
+        use std::os::unix::ffi::OsStringExt;
+        let names = vec![OsString::from_vec(b"bad\n\r\t\\\"'\xff".to_vec())];
+        assert_eq!(
+            list_dir_names_to_strings(names, "/d\n\r\t\\\"'é"),
+            Err("IO trap in list_dir: directory b\"/d\\n\\r\\t\\\\\\\"\\'\\xc3\\xa9\", entry b\"bad\\n\\r\\t\\\\\\\"\\'\\xff\": name is not valid UTF-8".to_owned())
+        );
     }
 }

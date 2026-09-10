@@ -322,8 +322,8 @@ edges (`spec/design/dtype_semantics.md` §C6) bind every change that touches
 numeric data, whether or not you have read that document:
 
 - **No numeric channel outside the tagged carrier.** A public ADT variant, wire
-  field, exported C signature, exported C data declaration, or binding parameter that
-  carries numeric values as
+  field, exported C signature, exported C data declaration, or binding parameter
+  or result that carries numeric values as
   bare `f64`/`double`, or that takes a raw integer dtype id, is a review-blocking
   finding. Zero-exception classification is the landing rule: every discovered row
   must end in exactly one final authority class - structurally nonnumeric, a
@@ -332,13 +332,19 @@ numeric data, whether or not you have read that document:
   grandfather rows, three successor overrides, and 155 permanent plain rows; the
   executable primary census and guard retain none of those disposition lists or
   admission paths. The active primary baseline has completed
-  that migration: all 237 rows have final authority as 66 exact structurally
+  that migration: all 251 rows have final authority as 66 exact structurally
   nonnumeric rows, 16 structurally recognized tagged carriers/transports, and
-  155 registered numeric operations (the [05-OP-35] stdlib registrations among
+  169 registered numeric operations (the [05-OP-35] stdlib registrations among
   them). It retains no grandfather, successor-override, permanent-disposition,
-  integer-plumbing, or other transition rows. The
-  84 typed-wire and 17 registered-PyO3 baseline rows remain sealed legacy cohorts,
-  while Count's wire field is final-registered. Those lists confer no authorization
+  integer-plumbing, or other transition rows. The wire baseline has 96 final
+  numeric leaves: 79 verified transports and 17 exact numeric operations.
+  WireDag v9 includes the `WireDagNode.shape_deps: u64` transport and the fixed
+  `NonnegativeExtent` carrier's literal-witness requirement role. Its
+  private verifier requires current graph, codec/admission, cache, publication
+  and mutation execution; neither a static descriptor nor a baseline grants
+  wire authority. Nine source/name/path/vocabulary and opaque-handle bindings have final
+  nonnumeric authority; eight registered-PyO3 baseline rows remain a sealed legacy
+  cohort. That cohort confers no authorization
   for a new, renamed, reclassified, or otherwise changed row, and a change touching one
   must move it to a final authority class rather than copy its disposition. A bare
   numeric carrier has no citation or maintainer-override path:
@@ -999,17 +1005,18 @@ the probe is skipped and the summary records why; the environment checks, the `.
 warning, the lease, and the summary behave the same on both platforms. CI stage runs
 skip the preflight.
 
-`--local` and the bare full gate then take an advisory workstation-wide lease,
-`fcntl.flock` on `gate.lock` under `$CHELIS_GATE_LEASE_DIR`, else `$XDG_CACHE_HOME/chelis`,
-else `~/.cache/chelis`, held for the whole run so two cold gates in different worktrees do
-not starve each
-other. The default is to wait indefinitely, polling every 10 seconds with a heartbeat
-every 60 seconds that names the holder's pid, worktree, head, and start time.
-`--no-wait` exits 4 at once when the lease is held, `--lease-timeout SECONDS` caps the
-wait and exits 4 on expiry, and `--no-lease` bypasses it. `--fast` never takes the
-lease; it prints a note when a full gate holds it. The kernel releases the lock when
-the holder exits, SIGKILL included, so the sidecar naming the holder is descriptive,
-never authoritative.
+`--local` and the bare full gate hold a workstation-wide `flock` on `gate.lock`
+under `$CHELIS_GATE_LEASE_DIR`, else `$XDG_CACHE_HOME/chelis`, else `~/.cache/chelis`.
+Updated runners acquire in ticket-registration order. Cancellation, timeout, and
+process death release queue places; kernel locks establish liveness, including after
+SIGKILL. Holder sidecars are descriptive only.
+
+Waits are indefinite by default, polling every 10 seconds; 60-second heartbeats show
+holder details and queue position. `--no-wait` exits 4 on lease/queue contention;
+`--lease-timeout SECONDS` caps the wait (exit 4); `--no-lease` bypasses; queue errors
+exit 2. `--fast` only reports a holder. Update active worktrees to honor the queue.
+Queue mechanics live in `scripts/gate.py`; acceptance:
+`.venv/bin/python -m unittest scripts.test_gate_queue`.
 
 Every command's combined stdout and stderr streams live. On failure the gate
 retains the complete transcript under `target/gate-failures/`, replays the

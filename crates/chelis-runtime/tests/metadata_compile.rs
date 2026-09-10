@@ -95,6 +95,76 @@ fn weakened_metadata_construction_fails_the_executable_contract() {
     ));
     for (from, to, witness) in [
         (
+            ".checked_mul(axis.step)",
+            ".checked_mul(0)",
+            "movement_plans_project_checked_domains_without_coordinate_scratch",
+        ),
+        (
+            ".checked_add(axis.offset)",
+            ".checked_add(0)",
+            "movement_plans_project_checked_domains_without_coordinate_scratch",
+        ),
+        (
+            "input.require_permutation(&result, axes)?;",
+            "",
+            "movement_plans_reject_bad_geometry_and_preserve_rank_zero_empty_and_int64",
+        ),
+        (
+            ".checked_mul(self.steps[window_axis])",
+            ".checked_mul(0)",
+            "window_metadata_binds_valid_padding_and_row_major_source_indices",
+        ),
+        (
+            "w > input.shape[axis]",
+            "false",
+            "window_metadata_binds_valid_padding_and_row_major_source_indices",
+        ),
+        (
+            ".checked_mul(matrix)",
+            ".checked_mul(0)",
+            "matmul_metadata_binds_matrix_spans_and_vendor_projection_without_storage",
+        ),
+        (
+            "self.dimensions.iter().any(|&extent| extent > limit)",
+            "false",
+            "matmul_metadata_binds_matrix_spans_and_vendor_projection_without_storage",
+        ),
+        (
+            "linear / self.inner.get() % self.indices.elements().get()",
+            "0",
+            "sparse_metadata_binds_indices_to_exact_hyperplane_and_elementwise_domains",
+        ),
+        (
+            "let coordinate = if axis == self.axis {",
+            "let coordinate = if false {",
+            "sparse_metadata_binds_indices_to_exact_hyperplane_and_elementwise_domains",
+        ),
+        (
+            "*slot = true;",
+            "*slot = false;",
+            "reduction_metadata_binds_grouping_to_checked_input_and_result_domains",
+        ),
+        (
+            "            index = coordinate\n",
+            "            index = 0_i64\n",
+            "reduction_metadata_binds_grouping_to_checked_input_and_result_domains",
+        ),
+        (
+            ".checked_add(before[axis])",
+            ".wrapping_add(before[axis]).checked_add(0)",
+            "affine_metadata_checks_exact_extents_and_offsets_without_storage",
+        ),
+        (
+            ".checked_mul(step)",
+            ".wrapping_mul(step).checked_add(0)",
+            "affine_metadata_checks_exact_extents_and_offsets_without_storage",
+        ),
+        (
+            "end[axis] > input",
+            "false",
+            "affine_metadata_checks_exact_extents_and_offsets_without_storage",
+        ),
+        (
             "self.shape.as_ref() == domain",
             "true",
             "checked_iteration_steps_preserve_exact_large_domains_without_storage",
@@ -108,6 +178,31 @@ fn weakened_metadata_construction_fails_the_executable_contract() {
             "self.shape.as_ref() == domain {\n            Ok(1)",
             "self.shape.as_ref() == domain {\n            Ok(0)",
             "checked_iteration_steps_preserve_exact_large_domains_without_storage",
+        ),
+        (
+            "self.normalize_axis(previous)? == axis",
+            "false",
+            "checked_movement_relations_reject_invalid_bijections_and_bystanders",
+        ),
+        (
+            "target.shape[out_axis] != self.shape[axis]",
+            "false",
+            "checked_movement_relations_reject_invalid_bijections_and_bystanders",
+        ),
+        (
+            "!inserted && self.shape[axis] != 1",
+            "false",
+            "checked_movement_relations_reject_invalid_bijections_and_bystanders",
+        ),
+        (
+            "extent != self.shape[input_axis]",
+            "false",
+            "checked_movement_relations_reject_invalid_bijections_and_bystanders",
+        ),
+        (
+            "write(axis, linear % extent)",
+            "write(axis, 0)",
+            "checked_movement_coordinates_preserve_exact_large_indices_without_storage",
         ),
         (
             "**extent < 0",
@@ -221,7 +316,7 @@ fn internal_callers_cannot_forge_counts_or_restore_independent_tensor_fields() {
     );
     let context = format!(
         "#![allow(dead_code, non_camel_case_types)]\nmod metadata;\n\
-         use metadata::{{ShapeMetadata, ElementCount, ByteCount, AllocationBytes}};\n\
+         use metadata::{{ShapeMetadata, ElementCount, ByteCount, AllocationBytes, ReductionMetadata, SparseMetadata, MatmulMetadata, WindowMetadata, MovementMetadata}};\n\
          use chelis_vocab::RuntimeDType;\nuse std::sync::atomic::AtomicU8;\n\
          struct HeapHeader;\nstruct TensorStorageProvenance;\nstruct chelis_tensor_write;\n\
          {declarations}\n"
@@ -236,9 +331,49 @@ fn internal_callers_cannot_forge_counts_or_restore_independent_tensor_fields() {
             metadata.require_capacity(bytes).unwrap();
             let _: i64 = t.metadata.elements().get();
             let _: i64 = storage.byte_capacity.get();
+            let plan = ReductionMetadata::new(&[2, 3], &[1], RuntimeDType::I64).unwrap();
+            let _: i64 = plan.index(1, 2).unwrap();
+            let indices = ShapeMetadata::contiguous(&[2], RuntimeDType::I64).unwrap();
+            let sparse = SparseMetadata::new(&metadata, &indices, 1, false).unwrap();
+            let _: i64 = sparse.data_index(0, 1).unwrap();
         }
     "#;
     let mut negatives = vec![
+        ("fn bad(m: &mut MovementMetadata) { m.result = ShapeMetadata::contiguous(&[99], RuntimeDType::I64).unwrap(); }".to_owned(), "E0616", "result"),
+        ("fn bad(m: &mut MovementMetadata) { m.projection = Box::new([]); }".to_owned(), "E0616", "projection"),
+        ("fn bad(m: &mut MovementMetadata) { m.source_domain = false; }".to_owned(), "E0616", "source_domain"),
+        ("fn bad(m: &mut WindowMetadata) { m.result = ShapeMetadata::contiguous(&[99], RuntimeDType::I64).unwrap(); }".to_owned(), "E0616", "result"),
+        ("fn bad(m: &mut WindowMetadata) { m.count = ElementCount::from_extents(&[99]).unwrap(); }".to_owned(), "E0616", "count"),
+        (
+            "fn bad(m: &mut MatmulMetadata) { m.result = ShapeMetadata::contiguous(&[99], RuntimeDType::I64).unwrap(); }".to_owned(),
+            "E0616",
+            "result",
+        ),
+        (
+            "fn bad(m: &mut MatmulMetadata) { m.batches = ElementCount::from_extents(&[99]).unwrap(); }".to_owned(),
+            "E0616",
+            "batches",
+        ),
+        (
+            "fn bad(m: &mut SparseMetadata) { m.domain = ShapeMetadata::contiguous(&[99], RuntimeDType::I64).unwrap(); }".to_owned(),
+            "E0616",
+            "domain",
+        ),
+        (
+            "fn bad(m: &mut SparseMetadata) { m.axis = 99; }".to_owned(),
+            "E0616",
+            "axis",
+        ),
+        (
+            "fn bad(m: &mut ReductionMetadata) { m.leaves = ElementCount::from_extents(&[99]).unwrap(); }".to_owned(),
+            "E0616",
+            "leaves",
+        ),
+        (
+            "fn bad(m: &mut ReductionMetadata) { m.result = ShapeMetadata::contiguous(&[99], RuntimeDType::I64).unwrap(); }".to_owned(),
+            "E0616",
+            "result",
+        ),
         (
             "fn bad() { let _ = ElementCount(1); }".to_owned(),
             "E0423",

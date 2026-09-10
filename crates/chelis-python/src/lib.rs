@@ -1,3 +1,6 @@
+mod source_json;
+
+use source_json::SourceJson;
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::{c_char, c_int, c_void};
@@ -16,8 +19,10 @@ use chelis_compiler_api::compiler::{
     reef_context_hip_unsupported_error,
 };
 use chelis_compiler_api::schema::{
-    CheckRequest, CompileRequest, CompileTarget, DecompileRequest, DesugarRequest, EvalRequest,
-    EvalResult, SourceKind, TensorValue, ValidateMode, ValidateRequest,
+    ArtifactAbiVersion, CheckRequest, CompileRequest, CompileTarget,
+    CompiledArtifactManifest as ArtifactManifest, DecompileRequest, DecompileResult,
+    DesugarRequest, EvalRequest, EvalResult, SourceKind, TensorValue, ValidateMode,
+    ValidateRequest, ValidateResult,
 };
 use chelis_compiler_api::{CancelToken, install_cancel_token};
 use chelis_compiler_api::{
@@ -32,7 +37,6 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyModule, PyTuple};
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
@@ -142,21 +146,6 @@ struct DLManagedTensor {
     dl_tensor: DLTensor,
     manager_ctx: *mut c_void,
     deleter: Option<unsafe extern "C" fn(*mut DLManagedTensor)>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ArtifactManifest {
-    abi_version: u32,
-    target: CompileTarget,
-    host_entry_name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    device_entry_name: Option<String>,
-    inputs: Vec<ExecutionTensorSpec>,
-    outputs: Vec<ExecutionTensorSpec>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    symbolic_dims: Vec<String>,
-    source_path: String,
-    source_hash: String,
 }
 
 #[derive(Clone)]
@@ -288,12 +277,12 @@ struct GpuInputTensor {
     device_id: i32,
 }
 
-#[pyclass(name = "CompiledModel", unsendable)]
+#[::pyo3::pyclass(name = "CompiledModel", unsendable)]
 struct NativeCompiledModel {
     loaded: LoadedArtifact,
 }
 
-#[pyclass(unsendable)]
+#[::pyo3::pyclass(unsendable)]
 struct NativeTensor {
     owner: TensorOwner,
 }
@@ -322,7 +311,7 @@ impl Drop for GpuTensorHandle {
     }
 }
 
-#[pymethods]
+#[::pyo3::pymethods]
 impl NativeTensor {
     #[getter]
     fn shape(&self) -> Vec<usize> {
@@ -367,7 +356,7 @@ fn target_label(target: CompileTarget) -> &'static str {
     }
 }
 
-#[pymethods]
+#[::pyo3::pymethods]
 impl NativeCompiledModel {
     #[getter]
     fn target(&self) -> String {
@@ -566,7 +555,7 @@ unsafe fn load_host_runtime_api(library: &Library) -> PyResult<HostRuntimeApi> {
     })
 }
 
-#[pyfunction(signature = (source, *, source_kind = "surf"))]
+#[::pyo3::pyfunction(signature = (source, *, source_kind = "surf"))]
 fn check_json(py: Python<'_>, source: &str, source_kind: &str) -> PyResult<String> {
     let request = CheckRequest {
         source_kind: parse_source_kind(source_kind)?,
@@ -575,7 +564,7 @@ fn check_json(py: Python<'_>, source: &str, source_kind: &str) -> PyResult<Strin
     run_json(py, || compiler::check(request))
 }
 
-#[pyfunction]
+#[::pyo3::pyfunction]
 fn desugar_json(py: Python<'_>, source: &str) -> PyResult<String> {
     let request = DesugarRequest {
         source: source.to_string(),
@@ -583,15 +572,15 @@ fn desugar_json(py: Python<'_>, source: &str) -> PyResult<String> {
     run_json(py, || compiler::desugar(request))
 }
 
-#[pyfunction]
-fn decompile_json(py: Python<'_>, source: &str) -> PyResult<String> {
+#[::pyo3::pyfunction]
+fn decompile_json(py: Python<'_>, source: &str) -> PyResult<SourceJson<DecompileResult>> {
     let request = DecompileRequest {
         source: source.to_string(),
     };
-    run_json(py, || compiler::decompile(request))
+    run_job(py, || compiler::decompile(request)).map(SourceJson::new)
 }
 
-#[pyfunction(signature = (source, *, target = "c", source_kind = "surf", entry_name = None))]
+#[::pyo3::pyfunction(signature = (source, *, target = "c", source_kind = "surf", entry_name = None))]
 fn compile_json(
     py: Python<'_>,
     source: &str,
@@ -608,7 +597,7 @@ fn compile_json(
     run_json(py, || compiler::compile(request))
 }
 
-#[pyfunction(signature = (source, bindings_json = "{}", *, source_kind = "surf", project_root = None))]
+#[::pyo3::pyfunction(signature = (source, bindings_json = "{}", *, source_kind = "surf", project_root = None))]
 fn eval_json(
     py: Python<'_>,
     source: &str,
@@ -646,16 +635,16 @@ fn eval_json(
     run_json(py, || compiler::eval(request))
 }
 
-#[pyfunction(signature = (source, *, mode = "surf"))]
-fn validate_json(py: Python<'_>, source: &str, mode: &str) -> PyResult<String> {
+#[::pyo3::pyfunction(signature = (source, *, mode = "surf"))]
+fn validate_json(py: Python<'_>, source: &str, mode: &str) -> PyResult<SourceJson<ValidateResult>> {
     let request = ValidateRequest {
         mode: parse_validate_mode(mode)?,
         source: source.to_string(),
     };
-    run_json(py, || compiler::validate(request))
+    run_job(py, || compiler::validate(request)).map(SourceJson::new)
 }
 
-#[pyfunction(signature = (source_path, *, target = "c", source_kind = "surf", entry_name = None, artifact_dir = None, project_root = None, force_bare = false))]
+#[::pyo3::pyfunction(signature = (source_path, *, target = "c", source_kind = "surf", entry_name = None, artifact_dir = None, project_root = None, force_bare = false))]
 #[allow(clippy::too_many_arguments)] // 1:1 with the Python keyword surface
 fn compile_and_load(
     py: Python<'_>,
@@ -687,7 +676,7 @@ fn compile_and_load(
     load_artifact(py, &output.lib_path, output.tempdir)
 }
 
-#[pyfunction]
+#[::pyo3::pyfunction]
 fn load(py: Python<'_>, path: &str) -> PyResult<NativeCompiledModel> {
     load_artifact(py, Path::new(path), None)
 }
@@ -722,6 +711,16 @@ const SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 fn run_json<T, F>(py: Python<'_>, f: F) -> PyResult<String>
 where
     T: serde::Serialize + Send + 'static,
+    F: FnOnce() -> Result<T, CompilerError> + Send + 'static,
+{
+    let result = run_job(py, f)?;
+    serde_json::to_string(&result)
+        .map_err(|err| ChelisError::new_err(format!("serialization failed: {err}")))
+}
+
+fn run_job<T, F>(py: Python<'_>, f: F) -> PyResult<T>
+where
+    T: Send + 'static,
     F: FnOnce() -> Result<T, CompilerError> + Send + 'static,
 {
     let token = CancelToken::new();
@@ -803,9 +802,7 @@ where
         }
     };
 
-    let result = outcome.map_err(compiler_error)?;
-    serde_json::to_string(&result)
-        .map_err(|err| ChelisError::new_err(format!("serialization failed: {err}")))
+    outcome.map_err(compiler_error)
 }
 
 /// `dlopen` a compiled artifact so that dropping it does not unmap it.
@@ -1299,7 +1296,7 @@ fn artifact_manifest_inner(
         .canonicalize()
         .unwrap_or_else(|_| source_path.to_path_buf());
     ArtifactManifest {
-        abi_version: 1,
+        abi_version: ArtifactAbiVersion::V1,
         target: artifact.compile_result.target,
         host_entry_name: artifact.host_entry_name.clone(),
         device_entry_name: artifact.device_entry_name.clone(),
@@ -1850,12 +1847,21 @@ fn validate_shape(spec: &ExecutionTensorSpec, shape: &[usize]) -> PyResult<()> {
         )));
     }
     for (axis, (actual, dim)) in shape.iter().zip(&spec.dims).enumerate() {
+        let actual_extent = i64::try_from(*actual).map_err(|_| {
+            PyValueError::new_err(format!(
+                "input `{}` axis {axis} exceeds the int64 extent domain",
+                spec.name
+            ))
+        })?;
         if let Some(expected) = dim.size
-            && *actual != expected
+            && actual_extent != expected.get()
         {
             return Err(PyValueError::new_err(format!(
                 "input `{}` axis {} expected {}, got {}",
-                spec.name, axis, expected, actual
+                spec.name,
+                axis,
+                expected.get(),
+                actual
             )));
         }
     }
@@ -2264,18 +2270,40 @@ fn hip_free(ptr: *mut c_void) -> Result<(), String> {
     }
 }
 
+/// Exact PyO3 class identities for the registered-surface census.
+/// The census compares this list bijectively with the live module's classes.
+pub fn capacity_census_classes() -> [(&'static str, &'static str, bool); 2] {
+    [
+        capacity_census_class::<NativeCompiledModel>(),
+        capacity_census_class::<NativeTensor>(),
+    ]
+}
+
+fn capacity_census_class<T: pyo3::PyClass>() -> (&'static str, &'static str, bool) {
+    // Read the slots emitted by #[::pyo3::pymethods], rather than assuming an absent
+    // rustdoc method means PyO3's non-instantiable default constructor. Presence
+    // does not identify the Rust function; discovery rejects unproved slots.
+    let has_constructor = <T as pyo3::impl_::pyclass::PyClassImpl>::items_iter()
+        .any(|items| items.slots.iter().any(|slot| slot.slot == ffi::Py_tp_new));
+    (
+        <T as pyo3::PyTypeInfo>::NAME,
+        std::any::type_name::<T>(),
+        has_constructor,
+    )
+}
+
 pub fn register_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("ChelisError", module.py().get_type::<ChelisError>())?;
     module.add_class::<NativeCompiledModel>()?;
     module.add_class::<NativeTensor>()?;
-    module.add_function(wrap_pyfunction!(check_json, module)?)?;
-    module.add_function(wrap_pyfunction!(compile_json, module)?)?;
-    module.add_function(wrap_pyfunction!(compile_and_load, module)?)?;
-    module.add_function(wrap_pyfunction!(decompile_json, module)?)?;
-    module.add_function(wrap_pyfunction!(desugar_json, module)?)?;
-    module.add_function(wrap_pyfunction!(eval_json, module)?)?;
-    module.add_function(wrap_pyfunction!(load, module)?)?;
-    module.add_function(wrap_pyfunction!(validate_json, module)?)?;
+    module.add_function(::pyo3::wrap_pyfunction!(check_json, module)?)?;
+    module.add_function(::pyo3::wrap_pyfunction!(compile_json, module)?)?;
+    module.add_function(::pyo3::wrap_pyfunction!(compile_and_load, module)?)?;
+    module.add_function(::pyo3::wrap_pyfunction!(decompile_json, module)?)?;
+    module.add_function(::pyo3::wrap_pyfunction!(desugar_json, module)?)?;
+    module.add_function(::pyo3::wrap_pyfunction!(eval_json, module)?)?;
+    module.add_function(::pyo3::wrap_pyfunction!(load, module)?)?;
+    module.add_function(::pyo3::wrap_pyfunction!(validate_json, module)?)?;
     Ok(())
 }
 
@@ -2292,10 +2320,115 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::tempdir;
 
+    #[test]
+    fn binding_constructor_metadata_tracks_actual_pyo3_slots() {
+        #[::pyo3::pyclass]
+        struct NoConstructor;
+        #[::pyo3::pyclass]
+        struct HasConstructor {
+            dtype: i32,
+        }
+        impl HasConstructor {
+            fn new() -> Self {
+                Self { dtype: 0 }
+            }
+        }
+        #[::pyo3::pymethods]
+        impl HasConstructor {
+            #[new]
+            fn create(dtype: i32) -> Self {
+                Self { dtype }
+            }
+        }
+        assert!(!capacity_census_class::<NoConstructor>().2);
+        assert!(capacity_census_class::<HasConstructor>().2);
+        assert_eq!(HasConstructor::new().dtype, 0);
+        Python::with_gil(|py| {
+            assert!(py.get_type::<NoConstructor>().call0().is_err());
+            let constructor = py.get_type::<HasConstructor>();
+            let value = constructor.call1((7,)).unwrap();
+            assert_eq!(value.extract::<PyRef<HasConstructor>>().unwrap().dtype, 7);
+            assert!(constructor.call0().is_err());
+        });
+    }
+
     const HELLO_TENSOR: &str = include_str!("../../../examples/hello_tensor.ch");
     const LOSS_PROGRAM: &str = r#"x = (x : tensor[4, f32])
 loss = (mean(x, 0) : tensor[f32])
 "#;
+
+    #[test]
+    fn native_shape_admission_checks_exact_int64_extents() {
+        use chelis_compiler_api::{compiler::ExecutionDim, schema::numbers::NonnegativeExtent};
+        let mut spec = ExecutionTensorSpec {
+            name: "x".into(),
+            dtype: "f32".into(),
+            dims: vec![ExecutionDim {
+                name: None,
+                size: Some(NonnegativeExtent::new(2).unwrap()),
+            }],
+        };
+        assert!(validate_shape(&spec, &[2]).is_ok());
+        assert!(validate_shape(&spec, &[3]).is_err());
+        assert!(validate_shape(&spec, &[]).is_err());
+        spec.dims[0].size = None;
+        assert!(validate_shape(&spec, &[0]).is_ok());
+        if let Some(outside_int64) = usize::try_from(i64::MAX)
+            .ok()
+            .and_then(|v| v.checked_add(1))
+        {
+            assert!(validate_shape(&spec, &[outside_int64]).is_err());
+        }
+    }
+
+    #[test]
+    fn compiled_manifest_version_admission_precedes_metadata_and_library_use() {
+        let valid = serde_json::json!({
+            "abi_version": 1, "target": "c", "host_entry_name": "chelis_main",
+            "inputs": [], "outputs": [], "source_path": "", "source_hash": ""
+        });
+        let manifest: ArtifactManifest = serde_json::from_value(valid.clone()).unwrap();
+        assert_eq!(serde_json::to_value(manifest).unwrap(), valid);
+        let dir = tempdir().unwrap();
+        let library = dir.path().join("not-a-library.so");
+        let path = library.with_extension("json");
+        fs::write(&path, serde_json::to_vec(&valid).unwrap()).unwrap();
+        Python::with_gil(|py| {
+            let error = load_artifact(py, &library, None)
+                .err()
+                .expect("no library exists");
+            assert!(
+                error.to_string().contains("load shared library failed"),
+                "{error}"
+            );
+            for header in [
+                "",
+                ",\"abi_version\":0",
+                ",\"abi_version\":2",
+                ",\"abi_version\":4294967295",
+                ",\"abi_version\":-1",
+                ",\"abi_version\":1.0",
+                ",\"abi_version\":true",
+                ",\"abi_version\":\"1\"",
+                ",\"abi_version\":1,\"abi_version\":1",
+            ] {
+                // Bad metadata appears first; unsupported/missing versions must
+                // fail at the envelope before visiting it or loading a library.
+                fs::write(&path, format!("{{\"inputs\":\"invalid\"{header}}}")).unwrap();
+                let error = load_artifact(py, &library, None)
+                    .err()
+                    .expect("reject version");
+                assert!(
+                    error.to_string().contains("artifact ABI version"),
+                    "{header}: {error}"
+                );
+                assert!(
+                    !error.to_string().contains("load shared library"),
+                    "{error}"
+                );
+            }
+        });
+    }
 
     /// The host ABI's element count is an `int64_t`, so its check belongs in
     /// the int64 extent domain ([05-DIM-2]). These extents assume a 64-bit
@@ -2555,8 +2688,7 @@ loss = (mean(x, 0) : tensor[f32])
         Python::with_gil(|py| {
             let module = PyModule::new(py, "_native").expect("module");
             register_module(&module).expect("register");
-            let bindings =
-                r#"{"x":{"shape":[4],"data":{"dtype":"f32","values":[1.0,2.0,3.0,4.0]}}}"#;
+            let bindings = r#"{"x":{"shape":[4],"data":{"dtype":"f32","bits":["3f800000","40000000","40400000","40800000"]}}}"#;
             let result = module
                 .getattr("eval_json")
                 .expect("eval_json")
@@ -2572,15 +2704,14 @@ loss = (mean(x, 0) : tensor[f32])
                 .find(|root| root["name"] == "loss")
                 .expect("loss root");
             assert_eq!(loss["value"]["type"].as_str(), Some("tensor"));
-            // Execution wire v2 (chelis#729): the tensor payload is the
-            // tagged per-dtype form.
+            // Execution wire v3: floats carry exact stored bits under the dtype.
             assert_eq!(
                 loss["value"]["value"]["data"]["dtype"].as_str(),
                 Some("f32")
             );
             assert_eq!(
-                loss["value"]["value"]["data"]["values"][0].as_f64(),
-                Some(2.5)
+                loss["value"]["value"]["data"]["bits"][0].as_str(),
+                Some("40200000")
             );
         });
     }
@@ -4238,11 +4369,11 @@ mod worker_stack_tests {
                 .iter()
                 .find(|root| root["name"] == "depth")
                 .expect("depth root");
-            // Int roots surface as {"type": "int", "value": N}; the exact
-            // number proves the recursion ran to completion rather than
-            // being clipped by a partial-result path.
-            assert_eq!(depth["value"]["type"].as_str(), Some("int64"));
-            assert_eq!(depth["value"]["value"].as_i64(), Some(200));
+            // The tagged int64 and exact value prove the recursion completed.
+            assert_eq!(payload["schema_version"], 3);
+            assert_eq!(depth["value"]["type"], "scalar");
+            assert_eq!(depth["value"]["value"]["dtype"], "int64");
+            assert_eq!(depth["value"]["value"]["value"].as_i64(), Some(200));
         });
     }
 }

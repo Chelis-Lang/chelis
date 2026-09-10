@@ -560,12 +560,279 @@ steps, and weakened identity conditions. This final classification is limited to
 these two methods and `backend-element-spelling`; another numeric or width owner
 still fails the inventory. It adds no foundation or active debt.
 
-Generated C adoption still requires movement and reduction indexing, sparse/BLAS loop
-domains, Count/window scratch allocation, and the complete Phase 1 execution
-receipt/mutation oracle remain outstanding. Host-only results do not establish
+#### Generated C permutation and expansion delivery (#889)
+
+The DAG `emit_permute` and `emit_expand` paths validate the exact target metadata
+and movement relationship before their existing storage-plan allocation or
+repurpose. The runtime requires a complete normalized axis bijection for
+permutation, and a unit replacement axis or one inserted axis for expansion;
+every unchanged axis must agree, including on empty tensors. Existing extent
+claim guards and source selection retain their runtime-extents authority.
+
+Their loops transport coordinates as canonical int64 `chelis_scalar` values.
+The runtime's private checked metadata owns unraveling and flattening; the C
+consumer only reorders coordinates or supplies the explicit zero coordinate on
+a replaced unit axis. No per-element heap allocation is needed. These are
+metadata-only operations, so generated producer write guards remain live.
+Element payload access and storage ownership keep their existing mechanisms.
+The four exact [05-OP-33] operations and their census registrations ship with
+these two consumers as one checked coordinate-mapping slice.
+
+Supporting Phase 0 acceptance includes `checked_c_movement` runtime contracts in
+debug and release, the two-method emitter adoption control, and generated C
+execution under optimized ASan/UBSan. Positive and negative cases cover all nine
+representations, scalar/empty/dynamic ranks, exact large metadata, permutation
+bijections, expansion axis relationships, canonical scalar coordinates, and
+linear/coordinate range rejection. Executable mutations must detect unchecked
+coordinates and erased target validation. The immutable 358-row foundation is
+preserved; the two retired movement-template rows reduce active debt from 326
+to 324 without adding an owner exception. This extends supporting evidence and
+does not implement the complete Phase 1 receipt oracle.
+
+#### Generated C padding, shrinking, and striding (#889)
+
+This slice routes these three DAG emitters through the private checked shape
+owner. Three metadata-only C operations derive and validate the complete target
+shape before exposing its extents; one affine-coordinate operation checks the
+offset/step map through that same owner. Generated C preserves extent-claim order,
+checks the submitted shape against the computed shape before allocation or reuse,
+and uses checked unraveling and affine indices without per-element allocation.
+Payload copying preserves stored bits; padding uses the existing tagged fill.
+Runtime-bound shrinking retains its existing empty-range rejection, shared with
+Eval; this slice does not change that operation-level admission rule. The metadata
+operations and statically empty C paths retain zero-element shapes.
+
+The bounded acceptance surface is `checked_c_affine` in debug and release,
+the backend movement adoption controls, and optimized generated-C sanitizer
+execution. Controls cover all nine dtypes, scalar/empty/high ranks, exact large
+metadata, invalid bounds and target shapes, arithmetic overflow, and erased/late
+validation. The Phase 0 coverage manifest adds the runtime suite in both profiles;
+its digest changes for that command registration. The immutable 358-row foundation
+is preserved, and retiring the three raw movement templates reduces active debt
+from 324 to 321. Checked-add/multiply and bounds mutations execute against the
+private metadata owner. No new inventory identity or owner exception is admitted.
+The complete Phase 1 oracle remains a separate deliverable.
+
+After the reduction/Count, sparse, BLAS, and window deliveries below, remaining
+host metadata consumers and the complete Phase 1 execution receipt/mutation oracle
+remain outstanding. Host-only results do not establish
 device execution or close #889/#893. Generated host/device descriptors and
 validated Python/DLPack wrappers remain under #893/#1345; #1288 consumes those
 interfaces and owns their exact discovery and authority registrations.
+
+#### Generated C reductions and Count (#889)
+
+Seven reduction emitter paths obtain a checked `ReductionMetadata` plan before
+allocation or repurpose: materialized Sum, Count, Max (including its reduced-float
+arm), Min/Prod, Argmax/Argmin, and fused Sum/Max. The opaque C plan snapshots the
+input domain, selected axes, checked result metadata, and row-major leaf count.
+A fused domain owns no tensor payload or unused storage strides. Empty results
+have no reachable groups; empty selected domains retain their operation's identity.
+Exact result shapes are checked after the existing ordered extent claims and before
+submission. The plan survives input repurpose or release without retaining storage.
+
+Sum and Count allocate tree scratch through checked runtime tensors, at the actual
+accumulator representation. Scratch bytes and target projection are checked before
+result allocation; each worker owns its scratch tensor and write guard. Sum keeps
+#1299's adjacent-pair tree and integer finalization; Count keeps its original
+row-major leaves, checked int64 pairs, and odd tails. Existing dtype rejection,
+non-Sum arithmetic, and vendor-selection obligations remain separately owned.
+Kernel scratch remains outside the shared planner's distinct DAG-slot bound;
+using checked runtime allocation does not make scratch a planned tensor slot.
+
+This is one shippable adoption slice because result validation, loop bounds, source
+indices, and scratch capacity must agree for the same grouping. Its oracle combines
+`checked_c_reduction` and the private `checked_metadata`/`metadata_compile` controls
+in debug and release, generated native and sanitizer executions, existing fused,
+integer-promotion and exact-tree regressions, and `count_bool_axes.ch` parity.
+The Phase 0 freeze adds these commands and the grouping/index bypass mutations.
+The 358 foundation identities remain unchanged; no new owner exception is admitted.
+The retired Sum raw-index template leaves active debt (314 to 313). This supports
+the reduction slice only: sparse/BLAS/window consumers and the complete Phase 1
+execution-receipt oracle remain open. It does not close #889 or #893.
+
+
+#### Generated C sparse loops (#889)
+
+Gather, ScatterAdd, ScatterReplace, and ScatterElements share a checked
+`SparseMetadata` domain. Hyperplane operations bind the base prefix/suffix to the
+complete index shape; elementwise replacement binds each index coordinate to its
+base axis. The runtime checks exact updates/result shapes and dtype, and projects
+index slots and selected base indices from this domain. Snapshots retain no payload
+and require no per-index allocation. Generated DAG loops and all three host sparse
+summary paths check the target before allocation or reuse. Scatter copies consume
+checked byte counts, and ascending update positions preserve duplicate-write order.
+
+The seven registered C functions and their opaque plan form one adoption slice with
+the sparse consumers: exact shapes, loop domains, and index maps must agree before
+submission. Arithmetic algorithms and existing backend dtype admission are unchanged.
+The bounded oracle combines runtime `checked_c_sparse`, private metadata and
+construction/mutation controls in debug/release, backend `checked_c_sparse`, native
+`checked_c_sparse_` sanitizer tests, host-summary execution/rejection tests, and
+`checked_sparse_axes.ch` evaluator/C parity. Native controls cover all nine stored
+payload representations on Gather/Replace/Elements, duplicate f32 ScatterAdd,
+nontrailing domains, empty results, and invalid indices; the host Add summary is
+executed directly from IR because it is produced by AD rather than a Surf builtin.
+
+The Phase 0 foundation keeps all 358 identities. Replacing thirteen raw sparse
+consumer owners reduces active debt from 313 to 300 without a new exception. The
+coverage freeze adds these executable suites; it does not establish the complete
+Phase 1 execution-receipt oracle or the remaining BLAS/window/host consumers.
+
+
+#### Generated C BLAS submission metadata (#889)
+
+Already selected internal BLAS nodes and host summaries obtain a `MatmulMetadata`
+plan after explicit batch alignment. Its operand/result snapshots own complete
+shapes, batch counts, per-matrix counts, checked matrix indices, and allocation
+bounds. Required declarations and native link flags follow the selected nodes, including
+when no further specialization was requested. Exact result-shape and vendor-dimension checks precede output allocation
+or reuse. Reduced-float conversion scratch uses checked f32 capacities and runtime
+tensor owners/write guards; one batch loop consumes checked source/result indices.
+Empty results make no vendor call, and zero contraction writes dtype-zero output.
+
+The generated translation unit binds its dimension type to the actual sgemm and
+dgemm function prototypes using C11 type assertions. Accelerate's `__LAPACK_int`,
+OpenBLAS's `blasint`, and Netlib's `CBLAS_INT` declarations select a signed 32- or
+64-bit domain; a missing, unsigned, unsupported-width, or inconsistent declaration
+fails compilation. These declarations are compiler-private, so the published
+Chelis ABI stays configuration invariant. Tagged int64 dimensions are checked
+against that domain before casts at the call. Exact per-matrix f32 scratch bytes
+are checked even when source storage uses f16/bf16.
+
+This is metadata adoption, not algorithm selection. [05-OP-30]'s canonical
+contraction rule still prevents shape-only BLAS specialization; production host
+preparation continues clearing those summaries. Direct internal node and summary
+fixtures exercise the submission boundary without re-enabling a vendor shortcut.
+Operand/accumulator/destination dtype choices and conversion arithmetic stay pinned
+by the existing IR. The bounded oracle combines private metadata/projection and
+construction controls, runtime C plan tests in debug/release, generated native
+sanitizer tests, and actual/fake vendor-header width/prototype controls. It does
+not prove vendor arithmetic equivalent for unrestricted inputs or complete Phase 1.
+The 358-entry foundation is unchanged; five retired BLAS consumer identities reduce
+active debt from 300 to 295 without an owner exception. Coverage adds the matrix
+runtime suite in both profiles, delegation bypass controls, and native submission
+and vendor-prototype execution. Production matrix-index and vendor-range mutations
+must fail with overflow checks disabled; virtual f16 operands demonstrate a fitting
+source allocation whose f32 scratch capacity overflows.
+
+
+#### Generated C window geometry (#889)
+
+`WindowMetadata` snapshots complete source/result shapes and positive trailing
+window/stride lists, checks valid-padding extents, and maps a result position and
+row-major leaf to a checked source index. Seven OP33 entry points expose that
+immutable plan without retaining payload or tensor ownership. Shape and dtype
+validation precede generated forward/gradient allocation, including same-capacity
+wrong shapes. Leading empty axes have no reachable index and no unused window
+product. The generated loops carry int64 positions and use no rank-sized coordinate
+arrays or compiler-computed window-volume product. Forward leaves and serial
+cotangent/leaf updates retain their prior order.
+
+The bounded acceptance surface combines `checked_metadata`, `metadata_compile`,
+`checked_c_window`, native `exec_compile::checked_windows_*`, existing window
+emission/numerical tests, and `parity_checked_window_geometry`. Production
+stride/valid-padding mutations must fail with overflow checks disabled; private
+fields reject outside mutation. Runtime tests cover all nine storage dtypes and
+five diagnostic selectors, invalid tags/axes/indices/targets, source write guards,
+release and repurpose. Native f32 fixtures exercise four forward reducers and
+four gradients, both nonempty and leading-empty, plus incorrect result/cotangent
+shapes under optimized ASan/UBSan. The executable example runs Eval/C parity.
+
+This delivery preserves the existing f32/static-window-output admission and the
+existing accumulation/NaN/tie behavior. #1298 owns window arithmetic remediation;
+these geometry tests do not establish its full normative contract. The 358-row
+foundation stays identical, and the removed gradient coordinate template reduces
+active debt from 295 to 294 without adding an owner exception. The complete Phase
+1 oracle, remaining host metadata consumers, and Phase 2 ABI/Python/DLPack work
+remain separate obligations.
+
+
+#### Generated C JSON ordering scratch (#889)
+
+Canonical JSON object ordering allocates its int64 index scratch through the
+runtime tensor owner, retains one write guard during ordering, and ends/releases
+it after building the ordered list. The ordering algorithm is unchanged. The
+scratch count comes from the validated list length, and allocation checks its
+int64 product, byte count and target capacity before the first scratch access.
+Empty objects allocate a zero-count owner without entering the ordering loops.
+
+The bounded acceptance surface is `checked_c_json_scratch` for delegation and
+cleanup-tail spelling, plus `issue_1314_json_bigint`'s recursive canonical Unicode,
+reordered and empty object case through Eval/C. Its separate
+`json_scratch_execution_detects_skipped_cleanup` test links the exact Cargo archive
+built with the private ownership ledger and executes the emitted ordering helper
+with an explicitly released caller. Empty and two-entry objects leave zero live
+owners/bytes. Output-preserving last-iteration return and omitted-owner-release
+mutations must leave live ownership; omitted guard exit must fail with the active
+write-guard error. The source check alone does not prove control-flow cleanup.
+These execution registrations move the frozen Phase 0 contract under B1; its
+immutable foundation and active identities stay unchanged. Literal ingress,
+movement coordinate scratch and source diagnostic identity, the complete Phase 1
+consumer audit/receipt oracle, and Phase 2 remain separate obligations.
+
+#### Generated C literal ingress (#889)
+
+Tensor literals carry finalized tagged scalar images instead of a raw payload
+array and an unchecked byte-count copy. Two exact OP33 entry points validate the
+complete result rank/shape, zero dtype exemplar and element count before storage
+allocation or reuse, then validate every source carrier before the first guarded
+write. The write preserves each declared storage width and its exact bits; it
+neither converts values nor accumulates. Mismatched IR storage/result dtypes are
+rejected during emission. Empty literals submit a null array with exact zero count.
+
+The C dimension renderer accepts only `DimInfo` leaves; its unused arithmetic
+`DimExpr` renderer is removed, so those callers cannot emit unchecked products or
+divisions through that path.
+
+The bounded execution surface is `checked_c_literal` in debug/release,
+`checked_c_host_metadata` delegation/bypass controls, native
+`exec_compile::checked_literals_*` under optimized ASan/UBSan.
+Literal tests exercise all nine storage representations, rank zero and empty
+domains, exact int64 values above 2^53, floating bit patterns, invalid counts,
+tags/payloads and overflow. A malformed last carrier must trap with canonical
+`const`/int64 identity while every destination element remains unchanged. These
+commands extend the frozen Phase 0 manifest; removing or reordering ingress calls
+is rejected by the bounded source controls.
+
+The immutable 358-row foundation is unchanged. Removing the literal emitter's raw
+storage/element-spelling templates reduces active debt from 294 to 292 without a
+new identity or owner exception. JSON ordering and movement coordinate scratch,
+the movement source operation diagnostic identity, the complete Phase 1 consumer audit and execution
+receipt/mutation oracle, and Phase 2 descriptors/bindings remain outstanding.
+
+#### Immutable movement geometry (#889)
+
+The C permutation, expansion/insertion, padding, shrinking and striding consumers
+snapshot checked input/result metadata into one private movement plan before output
+allocation or reuse. The plan projects each checked row-major index directly;
+rank-sized coordinate arrays and per-element scratch are removed. Its projection
+allocation is checked and cannot grow during construction. Padding iterates the
+source domain and maps into the filled result; the other forms iterate the result
+and map into the source. Empty domains perform no projection or payload access.
+
+The exact eight OP33 APIs bind this metadata contract and preserve every payload
+representation. Closed operation and side enums select the shape policy and
+canonical diagnostic, without carrying numeric data. Plans retain no payload and
+remain valid during source writes and after release/repurpose. The shared IR
+`ExpansionKind` derivation distinguishes rank-preserving expansion from insertion
+on verified static types under spec/10 §3.4; both the C plan selector and local dimension guard use
+that form. No serialized IR or Python binding signature changes.
+
+The bounded acceptance surface combines runtime `checked_c_movement_plans` and
+private `checked_metadata` in debug/release, `metadata_compile`'s field-privacy and
+production step/offset/bijection mutations, the two backend movement source suites,
+`exec_compile::checked_c_movement_*` with optimized ASan/UBSan and exact stored-bit
+maps, `movement_expansion_kind`, the runtime movement CLI suite, and
+`parity_checked_reshape`. The CLI positive/negative pair uses an extent read from a
+locally shortened tensor and checks exact `expand`/`insert` trap identities. Bare
+scalar expansion extents remain outside the admitted CLI surface under #469.
+The frozen Phase 0 manifest requires these executions; its foundation stays fixed,
+with no new owner exception. This B1 contract amendment adds the explicit movement
+receipt registrations and their negative controls. Full Phase 1 allocation/view/
+copy coverage and its composite receipt oracle remain separate work, as do Phase 2
+descriptors and bindings. This is one geometry slice because the shared plan, all
+five consumers, semantic authority and executable controls must ship together.
 
 ## C3. One generated host/device descriptor schema
 
@@ -902,6 +1169,12 @@ representation-seam row. Only the source count and corresponding integrity
 digest change; foundation rows, active debt, and mutation implementations stay
 unchanged. The existing `unregistered-inventory-source` mutation covers this
 source-list-only move. No numbered representation semantics change.
+
+The Python source-result adapter registers `chelis-python/src/source_json.rs`
+in the same source universe. Its typed JSON conversion adds no representation
+seam: foundation rows, active debt, and mutation implementations remain unchanged.
+The source count and integrity digest include this file, with the existing
+`unregistered-inventory-source` mutation covering the source-list-only move.
 
 ## B2. Invariants at every phase boundary
 

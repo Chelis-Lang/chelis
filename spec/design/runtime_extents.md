@@ -24,11 +24,11 @@ The following are merged mechanisms, not a claim of complete class coverage.
 | B1 | #1510 (`801f92c02`) | `output_axis_sources` and a production-path cardinality check; #1480 closed |
 | B2a | #1536 (`55ec86524`) | derived classes/witnesses and entry guards; signature scope is approximated by root reachability |
 | B2h | #1531 (`1253d7653`) | host def application on eval uses the kernel decision C uses; entry checks reach this route |
-| B2r | #1597 (`12c04c66a`) | reshape leaves the kernel keep-list; local carrier guards have C and eval consumers; #1375 closed |
+| B2r | #1597 (`12c04c66a`) | reshape leaves the kernel keep-list; local carrier guards have C and eval consumers; inlined #1375 residue belongs to #1686 |
 | expand/insert decision and implementation | #1532, #1547, #1590 (`c8a5f1a75`) | one meaning per primitive; same-rank unit-extent guards; the lowering override is removed |
 | S2c | #1605 (`42ce46cdc`) | deferral recorder, stores, executor, settlement registry, and source-ordinal index removed |
 | B2b-0 | #1616 (`f6cfd2d72`) | seven existing phase-B rows receive passing receipts; no guard mechanism changes |
-| B2b-0b broadcast preparation | #1658 (`3fbc1df49`) | anonymous broadcast axes retain their own sources; the 11-case #1619 exit passes |
+| B2b-0b broadcast preparation | #1658 (`3fbc1df49`) | anonymous broadcast axes retain their own sources; the 11-case broadcast attribution contract passes; inlined unit-check residue belongs to #1687 |
 | B2b-0b numeric local guards | #1662 (`5dde8373c`) | literal/resolved claims compare independent runtime carriers; the 32-lane local matrix passes |
 
 The extent carrier is no longer a display name, and sources/classes already
@@ -48,12 +48,14 @@ Current failure boundaries:
 - #1374/#1376: lowering may drop the argument whose axis witnesses the result
   claim. Root reachability cannot recover a signature that is no longer
   represented, and an unread argument still owes its signature check.
-- #1377: the exported kernel can guard a literal claim while the inlined root
-  silently returns extent 5 under a declaration of 4 on both lanes. The old
-  `lane_divergent` row disposition misdescribes that rooted case.
-- #1397: movement inference can replace a declared extent with `*`; a
-  wildcard-returning root can then disappear from eval and entry emission.
-  #1378's public vmap acceptance witness is masked by that second failure.
+- #1686: arithmetic reshape targets lose named/literal result checks after
+  inlining. This is original #1375 work omitted by its closing PR #1597.
+- #1687: non-unit broadcast operands lose their runtime checks after
+  inlining. This retains the original #597/#1619 negative exit.
+- #1397: checked function stamps now retain the declared result; movement
+  execution still owes its guard and general wildcard-returning roots can
+  disappear from eval and entry emission. #1378's public vmap witness remains
+  masked by that root failure.
 - #1266/#569: the provenance walk still rejects equivalent field/pipe forms.
 - #1379: local op-computed extents need guard sites beyond the folded-axis
   and scalar-target forms B2r serves.
@@ -80,7 +82,7 @@ shape. B2b-1 owns preservation and enforcement of those scoped claims.
 The bounded acceptance command is `singleton_broadcast_contract` in C5.
 Literal call/inlining obligations, op-computed local guards, and scoped claim transport
 remain separate obligations below. In particular, an inlined call with a
-non-unit argument still loses its runtime unit guard; repairing #1619's
+non-unit argument still loses its runtime unit guard (#1687); repairing #1619's
 anonymous-output rewrite does not establish claim preservation through calls.
 
 ## Part I: implementation contracts
@@ -266,6 +268,74 @@ representation of the same obligation, not distinct trapping operations.
 
 #### C2.6 Atomic integration and wire ordering
 
+B2b-1 first implements literal call claims through an explicit IR witness.
+This bounded change owns #1377's shape-derived `insert` call and its nested
+and discarded-result controls. A literal identifies its own required value;
+it does not need to identify a named binder by spelling. The remaining named
+claim migration still owns scoped binding identities, unread named witnesses,
+and #1374/#1376/#1566. Both changes retain the C2.3 distinction between a
+requirement and an independently observed extent.
+
+The literal transport uses `RiscOp::ExtentWitness { parameter, axis,
+requirements }`. Its one tensor input is the actual argument; its result is
+the observed axis extent as a rank-zero `int64`. `parameter` is diagnostic
+text, `axis: RtAxis` selects the observed axis, and
+`requirements: Vec<ScalarValue>` retains ordered, tagged `int64` literal
+claims. Requirements are explicit fields, with no missing-field default.
+The operation reads shape metadata without copying the argument's elements.
+Its existing `span_id` records the introducing call.
+
+Lowering creates these witnesses in parameter/axis order before lowering the
+callee body. A parameter shape read uses its witness through an ordinary
+`RtDim::Node` input slot. The checked declared result supplies the literal
+obligation, while the witness input supplies the observed value. A fresh call
+creates fresh witness nodes; copying or importing a graph remaps their ordinary
+inputs and retains their claims. No name-keyed extent grouping is involved.
+Within each lexical environment, a value binding carries its original tensor
+node and witnesses together. Binding an alias forwards that metadata; rebinding
+replaces it and leaving the scope restores it. Borrowing an alias for a shape
+read consumes the same binding metadata. Thus alias
+chains retain the declaring witness without conflating different parameters
+that happen to receive the same actual tensor. Shape reads consume this binding
+metadata rather than requiring the parameter's original spelling.
+Once a guard establishes equality, a consumer may use that checked literal;
+the result annotation alone never licenses the substitution.
+
+The enclosing invocation result retains its call witnesses through explicit
+`shape_deps`, including witnesses of nested calls whose tensor results are
+discarded. A fresh `Copy` return carrier follows the result value and every
+required witness; an existing returned value is never mutated to depend on
+a later call. These dependencies participate in root-scoped evaluation and DCE:
+an unrelated export does not activate another invocation's checks. A witness
+without a requirement adds no trap dependency. CSE, specialization and folding preserve the check or discharge
+it from independent evidence; they cannot infer success from its requirement.
+Grad retains primal checks and assigns zero cotangent to shape values. Vmap
+keeps the result scalar and shifts its observed input axis past the batch axis.
+
+The construction/consumer inventory for this change is:
+
+| boundary | concrete owners |
+|---|---|
+| checked declaration | `infer/common.rs` declaration owner and `infer/annotate.rs` function stamp; `CheckedProgram::signature_inference` retains the declared result |
+| construction and calls | `lower.rs`: `lower_fn`, `lower_plain_callable_app`, parameter shape-read lowering, block/let invocation dependencies and declared-result preservation |
+| graph transport | `Dag::add_node`/`replace_node`, `lower.rs::splice_dag`, `optimize.rs` DCE/CSE/folding, `specialize.rs`, `fuse.rs`, `grad.rs`, `vmap.rs`, `tier2.rs` and contextual library import |
+| validation and sources | `verify.rs`, `axis_sources.rs`, `dag.rs` operation properties and runtime-dimension consumers |
+| execution and ownership | `eval.rs`, `ownership/mod.rs`, `ownership/storage.rs`, C/HIP/Metal emitters and compiler target classification |
+| public transport and caches | compiler-api `schema.rs` wire op and `compiler.rs` conversions, stdlib/library cache versions and build identity; capacity/rejection registries and structural inventory |
+
+The existing six-case `literal_result_claim_contract` is extended by nested
+calls and discarded results in
+`literal_claim_transport_survives_nested_and_unused_calls`. These public
+fixtures preceded implementation and both runners now pass.
+`runtime_extent_literal_transport` checks independent requirements, invalid
+carriers, root liveness, CSE/folding, grad and vmap. `wire_extent_witness`
+checks exact claims, invocation edges and source provenance on roundtrip,
+plus rejection of missing fields and malformed claims/edges. WireDag v9
+adds these explicit fields; stdlib/library cache versions are 15/11.
+The wider named-claim and op-computed-source exits remain separate. HIP and
+Metal retain their existing runtime scalar shape-read exclusions; these
+host execution receipts do not certify device execution.
+
 B2b-1 changes the checked-to-lowered claim carrier and every consumer together.
 Its PR must name the concrete type fields and all construction/rebuild/decode
 sites before implementation; compilation and negative tests reject omitted
@@ -341,8 +411,8 @@ The class completion command remains:
 
 Automatic success is exit zero ending `RUNTIME EXTENT ORACLE: PASS`, with
 applicable HIP and Metal hardware receipts at the same head/corpus digest.
-The recorded phase-B corpus has 56 rows: 35 at exit,
-21 short. This is baseline metadata, not a fresh execution receipt. The final
+The recorded phase-B corpus has 57 rows: 38 at exit,
+19 short. This is baseline metadata, not a fresh execution receipt. The final
 command currently fails because `SLICE_PHASES` still requires unregistered
 `c`. B2b-3 retires that requirement and its tests; it does not add a fake
 passing phase or erase outstanding B rows. `--phase a` and `--phase b`
@@ -358,7 +428,7 @@ cargo test -p chelis-cli --test runtime_extent_claim_preparation \
 ```
 
 The first locks measured current behavior with explicit issue-owned gaps and
-runs the repaired broadcast subset. It must fail on an unexplained behavior
+runs the repaired broadcast and literal-call subsets. It must fail on an unexplained behavior
 change. The second is the manual
 acceptance runner over the SAME fixtures and asserts the decided contract.
 It is intentionally red until the owning fixes land, reports every failed
@@ -367,7 +437,7 @@ acceptance test, a clean checker, object-only output, or equal wrong answers
 on Eval/C is never a passing completion receipt. Missing compiler/toolchain
 prerequisites fail the suite rather than skip a lane.
 
-The #1619 exit is the unignored `singleton_broadcast_contract` test:
+The bounded #1619 attribution receipt is the unignored `singleton_broadcast_contract` test:
 
 ```sh
 cargo test -p chelis-cli --test runtime_extent_claim_preparation \
@@ -422,17 +492,23 @@ Phase B records `guard.local.declaration_order.eval_c`. This closes the P2
 multi-axis reshape ordering witness recorded during #1662; it does not claim
 the remaining op-computed guard coverage or call/witness transport.
 
-The separate six-case #1377 prerequisite runner remains intentionally red:
+The #1377 exit runs six direct-call cases and 34 nested/discarded/alias
+cases, with declared types and exact outputs or required traps:
 
 ```sh
 cargo test -p chelis-cli --test runtime_extent_claim_preparation \
-  literal_result_claim_contract -- --ignored --exact --nocapture
+  literal_ -- --nocapture
 ```
 
 It asserts the declared result and exact execution or required failure on
-exported calls, top-level bindings and inlined main. B2b-1 owns its complete
-exit; a passing kernel matrix cannot supply its missing declaration or call
-attribution.
+exported calls, top-level bindings and inlined main, including returning an
+existing value after a discarded call, alias chains, borrows and shadowing.
+All 40 cases pass.
+Phase B attaches the direct public runner to its two inlined-root rows and
+adds `claim.literal.nested_and_unused.eval_c`. The 55-case preparation
+baseline now has 51 unmet cells: 24 declared signatures are preserved and
+two formerly silent #1377 inlined failures trap. The remaining 18 repaired
+signature cells belong to #1374/#1376/#1397; their execution gaps stay open.
 
 The suite's rows distinguish:
 
@@ -487,7 +563,7 @@ All are Slice B work under #1277 unless expressly separated.
 | owner | entry | deliverable and exit |
 |---|---|---|
 | B2b-0b: remaining local guards | merged B2r/S2b and #1658's broadcast preparation repair | guard literal and resolved numeric claims from independent local size sources; op-computed local extents; exact positive/negative C/Eval rows |
-| B2b-1: claim transport | C2 contract and red fixtures; integrates B2b-0b | scoped checked/lowered identities, explicit caller witnesses, multi-claim axes, rebuild/wire transport and migrated binding consumers; #1374/#1376/#1566, #1397's declaration-erasure half, and #1377's complete call/inlined-root exit |
+| B2b-1: claim transport | C2 contract and red fixtures; integrates B2b-0b | declaring-signature helper guard order, then atomic computed-reshape and broadcast-unit transport (#1686/#1687); scoped checked/lowered identities, explicit caller witnesses, multi-claim axes, rebuild/wire transport and migrated binding consumers; #1374/#1376/#1566, #1397's declaration-erasure half, with #1377's literal call/inlined-root exit established by the witness subset |
 | B2b-root: root execution | can start independently; acceptance composes B2b-1 | #1397's general wildcard-root boundary; run or diagnose every accepted root; unlock and reverify #1378's exact public value witness |
 | B2b-2: sources and acceptance | guards and claim transport for every newly admitted row | finish declaration sources (#665/#1556), supply #1482's missing shape source, remove provenance restrictions (#1266/#569/#1379), then remove unused `shape_deps` |
 | B2b-3: phase exit | preceding host repairs and per-row platform dispositions | register actual passing receipts, correct measured stale baselines, retire phase c from final selection; phase b/final remain red until their named obligations pass |
@@ -496,14 +572,51 @@ All are Slice B work under #1277 unless expressly separated.
 B2b-0b and B2b-1 can be developed as separate changes, but their shared local
 site integration must preserve both claim kinds. Claim transport is not an
 out-of-scope caller problem: it is precisely B2b-1's closure requirement.
-The six #1377 preparation fixtures expose this dependency: the reported
-literal result type is erased on every route, and the inlined mismatch loses
-its obligation. B2b-0b supplies the local guard consumer; B2b-1 retains the
-declaration, witness and call attribution that let that consumer enforce the
-public contract. Kernel guard tests alone cannot close #1377.
+The #1377 exit now retains the declared type and an explicit call-entry
+witness, with invocation dependencies preserving discarded checks. B2b-1
+still owns the named scoped identities and unread named caller witnesses
+needed by #1374/#1376/#1566. Kernel guard tests alone do not close those
+public contracts.
 B2b-root is separately bounded within #1397 so a declaration fix cannot
 silently close its broader root failure. #1378 stays open until the public
 witness executes; its typed Slice A mechanism need not be reimplemented.
+
+The helper signature-order repair ships first. A helper lowered from a declared
+function receives tensor inputs in that function's parameter order, including
+shape-only parameters. A signatureless subexpression retains its assigned,
+deterministic ABI order. Pruning and rebuilding preserve relative input order;
+host callers continue mapping actual arguments by input label. A literal is
+its own canonical value: when its checked value is a folded input-axis read,
+class ordering uses the source input's signature slot and axis, not the later
+consumer node. Named classes retain their declaring canonical witnesses.
+A shared IR schedule orders individual checks across classes and claim kinds;
+Eval and the C prologue consume it without regrouping:
+a repeated literal cannot pull its later witness ahead of an intervening
+parameter. Canonical values and witness deduplication remain attached to their
+checks. The acceptance command is:
+
+```sh
+cargo nextest run -p chelis-cli --test runtime_extent_claim_preparation \
+  -E 'test(=helper_signature_guard_order_contract)'
+```
+
+This covers signature `b,z,a` with satisfied, individually failing and
+simultaneously failing claims through exported C, bindings and inlined main,
+plus interleaved named and mixed named/literal binding checks, repeated literal
+claims at nonadjacent parameters, nested discarded
+calls, aliases and both executable-example variants. Internal tests cover signatureless
+ABI order and reconstruction. These checks do not discharge the computed
+reshape or unit-precondition obligations.
+
+The subsequent checked-extent integration owns #1686/#1687 together. It captures
+scoped claims and declaring witnesses before substitution/folding; a checked
+scalar compares an independently computed reshape target before allocation,
+and a checked tensor enforces an operand-axis precondition before refining that
+axis. Their explicit dependencies retain nested/discarded checks through
+rewrites and wire/cache boundaries. The `omitted_extent_claim_contract` runner
+must assert declarations, actual shape/values and runtime Domain failures on
+exported calls, bindings and inlined main before either issue closes. HIP/Metal
+execution remains with the platform owners described below.
 
 The B2b-1 carrier is one atomic integration change because dropping scope,
 claims or witnesses at any checker/lowerer/rebuild/wire boundary loses the

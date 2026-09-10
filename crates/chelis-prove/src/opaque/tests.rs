@@ -1,4 +1,5 @@
 use super::*;
+use crate::wire_values;
 use chelis_pred::PredAmenability;
 
 fn f32_value(value: f64) -> ScalarValue {
@@ -277,7 +278,7 @@ fn int8_field_samples_are_integers_within_int8_range() {
 
 #[test]
 fn int64_wire_element_enters_the_prover_without_crossing_f64() {
-    let elements = chelis_compiler_api::schema::TensorElements::Int64(vec![9_007_199_254_740_993]);
+    let elements = wire_values::storage_i64(vec![9_007_199_254_740_993]);
     let value = tensor_element_scalar(&elements, 0).expect("int64 wire element");
     assert_eq!(value.prim(), Prim::Int64);
     assert_eq!(value.as_i64_exact(), Some(9_007_199_254_740_993));
@@ -294,4 +295,23 @@ fn typed_generated_env_renders_plain_exact_integer_json() {
         generated_env_json(&env)["p.id"].as_i64(),
         Some(9_007_199_254_740_993)
     );
+}
+
+#[test]
+fn sealed_wire_elements_preserve_nan_payloads_and_reject_out_of_bounds() {
+    for (dtype, bits) in [
+        ("f16", "7c01"),
+        ("bf16", "ff81"),
+        ("f32", "7f800001"),
+        ("f64", "fff0000000000001"),
+    ] {
+        let json = serde_json::json!({"dtype": dtype, "bits": [bits]});
+        let storage = serde_json::from_value(json).unwrap();
+        let scalar = tensor_element_scalar(&storage, 0).expect("stored element");
+        assert_eq!(
+            serde_json::to_value(scalar).unwrap(),
+            serde_json::json!({"dtype": dtype, "bits": bits})
+        );
+        assert!(tensor_element_scalar(&storage, 1).is_none());
+    }
 }

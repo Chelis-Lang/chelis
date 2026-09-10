@@ -1,3 +1,4 @@
+use chelis_compiler_api::schema::numbers::NonnegativeExtent;
 use chelis_compiler_api::schema::{
     WIRE_DAG_SCHEMA_VERSION, WireDag, WireDagDecodeError, WireDagNode, WireDagSchemaError,
     WireDimInfo, WireRiscOp, WireTensorType,
@@ -6,6 +7,9 @@ use chelis_types::{scalar_from_i64, types::Prim};
 
 fn bool_input() -> WireDagNode {
     WireDagNode {
+        shape_deps: vec![],
+        span_id: None,
+        merged_spans: vec![],
         id: 0,
         op: WireRiscOp::Load {
             name: "mask".to_string(),
@@ -13,26 +17,37 @@ fn bool_input() -> WireDagNode {
         inputs: vec![],
         output_type: WireTensorType {
             dims: vec![
-                WireDimInfo::Lit { size: 2 },
-                WireDimInfo::Lit { size: 3 },
-                WireDimInfo::Lit { size: 4 },
+                WireDimInfo::Lit {
+                    size: NonnegativeExtent::new(2).unwrap(),
+                },
+                WireDimInfo::Lit {
+                    size: NonnegativeExtent::new(3).unwrap(),
+                },
+                WireDimInfo::Lit {
+                    size: NonnegativeExtent::new(4).unwrap(),
+                },
             ],
             precision: "bool".to_string(),
         },
     }
 }
 
-fn count_dag(axes: Vec<usize>) -> WireDag {
+fn count_dag(axes: Vec<i32>) -> WireDag {
     WireDag {
         schema_version: WIRE_DAG_SCHEMA_VERSION,
         nodes: vec![
             bool_input(),
             WireDagNode {
+                shape_deps: vec![],
+                span_id: None,
+                merged_spans: vec![],
                 id: 1,
                 op: WireRiscOp::Count { axes },
                 inputs: vec![0],
                 output_type: WireTensorType {
-                    dims: vec![WireDimInfo::Lit { size: 3 }],
+                    dims: vec![WireDimInfo::Lit {
+                        size: NonnegativeExtent::new(3).unwrap(),
+                    }],
                     precision: "int64".to_string(),
                 },
             },
@@ -72,10 +87,10 @@ fn assert_contract_rejects_encode_and_decode(dag: &WireDag, expected: &str) {
 
 #[test]
 fn current_wire_dag_count_round_trips_canonical_axes() {
-    assert_eq!(WIRE_DAG_SCHEMA_VERSION, 7);
+    assert_eq!(WIRE_DAG_SCHEMA_VERSION, 9);
     let dag = count_dag(vec![2, 0]);
     let json = serde_json::to_string(&dag).expect("canonical Count must encode");
-    assert!(json.contains(r#""schema_version":7"#));
+    assert!(json.contains(r#""schema_version":9"#));
     assert!(json.contains(r#""kind":"count","axes":[2,0]"#));
 
     let decoded = WireDag::from_validated_json(&json).expect("canonical Count must decode");
@@ -97,8 +112,8 @@ fn current_wire_dag_rejects_missing_older_and_future_versions_before_op_decode()
             Some(5),
         ),
         (
-            r#"{"schema_version":8,"nodes":[{"id":0,"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#,
-            Some(8),
+            r#"{"schema_version":10,"nodes":[{"id":0,"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#,
+            Some(10),
         ),
     ];
 
@@ -109,7 +124,7 @@ fn current_wire_dag_rejects_missing_older_and_future_versions_before_op_decode()
                     supported,
                 })),
                 None,
-            ) => assert_eq!(supported, 7),
+            ) => assert_eq!(supported, WIRE_DAG_SCHEMA_VERSION),
             (
                 Err(WireDagDecodeError::Schema(WireDagSchemaError::UnsupportedSchemaVersion {
                     found: actual,
@@ -118,7 +133,7 @@ fn current_wire_dag_rejects_missing_older_and_future_versions_before_op_decode()
                 Some(expected),
             ) => {
                 assert_eq!(actual, expected);
-                assert_eq!(supported, 7);
+                assert_eq!(supported, WIRE_DAG_SCHEMA_VERSION);
             }
             (other, _) => panic!("schema mismatch must win before op decode, got {other:?}"),
         }
@@ -131,7 +146,7 @@ fn current_wire_dag_rejects_missing_older_and_future_versions_before_op_decode()
         );
     }
 
-    let current_unknown = r#"{"schema_version":7,"nodes":[{"id":0,"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#;
+    let current_unknown = r#"{"schema_version":9,"nodes":[{"id":0,"shape_deps":[],"span_id":null,"merged_spans":[],"op":{"kind":"not_an_op"},"inputs":[],"output_type":{"dims":[],"precision":"bool"}}],"roots":[0]}"#;
     assert!(matches!(
         WireDag::from_validated_json(current_unknown),
         Err(WireDagDecodeError::Parse(_))
@@ -140,7 +155,7 @@ fn current_wire_dag_rejects_missing_older_and_future_versions_before_op_decode()
 
 #[test]
 fn current_wire_dag_rejects_every_older_explicit_version_and_legacy_pad() {
-    for version in 1..=6 {
+    for version in 1..WIRE_DAG_SCHEMA_VERSION {
         let mut dag = count_dag(vec![2, 0]);
         dag.schema_version = version;
         assert!(
@@ -154,7 +169,7 @@ fn current_wire_dag_rejects_every_older_explicit_version_and_legacy_pad() {
             Err(WireDagDecodeError::Schema(
                 WireDagSchemaError::UnsupportedSchemaVersion {
                     found,
-                    supported: 7
+                    supported: WIRE_DAG_SCHEMA_VERSION
                 }
             )) if found == version
         ));
@@ -163,7 +178,7 @@ fn current_wire_dag_rejects_every_older_explicit_version_and_legacy_pad() {
     let legacy_pad = r#"{
         "schema_version": 4,
         "nodes": [{
-            "id": 0,
+            "id": 0, "shape_deps": [], "span_id": null, "merged_spans": [],
             "op": {"kind": "pad", "padding": [], "fill": 1.5},
             "inputs": [],
             "output_type": {"dims": [], "precision": "f32"}
@@ -175,7 +190,7 @@ fn current_wire_dag_rejects_every_older_explicit_version_and_legacy_pad() {
         Err(WireDagDecodeError::Schema(
             WireDagSchemaError::UnsupportedSchemaVersion {
                 found: 4,
-                supported: 7
+                supported: WIRE_DAG_SCHEMA_VERSION
             }
         ))
     ));
@@ -192,10 +207,10 @@ fn current_wire_dag_rejects_noncanonical_count_axes_on_encode_and_decode() {
         );
 
         let value = serde_json::json!({
-            "schema_version": 7,
+            "schema_version": WIRE_DAG_SCHEMA_VERSION,
             "nodes": [
                 {
-                    "id": 0,
+                    "id": 0, "shape_deps": [], "span_id": null, "merged_spans": [],
                     "op": {"kind": "load", "name": "mask"},
                     "inputs": [],
                     "output_type": {
@@ -208,7 +223,7 @@ fn current_wire_dag_rejects_noncanonical_count_axes_on_encode_and_decode() {
                     }
                 },
                 {
-                    "id": 1,
+                    "id": 1, "shape_deps": [], "span_id": null, "merged_spans": [],
                     "op": {"kind": "count", "axes": axes},
                     "inputs": [0],
                     "output_type": {
@@ -243,7 +258,9 @@ fn current_wire_dag_rejects_count_semantic_dtype_and_shape_corruption() {
     );
 
     let mut wrong_output_shape = count_dag(vec![2, 0]);
-    wrong_output_shape.nodes[1].output_type.dims = vec![WireDimInfo::Lit { size: 4 }];
+    wrong_output_shape.nodes[1].output_type.dims = vec![WireDimInfo::Lit {
+        size: NonnegativeExtent::new(4).unwrap(),
+    }];
     assert_contract_rejects_encode_and_decode(
         &wrong_output_shape,
         "Count node 1 output dimensions must equal input dimensions with axes removed",
@@ -256,6 +273,9 @@ fn current_wire_dag_rejects_pad_fill_dtype_mismatch_on_encode_and_decode() {
     let dag = WireDag {
         schema_version: WIRE_DAG_SCHEMA_VERSION,
         nodes: vec![WireDagNode {
+            shape_deps: vec![],
+            span_id: None,
+            merged_spans: vec![],
             id: 0,
             op: WireRiscOp::Pad {
                 padding: vec![],
@@ -278,7 +298,7 @@ fn current_wire_dag_rejects_pad_fill_dtype_mismatch_on_encode_and_decode() {
     let json = serde_json::json!({
         "schema_version": WIRE_DAG_SCHEMA_VERSION,
         "nodes": [{
-            "id": 0,
+            "id": 0, "shape_deps": [], "span_id": null, "merged_spans": [],
             "op": {"kind": "pad", "padding": [], "fill": fill},
             "inputs": [],
             "output_type": {"dims": [], "precision": "f32"}
@@ -310,26 +330,49 @@ fn current_wire_dag_rejects_count_without_one_resolvable_input() {
 #[test]
 fn current_wire_dag_requires_accumulator_fields_in_current_ops() {
     for op in [
-        r#"{"kind":"sum","axis":0}"#,
-        r#"{"kind":"blas_matmul","batch_dims":[],"m":{"kind":"concrete","value":1},"n":{"kind":"concrete","value":1},"k":{"kind":"concrete","value":1}}"#,
-    ] {
-        let json = format!(
-            r#"{{"schema_version":7,"nodes":[{{"id":0,"op":{op},"inputs":[],"output_type":{{"dims":[],"precision":"f32"}}}}],"roots":[0]}}"#
-        );
-        assert!(matches!(
-            WireDag::from_validated_json(&json),
-            Err(WireDagDecodeError::Parse(_))
-        ));
-    }
-
-    for op in [
         r#"{"kind":"sum","axis":0,"accumulator":"f32"}"#,
         r#"{"kind":"blas_matmul","batch_dims":[],"m":{"kind":"concrete","value":1},"n":{"kind":"concrete","value":1},"k":{"kind":"concrete","value":1},"accumulator":"f32"}"#,
     ] {
-        let json = format!(
-            r#"{{"schema_version":7,"nodes":[{{"id":0,"op":{op},"inputs":[],"output_type":{{"dims":[],"precision":"f32"}}}}],"roots":[0]}}"#
-        );
-        WireDag::from_validated_json(&json)
+        let op: serde_json::Value = serde_json::from_str(op).unwrap();
+        let matmul = op["kind"] == "blas_matmul";
+        let dim = serde_json::json!({"kind":"lit","size":1});
+        let input_dims = if matmul {
+            vec![dim.clone(), dim.clone()]
+        } else {
+            vec![dim.clone()]
+        };
+        let output_dims = if matmul { input_dims.clone() } else { vec![] };
+        let mut nodes = vec![serde_json::json!({
+            "shape_deps":[],"span_id":null,"merged_spans":[],
+            "id":0,"op":{"kind":"load","name":"x"},"inputs":[],
+            "output_type":{"dims":input_dims,"precision":"f32"}
+        })];
+        let inputs = if matmul {
+            nodes.push(serde_json::json!({
+                "shape_deps":[],"span_id":null,"merged_spans":[],
+                "id":1,"op":{"kind":"load","name":"y"},"inputs":[],
+                "output_type":{"dims":input_dims,"precision":"f32"}
+            }));
+            vec![0, 1]
+        } else {
+            vec![0]
+        };
+        let root = nodes.len();
+        nodes.push(serde_json::json!({
+            "shape_deps":[],"span_id":null,"merged_spans":[],
+            "id":root,"op":op,"inputs":inputs,
+            "output_type":{"dims":output_dims,"precision":"f32"}
+        }));
+        let mut json = serde_json::json!({"schema_version":WIRE_DAG_SCHEMA_VERSION,"nodes":nodes,"roots":[root]});
+        WireDag::from_validated_json(&json.to_string())
             .expect("explicit current-version accumulator fields must decode");
+        json["nodes"][root]["op"]
+            .as_object_mut()
+            .unwrap()
+            .remove("accumulator");
+        assert!(matches!(
+            WireDag::from_validated_json(&json.to_string()),
+            Err(WireDagDecodeError::Parse(_))
+        ));
     }
 }

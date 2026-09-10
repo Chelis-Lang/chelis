@@ -47,8 +47,8 @@ out = apply_sum(3.0f64)
 
 const SHAPE_SENSITIVE_LOCAL: &str = "\
 def call_local(x: f64) -> f64 = {
-  conv2d = fn (a: f64, b: f64, c: f64, d: f64) -> add(add(a, b), add(c, d))
-  conv2d(x, 2.0f64, 3.0f64, 4.0f64)
+  conv = fn (a: f64, b: f64, c: f64, d: f64) -> add(add(a, b), add(c, d))
+  conv(x, 2.0f64, 3.0f64, 4.0f64)
 }
 out = call_local(1.0f64)
 ";
@@ -162,7 +162,7 @@ const INVALID_BUILTIN_CONV2D: &str = "\
 def bad_conv(
   x: tensor[1, 1, 3, 3, f32],
   k: tensor[1, 1, 1, 1, f32]
-) -> tensor[1, 1, 3, 3, f32] = conv2d(x, k, 1.0f64, 0)
+) -> tensor[1, 1, 3, 3, f32] = conv(x, k, [1.0f64, 1.0f64], [(0i64, 0i64), (0i64, 0i64)])
 ";
 
 const PRELUDE_COLLISION: &str = "\
@@ -381,7 +381,7 @@ fn applied_uppercase_head_without_a_declared_constructor_rejects() {
 #[test]
 fn real_shape_sensitive_builtin_keeps_its_validation() {
     let dir = tempdir().expect("tempdir");
-    let source = dir.path().join("invalid_builtin_conv2d.ch");
+    let source = dir.path().join("invalid_builtin_conv.ch");
     write_file(&source, INVALID_BUILTIN_CONV2D);
 
     let output = chelis()
@@ -391,7 +391,7 @@ fn real_shape_sensitive_builtin_keeps_its_validation() {
     assert_eq!(output.status.code(), Some(2));
     assert!(
         String::from_utf8_lossy(&output.stdout)
-            .contains("IR builtin `conv2d` requires a literal integer stride"),
+            .contains("IR builtin `conv` requires literal per-axis stride and padding metadata"),
         "stdout: {}",
         String::from_utf8_lossy(&output.stdout)
     );

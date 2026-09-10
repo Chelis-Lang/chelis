@@ -1741,7 +1741,7 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
         .and_then(|ty| parse_expanded_fn_type_expr(program, &ty))
         .map(|(params, _)| params)
         .unwrap_or_default();
-    let mut scope = UnordMap::new();
+    let mut scope = Vec::new();
     for (index, param) in children(params_list).iter().enumerate() {
         let pname = param_name(param)?;
         let pty = declared_param_tys
@@ -1750,7 +1750,7 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
             .or_else(|| param_host_type(param).map(|ty| expand_host_type_aliases(program, ty)))
             .filter(|ty| !ty.is_unresolved())?;
         let tensor_ty = tensor_type_from_host_input(&pty)?;
-        scope.insert(pname, tensor_ty);
+        scope.push((pname, tensor_ty));
     }
 
     let body_expr = kids.get(1)?;
@@ -1760,8 +1760,10 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
     // would let the host fallback emit an undefined-symbol call to
     // the grad function.
     let context = crate::lower::prepare_subexpr_lowering_context(program.type_env(), defs.clone());
-    match crate::lower::try_lower_subexpr_program_with_context(body_expr, scope, &context) {
-        Ok(dag) => Some(dag),
+    match crate::lower::try_lower_subexpr_program_with_ordered_inputs(
+        body_expr, scope, &context, None, 0,
+    ) {
+        Ok((dag, _)) => Some(dag),
         Err(diagnostic) if diagnostic.fatal => {
             crate::lower::raise_fatal_lowering_diagnostic(diagnostic)
         }
@@ -3107,6 +3109,7 @@ pub fn host_def_kernel(
         &signature.body_expr,
         program,
         &signature.scope,
+        Some(&signature.params),
         &expected,
         random,
     )?;
@@ -3701,6 +3704,7 @@ fn lower_def_body_kernel(
         &signature.body_expr,
         program,
         &signature.scope,
+        Some(&signature.params),
         &expected,
         None,
     ) {
@@ -3751,25 +3755,40 @@ fn lower_kernel_dag(
     expr: &Expr,
     program: &CheckedProgram,
     scope: &UnordMap<String, HostTypeTerm>,
+    declaring_params: Option<&[HostParam]>,
     expected: &TensorType,
     random: Option<RandomLoweringState>,
 ) -> Result<(crate::Dag, Option<u64>), crate::lower::LowerDiagnostic> {
     let context = cached_subexpr_lowering_context(program);
-    let scope_types = collect_tensor_scope(scope);
+    let scope_types = match declaring_params {
+        Some(params) => params
+            .iter()
+            .filter_map(|param| {
+                tensor_type_from_host_input(&param.ty).map(|ty| (param.name.clone(), ty))
+            })
+            .collect(),
+        None => collect_tensor_scope(scope).into_sorted(),
+    };
     let (dag, next_random_counter) = match random {
         None => (
-            crate::lower::try_lower_subexpr_program_with_context(expr, scope_types, &context)?,
+            crate::lower::try_lower_subexpr_program_with_ordered_inputs(
+                expr,
+                scope_types,
+                &context,
+                None,
+                0,
+            )?
+            .0,
             None,
         ),
         Some(state) => {
-            let (dag, counter) =
-                crate::lower::try_lower_subexpr_program_with_context_and_random_state(
-                    expr,
-                    scope_types,
-                    &context,
-                    state.seed,
-                    state.counter,
-                )?;
+            let (dag, counter) = crate::lower::try_lower_subexpr_program_with_ordered_inputs(
+                expr,
+                scope_types,
+                &context,
+                state.seed,
+                state.counter,
+            )?;
             (dag, Some(counter))
         }
     };
@@ -4087,7 +4106,7 @@ fn lower_tensor_helper_dag(
     // helper sub-lowering instead of swallowing it; the host
     // fallback would otherwise emit an undefined-symbol call to
     // the rejected grad function.
-    match lower_kernel_dag(expr, program, scope, expected, None) {
+    match lower_kernel_dag(expr, program, scope, None, expected, None) {
         Ok((dag, _)) => Some(dag),
         Err(diagnostic) if diagnostic.fatal => {
             crate::lower::raise_fatal_lowering_diagnostic(diagnostic)
@@ -10347,10 +10366,19 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
     if kids.is_empty() {
         return Ok((Cow::Borrowed(expr), Cow::Borrowed(scope), Vec::new()));
     }
-    if !kids
-        .iter()
-        .skip(1)
-        .any(should_keep_tensor_expr_in_host_lane)
+    // A host-only descendant beneath a tensor expression still needs a
+    // host boundary: matmul(softmax(where(...)), v) cannot lower as one
+    // kernel. Evaluate both matrix operands once, in source order, then
+    // pass their typed values to the ordinary rank-generic matrix helper.
+    // This also preserves effects in the other operand when only one has
+    // a host-only descendant. Other builtins may carry static axis/list
+    // arguments, so this two-tensor boundary is specific to matmul.
+    let hoist_matmul_operands = kids.len() == 3 && direct_var_name(&kids[0]) == Some("matmul");
+    if !hoist_matmul_operands
+        && !kids
+            .iter()
+            .skip(1)
+            .any(should_keep_tensor_expr_in_host_lane)
     {
         return Ok((Cow::Borrowed(expr), Cow::Borrowed(scope), Vec::new()));
     }
@@ -10364,7 +10392,7 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
     let mut bindings = Vec::new();
 
     for (index, arg) in kids.iter().enumerate().skip(1) {
-        if should_keep_tensor_expr_in_host_lane(arg) {
+        if hoist_matmul_operands || should_keep_tensor_expr_in_host_lane(arg) {
             let value = lower_host_expr(arg, program, scope, tensor_helpers)?;
             let preferred_ty = fn_sig
                 .and_then(|(param_tys, _)| param_tys.get(index - 1))
@@ -12036,50 +12064,24 @@ fn collect_tensor_scope(scope: &UnordMap<String, HostTypeTerm>) -> UnordMap<Stri
 fn tensor_type_from_host_input(ty: &HostTypeTerm) -> Option<TensorType> {
     match ty {
         HostTypeTerm::Tensor(tensor) => Some(tensor.clone()),
-        // WS-4: map each declared float width to its own precision. The
-        // previous unconditional `Float64 -> F32` silently truncated f64
-        // scalar entry parameters to 4-byte storage; the declared width
-        // now survives because `parse_host_type_with_subst` preserves the
-        // `f32`/`f64` distinction.
-        &HostTypeTerm::Float32 => Some(TensorType {
-            dims: vec![],
-            precision: chelis_types::types::Prim::F32,
-        }),
-        &HostTypeTerm::Float64 => Some(TensorType {
-            dims: vec![],
-            precision: chelis_types::types::Prim::F64,
-        }),
-        &HostTypeTerm::Int64 => Some(TensorType {
-            dims: vec![],
-            precision: chelis_types::types::Prim::Int64,
-        }),
-        &HostTypeTerm::Bool => Some(TensorType {
-            dims: vec![],
-            precision: chelis_types::types::Prim::Bool,
-        }),
+        HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(prim))
+            if prim.is_admissible_active() && *prim != Prim::String =>
+        {
+            Some(TensorType {
+                dims: vec![],
+                precision: *prim,
+            })
+        }
         _ => None,
     }
 }
 
 fn host_type_from_tensor_input(ty: &TensorType) -> HostTypeTerm {
     if ty.dims.is_empty() {
-        match ty.precision {
-            chelis_types::types::Prim::Bool => HostTypeTerm::Bool,
-            chelis_types::types::Prim::Int8
-            | chelis_types::types::Prim::Int16
-            | chelis_types::types::Prim::Int32
-            | chelis_types::types::Prim::Int64 => HostTypeTerm::Int64,
-            // WS-4: restore the float width on the reverse boundary so a
-            // rank-0 f32 tensor round-trips to `Float32` (declared width)
-            // rather than collapsing every float to `Float64`. The
-            // narrower IEEE floats (`f16`/`bf16`) have no dedicated host
-            // scalar variant, so they keep the coarse `Float32` class.
-            chelis_types::types::Prim::F32
-            | chelis_types::types::Prim::F16
-            | chelis_types::types::Prim::Bf16
-            | chelis_types::types::Prim::F8e4m3 => HostTypeTerm::Float32,
-            chelis_types::types::Prim::F64 => HostTypeTerm::Float64,
-            chelis_types::types::Prim::String => HostTypeTerm::String,
+        if ty.precision == Prim::String {
+            HostTypeTerm::String
+        } else {
+            HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(ty.precision))
         }
     } else {
         HostTypeTerm::Tensor(ty.clone())
@@ -16739,37 +16741,40 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     }
 
     #[test]
-    fn host_input_tensor_round_trip_preserves_float_width() {
-        // The two boundary helpers must agree: a declared f32/f64 host
-        // scalar lowers to a rank-0 tensor of the matching precision, and
-        // the reverse map restores the same host width.
-        assert_eq!(
-            tensor_type_from_host_input(&HostTypeTerm::Float32),
-            Some(TensorType {
+    fn host_input_tensor_round_trip_preserves_every_active_scalar_dtype() {
+        for prim in [
+            Prim::F16,
+            Prim::Bf16,
+            Prim::F32,
+            Prim::F64,
+            Prim::Int8,
+            Prim::Int16,
+            Prim::Int32,
+            Prim::Int64,
+            Prim::Bool,
+        ] {
+            let host = HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(prim));
+            let tensor = TensorType {
                 dims: vec![],
-                precision: Prim::F32,
-            }),
-        );
+                precision: prim,
+            };
+            assert_eq!(
+                tensor_type_from_host_input(&host),
+                Some(tensor.clone()),
+                "{prim:?}"
+            );
+            assert_eq!(host_type_from_tensor_input(&tensor), host, "{prim:?}");
+        }
+    }
+
+    #[test]
+    fn host_input_tensor_boundary_rejects_non_tensor_scalar_domains() {
+        assert_eq!(tensor_type_from_host_input(&HostTypeTerm::String), None);
         assert_eq!(
-            tensor_type_from_host_input(&HostTypeTerm::Float64),
-            Some(TensorType {
-                dims: vec![],
-                precision: Prim::F64,
-            }),
-        );
-        assert_eq!(
-            host_type_from_tensor_input(&TensorType {
-                dims: vec![],
-                precision: Prim::F32,
-            }),
-            HostTypeTerm::Float32,
-        );
-        assert_eq!(
-            host_type_from_tensor_input(&TensorType {
-                dims: vec![],
-                precision: Prim::F64,
-            }),
-            HostTypeTerm::Float64,
+            tensor_type_from_host_input(&HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(
+                Prim::F8e4m3
+            ))),
+            None
         );
     }
 

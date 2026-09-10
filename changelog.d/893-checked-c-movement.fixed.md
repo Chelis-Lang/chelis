@@ -1,0 +1,1 @@
+Generated C permutation and expansion now validate target metadata before allocation and use checked runtime coordinates. Movement preserves exact stored values across all tensor dtypes, including int64 values above 2^53, and rejects invalid or overflowing metadata.

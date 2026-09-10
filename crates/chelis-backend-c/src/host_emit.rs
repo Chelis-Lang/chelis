@@ -175,7 +175,7 @@ use crate::host_abi::{
     HostAbiMatchArm as HostMatchArm, HostAbiParam as HostParam, HostAbiProgram as HostProgram,
     HostAbiType, HostAbiType as HostType, ProjectedHostProgram, ProjectedHostSite,
 };
-use chelis_ir::dag::{DimExpr, DimInfo, RiscOp, TensorType};
+use chelis_ir::dag::{DimInfo, RiscOp, TensorType};
 use chelis_ir::ownership::{
     HostSiteId, VerifiedApplyKind, VerifiedBlockId, VerifiedDagView, VerifiedEdgeView,
     VerifiedHostAction, VerifiedHostOperation, VerifiedHostTensorHelperView,
@@ -454,6 +454,7 @@ pub(crate) fn emit_host_abi_program(
     ]);
     if helper_requirements.needs_blas_header {
         out.push("#include \"chelis_blas.h\"".to_string());
+        out.push(CEmitter::blas_integer_support());
     }
     if helper_requirements.needs_math_header {
         out.push("#include \"chelis_math.h\"".to_string());
@@ -660,10 +661,10 @@ fn append_json_canonical_object_helpers(out: &mut Vec<String>) {
         "static chelis_list *chelis_json_canonical_object_entries(const chelis_dict *dict) {",
         "    chelis_list *source = chelis_dict_entries(dict);",
         "    int64_t len = chelis_list_len(source);",
-        "    int64_t *order = len > 0 ? (int64_t *)malloc((size_t)len * sizeof(int64_t)) : NULL;",
-        "    if (len > 0 && order == NULL) {",
-        "        chelis_fail(chelis_string_from_cstr(\"JSON canonical object ordering allocation failed\"));",
-        "    }",
+        "    chelis_tensor *order_storage = chelis_alloc(1, &len, CHELIS_DTYPE_I64);",
+        "    chelis_tensor_write *order_guard = chelis_tensor_begin_write(order_storage);",
+        "    chelis_write_view order_view = chelis_tensor_write_view(order_guard);",
+        "    int64_t *order = (int64_t *)order_view.data;",
         "    for (int64_t index = 0; index < len; ++index) {",
         "        order[index] = index;",
         "        int64_t cursor = index;",
@@ -686,7 +687,8 @@ fn append_json_canonical_object_helpers(out: &mut Vec<String>) {
         "        chelis_list_push(result, entry);",
         "        chelis_value_release(entry);",
         "    }",
-        "    free(order);",
+        "    chelis_tensor_end_write(order_guard);",
+        "    chelis_tensor_release(order_storage);",
         "    chelis_list_release(source);",
         "    return result;",
         "}",
@@ -1695,6 +1697,16 @@ fn emit_function(
             ));
         }
     }
+    let entry = ownership_sites
+        .iter()
+        .find(|site| site.kind == chelis_ir::ownership::HostSiteKind::FunctionEntry)
+        .ok_or_else(|| {
+            invalid_abi_shape(
+                "verified host function has no FunctionEntry site".to_string(),
+                "verified C host ownership emission",
+            )
+        })?;
+    emitter.emit_entry_terminals(entry, authored)?;
     emitter.emit_expr_to_var(&function.body, "__result", &function.ret_ty)?;
     let terminal = ownership_sites
         .iter()
@@ -2949,6 +2961,37 @@ impl<'a> HostEmitter<'a> {
         let ty = Self::owner_abi_type(owner)?;
         if let Some(release) = release_call(&var, &ty) {
             self.lines.push(format!("{}{release}", self.indent));
+        }
+        Ok(())
+    }
+
+    fn emit_entry_terminals(
+        &mut self,
+        site: &ProjectedHostSite<'a>,
+        authored: bool,
+    ) -> Result<(), Unsupported> {
+        // The ABI wrapper implements the authored entry's clones and jump.
+        // Its target owners are bound to the body parameters above. Emit each
+        // projected terminal once here: an edge terminal and its Operation
+        // projection have the same identity, not two independent releases.
+        // Internal specializations have no adapter edge, but can have drops
+        // scheduled directly at block entry.
+        for action in &site.directives {
+            match action {
+                VerifiedHostAction::Operation(VerifiedHostOperation::Drop { owner, .. }) => {
+                    self.emit_owner_drop(owner.owner())?;
+                }
+                VerifiedHostAction::Operation(VerifiedHostOperation::Discard { .. }) => {}
+                VerifiedHostAction::Operation(VerifiedHostOperation::Clone { .. })
+                | VerifiedHostAction::Terminator(VerifiedHostTerminator::Jump { .. })
+                    if authored => {}
+                other => {
+                    return Err(invalid_abi_shape(
+                        format!("unexpected verified function-entry action {other:?}"),
+                        "verified C host ownership emission",
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -5510,61 +5553,12 @@ impl<'a> HostEmitter<'a> {
                 let tensor_name = self.next_temp(&format!("tensor_arg{index}"));
                 self.lines
                     .push(format!("{}chelis_tensor* {};", self.indent, tensor_name));
-                // Scalar inputs to tensor helpers use true rank-0 tensors so
-                // the declared dtype keeps shape=[] across generated host/DAG
-                // calls. Every arm writes through its exact storage type;
-                // Bool is the canonical one-byte Bool8 carrier.
-                let (dtype, store) = match inferred_ty {
-                    HostType::Int8 => (
-                        "CHELIS_DTYPE_I8",
-                        format!("((int8_t*){tensor_name}_write.data)[0] = {value_name};"),
-                    ),
-                    HostType::Int16 => (
-                        "CHELIS_DTYPE_I16",
-                        format!("((int16_t*){tensor_name}_write.data)[0] = {value_name};"),
-                    ),
-                    HostType::Int64 => (
-                        "CHELIS_DTYPE_I64",
-                        format!("((int64_t*){tensor_name}_write.data)[0] = {value_name};"),
-                    ),
-                    HostType::Bool => (
-                        "CHELIS_DTYPE_BOOL",
-                        format!(
-                            "((uint8_t*){tensor_name}_write.data)[0] = {value_name} ? UINT8_C(1) : UINT8_C(0);"
-                        ),
-                    ),
-                    // #381: an f64 captured scalar (e.g. `cast(1.1, f64)`)
-                    // fed to a tensor helper via `scalar_to_tensor` must be
-                    // packed into a `CHELIS_DTYPE_F64` rank-0 tensor and written
-                    // through a `double*`. The pre-fix catch-all packed it
-                    // as `CHELIS_DTYPE_F32` and stored only the low 4 bytes; the
-                    // f64 kernel then read 8 bytes (the high 4 garbage),
-                    // collapsing the value to ~0 and silently disagreeing
-                    // with the evaluator. Float32 still uses the f32 arm.
-                    HostType::Float64 => (
-                        "CHELIS_DTYPE_F64",
-                        format!("((double*){tensor_name}_write.data)[0] = (double)({value_name});"),
-                    ),
-                    _ => (
-                        "CHELIS_DTYPE_F32",
-                        format!("((float*){tensor_name}_write.data)[0] = (float)({value_name});"),
-                    ),
-                };
+                // Preserve the declared dtype and stored bits through the
+                // existing tagged scalar carrier; no scalar class falls back
+                // to f32 or interprets f16/bf16 storage as an integer value.
+                let scalar = scalar_carrier_expr(&value_name, &inferred_ty)?;
                 self.lines.push(format!(
-                    "{}{tensor_name} = chelis_alloc(0, NULL, {dtype});",
-                    self.indent
-                ));
-                self.lines.push(format!(
-                    "{}chelis_tensor_write *{tensor_name}_guard = chelis_tensor_begin_write({tensor_name});",
-                    self.indent
-                ));
-                self.lines.push(format!(
-                    "{}chelis_write_view {tensor_name}_write = chelis_tensor_write_view({tensor_name}_guard);",
-                    self.indent
-                ));
-                self.lines.push(format!("{}{store}", self.indent));
-                self.lines.push(format!(
-                    "{}chelis_tensor_end_write({tensor_name}_guard);",
+                    "{}{tensor_name} = chelis_scalar_tensor({scalar});",
                     self.indent
                 ));
                 (tensor_name.clone(), Some(tensor_name))
@@ -5702,135 +5696,86 @@ impl<'a> HostEmitter<'a> {
         let rhs = tensor_args
             .get(summary.rhs_input)
             .expect("summary rhs input index");
-        let m_expr = self.summary_dim_expr(&summary.m, summary, &tensor_args);
-        let n_expr = self.summary_dim_expr(&summary.n, summary, &tensor_args);
-        let k_expr = self.summary_dim_expr(&summary.k, summary, &tensor_args);
+        let plan = self.next_temp("blas_plan");
+        let index_type = sparse_elem_type(Prim::Int64);
+        let element = sparse_elem_type(Prim::F32);
+        self.lines.push(format!("{}chelis_matmul_plan *{plan} = chelis_tensor_matmul_plan({lhs}, {rhs}, chelis_scalar_from_bits(CHELIS_DTYPE_F32, UINT64_C(0)));", self.indent));
+        // The summary's declared output remains an independent target claim.
         let output_dims = summary
-            .batch_dims
+            .output
+            .dims
             .iter()
-            .chain([&summary.m, &summary.n])
-            .map(|dim| self.summary_dim_expr(dim, summary, &tensor_args))
+            .map(|dim| match dim {
+                DimInfo::Lit(value) | DimInfo::Named(_, Some(value)) => value.to_string(),
+                DimInfo::Named(name, None) => self
+                    .summary_symbol_expr(name, summary, &tensor_args)
+                    .unwrap_or_else(|| {
+                        panic!("BLAS summary output symbol `{name}` has no input binding")
+                    }),
+            })
             .collect::<Vec<_>>();
+        let rank = output_dims.len();
+        let tagged = output_dims
+            .iter()
+            .map(|d| format!("chelis_scalar_from_bits(CHELIS_DTYPE_I64, {d})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.lines.push(format!("{}chelis_matmul_check_target({plan}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {rank}), (chelis_scalar[]){{ {tagged} }});", self.indent));
+        self.lines.push(format!("{}chelis_matmul_check_vendor({plan}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, CHELIS_BLAS_MAXIMUM));", self.indent));
         let shape_name = self.next_temp("blas_shape");
+        let shape = (0..rank).map(|axis| format!("chelis_matmul_extent({plan}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {axis}))")).collect::<Vec<_>>().join(", ");
         self.lines.push(format!(
-            "{}int64_t {shape_name}[{}] = {{ {} }};",
-            self.indent,
-            output_dims.len(),
-            output_dims.join(", ")
-        ));
-        self.lines.push(format!(
-            "{}{target} = chelis_alloc({}, {shape_name}, CHELIS_DTYPE_F32);",
-            self.indent,
-            output_dims.len()
-        ));
-
-        let lhs_contig = self.next_temp("blas_lhs");
-        let rhs_contig = self.next_temp("blas_rhs");
-        self.lines.push(format!(
-            "{}chelis_tensor *{lhs_contig} = {lhs};",
+            "{}{index_type} {shape_name}[{rank}] = {{ {shape} }};",
             self.indent
         ));
-        self.lines.push(format!(
-            "{}if (!(chelis_tensor_rank({lhs_contig}) >= 2 && chelis_host_tensor_stride({lhs_contig}, chelis_tensor_rank({lhs_contig}) - 1) == 1 && chelis_host_tensor_stride({lhs_contig}, chelis_tensor_rank({lhs_contig}) - 2) == {k_expr})) {{",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}    {lhs_contig} = chelis_contiguous({lhs_contig});",
-            self.indent
-        ));
-        self.lines.push(format!("{}}}", self.indent));
-        self.lines.push(format!(
-            "{}chelis_tensor *{rhs_contig} = {rhs};",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}if (!(chelis_tensor_rank({rhs_contig}) >= 2 && chelis_host_tensor_stride({rhs_contig}, chelis_tensor_rank({rhs_contig}) - 1) == 1 && chelis_host_tensor_stride({rhs_contig}, chelis_tensor_rank({rhs_contig}) - 2) == {n_expr})) {{",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}    {rhs_contig} = chelis_contiguous({rhs_contig});",
-            self.indent
-        ));
-        self.lines.push(format!("{}}}", self.indent));
-
-        if summary.batch_dims.is_empty() {
-            let (guard, view) = self.begin_tensor_write(target);
-            self.lines.push(format!(
-                "{}cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, {m_expr}, {n_expr}, {k_expr}, 1.0f, (const float*)chelis_host_tensor_data({lhs_contig}), {k_expr}, (const float*)chelis_host_tensor_data({rhs_contig}), {n_expr}, 0.0f, (float*){view}.data, {n_expr});",
-                self.indent
-            ));
-            self.end_tensor_write(&guard);
-        } else {
-            let batch_count = summary
-                .batch_dims
-                .iter()
-                .map(|dim| self.summary_dim_expr(dim, summary, &tensor_args))
-                .reduce(|lhs, rhs| format!("({lhs} * {rhs})"))
-                .unwrap_or_else(|| "1".to_string());
-            let batch = self.next_temp("blas_batch");
-            let rem = self.next_temp("blas_rem");
-            let lhs_offset = self.next_temp("blas_lhs_offset");
-            let rhs_offset = self.next_temp("blas_rhs_offset");
-            let out_offset = self.next_temp("blas_out_offset");
-            let out_strides = (0..summary.batch_dims.len())
-                .map(|axis| {
-                    let stride = self.next_temp(&format!("blas_out_stride_{axis}"));
-                    self.lines.push(format!(
-                        "{}int64_t {stride} = chelis_host_tensor_stride({target}, {axis});",
-                        self.indent
-                    ));
-                    stride
-                })
-                .collect::<Vec<_>>();
-            let (guard, view) = self.begin_tensor_write(target);
-            self.lines.push(format!(
-                "{}for (int64_t {batch} = 0; {batch} < {batch_count}; {batch}++) {{",
-                self.indent
-            ));
-            self.lines
-                .push(format!("{}    int64_t {rem} = {batch};", self.indent));
-            self.lines
-                .push(format!("{}    int64_t {lhs_offset} = 0;", self.indent));
-            self.lines
-                .push(format!("{}    int64_t {rhs_offset} = 0;", self.indent));
-            self.lines
-                .push(format!("{}    int64_t {out_offset} = 0;", self.indent));
-            for axis in (0..summary.batch_dims.len()).rev() {
-                let dim_expr =
-                    self.summary_dim_expr(&summary.batch_dims[axis], summary, &tensor_args);
-                let coord = self.next_temp(&format!("blas_coord_{axis}"));
-                self.lines.push(format!(
-                    "{}    int64_t {coord} = {rem} % ({dim_expr});",
-                    self.indent
-                ));
-                self.lines
-                    .push(format!("{}    {rem} /= ({dim_expr});", self.indent));
-                self.lines.push(format!(
-                    "{}    {lhs_offset} += {coord} * chelis_host_tensor_stride({lhs_contig}, {axis});",
-                    self.indent
-                ));
-                self.lines.push(format!(
-                    "{}    {rhs_offset} += {coord} * chelis_host_tensor_stride({rhs_contig}, {axis});",
-                    self.indent
-                ));
-                self.lines.push(format!(
-                    "{}    {out_offset} += {coord} * {};",
-                    self.indent, out_strides[axis]
-                ));
-            }
-            self.lines.push(format!(
-                "{}    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, {m_expr}, {n_expr}, {k_expr}, 1.0f, (const float*)chelis_host_tensor_data({lhs_contig}) + {lhs_offset}, {k_expr}, (const float*)chelis_host_tensor_data({rhs_contig}) + {rhs_offset}, {n_expr}, 0.0f, (float*){view}.data + {out_offset}, {n_expr});",
-                self.indent
-            ));
-            self.lines.push(format!("{}}}", self.indent));
-            self.end_tensor_write(&guard);
+        let m = self.next_temp("blas_m");
+        let n = self.next_temp("blas_n");
+        let k = self.next_temp("blas_k");
+        for (name, dimension) in [(&m, "ROWS"), (&n, "COLUMNS"), (&k, "REDUCTION")] {
+            self.lines.push(format!("{}{index_type} {name} = chelis_matmul_dimension({plan}, CHELIS_MATMUL_{dimension});", self.indent));
         }
+        let count = self.next_temp("blas_batches");
         self.lines.push(format!(
-            "{}if ({lhs_contig} != {lhs}) chelis_tensor_release({lhs_contig});",
+            "{}{index_type} {count} = chelis_matmul_batch_count({plan});",
             self.indent
         ));
         self.lines.push(format!(
-            "{}if ({rhs_contig} != {rhs}) chelis_tensor_release({rhs_contig});",
+            "{}{target} = chelis_alloc({rank}, {shape_name}, CHELIS_DTYPE_F32);",
+            self.indent
+        ));
+        let (guard, view) = self.begin_tensor_write(target);
+        self.lines.push(format!("{}if ({k} == 0) {{", self.indent));
+        let bytes = self.next_temp("blas_bytes");
+        self.lines.push(format!(
+            "{}    {index_type} {bytes} = chelis_tensor_byte_count({target});",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}    if ({bytes} != 0) memset({view}.data, 0, (size_t){bytes});",
+            self.indent
+        ));
+        self.lines.push(format!("{}}} else {{", self.indent));
+        let batch = self.next_temp("blas_batch");
+        let lhs_offset = self.next_temp("blas_lhs_offset");
+        let rhs_offset = self.next_temp("blas_rhs_offset");
+        let out_offset = self.next_temp("blas_out_offset");
+        self.lines.push(format!(
+            "{}    for ({index_type} {batch} = 0; {batch} < {count}; ++{batch}) {{",
+            self.indent
+        ));
+        for (name, part) in [
+            (&lhs_offset, "LEFT"),
+            (&rhs_offset, "RIGHT"),
+            (&out_offset, "RESULT"),
+        ] {
+            self.lines.push(format!("{}        {index_type} {name} = chelis_matmul_index({plan}, CHELIS_MATMUL_{part}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {batch}), chelis_scalar_from_bits(CHELIS_DTYPE_I64, 0));", self.indent));
+        }
+        self.lines.push(format!("{}        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, (chelis_blas_integer){m}, (chelis_blas_integer){n}, (chelis_blas_integer){k}, 1.0f, (const {element}*)chelis_host_tensor_data({lhs}) + {lhs_offset}, (chelis_blas_integer){k}, (const {element}*)chelis_host_tensor_data({rhs}) + {rhs_offset}, (chelis_blas_integer){n}, 0.0f, ({element}*){view}.data + {out_offset}, (chelis_blas_integer){n});", self.indent));
+        self.lines.push(format!("{}    }}", self.indent));
+        self.lines.push(format!("{}}}", self.indent));
+        self.end_tensor_write(&guard);
+        self.lines.push(format!(
+            "{}chelis_matmul_plan_release({plan});",
             self.indent
         ));
         Ok(())
@@ -5908,30 +5853,6 @@ impl<'a> HostEmitter<'a> {
         }
     }
 
-    fn summary_dim_expr(
-        &self,
-        dim: &DimExpr,
-        summary: &HostBlasMatmulSummary,
-        tensor_args: &[String],
-    ) -> String {
-        match dim {
-            DimExpr::Concrete(value) => value.to_string(),
-            DimExpr::Sym(name) => self
-                .summary_symbol_expr(name, summary, tensor_args)
-                .unwrap_or_else(|| panic!("BLAS summary symbol `{name}` has no input binding")),
-            DimExpr::Mul(lhs, rhs) => format!(
-                "({} * {})",
-                self.summary_dim_expr(lhs, summary, tensor_args),
-                self.summary_dim_expr(rhs, summary, tensor_args)
-            ),
-            DimExpr::Div(lhs, rhs) => format!(
-                "({} / {})",
-                self.summary_dim_expr(lhs, summary, tensor_args),
-                self.summary_dim_expr(rhs, summary, tensor_args)
-            ),
-        }
-    }
-
     fn summary_symbol_expr(
         &self,
         name: &str,
@@ -5990,56 +5911,63 @@ impl<'a> HostEmitter<'a> {
         self.emit_sparse_summary_contract(summary, &tensor_args);
 
         let target_dtype = sparse_dtype_macro(summary.output.precision);
-        let target_elem_t = sparse_elem_type(summary.output.precision);
-        let target_elem_size = format!("sizeof({target_elem_t})");
-
-        // Build output shape from `summary.output.dims`. Symbolic dims
-        // resolve via the caller's tensor-arg shape (the contract
-        // assertions above already verified those are consistent).
+        let base = &tensor_args[summary.input_indices[0]];
+        let indices = &tensor_args[summary.input_indices[1]];
+        let (operation, updates) = match kind {
+            SparseSummaryKind::Gather => ("CHELIS_SPARSE_GATHER", "NULL"),
+            SparseSummaryKind::ScatterAdd => (
+                "CHELIS_SPARSE_ADD",
+                tensor_args[summary.input_indices[2]].as_str(),
+            ),
+            SparseSummaryKind::ScatterReplace => (
+                "CHELIS_SPARSE_REPLACE",
+                tensor_args[summary.input_indices[2]].as_str(),
+            ),
+        };
+        let plan = self.next_temp("sparse_plan");
+        let count = self.next_temp("sparse_count");
+        let index_type = sparse_elem_type(Prim::Int64);
+        self.lines.push(format!("{}chelis_sparse_plan *{plan} = chelis_tensor_sparse_plan({base}, {indices}, {updates}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {}), {operation});", self.indent, summary.axis));
         let output_dims = summary
             .output
             .dims
             .iter()
             .map(|dim| sparse_dim_info_expr(dim, summary, &tensor_args))
             .collect::<Vec<_>>();
+        let tagged = if output_dims.is_empty() {
+            "NULL".to_owned()
+        } else {
+            format!(
+                "(chelis_scalar[]){{ {} }}",
+                output_dims
+                    .iter()
+                    .map(|d| format!("chelis_scalar_from_bits(CHELIS_DTYPE_I64, {d})"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        let rank = output_dims.len();
+        self.lines.push(format!("{}chelis_sparse_check_target({plan}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {rank}), {tagged});", self.indent));
+        self.lines.push(format!(
+            "{}{index_type} {count} = chelis_sparse_count({plan});",
+            self.indent
+        ));
         let shape_name = self.next_temp("sparse_shape");
-        self.lines.push(format!(
-            "{}int64_t {shape_name}[{}] = {{ {} }};",
-            self.indent,
-            output_dims.len(),
+        let shape = if rank == 0 {
+            "0".to_owned()
+        } else {
             output_dims.join(", ")
+        };
+        self.lines.push(format!(
+            "{}{index_type} {shape_name}[{}] = {{ {shape} }};",
+            self.indent,
+            rank.max(1)
         ));
         self.lines.push(format!(
-            "{}{target} = chelis_alloc({}, {shape_name}, {target_dtype});",
-            self.indent,
-            output_dims.len()
+            "{}{target} = chelis_alloc({rank}, {shape_name}, {target_dtype});",
+            self.indent
         ));
-
-        match kind {
-            SparseSummaryKind::Gather => {
-                self.emit_sparse_gather_summary_body(target, summary, &tensor_args, target_elem_t);
-            }
-            SparseSummaryKind::ScatterAdd => {
-                self.emit_sparse_scatter_summary_body(
-                    target,
-                    summary,
-                    &tensor_args,
-                    target_elem_t,
-                    &target_elem_size,
-                    /* accumulate */ true,
-                );
-            }
-            SparseSummaryKind::ScatterReplace => {
-                self.emit_sparse_scatter_summary_body(
-                    target,
-                    summary,
-                    &tensor_args,
-                    target_elem_t,
-                    &target_elem_size,
-                    /* accumulate */ false,
-                );
-            }
-        }
+        self.emit_sparse_summary_body(target, kind, summary, &tensor_args, &plan, &count);
         Ok(())
     }
 
@@ -6121,250 +6049,53 @@ impl<'a> HostEmitter<'a> {
         }
     }
 
-    /// Emit the Gather loop body for a summary-derived callsite.
-    /// Operands come from `summary.input_indices` referencing
-    /// `tensor_args`: `[values, indices]`.
-    ///
-    /// The emitted shape mirrors `emit_sparse_gather` so structural
-    /// tests can match the same `_g`, `_values_data`, `_indices_data`,
-    /// `_out_data` markers and the same nested `(b, i, d)` loop
-    /// ordering.
-    fn emit_sparse_gather_summary_body(
+    /// Both host sparse forms consume the same checked domain as DAG kernels.
+    fn emit_sparse_summary_body(
         &mut self,
         target: &str,
+        kind: SparseSummaryKind,
         summary: &HostSparseOpSummary,
-        tensor_args: &[String],
-        target_elem_t: &str,
+        args: &[String],
+        plan: &str,
+        count: &str,
     ) {
-        let values_arg = &tensor_args[summary.input_indices[0]];
-        let indices_arg = &tensor_args[summary.input_indices[1]];
-        let values_ty = &summary.input_tys[summary.input_indices[0]];
-        let indices_ty = &summary.input_tys[summary.input_indices[1]];
-        let values_elem_t = sparse_elem_type(values_ty.precision);
-        let indices_elem_t = sparse_elem_type(indices_ty.precision);
-        let before = sparse_dim_product(&values_ty.dims[..summary.axis], summary, tensor_args);
-        let axis_size = sparse_dim_info_expr(&values_ty.dims[summary.axis], summary, tensor_args);
-        let after = sparse_dim_product(&values_ty.dims[summary.axis + 1..], summary, tensor_args);
-
-        let values_ct = self.next_temp("sparse_values");
-        let indices_ct = self.next_temp("sparse_indices");
+        let base = &args[summary.input_indices[0]];
+        let indices = &args[summary.input_indices[1]];
+        let element = sparse_elem_type(summary.output.precision);
+        let index_element = sparse_elem_type(summary.input_tys[summary.input_indices[1]].precision);
+        let index_type = sparse_elem_type(Prim::Int64);
+        let (guard, view) = self.begin_tensor_write(target);
+        if !matches!(kind, SparseSummaryKind::Gather) {
+            let bytes = self.next_temp("sparse_bytes");
+            self.lines.push(format!(
+                "{}{index_type} {bytes} = chelis_tensor_byte_count({target});",
+                self.indent
+            ));
+            self.lines.push(format!("{}if ({bytes} != 0) memcpy({view}.data, chelis_host_tensor_data({base}), (size_t){bytes});", self.indent));
+        }
+        let linear = self.next_temp("sparse_linear");
+        let slot = self.next_temp("sparse_slot");
+        let selected = self.next_temp("sparse_selected");
+        let offset = self.next_temp("sparse_offset");
         self.lines.push(format!(
-            "{}chelis_tensor *{values_ct} = chelis_contiguous({values_arg});",
+            "{}for ({index_type} {linear} = 0; {linear} < {count}; ++{linear}) {{",
             self.indent
         ));
-        self.lines.push(format!(
-            "{}chelis_tensor *{indices_ct} = chelis_contiguous({indices_arg});",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}const {values_elem_t} *{values_ct}_data = (const {values_elem_t}*)chelis_host_tensor_data({values_ct});",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}const {indices_elem_t} *{indices_ct}_data = (const {indices_elem_t}*)chelis_host_tensor_data({indices_ct});",
-            self.indent
-        ));
-        let index_count = self.next_temp("sparse_index_count");
-        self.lines.push(format!(
-            "{}int64_t {index_count} = chelis_tensor_numel({indices_ct});",
-            self.indent
-        ));
-        let (target_guard, target_view) = self.begin_tensor_write(target);
-        self.lines.push(format!(
-            "{}{target_elem_t} *{target}_out_data = ({target_elem_t}*){target_view}.data;",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}int64_t {target}_before = {before};",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}int64_t {target}_axis_size = {axis_size};",
-            self.indent
-        ));
-        self.lines
-            .push(format!("{}int64_t {target}_after = {after};", self.indent));
-        self.lines.push(format!(
-            "{}int64_t {target}_index_count = {index_count};",
-            self.indent,
-        ));
-        self.lines.push(format!(
-            "{}for (int64_t {target}_b = 0; {target}_b < {target}_before; {target}_b++) {{",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}    for (int64_t {target}_i = 0; {target}_i < {target}_index_count; {target}_i++) {{",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}        int64_t {target}_g = (chelis_host_tensor_dtype({indices_ct}) == CHELIS_DTYPE_I64) ? (int64_t)((const int64_t*)chelis_host_tensor_data({indices_ct}))[{target}_i] : (int64_t)({indices_ct}_data)[{target}_i];",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}        if ({target}_g < 0 || {target}_g >= {target}_axis_size) abort();",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}        for (int64_t {target}_d = 0; {target}_d < {target}_after; {target}_d++) {{",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}            int64_t {target}_out = (({target}_b * {target}_index_count + {target}_i) * {target}_after) + {target}_d;",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}            int64_t {target}_src = (({target}_b * {target}_axis_size + {target}_g) * {target}_after) + {target}_d;",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}            {target}_out_data[{target}_out] = {values_ct}_data[{target}_src];",
-            self.indent
-        ));
-        self.lines.push(format!("{}        }}", self.indent));
-        self.lines.push(format!("{}    }}", self.indent));
+        self.lines.push(format!("{}    {index_type} {slot} = chelis_sparse_index_slot({plan}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {linear}));", self.indent));
+        self.lines.push(format!("{}    {index_type} {selected} = ((const {index_element}*)chelis_host_tensor_data({indices}))[{slot}];", self.indent));
+        self.lines.push(format!("{}    {index_type} {offset} = chelis_sparse_data_index({plan}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {linear}), chelis_scalar_from_bits(CHELIS_DTYPE_I64, {selected}));", self.indent));
+        match kind {
+            SparseSummaryKind::Gather => self.lines.push(format!("{}    (({element}*){view}.data)[{linear}] = ((const {element}*)chelis_host_tensor_data({base}))[{offset}];", self.indent)),
+            SparseSummaryKind::ScatterAdd | SparseSummaryKind::ScatterReplace => {
+                let updates = &args[summary.input_indices[2]];
+                let op = match kind { SparseSummaryKind::ScatterAdd => "+=", SparseSummaryKind::ScatterReplace => "=", SparseSummaryKind::Gather => unreachable!() };
+                self.lines.push(format!("{}    (({element}*){view}.data)[{offset}] {op} ((const {element}*)chelis_host_tensor_data({updates}))[{linear}];", self.indent));
+            }
+        }
         self.lines.push(format!("{}}}", self.indent));
-        self.end_tensor_write(&target_guard);
+        self.end_tensor_write(&guard);
         self.lines.push(format!(
-            "{}if ({values_ct} != {values_arg}) chelis_tensor_release({values_ct});",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}if ({indices_ct} != {indices_arg}) chelis_tensor_release({indices_ct});",
-            self.indent
-        ));
-    }
-
-    /// Emit the ScatterAdd or Scatter-replace loop body for a
-    /// summary-derived callsite. Operands are `[target_in, indices,
-    /// updates]`. `accumulate=true` selects `+=` (ScatterAdd);
-    /// `accumulate=false` selects `=` (last-write-wins Scatter, single
-    /// threaded to preserve the deterministic order documented in
-    /// `spec/05-risc-primitives.md` §3.5).
-    #[allow(clippy::too_many_arguments)]
-    fn emit_sparse_scatter_summary_body(
-        &mut self,
-        target: &str,
-        summary: &HostSparseOpSummary,
-        tensor_args: &[String],
-        target_elem_t: &str,
-        target_elem_size: &str,
-        accumulate: bool,
-    ) {
-        let target_arg = &tensor_args[summary.input_indices[0]];
-        let indices_arg = &tensor_args[summary.input_indices[1]];
-        let updates_arg = &tensor_args[summary.input_indices[2]];
-        let target_ty = &summary.input_tys[summary.input_indices[0]];
-        let indices_ty = &summary.input_tys[summary.input_indices[1]];
-        let updates_ty = &summary.input_tys[summary.input_indices[2]];
-        let indices_elem_t = sparse_elem_type(indices_ty.precision);
-        let updates_elem_t = sparse_elem_type(updates_ty.precision);
-        let before = sparse_dim_product(&target_ty.dims[..summary.axis], summary, tensor_args);
-        let axis_size = sparse_dim_info_expr(&target_ty.dims[summary.axis], summary, tensor_args);
-        let after = sparse_dim_product(&target_ty.dims[summary.axis + 1..], summary, tensor_args);
-
-        let target_ct = self.next_temp("sparse_target");
-        let indices_ct = self.next_temp("sparse_indices");
-        let updates_ct = self.next_temp("sparse_updates");
-        self.lines.push(format!(
-            "{}chelis_tensor *{target_ct} = chelis_contiguous({target_arg});",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}chelis_tensor *{indices_ct} = chelis_contiguous({indices_arg});",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}chelis_tensor *{updates_ct} = chelis_contiguous({updates_arg});",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}const {indices_elem_t} *{indices_ct}_data = (const {indices_elem_t}*)chelis_host_tensor_data({indices_ct});",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}const {updates_elem_t} *{updates_ct}_data = (const {updates_elem_t}*)chelis_host_tensor_data({updates_ct});",
-            self.indent
-        ));
-        let target_count = self.next_temp("sparse_target_count");
-        let index_count = self.next_temp("sparse_index_count");
-        self.lines.push(format!(
-            "{}int64_t {target_count} = chelis_tensor_numel({target});",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}int64_t {index_count} = chelis_tensor_numel({indices_ct});",
-            self.indent
-        ));
-        let (target_guard, target_view) = self.begin_tensor_write(target);
-        self.lines.push(format!(
-            "{}{target_elem_t} *{target}_out_data = ({target_elem_t}*){target_view}.data;",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}memcpy({target_view}.data, chelis_host_tensor_data({target_ct}), (size_t){target_count} * {target_elem_size});",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}int64_t {target}_before = {before};",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}int64_t {target}_axis_size = {axis_size};",
-            self.indent
-        ));
-        self.lines
-            .push(format!("{}int64_t {target}_after = {after};", self.indent));
-        self.lines.push(format!(
-            "{}int64_t {target}_index_count = {index_count};",
-            self.indent,
-        ));
-        self.lines.push(format!(
-            "{}for (int64_t {target}_b = 0; {target}_b < {target}_before; {target}_b++) {{",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}    for (int64_t {target}_i = 0; {target}_i < {target}_index_count; {target}_i++) {{",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}        int64_t {target}_g = (chelis_host_tensor_dtype({indices_ct}) == CHELIS_DTYPE_I64) ? (int64_t)((const int64_t*)chelis_host_tensor_data({indices_ct}))[{target}_i] : (int64_t)({indices_ct}_data)[{target}_i];",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}        if ({target}_g < 0 || {target}_g >= {target}_axis_size) abort();",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}        for (int64_t {target}_d = 0; {target}_d < {target}_after; {target}_d++) {{",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}            int64_t {target}_src = (({target}_b * {target}_index_count + {target}_i) * {target}_after) + {target}_d;",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}            int64_t {target}_out = (({target}_b * {target}_axis_size + {target}_g) * {target}_after) + {target}_d;",
-            self.indent
-        ));
-        let op = if accumulate { "+=" } else { "=" };
-        self.lines.push(format!(
-            "{}            {target}_out_data[{target}_out] {op} {updates_ct}_data[{target}_src];",
-            self.indent
-        ));
-        self.lines.push(format!("{}        }}", self.indent));
-        self.lines.push(format!("{}    }}", self.indent));
-        self.lines.push(format!("{}}}", self.indent));
-        self.end_tensor_write(&target_guard);
-        self.lines.push(format!(
-            "{}if ({target_ct} != {target_arg}) chelis_tensor_release({target_ct});",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}if ({indices_ct} != {indices_arg}) chelis_tensor_release({indices_ct});",
-            self.indent
-        ));
-        self.lines.push(format!(
-            "{}if ({updates_ct} != {updates_arg}) chelis_tensor_release({updates_ct});",
+            "{}chelis_sparse_plan_release({plan});",
             self.indent
         ));
     }
@@ -8610,17 +8341,6 @@ fn sparse_dim_info_expr(
         DimInfo::Named(name, None) => sparse_symbol_expr(name, summary, tensor_args)
             .unwrap_or_else(|| panic!("sparse summary symbol `{name}` has no input binding")),
     }
-}
-
-fn sparse_dim_product(
-    dims: &[DimInfo],
-    summary: &HostSparseOpSummary,
-    tensor_args: &[String],
-) -> String {
-    dims.iter()
-        .map(|d| sparse_dim_info_expr(d, summary, tensor_args))
-        .reduce(|lhs, rhs| format!("({lhs} * {rhs})"))
-        .unwrap_or_else(|| "1".to_string())
 }
 
 fn sparse_symbol_expr(

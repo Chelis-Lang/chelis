@@ -9,13 +9,18 @@ use std::process::{Command, Output};
 
 use pyo3::prelude::*;
 use pyo3::types::{PyCFunction, PyModule, PyType};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 #[path = "../../../tests/support/capacity_census_authority.rs"]
 mod capacity_census_authority;
 #[path = "../../../tests/support/managed_python.rs"]
 mod managed_python;
-use capacity_census_authority::{AuthorityRegistries, SurfaceDescriptor};
+#[path = "../../../tests/support/pyo3_registration.rs"]
+mod pyo3_registration;
+#[path = "../../../tests/support/pyo3_registration_fixture.rs"]
+mod pyo3_registration_fixture;
+use capacity_census_authority::{AuthorityRegistries, StaticSurfaceDescriptor, SurfaceDescriptor};
 
 const PERMANENT_BINDING_DISPOSITION: &str = "permanent-disposition(C6 registered PyO3 signature surface complete descriptor set ratified 2026-08-04)";
 const BINDING_CENSUS_FAMILY: &str = "pyo3-binding";
@@ -115,6 +120,89 @@ const FROZEN_BINDING_ROWS: &[FrozenSurfaceRow] = &[
     },
 ];
 
+// Only these unchanged foundation rows retain the temporary admission path.
+const ACTIVE_LEGACY_IDS: &[&str] = &[
+    "chelis_python::check_json(py: Python<'_>, source: &str, source_kind: &str) -> PyResult<String>",
+    "chelis_python::compile_json(py: Python<'_>, source: &str, target: &str, source_kind: &str, entry_name: Option<String>) -> PyResult<String>",
+    "chelis_python::desugar_json(py: Python<'_>, source: &str) -> PyResult<String>",
+    "chelis_python::eval_json(py: Python<'_>, source: &str, bindings_json: &str, source_kind: &str, project_root: Option<&str>) -> PyResult<String>",
+    "chelis_python::CompiledModel::__call__(self: &Self, py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyObject>",
+    "chelis_python::NativeTensor::__dlpack__(self: &Self, py: Python<'_>, stream: Option<usize>, max_version: Option<&Bound<'_, PyAny>>, dl_device: Option<&Bound<'_, PyAny>>, copy: Option<bool>) -> PyResult<PyObject>",
+    "chelis_python::NativeTensor::__dlpack_device__(self: &Self) -> (i32, i32)",
+    "chelis_python::NativeTensor::shape(self: &Self) -> Vec<usize>",
+];
+
+// Exact original implementations of the unchanged deferred signatures above.
+// Public-name equality cannot admit a renamed Rust implementation or a new
+// getter/setter/constructor kind into the frozen cohort.
+const ACTIVE_LEGACY_IMPLEMENTATIONS: &[&str] = &[
+    "chelis_python::check_json#function",
+    "chelis_python::compile_json#function",
+    "chelis_python::desugar_json#function",
+    "chelis_python::eval_json#function",
+    "chelis_python::NativeCompiledModel::__call__#method",
+    "chelis_python::NativeTensor::__dlpack__#method",
+    "chelis_python::NativeTensor::__dlpack_device__#method",
+    "chelis_python::NativeTensor::shape#getter",
+];
+
+const NONNUMERIC_BINDINGS: &[StaticSurfaceDescriptor] = &[
+    StaticSurfaceDescriptor::new(
+        BINDING_CENSUS_FAMILY,
+        "binding-pyfunction",
+        "chelis_python::decompile_json(py: Python<'_>, source: &str) -> PyResult<source_json::SourceJson<chelis_compiler_api::schema::DecompileResult>>",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        BINDING_CENSUS_FAMILY,
+        "binding-pyfunction",
+        "chelis_python::compile_and_load(py: Python<'_>, source_path: &str, target: &str, source_kind: &str, entry_name: Option<String>, artifact_dir: Option<&str>, project_root: Option<&str>, force_bare: bool) -> PyResult<NativeCompiledModel>",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        BINDING_CENSUS_FAMILY,
+        "binding-pyfunction",
+        "chelis_python::load(py: Python<'_>, path: &str) -> PyResult<NativeCompiledModel>",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        BINDING_CENSUS_FAMILY,
+        "binding-pyfunction",
+        "chelis_python::validate_json(py: Python<'_>, source: &str, mode: &str) -> PyResult<source_json::SourceJson<chelis_compiler_api::schema::ValidateResult>>",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        BINDING_CENSUS_FAMILY,
+        "binding-pymethod",
+        "chelis_python::CompiledModel::input_names(self: &Self) -> Vec<String>",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        BINDING_CENSUS_FAMILY,
+        "binding-pymethod",
+        "chelis_python::CompiledModel::output_names(self: &Self) -> Vec<String>",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        BINDING_CENSUS_FAMILY,
+        "binding-pymethod",
+        "chelis_python::CompiledModel::path(self: &Self) -> String",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        BINDING_CENSUS_FAMILY,
+        "binding-pymethod",
+        "chelis_python::CompiledModel::target(self: &Self) -> String",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        BINDING_CENSUS_FAMILY,
+        "binding-pymethod",
+        "chelis_python::NativeTensor::dtype(self: &Self) -> PyResult<&'static str>",
+        &[],
+    ),
+];
+
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 struct SurfaceRow {
     kind: String,
@@ -123,10 +211,35 @@ struct SurfaceRow {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Baseline {
     version: u32,
-    citation: String,
-    rows: Vec<SurfaceRow>,
+    rows: Vec<BaselineRow>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BaselineRow {
+    kind: String,
+    id: String,
+    flags: Vec<String>,
+    #[serde(default)]
+    citation: Option<String>,
+    #[serde(default)]
+    authority: Option<String>,
+    #[serde(default)]
+    graph_identity: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscoveredRow {
+    kind: String,
+    id: String,
+    flags: Vec<String>,
+    legacy_flags: Vec<String>,
+    identity: Option<String>,
+    problem: Option<String>,
+    implementation: String,
 }
 
 #[pyfunction]
@@ -146,9 +259,25 @@ fn workspace_root() -> PathBuf {
 struct RegisteredSurface {
     functions: Vec<String>,
     methods: Vec<String>,
+    classes: Vec<(String, String)>,
+    provenance: Provenance,
+}
+
+#[derive(Debug, Serialize)]
+struct Provenance {
+    source_path: &'static str,
+    source_sha256: String,
+    registrations: Vec<pyo3_registration::Registration>,
 }
 
 fn registered_surface(include_reviewer_probe: bool) -> RegisteredSurface {
+    const SOURCE: &str = include_str!("../src/lib.rs");
+    let provenance = Provenance {
+        source_path: "crates/chelis-python/src/lib.rs",
+        source_sha256: format!("{:x}", Sha256::digest(SOURCE.as_bytes())),
+        registrations: pyo3_registration::registrations(SOURCE)
+            .expect("derive exact PyO3 registration provenance from compiled source"),
+    };
     Python::with_gil(|py| {
         let module = PyModule::new(py, "_capacity_census").expect("create Python module");
         chelis_python::register_module(&module).expect("register chelis-python module");
@@ -159,6 +288,9 @@ fn registered_surface(include_reviewer_probe: bool) -> RegisteredSurface {
         }
         let mut functions = Vec::new();
         let mut methods = Vec::new();
+        let mut classes = Vec::new();
+        let mut declared = chelis_python::capacity_census_classes().to_vec();
+        declared.sort();
         for (key, value) in module.dict().iter() {
             let name = key.extract::<String>().expect("registered item name");
             if value.is_instance_of::<PyCFunction>() {
@@ -168,6 +300,7 @@ fn registered_surface(include_reviewer_probe: bool) -> RegisteredSurface {
             if !value.is_instance_of::<PyType>() || name == "ChelisError" {
                 continue;
             }
+            classes.push(name.clone());
             let keys = value
                 .getattr("__dict__")
                 .and_then(|dictionary| dictionary.call_method0("keys"))
@@ -177,36 +310,214 @@ fn registered_surface(include_reviewer_probe: bool) -> RegisteredSurface {
                     .expect("registered class key")
                     .extract::<String>()
                     .expect("registered method name");
+                if method_name == "__new__"
+                    && declared
+                        .iter()
+                        .any(|(class, _, has_constructor)| *class == name && !has_constructor)
+                {
+                    continue;
+                }
                 let method = value
                     .getattr(method_name.as_str())
                     .expect("registered class attribute");
                 if !method_name.starts_with("__") || method.is_callable() {
+                    let raw = value
+                        .getattr("__dict__")
+                        .and_then(|dictionary| dictionary.get_item(&method_name))
+                        .expect("actual class descriptor");
+                    let descriptor = raw.get_type().name().unwrap().to_string();
+                    let rust_class = declared
+                        .iter()
+                        .find(|(class, _, _)| *class == name)
+                        .expect("registered class provenance")
+                        .1;
+                    let registrations: Vec<_> = provenance
+                        .registrations
+                        .iter()
+                        .filter(|row| {
+                            row.owner.as_ref().is_some_and(|owner| {
+                                format!("chelis_python::{owner}") == rust_class
+                            }) && row.python_name == method_name
+                        })
+                        .collect();
+                    assert!(
+                        !registrations.is_empty(),
+                        "missing live descriptor provenance: {name}::{method_name}"
+                    );
+                    for registration in registrations {
+                        let expected = match registration.kind.as_str() {
+                            "getter" | "setter" => "getset_descriptor",
+                            "constructor" => "builtin_function_or_method",
+                            "classmethod" => "classmethod_descriptor",
+                            "staticmethod" => "staticmethod",
+                            "method" if method_name == "__call__" => "wrapper_descriptor",
+                            "method" => "method_descriptor",
+                            _ => panic!("unsupported live descriptor provenance"),
+                        };
+                        assert_eq!(
+                            descriptor, expected,
+                            "live descriptor provenance for {name}::{method_name}"
+                        );
+                    }
                     methods.push(format!("{name}::{method_name}"));
                 }
             }
         }
         functions.sort();
         methods.sort();
-        RegisteredSurface { functions, methods }
+        classes.sort();
+        assert_eq!(
+            classes,
+            declared
+                .iter()
+                .map(|(name, _, _)| name.to_string())
+                .collect::<Vec<_>>(),
+            "every live registered class requires an exact Rust PyClass identity"
+        );
+        RegisteredSurface {
+            functions,
+            methods,
+            classes: declared
+                .into_iter()
+                .map(|(name, identity, _)| (name.to_string(), identity.to_string()))
+                .collect(),
+            provenance,
+        }
     })
+}
+
+#[test]
+fn source_registration_matches_actual_pyo3_descriptor_kinds() {
+    let surface = registered_surface(false);
+    assert_eq!(surface.provenance.registrations.len(), 17);
+    assert_eq!(surface.functions.len(), 8);
+    assert_eq!(surface.methods.len(), 9);
+}
+
+#[test]
+fn renamed_callables_join_compiled_execution_to_actual_rustdoc() {
+    pyo3_registration_fixture::verify_execution();
+    const PATH: &str = "tests/support/pyo3_registration_fixture.rs";
+    const SOURCE: &str = include_str!("../../../tests/support/pyo3_registration_fixture.rs");
+    let provenance = Provenance {
+        source_path: PATH,
+        source_sha256: format!("{:x}", Sha256::digest(SOURCE.as_bytes())),
+        registrations: pyo3_registration::registrations(SOURCE).unwrap(),
+    };
+    let root = workspace_root();
+    let temporary = tempfile::tempdir().unwrap();
+    let metadata = temporary.path().join("provenance.json");
+    std::fs::write(&metadata, serde_json::to_vec(&provenance).unwrap()).unwrap();
+    let deps = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    // Cargo may retain artifacts from older dependency feature combinations.
+    // The fixture uses the current build's newest PyO3 artifact, with the
+    // same lockfile and literal fixture source as its compiled execution.
+    let pyo3 = std::fs::read_dir(&deps)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry.file_name().to_string_lossy().starts_with("libpyo3-")
+                && entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "rlib")
+        })
+        .max_by_key(|entry| entry.metadata().unwrap().modified().unwrap())
+        .unwrap()
+        .path();
+    let output = Command::new("rustdoc")
+        .args([
+            PATH,
+            "--edition=2024",
+            "--crate-name",
+            "chelis_python",
+            "--crate-type",
+            "lib",
+            "--extern",
+            &format!("pyo3={}", pyo3.display()),
+            "-L",
+            &format!("dependency={}", deps.display()),
+            "--output-format",
+            "json",
+            "-Z",
+            "unstable-options",
+            "--document-private-items",
+            "-o",
+        ])
+        .arg(temporary.path())
+        .env("RUSTC_BOOTSTRAP", "1")
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let python = managed_python::managed_python(&root).unwrap();
+    let output = Command::new(python).arg("-c").arg(r#"
+import copy, json, sys
+sys.path.insert(0, 'scripts')
+from capacity_census_bindings import discover_bindings
+document = json.load(open(sys.argv[1]))
+proof = json.load(open(sys.argv[2]))
+functions = ['public_function']
+methods = ['NativeTensor::' + name for name in ['__new__', 'dtype', 'run', 'from_code', 'accept', '__call__']]
+classes = {'NativeTensor': 'chelis_python::NativeTensor'}
+rows = discover_bindings([document], functions, methods, classes, provenance=proof)
+assert len(rows) == 8, rows
+direct = [row for row in rows if not row['implementation'].endswith('#classmethod')]
+assert len(direct) == 7 and all(row['problem'] is None and row['flags'] for row in direct), rows
+class_row = next(row for row in rows if row['implementation'].endswith('#classmethod'))
+assert class_row['implementation'] == 'chelis_python::NativeTensor::build#classmethod'
+assert 'dynamic Python payload requires' in class_row['problem'], class_row
+assert any(row['implementation'] == 'chelis_python::NativeTensor::dtype_code#getter' and row['flags'] == ['numeric-return'] for row in rows)
+assert any(row['implementation'] == 'chelis_python::NativeTensor::assign_dtype#setter' and row['flags'] == ['raw-dtype-int'] for row in rows)
+assert any(row['implementation'] == 'chelis_python::NativeTensor::create#constructor' and row['flags'] == ['raw-dtype-int'] for row in rows)
+for key in ['source_sha256', 'registrations']:
+    bad = copy.deepcopy(proof)
+    bad[key] = '0' * 64 if key == 'source_sha256' else bad[key][1:]
+    try: discover_bindings([document], functions, methods, classes, provenance=bad)
+    except Exception as error: assert 'provenance' in str(error), str(error)
+    else: raise AssertionError('stale/missing provenance accepted')
+print('Eight compiled renamed implementations bound; seven direct numeric payloads classified; dynamic class receiver rejected; decoy helpers excluded; stale/missing receipts rejected.')
+"#).arg(temporary.path().join("chelis_python.json")).arg(metadata).current_dir(root).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn run_typed_enumerator(surface: &RegisteredSurface) -> Output {
     let root = workspace_root();
     let python = managed_python::managed_python(&root).unwrap_or_else(|error| panic!("{error}"));
     let mut command = Command::new(python);
+    let provenance = tempfile::NamedTempFile::new().expect("temporary registration provenance");
+    serde_json::to_writer(provenance.as_file(), &surface.provenance)
+        .expect("serialize registration provenance");
     command
         .arg(root.join("scripts/capacity_census_typed.py"))
         // No `--target-dir`: see the wire census for why the enumerator owns
         // that choice. Both censuses share one cargo target directory so the
         // second one to run reuses the first's compiled dependency graph.
-        .arg("bindings")
+        .arg("bindings-discovery")
+        .arg("--registered-provenance")
+        .arg(provenance.path())
         .current_dir(&root);
     for name in &surface.functions {
         command.args(["--registered", name]);
     }
     for method in &surface.methods {
         command.args(["--registered-method", method]);
+    }
+    for (name, identity) in &surface.classes {
+        command.args(["--registered-class", &format!("{name}={identity}")]);
     }
     command.output().expect("run typed PyO3 census enumerator")
 }
@@ -227,35 +538,20 @@ fn frozen_surface_rows() -> Vec<SurfaceRow> {
         .collect()
 }
 
-fn permanent_baseline_problem(bytes: &[u8]) -> Option<String> {
-    let baseline: Baseline = match serde_json::from_slice(bytes) {
-        Ok(baseline) => baseline,
-        Err(error) => return Some(format!("binding baseline is not valid JSON: {error}")),
-    };
-    if baseline.version != 1 {
-        return Some(format!(
-            "unknown binding census baseline version {}",
-            baseline.version
-        ));
-    }
-    if baseline.citation != PERMANENT_BINDING_DISPOSITION {
-        return Some(format!(
-            "binding disposition changed: expected {PERMANENT_BINDING_DISPOSITION:?}, got {:?}",
-            baseline.citation
-        ));
-    }
-    if baseline.rows != frozen_surface_rows() {
-        return Some(
-            "binding baseline rows differ from the hand-maintained permanent kind/id/flags manifest"
-                .to_string(),
-        );
-    }
-    None
+fn active_legacy_rows() -> Vec<SurfaceRow> {
+    frozen_surface_rows()
+        .into_iter()
+        .filter(|row| ACTIVE_LEGACY_IDS.contains(&row.id.as_str()))
+        .collect()
 }
 
 fn current_authority_problem(current: &[SurfaceRow]) -> Option<String> {
-    let legacy = frozen_surface_rows();
+    let legacy = active_legacy_rows();
+    let mut seen = std::collections::BTreeSet::new();
     for row in current {
+        if !seen.insert((&row.kind, &row.id)) {
+            return Some(format!("duplicate binding identity {}", row.id));
+        }
         if legacy.contains(row) {
             continue;
         }
@@ -268,7 +564,7 @@ fn current_authority_problem(current: &[SurfaceRow]) -> Option<String> {
         if let Err(problem) = capacity_census_authority::classify_final_authority(
             &surface,
             AuthorityRegistries {
-                nonnumeric: &[],
+                nonnumeric: NONNUMERIC_BINDINGS,
                 tagged_transports: &[],
                 numeric_operations: &[],
             },
@@ -280,108 +576,267 @@ fn current_authority_problem(current: &[SurfaceRow]) -> Option<String> {
     None
 }
 
+fn baseline_problem(bytes: &[u8]) -> Option<String> {
+    let baseline: Baseline = match serde_json::from_slice(bytes) {
+        Ok(value) => value,
+        Err(error) => return Some(format!("invalid binding baseline: {error}")),
+    };
+    if baseline.version != 2 {
+        return Some("unknown binding baseline version".into());
+    }
+    let legacy = active_legacy_rows();
+    let mut rows = Vec::new();
+    for row in &baseline.rows {
+        let surface = SurfaceRow {
+            kind: row.kind.clone(),
+            id: row.id.clone(),
+            flags: row.flags.clone(),
+        };
+        if legacy.contains(&surface) {
+            if row.citation.as_deref() != Some(PERMANENT_BINDING_DISPOSITION)
+                || row.authority.is_some()
+                || row.graph_identity.is_some()
+            {
+                return Some("changed legacy binding disposition".into());
+            }
+        } else if row.citation.is_some()
+            || row.authority.as_deref() != Some("nonnumeric")
+            || !row
+                .graph_identity
+                .as_ref()
+                .is_some_and(|id| id.len() == 64 && id.bytes().all(|c| c.is_ascii_hexdigit()))
+        {
+            return Some(
+                "final binding requires only its authority and current graph identity".into(),
+            );
+        }
+        rows.push(surface);
+    }
+    if let Some(problem) = current_authority_problem(&rows) {
+        return Some(problem);
+    }
+    if rows.len() != legacy.len() + NONNUMERIC_BINDINGS.len()
+        || legacy.iter().any(|row| !rows.contains(row))
+        || NONNUMERIC_BINDINGS
+            .iter()
+            .any(|row| !rows.iter().any(|r| r.kind == row.kind && r.id == row.id))
+    {
+        return Some("binding census and authority registries are not bijective".into());
+    }
+    None
+}
+
+fn discovered_problem(discovered: &[DiscoveredRow], baseline: &Baseline) -> Option<String> {
+    let legacy = active_legacy_rows();
+    let mut current = Vec::new();
+    for row in discovered {
+        let old = SurfaceRow {
+            kind: row.kind.clone(),
+            id: row.id.clone(),
+            flags: row.legacy_flags.clone(),
+        };
+        let surface = if legacy.contains(&old) {
+            let index = ACTIVE_LEGACY_IDS
+                .iter()
+                .position(|id| *id == row.id)
+                .unwrap();
+            if row.implementation != ACTIVE_LEGACY_IMPLEMENTATIONS[index] {
+                return Some(format!("changed frozen registration provenance {}", row.id));
+            }
+            old
+        } else {
+            if let Some(problem) = &row.problem {
+                return Some(format!("{}: {problem}", row.id));
+            }
+            if row.identity.is_none() {
+                return Some(format!("{}: missing exposure identity", row.id));
+            }
+            SurfaceRow {
+                kind: row.kind.clone(),
+                id: row.id.clone(),
+                flags: row.flags.clone(),
+            }
+        };
+        let Some(expected) = baseline
+            .rows
+            .iter()
+            .find(|expected| expected.kind == surface.kind && expected.id == surface.id)
+        else {
+            return Some(format!("unregistered binding {}", row.id));
+        };
+        if surface.flags != expected.flags {
+            return Some(format!("changed binding capacity {}", row.id));
+        }
+        if !legacy.contains(&surface) && row.identity != expected.graph_identity {
+            return Some(format!("changed reachable binding graph {}", row.id));
+        }
+        current.push(surface);
+    }
+    if current.len() != baseline.rows.len() {
+        return Some("binding inventory is not bijective".into());
+    }
+    current_authority_problem(&current)
+}
+
 #[test]
 fn registered_pyfunctions_match_the_reviewed_rustdoc_signatures() {
-    let baseline_bytes = baseline_bytes();
-    assert!(
-        permanent_baseline_problem(&baseline_bytes).is_none(),
-        "binding census guard changed: editing the baseline is not the fix; dispose the \
-         registered signature under dtype_semantics.md section C6 and update the frozen \
-         complete hand-maintained descriptor manifest only with that review: {:?}",
-        permanent_baseline_problem(&baseline_bytes)
-    );
-    let baseline: Baseline =
-        serde_json::from_slice(&baseline_bytes).expect("binding baseline JSON");
-    assert_eq!(
-        baseline.version, 1,
-        "unknown binding census baseline version"
-    );
-    assert_eq!(baseline.citation, PERMANENT_BINDING_DISPOSITION);
-
+    let bytes = baseline_bytes();
+    assert_eq!(baseline_problem(&bytes), None);
+    let baseline: Baseline = serde_json::from_slice(&bytes).unwrap();
     let output = run_typed_enumerator(&registered_surface(false));
     assert!(
         output.status.success(),
-        "typed binding census failed:\nstdout:\n{}\nstderr:\n{}",
+        "typed binding discovery failed:\n{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let current: Vec<SurfaceRow> =
-        serde_json::from_slice(&output.stdout).expect("typed binding census JSON");
+    let current: Vec<DiscoveredRow> = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(
-        current_authority_problem(&current),
+        discovered_problem(&current, &baseline),
         None,
-        "every non-legacy binding row requires exactly one final authority"
-    );
-    assert_eq!(
-        current, baseline.rows,
-        "registered PyO3 signature shape changed. A raw dtype id or bare numeric carrier \
-         has no ordinary issue-citation path: redesign onto the typed carrier, remove the \
-         ingress, or add the exact final authority registration without changing the \
-         sealed legacy cohort"
+        "only exact unchanged legacy rows may defer exposure proof; every final/new row requires complete discovery and authority\nactual discovery: {}",
+        String::from_utf8_lossy(&output.stdout)
     );
 }
 
 #[test]
-fn permanent_binding_disposition_is_bound_to_the_complete_descriptor_set() {
-    let baseline_bytes = baseline_bytes();
-    let mut baseline: serde_json::Value =
-        serde_json::from_slice(&baseline_bytes).expect("binding baseline JSON");
-    baseline["rows"]
+fn retired_binding_rows_cannot_regain_legacy_admission() {
+    let retired: Vec<_> = frozen_surface_rows()
+        .into_iter()
+        .filter(|row| !active_legacy_rows().contains(row))
+        .collect();
+    assert_eq!(retired.len(), 9);
+    for mut row in retired {
+        row.flags = vec!["float-carrier".into()];
+        assert!(current_authority_problem(&[row]).is_some());
+    }
+    let mut baseline: serde_json::Value = serde_json::from_slice(&baseline_bytes()).unwrap();
+    let row = baseline["rows"]
         .as_array_mut()
-        .expect("binding rows")
-        .push(serde_json::json!({
-            "kind": "binding-pyfunction",
-            "id": "chelis_python::reviewer_probe(dtype: i32) -> i32",
-            "flags": ["raw-dtype-int"]
-        }));
-    let mutated = serde_json::to_vec(&baseline).expect("serialize mutated binding baseline");
-    let problem = permanent_baseline_problem(&mutated)
-        .expect("copying the permanent top-level disposition onto an added row must fail");
-    assert!(
-        problem.contains("permanent kind/id/flags manifest"),
-        "the production manifest guard must reject the copied disposition: {problem}"
-    );
+        .unwrap()
+        .iter_mut()
+        .find(|row| row.get("authority").is_some())
+        .unwrap();
+    row["citation"] = serde_json::json!(PERMANENT_BINDING_DISPOSITION);
+    assert!(baseline_problem(&serde_json::to_vec(&baseline).unwrap()).is_some());
 }
 
 #[test]
-fn a_typed_permanent_disposition_cannot_move_between_families() {
-    let baseline_bytes = baseline_bytes();
-    let mut baseline: serde_json::Value =
-        serde_json::from_slice(&baseline_bytes).expect("binding baseline JSON");
-    baseline["citation"] = serde_json::json!(
-        "permanent-disposition(C6 dtype-tagged wire schema complete descriptor set ratified 2026-08-04)"
-    );
-    let mutated = serde_json::to_vec(&baseline).expect("serialize wrong-family binding baseline");
-    let problem = permanent_baseline_problem(&mutated)
-        .expect("the wire disposition must not ratify a binding manifest");
-    assert!(problem.contains("binding disposition changed"), "{problem}");
+fn copied_missing_and_duplicate_binding_registrations_fail() {
+    for mutation in ["copy", "missing", "duplicate", "numeric"] {
+        let mut baseline: serde_json::Value = serde_json::from_slice(&baseline_bytes()).unwrap();
+        let rows = baseline["rows"].as_array_mut().unwrap();
+        match mutation {
+            "copy" => {
+                let mut row = rows[0].clone();
+                row["id"] = serde_json::json!("new_binding");
+                rows.push(row);
+            }
+            "missing" => {
+                rows.pop();
+            }
+            "duplicate" => rows.push(rows[0].clone()),
+            "numeric" => {
+                let row = rows
+                    .iter_mut()
+                    .find(|row| row.get("authority").is_some())
+                    .unwrap();
+                row["flags"] = serde_json::json!(["numeric-return"]);
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            baseline_problem(&serde_json::to_vec(&baseline).unwrap()).is_some(),
+            "{mutation}"
+        );
+    }
+}
+
+#[test]
+fn final_bindings_require_successful_current_exposure() {
+    let baseline: Baseline = serde_json::from_slice(&baseline_bytes()).unwrap();
+    let make_current = || {
+        baseline
+            .rows
+            .iter()
+            .map(|row| DiscoveredRow {
+                kind: row.kind.clone(),
+                id: row.id.clone(),
+                flags: row.flags.clone(),
+                legacy_flags: row.flags.clone(),
+                identity: row.graph_identity.clone(),
+                problem: None,
+                implementation: ACTIVE_LEGACY_IDS
+                    .iter()
+                    .position(|id| *id == row.id)
+                    .map(|index| ACTIVE_LEGACY_IMPLEMENTATIONS[index].to_string())
+                    .unwrap_or_default(),
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(discovered_problem(&make_current(), &baseline), None);
+    for implementation in [
+        "chelis_python::renamed_numeric#function",
+        "chelis_python::NativeTensor::shape#setter",
+    ] {
+        let mut current = make_current();
+        let row = current
+            .iter_mut()
+            .find(|row| ACTIVE_LEGACY_IDS.contains(&row.id.as_str()))
+            .unwrap();
+        row.implementation = implementation.into();
+        assert!(
+            discovered_problem(&current, &baseline)
+                .unwrap()
+                .contains("frozen registration provenance")
+        );
+    }
+    for mutation in ["unresolved", "numeric", "stale", "missing", "duplicate"] {
+        let mut current = make_current();
+        let row = current
+            .iter_mut()
+            .find(|row| row.identity.is_some())
+            .unwrap();
+        match mutation {
+            "unresolved" => row.problem = Some("missing defining artifact".into()),
+            "numeric" => row.flags = vec!["float-carrier".into(), "numeric-return".into()],
+            "stale" => row.identity = Some("f".repeat(64)),
+            "missing" => row.identity = None,
+            "duplicate" => {
+                let duplicate = current.remove(0);
+                current[0] = duplicate;
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            discovered_problem(&current, &baseline).is_some(),
+            "{mutation}"
+        );
+    }
+    let mut value: serde_json::Value = serde_json::from_slice(&baseline_bytes()).unwrap();
+    value["citation"] = serde_json::json!(PERMANENT_BINDING_DISPOSITION);
+    assert!(baseline_problem(&serde_json::to_vec(&value).unwrap()).is_some());
 }
 
 #[test]
 fn a_registered_pyfunction_with_a_raw_dtype_parameter_is_rejected() {
     let output = run_typed_enumerator(&registered_surface(true));
-    assert!(
-        !output.status.success(),
-        "a newly registered callable absent from the rustdoc-signature census passed"
-    );
+    assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("reviewer_raw_dtype_probe")
-            && stderr.contains("no top-level rustdoc JSON signature"),
-        "unexpected fail-closed diagnostic: {stderr}"
+            && stderr.contains("missing registration provenance"),
+        "{stderr}"
     );
-
     let root = workspace_root();
-    let python = managed_python::managed_python(&root).unwrap_or_else(|error| panic!("{error}"));
-    let mutation = Command::new(python)
-        .arg(root.join("scripts/test_capacity_census_typed.py"))
-        .arg("BindingEnumerator")
+    let mutation = Command::new(managed_python::managed_python(&root).unwrap())
+        .arg(root.join("scripts/test_capacity_census_bindings.py"))
         .current_dir(&root)
         .output()
-        .expect("run typed binding mutation tests");
+        .unwrap();
     assert!(
         mutation.status.success(),
-        "binding raw-dtype mutation controls failed:\nstdout:\n{}\nstderr:\n{}",
+        "{}\n{}",
         String::from_utf8_lossy(&mutation.stdout),
         String::from_utf8_lossy(&mutation.stderr)
     );

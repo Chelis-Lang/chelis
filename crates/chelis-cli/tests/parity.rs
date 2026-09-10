@@ -427,8 +427,23 @@ fn parity_dict_foundation() {
 }
 
 #[test]
+fn parity_checked_window_geometry() {
+    drive_parity(&examples_root().join("checked_window_geometry.ch"), true);
+}
+
+#[test]
+fn parity_checked_sparse_axes() {
+    drive_parity(&examples_root().join("checked_sparse_axes.ch"), true);
+}
+
+#[test]
 fn parity_count_bool_axes() {
     drive_parity(&examples_root().join("count_bool_axes.ch"), true);
+}
+
+#[test]
+fn parity_explicit_normalization() {
+    drive_parity(&examples_root().join("explicit_normalization.ch"), true);
 }
 
 #[test]
@@ -452,6 +467,16 @@ fn parity_iter_foundation() {
 #[test]
 fn parity_list_foundation() {
     drive_parity(&examples_root().join("list_foundation.ch"), true);
+}
+
+#[test]
+fn parity_ordered_extent_claims() {
+    drive_parity(&examples_root().join("ordered_extent_claims.ch"), true);
+}
+
+#[test]
+fn parity_literal_extent_claim() {
+    drive_parity(&examples_root().join("literal_extent_claim.ch"), true);
 }
 
 #[test]
@@ -559,9 +584,12 @@ fn parity_rank_poly_borrow_library_only() {
 fn parity_corpus_is_complete() {
     let known: &[&str] = &[
         "checked_reshape.ch",
+        "checked_sparse_axes.ch",
+        "checked_window_geometry.ch",
         "constraint_directed_risk_guards.ch",
         "count_bool_axes.ch",
         "dict_foundation.ch",
+        "explicit_normalization.ch",
         "generic_explicit_shape.ch",
         "hash_order_determinism.ch",
         "hello_tensor.ch",
@@ -570,6 +598,8 @@ fn parity_corpus_is_complete() {
         "kinded_nominal_dimensions.ch",
         "linreg.ch",
         "list_foundation.ch",
+        "literal_extent_claim.ch",
+        "ordered_extent_claims.ch",
         "mnist.ch",
         "opaque_invariants.ch",
         "opaque_invariants_simplex.ch",

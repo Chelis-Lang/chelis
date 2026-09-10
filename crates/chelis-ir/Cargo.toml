@@ -22,6 +22,7 @@ stacker.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+syn.workspace = true
 chelis-surf.workspace = true
 chelis-macros.workspace = true
 bincode = "1"

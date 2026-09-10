@@ -73,9 +73,9 @@ impl MathLib {
 /// Optional backend features for C code generation.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CodegenOptions {
-    /// Emit BLAS-backed matmul code and surface the required OpenBLAS link flags.
-    ///
-    /// When false, matmul-shaped DAGs still compile via the generic reduction path.
+    /// Emit already-explicit backend BLAS nodes and their OpenBLAS link flags.
+    /// Primitive contractions retain their specified arithmetic regardless of
+    /// this option; recognizing a matrix shape does not authorize reassociation.
     pub use_blas: bool,
     /// Override the math library selection for SIMD emission (Level 3b).
     ///
@@ -163,11 +163,10 @@ pub fn codegen_with_options(
     let (needs_blas, input_labels, output_labels, symbolic_dims) = {
         let emission = dag.emission();
         (
-            options.use_blas
-                && emission
-                    .nodes()
-                    .iter()
-                    .any(|node| matches!(node.op, chelis_ir::dag::RiscOp::BlasMatmul { .. })),
+            emission
+                .nodes()
+                .iter()
+                .any(|node| matches!(node.op, chelis_ir::dag::RiscOp::BlasMatmul { .. })),
             emit::CEmitter::input_labels(emission),
             emit::CEmitter::output_labels(emission),
             emission.symbolic_params(),
@@ -193,7 +192,7 @@ pub fn prepare_dag_for_codegen(
     options: CodegenOptions,
 ) -> chelis_ir::dag::Dag {
     let dag = if options.use_blas {
-        chelis_ir::specialize::specialize_for_blas(&dag)
+        chelis_ir::specialize::specialize_for_exact_arithmetic(&dag)
     } else {
         dag
     };
@@ -207,7 +206,15 @@ pub fn prepare_host_program_for_codegen(
     fn prepare(
         helper: &mut chelis_ir::host::HostTensorHelper,
     ) -> Result<(), chelis_types::unsupported::Unsupported> {
-        let specialized = chelis_ir::specialize::specialize_for_blas(&helper.dag);
+        // A shape-derived BLAS summary is not proof of the primitive
+        // contraction's arithmetic. Keep the source graph as the payload.
+        if matches!(
+            helper.specialization,
+            Some(chelis_ir::host::HostTensorSpecialization::BlasMatmul(_))
+        ) {
+            helper.specialization = None;
+        }
+        let specialized = chelis_ir::specialize::specialize_for_exact_arithmetic(&helper.dag);
         chelis_ir::check_axis_sources(
             &specialized,
             chelis_types::unsupported::Stage::Codegen("c"),
@@ -219,6 +226,14 @@ pub fn prepare_host_program_for_codegen(
         prepare(helper)?;
     }
     for function in &mut program.functions {
+        // Wrapper propagation can lift a helper's shortcut into a function
+        // summary; clear that route as well before ownership binds payloads.
+        if matches!(
+            function.specialization,
+            Some(chelis_ir::host::HostFunctionSpecialization::BlasMatmul(_))
+        ) {
+            function.specialization = None;
+        }
         for helper in &mut function.tensor_helpers {
             prepare(helper)?;
         }
@@ -878,7 +893,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_with_blas_surfaces_openblas_requirement_for_matmul_pattern() {
+    fn blas_option_keeps_primitive_matmul_off_vendor_path() {
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
@@ -943,9 +958,9 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(result.requirements.needs_blas);
-        assert!(result.c_source.contains("#include \"chelis_blas.h\""));
-        assert!(result.c_source.contains("cblas_sgemm("));
+        assert!(!result.requirements.needs_blas);
+        assert!(!result.c_source.contains("cblas_sgemm("));
+        assert!(result.c_source.contains("__sum_level_"));
     }
 
     // ---- Compilation tests ----
@@ -2786,7 +2801,7 @@ int main(void) {{
     }
 
     #[test]
-    fn symbolic_batched_matmul_emits_runtime_blas_loop() {
+    fn symbolic_batched_matmul_preserves_primitive_arithmetic() {
         let mut dag = Dag::new();
         let a_ty = TensorType {
             dims: vec![
@@ -2830,20 +2845,14 @@ int main(void) {{
             },
         )
         .unwrap();
-        assert!(result.requirements.needs_blas);
+        assert!(!result.requirements.needs_blas);
         assert!(
             result
                 .c_source
                 .contains("int64_t seq = chelis_tensor_shape(inputs[0], 2);")
         );
-        assert!(result.c_source.contains("cblas_sgemm"));
-        assert!(result.c_source.contains("_batch_count = (batch * heads);"));
-        assert!(
-            !result
-                .c_source
-                .contains("(int64_t[]){ batch, heads, seq, 3, 2 }"),
-            "specialized batched BLAS must not allocate the dense product"
-        );
+        assert!(!result.c_source.contains("cblas_sgemm"));
+        assert!(result.c_source.contains("__sum_level_"));
 
         let lines = compile_and_run_input_cases(
             &dag,
@@ -3119,11 +3128,7 @@ int main(void) {
     }
 
     #[test]
-    fn matmul_codegen_compiles_with_openblas_when_available() {
-        if !openblas_available() {
-            eprintln!("skipping: OpenBLAS toolchain not available");
-            return;
-        }
+    fn canonical_matmul_codegen_compiles_and_runs() {
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
@@ -3188,7 +3193,8 @@ int main(void) {
             },
         )
         .unwrap();
-        assert!(result.c_source.contains("cblas_sgemm("));
+        assert!(!result.requirements.needs_blas);
+        assert!(!result.c_source.contains("cblas_sgemm("));
 
         let tmp = tempfile::tempdir().unwrap();
         copy_runtime_artifacts(tmp.path());
@@ -3199,6 +3205,8 @@ void test_blas(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_
 int main(void) {
     chelis_tensor *outputs[1] = {0};
     test_blas(NULL, 0, outputs, 1);
+    const float *data = (const float*)chelis_tensor_read_view(outputs[0]).data;
+    for (int i = 0; i < 8; i++) if (data[i] != 3.0f) return 1;
     chelis_tensor_release(outputs[0]);
     return 0;
 }
@@ -3221,6 +3229,8 @@ int main(void) {
             "gcc failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
+        let run = Command::new(tmp.path().join("test_blas")).output().unwrap();
+        assert!(run.status.success(), "canonical matmul output: {run:?}");
     }
 
     #[test]

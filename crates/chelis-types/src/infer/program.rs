@@ -394,6 +394,11 @@ pub(super) fn infer_program_with_product_in_session(
                 env.active_declared_type_names(),
                 errors,
             );
+            // chelis#1489: decide this def's deferred operands against the
+            // final substitution (see `validate_deferred_tensor_operands`).
+            // One pass, per def — an earlier revision had a second,
+            // whole-program phase that three library lanes never reached.
+            validate_deferred_tensor_operands(&mut subst, env.active_declared_type_names(), errors);
             // D-CHECK: drain the per-def deferred-access ledger (see
             // `validate_deferred_opaque_uses`).
             validate_deferred_opaque_uses(&subst, &adt_reg, errors);
@@ -1463,6 +1468,12 @@ pub(super) fn infer_ir_program_with_state(
                 state.env.active_declared_type_names(),
                 errors,
             );
+            // chelis#1489: see `validate_deferred_tensor_operands`.
+            validate_deferred_tensor_operands(
+                &mut state.subst,
+                state.env.active_declared_type_names(),
+                errors,
+            );
             // D-CHECK: drain the per-def deferred-access ledger (see
             // `validate_deferred_opaque_uses`).
             validate_deferred_opaque_uses(&state.subst, &state.adt_reg, errors);
@@ -2300,6 +2311,15 @@ fn normalize_node_to_list(expr: &deep::Expr) -> deep::Expr {
         "one normalization root produces exactly one expression"
     );
     values.pop().expect("normalization produced its root")
+}
+
+#[cfg(test)]
+pub(crate) fn builtin_selection_probe(
+    exprs: &[deep::Expr],
+    errors: &mut DiagnosticSink<'_>,
+) -> Vec<crate::builtin_discovery::BuiltinCaseSelection> {
+    let normalized = normalize_nodes_to_lists(exprs);
+    infer_program_with_product_in_session(&normalized, errors).builtin_selections
 }
 
 #[cfg(test)]

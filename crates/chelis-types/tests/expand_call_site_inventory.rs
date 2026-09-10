@@ -22,6 +22,18 @@ use std::process::Command;
 /// Files that may still contain `expand` program text, with the exact count and
 /// the reason the sites are there.
 const ALLOWED: &[(&str, usize, &str)] = &[
+    (
+        "examples/checked_reshape.ch",
+        1,
+        "the checked C metadata example broadcasts tensor[1, 2, int64] to tensor[3, 2, int64] at its unit axis, retaining rank 2",
+    ),
+    // These spell the checked C metadata API, not a Chelis program call.
+    // Keep exact counts so additions still require classification.
+    (
+        "scripts/dtype_phase4b_oracle.py",
+        1,
+        "the frozen normative registry reproduces that exact public C declaration",
+    ),
     // The vendored Hull conformance corpus. Hull is the upstream type and
     // effect REFERENCE, and this corpus is a frozen snapshot pinned to Hull
     // commit 653be94e with its verdicts recorded per program. Renaming these
@@ -40,6 +52,21 @@ const ALLOWED: &[(&str, usize, &str)] = &[
         "scripts/test_dtype_phase4b_oracle.py",
         1,
         "the wrong-line mutant in the mean-adjoint anchor test",
+    ),
+    (
+        "scripts/builtin_atom_semantic_contracts.py",
+        1,
+        "the normative [05-OP-49] movement signature assertion, whose expand retains rank and broadcasts an existing unit extent",
+    ),
+    (
+        "scripts/test_builtin_atom_registry.py",
+        1,
+        "the missing-contract mutant removes that same-rank movement signature to prove cross-references alone cannot supply builtin authority",
+    ),
+    (
+        "crates/chelis-types/tests/issue_1294_standard_lowerings.rs",
+        2,
+        "negative controls reject the obsolete shape-taking expand recipe and an invalid broadcast extent",
     ),
     // Genuine same-rank broadcasts: the declared result has the operand's rank.
     // These are what `expand` means after the split, so they are not renamed.
@@ -180,7 +207,7 @@ const ALLOWED: &[(&str, usize, &str)] = &[
     (
         "crates/chelis-types/tests/issue_668_deleted_derivation_does_not_suppress_conv2d.rs",
         3,
-        "three `y = expand(x, 0i32, 2i64)` bindings over a unit axis 0, feeding a `conv2d` whose validator must keep running; the operand carries the unit extent, so each is a same-rank broadcast",
+        "three `y = expand(x, 0i32, 2i64)` bindings over a unit axis 0, feeding a `conv` whose validator must keep running; the operand carries the unit extent, so each is a same-rank broadcast",
     ),
     (
         "crates/chelis-types/tests/issue_668_rank_agreement_is_unification.rs",

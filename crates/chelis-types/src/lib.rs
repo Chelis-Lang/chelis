@@ -42,6 +42,7 @@ pub mod unsupported;
 
 mod rejection_registry_generated;
 
+pub mod builtin_discovery;
 mod builtins;
 /// Source architecture guard for the `infer` module tree. Test-only: it
 /// inspects source layout, so it has no place in a release build.
@@ -49,7 +50,8 @@ mod builtins;
 mod source_arch;
 
 pub use builtins::{
-    AxisArgumentLayout, BUILTIN_NAMES, BUILTINS, BuiltinDecl, BuiltinInferenceRule,
+    AxisArgumentLayout, BUILTIN_NAMES, BUILTINS, BuiltinCapabilityDecl, BuiltinDecl,
+    BuiltinInferenceRule, BuiltinSemanticDomain, BuiltinSiblingCaseDecl, BuiltinSiblingCaseId,
     InferenceDisposition, Realizability, ShapeClass, axis_argument_layout, builtin_decl,
     builtin_env, prelude_adt_defs, realizability, shape_class,
 };

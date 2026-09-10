@@ -73,10 +73,11 @@ mod declarations;
 mod declared_surface;
 pub(crate) use declared_surface::resolve_declared_surface_in_session;
 pub use declared_surface::{DeclaredSignature, DeclaredTypeSurface, resolve_declared_surface};
-mod expr;
+mod deferred_operands;
+pub(crate) mod expr;
 mod expr_function;
 mod expr_pattern;
-mod expr_record;
+pub(crate) mod expr_record;
 mod expr_transform;
 mod program;
 pub(crate) mod recursion;
@@ -105,6 +106,7 @@ use binder_literal::*;
 use checked::*;
 use common::*;
 use declarations::*;
+use deferred_operands::*;
 use expr::*;
 use expr_function::*;
 use expr_pattern::*;
@@ -141,6 +143,9 @@ pub(crate) use program::{
     build_type_env_from_library_in_session, check_ir_with_signature_context_in_session,
     check_typed_program_in_session, infer_ir_program_in_session, infer_program_in_session,
 };
+
+#[cfg(test)]
+pub(crate) use program::builtin_selection_probe;
 
 #[cfg(test)]
 mod tests;

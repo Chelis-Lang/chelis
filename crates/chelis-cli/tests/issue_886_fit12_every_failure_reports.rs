@@ -131,7 +131,9 @@ fn an_unreadable_surf_file_reports_through_the_document() {
         let report = assert_transported("unreadable .ch", &path);
         // Restore before the tempdir drops, or cleanup fails on some systems.
         let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o644));
-        assert_eq!(report.score, 0.0, "an unread file scores zero");
+        // `score` is a validated `UnitInterval` since chelis#1664, not a
+        // bare `f64`; `get()` is its accessor.
+        assert_eq!(report.score.get(), 0.0, "an unread file scores zero");
     }
 }
 

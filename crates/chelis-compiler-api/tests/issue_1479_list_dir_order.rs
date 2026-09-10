@@ -105,44 +105,39 @@ fn list_dir_orders_dotfiles_and_digits_by_byte_sequence() {
     );
 }
 
-/// [05-HOST-4] fixes the order on the host's names *before* any conversion to
-/// `string`. Every other case here is ASCII, where a raw-byte sort and a sort
-/// of the converted strings agree, so none of them can tell the two apart: a
-/// red-team pass proved that moving the sort past `to_string_lossy` leaves all
-/// of them green.
-///
-/// These two names discriminate. `to_string_lossy` maps each invalid byte to
-/// U+FFFD, so they convert to two *distinct* strings whose order is the
-/// reverse of their byte order:
-///
-/// | host name  | byte order (required) | converted-string order (forbidden) |
-/// |------------|-----------------------|------------------------------------|
-/// | `b"\x80z"` | first, `0x80 < 0x81`  | second, `"\u{FFFD}z"` sorts after   |
-/// | `b"\x81a"` | second                | first                              |
-///
-/// Because the two strings differ, this is observable in the returned `List`;
-/// it is not chelis#1479 row 7's unobservable-duplicate case.
-///
-/// Linux only: the default macOS filesystem rejects a non-UTF-8 filename with
-/// `EILSEQ`, so neither this workstation nor the `macos-latest` runner can
-/// create the fixture. CI's Linux workspace job runs it.
+/// Actual invalid-name filesystem coverage runs on Linux; the pure conversion
+/// controls also exercise these cases on macOS without creating host files.
 #[cfg(target_os = "linux")]
 #[test]
-fn list_dir_orders_non_utf8_names_before_the_lossy_conversion() {
+fn list_dir_rejects_non_utf8_names_in_host_order() {
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
 
     let dir = tempdir().expect("tempdir");
-    // Created in the forbidden order, so a post-conversion sort cannot pass by
-    // leaving the entries where it found them.
-    for raw in [b"\x81a".as_slice(), b"\x80z".as_slice()] {
+    for raw in [
+        b"a\xff".as_slice(),
+        b"a\xfe".as_slice(),
+        b"0-valid".as_slice(),
+    ] {
         fs::write(dir.path().join(OsStr::from_bytes(raw)), b"x").expect("write fixture entry");
     }
-
-    assert_eq!(
-        list_dir_names(dir.path()),
-        vec!["\u{FFFD}z", "\u{FFFD}a"],
-        "entries must order by the host's name bytes, not by the converted strings"
+    let path = dir.path().to_str().unwrap();
+    let error = eval(EvalRequest {
+        source_kind: SourceKind::Surf,
+        source: format!("names = list_dir({})\n", surf_string_literal(path)),
+        bindings: BTreeMap::new(),
+    })
+    .expect_err("invalid names must reject the entire result");
+    let expected = format!(
+        r#"IO trap in list_dir: directory b"{}", entry b"a\xfe": name is not valid UTF-8"#,
+        path.as_bytes().escape_ascii()
+    );
+    assert!(
+        error
+            .errors
+            .iter()
+            .any(|diagnostic| diagnostic.message == expected),
+        "unexpected failure: {error:?}"
     );
 }
 

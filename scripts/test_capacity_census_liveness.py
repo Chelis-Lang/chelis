@@ -6,9 +6,15 @@ Run: .venv/bin/python scripts/test_capacity_census_liveness.py
 
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
+
+import capacity_census_liveness
 
 from capacity_census_liveness import (
     LEGACY_TRANSITION_DISPOSITIONS,
@@ -35,6 +41,28 @@ def row(
     }
 
 
+def final_wire_row(authority: str = "TaggedTransport") -> dict:
+    return {
+        "kind": "wire-schema-numeric-field",
+        "id": "fixture::WireValue.value: u64",
+        "flags": ["numeric-field"],
+        "authority": authority,
+        "contract": "source-offset" if authority == "TaggedTransport" else "[05-OP-65]",
+    }
+
+
+def load_wire_json(source: str) -> list[dict]:
+    with TemporaryDirectory() as temporary_directory:
+        root = Path(temporary_directory)
+        census = Path("capacity_census_wire.json")
+        (root / census).write_text(source)
+        return load_census_rows(root, (census,))
+
+
+def load_wire(payload: object) -> list[dict]:
+    return load_wire_json(json.dumps(payload))
+
+
 class ExtractIssueRefs(unittest.TestCase):
     def test_extracts_and_dedupes_in_order(self) -> None:
         refs = extract_issue_refs("seam unwinds per chelis#893/chelis#894; see chelis#893")
@@ -45,6 +73,93 @@ class ExtractIssueRefs(unittest.TestCase):
 
 
 class LoadCensusRows(unittest.TestCase):
+    def test_wire_final_authorities_need_no_issue_lookup(self) -> None:
+        for authority in ("TaggedTransport", "NumericOperation"):
+            for primitive, flag in (("u64", "numeric-field"), ("f64", "float-carrier")):
+                with self.subTest(authority=authority, primitive=primitive):
+                    source = {
+                        **final_wire_row(authority),
+                        "id": f"fixture::WireValue.value: {primitive}",
+                        "flags": [flag],
+                    }
+                    rows = load_wire({"version": 2, "rows": [source]})
+                    self.assertEqual(rows, [{**source, "_census_family": "wire"}])
+                    self.assertEqual(adjudicate(rows, {}), [])
+
+    def test_wire_duplicate_json_keys_cannot_overwrite_the_contract(self) -> None:
+        valid = json.dumps({"version": 2, "rows": [final_wire_row()]})
+        for source in (
+            valid.replace('"version": 2', '"version": 1, "version": 2'),
+            valid.replace('"authority":', '"authority": "Grandfather", "authority":'),
+        ):
+            with self.subTest(source=source), self.assertRaisesRegex(ValueError, "DUPLICATE"):
+                load_wire_json(source)
+
+    def test_wire_inventory_size_is_not_a_liveness_authority(self) -> None:
+        # Completeness is the live graph verifier's responsibility, not a
+        # hard-coded row count in the issue liveness ledger.
+        for count in (0, 1, 3):
+            with self.subTest(count=count):
+                rows = [
+                    {**final_wire_row(), "id": f"fixture::Offsets.offset_{n}: u64"}
+                    for n in range(count)
+                ]
+                self.assertEqual(len(load_wire({"version": 2, "rows": rows})), count)
+
+    def test_wire_baseline_requires_exact_version_2_envelope(self) -> None:
+        valid = {"version": 2, "rows": [final_wire_row()]}
+        malformed = [{"rows": valid["rows"]}]
+        malformed.extend({**valid, "version": value} for value in (1, 3, "2", 2.0, True))
+        malformed.extend({**valid, "rows": value} for value in (None, {}, "rows"))
+        malformed.extend({**valid, key: value} for key, value in (
+            ("citation", ""), ("citation", "chelis#1288"),
+            ("source_sha256", "baseline cannot supply execution evidence"),
+        ))
+        malformed.append([])
+        for payload in malformed:
+            with self.subTest(payload=payload), self.assertRaisesRegex(ValueError, "WIRE BASELINE"):
+                load_wire(payload)
+
+    def test_wire_rows_reject_legacy_fields_and_nonfinal_shapes(self) -> None:
+        valid = final_wire_row()
+        malformed = []
+        for key in valid:
+            incomplete = dict(valid)
+            del incomplete[key]
+            malformed.append(incomplete)
+        malformed.extend({**valid, key: value} for key, value in (
+            ("citation", ""),
+            ("citation", "chelis#1288"),
+            ("disposition", "permanent-disposition(reviewed)"),
+            ("authority", "Nonnumeric"),
+            ("authority", "Grandfather"),
+            ("authority", ["TaggedTransport", "NumericOperation"]),
+            ("kind", "binding-parameter"),
+            ("id", ""),
+            ("id", 12),
+            ("flags", []),
+            ("flags", ["numeric-field", "float-carrier"]),
+            ("flags", ["numeric-field", "numeric-field"]),
+            ("flags", ["raw-dtype-int"]),
+            ("contract", ""),
+            ("contract", None),
+        ))
+        malformed.append(None)
+        for source in malformed:
+            with self.subTest(source=source), self.assertRaisesRegex(ValueError, "WIRE BASELINE"):
+                load_wire({"version": 2, "rows": [source]})
+
+    def test_wire_numeric_operation_requires_atom_grammar(self) -> None:
+        for contract in ("chelis#1288", "[05-OBS-1]", "05-OP-65", "[05-OP-N]"):
+            source = {**final_wire_row("NumericOperation"), "contract": contract}
+            with self.subTest(contract=contract), self.assertRaisesRegex(ValueError, "WIRE BASELINE"):
+                load_wire({"version": 2, "rows": [source]})
+
+    def test_wire_duplicate_identity_cannot_be_hidden_by_different_authority(self) -> None:
+        for second in (final_wire_row(), final_wire_row("NumericOperation")):
+            with self.subTest(second=second), self.assertRaisesRegex(ValueError, "DUPLICATE"):
+                load_wire({"version": 2, "rows": [final_wire_row(), second]})
+
     def test_top_level_citation_is_inherited_without_overriding_row_citation(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -73,9 +188,9 @@ class Adjudicate(unittest.TestCase):
         disposition = next(
             value
             for value in LEGACY_TRANSITION_DISPOSITIONS
-            if "wire schema" in value
+            if "PyO3" in value
         )
-        problems = adjudicate([row(disposition, census_family="wire")], {})
+        problems = adjudicate([row(disposition, census_family="bindings")], {})
         self.assertEqual(problems, [])
 
     def test_retired_primary_disposition_fails_closed(self) -> None:
@@ -99,17 +214,32 @@ class Adjudicate(unittest.TestCase):
         self.assertIn("UNRECOGNIZED disposition", problems[0])
 
     def test_permanent_disposition_cannot_move_between_census_families(self) -> None:
-        dispositions = sorted(LEGACY_TRANSITION_DISPOSITIONS)
-        wire = next(value for value in dispositions if "wire schema" in value)
-        bindings = next(value for value in dispositions if "PyO3" in value)
+        bindings = next(value for value in LEGACY_TRANSITION_DISPOSITIONS if "PyO3" in value)
+        for family in ("primary", "unregistered"):
+            with self.subTest(family=family):
+                problems = adjudicate([row(bindings, census_family=family)], {})
+                self.assertEqual(len(problems), 1)
+                self.assertIn("WRONG CENSUS FAMILY", problems[0])
 
-        problems = adjudicate([row(wire, census_family="bindings")], {})
-        self.assertEqual(len(problems), 1)
-        self.assertIn("WRONG CENSUS FAMILY", problems[0])
+    def test_wire_cannot_admit_legacy_even_with_an_open_issue(self) -> None:
+        citations = (
+            "chelis#1288",
+            "permanent-disposition(C6 dtype-tagged wire schema complete descriptor set ratified 2026-08-04)",
+            *LEGACY_TRANSITION_DISPOSITIONS,
+        )
+        for citation in citations:
+            with self.subTest(citation=citation):
+                source = {**final_wire_row(), "citation": citation, "_census_family": "wire"}
+                problems = adjudicate(
+                    [source], {1288: IssueRecord(kind=IssueKind.ISSUE, state=IssueState.OPEN)}
+                )
+                self.assertEqual(len(problems), 1)
+                self.assertIn("WIRE BASELINE", problems[0])
 
-        problems = adjudicate([row(bindings, census_family="wire")], {})
-        self.assertEqual(len(problems), 1)
-        self.assertIn("WRONG CENSUS FAMILY", problems[0])
+    def test_wire_missing_citation_is_not_itself_final_authority(self) -> None:
+        malformed = {**final_wire_row(), "_census_family": "wire"}
+        del malformed["authority"]
+        self.assertIn("WIRE BASELINE", adjudicate([malformed], {})[0])
 
     def test_closed_citation_fails_with_readjudication_message(self) -> None:
         problems = adjudicate(
@@ -149,6 +279,36 @@ class Adjudicate(unittest.TestCase):
         self.assertEqual(len(problems), 1)
         self.assertIn("PULL REQUEST", problems[0])
         self.assertIn("not an OPEN issue", problems[0])
+
+
+class Main(unittest.TestCase):
+    def test_final_wire_rows_pass_without_network_lookup(self) -> None:
+        rows = load_wire({"version": 2, "rows": [final_wire_row()]})
+        output = io.StringIO()
+        with (
+            patch.object(capacity_census_liveness, "load_census_rows", return_value=rows),
+            patch.object(capacity_census_liveness, "fetch_issue") as fetch,
+            contextlib.redirect_stdout(output),
+        ):
+            self.assertEqual(capacity_census_liveness.main(), 0)
+        fetch.assert_not_called()
+        self.assertTrue(output.getvalue().endswith("CAPACITY CENSUS LIVENESS: PASS\n"))
+
+    def test_malformed_wire_baseline_fails_before_network_lookup(self) -> None:
+        output = io.StringIO()
+        with (
+            patch.object(
+                capacity_census_liveness,
+                "load_census_rows",
+                side_effect=ValueError("WIRE BASELINE must use version 2"),
+            ),
+            patch.object(capacity_census_liveness, "fetch_issue") as fetch,
+            contextlib.redirect_stdout(output),
+        ):
+            self.assertEqual(capacity_census_liveness.main(), 1)
+        fetch.assert_not_called()
+        self.assertIn("WIRE BASELINE", output.getvalue())
+        self.assertTrue(output.getvalue().endswith("CAPACITY CENSUS LIVENESS: FAIL\n"))
 
 
 class FetchIssue(unittest.TestCase):

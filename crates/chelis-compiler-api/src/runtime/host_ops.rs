@@ -1352,54 +1352,43 @@ pub(super) fn tensor_permute_host(
     )))
 }
 
-/// 2D matmul: lhs is [m, k], rhs is [k, n], output is [m, n].
+/// Execute matrix multiplication through its typed, rank-generic lowering.
 pub(super) fn tensor_matmul_host(
     lhs: &RuntimeTensorValue,
     rhs: &RuntimeTensorValue,
 ) -> Result<RuntimeTensorValue, String> {
-    if lhs.value.shape.len() != 2 || rhs.value.shape.len() != 2 {
-        return Err(format!(
-            "matmul host runtime currently supports only rank-2 × rank-2; got ranks {} and {}",
-            lhs.value.shape.len(),
-            rhs.value.shape.len()
-        ));
+    let a = &lhs.value.shape;
+    let b = &rhs.value.shape;
+    if a.len() < 2 || b.len() < 2 {
+        return Err("matmul requires both operand ranks to be at least two".to_string());
     }
-    let m = lhs.value.shape[0];
-    let k_lhs = lhs.value.shape[1];
-    let k_rhs = rhs.value.shape[0];
-    let n = rhs.value.shape[1];
-    if k_lhs != k_rhs {
-        return Err(format!(
-            "matmul shared-axis mismatch: lhs has {k_lhs}, rhs has {k_rhs}"
-        ));
+    if lhs.precision != rhs.precision || !lhs.precision.is_float() {
+        return Err("matmul requires one matching active float dtype".to_string());
     }
-    // #170 (DO NOT "fix" this into the stride-4 cascade): matmul does NOT
-    // take the #163 `sum` cascade, and its f64 accumulator is intentional.
-    // torch's CPU f32 matmul is a BLAS GEMM whose rounding is bit-exact
-    // with a strict-f32 left-fold (verified k=20..257), NOT the cascade
-    // (which is `sum`'s order — applying it here would CREATE a k>=128
-    // divergence). The eval reference deliberately keeps a HIGHER-precision
-    // f64 accumulator: it is the reference, the shipped C backend trades
-    // precision for speed via `cblas_sgemm`, and the matmul eval-vs-C
-    // parity tests use a TOLERANCE (not bit-identity) for exactly this
-    // expected eval(f64)-vs-backend(BLAS) gap. Matching torch's f32-GEMM
-    // bit pattern by downcasting eval to strict-f32 would lower precision,
-    // couple the reference to torch's specific BLAS version, and still not
-    // buy eval-vs-C bit-identity — net worse, no soundness win. So this is
-    // a documented, expected precision characteristic, not a divergence.
-    let a = lhs.value.to_f64_lossy_vec();
-    let b = rhs.value.to_f64_lossy_vec();
-    let mut out = vec![0.0_f64; m * n];
-    for i in 0..m {
-        for j in 0..n {
-            let mut acc = 0.0_f64;
-            for kk in 0..k_lhs {
-                acc += a[i * k_lhs + kk] * b[kk * n + j];
-            }
-            out[i * n + j] = acc;
+    if a[a.len() - 1] != b[b.len() - 2] {
+        return Err("matmul shared-axis mismatch".to_string());
+    }
+    for (&a_extent, &b_extent) in a[..a.len() - 2]
+        .iter()
+        .rev()
+        .zip(b[..b.len() - 2].iter().rev())
+    {
+        if a_extent != b_extent && a_extent != 1 && b_extent != 1 {
+            return Err("matmul batch-axis mismatch".to_string());
         }
     }
-    RuntimeTensorValue::from_wide("matmul", lhs.precision, vec![m, n], out)
+    let mut dag = Dag::new();
+    let lhs_ty = tensor_type_for(lhs);
+    let rhs_ty = tensor_type_for(rhs);
+    let lhs_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}0");
+    let rhs_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}1");
+    let lhs_id = add_load(&mut dag, lhs_name.clone(), lhs_ty.clone());
+    let rhs_id = add_load(&mut dag, rhs_name.clone(), rhs_ty.clone());
+    let root = tier2::lower_matmul(&mut dag, lhs_id, rhs_id, &lhs_ty, &rhs_ty, None);
+    let mut inputs = UnordMap::new();
+    inputs.insert(lhs_name, lhs.value.clone());
+    inputs.insert(rhs_name, rhs.value.clone());
+    extract_root(&dag, &inputs, root, "matmul")
 }
 
 /// `insert`: replicate a tensor along a NEW axis.
@@ -1923,8 +1912,7 @@ pub(super) fn tensor_softmax_host(
         //     exp mismatch remains) and would only lower the host lane's
         //     precision.
         // (b) torch's softmax is a FUSED kernel; neither the cascade nor an
-        //     f64 fold reliably bit-matches it (same situation as matmul —
-        //     see `tensor_matmul_host`). So softmax is DOCUMENTED, not
+        //     f64 fold reliably bit-matches it. So softmax is DOCUMENTED, not
         //     cascaded; only `sum`/`trace` take the cascade.
         let mut sum_exp = 0.0_f64;
         for k in 0..axis_size {
@@ -1950,7 +1938,7 @@ pub(super) fn tensor_softmax_host(
 // ---------------------------------------------------------------------------
 // Composed Tier-2 host-runtime delegation
 //
-// `mean` / `layer_norm` / `conv2d` are not single RISC ops; they
+// `mean` / `layer_norm` / `conv` are not single RISC ops; they
 // decompose into combinations of `RiscOp::Sum`, `RiscOp::Div`,
 // `RiscOp::Sqrt`, `RiscOp::Mul`, `RiscOp::Pad`, etc. The canonical
 // decomposition lives in `crates/chelis-ir/src/tier2.rs::lower_*`. To
@@ -2061,63 +2049,52 @@ where
     extract_root(&dag, &inputs, root, "composed triop tier2")
 }
 
-/// conv2d forward in the host runtime. `tier2::lower_conv2d` is shape-
-/// polymorphic via its `output_ty` parameter and panics if the spatial
-/// dims of `output_ty` disagree with the arithmetic derived from
-/// `(input_dims, kernel_dims, stride, padding)`. The host runtime does
-/// not have a downstream type-annotation source for the output type,
-/// so we compute it inline from the four spatial parameters: that's
-/// the same formula `lower_conv2d` reaches for via the
-/// `raw_h_out`/`raw_w_out` fallback at
-/// `crates/chelis-ir/src/tier2.rs:973-984`.
-pub(super) fn conv2d_host(
+/// Execute the same N-dimensional contraction graph as the compiled lane.
+pub(super) fn conv_host(
     input: &RuntimeTensorValue,
     kernel: &RuntimeTensorValue,
-    stride: usize,
-    padding: usize,
+    strides: &[usize],
+    padding: &[(usize, usize)],
 ) -> Result<RuntimeTensorValue, String> {
-    if input.value.shape.len() != 4 {
+    let shape = &input.value.shape;
+    let kernel_shape = &kernel.value.shape;
+    if shape.len() < 3 || kernel_shape.len() != shape.len() {
+        return Err("conv requires equal input/kernel ranks of at least 3".to_string());
+    }
+    let rank = shape.len() - 2;
+    if strides.len() != rank || padding.len() != rank {
         return Err(format!(
-            "conv2d input must be rank-4 (batch, channels, h, w), got shape {:?}",
-            input.value.shape
+            "conv requires exactly {rank} stride and padding entries"
         ));
     }
-    if kernel.value.shape.len() != 4 {
-        return Err(format!(
-            "conv2d kernel must be rank-4 (out_c, in_c, kh, kw), got shape {:?}",
-            kernel.value.shape
-        ));
+    if shape[1] != kernel_shape[1]
+        || input.precision != kernel.precision
+        || !input.precision.is_float()
+    {
+        return Err("conv requires matching channels and one active float dtype".to_string());
     }
-    let stride = stride.max(1);
-    let batch = input.value.shape[0];
-    let in_c = input.value.shape[1];
-    let h_in = input.value.shape[2];
-    let w_in = input.value.shape[3];
-    let out_c = kernel.value.shape[0];
-    let kernel_in_c = kernel.value.shape[1];
-    let kh = kernel.value.shape[2];
-    let kw = kernel.value.shape[3];
-    if kernel_in_c != in_c {
-        return Err(format!(
-            "conv2d kernel input channels ({kernel_in_c}) must match input channels ({in_c})"
-        ));
+    let mut output_shape = vec![shape[0], kernel_shape[0]];
+    for axis in 0..rank {
+        let padded = shape[axis + 2]
+            .checked_add(padding[axis].0)
+            .and_then(|n| n.checked_add(padding[axis].1))
+            .filter(|&n| i64::try_from(n).is_ok())
+            .ok_or("conv padded extent overflows int64")?;
+        let k = kernel_shape[axis + 2];
+        if strides[axis] == 0 || k == 0 || k > padded {
+            return Err(format!(
+                "conv invalid kernel/stride/padding at spatial axis {axis}"
+            ));
+        }
+        output_shape.push(
+            ((padded - k) / strides[axis])
+                .checked_add(1)
+                .filter(|&n| i64::try_from(n).is_ok())
+                .ok_or("conv output extent overflows int64")?,
+        );
     }
-    let padded_h = h_in + (2 * padding);
-    let padded_w = w_in + (2 * padding);
-    if padded_h < kh || padded_w < kw {
-        return Err(format!(
-            "conv2d kernel dims ({kh}, {kw}) exceed padded input dims ({padded_h}, {padded_w})"
-        ));
-    }
-    let h_out = ((padded_h - kh) / stride) + 1;
-    let w_out = ((padded_w - kw) / stride) + 1;
     let output_ty = TensorType {
-        dims: vec![
-            DimInfo::Lit(batch),
-            DimInfo::Lit(out_c),
-            DimInfo::Lit(h_out),
-            DimInfo::Lit(w_out),
-        ],
+        dims: output_shape.into_iter().map(DimInfo::Lit).collect(),
         precision: input.precision,
     };
     let input_ty = tensor_type_for(input);
@@ -2127,13 +2104,13 @@ pub(super) fn conv2d_host(
     let k_name = format!("{COMPOSED_PLACEHOLDER_PREFIX}1");
     let x_id = add_load(&mut dag, x_name.clone(), input_ty.clone());
     let k_id = add_load(&mut dag, k_name.clone(), kernel_ty.clone());
-    let root = tier2::lower_conv2d(
-        &mut dag, x_id, k_id, &input_ty, &kernel_ty, &output_ty, stride, padding, None,
+    let root = tier2::lower_conv(
+        &mut dag, x_id, k_id, &input_ty, &kernel_ty, &output_ty, strides, padding, None,
     );
     let mut inputs = UnordMap::new();
     inputs.insert(x_name, input.value.clone());
     inputs.insert(k_name, kernel.value.clone());
-    extract_root(&dag, &inputs, root, "conv2d")
+    extract_root(&dag, &inputs, root, "conv")
 }
 
 pub(super) fn tensor_concat_value(
@@ -2876,14 +2853,9 @@ pub(super) fn tensor_einsum_value(
     };
     let output_total = checked_product(&out_shape, "output")?;
     let reduction_total = checked_product(&reduction_shape, "reduction")?;
-    // #170 (DO NOT "fix" into the cascade): einsum is a contraction sum,
-    // same shape as matmul, and shares matmul's disposition. torch's f32
-    // einsum follows its GEMM order (strict-f32 left-fold), NOT the #163
-    // `sum` cascade. The eval reference keeps the higher-precision f64
-    // accumulator deliberately — same rationale as `tensor_matmul_host`:
-    // the eval(f64)-vs-C(BLAS) gap at large k is an expected, tolerance-
-    // covered precision characteristic, not a divergence. See the comment
-    // in `tensor_matmul_host`.
+    // This legacy host einsum still accumulates in f64. Unlike matmul,
+    // it does not yet delegate to the typed contraction implementation;
+    // #1290 owns alignment with [05-OP-33]'s exact tree and widths.
     let lhs_wide = lhs.value.to_f64_lossy_vec();
     let rhs_wide = rhs.value.to_f64_lossy_vec();
     let mut out = vec![0.0; output_total];

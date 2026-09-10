@@ -96,6 +96,7 @@ CONTRACT_FILES = (
     "openspec/specs/serialization/spec.md",
     "openspec/specs/transformations/spec.md",
     "openspec/specs/type-system/spec.md",
+    "spec/registry/builtin_semantic_identities.md",
     "spec/registry/c_scalar_carrier.md",
     "spec/registry/c_container_boundary.md",
     "spec/registry/c_tensor_runtime.md",
@@ -239,7 +240,57 @@ EXPECTED_OP_MANIFESTS = {
 | diagonal | `chelis_tensor *chelis_tensor_diagonal(const chelis_tensor *tensor, int32_t axis1, int32_t axis2)` |
 | trace | `chelis_tensor *chelis_tensor_trace(const chelis_tensor *tensor, int32_t axis1, int32_t axis2)` |
 | clamp | `chelis_tensor *chelis_tensor_clamp(const chelis_tensor *tensor, const chelis_tensor *lower, const chelis_tensor *upper)` |
-| contraction | `chelis_tensor *chelis_tensor_einsum(chelis_string equation, const chelis_tensor *left, const chelis_tensor *right, chelis_dtype accumulator)` |""".splitlines()
+| contraction | `chelis_tensor *chelis_tensor_einsum(chelis_string equation, const chelis_tensor *left, const chelis_tensor *right, chelis_dtype accumulator)` |
+| checked coordinate decoding | `void chelis_tensor_unravel_index(const chelis_tensor *tensor, chelis_scalar index, chelis_scalar *coordinates)` |
+| checked coordinate encoding | `int64_t chelis_tensor_flat_index(const chelis_tensor *tensor, const chelis_scalar *coordinates)` |
+| permutation target validation | `void chelis_tensor_check_permute(const chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *shape, const chelis_scalar *axes)` |
+| expansion target validation | `void chelis_tensor_check_expand(const chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *shape, int32_t axis)` |
+| padding shape construction | `void chelis_tensor_pad_shape(const chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *before, const chelis_scalar *after, chelis_scalar *shape)` |
+| shrinking shape construction | `void chelis_tensor_shrink_shape(const chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *start, const chelis_scalar *end, chelis_scalar *shape)` |
+| striding shape construction | `void chelis_tensor_stride_shape(const chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *steps, chelis_scalar *shape)` |
+| affine coordinate projection | `int64_t chelis_tensor_affine_index(const chelis_tensor *tensor, const chelis_scalar *coordinates, const chelis_scalar *offsets, const chelis_scalar *steps)` |
+| checked reduction tensor_reduction_plan | `chelis_reduction_plan *chelis_tensor_reduction_plan(const chelis_tensor *tensor, chelis_scalar axis_count, const chelis_scalar *axes, chelis_scalar exemplar, chelis_reduction_op operation)` |
+| checked reduction shape_reduction_plan | `chelis_reduction_plan *chelis_shape_reduction_plan(chelis_scalar rank, const chelis_scalar *shape, chelis_scalar axis_count, const chelis_scalar *axes, chelis_scalar exemplar, chelis_reduction_op operation)` |
+| checked reduction reduction_count | `int64_t chelis_reduction_count(const chelis_reduction_plan *plan)` |
+| checked reduction reduction_extent | `int64_t chelis_reduction_extent(const chelis_reduction_plan *plan, chelis_scalar axis)` |
+| checked reduction reduction_index | `int64_t chelis_reduction_index(const chelis_reduction_plan *plan, chelis_scalar outer, chelis_scalar leaf)` |
+| checked reduction reduction_check_target | `void chelis_reduction_check_target(const chelis_reduction_plan *plan, chelis_scalar rank, const chelis_scalar *shape)` |
+| checked reduction reduction_check_scratch | `void chelis_reduction_check_scratch(const chelis_reduction_plan *plan, chelis_scalar exemplar)` |
+| checked reduction reduction_plan_release | `void chelis_reduction_plan_release(chelis_reduction_plan *plan)` |
+| checked sparse tensor_sparse_plan | `chelis_sparse_plan *chelis_tensor_sparse_plan(const chelis_tensor *base, const chelis_tensor *indices, const chelis_tensor *updates, chelis_scalar axis, chelis_sparse_op operation)` |
+| checked sparse sparse_extent | `int64_t chelis_sparse_extent(const chelis_sparse_plan *plan, chelis_scalar axis)` |
+| checked sparse sparse_count | `int64_t chelis_sparse_count(const chelis_sparse_plan *plan)` |
+| checked sparse sparse_index_slot | `int64_t chelis_sparse_index_slot(const chelis_sparse_plan *plan, chelis_scalar linear)` |
+| checked sparse sparse_data_index | `int64_t chelis_sparse_data_index(const chelis_sparse_plan *plan, chelis_scalar linear, chelis_scalar selected)` |
+| checked sparse sparse_check_target | `void chelis_sparse_check_target(const chelis_sparse_plan *plan, chelis_scalar rank, const chelis_scalar *shape)` |
+| checked sparse sparse_plan_release | `void chelis_sparse_plan_release(chelis_sparse_plan *plan)` |
+| checked matrix tensor_matmul_plan | `chelis_matmul_plan *chelis_tensor_matmul_plan(const chelis_tensor *left, const chelis_tensor *right, chelis_scalar exemplar)` |
+| checked matrix matmul_extent | `int64_t chelis_matmul_extent(const chelis_matmul_plan *plan, chelis_scalar axis)` |
+| checked matrix matmul_dimension | `int64_t chelis_matmul_dimension(const chelis_matmul_plan *plan, chelis_matmul_dimension_kind dimension)` |
+| checked matrix matmul_batch_count | `int64_t chelis_matmul_batch_count(const chelis_matmul_plan *plan)` |
+| checked matrix matmul_matrix_count | `int64_t chelis_matmul_matrix_count(const chelis_matmul_plan *plan, chelis_matmul_part part)` |
+| checked matrix matmul_index | `int64_t chelis_matmul_index(const chelis_matmul_plan *plan, chelis_matmul_part part, chelis_scalar batch, chelis_scalar element)` |
+| checked matrix matmul_check_target | `void chelis_matmul_check_target(const chelis_matmul_plan *plan, chelis_scalar rank, const chelis_scalar *shape)` |
+| checked matrix matmul_check_scratch | `void chelis_matmul_check_scratch(const chelis_matmul_plan *plan, chelis_matmul_part part, chelis_scalar exemplar)` |
+| checked matrix matmul_check_vendor | `void chelis_matmul_check_vendor(const chelis_matmul_plan *plan, chelis_scalar maximum)` |
+| checked matrix matmul_plan_release | `void chelis_matmul_plan_release(chelis_matmul_plan *plan)` |
+| checked movement chelis_tensor_permute_plan | `chelis_movement_plan *chelis_tensor_permute_plan(const chelis_tensor *input, chelis_scalar rank, const chelis_scalar *axes)` |
+| checked movement chelis_tensor_expand_plan | `chelis_movement_plan *chelis_tensor_expand_plan(const chelis_tensor *input, chelis_scalar axis, chelis_scalar size, chelis_movement_op operation)` |
+| checked movement chelis_tensor_affine_plan | `chelis_movement_plan *chelis_tensor_affine_plan(const chelis_tensor *input, chelis_scalar rank, const chelis_scalar *first, const chelis_scalar *second, chelis_movement_op operation)` |
+| checked movement chelis_movement_extent | `int64_t chelis_movement_extent(const chelis_movement_plan *plan, chelis_movement_side side, chelis_scalar axis)` |
+| checked movement chelis_movement_count | `int64_t chelis_movement_count(const chelis_movement_plan *plan)` |
+| checked movement chelis_movement_index | `int64_t chelis_movement_index(const chelis_movement_plan *plan, chelis_scalar linear)` |
+| checked movement chelis_movement_check_target | `void chelis_movement_check_target(const chelis_movement_plan *plan, chelis_scalar rank, const chelis_scalar *shape)` |
+| checked movement chelis_movement_plan_release | `void chelis_movement_plan_release(chelis_movement_plan *plan)` |
+| checked window tensor_window_plan | `chelis_window_plan *chelis_tensor_window_plan(const chelis_tensor *input, chelis_scalar count, const chelis_scalar *window, const chelis_scalar *steps, chelis_window_op operation)` |
+| checked window window_extent | `int64_t chelis_window_extent(const chelis_window_plan *plan, chelis_window_side side, chelis_scalar axis)` |
+| checked window window_count | `int64_t chelis_window_count(const chelis_window_plan *plan)` |
+| checked window window_index | `int64_t chelis_window_index(const chelis_window_plan *plan, chelis_scalar group, chelis_scalar leaf)` |
+| checked window window_check_tensor | `void chelis_window_check_tensor(const chelis_window_plan *plan, const chelis_tensor *tensor, chelis_window_side side)` |
+| checked window window_check_target | `void chelis_window_check_target(const chelis_window_plan *plan, chelis_window_side side, chelis_scalar rank, const chelis_scalar *shape)` |
+| checked window window_plan_release | `void chelis_window_plan_release(chelis_window_plan *plan)` |
+| checked literal tensor_check_literal | `void chelis_tensor_check_literal(chelis_scalar rank, const chelis_scalar *shape, chelis_scalar exemplar, chelis_scalar count)` |
+| checked literal tensor_write_literal | `void chelis_tensor_write_literal(chelis_tensor_write *guard, chelis_scalar count, const chelis_scalar *values)` |""".splitlines()
     ),
     "05-OP-34": tuple(
         """\
@@ -393,7 +444,7 @@ EXPECTED_OP_MANIFESTS = {
     ),
     "05-OP-38": tuple(
         """\
-> | `tensor_scan` | `(T,((T,int64)->T!E),int64)->tensor[n,T]!E` |
+> | `tensor_scan` | `(T,((T,int64)->T!E),int64)->tensor[n,..state_shape(T),element(T)]!E` |
 > | `process_run` | `(string,List[string])->(int64,string,string)!{IO}` |
 > | `test_assert_eq` | `(Q,Q,string)->unit!{Test}` |
 > | `test_assert_close_tensor` | `(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}` |
@@ -421,18 +472,18 @@ FROZEN_ATOM_DIGESTS = {
     "05-OP-2": "86fe2002cebd6192d15078ed0e8144936e38ba14f925802d2d526b7bf880ecd3",
     "05-OP-3": "b5a3ee9ca9a4f3161e20e729467d044878080ac8fb302af14b512bea66a58d3b",
     "05-OP-4": "f45693d5e3ef37033aef4c9a3f03de1806ea034d8247390c3ff6113d1c2ffa13",
-    "05-OP-5": "00b9b1ecfdb42d0def6cc38296a518d9a25039cb2af3bdac53f1648225377d9a",
+    "05-OP-5": "011173c34344dc89d15eda5518a8ea833470fa953378bafba611391e8d083549",
     "05-OP-6": "95d842566c76f85e0e89844029d7387921f57f6997e68107be92fe9b9cc1061c",
     "05-OP-7": "d3c5120918a8de774833d776204d62c01b3eccd01ffc22e43ff5422d4e28e54b",
     "05-OP-8": "ea385826c01b7cb1d24e75e1dbb4889149f0a08441d798eafcee75fc7d9f7b4f",
     "05-OP-9": "8359a6d8688f86f3818477c4d3fd8df04018e593fab9ad7ffa6fd0ebf5c1acf1",
     "05-OP-10": "5d77be3eb92d9db44da15ea02a0706239f8f1c70b32ab0391d5dad6aff94cfa2",
-    "05-OP-11": "a9db7bb96766662e5c520e7714d0a6d266aebe9eb17603d4fd9750698c33133b",
-    "05-OP-12": "6e99f2ecbb3c7fbf3ae4f852104b03bdf65f5edf7ead1cae02c9e1d833708353",
-    "05-OP-13": "3fd84ffa594776abc51a8c277c5d9a0dbc2b7b8fc11ab1bf32209b30c7d97890",
-    "05-OP-14": "cba4686a8a31fb18cf9c5213af5ac4a545b03ce548b5c7bcd96e8f7f76648a40",
-    "05-OP-15": "a9ad8cf1423e99bf092e6dd52ce273555cda77b4beb52ff3a78564db1800933e",
-    "05-OP-16": "b5ee19533f9f7241117f5958e092978446b49faacba312eec5781be548b3303d",
+    "05-OP-11": "ecf20846cbb70956b075e5d7397ce068d59b51d51986bcd2f5e25236f88c3ff7",
+    "05-OP-12": "9a0acc6c7279de3d7c1696e9ce3c4f9a16667a9aca25c43857ac76b8e4d4a793",
+    "05-OP-13": "8cf9f59c3af760dec33de17c98940af57b3771c7c7842360baee7ba7fcd9d8c1",
+    "05-OP-14": "6de7de82e7c3daca3c1089c855b94584cf9bfee47f71fe7020e3a9d6621961eb",
+    "05-OP-15": "ce451642a40332fea15da796393f833880ba94948f663c60023e77043bedd0cd",
+    "05-OP-16": "ddced357a351860e42537449d526dfa3ba8cda0a2aa28073d3ea5b81eae2008f",
     "05-OP-17": "7c85fa51323c9993bb63f97ee4728c8fc5c13bd2c30315f6bcf7a69a77a39304",
     "05-OP-18": "6cf5eaa4e1ab068d667ea1d8cc26ba366694329669cba39443a4878a6d04714a",
     "05-OP-19": "d84cd2202079d852ba918b99e2bae1c964650362dee200942a9addba954bd5e5",
@@ -442,24 +493,24 @@ FROZEN_ATOM_DIGESTS = {
     "05-OP-23": "1e0adc2fc7abf416c131f9ad5b6b054581eabf0365a9707b985fbaaa06e5e5b7",
     "05-OP-24": "2f3009f8b80b944f11fa2cf378409d85eb7891a59cdc1024e58ce2b67af5b800",
     "05-OP-25": "29f27a57545efd179e0f6b2766f48d7fdafb7c2ac6c3bbaeeaf5b0c0646ed502",
-    "05-OP-26": "90050a454489c33ba0afb9caa41763591f22461eca947dd3525109c97976362f",
-    "05-OP-27": "03a81560ae84cb4dd151e57da34d117a9e616a33700957796edea98c2afaf82f",
+    "05-OP-26": "3371ca252044c6c2da596ce3df10ad6151221430d93a6bc3dbc98098e3e8d31d",
+    "05-OP-27": "9fb4c24b5756860675db850ab82192199afb562b157e2b5197b0e132704333ea",
     "05-OP-28": "9eb81ed515be3e016371f951a75a3b65c4bae2cd8bfbc8de22c510f8e71be56b",
     "05-OP-29": "3fc46cb450b49244dfea8859a662190128420ab2565f7d18f5f97d7ffb27fd0a",
     "05-OP-30": "30c8c04f547161b7c40cbe5659a0c5fee34102f34a6fc605bcde8740221b461b",
     "05-OP-31": "20100b3524f8381469ea2a24d035da89be346f7809b70bfd6698aa94b6df9031",
     "05-OP-32": "fc45b2ef829aeebdb0d524059c63452cd2d9c733a5c2cdf85b5bfdd845bda8a1",
-    "05-OP-33": "351ab8e6ef739ce3fee1db7b04b8299240c63598c79dbf20e92f2d9c94a38aab",
+    "05-OP-33": "c652775fe389dd144ce8eec68ebd91f0327b20fd42fb57ae09118fea1270750f",
     "05-OP-34": "0d2c7d4a051a43dc6b0c93b241434ff1d66bbd7a3e6d47e5c74b669d2fd687bf",
     "05-OP-35": "6eb9a0e1023aeed6dcf43abe8623a9b94dcb38db15224f38915320108c276ef7",
     "05-OP-36": "aeaaf9888f922b31159b8b7536444603897d649c8fb477e77bda659346177ab4",
     "05-OP-37": "2b27734c6956b706e031130b2c444cb69f0ff5a6a6886d1935611f61767f02b0",
-    "05-OP-38": "46685ae74bc05fac13ce0ff877e92978bea109b4660f7d7ca637222819cb368e",
+    "05-OP-38": "39e4e800864ca561f12d83cb0bb1b17489f46c59112bd1aacd3f00cf15e3e33d",
     "05-OP-39": "c23d7e9e0964df3655319ce26c486a8c006097cdb8ff714d8f7a1b8fcfecaa14",
-    "05-OP-40": "4d3da3d13beca3c53b18515dbd15178b214fa3baa015ab975257ef778899dc18",
+    "05-OP-40": "12c188d00bf6544645b1b4a7cb6b09af563b6dbbc98c2e931db9189d16e11376",
     "05-OP-41": "7bbbba7450bf89f9eac66a7f660f7352940a41e4baf6f7497873e46a29be41db",
     "05-OP-42": "d469e00652b7b9239f37532817b3c0f563bf22a66743c66dab66ce879be43ff4",
-    "05-OP-43": "51dd3a7b7df5ecc20c7796a49f7a0122daf0f3a4b6538993964fea7a9f284ee7",
+    "05-OP-43": "ec1ffe9abb148062ed80d696b0f9b5a60af477633b218dc2ca51675170e887b1",
     "05-OP-44": "5da56d56c928f228c0ed069c078696b648863e440c732ee41e8a23626757ea4e",
 }
 
@@ -472,19 +523,19 @@ FROZEN_REGION_DIGESTS = {
         'spec/11-ffi.md',
         '## 1. Python Interop',
         '## 2. C Interop',
-        '4ab5f5f0b8cd948648b4afa4ade5950b8686b1e10e2809ab5c78e26450ae7ee7',
+        '837dbd997cbe338382f349f51629a61cf326df75070ee86028cb542c2dfffdae',
     ),
     'numeric wire codecs and roles': (
         'spec/10-serialization.md',
         '### 3.2 Exact Numeric Value Codec',
         '## 4. Invariant Revalidation At Decode Boundaries',
-        '1703f7335244efd2d1189e74ab33cbecb8a57bbe615027fd1fa20cdbd83d42b4',
+        '273568d1ffaf227ad5d67ba2cba960de0c9a1121187d973c831b201947798caa',
     ),
     "agent numeric surface discipline": (
         "AGENTS.md",
         "### Numeric Surface Discipline",
         "### Public-Surface Change Rule",
-        "92b7a9076e1b671f4d7e7329337380939ab816a90f157533041d2b78a658b0b9",
+        "1e0620ff04db0988f44b04171e596344616fecb1448945c7d77a1cac633c9ac2",
     ),
     "numeric value semantics": (
         "spec/04-type-system.md",
@@ -496,13 +547,13 @@ FROZEN_REGION_DIGESTS = {
         "spec/05-risc-primitives.md",
         "### 2.1 Elementwise Binary",
         "### 2.4 Movement",
-        "a8fc522c8db143bce747512c7c64c52f62b2fb40c18e1e7906bf03ebcf027cf0",
+        "5cfbd4054d35b0c496c60ef70fb5d526431dbcbf391c229039e0d5fa656389ee",
     ),
     "logical builtin contract": (
         "spec/05-risc-primitives.md",
         "### 3.2 Comparison and Logical Operations",
         "### 3.3 Activation Functions",
-        "0f5112fa156d699d2bff79b65c0447d1075a381556b5f887f57d8dd0646dfd57",
+        "3c65a26f4a5f3bd8469bf6b78e32c79df3b8d61c119016bceb13cecb14097cb5",
     ),
     "name-preserving rank polymorphism": (
         "spec/04-type-system.md",
@@ -526,7 +577,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/05-risc-primitives.md",
         "### 3.8 Named Lossy Cast Forms",
         "## 4. Standard Lowerings",
-        "4c2e336e26005cfea1a4cd649236231db3f5a4add35305f385434bbd3c68f089",
+        "cd150af8941f2702efae3c86290ae7755b7011ff357dd4b841ab9d514c83232c",
     ),
     "capability schema": (
         "spec/design/capability_table.md",
@@ -544,7 +595,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/dtype_semantics.md",
         "## Phase 4 - the capability table becomes the permanent guard",
         "## I1. Interlock with loud unsupported ([#730])",
-        "ea61b94d134aa288bf5378b14490b97a2a9f4a2aa2566c9383164cf202cdb407",
+        "d21e93e6b327941813f93a47f2ecdf1cc5983a7eb6bf77528f25c25ed1cf3713",
     ),
     "compiled stdlib consumer": (
         "spec/design/loud_unsupported.md",
@@ -1216,10 +1267,22 @@ def validate_normative_contract(
     require_all(
         spec10,
         (
-            ("Schema version 8 is explicitly\npresent", "wire v8 presence"),
+            ("Schema version 9 is explicitly\npresent", "wire v9 presence"),
             ("the only accepted version", "wire current-version exactness"),
             ("There is no versionless default", "wire versionless rejection"),
             ("versionless default, legacy migration", "wire migration rejection"),
+            (
+                "Every requirement uses the exact\n`NonnegativeExtent` adapter over a nonnegative `int64`",
+                "wire literal-witness requirement carrier",
+            ),
+            (
+                "`WireDagNode.shape_deps` contains exact u64 node\nreferences to strictly earlier nodes",
+                "wire shape-dependency references",
+            ),
+            (
+                "`shape_deps`, `span_id` (explicitly null when absent), and `merged_spans` are\nmandatory fields",
+                "wire mandatory invocation fields",
+            ),
             ("WireRiscOp::Count { axes }", "wire count variant"),
             (
                 "complete\nnon-empty vector of unique normalized original-axis "
@@ -1285,7 +1348,7 @@ def validate_normative_contract(
     )
     require_all(
         docs["spec/design/dtype_semantics.md"],
-        (("No partial WireDag v8 is published.", "wire atomic cutover"),),
+        (("No partial WireDag v9 is published.", "wire atomic cutover"),),
         violations,
     )
     require_all(
@@ -2285,8 +2348,8 @@ def validate_normative_contract(
             "takes rank and every target extent as exact tagged int64 scalars",
             "changes no metadata, ownership, or payload",
             "preserves every stored element bit",
-            "exactly the twenty-eight final public C callable identities",
-            "axes and unboxed rank are `int32_t`",
+            "exactly the thirty-two final public C callable identities",
+            "unboxed axes and rank are `int32_t`",
             "tensor arguments and results are [05-OP-44]'s opaque `chelis_tensor` "
             "handles, and every tensor result is a new owner",
             "alignment, live-owner state, and write-guard state, before reading "
@@ -2554,14 +2617,15 @@ def validate_normative_contract(
         ),
         "05-OP-38": (
             "governs exactly these five numeric-capacity identities and signatures",
-            "`tensor_scan` | `(T,((T,int64)->T!E),int64)->tensor[n,T]!E`",
+            "`tensor_scan` | `(T,((T,int64)->T!E),int64)->tensor[n,..state_shape(T),element(T)]!E`",
             "`process_run` | `(string,List[string])->(int64,string,string)!{IO}`",
             "`test_assert_eq` | `(Q,Q,string)->unit!{Test}`",
             "`test_assert_close_tensor` | `(&tensor[..r,p_float],"
             "&tensor[..r,p_float],p_float,string)->unit!{Test}`",
             "`test_assert_eq_tensor` | `(&tensor[..r,p],&tensor[..r,p],string)"
             "->unit!{Test}`",
-            "`T` is one active numeric or bool scalar type",
+            "`T` is a scalar or tensor state",
+            "shape and dtype are invariant across every callback application",
             "`Q` is one static type in [05-OP-36]'s scalar or recursive equality "
             "domain",
             "Repeated variables denote the same type, dtype, rank, and dimensions",

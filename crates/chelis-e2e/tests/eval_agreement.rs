@@ -350,6 +350,7 @@ fn agreement_op_for_risc(op: &RiscOp) -> AgreementOp {
         | RiscOp::Shrink { .. }
         | RiscOp::Stride { .. }
         | RiscOp::Shape { .. }
+        | RiscOp::ExtentWitness { .. }
         | RiscOp::Const { .. }
         | RiscOp::ConstTensor { .. }
         | RiscOp::Load { .. }

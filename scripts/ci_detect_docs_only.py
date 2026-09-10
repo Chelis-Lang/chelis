@@ -74,6 +74,7 @@ EXECUTABLE_DOC_PATHS: frozenset[str] = frozenset(
         "spec/03-deep-syntax.md",
         "spec/04-type-system.md",
         "spec/05-risc-primitives.md",
+        "spec/registry/builtin_semantic_identities.md",
         "spec/11-ffi.md",
         "spec/design/capability_table.md",
         "spec/design/compiled_value_ownership.md",

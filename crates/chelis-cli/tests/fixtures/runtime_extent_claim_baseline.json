@@ -234,7 +234,7 @@
       "errors": [],
       "score": 1,
       "signatures": {
-        "f": "(tensor[f32], tensor[rows, f32]) -> tensor[*, f32]"
+        "f": "(tensor[f32], tensor[rows, f32]) -> tensor[4, f32]"
       },
       "success": true
     },
@@ -257,7 +257,7 @@
       "errors": [],
       "score": 1,
       "signatures": {
-        "f": "(tensor[f32], tensor[rows, f32]) -> tensor[*, f32]"
+        "f": "(tensor[f32], tensor[rows, f32]) -> tensor[4, f32]"
       },
       "success": true
     },
@@ -280,7 +280,7 @@
       "errors": [],
       "score": 1,
       "signatures": {
-        "f": "(tensor[f32], tensor[rows, f32]) -> tensor[*, f32]"
+        "f": "(tensor[f32], tensor[rows, f32]) -> tensor[4, f32]"
       },
       "success": true
     },
@@ -298,7 +298,7 @@
       "errors": [],
       "score": 1,
       "signatures": {
-        "f": "(tensor[f32], tensor[rows, f32]) -> tensor[*, f32]"
+        "f": "(tensor[f32], tensor[rows, f32]) -> tensor[4, f32]"
       },
       "success": true
     },
@@ -308,24 +308,24 @@
   "literal.root.mismatch": {
     "c": {
       "stage": "execute",
-      "stderr": "",
-      "stdout": "main = tensor(shape=[5], data=[7.0, 7.0, 7.0, 7.0, 7.0])",
-      "success": true
+      "stderr": "extent `4`: claimed = 4, x axis 0 = 5\nnumeric trap: domain in load at int64",
+      "stdout": "",
+      "success": false
     },
     "check": {
       "errors": [],
       "score": 1,
       "signatures": {
-        "f": "(tensor[f32], tensor[rows, f32]) -> tensor[*, f32]",
+        "f": "(tensor[f32], tensor[rows, f32]) -> tensor[4, f32]",
         "main": "() -> tensor[4, f32]"
       },
       "success": true
     },
     "eval": {
       "stage": "execute",
-      "stderr": "",
-      "stdout": "main = tensor(shape=[5], data=[7.0, 7.0, 7.0, 7.0, 7.0])",
-      "success": true
+      "stderr": "error: extent `4`: claimed = 4, x axis 0 = 5\nnumeric trap: domain in load at int64",
+      "stdout": "",
+      "success": false
     },
     "issue": 1377
   },
@@ -340,7 +340,7 @@
       "errors": [],
       "score": 1,
       "signatures": {
-        "f": "(tensor[f32], tensor[rows, f32]) -> tensor[*, f32]",
+        "f": "(tensor[f32], tensor[rows, f32]) -> tensor[4, f32]",
         "main": "() -> tensor[4, f32]"
       },
       "success": true
@@ -494,7 +494,7 @@
       "errors": [],
       "score": 1,
       "signatures": {
-        "f": "(tensor[d0, f32], tensor[d1, f32]) -> tensor[d0, *, f32]"
+        "f": "(tensor[d0, f32], tensor[d1, f32]) -> tensor[d0, d1, f32]"
       },
       "success": true
     },
@@ -517,7 +517,7 @@
       "errors": [],
       "score": 1,
       "signatures": {
-        "f": "(tensor[d0, f32], tensor[d1, f32]) -> tensor[d0, *, f32]"
+        "f": "(tensor[d0, f32], tensor[d1, f32]) -> tensor[d0, d1, f32]"
       },
       "success": true
     },
@@ -540,7 +540,7 @@
       "errors": [],
       "score": 1,
       "signatures": {
-        "f": "(tensor[d0, f32], tensor[d1, f32]) -> tensor[d0, *, f32]"
+        "f": "(tensor[d0, f32], tensor[d1, f32]) -> tensor[d0, d1, f32]"
       },
       "success": true
     },
@@ -558,7 +558,7 @@
       "errors": [],
       "score": 1,
       "signatures": {
-        "f": "(tensor[d0, f32], tensor[d1, f32]) -> tensor[d0, *, f32]"
+        "f": "(tensor[d0, f32], tensor[d1, f32]) -> tensor[d0, d1, f32]"
       },
       "success": true
     },
@@ -576,7 +576,7 @@
       "errors": [],
       "score": 1,
       "signatures": {
-        "f": "(tensor[d0, f32], tensor[d1, f32]) -> tensor[d0, *, f32]",
+        "f": "(tensor[d0, f32], tensor[d1, f32]) -> tensor[d0, d1, f32]",
         "main": "() -> tensor[2, 3, f32]"
       },
       "success": true
@@ -600,7 +600,7 @@
       "errors": [],
       "score": 1,
       "signatures": {
-        "f": "(tensor[d0, f32], tensor[d1, f32]) -> tensor[d0, *, f32]",
+        "f": "(tensor[d0, f32], tensor[d1, f32]) -> tensor[d0, d1, f32]",
         "main": "() -> tensor[2, 2, f32]"
       },
       "success": true
@@ -624,7 +624,7 @@
       "errors": [],
       "score": 1,
       "signatures": {
-        "f": "(tensor[f32], tensor[d0, f32], tensor[d1, f32]) -> tensor[*, f32]"
+        "f": "(tensor[f32], tensor[d0, f32], tensor[d1, f32]) -> tensor[d0, f32]"
       },
       "success": true
     },
@@ -647,7 +647,7 @@
       "errors": [],
       "score": 1,
       "signatures": {
-        "f": "(tensor[f32], tensor[d0, f32], tensor[d1, f32]) -> tensor[*, f32]"
+        "f": "(tensor[f32], tensor[d0, f32], tensor[d1, f32]) -> tensor[d0, f32]"
       },
       "success": true
     },
@@ -670,7 +670,7 @@
       "errors": [],
       "score": 1,
       "signatures": {
-        "f": "(tensor[f32], tensor[d0, f32], tensor[d1, f32]) -> tensor[*, f32]"
+        "f": "(tensor[f32], tensor[d0, f32], tensor[d1, f32]) -> tensor[d0, f32]"
       },
       "success": true
     },
@@ -688,7 +688,7 @@
       "errors": [],
       "score": 1,
       "signatures": {
-        "f": "(tensor[f32], tensor[d0, f32], tensor[d1, f32]) -> tensor[*, f32]"
+        "f": "(tensor[f32], tensor[d0, f32], tensor[d1, f32]) -> tensor[d0, f32]"
       },
       "success": true
     },
@@ -706,7 +706,7 @@
       "errors": [],
       "score": 1,
       "signatures": {
-        "f": "(tensor[f32], tensor[d0, f32], tensor[d1, f32]) -> tensor[*, f32]",
+        "f": "(tensor[f32], tensor[d0, f32], tensor[d1, f32]) -> tensor[d0, f32]",
         "main": "() -> tensor[2, f32]"
       },
       "success": true
@@ -730,7 +730,7 @@
       "errors": [],
       "score": 1,
       "signatures": {
-        "f": "(tensor[f32], tensor[d0, f32], tensor[d1, f32]) -> tensor[*, f32]",
+        "f": "(tensor[f32], tensor[d0, f32], tensor[d1, f32]) -> tensor[d0, f32]",
         "main": "() -> tensor[3, f32]"
       },
       "success": true
@@ -838,7 +838,7 @@
           "severity": 0.8
         }
       ],
-      "score": 0.9142857142857144,
+      "score": 0.9142857142857143,
       "signatures": {},
       "success": false
     },
@@ -931,7 +931,7 @@
       "errors": [],
       "score": 1,
       "signatures": {
-        "f": "(tensor[rows, f32]) -> tensor[*, f32]"
+        "f": "(tensor[rows, f32]) -> tensor[2, f32]"
       },
       "success": true
     },
@@ -954,7 +954,7 @@
       "errors": [],
       "score": 1,
       "signatures": {
-        "f": "(tensor[rows, f32]) -> tensor[*, f32]"
+        "f": "(tensor[rows, f32]) -> tensor[2, f32]"
       },
       "success": true
     },
@@ -977,7 +977,7 @@
       "errors": [],
       "score": 1,
       "signatures": {
-        "f": "(tensor[rows, f32]) -> tensor[*, f32]"
+        "f": "(tensor[rows, f32]) -> tensor[2, f32]"
       },
       "success": true
     },
@@ -995,7 +995,7 @@
       "errors": [],
       "score": 1,
       "signatures": {
-        "f": "(tensor[rows, f32]) -> tensor[*, f32]"
+        "f": "(tensor[rows, f32]) -> tensor[2, f32]"
       },
       "success": true
     },
@@ -1005,7 +1005,7 @@
   "shrink.root.mismatch": {
     "c": {
       "stage": "execute",
-      "stderr": "chelis: runtime dim disagrees with static extent 2 at node 2 axis 0",
+      "stderr": "Domain: movement target shape mismatch\nnumeric trap: domain in shrink at int64",
       "stdout": "",
       "success": false
     },
@@ -1013,7 +1013,7 @@
       "errors": [],
       "score": 1,
       "signatures": {
-        "f": "(tensor[rows, f32]) -> tensor[*, f32]",
+        "f": "(tensor[rows, f32]) -> tensor[2, f32]",
         "main": "() -> tensor[2, f32]"
       },
       "success": true
@@ -1037,7 +1037,7 @@
       "errors": [],
       "score": 1,
       "signatures": {
-        "f": "(tensor[rows, f32]) -> tensor[*, f32]",
+        "f": "(tensor[rows, f32]) -> tensor[2, f32]",
         "main": "() -> tensor[2, f32]"
       },
       "success": true
@@ -1088,7 +1088,7 @@
           "severity": 0.8
         }
       ],
-      "score": 0.9333333333333332,
+      "score": 0.9333333333333333,
       "signatures": {},
       "success": false
     },

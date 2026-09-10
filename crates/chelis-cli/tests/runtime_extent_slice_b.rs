@@ -572,25 +572,11 @@ fn an_op_declared_witness_reaches_the_hip_prologue_without_panicking() {
     );
 }
 
-/// The same example on the C lane, for the LOCAL half of section 4.7.
-///
-/// `seq` is one class with sixteen members: `x`'s own axis, seven extents
-/// operations compute, and eight folded reads of computed tensors. The last
-/// group is the guard set, and on `main` only FOUR of the eight are guarded,
-/// because chelis#616's `runtime_dim_sites` finds sites by walking
-/// occurrences for an op-declared name rather than by asking which members a
-/// class has. The derivation finds all eight, and each renders [04-NUM-9]
-/// instead of `chelis: runtime dim `seq` mismatch at node N axis A` followed
-/// by `abort()`.
-///
-/// The eight is this example's measured count, not a property of the rule; an
-/// edit to the example is expected to change it, and a reader updating it
-/// should re-derive rather than relax the assertion, because the count is the
-/// only thing here that distinguishes finding every member from finding the
-/// four the walk already found.
-///
-/// EVIDENTIARY STATUS: regression test on both halves - four guards and the
-/// legacy rendering on `main`, eight and [04-NUM-9] here.
+/// Every local folded read of `seq` is guarded at its operation. The
+/// current example's canonical contractions and explicit epsilon produce
+/// seventeen such reads: nine in projections/attention, three in each
+/// normalization block, and two in the feed-forward projections. The emitted nodes/axes below pin that independent
+/// derivation, so a missing or duplicated guard cannot preserve the count.
 #[test]
 fn every_local_member_of_one_class_is_guarded_at_its_operation_on_c() {
     if !gcc_available() {
@@ -615,17 +601,45 @@ fn every_local_member_of_one_class_is_guarded_at_its_operation_on_c() {
         !emitted.contains("chelis: runtime dim `seq` mismatch"),
         "no local guard keeps the legacy rendering"
     );
+    let guarded_sites = [
+        (12, 0),
+        (16, 0),
+        (20, 0),
+        (24, 2),
+        (25, 0),
+        (29, 1),
+        (32, 1),
+        (35, 0),
+        (39, 0),
+        (55, 0),
+        (56, 0),
+        (57, 0),
+        (60, 0),
+        (65, 0),
+        (81, 0),
+        (82, 0),
+        (83, 0),
+    ];
     assert_eq!(
         emitted.matches("extent `seq`: claimed = ").count(),
-        8,
-        "every folded read of a computed tensor under this claim is guarded"
+        guarded_sites.len()
     );
+    for (node, axis) in guarded_sites {
+        assert_eq!(
+            emitted
+                .matches(&format!(
+                    "extent `seq`: claimed = %lld, node {node} axis {axis} = %lld"
+                ))
+                .count(),
+            1
+        );
+    }
     assert_eq!(
         emitted
-            .matches(&format!("{}\");", domain_trap_line("expand")))
+            .matches(&format!("{}\");", domain_trap_line("insert")))
             .count(),
-        8,
-        "and each renders [04-NUM-9] naming the operation"
+        guarded_sites.len(),
+        "each local guard renders [04-NUM-9] naming its operation"
     );
 }
 
@@ -956,10 +970,9 @@ fn an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_c() {
 /// binder; the def reads all three, so each is a kernel input and each later
 /// witness is guarded against the canonical one at entry. `f` is a kernel on
 /// both lanes; a bare-variable body would be host code on both and would
-/// carry no guard on either. The canonical member is the derivation's, not
-/// the signature's first parameter: the compiled kernel for this program
-/// renders `p` as canonical, and the eval lane renders the identical lines
-/// because it reads the same derivation (C2.7).
+/// carry no guard on either. The signature's first parameter `zz` is the
+/// canonical witness on both lanes, as required by section 4.7. Helper
+/// extraction must preserve that order rather than sorting by binding name.
 ///
 /// EVIDENTIARY STATUS: regression test for the rendering. On the tree
 /// without B2h's guard reordering eval reported the symbolic-binding
@@ -977,7 +990,7 @@ fn load_load_named_class_guards_every_non_canonical_member_on_eval() {
     assert!(!ok, "the witness `r` disagrees: {out}");
     assert!(out.contains(&domain_trap_line("load")), "{out}");
     assert!(
-        out.contains("extent `zdim`: p axis 0 = 2, r axis 0 = 3"),
+        out.contains("extent `zdim`: zz axis 0 = 2, r axis 0 = 3"),
         "the later witness is compared against the canonical one, as the compiled kernel renders it: {out}"
     );
     let zz_disagrees = format!(
@@ -986,7 +999,7 @@ fn load_load_named_class_guards_every_non_canonical_member_on_eval() {
     let (ok, out) = eval_result(&dir, "zz_disagrees.ch", &zz_disagrees);
     assert!(!ok, "the witness `zz` disagrees: {out}");
     assert!(
-        out.contains("extent `zdim`: p axis 0 = 2, zz axis 0 = 3"),
+        out.contains("extent `zdim`: zz axis 0 = 3, p axis 0 = 2"),
         "every non-canonical member is its own guard: {out}"
     );
     let agree = format!(
@@ -1077,7 +1090,7 @@ fn a_class_with_no_movement_bound_consumer_still_guards_on_eval() {
     assert!(!ok, "the witnesses of `zdim` disagree at 2 and 3: {out}");
     assert!(out.contains(&domain_trap_line("load")), "{out}");
     assert!(
-        out.contains("extent `zdim`: p axis 0 = 3, zz axis 0 = 2"),
+        out.contains("extent `zdim`: zz axis 0 = 2, p axis 0 = 3"),
         "section 4.7's context line names the claim, both witnesses and each \
          observed extent: {out}"
     );
@@ -1115,7 +1128,7 @@ fn a_class_with_no_movement_bound_consumer_still_guards_on_c() {
     assert!(!ok, "the binary must fail: {out}");
     assert!(out.contains(&domain_trap_line("load")), "{out}");
     assert!(
-        out.contains("extent `zdim`: p axis 0 = 3, zz axis 0 = 2"),
+        out.contains("extent `zdim`: zz axis 0 = 2, p axis 0 = 3"),
         "byte-identical to the eval twin's line: {out}"
     );
 
@@ -1178,7 +1191,7 @@ fn two_classes_sharing_one_node_keep_separate_guards_on_eval() {
     assert!(!ok, "the `rows` witnesses disagree at 1 and 2: {out}");
     assert!(out.contains(&domain_trap_line("load")), "{out}");
     assert!(
-        out.contains("extent `rows`: p axis 0 = 2, zz axis 0 = 1"),
+        out.contains("extent `rows`: zz axis 0 = 1, p axis 0 = 2"),
         "the axis-0 class reports axis 0 of both members: {out}"
     );
     assert!(
@@ -1193,7 +1206,7 @@ fn two_classes_sharing_one_node_keep_separate_guards_on_eval() {
     );
     assert!(!ok, "the `cols` witnesses disagree at 2 and 3: {out}");
     assert!(
-        out.contains("extent `cols`: p axis 1 = 3, zz axis 1 = 2"),
+        out.contains("extent `cols`: zz axis 1 = 2, p axis 1 = 3"),
         "the axis-1 class is its own guard, naming axis 1 of the same two \
          member nodes: {out}"
     );
@@ -1228,7 +1241,7 @@ fn two_classes_sharing_one_node_keep_separate_guards_on_c() {
     assert!(!ok, "the binary must fail: {out}");
     assert!(out.contains(&domain_trap_line("load")), "{out}");
     assert!(
-        out.contains("extent `rows`: p axis 0 = 2, zz axis 0 = 1"),
+        out.contains("extent `rows`: zz axis 0 = 1, p axis 0 = 2"),
         "byte-identical to the eval twin's line: {out}"
     );
     assert!(!out.contains("extent `cols`"), "{out}");
@@ -1241,7 +1254,7 @@ fn two_classes_sharing_one_node_keep_separate_guards_on_c() {
     assert!(!ok, "the binary must fail: {out}");
     assert!(out.contains(&domain_trap_line("load")), "{out}");
     assert!(
-        out.contains("extent `cols`: p axis 1 = 3, zz axis 1 = 2"),
+        out.contains("extent `cols`: zz axis 1 = 2, p axis 1 = 3"),
         "byte-identical to the eval twin's line: {out}"
     );
 

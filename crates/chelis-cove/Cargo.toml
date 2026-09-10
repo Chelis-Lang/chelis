@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 anyhow = "1"
 chelis-tide.workspace = true
+chelis-types.workspace = true
 crossterm = "0.29.0"
 ratatui = { version = "0.30.0", default-features = false, features = ["crossterm_0_29"] }
 tree-sitter = "0.26.8"

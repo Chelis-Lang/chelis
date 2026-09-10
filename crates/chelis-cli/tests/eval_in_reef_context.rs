@@ -229,8 +229,9 @@ fn cmd_eval_json_reef_package_simple_def_emits_json() {
         .expect("simple_value root present");
     // [05-OBS-4]: scalar-typed roots are bare scalars at every exit even
     // when a lane internally realizes them through a rank-0 tensor.
-    assert_eq!(simple["value"]["type"], "int32");
-    assert_eq!(simple["value"]["value"], 42);
+    assert_eq!(simple["value"]["type"], "scalar");
+    assert_eq!(simple["value"]["value"]["dtype"], "int32");
+    assert_eq!(simple["value"]["value"]["value"], 42);
 }
 
 /// Fixture #2: reef package with a path-dep import. Covers the
@@ -375,7 +376,7 @@ fn cmd_eval_value_binding_calling_imported_fn_is_not_dropped() {
     let roots = parsed["roots"].as_array().expect("roots array");
     let find_value = |name: &str| -> Option<i64> {
         roots.iter().find_map(|r| {
-            (r["name"].as_str() == Some(name)).then(|| r["value"]["value"].as_i64())?
+            (r["name"].as_str() == Some(name)).then(|| r["value"]["value"]["value"].as_i64())?
         })
     };
     assert_eq!(
@@ -463,9 +464,9 @@ module_prefix = "Mylib"
         .find(|root| root["name"] == "result")
         .expect("result root");
     assert_eq!(
-        result["value"]["value"],
-        serde_json::json!(7.0),
-        "[05-OBS-4] requires a scalar-typed root to stay bare"
+        result["value"],
+        serde_json::json!({"type": "scalar", "value": {"dtype": "f32", "bits": "40e00000"}}),
+        "[05-OBS-4] keeps the root scalar; spec/10 encodes its exact stored f32 bits"
     );
 }
 
@@ -507,7 +508,7 @@ fn cmd_eval_host_arrow_pure_root_surfaces_applied_value() {
         .unwrap_or_else(|e| panic!("eval --json must emit valid JSON, got {stdout:?}: {e}"));
     let roots = parsed["roots"].as_array().expect("roots array");
     let priced = roots.iter().find_map(|r| {
-        (r["name"].as_str() == Some("priced")).then(|| r["value"]["value"].as_i64())?
+        (r["name"].as_str() == Some("priced")).then(|| r["value"]["value"]["value"].as_i64())?
     });
     assert_eq!(
         priced,
@@ -609,7 +610,7 @@ fn cmd_eval_host_arrow_consumed_pure_root_realizes_concrete_value() {
         .unwrap_or_else(|e| panic!("eval --json must emit valid JSON, got {stdout:?}: {e}"));
     let roots = parsed["roots"].as_array().expect("roots array");
     let consumer = roots.iter().find_map(|r| {
-        (r["name"].as_str() == Some("consumer")).then(|| r["value"]["value"].as_i64())?
+        (r["name"].as_str() == Some("consumer")).then(|| r["value"]["value"]["value"].as_i64())?
     });
     assert_eq!(
         consumer,
@@ -625,7 +626,7 @@ fn cmd_eval_host_arrow_consumed_pure_root_realizes_concrete_value() {
         "the consumed root `base` must still surface; got roots: {roots:?}"
     );
     assert_eq!(
-        base.and_then(|r| r["value"]["value"].as_i64()),
+        base.and_then(|r| r["value"]["value"]["value"].as_i64()),
         Some(42),
         "a consumed pure nullary root must surface its concrete result; got roots: {roots:?}"
     );

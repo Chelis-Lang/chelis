@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "freeze_sha256": "978f9fcdec0efb941fa778e66893c32a530f01765594d04dcf01c13c1ee78498",
+  "freeze_sha256": "cd6df6e3821f800b648c849e34719d8c7cc385741b8c5fb3c996c6e03c20b69f",
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -1457,14 +1457,6 @@
       "sample": "uint16_t* restrict __out_{id} = (uint16_t*)t{id}_data;"
     },
     {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_blas_matmul",
-      "sample": "float"
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_blas_matmul_reduced_f",
-      "sample": "int64_t t{id}_mk = (int64_t)({m_expr}) * (int64_t)({k_expr});"
-    },
-    {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_cast",
       "sample": "int64_t {first_trap_index} = INT64_MAX;"
     },
@@ -1477,16 +1469,12 @@
       "sample": "chelis_fill_scalar(t{id}_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)(int64_..."
     },
     {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_const_tensor",
-      "sample": "memcpy(t{id}_data, __bits, {}u * sizeof(uint32_t)); }}"
-    },
-    {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_count",
       "sample": "const uint8_t* restrict __count_in_{id} = (const uint8_t*)t{a}_data;"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_expand",
-      "sample": "for (int64_t i = 0; i < t{id}_size; i++) {{"
+      "sample": "for (int64_t i = 0; i < chelis_movement_count(t{id}_movement); i++) {{"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_extrema_adjoint",
@@ -1518,7 +1506,7 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_permute",
-      "sample": "for (int64_t i = 0; i < t{id}_size; i++) {{"
+      "sample": "for (int64_t i = 0; i < chelis_movement_count(t{id}_movement); i++) {{"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_preplanned",
@@ -1553,19 +1541,7 @@
       "sample": "for (int64_t outer = 0; outer < t{id}_size; outer++) {{"
     },
     {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_sum",
-      "sample": "int8_t"
-    },
-    {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_sum_general",
-      "sample": "for (int64_t outer = 0; outer < t{id}_size; outer++) {{"
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_sum_int_promoted",
-      "sample": "for (int64_t outer = 0; outer < t{id}_size; outer++) {{"
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_sum_reduced_f",
       "sample": "for (int64_t outer = 0; outer < t{id}_size; outer++) {{"
     },
     {
@@ -1586,27 +1562,11 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_shrink",
-      "sample": "for (int64_t i = 0; i < t{id}_size; i++) {{"
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_sparse_gather",
-      "sample": "int64_t t{id}_before = {before};"
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_sparse_scatter_add",
-      "sample": "int64_t t{id}_before = {before};"
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_sparse_scatter_elements",
-      "sample": "int64_t t{id}_axis_size = {axis_size};"
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_sparse_scatter_replace",
-      "sample": "int64_t t{id}_before = {before};"
+      "sample": "for (int64_t i = 0; i < chelis_movement_count(t{id}_movement); i++) {{"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_stride",
-      "sample": "for (int64_t i = 0; i < t{id}_size; i++) {{"
+      "sample": "for (int64_t i = 0; i < chelis_movement_count(t{id}_movement); i++) {{"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_tensor_snapshot",
@@ -1669,10 +1629,6 @@
       "sample": "float"
     },
     {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_blas_matmul_summary",
-      "sample": "{}cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, {m_expr}, {n_expr}, {k_expr}, 1.0f, (con..."
-    },
-    {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_builtin",
       "sample": "float activation `{name}` resolved to non-float result type `{ty:?}`"
     },
@@ -1723,14 +1679,6 @@
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::emit_binary_func_elementwise_arm",
       "sample": "{ind} for (int64_t i = 0; i < {target_view}.count; i++) {{"
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::emit_sparse_gather_summary_body",
-      "sample": "{}int64_t {index_count} = chelis_tensor_numel({indices_ct});"
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::emit_sparse_scatter_summary_body",
-      "sample": "{}int64_t {target_count} = chelis_tensor_numel({target});"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::emit_unary_elementwise_arm",
@@ -2157,24 +2105,12 @@
       "sample": "float __av = {load}(__in_a_{id}[i]);"
     },
     {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_blas_matmul_reduced_f",
-      "sample": "for (int64_t i = 0; i < t{id}_mk; i++) t{id}_af[i] = {reduced_to_f32}(((const uint16_t*)t{a}_data..."
-    },
-    {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_cast",
       "sample": "[05-OP-6] C emission is float-to-integer only"
     },
     {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_const_tensor",
-      "sample": "{{ static const uint32_t __bits[] = {{ {} }};"
-    },
-    {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_count",
-      "sample": "int64_t __out_indices[{}];"
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_expand",
-      "sample": "int64_t out_indices[t{id}_rank > 0 ? t{id}_rank : 1];"
+      "sample": "uint8_t __bit_{id} = __count_in_{id}[__src_{id}];"
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_extrema_adjoint",
@@ -2186,7 +2122,7 @@
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_fused_reduce",
-      "sample": "int64_t out_indices[t{id}_rank > 0 ? t{id}_rank : 1];"
+      "sample": "((const float*)t{ext_id}_data)[idx_ext{i}]"
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_input_shape_preamble",
@@ -2197,20 +2133,12 @@
       "sample": "acc = chelis_fmin_propnan_f32(acc, ((const float*)t{a}_data)[src_idx]);"
     },
     {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_pad",
-      "sample": "{{ int8_t *__p = (int8_t*)t{id}_data; for (int64_t __i = 0; __i < t{id}_size; __i++) __p[__i] = I..."
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_permute",
-      "sample": "int64_t out_indices[t{id}_rank > 0 ? t{id}_rank : 1];"
-    },
-    {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_recip_reduced_f",
       "sample": "float __av = {load}(__in_a_{id}[i]);"
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_argcmp",
-      "sample": "int64_t out_indices[t{id}_rank > 0 ? t{id}_rank : 1];"
+      "sample": "float v = ((const float*)t{a}_data)[src_idx];"
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_max",
@@ -2218,23 +2146,11 @@
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_max_reduced_f",
-      "sample": "int64_t out_indices[t{id}_rank > 0 ? t{id}_rank : 1];"
+      "sample": "acc = chelis_fmax_propnan_f32(acc, {load}(((uint16_t*)t{a}_data)[src_idx]));"
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_simple",
       "sample": "((float*)t{id}_data)[0] = {fn_name}((const float*)t{a}_data, t{a}_size);"
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_sum_general",
-      "sample": "((float*)t{id}_data)[0] = chelis_sum_f32((const float*)t{a}_data, t{a}_size);"
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_sum_int_promoted",
-      "sample": "for (int64_t __zi = 0; __zi < t{id}_size; __zi++) {{ (({acc_c_ty}*)t{id}_data)[__zi] = 0; }}"
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_sum_reduced_f",
-      "sample": "int64_t out_indices[t{id}_rank > 0 ? t{id}_rank : 1];"
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_window",
@@ -2242,39 +2158,11 @@
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_window_grad",
-      "sample": "for (int64_t __i = 0; __i < t{id}_size; __i++) {{ ((float*)t{id}_data)[__i] = 0.0f; }}"
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_window_grad_full_indices",
-      "sample": "int64_t full_indices[t{input}_rank > 0 ? t{input}_rank : 1];"
+      "sample": "for (int64_t i = 0; i < t{id}_size; i++) {{ ((float*)t{id}_data)[i] = 0.0f; }}"
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_shape",
       "sample": "{{ int32_t *__p = (int32_t*)t{id}_data; __p[0] = (int32_t)({extent}); }}"
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_shrink",
-      "sample": "int64_t dst_indices[t{id}_rank > 0 ? t{id}_rank : 1];"
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_sparse_gather",
-      "sample": "int64_t t{id}_g = (t{indices}_dtype == CHELIS_DTYPE_I64) ? (int64_t)((const int64_t*)t{indices}_d..."
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_sparse_scatter_add",
-      "sample": "int64_t t{id}_g = (t{indices}_dtype == CHELIS_DTYPE_I64) ? (int64_t)((const int64_t*)t{indices}_d..."
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_sparse_scatter_elements",
-      "sample": "int64_t t{id}_g = (t{indices}_dtype == CHELIS_DTYPE_I64) ? (int64_t)((const int64_t*)t{indices}_d..."
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_sparse_scatter_replace",
-      "sample": "int64_t t{id}_g = (t{indices}_dtype == CHELIS_DTYPE_I64) ? (int64_t)((const int64_t*)t{indices}_d..."
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_stride",
-      "sample": "int64_t out_indices[t{id}_rank > 0 ? t{id}_rank : 1];"
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_tensor_snapshot",
@@ -2297,28 +2185,8 @@
       "sample": "(int64_t[]){{ {} }}"
     },
     {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_blas_matmul_summary",
-      "sample": "{}int64_t {shape_name}[{}] = {{ {} }};"
-    },
-    {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_builtin",
       "sample": "`cast_trunc` resolved to {source:?} -> {target:?}; [05-OP-6] is float-to-integer only"
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_sparse_summary",
-      "sample": "{}int64_t {shape_name}[{}] = {{ {} }};"
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_tensor_call",
-      "sample": "((int8_t*){tensor_name}_write.data)[0] = {value_name};"
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::emit_sparse_gather_summary_body",
-      "sample": "{} int64_t {target}_g = (chelis_host_tensor_dtype({indices_ct}) == CHELIS_DTYPE_I64) ? (int64_t)(..."
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::emit_sparse_scatter_summary_body",
-      "sample": "{} int64_t {target}_g = (chelis_host_tensor_dtype({indices_ct}) == CHELIS_DTYPE_I64) ? (int64_t)(..."
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_json_canonical_object_helpers",
@@ -2483,10 +2351,6 @@
     {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/tier2.rs|owner=align_matmul_operand",
       "sample": "lead_dims . len () . saturating_sub (source_lead . len ())"
-    },
-    {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/tier2.rs|owner=lower_conv2d",
-      "sample": "h_out_size . saturating_sub (1)"
     },
     {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/tier2.rs|owner=lower_layer_norm",
@@ -2746,7 +2610,7 @@
       "artifact": "the frozen INVENTORY_SOURCES file list",
       "enumerator": "chelis-repr-inventory: syn for Rust; clang's front end under fixed target lanes, a committed stub SDK, and a scrubbed environment for C and Objective-C headers, classified with the capacity census's closed type-word lists",
       "universe": {
-        "registered_sources": 71,
+        "registered_sources": 72,
         "roots": [
           "crates/chelis-runtime/src/**/*.rs",
           "crates/chelis-runtime/include/**/*.h",
@@ -3502,15 +3366,79 @@
     "release_reproducers": [
       {
         "name": "checked host metadata debug contract",
-        "command": "cargo nextest run -p chelis-runtime --features ownership-ledger --test checked_metadata --test metadata_compile --test checked_metadata_padding --test checked_c_metadata --test checked_c_indexing --test exact_tagged_c_abi --test op33_empty_tensor_axis_decomposition --test op33_tensor_validation --test op33_legal_domain_matrix --test dim_carrier_int64 --test tensor_repurpose --test tensor_write_guard"
+        "command": "cargo nextest run -p chelis-runtime --features ownership-ledger --test checked_metadata --test metadata_compile --test checked_metadata_padding --test checked_c_metadata --test checked_c_indexing --test checked_c_movement --test checked_c_movement_plans --test checked_c_affine --test checked_c_reduction --test checked_c_sparse --test checked_c_matmul --test checked_c_window --test checked_c_literal --test exact_tagged_c_abi --test op33_empty_tensor_axis_decomposition --test op33_tensor_validation --test op33_legal_domain_matrix --test dim_carrier_int64 --test tensor_repurpose --test tensor_write_guard"
       },
       {
         "name": "checked host metadata release contract",
-        "command": "cargo nextest run --release -p chelis-runtime --features ownership-ledger --test checked_metadata --test metadata_compile --test checked_metadata_padding --test checked_c_metadata --test checked_c_indexing --test exact_tagged_c_abi --test op33_empty_tensor_axis_decomposition --test op33_tensor_validation --test op33_legal_domain_matrix --test dim_carrier_int64 --test tensor_repurpose --test tensor_write_guard"
+        "command": "cargo nextest run --release -p chelis-runtime --features ownership-ledger --test checked_metadata --test metadata_compile --test checked_metadata_padding --test checked_c_metadata --test checked_c_indexing --test checked_c_movement --test checked_c_movement_plans --test checked_c_affine --test checked_c_reduction --test checked_c_sparse --test checked_c_matmul --test checked_c_window --test checked_c_literal --test exact_tagged_c_abi --test op33_empty_tensor_axis_decomposition --test op33_tensor_validation --test op33_legal_domain_matrix --test dim_carrier_int64 --test tensor_repurpose --test tensor_write_guard"
       },
       {
         "name": "checked C snapshot delegation and restoration mutations",
         "command": "cargo nextest run -p chelis-backend-c --test checked_c_metadata"
+      },
+      {
+        "name": "checked C reduction delegation and bypass mutations",
+        "command": "cargo nextest run -p chelis-backend-c --test checked_c_reduction"
+      },
+      {
+        "name": "checked C reductions and Count optimized sanitizer execution",
+        "command": "cargo nextest run -p chelis-backend-c --test exec_compile --test fused_compile -E binary(fused_compile) | test(checked_c_reduction_) | test(exec_count_) | test(exec_reduce_sum_) | test(ws_a1_exec_f64_reduce_sum) | test(ws_a1_exec_i32_reduce_sum) | test(exec_i8_reduce_sum) | test(exec_i16_reduce_sum) | test(direct_fused_sum_runtime_shape) | test(direct_fused_max_reduce_runtime_shape)"
+      },
+      {
+        "name": "checked C reduction example parity",
+        "command": "cargo nextest run -p chelis-cli --test parity --test issue_1294_standard_lowerings -E test(parity_count_bool_axes) | test(canonical_sum_) | test(scalar_and_fused_sums_) | test(hosted_matmul_preserves_the_canonical_reduction_tree) | test(hosted_matmul_empty_reductions_)"
+      },
+      {
+        "name": "checked C JSON ordering scratch delegation and lifetime controls",
+        "command": "cargo nextest run -p chelis-backend-c --test checked_c_json_scratch"
+      },
+      {
+        "name": "checked C JSON ordering scratch recursive and empty execution",
+        "command": "cargo nextest run -p chelis-cli --test issue_1314_json_bigint -E test(=json_object_serialization_is_recursive_canonical_unicode_order_in_eval_and_c)"
+      },
+      {
+        "name": "checked C JSON scratch ownership ledger and skipped-cleanup mutations",
+        "command": "cargo nextest run -p chelis-cli --test issue_1314_json_bigint -E test(=json_scratch_execution_detects_skipped_cleanup)"
+      },
+      {
+        "name": "checked C literal ingress delegation controls",
+        "command": "cargo nextest run -p chelis-backend-c --test checked_c_host_metadata"
+      },
+      {
+        "name": "checked C literal storage optimized sanitizer execution",
+        "command": "cargo nextest run -p chelis-backend-c --test exec_compile -E test(checked_literals_)"
+      },
+      {
+        "name": "checked C window delegation and bypass mutations",
+        "command": "cargo nextest run -p chelis-backend-c --test checked_c_window"
+      },
+      {
+        "name": "checked C window geometry and gradient optimized sanitizer execution",
+        "command": "cargo nextest run -p chelis-backend-c --test exec_compile --test issue_254_reduce_window_emit -E test(checked_windows_) | test(exec_reduce_window_) | binary(issue_254_reduce_window_emit)"
+      },
+      {
+        "name": "checked C window executable example parity",
+        "command": "cargo nextest run -p chelis-cli --test parity -E test(parity_checked_window_geometry) | test(parity_corpus_is_complete)"
+      },
+      {
+        "name": "checked C BLAS submission delegation and bypass mutations",
+        "command": "cargo nextest run -p chelis-backend-c --test checked_c_blas"
+      },
+      {
+        "name": "checked C BLAS optimized submission and vendor prototype execution",
+        "command": "cargo nextest run -p chelis-backend-c --test exec_compile -E test(checked_blas_) | test(blas_vendor_dimension_contract)"
+      },
+      {
+        "name": "checked C sparse delegation and bypass mutations",
+        "command": "cargo nextest run -p chelis-backend-c --test checked_c_sparse"
+      },
+      {
+        "name": "checked C sparse optimized sanitizer execution",
+        "command": "cargo nextest run -p chelis-backend-c --test exec_compile -E test(checked_c_sparse_)"
+      },
+      {
+        "name": "checked C sparse host summary execution and rejection",
+        "command": "cargo nextest run -p chelis-cli --test cross_library_sparse_summaries --test parity -E binary(cross_library_sparse_summaries) | test(parity_checked_sparse_axes)"
       },
       {
         "name": "checked C shared indexing cohort and restoration mutations",
@@ -3519,6 +3447,26 @@
       {
         "name": "checked C shared indexing optimized sanitizer execution",
         "command": "cargo nextest run -p chelis-backend-c --test exec_compile -E test(checked_c_indexing_)"
+      },
+      {
+        "name": "checked C movement delegation and restoration mutations",
+        "command": "cargo nextest run -p chelis-backend-c --test checked_c_movement --test checked_c_movement_plans"
+      },
+      {
+        "name": "movement local extent CLI parity and primitive diagnostics",
+        "command": "cargo nextest run -p chelis-cli --test issue_616_runtime_movement_c_parity"
+      },
+      {
+        "name": "verified expansion primitive identity and local guards",
+        "command": "cargo nextest run -p chelis-ir --test movement_expansion_kind"
+      },
+      {
+        "name": "verified expansion primitive identity and local guards in release",
+        "command": "cargo nextest run --release -p chelis-ir --test movement_expansion_kind"
+      },
+      {
+        "name": "checked C movement optimized sanitizer execution",
+        "command": "cargo nextest run -p chelis-backend-c --test exec_compile -E test(checked_c_movement_) | test(a_local_class_guards) | test(a_literal_claim_on_a_symbolic_input) | test(numeric_local_extent_claims)"
       },
       {
         "name": "checked C shared indexing dtype dispatch and storage reuse",

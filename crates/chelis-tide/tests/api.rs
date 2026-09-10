@@ -260,7 +260,7 @@ async fn eval_endpoint_uses_named_bindings_and_rejects_missing_inputs() {
         json!({
             "source_kind":"surf",
             "source":LOSS_PROGRAM,
-            "bindings":{"x":{"shape":[4],"data":{"dtype":"f32","values":[1.0,2.0,3.0,4.0]}}}
+            "bindings":{"x":{"shape":[4],"data":{"dtype":"f32","bits":["3f800000","40000000","40400000","40800000"]}}}
         }),
     )
     .await;
@@ -272,7 +272,7 @@ async fn eval_endpoint_uses_named_bindings_and_rejects_missing_inputs() {
         .find(|root| root["name"] == "loss")
         .expect("loss root");
     assert_eq!(loss_root["value"]["type"], "tensor");
-    assert_eq!(loss_root["value"]["value"]["data"]["values"][0], 2.5);
+    assert_eq!(loss_root["value"]["value"]["data"]["bits"][0], "40200000");
 
     let (_, bad) = post_json(
         router(),
@@ -344,7 +344,11 @@ entries = dict_entries(vocab)
         .expect("vocab root");
     assert_eq!(vocab["value"]["type"], "dict");
     assert_eq!(vocab["value"]["entries"][0]["key"]["type"], "string");
-    assert_eq!(vocab["value"]["entries"][0]["value"]["type"], "int64");
+    assert_eq!(vocab["value"]["entries"][0]["value"]["type"], "scalar");
+    assert_eq!(
+        vocab["value"]["entries"][0]["value"]["value"]["dtype"],
+        "int64"
+    );
     let entries = roots
         .iter()
         .find(|root| root["name"] == "entries")
@@ -352,7 +356,11 @@ entries = dict_entries(vocab)
     assert_eq!(entries["value"]["type"], "list");
     assert_eq!(entries["value"]["value"][0]["type"], "tuple");
     assert_eq!(entries["value"]["value"][0]["value"][0]["type"], "string");
-    assert_eq!(entries["value"]["value"][0]["value"][1]["type"], "int64");
+    assert_eq!(entries["value"]["value"][0]["value"][1]["type"], "scalar");
+    assert_eq!(
+        entries["value"]["value"][0]["value"][1]["value"]["dtype"],
+        "int64"
+    );
 }
 
 #[tokio::test]
@@ -367,7 +375,7 @@ items = to_list(x)
         json!({
             "source_kind":"surf",
             "source":source,
-            "bindings":{"x":{"shape":[4],"data":{"dtype":"f32","values":[1.0,2.0,3.0,4.0]}}}
+            "bindings":{"x":{"shape":[4],"data":{"dtype":"f32","bits":["3f800000","40000000","40400000","40800000"]}}}
         }),
     )
     .await;
@@ -381,13 +389,17 @@ items = to_list(x)
     assert_eq!(items["value"]["type"], "list");
     let values = items["value"]["value"].as_array().expect("list values");
     assert_eq!(values.len(), 4);
-    assert!(values.iter().all(|value| value["type"] == "float32"));
+    assert!(
+        values
+            .iter()
+            .all(|value| value["type"] == "scalar" && value["value"]["dtype"] == "f32")
+    );
     assert_eq!(
         values
             .iter()
-            .map(|value| value["value"].as_f64().expect("float32 value"))
+            .map(|value| value["value"]["bits"].as_str().expect("f32 bits"))
             .collect::<Vec<_>>(),
-        vec![1.0, 2.0, 3.0, 4.0]
+        vec!["3f800000", "40000000", "40400000", "40800000"]
     );
 }
 
@@ -422,26 +434,26 @@ trimmed = dict_remove(merged, "gamma")
         .expect("prefix root");
     assert_eq!(prefix["value"]["type"], "list");
     assert_eq!(prefix["value"]["value"].as_array().unwrap().len(), 2);
-    assert_eq!(prefix["value"]["value"][1]["value"], 2);
+    assert_eq!(prefix["value"]["value"][1]["value"]["value"], 2);
     let suffix = roots
         .iter()
         .find(|root| root["name"] == "suffix")
         .expect("suffix root");
     assert_eq!(suffix["value"]["type"], "list");
-    assert_eq!(suffix["value"]["value"][0]["value"], 2);
+    assert_eq!(suffix["value"]["value"][0]["value"]["value"], 2);
     let groups = roots
         .iter()
         .find(|root| root["name"] == "groups")
         .expect("groups root");
     assert_eq!(groups["value"]["type"], "list");
     assert_eq!(groups["value"]["value"][0]["type"], "list");
-    assert_eq!(groups["value"]["value"][1]["value"][0]["value"], 3);
+    assert_eq!(groups["value"]["value"][1]["value"][0]["value"]["value"], 3);
     let scanned = roots
         .iter()
         .find(|root| root["name"] == "scanned")
         .expect("scanned root");
     assert_eq!(scanned["value"]["type"], "list");
-    assert_eq!(scanned["value"]["value"][2]["value"], 6);
+    assert_eq!(scanned["value"]["value"][2]["value"]["value"], 6);
     // Top-level tuple-typed bindings are expanded into per-field roots
     // (`<name>.0`, `<name>.1`, …) by `extend_root_names_from_value`, so
     // the `buckets` tuple-typed binding surfaces as two list roots.
@@ -450,25 +462,25 @@ trimmed = dict_remove(merged, "gamma")
         .find(|root| root["name"] == "buckets.0")
         .expect("buckets.0 root");
     assert_eq!(buckets_pass["value"]["type"], "list");
-    assert_eq!(buckets_pass["value"]["value"][0]["value"], 2);
+    assert_eq!(buckets_pass["value"]["value"][0]["value"]["value"], 2);
     let buckets_fail = roots
         .iter()
         .find(|root| root["name"] == "buckets.1")
         .expect("buckets.1 root");
     assert_eq!(buckets_fail["value"]["type"], "list");
-    assert_eq!(buckets_fail["value"]["value"][0]["value"], 1);
+    assert_eq!(buckets_fail["value"]["value"][0]["value"]["value"], 1);
     let exploded = roots
         .iter()
         .find(|root| root["name"] == "exploded")
         .expect("exploded root");
     assert_eq!(exploded["value"]["type"], "list");
-    assert_eq!(exploded["value"]["value"][1]["value"], 11);
+    assert_eq!(exploded["value"]["value"][1]["value"]["value"], 11);
     let flattened = roots
         .iter()
         .find(|root| root["name"] == "flattened")
         .expect("flattened root");
     assert_eq!(flattened["value"]["type"], "list");
-    assert_eq!(flattened["value"]["value"][2]["value"], 3);
+    assert_eq!(flattened["value"]["value"][2]["value"]["value"], 3);
     let merged = roots
         .iter()
         .find(|root| root["name"] == "merged")
@@ -481,8 +493,9 @@ trimmed = dict_remove(merged, "gamma")
         .iter()
         .find(|entry| entry["key"]["value"] == "beta")
         .expect("beta entry");
-    assert_eq!(beta["value"]["type"], "int64");
-    assert_eq!(beta["value"]["value"], 20);
+    assert_eq!(beta["value"]["type"], "scalar");
+    assert_eq!(beta["value"]["value"]["dtype"], "int64");
+    assert_eq!(beta["value"]["value"]["value"], 20);
     let trimmed = roots
         .iter()
         .find(|root| root["name"] == "trimmed")
@@ -493,7 +506,7 @@ trimmed = dict_remove(merged, "gamma")
         .iter()
         .find(|root| root["name"] == "key_count")
         .expect("key_count root");
-    assert_eq!(key_count["value"]["value"], 1);
+    assert_eq!(key_count["value"]["value"]["value"], 1);
 }
 
 #[tokio::test]
@@ -912,7 +925,7 @@ async fn router_handles_concurrent_requests() {
         json!({
             "source_kind":"surf",
             "source":LOSS_PROGRAM,
-            "bindings":{"x":{"shape":[4],"data":{"dtype":"f32","values":[1.0,2.0,3.0,4.0]}}}
+            "bindings":{"x":{"shape":[4],"data":{"dtype":"f32","bits":["3f800000","40000000","40400000","40800000"]}}}
         }),
     ));
     let (first, second) = tokio::join!(first, second);
@@ -934,4 +947,62 @@ async fn malformed_json_returns_bad_request() {
         .await
         .expect("response");
     assert_eq!(response.status().as_u16(), 400);
+}
+
+#[tokio::test]
+async fn eval_endpoint_rejects_legacy_and_malformed_storage_before_execution() {
+    for data in [
+        json!({"dtype":"f32","values":[1.0,2.0,3.0,4.0]}),
+        json!({"dtype":"f32","bits":["3f80000","40000000","40400000","40800000"]}),
+    ] {
+        let response = router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/eval")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "source_kind":"surf", "source":LOSS_PROGRAM,
+                            "bindings":{"x":{"shape":[4],"data":data}}
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), 422);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let message = String::from_utf8(body.to_vec()).expect("error text");
+        assert!(message.contains("bindings"), "{message}");
+    }
+}
+
+#[tokio::test]
+async fn eval_endpoint_rejects_valid_storage_with_wrong_binding_dtype() {
+    let (status, error) = post_json(
+        router(),
+        "/eval",
+        json!({
+            "source_kind":"surf", "source":LOSS_PROGRAM,
+            "bindings":{"x":{"shape":[4],"data":{
+                "dtype":"f64",
+                "bits":["3ff0000000000000","4000000000000000","4008000000000000","4010000000000000"]
+            }}}
+        }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(error["ok"], false, "{error}");
+    let diagnostics = error["errors"].to_string();
+    assert!(
+        diagnostics.contains("f32") && diagnostics.contains("f64"),
+        "{error}"
+    );
 }

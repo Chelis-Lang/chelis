@@ -21,8 +21,9 @@ mod element;
 mod ieee_narrow;
 mod metadata;
 use metadata::{
-    AllocationBytes, AxisDecomposition, ByteCount, ElementCount, IterationSpace, MetadataError,
-    ShapeMetadata,
+    AllocationBytes, AxisDecomposition, ByteCount, ElementCount, IterationSpace, MatmulDimension,
+    MatmulMetadata, MatmulPart, MetadataError, MovementMetadata, MovementOp, ReductionMetadata,
+    ShapeMetadata, SparseMetadata, WindowMetadata,
 };
 mod ownership_ledger;
 
@@ -259,6 +260,27 @@ pub unsafe fn data_as_f32_const(tensor: *const chelis_tensor) -> *const f32 {
         );
     }
     unsafe { tensor_data(tensor) as *const f32 }
+}
+
+/// [05-HOST-4]: choose the first invalid host name in the declared order.
+/// Complete validation precedes construction of language/runtime list values.
+fn list_dir_names_to_strings(
+    mut names: Vec<std::ffi::OsString>,
+    path: &str,
+) -> Result<Vec<String>, String> {
+    names.sort_by(|a, b| a.as_encoded_bytes().cmp(b.as_encoded_bytes()));
+    names
+        .into_iter()
+        .map(|name| {
+            name.into_string().map_err(|name| {
+                format!(
+                    "IO trap in list_dir: directory b\"{}\", entry b\"{}\": name is not valid UTF-8",
+                    path.as_bytes().escape_ascii(),
+                    name.as_encoded_bytes().escape_ascii()
+                )
+            })
+        })
+        .collect()
 }
 
 macro_rules! runtime_fail {
@@ -1609,15 +1631,20 @@ unsafe fn validate_dict_key(key: chelis_value, context: &str) {
     validate_value(key, context);
     match key.tag {
         chelis_value_tag::CHELIS_VALUE_STRING => {}
-        chelis_value_tag::CHELIS_VALUE_SCALAR => match validate_scalar(key.payload.scalar, context) {
+        chelis_value_tag::CHELIS_VALUE_SCALAR => match validate_scalar(key.payload.scalar, context)
+        {
             RuntimeDType::Bool
             | RuntimeDType::I8
             | RuntimeDType::I16
             | RuntimeDType::I32
             | RuntimeDType::I64 => {}
-            _ => runtime_fail!("Domain: {context}: dictionary keys must be string, bool, or signed integer scalars"),
+            _ => runtime_fail!(
+                "Domain: {context}: dictionary keys must be string, bool, or signed integer scalars"
+            ),
         },
-        _ => runtime_fail!("Domain: {context}: dictionary keys must be string, bool, or signed integer scalars"),
+        _ => runtime_fail!(
+            "Domain: {context}: dictionary keys must be string, bool, or signed integer scalars"
+        ),
     }
 }
 
@@ -2283,6 +2310,1182 @@ pub unsafe extern "C" fn chelis_tensor_elementwise_index_step_for_shape(
     }
     let domain = metadata_or_fail(IterationSpace::new(&extents), context);
     metadata_or_fail(domain.elementwise_index_step(&(*input).metadata), context)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_unravel_index(
+    tensor: *const chelis_tensor,
+    index: chelis_scalar,
+    coordinates: *mut chelis_scalar,
+) {
+    let context = "chelis_tensor_unravel_index";
+    tensor_metadata_dtype(tensor, context);
+    let count = metadata_or_fail(
+        ElementCount::scratch_entries((*tensor).shape().len(), 0),
+        context,
+    );
+    let length = metadata_or_fail(count.scratch_len::<chelis_scalar>(), context);
+    if length > 0 && coordinates.is_null() {
+        runtime_fail!("Domain: {context} positive rank has null coordinates");
+    }
+    let index = exact_i64_scalar(index, context);
+    metadata_or_fail(
+        (*tensor).metadata.unravel_into(index, |axis, value| {
+            coordinates
+                .add(axis)
+                .write(chelis_scalar_from_bits(CHELIS_DTYPE_I64, value as u64));
+        }),
+        context,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_flat_index(
+    tensor: *const chelis_tensor,
+    coordinates: *const chelis_scalar,
+) -> i64 {
+    let context = "chelis_tensor_flat_index";
+    tensor_metadata_dtype(tensor, context);
+    let count = metadata_or_fail(
+        ElementCount::scratch_entries((*tensor).shape().len(), 0),
+        context,
+    );
+    let length = metadata_or_fail(count.scratch_len::<chelis_scalar>(), context);
+    if length > 0 && coordinates.is_null() {
+        runtime_fail!("Domain: {context} positive rank has null coordinates");
+    }
+    let index = metadata_or_fail(
+        (*tensor)
+            .metadata
+            .flat_index_by(|axis| exact_i64_scalar(coordinates.add(axis).read(), context)),
+        context,
+    );
+    i64::try_from(index)
+        .unwrap_or_else(|_| runtime_fail!("Overflow: {context} index exceeds int64"))
+}
+
+unsafe fn checked_movement_target(
+    tensor: *const chelis_tensor,
+    rank: chelis_scalar,
+    shape: *const chelis_scalar,
+    context: &str,
+) -> ShapeMetadata {
+    let dtype = tensor_metadata_dtype(tensor, context);
+    let rank = exact_i64_scalar(rank, context);
+    if rank < 0 {
+        runtime_fail!("Domain: {context} negative rank {rank}");
+    }
+    let rank = i32::try_from(rank)
+        .unwrap_or_else(|_| runtime_fail!("Overflow: {context} rank exceeds int32"));
+    if rank > 0 && shape.is_null() {
+        runtime_fail!("Domain: {context} positive rank has null shape");
+    }
+    let count = metadata_or_fail(ElementCount::from_extents(&[i64::from(rank)]), context);
+    metadata_or_fail(count.scratch_len::<chelis_scalar>(), context);
+    let length = metadata_or_fail(count.scratch_len::<i64>(), context);
+    let mut extents = Vec::with_capacity(length);
+    for axis in 0..length {
+        extents.push(exact_i64_scalar(shape.add(axis).read(), context));
+    }
+    let target = metadata_or_fail(ShapeMetadata::contiguous(&extents, dtype), context);
+    metadata_or_fail(target.bytes().allocation(), context);
+    target
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_check_permute(
+    tensor: *const chelis_tensor,
+    rank: chelis_scalar,
+    shape: *const chelis_scalar,
+    axes: *const chelis_scalar,
+) {
+    let context = "chelis_tensor_check_permute";
+    let target = checked_movement_target(tensor, rank, shape, context);
+    if target.rank() != (*tensor).rank() {
+        runtime_fail!("Domain: {context} permutation rank mismatch");
+    }
+    let count = metadata_or_fail(
+        ElementCount::scratch_entries((*tensor).shape().len(), 0),
+        context,
+    );
+    metadata_or_fail(count.scratch_len::<chelis_scalar>(), context);
+    let length = metadata_or_fail(count.scratch_len::<i64>(), context);
+    if length > 0 && axes.is_null() {
+        runtime_fail!("Domain: {context} positive rank has null axes");
+    }
+    let mut decoded_axes = Vec::with_capacity(length);
+    for axis in 0..length {
+        decoded_axes.push(exact_i64_scalar(axes.add(axis).read(), context));
+    }
+    metadata_or_fail(
+        (*tensor)
+            .metadata
+            .require_permutation(&target, &decoded_axes),
+        context,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_check_expand(
+    tensor: *const chelis_tensor,
+    rank: chelis_scalar,
+    shape: *const chelis_scalar,
+    axis: i32,
+) {
+    let context = "chelis_tensor_check_expand";
+    let target = checked_movement_target(tensor, rank, shape, context);
+    metadata_or_fail((*tensor).metadata.require_expansion(&target, axis), context);
+}
+
+fn affine_result<T>(result: Result<T, MetadataError>, op: &str) -> T {
+    result.unwrap_or_else(|error| {
+        let class = match &error {
+            MetadataError::Domain(_) => "domain",
+            MetadataError::Overflow(_) => "overflow",
+        };
+        eprintln!("{error}");
+        runtime_fail!("numeric trap: {class} in {op} at int64")
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_check_literal(
+    rank: chelis_scalar,
+    shape: *const chelis_scalar,
+    exemplar: chelis_scalar,
+    count: chelis_scalar,
+) {
+    let op = "const";
+    let dtype = reduction_exemplar(exemplar, op);
+    let count = affine_scalar(count, op);
+    if exemplar.bits != 0 || count < 0 {
+        affine_result::<()>(
+            Err(MetadataError::Domain(
+                "literal requires a zero exemplar and nonnegative count".into(),
+            )),
+            op,
+        );
+    }
+    let shape = reduction_array(rank, shape, op);
+    let metadata = affine_result(ShapeMetadata::contiguous(&shape, dtype), op);
+    if metadata.elements().get() != count {
+        affine_result::<()>(
+            Err(MetadataError::Domain(
+                "literal count differs from result shape".into(),
+            )),
+            op,
+        );
+    }
+    affine_result(metadata.bytes().allocation(), op);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_write_literal(
+    guard: *mut chelis_tensor_write,
+    count: chelis_scalar,
+    values: *const chelis_scalar,
+) {
+    let op = "const";
+    let tensor = lock_live_write_guard(guard, op);
+    let count = affine_scalar(count, op);
+    if count != tensor.metadata.elements().get() || (count > 0 && values.is_null()) {
+        affine_result::<()>(
+            Err(MetadataError::Domain(
+                "literal count or source pointer differs from destination".into(),
+            )),
+            op,
+        );
+    }
+    let length = affine_result(
+        tensor.metadata.elements().scratch_len::<chelis_scalar>(),
+        op,
+    );
+    // Preflight every carrier before the first store. The caller keeps the
+    // complete literal array stable and separate from the destination.
+    for index in 0..length {
+        if reduction_exemplar(values.add(index).read(), op) != tensor.metadata.dtype() {
+            affine_result::<()>(
+                Err(MetadataError::Domain(
+                    "literal element dtype mismatch".into(),
+                )),
+                op,
+            );
+        }
+    }
+    for index in 0..length {
+        write_scalar_bits((*guard).tensor, index, values.add(index).read());
+    }
+    unlock_tensor(tensor, TENSOR_ACCESS_WRITING);
+}
+
+pub type chelis_window_op = c_int;
+pub const CHELIS_WINDOW_SUM: chelis_window_op = 0;
+pub const CHELIS_WINDOW_MEAN: chelis_window_op = 1;
+pub const CHELIS_WINDOW_MAX: chelis_window_op = 2;
+pub const CHELIS_WINDOW_MIN: chelis_window_op = 3;
+pub const CHELIS_WINDOW_GRAD: chelis_window_op = 4;
+pub type chelis_window_side = c_int;
+pub const CHELIS_WINDOW_SOURCE: chelis_window_side = 0;
+pub const CHELIS_WINDOW_RESULT: chelis_window_side = 1;
+#[allow(non_camel_case_types)]
+pub type chelis_movement_op = c_int;
+pub const CHELIS_MOVEMENT_EXPAND: chelis_movement_op = 0;
+pub const CHELIS_MOVEMENT_INSERT: chelis_movement_op = 1;
+pub const CHELIS_MOVEMENT_PAD: chelis_movement_op = 2;
+pub const CHELIS_MOVEMENT_SHRINK: chelis_movement_op = 3;
+pub const CHELIS_MOVEMENT_STRIDE: chelis_movement_op = 4;
+#[allow(non_camel_case_types)]
+pub type chelis_movement_side = c_int;
+pub const CHELIS_MOVEMENT_SOURCE: chelis_movement_side = 0;
+pub const CHELIS_MOVEMENT_RESULT: chelis_movement_side = 1;
+#[allow(non_camel_case_types)]
+pub struct chelis_movement_plan {
+    metadata: MovementMetadata,
+    op: &'static str,
+}
+unsafe fn movement_plan<'a>(plan: *const chelis_movement_plan) -> &'a chelis_movement_plan {
+    if plan.is_null() {
+        affine_result::<()>(
+            Err(MetadataError::Domain("null movement plan".into())),
+            "movement",
+        );
+    }
+    &*plan
+}
+unsafe fn movement_plan_rank(input: *const chelis_tensor, rank: chelis_scalar, op: &str) -> usize {
+    tensor_metadata_dtype(input, op);
+    let rank = affine_scalar(rank, op);
+    if rank < 0 {
+        affine_result::<()>(
+            Err(MetadataError::Domain("negative movement rank".into())),
+            op,
+        );
+    }
+    let rank = affine_result(
+        i32::try_from(rank).map_err(|_| MetadataError::Overflow("movement rank exceeds int32")),
+        op,
+    );
+    if rank != (*input).rank() {
+        affine_result::<()>(
+            Err(MetadataError::Domain("movement rank mismatch".into())),
+            op,
+        );
+    }
+    (*input).shape().len()
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_permute_plan(
+    input: *const chelis_tensor,
+    rank: chelis_scalar,
+    axes: *const chelis_scalar,
+) -> *mut chelis_movement_plan {
+    let op = "permute";
+    let rank = movement_plan_rank(input, rank, op);
+    let axes = affine_array(axes, rank, op);
+    let metadata = affine_result(MovementMetadata::permuted(&(*input).metadata, &axes), op);
+    Box::into_raw(Box::new(chelis_movement_plan { metadata, op }))
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_expand_plan(
+    input: *const chelis_tensor,
+    axis: chelis_scalar,
+    size: chelis_scalar,
+    operation: chelis_movement_op,
+) -> *mut chelis_movement_plan {
+    let (op, insert) = match operation {
+        CHELIS_MOVEMENT_EXPAND => ("expand", false),
+        CHELIS_MOVEMENT_INSERT => ("insert", true),
+        _ => affine_result(
+            Err(MetadataError::Domain("invalid expansion operation".into())),
+            "movement",
+        ),
+    };
+    tensor_metadata_dtype(input, op);
+    let metadata = affine_result(
+        MovementMetadata::expanded(
+            &(*input).metadata,
+            affine_scalar(axis, op),
+            affine_scalar(size, op),
+            insert,
+        ),
+        op,
+    );
+    Box::into_raw(Box::new(chelis_movement_plan { metadata, op }))
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_affine_plan(
+    input: *const chelis_tensor,
+    rank: chelis_scalar,
+    first: *const chelis_scalar,
+    second: *const chelis_scalar,
+    operation: chelis_movement_op,
+) -> *mut chelis_movement_plan {
+    let (op, kind) = match operation {
+        CHELIS_MOVEMENT_PAD => ("pad", MovementOp::Pad),
+        CHELIS_MOVEMENT_SHRINK => ("shrink", MovementOp::Shrink),
+        CHELIS_MOVEMENT_STRIDE => ("stride", MovementOp::Stride),
+        _ => affine_result(
+            Err(MetadataError::Domain("invalid affine operation".into())),
+            "movement",
+        ),
+    };
+    let rank = movement_plan_rank(input, rank, op);
+    let first = affine_array(first, rank, op);
+    let second = if matches!(kind, MovementOp::Stride) {
+        Vec::new()
+    } else {
+        affine_array(second, rank, op)
+    };
+    let metadata = affine_result(
+        MovementMetadata::affine(&(*input).metadata, &first, &second, kind),
+        op,
+    );
+    Box::into_raw(Box::new(chelis_movement_plan { metadata, op }))
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_movement_extent(
+    plan: *const chelis_movement_plan,
+    side: chelis_movement_side,
+    axis: chelis_scalar,
+) -> i64 {
+    let plan = movement_plan(plan);
+    let shape = match side {
+        CHELIS_MOVEMENT_SOURCE => plan.metadata.input(),
+        CHELIS_MOVEMENT_RESULT => plan.metadata.result(),
+        _ => affine_result(
+            Err(MetadataError::Domain("invalid movement side".into())),
+            plan.op,
+        ),
+    };
+    affine_result(shape.extent_at(affine_scalar(axis, plan.op)), plan.op)
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_movement_count(plan: *const chelis_movement_plan) -> i64 {
+    movement_plan(plan).metadata.count().get()
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_movement_index(
+    plan: *const chelis_movement_plan,
+    linear: chelis_scalar,
+) -> i64 {
+    let plan = movement_plan(plan);
+    affine_result(plan.metadata.index(affine_scalar(linear, plan.op)), plan.op)
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_movement_check_target(
+    plan: *const chelis_movement_plan,
+    rank: chelis_scalar,
+    shape: *const chelis_scalar,
+) {
+    let plan = movement_plan(plan);
+    let shape = reduction_array(rank, shape, plan.op);
+    if shape != plan.metadata.result().shape() {
+        affine_result::<()>(
+            Err(MetadataError::Domain(
+                "movement target shape mismatch".into(),
+            )),
+            plan.op,
+        );
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_movement_plan_release(plan: *mut chelis_movement_plan) {
+    movement_plan(plan);
+    drop(Box::from_raw(plan));
+}
+
+pub struct chelis_window_plan {
+    metadata: WindowMetadata,
+    op: &'static str,
+}
+impl chelis_window_plan {
+    fn shape(&self, side: chelis_window_side) -> &ShapeMetadata {
+        match side {
+            CHELIS_WINDOW_SOURCE => self.metadata.input(),
+            CHELIS_WINDOW_RESULT => self.metadata.result(),
+            _ => affine_result(
+                Err(MetadataError::Domain("invalid window side".into())),
+                self.op,
+            ),
+        }
+    }
+}
+unsafe fn window_plan<'a>(plan: *const chelis_window_plan) -> &'a chelis_window_plan {
+    if plan.is_null() {
+        affine_result::<()>(
+            Err(MetadataError::Domain("null window plan".into())),
+            "reduce_window",
+        );
+    }
+    &*plan
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_window_plan(
+    input: *const chelis_tensor,
+    count: chelis_scalar,
+    window: *const chelis_scalar,
+    steps: *const chelis_scalar,
+    operation: chelis_window_op,
+) -> *mut chelis_window_plan {
+    let op = match operation {
+        CHELIS_WINDOW_SUM => "reduce_window_sum",
+        CHELIS_WINDOW_MEAN => "reduce_window_mean",
+        CHELIS_WINDOW_MAX => "reduce_window_max",
+        CHELIS_WINDOW_MIN => "reduce_window_min",
+        CHELIS_WINDOW_GRAD => "reduce_window_grad",
+        _ => affine_result(
+            Err(MetadataError::Domain("invalid window operation".into())),
+            "reduce_window",
+        ),
+    };
+    tensor_metadata_dtype(input, op);
+    let window = reduction_array(count, window, op);
+    let steps = reduction_array(count, steps, op);
+    let metadata = affine_result(WindowMetadata::new(&(*input).metadata, &window, &steps), op);
+    Box::into_raw(Box::new(chelis_window_plan { metadata, op }))
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_window_extent(
+    plan: *const chelis_window_plan,
+    side: chelis_window_side,
+    axis: chelis_scalar,
+) -> i64 {
+    let plan = window_plan(plan);
+    affine_result(
+        plan.shape(side).extent_at(affine_scalar(axis, plan.op)),
+        plan.op,
+    )
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_window_count(plan: *const chelis_window_plan) -> i64 {
+    window_plan(plan).metadata.count().get()
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_window_index(
+    plan: *const chelis_window_plan,
+    group: chelis_scalar,
+    leaf: chelis_scalar,
+) -> i64 {
+    let plan = window_plan(plan);
+    affine_result(
+        plan.metadata
+            .index(affine_scalar(group, plan.op), affine_scalar(leaf, plan.op)),
+        plan.op,
+    )
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_window_check_tensor(
+    plan: *const chelis_window_plan,
+    tensor: *const chelis_tensor,
+    side: chelis_window_side,
+) {
+    let plan = window_plan(plan);
+    let dtype = tensor_metadata_dtype(tensor, plan.op);
+    let expected = plan.shape(side);
+    if dtype != expected.dtype() || (*tensor).shape() != expected.shape() {
+        affine_result::<()>(
+            Err(MetadataError::Domain(
+                "window tensor shape or dtype mismatch".into(),
+            )),
+            plan.op,
+        );
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_window_check_target(
+    plan: *const chelis_window_plan,
+    side: chelis_window_side,
+    rank: chelis_scalar,
+    shape: *const chelis_scalar,
+) {
+    let plan = window_plan(plan);
+    let shape = reduction_array(rank, shape, plan.op);
+    if shape != plan.shape(side).shape() {
+        affine_result::<()>(
+            Err(MetadataError::Domain("window target shape mismatch".into())),
+            plan.op,
+        );
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_window_plan_release(plan: *mut chelis_window_plan) {
+    window_plan(plan);
+    drop(Box::from_raw(plan));
+}
+
+#[allow(non_camel_case_types)]
+pub type chelis_matmul_part = c_int;
+pub const CHELIS_MATMUL_LEFT: chelis_matmul_part = 0;
+pub const CHELIS_MATMUL_RIGHT: chelis_matmul_part = 1;
+pub const CHELIS_MATMUL_RESULT: chelis_matmul_part = 2;
+#[allow(non_camel_case_types)]
+pub type chelis_matmul_dimension_kind = c_int;
+pub const CHELIS_MATMUL_ROWS: chelis_matmul_dimension_kind = 0;
+pub const CHELIS_MATMUL_COLUMNS: chelis_matmul_dimension_kind = 1;
+pub const CHELIS_MATMUL_REDUCTION: chelis_matmul_dimension_kind = 2;
+#[allow(non_camel_case_types)]
+pub struct chelis_matmul_plan {
+    metadata: MatmulMetadata,
+}
+
+fn matmul_part(part: chelis_matmul_part) -> MatmulPart {
+    match part {
+        CHELIS_MATMUL_LEFT => MatmulPart::Left,
+        CHELIS_MATMUL_RIGHT => MatmulPart::Right,
+        CHELIS_MATMUL_RESULT => MatmulPart::Result,
+        _ => affine_result(
+            Err(MetadataError::Domain("invalid matmul part".into())),
+            "matmul",
+        ),
+    }
+}
+unsafe fn matmul_plan<'a>(plan: *const chelis_matmul_plan) -> &'a MatmulMetadata {
+    if plan.is_null() {
+        affine_result::<()>(
+            Err(MetadataError::Domain("null matmul plan".into())),
+            "matmul",
+        );
+    }
+    &(*plan).metadata
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_matmul_plan(
+    left: *const chelis_tensor,
+    right: *const chelis_tensor,
+    exemplar: chelis_scalar,
+) -> *mut chelis_matmul_plan {
+    tensor_metadata_dtype(left, "matmul");
+    tensor_metadata_dtype(right, "matmul");
+    let dtype = reduction_exemplar(exemplar, "matmul");
+    let metadata = affine_result(
+        MatmulMetadata::new(&(*left).metadata, &(*right).metadata, dtype),
+        "matmul",
+    );
+    Box::into_raw(Box::new(chelis_matmul_plan { metadata }))
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_matmul_extent(
+    plan: *const chelis_matmul_plan,
+    axis: chelis_scalar,
+) -> i64 {
+    affine_result(
+        matmul_plan(plan)
+            .result()
+            .extent_at(affine_scalar(axis, "matmul")),
+        "matmul",
+    )
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_matmul_dimension(
+    plan: *const chelis_matmul_plan,
+    dimension: chelis_matmul_dimension_kind,
+) -> i64 {
+    let dimension = match dimension {
+        CHELIS_MATMUL_ROWS => MatmulDimension::Rows,
+        CHELIS_MATMUL_COLUMNS => MatmulDimension::Columns,
+        CHELIS_MATMUL_REDUCTION => MatmulDimension::Reduction,
+        _ => affine_result(
+            Err(MetadataError::Domain("invalid matmul dimension".into())),
+            "matmul",
+        ),
+    };
+    matmul_plan(plan).dimension(dimension)
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_matmul_batch_count(plan: *const chelis_matmul_plan) -> i64 {
+    matmul_plan(plan).batches().get()
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_matmul_matrix_count(
+    plan: *const chelis_matmul_plan,
+    part: chelis_matmul_part,
+) -> i64 {
+    matmul_plan(plan).matrix_count(matmul_part(part)).get()
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_matmul_index(
+    plan: *const chelis_matmul_plan,
+    part: chelis_matmul_part,
+    batch: chelis_scalar,
+    element: chelis_scalar,
+) -> i64 {
+    affine_result(
+        matmul_plan(plan).index(
+            matmul_part(part),
+            affine_scalar(batch, "matmul"),
+            affine_scalar(element, "matmul"),
+        ),
+        "matmul",
+    )
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_matmul_check_target(
+    plan: *const chelis_matmul_plan,
+    rank: chelis_scalar,
+    shape: *const chelis_scalar,
+) {
+    let shape = reduction_array(rank, shape, "matmul");
+    if shape != matmul_plan(plan).result().shape() {
+        affine_result::<()>(
+            Err(MetadataError::Domain("matmul target shape mismatch".into())),
+            "matmul",
+        );
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_matmul_check_scratch(
+    plan: *const chelis_matmul_plan,
+    part: chelis_matmul_part,
+    exemplar: chelis_scalar,
+) {
+    let dtype = reduction_exemplar(exemplar, "matmul");
+    affine_result(
+        matmul_plan(plan)
+            .matrix_count(matmul_part(part))
+            .bytes(dtype)
+            .and_then(ByteCount::allocation),
+        "matmul",
+    );
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_matmul_check_vendor(
+    plan: *const chelis_matmul_plan,
+    maximum: chelis_scalar,
+) {
+    affine_result(
+        matmul_plan(plan).check_vendor(affine_scalar(maximum, "matmul")),
+        "matmul",
+    );
+}
+#[no_mangle]
+pub unsafe extern "C" fn chelis_matmul_plan_release(plan: *mut chelis_matmul_plan) {
+    matmul_plan(plan);
+    drop(Box::from_raw(plan));
+}
+
+#[allow(non_camel_case_types)]
+pub type chelis_sparse_op = c_int;
+pub const CHELIS_SPARSE_GATHER: chelis_sparse_op = 0;
+pub const CHELIS_SPARSE_ADD: chelis_sparse_op = 1;
+pub const CHELIS_SPARSE_REPLACE: chelis_sparse_op = 2;
+pub const CHELIS_SPARSE_ELEMENTS: chelis_sparse_op = 3;
+
+#[allow(non_camel_case_types)]
+pub struct chelis_sparse_plan {
+    metadata: SparseMetadata,
+    gather: bool,
+    op: &'static str,
+}
+
+impl chelis_sparse_plan {
+    fn result(&self) -> &ShapeMetadata {
+        if self.gather {
+            self.metadata.domain()
+        } else {
+            self.metadata.base()
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_sparse_plan(
+    base: *const chelis_tensor,
+    indices: *const chelis_tensor,
+    updates: *const chelis_tensor,
+    axis: chelis_scalar,
+    operation: chelis_sparse_op,
+) -> *mut chelis_sparse_plan {
+    let op = match operation {
+        CHELIS_SPARSE_GATHER => "gather",
+        CHELIS_SPARSE_ADD => "scatter",
+        CHELIS_SPARSE_REPLACE => "scatter_replace",
+        CHELIS_SPARSE_ELEMENTS => "scatter_elements",
+        _ => runtime_fail!("Domain: unknown sparse operation"),
+    };
+    let base_dtype = tensor_metadata_dtype(base, op);
+    let index_dtype = tensor_metadata_dtype(indices, op);
+    if !matches!(
+        index_dtype,
+        RuntimeDType::I8 | RuntimeDType::I16 | RuntimeDType::I32 | RuntimeDType::I64
+    ) {
+        affine_result::<()>(
+            Err(MetadataError::Domain(
+                "sparse indices require a signed integer dtype".into(),
+            )),
+            op,
+        );
+    }
+    let metadata = affine_result(
+        SparseMetadata::new(
+            &(*base).metadata,
+            &(*indices).metadata,
+            affine_scalar(axis, op),
+            operation == CHELIS_SPARSE_ELEMENTS,
+        ),
+        op,
+    );
+    let gather = operation == CHELIS_SPARSE_GATHER;
+    if !gather {
+        if updates.is_null() {
+            affine_result::<()>(
+                Err(MetadataError::Domain("scatter requires updates".into())),
+                op,
+            );
+        }
+        let updates_dtype = tensor_metadata_dtype(updates, op);
+        if updates_dtype != base_dtype || (*updates).shape() != metadata.domain().shape() {
+            affine_result::<()>(
+                Err(MetadataError::Domain(
+                    "scatter update shape or dtype mismatch".into(),
+                )),
+                op,
+            );
+        }
+    }
+    Box::into_raw(Box::new(chelis_sparse_plan {
+        metadata,
+        gather,
+        op,
+    }))
+}
+
+unsafe fn sparse_plan<'a>(plan: *const chelis_sparse_plan) -> &'a chelis_sparse_plan {
+    if plan.is_null() {
+        runtime_fail!("Domain: null sparse plan");
+    }
+    &*plan
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_sparse_extent(
+    plan: *const chelis_sparse_plan,
+    axis: chelis_scalar,
+) -> i64 {
+    let p = sparse_plan(plan);
+    affine_result(p.result().extent_at(affine_scalar(axis, p.op)), p.op)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_sparse_count(plan: *const chelis_sparse_plan) -> i64 {
+    sparse_plan(plan).metadata.domain().elements().get()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_sparse_index_slot(
+    plan: *const chelis_sparse_plan,
+    linear: chelis_scalar,
+) -> i64 {
+    let p = sparse_plan(plan);
+    affine_result(p.metadata.index_slot(affine_scalar(linear, p.op)), p.op)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_sparse_data_index(
+    plan: *const chelis_sparse_plan,
+    linear: chelis_scalar,
+    selected: chelis_scalar,
+) -> i64 {
+    let p = sparse_plan(plan);
+    affine_result(
+        p.metadata
+            .data_index(affine_scalar(linear, p.op), affine_scalar(selected, p.op)),
+        p.op,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_sparse_check_target(
+    plan: *const chelis_sparse_plan,
+    rank: chelis_scalar,
+    shape: *const chelis_scalar,
+) {
+    let p = sparse_plan(plan);
+    let shape = reduction_array(rank, shape, p.op);
+    if shape != p.result().shape() {
+        affine_result::<()>(
+            Err(MetadataError::Domain("sparse target shape mismatch".into())),
+            p.op,
+        );
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_sparse_plan_release(plan: *mut chelis_sparse_plan) {
+    sparse_plan(plan);
+    drop(Box::from_raw(plan));
+}
+
+#[allow(non_camel_case_types)]
+pub type chelis_reduction_op = c_int;
+pub const CHELIS_REDUCE_SUM: chelis_reduction_op = 0;
+pub const CHELIS_REDUCE_COUNT: chelis_reduction_op = 1;
+pub const CHELIS_REDUCE_MAX: chelis_reduction_op = 2;
+pub const CHELIS_REDUCE_MIN: chelis_reduction_op = 3;
+pub const CHELIS_REDUCE_PROD: chelis_reduction_op = 4;
+pub const CHELIS_REDUCE_ARGMAX: chelis_reduction_op = 5;
+pub const CHELIS_REDUCE_ARGMIN: chelis_reduction_op = 6;
+
+#[allow(non_camel_case_types)]
+pub struct chelis_reduction_plan {
+    metadata: ReductionMetadata,
+    op: &'static str,
+}
+
+fn reduction_operation(op: chelis_reduction_op) -> &'static str {
+    match op {
+        CHELIS_REDUCE_SUM => "sum",
+        CHELIS_REDUCE_COUNT => "count",
+        CHELIS_REDUCE_MAX => "max_reduce",
+        CHELIS_REDUCE_MIN => "min_reduce",
+        CHELIS_REDUCE_PROD => "prod_reduce",
+        CHELIS_REDUCE_ARGMAX => "argmax_reduce",
+        CHELIS_REDUCE_ARGMIN => "argmin_reduce",
+        _ => runtime_fail!("Domain: unknown reduction operation"),
+    }
+}
+
+unsafe fn reduction_array(rank: chelis_scalar, values: *const chelis_scalar, op: &str) -> Vec<i64> {
+    let rank = affine_scalar(rank, op);
+    if rank < 0 {
+        affine_result::<()>(
+            Err(MetadataError::Domain("negative metadata array rank".into())),
+            op,
+        );
+    }
+    let rank = affine_result(
+        i32::try_from(rank)
+            .map_err(|_| MetadataError::Overflow("metadata array rank exceeds int32")),
+        op,
+    );
+    affine_array(values, rank as usize, op)
+}
+
+unsafe fn reduction_axes(
+    count: chelis_scalar,
+    axes: *const chelis_scalar,
+    rank: usize,
+    op: &str,
+) -> Vec<i64> {
+    let count = affine_scalar(count, op);
+    if count < 1 || count > rank as i64 {
+        affine_result::<()>(
+            Err(MetadataError::Domain(
+                "reduction axis count outside input rank".into(),
+            )),
+            op,
+        );
+    }
+    affine_array(axes, count as usize, op)
+}
+
+fn reduction_exemplar(value: chelis_scalar, op: &str) -> RuntimeDType {
+    let dtype = affine_result(
+        decode_runtime_dtype(value.dtype)
+            .map_err(|_| MetadataError::Domain("unknown scalar dtype".into())),
+        op,
+    );
+    let width = scalar_used_bits(dtype);
+    if value.reserved != [0; 7]
+        || (width < 64 && value.bits >> width != 0)
+        || (dtype == RuntimeDType::Bool && value.bits > 1)
+    {
+        affine_result::<()>(
+            Err(MetadataError::Domain(
+                "noncanonical reduction exemplar".into(),
+            )),
+            op,
+        );
+    }
+    dtype
+}
+
+fn new_reduction_plan(
+    shape: &[i64],
+    axes: &[i64],
+    exemplar: chelis_scalar,
+    op: &'static str,
+) -> *mut chelis_reduction_plan {
+    let dtype = reduction_exemplar(exemplar, op);
+    let metadata = affine_result(ReductionMetadata::new(shape, axes, dtype), op);
+    Box::into_raw(Box::new(chelis_reduction_plan { metadata, op }))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_reduction_plan(
+    tensor: *const chelis_tensor,
+    axis_count: chelis_scalar,
+    axes: *const chelis_scalar,
+    exemplar: chelis_scalar,
+    operation: chelis_reduction_op,
+) -> *mut chelis_reduction_plan {
+    let op = reduction_operation(operation);
+    tensor_metadata_dtype(tensor, op);
+    let axes = reduction_axes(axis_count, axes, (*tensor).shape().len(), op);
+    new_reduction_plan((*tensor).shape(), &axes, exemplar, op)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_shape_reduction_plan(
+    rank: chelis_scalar,
+    shape: *const chelis_scalar,
+    axis_count: chelis_scalar,
+    axes: *const chelis_scalar,
+    exemplar: chelis_scalar,
+    operation: chelis_reduction_op,
+) -> *mut chelis_reduction_plan {
+    let op = reduction_operation(operation);
+    let shape = reduction_array(rank, shape, op);
+    let axes = reduction_axes(axis_count, axes, shape.len(), op);
+    new_reduction_plan(&shape, &axes, exemplar, op)
+}
+
+unsafe fn reduction_plan<'a>(plan: *const chelis_reduction_plan) -> &'a chelis_reduction_plan {
+    if plan.is_null() {
+        runtime_fail!("Domain: null reduction plan");
+    }
+    &*plan
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_reduction_count(plan: *const chelis_reduction_plan) -> i64 {
+    reduction_plan(plan).metadata.leaves().get()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_reduction_extent(
+    plan: *const chelis_reduction_plan,
+    axis: chelis_scalar,
+) -> i64 {
+    let plan = reduction_plan(plan);
+    let axis = affine_scalar(axis, plan.op);
+    affine_result(plan.metadata.extent(axis), plan.op)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_reduction_index(
+    plan: *const chelis_reduction_plan,
+    outer: chelis_scalar,
+    leaf: chelis_scalar,
+) -> i64 {
+    let plan = reduction_plan(plan);
+    affine_result(
+        plan.metadata
+            .index(affine_scalar(outer, plan.op), affine_scalar(leaf, plan.op)),
+        plan.op,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_reduction_check_target(
+    plan: *const chelis_reduction_plan,
+    rank: chelis_scalar,
+    shape: *const chelis_scalar,
+) {
+    let plan = reduction_plan(plan);
+    let shape = reduction_array(rank, shape, plan.op);
+    if shape != plan.metadata.result().shape() {
+        affine_result::<()>(
+            Err(MetadataError::Domain(
+                "reduction target shape mismatch".into(),
+            )),
+            plan.op,
+        );
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_reduction_check_scratch(
+    plan: *const chelis_reduction_plan,
+    exemplar: chelis_scalar,
+) {
+    let plan = reduction_plan(plan);
+    let dtype = reduction_exemplar(exemplar, plan.op);
+    affine_result(
+        plan.metadata
+            .leaves()
+            .bytes(dtype)
+            .and_then(ByteCount::allocation),
+        plan.op,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_reduction_plan_release(plan: *mut chelis_reduction_plan) {
+    reduction_plan(plan);
+    drop(Box::from_raw(plan));
+}
+
+fn affine_scalar(value: chelis_scalar, op: &str) -> i64 {
+    affine_result(
+        if value.dtype == CHELIS_DTYPE_I64 && value.reserved == [0; 7] {
+            Ok(i64::from_ne_bytes(value.bits.to_ne_bytes()))
+        } else {
+            Err(MetadataError::Domain(
+                "requires canonical tagged int64 metadata".into(),
+            ))
+        },
+        op,
+    )
+}
+
+unsafe fn affine_array(values: *const chelis_scalar, length: usize, op: &str) -> Vec<i64> {
+    if length > 0 && values.is_null() {
+        affine_result::<()>(
+            Err(MetadataError::Domain("null movement bounds".into())),
+            op,
+        );
+    }
+    let count = affine_result(ElementCount::scratch_entries(length, 0), op);
+    affine_result(count.scratch_len::<chelis_scalar>(), op);
+    let mut result = Vec::with_capacity(affine_result(count.scratch_len::<i64>(), op));
+    for axis in 0..length {
+        result.push(affine_scalar(values.add(axis).read(), op));
+    }
+    result
+}
+
+#[derive(Clone, Copy)]
+enum AffineShapeOp {
+    Pad,
+    Shrink,
+    Stride,
+}
+
+unsafe fn affine_shape(
+    tensor: *const chelis_tensor,
+    rank: chelis_scalar,
+    first: *const chelis_scalar,
+    second: *const chelis_scalar,
+    shape: *mut chelis_scalar,
+    operation: AffineShapeOp,
+) {
+    let op = match operation {
+        AffineShapeOp::Pad => "pad",
+        AffineShapeOp::Shrink => "shrink",
+        AffineShapeOp::Stride => "stride",
+    };
+    tensor_metadata_dtype(tensor, op);
+    let rank = affine_scalar(rank, op);
+    if rank < 0 {
+        affine_result::<()>(
+            Err(MetadataError::Domain("negative movement rank".into())),
+            op,
+        );
+    }
+    let rank = affine_result(
+        i32::try_from(rank).map_err(|_| MetadataError::Overflow("movement rank exceeds int32")),
+        op,
+    );
+    if rank != (*tensor).rank() {
+        affine_result::<()>(
+            Err(MetadataError::Domain(
+                "movement rank differs from input".into(),
+            )),
+            op,
+        );
+    }
+    let length = (*tensor).shape().len();
+    if length > 0 && shape.is_null() {
+        affine_result::<()>(
+            Err(MetadataError::Domain("null movement output shape".into())),
+            op,
+        );
+    }
+    let first = affine_array(first, length, op);
+    let target = match operation {
+        AffineShapeOp::Pad => (*tensor)
+            .metadata
+            .padded(&first, &affine_array(second, length, op)),
+        AffineShapeOp::Shrink => (*tensor)
+            .metadata
+            .shrunk(&first, &affine_array(second, length, op)),
+        AffineShapeOp::Stride => (*tensor).metadata.strided(&first),
+    };
+    let target = affine_result(target, op);
+    // All input arrays are decoded and the whole target is checked before any
+    // output write, including when the caller aliases an input bound array.
+    for (axis, &extent) in target.shape().iter().enumerate() {
+        shape
+            .add(axis)
+            .write(chelis_scalar_from_bits(CHELIS_DTYPE_I64, extent as u64));
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_pad_shape(
+    tensor: *const chelis_tensor,
+    rank: chelis_scalar,
+    before: *const chelis_scalar,
+    after: *const chelis_scalar,
+    shape: *mut chelis_scalar,
+) {
+    affine_shape(tensor, rank, before, after, shape, AffineShapeOp::Pad);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_shrink_shape(
+    tensor: *const chelis_tensor,
+    rank: chelis_scalar,
+    start: *const chelis_scalar,
+    end: *const chelis_scalar,
+    shape: *mut chelis_scalar,
+) {
+    affine_shape(tensor, rank, start, end, shape, AffineShapeOp::Shrink);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_stride_shape(
+    tensor: *const chelis_tensor,
+    rank: chelis_scalar,
+    steps: *const chelis_scalar,
+    shape: *mut chelis_scalar,
+) {
+    affine_shape(
+        tensor,
+        rank,
+        steps,
+        std::ptr::null(),
+        shape,
+        AffineShapeOp::Stride,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_tensor_affine_index(
+    tensor: *const chelis_tensor,
+    coordinates: *const chelis_scalar,
+    offsets: *const chelis_scalar,
+    steps: *const chelis_scalar,
+) -> i64 {
+    let op = "affine_index";
+    tensor_metadata_dtype(tensor, op);
+    let count = affine_result(
+        ElementCount::scratch_entries((*tensor).shape().len(), 0),
+        op,
+    );
+    let length = affine_result(count.scratch_len::<chelis_scalar>(), op);
+    if length > 0 && (coordinates.is_null() || offsets.is_null() || steps.is_null()) {
+        affine_result::<()>(
+            Err(MetadataError::Domain(
+                "null affine coordinates, offsets, or steps".into(),
+            )),
+            op,
+        );
+    }
+    let index = affine_result(
+        (*tensor).metadata.affine_index_by(|axis| {
+            (
+                affine_scalar(coordinates.add(axis).read(), op),
+                affine_scalar(offsets.add(axis).read(), op),
+                affine_scalar(steps.add(axis).read(), op),
+            )
+        }),
+        op,
+    );
+    affine_result(
+        i64::try_from(index).map_err(|_| MetadataError::Overflow("affine index exceeds int64")),
+        op,
+    )
 }
 
 #[no_mangle]
@@ -5085,16 +6288,11 @@ pub unsafe extern "C" fn chelis_list_dir(path: chelis_string) -> *mut chelis_lis
             entry.unwrap_or_else(|err| runtime_fail!("list_dir failed for `{path_text}`: {err}"));
         names.push(entry.file_name());
     }
-    // [05-HOST-4]: order by the host's own name bytes, before the lossy
-    // conversion below, and identically to the evaluator lane. Sorting the
-    // converted strings instead would leave two names that both collapse to
-    // U+FFFD tie-broken by directory order.
-    names.sort_by(|a, b| a.as_encoded_bytes().cmp(b.as_encoded_bytes()));
+    let names =
+        list_dir_names_to_strings(names, &path_text).unwrap_or_else(|err| runtime_fail!("{err}"));
     let items = names
         .into_iter()
-        .map(|name| {
-            internal_value_from_string(new_runtime_string(name.to_string_lossy().into_owned()))
-        })
+        .map(|name| internal_value_from_string(new_runtime_string(name)))
         .collect();
     new_list(items, "chelis_list_dir")
 }
@@ -5934,5 +7132,62 @@ mod tests {
             assert_eq!(chelis_tensor_to_scalar(tensor), value);
             chelis_tensor_release(tensor);
         }
+    }
+}
+
+#[cfg(test)]
+mod list_dir_conversion_tests {
+    use super::list_dir_names_to_strings;
+    use std::ffi::OsString;
+
+    #[test]
+    fn list_dir_conversion_preserves_unicode_and_empty_lists() {
+        let names = ["替", "\u{fffd}", "é", "e\u{301}", "a\n\"\\z"];
+        let mut expected = names.to_vec();
+        expected.sort();
+        assert_eq!(
+            list_dir_names_to_strings(names.into_iter().map(OsString::from).collect(), "/dir"),
+            Ok(expected.into_iter().map(str::to_owned).collect())
+        );
+        assert_eq!(list_dir_names_to_strings(vec![], "/dir"), Ok(vec![]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_dir_conversion_rejects_collisions_and_selects_first_raw_name() {
+        use std::os::unix::ffi::OsStringExt;
+        // In-memory host names exercise the production conversion on macOS,
+        // including filesystems that cannot create an invalid-name fixture.
+        for names in [
+            vec![b"a\xff".to_vec(), b"a\xfe".to_vec()],
+            vec![b"a\xfe".to_vec(), b"a\xff".to_vec()],
+        ] {
+            let mut names: Vec<_> = names.into_iter().map(OsString::from_vec).collect();
+            names.push(OsString::from("0-valid"));
+            assert_eq!(
+                list_dir_names_to_strings(names, "/dir"),
+                Err("IO trap in list_dir: directory b\"/dir\", entry b\"a\\xfe\": name is not valid UTF-8".to_owned())
+            );
+        }
+        // Raw order and replacement-string order disagree for these names.
+        let names = vec![
+            OsString::from_vec(b"\x81a".to_vec()),
+            OsString::from_vec(b"\x80z".to_vec()),
+        ];
+        assert_eq!(
+            list_dir_names_to_strings(names, "/dir"),
+            Err("IO trap in list_dir: directory b\"/dir\", entry b\"\\x80z\": name is not valid UTF-8".to_owned())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_dir_conversion_escapes_directory_and_offending_entry_reversibly() {
+        use std::os::unix::ffi::OsStringExt;
+        let names = vec![OsString::from_vec(b"bad\n\r\t\\\"'\xff".to_vec())];
+        assert_eq!(
+            list_dir_names_to_strings(names, "/d\n\r\t\\\"'é"),
+            Err("IO trap in list_dir: directory b\"/d\\n\\r\\t\\\\\\\"\\'\\xc3\\xa9\", entry b\"bad\\n\\r\\t\\\\\\\"\\'\\xff\": name is not valid UTF-8".to_owned())
+        );
     }
 }

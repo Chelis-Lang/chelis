@@ -59,6 +59,15 @@ the runner compares by PLAIN STRING EQUALITY. There is NO Python type lattice an
 NO re-implemented `types_equal`. `wire_to_canonical` is golden-tested against
 frozen Hull wire blobs (`golden_wire.json`) so a wire-schema drift fails LOUD.
 
+The eval reader consumes execution wire v3 under `spec/10-serialization.md`
+§3.2: floats are decoded from their exact dtype's bit strings, and integers
+remain exact integers. Legacy scalar tags, float number/null payloads, malformed
+carriers, and invalid tensor shapes fail as `compiler_crash`. The scalar view
+compares NaNs by class and infinities by sign; it does not compare NaN payload
+identities. Finite comparisons retain the pinned `0.01` tolerance and exact
+integer subtraction. This decoding change does not regenerate the frozen Hull
+reference or change its verdicts.
+
 ## Files
 
 - `manifest.json` -- provenance (Hull commit, pinned chelis version, seed,
