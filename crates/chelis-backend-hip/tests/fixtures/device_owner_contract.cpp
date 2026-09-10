@@ -140,6 +140,14 @@ static void explicit_borrow_retains_metadata_only() {
     hipFree(data);
 }
 static void rejected(const char *mode) {
+    if (!std::strcmp(mode, "empty-clone-overflow")) {
+        chelis_scalar dimensions[] = {integer(0), integer(INT64_MAX), integer(INT64_MAX)};
+        chelis_scalar strides[] = {integer(INT64_MAX), integer(INT64_MAX), integer(INT64_MAX)};
+        auto plan = chelis_metadata_plan_view(integer(3), dimensions, strides, exemplar(CHELIS_DTYPE_F64), integer(0));
+        auto empty = chelis_device_tensor_borrow(plan, nullptr, integer(0));
+        chelis_device_tensor_clone(empty);
+        std::exit(0);
+    }
     int64_t shape[] = {2,3}, strides[] = {3,1};
     void *data = nullptr;
     hipMalloc(&data, 48);

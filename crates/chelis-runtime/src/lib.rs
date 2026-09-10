@@ -2471,6 +2471,14 @@ pub struct chelis_metadata_plan {
 }
 
 impl chelis_metadata_plan {
+    fn byte_offset(&self, linear: i64) -> Result<i64, MetadataError> {
+        let offset = match &self.layout {
+            MetadataPlanLayout::Contiguous(metadata) => metadata.byte_offset(linear),
+            MetadataPlanLayout::Strided(metadata) => metadata.byte_offset(linear),
+        }?;
+        i64::try_from(offset.get())
+            .map_err(|_| MetadataError::Overflow("metadata byte offset exceeds int64"))
+    }
     fn shape(&self) -> &[i64] {
         match &self.layout {
             MetadataPlanLayout::Contiguous(metadata) => metadata.shape(),
@@ -2646,6 +2654,16 @@ pub unsafe extern "C" fn chelis_metadata_plan_count(plan: *const chelis_metadata
 #[no_mangle]
 pub unsafe extern "C" fn chelis_metadata_plan_byte_count(plan: *const chelis_metadata_plan) -> i64 {
     metadata_plan_owner(plan).bytes().get()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chelis_metadata_plan_byte_offset(
+    plan: *const chelis_metadata_plan,
+    linear_index: chelis_scalar,
+) -> i64 {
+    let plan = metadata_plan_owner(plan);
+    let index = affine_scalar(linear_index, "metadata_plan");
+    affine_result(plan.byte_offset(index), "metadata_plan")
 }
 
 #[no_mangle]

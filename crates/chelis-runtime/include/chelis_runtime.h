@@ -352,6 +352,7 @@ const int64_t *chelis_metadata_plan_shape(const chelis_metadata_plan *plan);
 const int64_t *chelis_metadata_plan_strides(const chelis_metadata_plan *plan);
 int64_t chelis_metadata_plan_count(const chelis_metadata_plan *plan);
 int64_t chelis_metadata_plan_byte_count(const chelis_metadata_plan *plan);
+int64_t chelis_metadata_plan_byte_offset(const chelis_metadata_plan *plan, chelis_scalar linear_index);
 chelis_dtype chelis_metadata_plan_dtype(const chelis_metadata_plan *plan);
 void chelis_metadata_plan_check_capacity(const chelis_metadata_plan *plan, chelis_scalar byte_capacity);
 void chelis_metadata_plan_release(chelis_metadata_plan *plan);

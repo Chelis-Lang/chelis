@@ -60,12 +60,18 @@ fn malformed_packet_capacity_and_transfer_requests_trap_before_copy() {
         "count-transfer",
         "borrow-capacity",
         "gapped-allocation",
+        "empty-clone-overflow",
     ] {
         let output = Command::new(&fixture().binary).arg(case).output().unwrap();
         assert!(!output.status.success(), "{case} returned success");
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let class = if case == "empty-clone-overflow" {
+            "overflow"
+        } else {
+            "domain"
+        };
         assert!(
-            stderr.contains("numeric trap: domain in metadata_plan at int64"),
+            stderr.contains(&format!("numeric trap: {class} in metadata_plan at int64")),
             "{case}: {stderr}"
         );
         assert!(

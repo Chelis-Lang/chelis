@@ -2191,7 +2191,11 @@ exact ADT identity by [05-OP-34].
 > bits in logical row-major order at every active [04-NUM-8] representation,
 > using the source plan's checked byte offsets. Gapped, broadcast and permuted
 > sources therefore materialize their logical values without retaining source
-> storage. Neither source metadata nor source payload is changed.
+> storage. The output must satisfy the contiguous plan's representation domain,
+> including representable canonical suffix strides for an empty shape. An admitted
+> supplied-stride view may therefore trap `Overflow` when its contiguous output
+> plan cannot be represented, before payload allocation or access. Neither source
+> metadata nor source payload is changed.
 >
 > `chelis_device_tensor_copy_from_host` and `chelis_device_tensor_copy_to_host`
 > copy exact stored bits between a live host read view or exclusive host write
