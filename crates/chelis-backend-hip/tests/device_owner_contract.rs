@@ -15,12 +15,21 @@ fn fixture() -> &'static Fixture {
         assert!(runtime.is_absolute() && runtime.is_file(), "missing exact-head runtime archive: {}", runtime.display());
         let directory = tempfile::tempdir().unwrap();
         let binary = directory.path().join("device-owner-contract");
+        let object = directory.path().join("device-owner.o");
+        let compiled = Command::new(env::var_os("CXX").unwrap_or_else(|| "c++".into()))
+            .args(["-std=c++17", "-O1", "-g", "-Dchelis_metadata_plan_release=fixture_metadata_plan_release", "-I"])
+            .arg(root.join("tests/fixtures/device_owner_sdk"))
+            .arg("-I").arg(root.join("runtime"))
+            .arg("-I").arg(root.join("../chelis-runtime/include"))
+            .arg("-c").arg(root.join("runtime/chelis_device_owner.cpp"))
+            .arg("-o").arg(&object).output().expect("start companion compiler");
+        assert!(compiled.status.success(), "companion compile failed: {}", String::from_utf8_lossy(&compiled.stderr));
         let mut command = Command::new(env::var_os("CXX").unwrap_or_else(|| "c++".into()));
         command.args(["-std=c++17", "-O1", "-g"])
             .arg("-I").arg(root.join("tests/fixtures/device_owner_sdk"))
             .arg("-I").arg(root.join("runtime"))
             .arg("-I").arg(root.join("../chelis-runtime/include"))
-            .arg(root.join("runtime/chelis_device_owner.cpp"))
+            .arg(&object)
             .arg(root.join("tests/fixtures/device_owner_contract.cpp"))
             .arg(runtime).args(["-lpthread", "-lm"]);
         if cfg!(target_os = "linux") { command.arg("-ldl"); }
@@ -33,7 +42,12 @@ fn fixture() -> &'static Fixture {
 
 #[test]
 fn checked_owner_materializes_exact_strided_bits_and_releases_only_owned_storage() {
-    for case in ["logical-order", "dynamic-rank", "explicit-borrow"] {
+    for case in [
+        "logical-order",
+        "dynamic-rank",
+        "explicit-borrow",
+        "device-context",
+    ] {
         let output = Command::new(&fixture().binary).arg(case).output().unwrap();
         assert!(
             output.status.success(),
@@ -61,6 +75,10 @@ fn malformed_packet_capacity_and_transfer_requests_trap_before_copy() {
         "borrow-capacity",
         "gapped-allocation",
         "empty-clone-overflow",
+        "pointer-device",
+        "context-view",
+        "context-clone",
+        "context-transfer",
     ] {
         let output = Command::new(&fixture().binary).arg(case).output().unwrap();
         assert!(!output.status.success(), "{case} returned success");

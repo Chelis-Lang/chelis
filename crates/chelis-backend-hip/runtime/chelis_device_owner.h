@@ -17,6 +17,7 @@ chelis_device_tensor_owner *chelis_device_tensor_alloc(chelis_metadata_plan *pla
 chelis_device_tensor_owner *chelis_device_tensor_borrow(chelis_metadata_plan *plan, void *data, chelis_scalar byte_capacity);
 chelis_device_tensor_owner *chelis_device_tensor_import(const chelis_gpu_tensor *packet);
 const chelis_gpu_tensor *chelis_device_tensor_view(const chelis_device_tensor_owner *owner);
+int32_t chelis_device_tensor_device(const chelis_device_tensor_owner *owner);
 chelis_device_tensor_owner *chelis_device_tensor_clone(const chelis_device_tensor_owner *source);
 void chelis_device_tensor_release(chelis_device_tensor_owner *owner);
 void chelis_device_tensor_copy_from_host(chelis_device_tensor_owner *destination, const chelis_tensor *source);

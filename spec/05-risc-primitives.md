@@ -2186,6 +2186,17 @@ exact ADT identity by [05-OP-34].
 > storage or one for owned storage, and zero reserved bytes. The observation
 > grants no right to mutate metadata or release an owner through a packet address.
 >
+> `chelis_device_tensor_device` returns the owner's exact nonnegative int32
+> HIP device identity, recorded from the runtime context at construction. A
+> nonempty borrow/import also requires official pointer attributes to identify
+> device storage on that same device. Empty owners bind to the actual construction
+> context without inventing a pointer. Packet observation, clone, transfers and
+> device entry require the current HIP device to agree with every participating
+> owner before payload access or launch; mismatch traps `Domain`. Device identity
+> observation itself does not depend on the caller's current device. A Python
+> input's reported device is checked against the actual runtime and owner device;
+> each returned output's device comes from its owner, never another input.
+>
 > `chelis_device_tensor_clone` returns a distinct owner with a new contiguous
 > metadata plan and independent owned device storage. It copies exact stored
 > bits in logical row-major order at every active [04-NUM-8] representation,
@@ -2213,7 +2224,9 @@ exact ADT identity by [05-OP-34].
 > storage. Every call requires a live handle of the correct kind from the same
 > loaded artifact library; the caller retains that library through finalization.
 > No packet-to-owner cast or independently invoked allocator substitutes for this
-> finalizer. Invalid field, count, dtype, capacity, or ownership domains trap
+> finalizer. Finalization selects the recorded owner device for device storage
+> release and restores the calling thread's prior current device. Invalid field,
+> count, dtype, capacity, device, or ownership domains trap
 > `Domain`; unrepresentable metadata or offsets trap `Overflow`, before payload
 > allocation or access, using `metadata_plan` at int64. These device operations
 > have no cotangent or accumulator and perform no numeric dtype conversion.

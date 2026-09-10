@@ -106,3 +106,4 @@ identity; row order is not semantic and no ordinal is part of any identity.
 | device owner finalization | `void chelis_device_tensor_release(chelis_device_tensor_owner *owner)` |
 | host to device transfer | `void chelis_device_tensor_copy_from_host(chelis_device_tensor_owner *destination, const chelis_tensor *source)` |
 | device to host transfer | `void chelis_device_tensor_copy_to_host(chelis_tensor_write *destination, const chelis_device_tensor_owner *source)` |
+| device owner device | `int32_t chelis_device_tensor_device(const chelis_device_tensor_owner *owner)` |

@@ -962,7 +962,12 @@ operations. The support root includes that header and the generated packet
 fragment. No implementation source is included into a published header, and the
 header census receives no C++ privacy exemption. The opaque handle directly
 owns its plan and contains the packet it observes; a packet pointer is never
-cast back to an owner. Python retains the loaded library through owner release.
+cast back to an owner. Python retains the loaded library through owner release. The private owner also
+records actual HIP device identity; its exact observation is the ninth device
+operation. Nonempty pointer attributes and current context must agree, and the
+finalizer selects/restores the owner device. Python never assigns output device
+identity from input zero. Explicit completion of device copies protects source
+owners and host guards even when an SDK transfer can complete asynchronously.
 
 Storage-slot lifetime remains the proof for temporary views: each view owns its
 metadata while borrowing an input or slot retained until its last use. Cleanup

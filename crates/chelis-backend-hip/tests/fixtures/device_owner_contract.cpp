@@ -9,9 +9,21 @@
 #include <cstring>
 #include <map>
 #include <vector>
+#include <thread>
 
 static std::map<uintptr_t, size_t> allocations;
+static std::map<uintptr_t, int> allocation_devices;
+static thread_local int current_device = 0;
+struct PendingCopy { void *destination; const void *source; size_t bytes; int device; };
+static std::vector<PendingCopy> pending_copies;
 static size_t releases = 0;
+static size_t plan_releases = 0;
+// Only the companion translation unit redirects this call for observation;
+// this wrapper always invokes the actual runtime plan finalizer.
+extern "C" void fixture_metadata_plan_release(chelis_metadata_plan *plan) {
+    ++plan_releases;
+    chelis_metadata_plan_release(plan);
+}
 static void require_device(const void *pointer, size_t bytes) {
     if (!bytes) return;
     auto position = allocations.upper_bound(reinterpret_cast<uintptr_t>(pointer));
@@ -19,16 +31,42 @@ static void require_device(const void *pointer, size_t bytes) {
     --position;
     size_t offset = reinterpret_cast<uintptr_t>(pointer) - position->first;
     assert(offset <= position->second && bytes <= position->second - offset);
+    assert(allocation_devices.at(position->first) == current_device);
+}
+extern "C" hipError_t hipGetDevice(int *device) { *device = current_device; return hipSuccess; }
+extern "C" hipError_t hipSetDevice(int device) { assert(device >= 0 && device < 3); current_device = device; return hipSuccess; }
+extern "C" hipError_t hipPointerGetAttributes(hipPointerAttribute_t *attributes, const void *pointer) {
+    auto position = allocations.upper_bound(reinterpret_cast<uintptr_t>(pointer));
+    if (position == allocations.begin()) return hipErrorInvalidValue;
+    --position;
+    auto offset = reinterpret_cast<uintptr_t>(pointer) - position->first;
+    if (offset >= position->second) return hipErrorInvalidValue;
+    *attributes = {hipMemoryTypeDevice, allocation_devices.at(position->first), const_cast<void *>(pointer), nullptr, 0, 0};
+    return hipSuccess;
+}
+extern "C" hipError_t hipDeviceSynchronize() {
+    for (auto copy = pending_copies.begin(); copy != pending_copies.end();) {
+        if (copy->device != current_device) { ++copy; continue; }
+        require_device(copy->source, copy->bytes);
+        require_device(copy->destination, copy->bytes);
+        std::memcpy(copy->destination, copy->source, copy->bytes);
+        copy = pending_copies.erase(copy);
+    }
+    return hipSuccess;
 }
 extern "C" hipError_t hipMalloc(void **pointer, size_t bytes) {
     assert(bytes > 0); // empty owners must not allocate a synthetic element
     *pointer = std::malloc(bytes);
     assert(*pointer);
     assert(allocations.emplace(reinterpret_cast<uintptr_t>(*pointer), bytes).second);
+    allocation_devices.emplace(reinterpret_cast<uintptr_t>(*pointer), current_device);
     return hipSuccess;
 }
 extern "C" hipError_t hipFree(void *pointer) {
     if (!pointer) return hipSuccess;
+    require_device(pointer, 1);
+    assert(pending_copies.empty()); // no unfinished copy may retain released storage
+    allocation_devices.erase(reinterpret_cast<uintptr_t>(pointer));
     assert(allocations.erase(reinterpret_cast<uintptr_t>(pointer)) == 1);
     ++releases;
     std::free(pointer);
@@ -42,7 +80,8 @@ extern "C" hipError_t hipMemset(void *pointer, int value, size_t bytes) {
 extern "C" hipError_t hipMemcpy(void *destination, const void *source, size_t bytes, hipMemcpyKind kind) {
     if (kind == hipMemcpyHostToDevice || kind == hipMemcpyDeviceToDevice) require_device(destination, bytes);
     if (kind == hipMemcpyDeviceToHost || kind == hipMemcpyDeviceToDevice) require_device(source, bytes);
-    if (bytes) std::memcpy(destination, source, bytes);
+    if (bytes && kind == hipMemcpyDeviceToDevice) pending_copies.push_back({destination, source, bytes, current_device});
+    else if (bytes) std::memcpy(destination, source, bytes);
     return hipSuccess;
 }
 extern "C" const char *hipGetErrorString(hipError_t) { return "fixture HIP error"; }
@@ -87,7 +126,9 @@ static void logical_clone_and_transfer() {
             assert(copied->strides[1] == 1 && copied->strides[0] == shape[1]);
             assert(copied->byte_capacity == static_cast<int64_t>(expected.size()));
             size_t before = releases;
+            size_t plans_before = plan_releases;
             chelis_device_tensor_release(source);
+            assert(plan_releases == plans_before + 1);
             assert(releases == before); // a borrow never frees its input allocation
             hipFree(data); // escaping clone must survive both metadata and source storage
             auto host = chelis_alloc(2, shape, dtype);
@@ -99,8 +140,10 @@ static void logical_clone_and_transfer() {
             chelis_device_tensor_copy_from_host(fresh, host);
             assert(std::memcmp(chelis_device_tensor_view(fresh)->data, expected.data(), expected.size()) == 0);
             before = releases;
+            plans_before = plan_releases;
             chelis_device_tensor_release(clone);
             chelis_device_tensor_release(fresh);
+            assert(plan_releases == plans_before + 2);
             assert(releases == before + 2);
             chelis_tensor_release(host);
         }
@@ -135,9 +178,39 @@ static void explicit_borrow_retains_metadata_only() {
     assert(observed->shape[0] == 2 && observed->strides[0] == 3 && observed->ownership == 0);
     assert(observed->data == data && observed->byte_capacity == 48);
     size_t before = releases;
+    size_t plans_before = plan_releases;
     chelis_device_tensor_release(owner);
+    assert(plan_releases == plans_before + 1);
     assert(releases == before);
     hipFree(data);
+}
+static void actual_device_and_foreign_thread_finalization() {
+    hipSetDevice(1);
+    auto value = chelis_device_tensor_alloc(contiguous({2}, CHELIS_DTYPE_F64));
+    assert(chelis_device_tensor_device(value) == 1);
+    hipSetDevice(2);
+    assert(chelis_device_tensor_device(value) == 1); // observation is not inferred from current context
+    size_t before = releases;
+    std::thread finalizer([value] {
+        int previous = -1;
+        hipGetDevice(&previous);
+        assert(previous == 0);
+        chelis_device_tensor_release(value);
+        int after = -1;
+        hipGetDevice(&after);
+        assert(after == previous);
+    });
+    finalizer.join();
+    assert(releases == before + 1);
+    int current = -1;
+    hipGetDevice(&current);
+    assert(current == 2);
+    auto empty = chelis_device_tensor_alloc(contiguous({0}, CHELIS_DTYPE_F64));
+    assert(chelis_device_tensor_device(empty) == 2);
+    hipSetDevice(0);
+    chelis_device_tensor_release(empty);
+    hipGetDevice(&current);
+    assert(current == 0);
 }
 static void rejected(const char *mode) {
     if (!std::strcmp(mode, "empty-clone-overflow")) {
@@ -170,7 +243,16 @@ static void rejected(const char *mode) {
         auto plan = chelis_metadata_plan_view(integer(2), dimensions, gaps, exemplar(CHELIS_DTYPE_F64), integer(56));
         chelis_device_tensor_alloc(plan);
     }
+    if (!std::strcmp(mode, "pointer-device")) hipSetDevice(1);
     auto source = chelis_device_tensor_import(&raw);
+    if (!std::strcmp(mode, "context-view")) { hipSetDevice(1); chelis_device_tensor_view(source); }
+    if (!std::strcmp(mode, "context-clone")) { hipSetDevice(1); chelis_device_tensor_clone(source); }
+    if (!std::strcmp(mode, "context-transfer")) {
+        auto host = chelis_alloc(2, shape, CHELIS_DTYPE_F64);
+        auto guard = chelis_tensor_begin_write(host);
+        hipSetDevice(1);
+        chelis_device_tensor_copy_to_host(guard, source);
+    }
     if (!std::strcmp(mode, "borrow-write")) {
         auto host = chelis_alloc(2, shape, CHELIS_DTYPE_F64);
         chelis_device_tensor_copy_from_host(source, host);
@@ -189,6 +271,8 @@ int main(int argc, char **argv) {
     if (!std::strcmp(argv[1], "logical-order")) logical_clone_and_transfer();
     else if (!std::strcmp(argv[1], "dynamic-rank")) empty_scalar_and_dynamic_rank();
     else if (!std::strcmp(argv[1], "explicit-borrow")) explicit_borrow_retains_metadata_only();
+    else if (!std::strcmp(argv[1], "device-context")) actual_device_and_foreign_thread_finalization();
     else rejected(argv[1]);
     assert(allocations.empty());
+    assert(pending_copies.empty());
 }

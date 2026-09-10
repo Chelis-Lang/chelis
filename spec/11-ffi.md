@@ -125,7 +125,8 @@ written; positive arity requires a complete non-null array. Inputs are live
 borrowed handles for the entire invocation. The caller retains their storage and
 the loaded artifact library. Temporary views own checked metadata and borrow a
 provably live input or storage slot; the callee releases those views before their
-slots. Each escaping output is an independent owned contiguous clone in logical
+slots. Every input owner agrees with the actual current HIP device before
+allocation or launch; returned device identity is observed from each output owner. Each escaping output is an independent owned contiguous clone in logical
 strided order, including an output equal to an input or another output. Output
 adoption validates every actual descriptor before exposing a language result.
 The caller finalizes each output through `chelis_device_tensor_release` from the
