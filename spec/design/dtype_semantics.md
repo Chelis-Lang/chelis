@@ -406,6 +406,20 @@ ratified at spec/04 §5.2 in the same change set:
   numeric target dtypes, truncating-cast parity, and invalid-target rejection.
   The same-named checker/API suites additionally cover both checker ingresses,
   exact stored dtypes, integer values beyond 2^53, and Domain/Overflow traps.
+- Generic value-root calls (#1640) retain checked argument dtypes and extents
+  across host argument hoisting, then use the same DAG call-site bindings as
+  typed function bodies. A generic declaration has no standalone kernel;
+  its exclusion does not exclude an application whose body and arguments are
+  DAG-lowerable. This also covers bounded scalar dtype witnesses when the
+  result is a Bool tensor. Existing host capability and recursion exclusions
+  remain in force. The acceptance oracle is `cargo test -p chelis-cli --test
+  issue_1640_value_root_actualization`, registered in required CI: exact
+  eval/generated-C agreement for f32/f64 comparison value roots and typed-main
+  twins, rank-zero/rank-two scalar constructors, separate instantiations, and
+  invalid/unconstrained dtype rejection. §5.8.1's unresolved-precision tripwire
+  remains authoritative; no result dtype or shared fallback fills missing
+  argument bindings. `examples/generic_value_roots.ch` is in the executable
+  parity corpus.
 - **Fold rule (the §C2 decline clause, applied to casts):** a
   compile-time constant fold whose cast would trap DECLINES TO FOLD -
   the condition falls to runtime, where the trap fires with its full

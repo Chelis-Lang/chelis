@@ -1,0 +1,2 @@
+Generic functions with separate signatures retain their checked element dtype when constructing tensors from computed Lists, including empty Lists. This restores evaluation of the published arange and linspace constructors without a payload-derived dtype fallback.
+The Rust `RuntimeValue::Closure` variant gains `checked_signature`; callers constructing that variant must supply the checked function type (or `None` when no checked type is available).

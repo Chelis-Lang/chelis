@@ -3220,6 +3220,16 @@ fn top_level_expr_is_lowered_with_names(
     })
 }
 
+fn fn_type_has_bounded_scalar_var(expr: &Expr, bounded: Option<&UnordSet<String>>) -> bool {
+    let Some((DeepTag::TFn, _, types)) = stamped_parts(expr) else {
+        return false;
+    };
+    types.iter().any(|ty| {
+        extract_scalar_precision_var_name(ty)
+            .is_some_and(|name| bounded.is_some_and(|names| names.contains(&name)))
+    })
+}
+
 fn type_is_never_lowerable(expr: &Expr, bounded_dtype_names: Option<&UnordSet<String>>) -> bool {
     let Some((tag, _, kids)) = stamped_parts(expr) else {
         return true;
@@ -3237,11 +3247,7 @@ fn type_is_never_lowerable(expr: &Expr, bounded_dtype_names: Option<&UnordSet<St
         DeepTag::TFn => {
             // Bounded bare scalar binders, like tensor precision binders,
             // monomorphize only through their call sites.
-            kids.iter().any(|kid| {
-                extract_scalar_precision_var_name(kid).is_some_and(|name| {
-                    bounded_dtype_names.is_some_and(|bounded| bounded.contains(&name))
-                })
-            })
+            fn_type_has_bounded_scalar_var(expr, bounded_dtype_names)
                 || type_expr_has_precision_var(expr)
                 // Tier-2 rank polymorphism (spec/design/rank_polymorphism.md):
                 // a t-fn carrying a `(d-rank ...)` rank variable is
@@ -3865,6 +3871,48 @@ fn expr_depends_on_nonlowerable_name(
     bound_names: &UnordSet<String>,
 ) -> bool {
     if let Some((tag, meta, kids)) = stamped_parts(expr) {
+        // A precision/rank-polymorphic def has no standalone DAG, but a
+        // checked call can bind it. Inspect the body and actual arguments
+        // instead of inheriting the declaration's standalone exclusion.
+        // Real host requirements remain exclusions; no capability is inferred
+        // merely from the concrete result (which may be bool).
+        if tag == DeepTag::App
+            && let Some(name) = kids.first().and_then(callable_ref_name)
+            && !bound_names.contains(&name)
+            && let Some(body) = top_level_defs.get(&name)
+            && body.tag() == Some(DeepTag::Fn)
+            && lookup_declared_type_expr(types.signatures, type_env, &name).is_some_and(|ty| {
+                type_expr_has_precision_var(ty)
+                    || type_expr_has_rank_var(ty)
+                    || fn_type_has_bounded_scalar_var(ty, types.dtype_bound_names.get(&name))
+            })
+        {
+            if def_body_requires_host_runtime(body) || !visiting.insert(name.clone()) {
+                return true;
+            }
+            let requires_host = expr_depends_on_nonlowerable_name(
+                body,
+                top_level_defs,
+                types,
+                type_env,
+                cache,
+                visiting,
+                &UnordSet::new(),
+            );
+            visiting.remove(&name);
+            return requires_host
+                || kids.iter().skip(1).any(|arg| {
+                    expr_depends_on_nonlowerable_name(
+                        arg,
+                        top_level_defs,
+                        types,
+                        type_env,
+                        cache,
+                        visiting,
+                        bound_names,
+                    )
+                });
+        }
         if tag == DeepTag::Var
             && let Some(name) = kids.first().and_then(symbol_name)
             && !bound_names.contains(name)
