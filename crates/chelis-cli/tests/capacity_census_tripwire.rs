@@ -716,6 +716,76 @@ macro_rules! final_numeric_row {
 }
 
 const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_metadata_plan * chelis_metadata_plan_new ( chelis_scalar rank , const chelis_scalar * shape , chelis_scalar exemplar ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_new` constructs an independently owned, opaque"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_metadata_plan * chelis_metadata_plan_view ( chelis_scalar rank , const chelis_scalar * shape , const chelis_scalar * strides , chelis_scalar exemplar , chelis_scalar byte_capacity ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_view` instead retains rank-many exact tagged int64"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: int32_t chelis_metadata_plan_rank ( const chelis_metadata_plan * plan ) ;",
+        &["numeric-op"],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_new` constructs an independently owned, opaque"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: const int64_t * chelis_metadata_plan_shape ( const chelis_metadata_plan * plan ) ;",
+        &["numeric-op"],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_new` constructs an independently owned, opaque"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: const int64_t * chelis_metadata_plan_strides ( const chelis_metadata_plan * plan ) ;",
+        &["numeric-op"],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_new` constructs an independently owned, opaque"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: int64_t chelis_metadata_plan_count ( const chelis_metadata_plan * plan ) ;",
+        &["numeric-op"],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_new` constructs an independently owned, opaque"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: int64_t chelis_metadata_plan_byte_count ( const chelis_metadata_plan * plan ) ;",
+        &["numeric-op"],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_new` constructs an independently owned, opaque"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_dtype chelis_metadata_plan_dtype ( const chelis_metadata_plan * plan ) ;",
+        &["numeric-op"],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_new` constructs an independently owned, opaque"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: void chelis_metadata_plan_check_capacity ( const chelis_metadata_plan * plan , chelis_scalar byte_capacity ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_check_capacity` validates a canonical nonnegative int64"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: void chelis_metadata_plan_release ( chelis_metadata_plan * plan ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_release` consumes the live plan exactly once; all"
+    ),
     // Final [05-OP-32] registrations from the retired primary cohort.
     final_numeric_row!(
         "header-export",
@@ -6434,7 +6504,11 @@ fn metadata_plan_callables_require_exact_op33_authority() {
         .flat_map(|(name, text)| header_rows(name, text, &typedefs))
         .filter(|row| row.kind == "header-export" && row.id.contains("chelis_metadata_plan_"))
         .collect();
-    assert_eq!(rows.len(), 10, "complete checked metadata plan API: {rows:?}");
+    assert_eq!(
+        rows.len(),
+        10,
+        "complete checked metadata plan API: {rows:?}"
+    );
     let spec = fs::read_to_string(root.join(CONTROLLING_SPEC_REL)).unwrap();
     let registry = fs::read_to_string(root.join("spec/registry/c_tensor_runtime.md")).unwrap();
     let normative: BTreeSet<_> = registry
@@ -6442,23 +6516,41 @@ fn metadata_plan_callables_require_exact_op33_authority() {
         .filter(|line| line.contains("chelis_metadata_plan_"))
         .map(|line| {
             let signature = line.split('`').nth(1).expect("exact normative C signature");
-            format!("chelis_runtime.h: {}", canonical_c_tokens(&format!("{signature};")))
+            format!(
+                "chelis_runtime.h: {}",
+                canonical_c_tokens(&format!("{signature};"))
+            )
         })
         .collect();
-    assert_eq!(rows.iter().map(|row| row.id.clone()).collect::<BTreeSet<_>>(), normative);
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.id.clone())
+            .collect::<BTreeSet<_>>(),
+        normative
+    );
     for row in rows {
         let surface = authority_surface(&row);
         assert_eq!(
             capacity_census_authority::classify_final_authority(
-                &surface, final_authority_registries(), &spec,
+                &surface,
+                final_authority_registries(),
+                &spec,
             ),
             Ok(capacity_census_authority::FinalAuthority::NumericOperation { atom: "[05-OP-33]" }),
         );
         let mut successor = surface;
-        successor.id = successor.id.replace("chelis_metadata_plan_", "chelis_unchecked_metadata_");
-        assert!(capacity_census_authority::classify_final_authority(
-            &successor, final_authority_registries(), &spec,
-        ).is_err(), "a renamed successor must acquire independent exact authority");
+        successor.id = successor
+            .id
+            .replace("chelis_metadata_plan_", "chelis_unchecked_metadata_");
+        assert!(
+            capacity_census_authority::classify_final_authority(
+                &successor,
+                final_authority_registries(),
+                &spec,
+            )
+            .is_err(),
+            "a renamed successor must acquire independent exact authority"
+        );
     }
 }
 
