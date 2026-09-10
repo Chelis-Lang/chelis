@@ -95,6 +95,16 @@ fn weakened_metadata_construction_fails_the_executable_contract() {
     ));
     for (from, to, witness) in [
         (
+            ".checked_mul(matrix)",
+            ".checked_mul(0)",
+            "matmul_metadata_binds_matrix_spans_and_vendor_projection_without_storage",
+        ),
+        (
+            "self.dimensions.iter().any(|&extent| extent > limit)",
+            "false",
+            "matmul_metadata_binds_matrix_spans_and_vendor_projection_without_storage",
+        ),
+        (
             "linear / self.inner.get() % self.indices.elements().get()",
             "0",
             "sparse_metadata_binds_indices_to_exact_hyperplane_and_elementwise_domains",
@@ -281,7 +291,7 @@ fn internal_callers_cannot_forge_counts_or_restore_independent_tensor_fields() {
     );
     let context = format!(
         "#![allow(dead_code, non_camel_case_types)]\nmod metadata;\n\
-         use metadata::{{ShapeMetadata, ElementCount, ByteCount, AllocationBytes, ReductionMetadata, SparseMetadata}};\n\
+         use metadata::{{ShapeMetadata, ElementCount, ByteCount, AllocationBytes, ReductionMetadata, SparseMetadata, MatmulMetadata}};\n\
          use chelis_vocab::RuntimeDType;\nuse std::sync::atomic::AtomicU8;\n\
          struct HeapHeader;\nstruct TensorStorageProvenance;\nstruct chelis_tensor_write;\n\
          {declarations}\n"
@@ -304,6 +314,16 @@ fn internal_callers_cannot_forge_counts_or_restore_independent_tensor_fields() {
         }
     "#;
     let mut negatives = vec![
+        (
+            "fn bad(m: &mut MatmulMetadata) { m.result = ShapeMetadata::contiguous(&[99], RuntimeDType::I64).unwrap(); }".to_owned(),
+            "E0616",
+            "result",
+        ),
+        (
+            "fn bad(m: &mut MatmulMetadata) { m.batches = ElementCount::from_extents(&[99]).unwrap(); }".to_owned(),
+            "E0616",
+            "batches",
+        ),
         (
             "fn bad(m: &mut SparseMetadata) { m.domain = ShapeMetadata::contiguous(&[99], RuntimeDType::I64).unwrap(); }".to_owned(),
             "E0616",

@@ -163,11 +163,10 @@ pub fn codegen_with_options(
     let (needs_blas, input_labels, output_labels, symbolic_dims) = {
         let emission = dag.emission();
         (
-            options.use_blas
-                && emission
-                    .nodes()
-                    .iter()
-                    .any(|node| matches!(node.op, chelis_ir::dag::RiscOp::BlasMatmul { .. })),
+            emission
+                .nodes()
+                .iter()
+                .any(|node| matches!(node.op, chelis_ir::dag::RiscOp::BlasMatmul { .. })),
             emit::CEmitter::input_labels(emission),
             emit::CEmitter::output_labels(emission),
             emission.symbolic_params(),

@@ -32,7 +32,12 @@ fn checked_indexing_run(source: &str, harness: &str) -> std::process::Output {
     let dir = probe.path();
     fs::write(dir.join("kernel.c"), source).unwrap();
     fs::write(dir.join("main.c"), harness).unwrap();
-    let toolchain = chelis_backend_c::toolchain::test_toolchain(Default::default());
+    let toolchain = chelis_backend_c::toolchain::test_toolchain(
+        chelis_backend_c::toolchain::CodegenRequirements {
+            needs_blas: source.contains("#include \"chelis_blas.h\""),
+            ..Default::default()
+        },
+    );
     let binary = dir.join("probe");
     let compiled = Command::new(toolchain.compiler)
         .args([
@@ -60,6 +65,298 @@ fn checked_indexing_run(source: &str, harness: &str) -> std::process::Output {
         .env("ASAN_OPTIONS", "detect_leaks=0")
         .output()
         .unwrap()
+}
+
+fn checked_blas_dag(operand: Prim, output: Prim) -> Dag {
+    use chelis_ir::dag::DimExpr;
+    let ty = |names: &[&str], precision| TensorType {
+        dims: names
+            .iter()
+            .map(|n| DimInfo::Named((*n).into(), None))
+            .collect(),
+        precision,
+    };
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        ty(&["batch0", "batch1", "m", "k"], operand),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        ty(&["batch0", "batch1", "k", "n"], operand),
+        None,
+    );
+    let node = dag.add_node(
+        RiscOp::BlasMatmul {
+            batch_dims: vec![DimExpr::Sym("batch0".into()), DimExpr::Sym("batch1".into())],
+            m: DimExpr::Sym("m".into()),
+            n: DimExpr::Sym("n".into()),
+            k: DimExpr::Sym("k".into()),
+            accumulator: if operand == Prim::F64 {
+                Prim::F64
+            } else {
+                Prim::F32
+            },
+        },
+        vec![a, b],
+        ty(&["batch0", "batch1", "m", "n"], output),
+        None,
+    );
+    dag.add_root(node);
+    dag
+}
+
+#[test]
+fn blas_vendor_dimension_contract_matches_actual_function_prototypes() {
+    let source = codegen_with_options(
+        &checked_blas_dag(Prim::F32, Prim::F32),
+        "vendor_contract",
+        CodegenOptions {
+            use_blas: true,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .c_source;
+    let preamble = source
+        .split("/* CHELIS_UNIFORM_HELPERS_BEGIN */")
+        .next()
+        .unwrap();
+    let contract = &preamble[preamble.find("#ifndef CHELIS_C_BLAS_CONTRACT").unwrap()..];
+    let probe = common::probe_dir("blas_dimension_contract");
+    let compiler = chelis_backend_c::toolchain::c_compiler();
+    let compile = |text: &str| {
+        fs::write(probe.path().join("contract.c"), text).unwrap();
+        Command::new(&compiler)
+            .args(["-std=c11", "-Werror", "-c", "-I"])
+            .arg(runtime_include_dir())
+            .arg(probe.path().join("contract.c"))
+            .arg("-o")
+            .arg(probe.path().join("contract.o"))
+            .output()
+            .unwrap()
+    };
+    let actual = compile(preamble);
+    assert!(
+        actual.status.success(),
+        "{}",
+        String::from_utf8_lossy(&actual.stderr)
+    );
+    if cfg!(target_os = "macos") {
+        let ilp64 = compile(&format!("#define ACCELERATE_LAPACK_ILP64 1\n{preamble}"));
+        assert!(
+            ilp64.status.success(),
+            "{}",
+            String::from_utf8_lossy(&ilp64.stderr)
+        );
+    }
+    for openblas in [false, true] {
+        for (declared, argument, want) in [
+            ("int32_t", "int32_t", None),
+            ("int64_t", "int64_t", None),
+            ("int32_t", "int64_t", Some("dimension contract mismatch")),
+            ("int64_t", "int32_t", Some("dimension contract mismatch")),
+            ("uint32_t", "uint32_t", Some("dimensions must be signed")),
+            (
+                "int16_t",
+                "int16_t",
+                Some("unsupported CBLAS dimension width"),
+            ),
+        ] {
+            let layout = if openblas {
+                "CBLAS_ORDER"
+            } else {
+                "CBLAS_LAYOUT"
+            };
+            let selector = if openblas {
+                format!("#define OPENBLAS_VERSION 1\ntypedef {declared} blasint;\n")
+            } else {
+                format!("#define CBLAS_INT {declared}\n")
+            };
+            let declarations=[("s","float"),("d","double")].iter().map(|(prefix,element)|format!("void cblas_{prefix}gemm(enum {layout}, enum CBLAS_TRANSPOSE, enum CBLAS_TRANSPOSE, {argument}, {argument}, {argument}, {element}, const {element}*, {argument}, const {element}*, {argument}, {element}, {element}*, {argument});\n")).collect::<String>();
+            let fake = format!(
+                "#include <stdint.h>\n#undef __APPLE__\n{selector}typedef enum {layout} {{ CblasRowMajor=101 }} {layout};\nenum CBLAS_TRANSPOSE {{ CblasNoTrans=111 }};\n{declarations}{contract}"
+            );
+            let result = compile(&fake);
+            if let Some(reason) = want {
+                assert!(!result.status.success(), "{openblas}/{declared}/{argument}");
+                assert!(
+                    String::from_utf8_lossy(&result.stderr).contains(reason),
+                    "{}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
+            } else {
+                assert!(
+                    result.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn checked_blas_batches_scratch_and_empty_domains_execute_under_sanitizers() {
+    for (operand, output) in [
+        (Prim::F32, Prim::F32),
+        (Prim::F64, Prim::F64),
+        (Prim::F16, Prim::F16),
+        (Prim::Bf16, Prim::Bf16),
+        (Prim::F16, Prim::F32),
+        (Prim::Bf16, Prim::F32),
+    ] {
+        let source = codegen_with_options(
+            &checked_blas_dag(operand, output),
+            "checked_blas",
+            CodegenOptions {
+                use_blas: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .c_source;
+        // Existing selected nodes require their ABI declarations even when the
+        // caller did not request another specialization pass.
+        let default_options = codegen(&checked_blas_dag(operand, output), "checked_blas").unwrap();
+        assert!(default_options.requirements.needs_blas);
+        assert_eq!(default_options.c_source, source);
+        let mut sources = vec![source];
+        if operand == Prim::F32 && output == Prim::F32 {
+            use chelis_ir::dag::DimExpr;
+            use chelis_ir::host::{
+                HostBlasMatmulSummary, HostTensorHelper, HostTensorInput, HostTensorSpecialization,
+            };
+            let dag = checked_blas_dag(operand, output);
+            let a_ty = dag.nodes()[0].output_type.clone();
+            let b_ty = dag.nodes()[1].output_type.clone();
+            let out_ty = dag.nodes()[2].output_type.clone();
+            let inputs = vec![
+                HostTensorInput {
+                    name: "a".into(),
+                    ty: a_ty.clone(),
+                },
+                HostTensorInput {
+                    name: "b".into(),
+                    ty: b_ty.clone(),
+                },
+            ];
+            let params = inputs
+                .iter()
+                .map(|input| HostParam {
+                    name: input.name.clone(),
+                    ty: HostType::Tensor(input.ty.clone()),
+                })
+                .collect::<Vec<_>>();
+            let summary = HostBlasMatmulSummary {
+                lhs_input: 0,
+                rhs_input: 1,
+                input_tys: vec![a_ty, b_ty],
+                output: out_ty.clone(),
+                batch_dims: vec![DimExpr::Sym("batch0".into()), DimExpr::Sym("batch1".into())],
+                m: DimExpr::Sym("m".into()),
+                n: DimExpr::Sym("n".into()),
+                k: DimExpr::Sym("k".into()),
+            };
+            let body = HostExpr::new(HostExprKind::TensorCall {
+                helper: 0,
+                args: params
+                    .iter()
+                    .map(|p| HostExpr::new(HostExprKind::Var(p.name.clone(), p.ty.clone())))
+                    .collect(),
+                ty: HostType::Tensor(out_ty.clone()),
+            });
+            let helper = HostTensorHelper {
+                name: "matmul_helper".into(),
+                dag,
+                inputs,
+                output: out_ty.clone(),
+                specialization: Some(HostTensorSpecialization::BlasMatmul(summary)),
+                summary_rejection: None,
+            };
+            let program = HostProgram {
+                globals: vec![],
+                global_tensor_helpers: vec![],
+                summary_rejections: vec![],
+                functions: vec![HostFunction {
+                    name: "host_blas".into(),
+                    params,
+                    ret_ty: HostType::Tensor(out_ty),
+                    body,
+                    tensor_helpers: vec![helper],
+                    origin: HostFunctionOrigin::Authored,
+                    specialization: None,
+                    summary_rejections: vec![],
+                }],
+            };
+            let mut host_source =
+                support::emit_selected_host_program(program, "host_blas_probe").unwrap();
+            assert!(
+                host_source.contains("blas_plan_"),
+                "summary must execute instead of its helper"
+            );
+            host_source.push_str("\nvoid checked_blas(chelis_tensor **in,int n_in,chelis_tensor **out,int n_out) { (void)n_in; (void)n_out; out[0]=host_blas(in[0],in[1]); }\n");
+            sources.push(host_source);
+        }
+        let input_dtype = operand.runtime_dtype().unwrap().c_macro();
+        let output_dtype = output.runtime_dtype().unwrap().c_macro();
+        let store = match operand {
+            Prim::F32 => "((float*)v.data)[i]=value;",
+            Prim::F64 => "((double*)v.data)[i]=value;",
+            Prim::F16 => "((uint16_t*)v.data)[i]=chelis_f32_to_f16(value);",
+            Prim::Bf16 => "((uint16_t*)v.data)[i]=chelis_f32_to_bf16(value);",
+            _ => unreachable!(),
+        };
+        let read = match output {
+            Prim::F32 => "((const float*)v.data)[i]",
+            Prim::F64 => "((const double*)v.data)[i]",
+            Prim::F16 => "chelis_f16_to_f32(((const uint16_t*)v.data)[i])",
+            Prim::Bf16 => "chelis_bf16_to_f32(((const uint16_t*)v.data)[i])",
+            _ => unreachable!(),
+        };
+        for (batches, k) in [(2, 2), (0, 2), (2, 0)] {
+            let harness = format!(
+                r#"
+#include "chelis_runtime.h"
+void checked_blas(chelis_tensor **, int, chelis_tensor **, int);
+static void fill(chelis_tensor *t) {{
+    chelis_tensor_write *g=chelis_tensor_begin_write(t); chelis_write_view v=chelis_tensor_write_view(g);
+    for(int64_t i=0;i<v.count;++i) {{ float value=(float)(i%3+1); {store} }}
+    chelis_tensor_end_write(g);
+}}
+int main(void) {{
+    chelis_tensor *a=chelis_alloc(4,(int64_t[]){{{batches},2,3,{k}}},{input_dtype});
+    chelis_tensor *b=chelis_alloc(4,(int64_t[]){{{batches},2,{k},4}},{input_dtype});
+    fill(a); fill(b); chelis_tensor *in[]={{a,b}},*out[1]={{0}};
+    checked_blas(in,2,out,1);
+    chelis_read_view v=chelis_tensor_read_view(out[0]);
+    if(v.count!={batches}*2*3*4 || v.dtype!={output_dtype}) return 2;
+    int64_t shape[4]={{{batches},2,3,4}};
+    for(int axis=0;axis<4;++axis) if(chelis_tensor_shape(out[0],axis)!=shape[axis]) return 3;
+    for(int64_t i=0;i<v.count;++i) {{
+        int64_t batch=i/12,row=(i%12)/4,col=i%4; double expected=0;
+        for(int64_t t=0;t<{k};++t) expected+=(double)((batch*3*{k}+row*{k}+t)%3+1)*(double)((batch*{k}*4+t*4+col)%3+1);
+        if ((double)({read})!=expected) return 4;
+    }}
+    chelis_tensor_release(out[0]); chelis_tensor_release(a); chelis_tensor_release(b);
+    puts("MATMUL PASS"); return 0;
+}}
+"#
+            );
+            for source in &sources {
+                let result = checked_indexing_run(source, &harness);
+                assert!(
+                    result.status.success(),
+                    "{operand:?}/{output:?} {batches}/{k}: {}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
+                assert_eq!(result.stdout, b"MATMUL PASS\n");
+            }
+        }
+    }
 }
 
 #[test]

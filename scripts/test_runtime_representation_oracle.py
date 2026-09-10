@@ -392,7 +392,7 @@ class ManifestTests(unittest.TestCase):
         ])
         commands = [leg.argv for leg in oracle.phase0_legs()]
         for test in ("checked_metadata", "metadata_compile", "checked_metadata_padding", "checked_c_metadata",
-                     "checked_c_indexing", "checked_c_movement", "checked_c_reduction", "checked_c_sparse", "exact_tagged_c_abi",
+                     "checked_c_indexing", "checked_c_movement", "checked_c_reduction", "checked_c_sparse", "checked_c_matmul", "exact_tagged_c_abi",
                      "op33_empty_tensor_axis_decomposition", "op33_tensor_validation",
                      "op33_legal_domain_matrix", "dim_carrier_int64",
                      "tensor_repurpose", "tensor_write_guard"):
@@ -426,6 +426,12 @@ class ManifestTests(unittest.TestCase):
         commands = [leg.argv for leg in oracle.phase0_legs()]
         self.assertTrue(any("chelis-backend-c" in command and "checked_c_movement" in command for command in commands))
         self.assertTrue(any("exec_compile" in command and "test(checked_c_movement_)" in command for command in commands))
+
+    def test_checked_c_blas_has_submission_native_and_vendor_controls(self) -> None:
+        commands = [leg.argv for leg in oracle.phase0_legs()]
+        self.assertTrue(any("chelis-backend-c" in command and "checked_c_blas" in command for command in commands))
+        for selector in ("test(checked_blas_)", "test(blas_vendor_dimension_contract)"):
+            self.assertTrue(any("exec_compile" in command and any(selector in arg for arg in command) for command in commands))
 
     def test_checked_c_sparse_has_delegation_native_and_host_execution(self) -> None:
         commands = [leg.argv for leg in oracle.phase0_legs()]

@@ -2146,6 +2146,39 @@ exact ADT identity by [05-OP-34].
 > `Overflow`, retaining [04-NUM-9]'s canonical primitive identity at int64. These
 > metadata operations have no cotangent or arithmetic accumulator.
 >
+> `chelis_tensor_matmul_plan` snapshots two checked row-major matrix operands
+> and an exact tagged exemplar selecting the result representation. Both operands
+> have rank at least two, equal leading batch shapes, equal payload dtype, and
+> equal contraction extents. The result retains those batch axes followed by the
+> left row and right column extents. Its count, strides, representation bytes, and
+> allocation projection are checked before returning an independently owned opaque
+> plan. Batch broadcasting is explicit and precedes this boundary.
+> `chelis_matmul_extent` observes a result axis with one-step normalization;
+> `chelis_matmul_dimension` observes the closed `ROWS`, `COLUMNS`, or `REDUCTION`
+> dimension. `chelis_matmul_batch_count` gives the checked number of matrix groups,
+> zero when the result is empty. `chelis_matmul_matrix_count` selects the checked
+> per-matrix count for closed part `LEFT`, `RIGHT`, or `RESULT`.
+> `chelis_matmul_index` maps an in-range batch and per-matrix element to that
+> part's checked complete tensor index. Empty domains admit no index.
+>
+> `chelis_matmul_check_target` requires the exact tagged int64 result rank and
+> shape before allocation or reuse; positive array lengths require complete non-null
+> arrays. `chelis_matmul_check_scratch` checks a selected matrix count's bytes and
+> allocation projection at an exact tagged exemplar's representation.
+> `chelis_matmul_check_vendor` checks all dimensions against a positive exact tagged
+> int64 maximum supplied from the selected vendor argument type before conversion.
+> A computation with no matrix calls (empty output or zero contraction extent)
+> requires no vendor projection. Empty outputs owe no unused per-matrix products
+> or scratch. A zero contraction with a nonempty result retains its zero identity.
+> These metadata utilities select no arithmetic algorithm and confer no authority
+> to substitute vendor GEMM for section 4.1's exact primitive contraction.
+> `chelis_matmul_plan_release` consumes the live plan exactly once. Plans retain
+> no tensor storage and remain valid after source release or repurpose, including
+> concurrent observations while live. Invalid carriers, shapes, selectors, or
+> indices trap `Domain`; unrepresentable arithmetic or target projections trap
+> `Overflow`, with [04-NUM-9]'s canonical `matmul` identity at int64. There is no
+> cotangent or arithmetic accumulator for these metadata operations.
+>
 > `chelis_tensor_reshape` accepts a live, flat `List<int64>` of target extents
 > and an idle tensor of any active element dtype. It applies the same checked
 > reshape validation before allocating result storage, returns an independent

@@ -263,7 +263,17 @@ EXPECTED_OP_MANIFESTS = {
 | checked sparse sparse_index_slot | `int64_t chelis_sparse_index_slot(const chelis_sparse_plan *plan, chelis_scalar linear)` |
 | checked sparse sparse_data_index | `int64_t chelis_sparse_data_index(const chelis_sparse_plan *plan, chelis_scalar linear, chelis_scalar selected)` |
 | checked sparse sparse_check_target | `void chelis_sparse_check_target(const chelis_sparse_plan *plan, chelis_scalar rank, const chelis_scalar *shape)` |
-| checked sparse sparse_plan_release | `void chelis_sparse_plan_release(chelis_sparse_plan *plan)` |""".splitlines()
+| checked sparse sparse_plan_release | `void chelis_sparse_plan_release(chelis_sparse_plan *plan)` |
+| checked matrix tensor_matmul_plan | `chelis_matmul_plan *chelis_tensor_matmul_plan(const chelis_tensor *left, const chelis_tensor *right, chelis_scalar exemplar)` |
+| checked matrix matmul_extent | `int64_t chelis_matmul_extent(const chelis_matmul_plan *plan, chelis_scalar axis)` |
+| checked matrix matmul_dimension | `int64_t chelis_matmul_dimension(const chelis_matmul_plan *plan, chelis_matmul_dimension_kind dimension)` |
+| checked matrix matmul_batch_count | `int64_t chelis_matmul_batch_count(const chelis_matmul_plan *plan)` |
+| checked matrix matmul_matrix_count | `int64_t chelis_matmul_matrix_count(const chelis_matmul_plan *plan, chelis_matmul_part part)` |
+| checked matrix matmul_index | `int64_t chelis_matmul_index(const chelis_matmul_plan *plan, chelis_matmul_part part, chelis_scalar batch, chelis_scalar element)` |
+| checked matrix matmul_check_target | `void chelis_matmul_check_target(const chelis_matmul_plan *plan, chelis_scalar rank, const chelis_scalar *shape)` |
+| checked matrix matmul_check_scratch | `void chelis_matmul_check_scratch(const chelis_matmul_plan *plan, chelis_matmul_part part, chelis_scalar exemplar)` |
+| checked matrix matmul_check_vendor | `void chelis_matmul_check_vendor(const chelis_matmul_plan *plan, chelis_scalar maximum)` |
+| checked matrix matmul_plan_release | `void chelis_matmul_plan_release(chelis_matmul_plan *plan)` |""".splitlines()
     ),
     "05-OP-34": tuple(
         """\
@@ -473,7 +483,7 @@ FROZEN_ATOM_DIGESTS = {
     "05-OP-30": "30c8c04f547161b7c40cbe5659a0c5fee34102f34a6fc605bcde8740221b461b",
     "05-OP-31": "20100b3524f8381469ea2a24d035da89be346f7809b70bfd6698aa94b6df9031",
     "05-OP-32": "fc45b2ef829aeebdb0d524059c63452cd2d9c733a5c2cdf85b5bfdd845bda8a1",
-    "05-OP-33": "e37f072b257798be1f96ddacacca8e1070a4acef6739b7fc44074767715344e5",
+    "05-OP-33": "fd667e659e7494407d4668b97605ec7abf78e072d2e9ba6a0dde330ec1611d72",
     "05-OP-34": "0d2c7d4a051a43dc6b0c93b241434ff1d66bbd7a3e6d47e5c74b669d2fd687bf",
     "05-OP-35": "6eb9a0e1023aeed6dcf43abe8623a9b94dcb38db15224f38915320108c276ef7",
     "05-OP-36": "aeaaf9888f922b31159b8b7536444603897d649c8fb477e77bda659346177ab4",

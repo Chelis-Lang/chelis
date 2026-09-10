@@ -300,6 +300,11 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_matmul_plan * chelis_tensor_matmul_plan ( const chelis_tensor * left , const chelis_tensor * right , chelis_scalar exemplar ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: chelis_option * chelis_dict_get ( const chelis_dict * dict , chelis_value key ) ;",
       "flags": []
     },
@@ -722,6 +727,41 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_matmul_batch_count ( const chelis_matmul_plan * plan ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_matmul_dimension ( const chelis_matmul_plan * plan , chelis_matmul_dimension_kind dimension ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_matmul_extent ( const chelis_matmul_plan * plan , chelis_scalar axis ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_matmul_index ( const chelis_matmul_plan * plan , chelis_matmul_part part , chelis_scalar batch , chelis_scalar element ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_matmul_matrix_count ( const chelis_matmul_plan * plan , chelis_matmul_part part ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: int64_t chelis_mmap_len ( const chelis_mapped_file * mapped ) ;",
       "flags": [
         "numeric-op"
@@ -893,6 +933,26 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_matmul_check_scratch ( const chelis_matmul_plan * plan , chelis_matmul_part part , chelis_scalar exemplar ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_matmul_check_target ( const chelis_matmul_plan * plan , chelis_scalar rank , const chelis_scalar * shape ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_matmul_check_vendor ( const chelis_matmul_plan * plan , chelis_scalar maximum ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_matmul_plan_release ( chelis_matmul_plan * plan ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_option_release ( const chelis_option * option ) ;",
       "flags": []
     },
@@ -1036,6 +1096,16 @@
     {
       "kind": "header-struct",
       "id": "chelis_runtime.h: enum { CHELIS_VALUE_UNIT = 0 , CHELIS_VALUE_SCALAR = 1 , CHELIS_VALUE_STRING = 2 , CHELIS_VALUE_TENSOR = 3 , CHELIS_VALUE_LIST = 4 , CHELIS_VALUE_TUPLE = 5 , CHELIS_VALUE_DICT = 6 , CHELIS_VALUE_ADT = 7 , CHELIS_VALUE_OPTION = 8 , CHELIS_VALUE_MAPPED_FILE = 9 }",
+      "flags": []
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime.h: typedef enum { CHELIS_MATMUL_LEFT = 0 , CHELIS_MATMUL_RIGHT = 1 , CHELIS_MATMUL_RESULT = 2 } chelis_matmul_part",
+      "flags": []
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime.h: typedef enum { CHELIS_MATMUL_ROWS = 0 , CHELIS_MATMUL_COLUMNS = 1 , CHELIS_MATMUL_REDUCTION = 2 } chelis_matmul_dimension_kind",
       "flags": []
     },
     {
