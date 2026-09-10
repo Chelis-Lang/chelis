@@ -6085,15 +6085,6 @@ impl<'program> LowerCtx<'program> {
         use crate::host::staged::{HostSource, HostValueId, StageValue};
         use crate::host_type_state::{HostPrecisionTerm, HostTypeTerm};
         let program = self.host_program?;
-        // Lexical callable aliases belong to the existing inliner. Lower
-        // their arguments/body in that activation, then stage the scalar
-        // producer inside it; the alias is not a free runtime host name.
-        if let Some((DeepTag::App, _, kids)) = stamped_parts(expr)
-            && let Some(name) = kids.first().and_then(bare_var_name)
-            && self.local_callables.contains_key(&name)
-        {
-            return None;
-        }
         if !matches!(
             stamped_parts(expr),
             Some((
@@ -6102,7 +6093,8 @@ impl<'program> LowerCtx<'program> {
                     | DeepTag::Match
                     | DeepTag::Access
                     | DeepTag::TupleGet
-                    | DeepTag::Cast,
+                    | DeepTag::Cast
+                    | DeepTag::Var,
                 _,
                 _
             ))
@@ -6115,7 +6107,9 @@ impl<'program> LowerCtx<'program> {
         } else {
             crate::host::expr_host_type(expr, program, &scope)
         };
-        if ty.is_unresolved() || matches!(ty, HostTypeTerm::Tensor(_) | HostTypeTerm::Fn(..)) {
+        let is_var = matches!(stamped_parts(expr), Some((DeepTag::Var, _, _)));
+        let is_callable = matches!(ty, HostTypeTerm::Fn(..));
+        if ty.is_unresolved() || matches!(ty, HostTypeTerm::Tensor(_)) || (is_var != is_callable) {
             return None;
         }
         let mut referenced = UnordSet::new();
@@ -6776,6 +6770,13 @@ impl<'program> LowerCtx<'program> {
                     }
                     if let Some(callable) = self.callable_binding_expr(&bind_kids[i + 1]) {
                         self.binding_witnesses.remove(name);
+                        // Preserve the function value at its binding position
+                        // as well as its native inlining identity. Host scalar
+                        // expressions can then capture aliases through the
+                        // same typed host carrier as other lexical values.
+                        if let Some(value) = self.stage_host_value(&bind_kids[i + 1], false) {
+                            self.bindings.insert(name.clone(), value);
+                        }
                         self.local_callables.insert(name.clone(), callable);
                     } else {
                         let witnesses = self.binding_witnesses_for_expr(&bind_kids[i + 1]).cloned();

@@ -105,6 +105,10 @@ pub(crate) fn partition(
     for (id, (name, _)) in host_parameters {
         names.insert(StageValue::Host(*id), name.clone());
     }
+    let mut host_types = host_parameters
+        .iter()
+        .map(|(id, (_, ty))| (*id, ty))
+        .collect::<BTreeMap<_, _>>();
     let mut producers = BTreeSet::new();
     for source in sources {
         if !producers.insert(source.value) {
@@ -135,6 +139,7 @@ pub(crate) fn partition(
                 }
                 reserved.insert(candidate.clone());
                 names.insert(source.value, candidate);
+                host_types.insert(id, &source.ty);
             }
         }
     }
@@ -175,6 +180,25 @@ pub(crate) fn partition(
             .map(|(binding, value, ty)| {
                 if !partition.available.contains(value) {
                     return Err(format!("staged capture `{binding}` precedes its producer"));
+                }
+                let matches = match value {
+                    StageValue::Tensor(id) => logical.get(*id).is_some_and(|node| match ty {
+                        HostTypeTerm::Tensor(expected) => {
+                            expected.precision == node.output_type.precision
+                                && expected.dims.len() == node.output_type.dims.len()
+                        }
+                        HostTypeTerm::Scalar(super::HostPrecisionTerm::Concrete(precision)) => {
+                            *precision == node.output_type.precision
+                                && node.output_type.dims.is_empty()
+                        }
+                        _ => false,
+                    }),
+                    StageValue::Host(id) => host_types.get(id).is_some_and(|actual| *actual == ty),
+                };
+                if !matches {
+                    return Err(format!(
+                        "staged capture `{binding}` has a different producer type"
+                    ));
                 }
                 Ok(HostStageCapture {
                     binding: binding.clone(),
@@ -317,6 +341,146 @@ pub(crate) fn scalar_type() -> TensorType {
     }
 }
 
+/// Static function references stay direct calls in C. The plan retains the
+/// reference at its original binding position; resolving that captured value
+/// does not create a first-class function object or guess from a later name.
+pub(super) fn resolve_callable_aliases(
+    expr: &mut super::HostExpr,
+    aliases: &BTreeMap<String, String>,
+) {
+    use super::{HostCallback, HostCallbackKind, HostExprKind};
+    fn callback(callback: &mut HostCallback, aliases: &BTreeMap<String, String>) {
+        match &mut callback.kind {
+            HostCallbackKind::Named { function, .. } => {
+                if let Some(resolved) = aliases.get(function) {
+                    *function = resolved.clone();
+                }
+            }
+            HostCallbackKind::Inline { params, body } => {
+                let mut inner = aliases.clone();
+                for param in params {
+                    inner.remove(&param.name);
+                }
+                resolve_callable_aliases(body, &inner);
+            }
+        }
+    }
+    match &mut expr.kind {
+        HostExprKind::Var(name, _) => {
+            if let Some(resolved) = aliases.get(name) {
+                *name = resolved.clone();
+            }
+        }
+        HostExprKind::Call { function, args, .. } => {
+            if let Some(resolved) = aliases.get(function) {
+                *function = resolved.clone();
+            }
+            for arg in args {
+                resolve_callable_aliases(arg, aliases);
+            }
+        }
+        HostExprKind::Builtin { args, .. }
+        | HostExprKind::TensorCall { args, .. }
+        | HostExprKind::AdtConstruct { fields: args, .. }
+        | HostExprKind::List(args, _)
+        | HostExprKind::Tuple(args, _) => {
+            for arg in args {
+                resolve_callable_aliases(arg, aliases);
+            }
+        }
+        HostExprKind::AdtFieldAccess { base, .. } => resolve_callable_aliases(base, aliases),
+        HostExprKind::If {
+            cond,
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            resolve_callable_aliases(cond, aliases);
+            resolve_callable_aliases(then_expr, aliases);
+            resolve_callable_aliases(else_expr, aliases);
+        }
+        HostExprKind::MatchOption {
+            scrutinee,
+            bind_name,
+            some_expr,
+            none_expr,
+            ..
+        } => {
+            resolve_callable_aliases(scrutinee, aliases);
+            resolve_callable_aliases(none_expr, aliases);
+            let mut inner = aliases.clone();
+            inner.remove(bind_name);
+            resolve_callable_aliases(some_expr, &inner);
+        }
+        HostExprKind::MatchAdt {
+            scrutinee,
+            arms,
+            default_expr,
+            ..
+        } => {
+            resolve_callable_aliases(scrutinee, aliases);
+            if let Some(default) = default_expr {
+                resolve_callable_aliases(default, aliases);
+            }
+            for arm in arms {
+                let mut inner = aliases.clone();
+                for binding in &arm.bindings {
+                    inner.remove(&binding.name);
+                }
+                resolve_callable_aliases(&mut arm.expr, &inner);
+            }
+        }
+        HostExprKind::Let { bindings, body, .. } => {
+            let mut inner = aliases.clone();
+            for binding in bindings {
+                resolve_callable_aliases(&mut binding.value, &inner);
+                inner.remove(&binding.name);
+            }
+            resolve_callable_aliases(body, &inner);
+        }
+        HostExprKind::Map {
+            callback: cb, list, ..
+        }
+        | HostExprKind::Filter {
+            callback: cb, list, ..
+        }
+        | HostExprKind::Partition {
+            callback: cb, list, ..
+        }
+        | HostExprKind::FlatMap {
+            callback: cb, list, ..
+        } => {
+            callback(cb, aliases);
+            resolve_callable_aliases(list, aliases);
+        }
+        HostExprKind::Fold {
+            callback: cb,
+            init,
+            list,
+            ..
+        }
+        | HostExprKind::Scan {
+            callback: cb,
+            init,
+            list,
+            ..
+        } => {
+            callback(cb, aliases);
+            resolve_callable_aliases(init, aliases);
+            resolve_callable_aliases(list, aliases);
+        }
+        HostExprKind::WithSeed { seed, body, .. } => {
+            resolve_callable_aliases(seed, aliases);
+            resolve_callable_aliases(body, aliases);
+        }
+        HostExprKind::Int(_)
+        | HostExprKind::Float(_)
+        | HostExprKind::Bool(_)
+        | HostExprKind::String(_)
+        | HostExprKind::Unit => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,6 +598,15 @@ mod tests {
             }
         }
         assert!(available.contains(plan.output()));
+        // Claims and binder spelling do not establish an actual extent. A
+        // capture only requires the producer's rank and numeric carrier here;
+        // independently executed checked extents enforce shape obligations.
+        let mut refined = sources.clone();
+        refined[0].captures[0].2 = HostTypeTerm::Tensor(TensorType {
+            dims: vec![DimInfo::Named("other".into(), Some(2))],
+            precision: Prim::F32,
+        });
+        partition(&dag, &refined, &params, &inputs, &BTreeMap::new()).unwrap();
     }
 
     #[test]
@@ -445,14 +618,48 @@ mod tests {
             "dtype",
             "forward",
             "parameter_alias",
+            "capture_rank",
+            "capture_dtype",
+            "capture_scalar",
+            "capture_host",
         ] {
             let mut sources = sources.clone();
             let mut inputs = inputs.clone();
+            let mut host_parameters = BTreeMap::new();
             match mutation {
                 "missing" => sources.clear(),
                 "duplicate" => sources.push(sources[0].clone()),
                 "dtype" => {
                     sources[0].ty = HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int32))
+                }
+                "capture_rank" => {
+                    sources[0].captures[0].2 = HostTypeTerm::Tensor(TensorType {
+                        dims: vec![],
+                        precision: Prim::F32,
+                    });
+                }
+                "capture_dtype" => {
+                    sources[0].captures[0].2 = HostTypeTerm::Tensor(TensorType {
+                        dims: vec![DimInfo::Named("n".into(), None)],
+                        precision: Prim::F64,
+                    });
+                }
+                "capture_scalar" => {
+                    sources[0].captures[0].2 =
+                        HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::F32));
+                }
+                "capture_host" => {
+                    let host = HostValueId(0);
+                    host_parameters.insert(
+                        host,
+                        (
+                            "items".into(),
+                            HostTypeTerm::List(Box::new(HostTypeTerm::Scalar(
+                                HostPrecisionTerm::Concrete(Prim::Int64),
+                            ))),
+                        ),
+                    );
+                    sources[0].captures[0].1 = StageValue::Host(host);
                 }
                 "forward" => sources[0].captures[0].1 = StageValue::Tensor(dag.roots()[0]),
                 "parameter_alias" => {
@@ -461,7 +668,7 @@ mod tests {
                 _ => unreachable!(),
             }
             assert!(
-                partition(&dag, &sources, &params, &inputs, &BTreeMap::new()).is_err(),
+                partition(&dag, &sources, &params, &inputs, &host_parameters).is_err(),
                 "{mutation}"
             );
         }

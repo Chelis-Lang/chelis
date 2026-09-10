@@ -416,7 +416,10 @@ native remainder path: the active `host_produced_reshape_targets_preserve_declar
 fixture covers bitwise, metadata, list, helper and scalar-conditional producers,
 with direct and bound/copied results. Non-tensor locals retain typed host values;
 capture identity is keyed by the producing node or host value, never the binder
-spelling. Calls into staged definitions retain the shared plan instead of
+spelling. Static function aliases retain their resolved definition at the binding
+position: Eval captures the existing function value, and C projects that same
+identity into direct calls while respecting nested binders. Later shadowing cannot
+retarget the call. Calls into staged definitions retain the shared plan instead of
 re-extracting a tensor-only helper. Host control boundaries are an explicit
 planner result, so a fallback cannot silently retry whole-function DAG lowering.
 Random handlers retain host scope, each tensor segment consumes the live handled
@@ -474,9 +477,9 @@ six folded-source caller-contract fixtures, 48 producing-source expression fixtu
 six dynamic remainder fixtures and 12 HIP host CLI/API executions,
 three executable example controls, 24 grad/vmap controls
 and 16 imported-call controls. The staged-source coverage adds 60 producer
-fixtures, 48 capture/order fixtures, six eager-source fixtures, six scoped-witness
+fixtures, 60 capture/order fixtures, six eager-source fixtures, six scoped-witness
 fixtures, 12 HIP host CLI/API executions and 24 handled-Random fixtures. These
-505 public fixture variants check declarations independently of actual
+517 public fixture variants check declarations independently of actual
 shape/value or required failure. Random values are checked at exact f32 bits.
 Claim mismatches require Domain/reshape/int64. Scheduling fixtures
 independently require Eval's division-by-zero/floor_div/int64 diagnostic and

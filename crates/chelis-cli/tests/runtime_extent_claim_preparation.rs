@@ -1547,6 +1547,16 @@ fn staged_reshape_sources_preserve_captures_and_order() {
                 "{\n  target = extent\n  reshape(x, [target(source), 2i64])\n}",
             ),
             (
+                "scalar_helper_alias_nested",
+                "def extent(y: tensor[m, f32]) -> int64 = numel(y)\n",
+                "{\n  target = extent\n  reshape(x, [bitand(target(source), 3i64), 2i64])\n}",
+            ),
+            (
+                "scalar_helper_alias_shadow",
+                "def extent(y: tensor[m, f32]) -> int64 = numel(y)\n",
+                "{\n  target = extent\n  extent = to_list(source)\n  reshape(x, [bitand(target(source), len(extent)), 2i64])\n}",
+            ),
+            (
                 "repeated_calls",
                 "def g(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [bitand(numel(source), 3i64), 2i64])\n",
                 "{\n  first = g(source, x)\n  second = g(source, x)\n  copy(first)\n}",
@@ -1617,7 +1627,7 @@ fn staged_reshape_sources_preserve_captures_and_order() {
             Expected::TargetDivisionByZero,
         );
     }
-    assert_eq!(cases.len(), 48);
+    assert_eq!(cases.len(), 60);
     let mut failures = Vec::new();
     for case in cases {
         let observed = observe(&case);

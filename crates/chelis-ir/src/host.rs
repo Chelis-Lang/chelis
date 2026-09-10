@@ -4391,6 +4391,8 @@ fn lower_staged_host_plan(
         }
     }
     let mut bindings = Vec::new();
+    let mut callable_sources = BTreeMap::<String, String>::new();
+    let mut callable_spans = Vec::new();
     for stage in plan.stages() {
         match stage {
             staged::HostStage::Source {
@@ -4399,9 +4401,46 @@ fn lower_staged_host_plan(
                 output,
                 ty,
             } => {
+                if matches!(ty, HostTypeTerm::Fn(..)) {
+                    let reference = stamped_parts(expression)
+                        .filter(|(tag, _, _)| *tag == DeepTag::Var)
+                        .and_then(|(_, _, kids)| kids.first().and_then(symbol_name))
+                        .ok_or_else(|| {
+                            host_expr_lowering_error(
+                                expression,
+                                "a staged callable needs a resolved definition reference",
+                            )
+                        })?;
+                    let function = if let Some(capture) =
+                        captures.iter().find(|capture| capture.binding == reference)
+                    {
+                        callable_sources.get(&capture.value).cloned()
+                    } else {
+                        find_top_level_def_named(program.exprs(), reference)
+                            .map(|(name, _)| name.to_owned())
+                    }
+                    .ok_or_else(|| {
+                        host_expr_lowering_error(
+                            expression,
+                            "a staged callable has no resolved definition",
+                        )
+                    })?;
+                    if let Some(span) = expression.span_id() {
+                        callable_spans.push(span);
+                    }
+                    callable_sources.insert(output.clone(), function);
+                    scope.insert(output.clone(), ty.clone());
+                    continue;
+                }
                 let mut captured_scope = scope.clone();
                 let mut captured_bindings = Vec::new();
+                let mut callable_aliases = BTreeMap::new();
                 for capture in captures {
+                    if let Some(function) = callable_sources.get(&capture.value) {
+                        callable_aliases.insert(capture.binding.clone(), function.clone());
+                        captured_scope.insert(capture.binding.clone(), capture.ty.clone());
+                        continue;
+                    }
                     let value_ty = scope
                         .get(&capture.value)
                         .expect("available capture")
@@ -4427,13 +4466,14 @@ fn lower_staged_host_plan(
                     captured_scope.insert(capture.binding.clone(), capture.ty.clone());
                 }
                 let ty = ty.clone();
-                let body = lower_host_expr_with_expected(
+                let mut body = lower_host_expr_with_expected(
                     expression,
                     program,
                     &captured_scope,
                     helpers,
                     Some(&ty),
                 )?;
+                staged::resolve_callable_aliases(&mut body, &callable_aliases);
                 let value = HostExpr::new(HostExprKind::Let {
                     bindings: captured_bindings,
                     body: Box::new(body),
@@ -4507,11 +4547,15 @@ fn lower_staged_host_plan(
     }
     let ty = scope.get(plan.output()).expect("planned result").clone();
     let body = HostExpr::new(HostExprKind::Var(plan.output().to_owned(), ty.clone()));
-    Ok(HostExpr::new(HostExprKind::Let {
+    let mut result = HostExpr::new(HostExprKind::Let {
         bindings,
         body: Box::new(body),
         ty,
-    }))
+    });
+    for span in callable_spans {
+        result.append_merged_span(Some(span));
+    }
+    Ok(result)
 }
 
 /// Outcome of the structured BLAS-helper recognizer (W6 Task A).
