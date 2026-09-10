@@ -931,6 +931,14 @@ claim matrix separately covers exported calls, top-level bindings, inlined
 roots, aliases, and discarded calls. Guard mutations reject deleting or emptying
 the new parity row, making it library-only, or removing its corpus entry.
 
+PR #1692 adds `checked_sparse_axes.ch` and `parity_checked_sparse_axes`
+to the frozen inventory. Independent native stored-bit and checked-boundary
+controls cover non-trailing Gather indices, exact wide integers, duplicates,
+empty domains, and invalid-index diagnostics. The example's parity row executes
+both evaluator and generated C. Guard mutations reject deleting or emptying the
+row, making it library-only, or removing its corpus entry; every previous corpus
+entry remains required.
+
 Three digest-locked behavioral canaries perturb the compiled observation before
 the shared comparator, drive the shared `assert_expected` helper with a
 known-wrong expected value, and present an adjacent f32 result while the

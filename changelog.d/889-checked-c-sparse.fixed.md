@@ -1,0 +1,1 @@
+Generated C sparse kernels and host helper loops validate exact shapes and project checked indices before allocation or access. Scatter copies use checked byte counts, preserving empty domains, exact stored values, and duplicate-update order.

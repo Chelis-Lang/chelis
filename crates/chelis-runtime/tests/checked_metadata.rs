@@ -7,7 +7,74 @@ mod metadata;
 use chelis_vocab::RuntimeDType;
 use metadata::{
     ByteCount, ElementCount, IterationSpace, MetadataError, ReductionMetadata, ShapeMetadata,
+    SparseMetadata,
 };
+
+#[test]
+fn sparse_metadata_binds_indices_to_exact_hyperplane_and_elementwise_domains() {
+    let shape = |s: &[i64], dtype| ShapeMetadata::contiguous(s, dtype).unwrap();
+    for dtype in RuntimeDType::ALL {
+        let base = shape(&[2, 3, 2], dtype);
+        let indices = shape(&[2, 2], RuntimeDType::I8);
+        let plan = SparseMetadata::new(&base, &indices, -2, false).unwrap();
+        assert_eq!(plan.base().shape(), &[2, 3, 2]);
+        assert_eq!(plan.base().extent_at(-1).unwrap(), 2);
+        assert_eq!(plan.domain().shape(), &[2, 2, 2, 2]);
+        assert_eq!(plan.domain().dtype(), dtype);
+        let selected = [2, 0, 1, 2];
+        let expected = [4, 5, 0, 1, 2, 3, 4, 5, 10, 11, 6, 7, 8, 9, 10, 11];
+        for (linear, expected) in expected.into_iter().enumerate() {
+            let slot = plan.index_slot(linear as i64).unwrap();
+            assert_eq!(slot, (linear as i64 / 2) % 4);
+            assert_eq!(
+                plan.data_index(linear as i64, selected[slot as usize])
+                    .unwrap(),
+                expected
+            );
+        }
+        for bad in [-1, 16] {
+            assert!(plan.index_slot(bad).is_err());
+            assert!(plan.data_index(bad, 0).is_err());
+        }
+        for bad in [-1, 3] {
+            assert!(plan.data_index(0, bad).is_err());
+        }
+        assert!(SparseMetadata::new(&base, &indices, 3, false).is_err());
+        assert!(SparseMetadata::new(&base, &indices, -4, false).is_err());
+        let base = shape(&[2, 3], dtype);
+        let plan = SparseMetadata::new(&base, &indices, 1, true).unwrap();
+        assert_eq!(plan.domain().shape(), &[2, 2]);
+        for (linear, (selected, expected)) in
+            [(2, 2), (0, 0), (1, 4), (2, 5)].into_iter().enumerate()
+        {
+            assert_eq!(plan.index_slot(linear as i64).unwrap(), linear as i64);
+            assert_eq!(plan.data_index(linear as i64, selected).unwrap(), expected);
+        }
+        assert!(SparseMetadata::new(&base, &shape(&[3, 2], RuntimeDType::I8), 1, true).is_err());
+        assert!(SparseMetadata::new(&base, &shape(&[2], RuntimeDType::I8), 1, true).is_err());
+    }
+    let base = shape(&[0, 3, 2], RuntimeDType::I64);
+    let indices = shape(&[4], RuntimeDType::I32);
+    let empty = SparseMetadata::new(&base, &indices, 1, false).unwrap();
+    assert_eq!(empty.domain().elements().get(), 0);
+    assert!(empty.index_slot(0).is_err());
+    assert!(empty.data_index(0, 0).is_err());
+    let base = shape(&[2, 0, 3], RuntimeDType::I8);
+    let no_valid_index = SparseMetadata::new(&base, &indices, 1, false).unwrap();
+    assert_eq!(no_valid_index.domain().elements().get(), 24);
+    assert!(no_valid_index.data_index(0, 0).is_err());
+    let large = shape(&[i64::MAX, 0], RuntimeDType::I64);
+    assert!(matches!(
+        SparseMetadata::new(&large, &indices, 1, false),
+        Err(MetadataError::Overflow(_))
+    ));
+    let base = shape(&[1, i64::MAX], RuntimeDType::I8);
+    let scalar_index = shape(&[], RuntimeDType::I64);
+    let large = SparseMetadata::new(&base, &scalar_index, 0, false).unwrap();
+    assert_eq!(large.domain().elements().get(), i64::MAX);
+    assert_eq!(large.index_slot(i64::MAX - 1).unwrap(), 0);
+    assert_eq!(large.data_index(i64::MAX - 1, 0).unwrap(), i64::MAX - 1);
+}
 
 #[test]
 fn reduction_metadata_binds_grouping_to_checked_input_and_result_domains() {

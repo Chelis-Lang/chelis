@@ -5359,9 +5359,12 @@ fn build_c_emits_sparse_gather_loop_for_int32_indices() {
         .success();
 
     let c_src = fs::read_to_string(out_dir.join("gather_c.c")).expect("c source");
-    assert!(c_src.contains("const int32_t *"));
-    assert!(c_src.contains("values_data"));
-    assert!(c_src.contains("_out_data"));
+    assert!(c_src.contains("chelis_tensor_sparse_plan("));
+    assert!(c_src.contains("chelis_sparse_index_slot("));
+    assert!(c_src.contains("chelis_sparse_data_index("));
+    assert!(c_src.contains("chelis_sparse_check_target("));
+    assert!(c_src.contains("chelis_sparse_plan_release("));
+    assert!(c_src.contains("CHELIS_DTYPE_I32"));
     assert!(!c_src.contains("chelis_tensor_gather("));
     assert!(
         !c_src.contains("(int64_t[]){ 64, 1000, 128 }"),

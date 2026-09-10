@@ -427,6 +427,11 @@ fn parity_dict_foundation() {
 }
 
 #[test]
+fn parity_checked_sparse_axes() {
+    drive_parity(&examples_root().join("checked_sparse_axes.ch"), true);
+}
+
+#[test]
 fn parity_count_bool_axes() {
     drive_parity(&examples_root().join("count_bool_axes.ch"), true);
 }
@@ -574,6 +579,7 @@ fn parity_rank_poly_borrow_library_only() {
 fn parity_corpus_is_complete() {
     let known: &[&str] = &[
         "checked_reshape.ch",
+        "checked_sparse_axes.ch",
         "constraint_directed_risk_guards.ch",
         "count_bool_axes.ch",
         "dict_foundation.ch",
