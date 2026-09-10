@@ -54,16 +54,10 @@ fn issue254_emit_reduce_window_max_uses_fmaxf_and_neg_infinity() {
         src.contains("-INFINITY"),
         "Max emit must initialize acc to -INFINITY, got:\n{src}"
     );
-    // Two windowed axes → two nested `__w` loops with the literal
-    // window size 2.
-    assert!(
-        src.contains("for (int __w0 = 0; __w0 < 2;"),
-        "Max emit must have an inner window loop along axis 0, got:\n{src}"
-    );
-    assert!(
-        src.contains("for (int __w1 = 0; __w1 < 2;"),
-        "Max emit must have an inner window loop along axis 1, got:\n{src}"
-    );
+    assert!(src.contains("chelis_window_count("));
+    assert!(src.contains("for (int64_t leaf = 0; leaf < t1_window_count;"));
+    assert!(src.contains("chelis_window_index("));
+    assert!(!src.contains("full_indices[") && !src.contains("out_indices["));
 }
 
 #[test]
@@ -111,13 +105,12 @@ fn issue254_emit_reduce_window_mean_divides_by_window_volume() {
     );
     // Window volume = 2 * 2 = 4.
     assert!(
-        src.contains("acc /= 4.0f;"),
+        src.contains("acc /= (float)t1_window_count;"),
         "Mean emit must divide by the window volume (4 for 2x2), got:\n{src}"
     );
 }
 
-/// Stride > 1 must show up in the source-index arithmetic (the IR
-/// node carries strides verbatim, and the emit multiplies by them).
+/// Stride > 1 is transported exactly to the checked projection plan.
 #[test]
 fn issue254_emit_reduce_window_max_uses_stride_in_index_arithmetic() {
     let mut dag = Dag::new();
@@ -138,14 +131,12 @@ fn issue254_emit_reduce_window_max_uses_stride_in_index_arithmetic() {
         None,
     );
     let src = codegen(&dag, "kernel").unwrap().c_source;
-    assert!(
-        src.contains("* 2 + __w0"),
-        "stride>1 emit must multiply the output index by the stride along axis 0, got:\n{src}"
-    );
-    assert!(
-        src.contains("* 2 + __w1"),
-        "stride>1 emit must multiply the output index by the stride along axis 1, got:\n{src}"
-    );
+    let plan = src
+        .lines()
+        .find(|line| line.contains("= chelis_tensor_window_plan("))
+        .unwrap();
+    assert!(plan.contains("(chelis_scalar[]){chelis_scalar_from_bits(CHELIS_DTYPE_I64, UINT64_C(2)), chelis_scalar_from_bits(CHELIS_DTYPE_I64, UINT64_C(2))}"));
+    assert!(src.contains("chelis_window_index("));
 }
 
 #[test]

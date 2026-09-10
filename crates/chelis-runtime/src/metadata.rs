@@ -47,6 +47,107 @@ pub(crate) struct IterationSpace {
     elements: ElementCount,
 }
 
+/// Valid-padding window geometry independent of source storage and arithmetic.
+pub(crate) struct WindowMetadata {
+    input: ShapeMetadata,
+    result: ShapeMetadata,
+    window: Box<[i64]>,
+    steps: Box<[i64]>,
+    leading: usize,
+    count: ElementCount,
+}
+
+impl WindowMetadata {
+    pub(crate) fn new(
+        input: &ShapeMetadata,
+        window: &[i64],
+        steps: &[i64],
+    ) -> Result<Self, MetadataError> {
+        if window.is_empty() || window.len() != steps.len() || window.len() > input.shape.len() {
+            return Err(MetadataError::Domain(
+                "window and stride arity outside input rank".into(),
+            ));
+        }
+        ElementCount::scratch_entries(window.len(), 0)?.scratch_len::<i64>()?;
+        let leading = input.shape.len() - window.len();
+        let mut shape = input.shape.to_vec();
+        for (i, (&w, &step)) in window.iter().zip(steps).enumerate() {
+            let axis = leading + i;
+            if w <= 0 || step <= 0 || w > input.shape[axis] {
+                return Err(MetadataError::Domain(
+                    "window or stride outside valid-padding domain".into(),
+                ));
+            }
+            shape[axis] = input.shape[axis]
+                .checked_sub(w)
+                .and_then(|n| n.checked_div(step))
+                .and_then(|n| n.checked_add(1))
+                .ok_or(MetadataError::Overflow("window extent exceeds int64"))?;
+        }
+        let result = ShapeMetadata::contiguous(&shape, input.dtype())?;
+        result.bytes().allocation()?;
+        let count = ElementCount::from_extents(if result.elements().get() == 0 {
+            &[0]
+        } else {
+            window
+        })?;
+        Ok(Self {
+            input: input.clone(),
+            result,
+            window: window.into(),
+            steps: steps.into(),
+            leading,
+            count,
+        })
+    }
+    pub(crate) fn input(&self) -> &ShapeMetadata {
+        &self.input
+    }
+    pub(crate) fn result(&self) -> &ShapeMetadata {
+        &self.result
+    }
+    pub(crate) fn count(&self) -> ElementCount {
+        self.count
+    }
+    pub(crate) fn index(&self, group: i64, leaf: i64) -> Result<i64, MetadataError> {
+        self.result.require_index(group)?;
+        if leaf < 0 || leaf >= self.count.get() {
+            return Err(MetadataError::Domain(
+                "window leaf outside iteration domain".into(),
+            ));
+        }
+        let mut group_remaining = group;
+        let mut leaf_remaining = leaf;
+        let mut source_index = 0_i64;
+        for axis in (0..self.input.shape.len()).rev() {
+            let coordinate = group_remaining % self.result.shape[axis];
+            group_remaining /= self.result.shape[axis];
+            let coordinate = if axis < self.leading {
+                coordinate
+            } else {
+                let window_axis = axis - self.leading;
+                let offset = leaf_remaining % self.window[window_axis];
+                leaf_remaining /= self.window[window_axis];
+                coordinate
+                    .checked_mul(self.steps[window_axis])
+                    .and_then(|n| n.checked_add(offset))
+                    .ok_or(MetadataError::Overflow("window coordinate exceeds int64"))?
+            };
+            if coordinate >= self.input.shape[axis] {
+                return Err(MetadataError::Domain(
+                    "window coordinate outside source".into(),
+                ));
+            }
+            source_index = coordinate
+                .checked_mul(self.input.strides[axis])
+                .and_then(|n| source_index.checked_add(n))
+                .ok_or(MetadataError::Overflow("window index exceeds int64"))?;
+        }
+        self.input.require_index(source_index)?;
+        Ok(source_index)
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum MatmulPart {
     Left,

@@ -1018,7 +1018,7 @@ impl CEmitter {
                     &node.inputs,
                     &node.output_type,
                     dag,
-                );
+                )?;
             }
             RiscOp::Argmax { axis } => {
                 self.emit_reduce_argcmp(id, *axis, &node.inputs, &node.output_type, dag, true)?;
@@ -5032,6 +5032,61 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     /// (and the CLI's mirror); the `panic!` below is a defensive backstop so
     /// silent truncation cannot recur if some path reaches emit unguarded.
     #[allow(clippy::too_many_arguments)]
+    fn emit_window_plan(
+        &mut self,
+        id: usize,
+        input: usize,
+        window: &[usize],
+        strides: &[usize],
+        ty: &TensorType,
+        operation: &str,
+        side: &str,
+    ) -> Result<(), Unsupported> {
+        let array = |values: &[usize]| -> Result<String, Unsupported> {
+            if values.is_empty() {
+                return Ok("NULL".into());
+            }
+            let values = values
+                .iter()
+                .map(|&value| {
+                    let value = i64::try_from(value).map_err(|_| {
+                        Unsupported::new(
+                            UnsupportedKind::Construct("a window parameter outside int64".into()),
+                            format!("the C DAG emitter (node {id})"),
+                            Stage::Codegen("c"),
+                            chelis_types::deliberate_rejection!(
+                                "[05-RWIN-1]",
+                                "window extents and strides require positive int64 values"
+                            ),
+                        )
+                    })?;
+                    Ok(format!(
+                        "chelis_scalar_from_bits(CHELIS_DTYPE_I64, UINT64_C({value}))"
+                    ))
+                })
+                .collect::<Result<Vec<_>, Unsupported>>()?;
+            Ok(format!("(chelis_scalar[]){{{}}}", values.join(", ")))
+        };
+        let window = array(window)?;
+        let count = strides.len();
+        let strides = array(strides)?;
+        self.line(&format!("chelis_window_plan *t{id}_window = chelis_tensor_window_plan(t{input}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {count}), {window}, {strides}, {operation});"));
+        let extents = (0..ty.dims.len()).map(|axis| (axis, format!("chelis_window_extent(t{id}_window, {side}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {axis}))"))).collect::<Vec<_>>();
+        self.emit_runtime_dim_sites(id, &extents);
+        let shape = Self::tagged_shape_literal(ty);
+        let rank = ty.dims.len();
+        self.line(&format!("chelis_window_check_target(t{id}_window, {side}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, {rank}), {shape});"));
+        let index = Self::elem_type(&TensorType {
+            dims: vec![],
+            precision: Prim::Int64,
+        });
+        self.line(&format!(
+            "{index} t{id}_window_count = chelis_window_count(t{id}_window);"
+        ));
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn emit_reduce_window(
         &mut self,
         id: usize,
@@ -5132,15 +5187,24 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 ));
             }
         }
-        let window_volume: usize = window_shape.iter().product();
+        let operation = match reducer {
+            ReduceWindowKind::Sum => "CHELIS_WINDOW_SUM",
+            ReduceWindowKind::Mean => "CHELIS_WINDOW_MEAN",
+            ReduceWindowKind::Max => "CHELIS_WINDOW_MAX",
+            ReduceWindowKind::Min => "CHELIS_WINDOW_MIN",
+        };
+        self.emit_window_plan(
+            id,
+            a,
+            window_shape,
+            strides,
+            ty,
+            operation,
+            "CHELIS_WINDOW_RESULT",
+        )?;
         self.emit_slot_wrapper(id, ty);
-        // NOTE (#172 sibling, intentionally NOT changed here): windowed
-        // Max/Min keep C99 `fmaxf`/`fminf` (NaN-dropping). The #172 fix
-        // scopes NaN propagation to the `max_reduce` / `min_reduce`
-        // reductions; flipping reduce_window forward without also defining
-        // the NaN gradient-routing in the windowed backward (the `ext`
-        // recompute below) would introduce a fwd/bwd inconsistency. Tracked
-        // as a follow-up; reduce_window has its own parity gate (spec §2.3).
+        // Arithmetic policy is unchanged here; #1298 owns canonical window
+        // accumulation and extrema NaN/adjoint remediation.
         let (init_literal, combine_template) = match reducer {
             ReduceWindowKind::Max => (
                 "-INFINITY",
@@ -5154,7 +5218,6 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
                 ("0.0f", "acc += ((const float*)t{a}_data)[src_idx];")
             }
         };
-
         self.line("#pragma omp parallel for");
         self.line(&format!(
             "for (int64_t outer = 0; outer < t{id}_size; outer++) {{"
@@ -5162,70 +5225,21 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         self.indent += 1;
         self.line(&format!("float acc = {init_literal};"));
         self.line(&format!(
-            "int64_t out_indices[t{id}_rank > 0 ? t{id}_rank : 1];"
+            "for (int64_t leaf = 0; leaf < t{id}_window_count; leaf++) {{"
         ));
-        self.line(&format!(
-            "chelis_flat_to_indices(outer, t{id}_shape, t{id}_rank, out_indices);"
-        ));
-        // Generate nested window loops. Each windowed axis gets its
-        // own loop variable __w{i}; the leading axes are passed
-        // through from `out_indices[..leading]`.
-        for (i, w) in window_shape.iter().enumerate() {
-            self.line(&format!("for (int __w{i} = 0; __w{i} < {w}; __w{i}++) {{"));
-            self.indent += 1;
-        }
-        self.line(&format!(
-            "int64_t full_indices[t{a}_rank > 0 ? t{a}_rank : 1];"
-        ));
-        for d in 0..leading {
-            self.line(&format!("full_indices[{d}] = out_indices[{d}];"));
-        }
-        for (i, s) in strides.iter().enumerate() {
-            let axis = leading + i;
-            self.line(&format!(
-                "full_indices[{axis}] = out_indices[{axis}] * {s} + __w{i};"
-            ));
-        }
-        self.line(&format!(
-            "int64_t src_idx = chelis_indices_to_flat(full_indices, t{a}_strides, t{a}_rank);"
-        ));
-        let combine = combine_template.replace("{a}", &a.to_string());
-        self.line(&combine);
-        for _ in 0..n {
-            self.indent -= 1;
-            self.line("}");
-        }
+        self.indent += 1;
+        self.line(&format!("int64_t src_idx = chelis_window_index(t{id}_window, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)leaf));"));
+        self.line(&combine_template.replace("{a}", &a.to_string()));
+        self.indent -= 1;
+        self.line("}");
         if matches!(reducer, ReduceWindowKind::Mean) {
-            self.line(&format!("acc /= {}.0f;", window_volume));
+            self.line(&format!("acc /= (float)t{id}_window_count;"));
         }
         self.line(&format!("((float*)t{id}_data)[outer] = acc;"));
         self.indent -= 1;
         self.line("}");
+        self.line(&format!("chelis_window_plan_release(t{id}_window);"));
         Ok(())
-    }
-
-    /// Emit the per-window `full_indices` source multi-index used by the
-    /// `reduce_window` adjoint: leading axes pass through from
-    /// `out_indices`, windowed axis `i` is `out_indices[axis]*stride + __w{i}`.
-    /// Assumes the `__w{i}` loop variables and `out_indices` are in scope.
-    fn emit_reduce_window_grad_full_indices(
-        &mut self,
-        leading: usize,
-        strides: &[usize],
-        input: usize,
-    ) {
-        self.line(&format!(
-            "int64_t full_indices[t{input}_rank > 0 ? t{input}_rank : 1];"
-        ));
-        for d in 0..leading {
-            self.line(&format!("full_indices[{d}] = out_indices[{d}];"));
-        }
-        for (i, s) in strides.iter().enumerate() {
-            let axis = leading + i;
-            self.line(&format!(
-                "full_indices[{axis}] = out_indices[{axis}] * {s} + __w{i};"
-            ));
-        }
     }
 
     /// Reverse-mode adjoint of `reduce_window_*` (`RiscOp::ReduceWindowGrad`).
@@ -5235,7 +5249,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
     /// shape. Each window's `g` is scattered (overlap-add) back over the
     /// window — `Sum` adds `g`, `Mean` adds `g / window_volume`, and
     /// `Max`/`Min` add `g` only at positions equal to that window's extreme
-    /// (ties distribute, matching the `max_reduce` mask adjoint). See
+    /// (existing tie/NaN arithmetic remains tracked by #1298). Geometry follows
     /// `spec/05-risc-primitives.md` §2.3.1.
     ///
     /// Emitted **serially** (no `#pragma omp parallel for`): overlapping
@@ -5251,7 +5265,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         inputs: &[NodeId],
         ty: &TensorType,
         dag: VerifiedDagView<'_>,
-    ) {
+    ) -> Result<(), Unsupported> {
         let x = inputs[0].0;
         let g = inputs[1].0;
         let x_node = dag.get(inputs[0]).unwrap();
@@ -5279,89 +5293,61 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             in_rank >= n,
             "reduce_window_grad: output rank {in_rank} smaller than window arity {n}"
         );
-        let leading = in_rank - n;
-        let window_volume: usize = window_shape.iter().product();
-
-        self.emit_slot_wrapper(id, ty);
-
-        // din accumulates with `+=`, so it must start at zero.
+        self.emit_window_plan(
+            id,
+            x,
+            window_shape,
+            strides,
+            ty,
+            "CHELIS_WINDOW_GRAD",
+            "CHELIS_WINDOW_SOURCE",
+        )?;
         self.line(&format!(
-            "for (int64_t __i = 0; __i < t{id}_size; __i++) {{ ((float*)t{id}_data)[__i] = 0.0f; }}"
+            "chelis_window_check_tensor(t{id}_window, t{g}, CHELIS_WINDOW_RESULT);"
         ));
-
-        // Serial scatter over each cotangent (forward-output) position.
+        self.emit_slot_wrapper(id, ty);
+        self.line(&format!(
+            "for (int64_t i = 0; i < t{id}_size; i++) {{ ((float*)t{id}_data)[i] = 0.0f; }}"
+        ));
+        // Serial cotangent/leaf order preserves deterministic overlap addition.
         self.line(&format!(
             "for (int64_t outer = 0; outer < t{g}_size; outer++) {{"
         ));
         self.indent += 1;
         self.line(&format!("float gval = ((const float*)t{g}_data)[outer];"));
-        self.line(&format!(
-            "int64_t out_indices[t{g}_rank > 0 ? t{g}_rank : 1];"
-        ));
-        self.line(&format!(
-            "chelis_flat_to_indices(outer, t{g}_shape, t{g}_rank, out_indices);"
-        ));
-
-        let is_extreme = matches!(reducer, ReduceWindowKind::Max | ReduceWindowKind::Min);
-        if is_extreme {
-            // First pass: the window extreme over `x` (needed to decide
-            // which positions receive the gradient).
+        if matches!(reducer, ReduceWindowKind::Max | ReduceWindowKind::Min) {
             let (init, cmp) = match reducer {
                 ReduceWindowKind::Max => ("-INFINITY", "fmaxf"),
                 _ => ("INFINITY", "fminf"),
             };
             self.line(&format!("float ext = {init};"));
-            for (i, w) in window_shape.iter().enumerate() {
-                self.line(&format!("for (int __w{i} = 0; __w{i} < {w}; __w{i}++) {{"));
-                self.indent += 1;
-            }
-            self.emit_reduce_window_grad_full_indices(leading, strides, x);
             self.line(&format!(
-                "int64_t src_idx = chelis_indices_to_flat(full_indices, t{x}_strides, t{x}_rank);"
+                "for (int64_t leaf = 0; leaf < t{id}_window_count; leaf++) {{"
             ));
+            self.indent += 1;
+            self.line(&format!("int64_t src_idx = chelis_window_index(t{id}_window, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)leaf));"));
             self.line(&format!(
                 "ext = {cmp}(ext, ((const float*)t{x}_data)[src_idx]);"
             ));
-            for _ in 0..n {
-                self.indent -= 1;
-                self.line("}");
-            }
-        }
-
-        // Scatter pass: distribute `gval` into the windowed `din` positions.
-        for (i, w) in window_shape.iter().enumerate() {
-            self.line(&format!("for (int __w{i} = 0; __w{i} < {w}; __w{i}++) {{"));
-            self.indent += 1;
-        }
-        self.emit_reduce_window_grad_full_indices(leading, strides, x);
-        self.line(&format!(
-            "int64_t dst_idx = chelis_indices_to_flat(full_indices, t{id}_strides, t{id}_rank);"
-        ));
-        match reducer {
-            ReduceWindowKind::Sum => {
-                self.line(&format!("((float*)t{id}_data)[dst_idx] += gval;"));
-            }
-            ReduceWindowKind::Mean => {
-                self.line(&format!(
-                    "((float*)t{id}_data)[dst_idx] += gval / {window_volume}.0f;"
-                ));
-            }
-            ReduceWindowKind::Max | ReduceWindowKind::Min => {
-                self.line(&format!(
-                    "int64_t src_idx = chelis_indices_to_flat(full_indices, t{x}_strides, t{x}_rank);"
-                ));
-                self.line(&format!(
-                    "if (((const float*)t{x}_data)[src_idx] == ext) {{ ((float*)t{id}_data)[dst_idx] += gval; }}"
-                ));
-            }
-        }
-        for _ in 0..n {
             self.indent -= 1;
             self.line("}");
         }
-
+        self.line(&format!(
+            "for (int64_t leaf = 0; leaf < t{id}_window_count; leaf++) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!("int64_t dst_idx = chelis_window_index(t{id}_window, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)outer), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)leaf));"));
+        match reducer {
+            ReduceWindowKind::Sum => self.line(&format!("((float*)t{id}_data)[dst_idx] += gval;")),
+            ReduceWindowKind::Mean => self.line(&format!("((float*)t{id}_data)[dst_idx] += gval / (float)t{id}_window_count;")),
+            ReduceWindowKind::Max | ReduceWindowKind::Min => self.line(&format!("if (((const float*)t{x}_data)[dst_idx] == ext) {{ ((float*)t{id}_data)[dst_idx] += gval; }}")),
+        }
         self.indent -= 1;
         self.line("}");
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!("chelis_window_plan_release(t{id}_window);"));
+        Ok(())
     }
 
     // ---- Argmax / Argmin ----

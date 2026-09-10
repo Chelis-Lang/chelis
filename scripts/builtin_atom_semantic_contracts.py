@@ -105,6 +105,8 @@ CALLABLE_CLAUSES = {
         (("mean",), "`mean(x, axes...) -> result` admits a tensor operand of"),
         (("mmap_read", "read_bytes"), "`print(value)->unit!{IO}`, `debug(value)->value!{IO}`"),
         (("rank",), "`rank(x)` and `numel(x)` borrow a tensor and return int32 and int64 respectively"),
+        (("reduce_window_sum", "reduce_window_mean", "reduce_window_max", "reduce_window_min"),
+         "`window_reduction(arguments...) -> result` governs exactly"),
         (("relu",), "`relu(x) -> result` admits every active float dtype"),
         (("shape",), "The runtime extent read (`shape(x, axis)`; C ABI"),
         (("sub",), "`sub(left, right) -> result` admits two values"),

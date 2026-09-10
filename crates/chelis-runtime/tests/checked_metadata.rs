@@ -7,8 +7,65 @@ mod metadata;
 use chelis_vocab::RuntimeDType;
 use metadata::{
     ByteCount, ElementCount, IterationSpace, MatmulDimension, MatmulMetadata, MatmulPart,
-    MetadataError, ReductionMetadata, ShapeMetadata, SparseMetadata,
+    MetadataError, ReductionMetadata, ShapeMetadata, SparseMetadata, WindowMetadata,
 };
+
+#[test]
+fn window_metadata_binds_valid_padding_and_row_major_source_indices() {
+    let shape = |s: &[i64], dtype| ShapeMetadata::contiguous(s, dtype).unwrap();
+    for dtype in RuntimeDType::ALL {
+        let input = shape(&[2, 5, 6], dtype);
+        let plan = WindowMetadata::new(&input, &[2, 3], &[2, 2]).unwrap();
+        assert_eq!(plan.input().shape(), &[2, 5, 6]);
+        assert_eq!(plan.result().shape(), &[2, 2, 2]);
+        assert_eq!(plan.result().dtype(), dtype);
+        assert_eq!(plan.count().get(), 6);
+        for group in 0..8 {
+            for leaf in 0..6 {
+                let expected = (group / 4) * 30
+                    + ((group % 4) / 2 * 2 + leaf / 3) * 6
+                    + (group % 2 * 2 + leaf % 3);
+                assert_eq!(plan.index(group, leaf).unwrap(), expected);
+            }
+        }
+        for (group, leaf) in [(-1, 0), (8, 0), (0, -1), (0, 6)] {
+            assert!(matches!(
+                plan.index(group, leaf),
+                Err(MetadataError::Domain(_))
+            ));
+        }
+        drop(input);
+        assert_eq!(plan.index(7, 5).unwrap(), 52);
+    }
+    let f = RuntimeDType::F32;
+    for (input, windows, steps) in [
+        (&[4][..], &[][..], &[][..]),
+        (&[4], &[2], &[]),
+        (&[4], &[1, 1], &[1, 1]),
+        (&[4], &[0], &[1]),
+        (&[4], &[-1], &[1]),
+        (&[4], &[2], &[0]),
+        (&[4], &[2], &[-1]),
+        (&[4], &[5], &[2]),
+        (&[0], &[1], &[1]),
+    ] {
+        assert!(matches!(
+            WindowMetadata::new(&shape(input, f), windows, steps),
+            Err(MetadataError::Domain(_))
+        ));
+    }
+    let empty = WindowMetadata::new(&shape(&[0, i64::MAX], f), &[i64::MAX], &[1]).unwrap();
+    assert_eq!(empty.result().shape(), &[0, 1]);
+    assert_eq!(empty.count().get(), 0);
+    assert!(empty.index(0, 0).is_err());
+    let huge = WindowMetadata::new(&shape(&[i64::MAX], RuntimeDType::I8), &[2], &[2]).unwrap();
+    assert_eq!(huge.result().shape(), &[i64::MAX / 2]);
+    assert_eq!(huge.index(i64::MAX / 2 - 1, 1).unwrap(), i64::MAX - 2);
+    let whole =
+        WindowMetadata::new(&shape(&[i64::MAX], RuntimeDType::I8), &[i64::MAX], &[1]).unwrap();
+    assert_eq!(whole.count().get(), i64::MAX);
+    assert_eq!(whole.index(0, i64::MAX - 1).unwrap(), i64::MAX - 1);
+}
 
 #[test]
 fn matmul_metadata_binds_matrix_spans_and_vendor_projection_without_storage() {
