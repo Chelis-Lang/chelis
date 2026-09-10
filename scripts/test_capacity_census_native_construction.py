@@ -1,6 +1,6 @@
 """Constructor scope controls for the native boundary's private adapters.
 
-These tests establish lexical ownership only. The final factory must select
+These tests establish direct construction ownership only. The final factory must select
 the actual governing conversion/validation methods and prove their behavior.
 """
 
@@ -43,36 +43,36 @@ class ConstructorScopes(unittest.TestCase):
         self.closure_body = body(self.closure, "Closure", (self.root,))
         self.nested_body = body(self.nested, "Closure", (self.closure, self.root))
         self.raw = {
-            "format": 3,
+            "format": 4,
             "scope": "native-bindings",
             "errors": [],
             "bodies": [self.root_body, self.closure_body, self.nested_body],
             "aggregates": [self.aggregate(self.root_body)],
+            "constructor_uses": [],
         }
 
     def aggregate(self, caller):
         return {"definition": self.carrier, "caller": copy.deepcopy(caller)}
 
-    def check(self, raw=None, *, closures=False, roots=None):
+    def check(self, raw=None, *, roots=None):
         from capacity_census_native_construction import constructor_scope_ownership
 
         return constructor_scope_ownership(
             self.raw if raw is None else raw,
             DefinitionIdentity.from_record(self.carrier),
-            roots or {DefinitionIdentity.from_record(self.root): closures},
+            roots if roots is not None else {DefinitionIdentity.from_record(self.root)},
         )
 
-    def test_exact_root_and_explicit_closure_scopes(self):
+    def test_exact_root_accepts_and_closure_construction_rejects(self):
         result = self.check()
         expected = frozenset({DefinitionIdentity.from_record(self.root)})
         self.assertEqual(result.allowed_owners, expected)
         self.assertEqual(result.required_owners, expected)
         self.raw["aggregates"] = [self.aggregate(self.nested_body)]
-        result = self.check(closures=True)
-        self.assertEqual(result.required_owners,
-                         frozenset({DefinitionIdentity.from_record(self.nested)}))
-        with self.assertRaisesRegex(NativeFlowEvidenceError, "outside"):
-            self.check(closures=False)
+        with self.assertRaisesRegex(NativeFlowEvidenceError, "direct governing"):
+            self.check()
+        with self.assertRaisesRegex(NativeFlowEvidenceError, "policy"):
+            self.check(roots={DefinitionIdentity.from_record(self.root): True})
 
     def test_same_named_helper_and_nested_function_are_outside(self):
         for kind, name in (("Fn", "validate"), ("Fn", "nested_function")):
@@ -82,11 +82,10 @@ class ConstructorScopes(unittest.TestCase):
                 raw["bodies"].append(helper)
                 raw["aggregates"] = [self.aggregate(helper)]
                 with self.assertRaisesRegex(NativeFlowEvidenceError, "outside"):
-                    self.check(raw, closures=True)
+                    self.check(raw)
 
     def test_closure_parent_chain_must_match_the_actual_body_graph(self):
         self.raw["aggregates"] = [self.aggregate(self.nested_body)]
-        self.check(closures=True)
         for mutation in ("missing-parent", "changed-parent-chain", "cycle"):
             with self.subTest(mutation=mutation):
                 raw = copy.deepcopy(self.raw)
@@ -98,7 +97,7 @@ class ConstructorScopes(unittest.TestCase):
                     raw["bodies"][2]["ancestors"].insert(0, self.nested)
                     raw["aggregates"][0]["caller"] = copy.deepcopy(raw["bodies"][2])
                 with self.assertRaises(NativeFlowEvidenceError):
-                    self.check(raw, closures=True)
+                    self.check(raw)
 
     def test_aggregate_caller_must_match_its_concrete_body(self):
         self.check()
@@ -128,8 +127,8 @@ class ConstructorScopes(unittest.TestCase):
         other = definition(9, "other_validator")
         raw["bodies"].append(body(other))
         raw["aggregates"] = [self.aggregate(self.root_body)]
-        roots = {DefinitionIdentity.from_record(self.root): False,
-                 DefinitionIdentity.from_record(other): False}
+        roots = {DefinitionIdentity.from_record(self.root),
+                 DefinitionIdentity.from_record(other)}
         with self.assertRaisesRegex(NativeFlowEvidenceError, "missing"):
             self.check(raw, roots=roots)
 
@@ -160,6 +159,27 @@ class ConstructorScopes(unittest.TestCase):
         # actual compiler body census. Lexical equality is not type authority.
         self.raw["aggregates"][0]["caller"]["open_type_or_const"] = False
         with self.assertRaisesRegex(NativeFlowEvidenceError, "actual body"):
+            self.check()
+
+    def test_constructor_use_census_cannot_be_omitted_or_downgraded(self):
+        self.check()
+        for mutation in ("missing", "not-list", "old-format"):
+            raw = copy.deepcopy(self.raw)
+            if mutation == "missing":
+                del raw["constructor_uses"]
+            elif mutation == "not-list":
+                raw["constructor_uses"] = {}
+            else:
+                raw["format"] = 3
+            with self.subTest(mutation=mutation), self.assertRaises(NativeFlowEvidenceError):
+                self.check(raw)
+
+    def test_empty_and_nonfunction_owner_policies_reject(self):
+        with self.assertRaisesRegex(NativeFlowEvidenceError, "policy"):
+            self.check(roots=set())
+        self.raw["bodies"][0]["kind"] = "Closure"
+        self.raw["aggregates"][0]["caller"]["kind"] = "Closure"
+        with self.assertRaisesRegex(NativeFlowEvidenceError, "governing function"):
             self.check()
 
 
@@ -198,10 +218,10 @@ class CompiledConstructorScopes(unittest.TestCase):
         method = methods[0]
         return (
             DefinitionIdentity.from_record(method["implementation"]["self_type"]["nominal"]),
-            {DefinitionIdentity.from_record(method["definition"]): True},
+            {DefinitionIdentity.from_record(method["definition"])},
         )
 
-    def test_actual_nested_conversion_closures_and_unrelated_constructor(self):
+    def test_actual_direct_conversion_and_unrelated_constructor(self):
         from capacity_census_native_construction import constructor_scope_ownership
 
         source = """
@@ -209,8 +229,7 @@ struct Validated(i64);
 trait Convert { fn convert(value: i64) -> Self; }
 impl Convert for Validated {
     fn convert(value: i64) -> Self {
-        let outer = || { let inner = || Validated(value); inner() };
-        outer()
+        Validated(value)
     }
 }
 pub fn entry(value: i64) -> i64 { Validated::convert(value).0 }
@@ -220,10 +239,57 @@ pub fn entry(value: i64) -> i64 { Validated::convert(value).0 }
         self.assertTrue(result.required_owners)
         kinds = {DefinitionIdentity.from_record(item["definition"]): item["kind"]
                  for item in raw["bodies"]}
-        self.assertEqual({kinds[owner] for owner in result.required_owners}, {"Closure"})
+        self.assertEqual({kinds[owner] for owner in result.required_owners}, {"AssocFn"})
         raw = self.observe(source + "fn convert(value: i64) -> Validated { Validated(value) }")
         with self.assertRaisesRegex(NativeFlowEvidenceError, "outside"):
             constructor_scope_ownership(raw, *self.policy(raw))
+
+    def test_actual_raw_constructor_values_cannot_hide_beside_valid_aggregate(self):
+        from capacity_census_native_construction import constructor_scope_ownership
+
+        base = """
+struct Validated(i64);
+trait Convert { fn convert(value: i64) -> Self; }
+impl Convert for Validated {
+    fn convert(value: i64) -> Self { Validated(value) }
+}
+pub fn entry(value: i64) -> i64 { Validated::convert(value).0 }
+"""
+        self.assertTrue(constructor_scope_ownership(self.observe(base),
+                        *self.policy(self.observe(base))).required_owners)
+        for extra in (
+            "fn callback(v: Vec<i64>) -> Vec<Validated> { v.into_iter().map(Validated).collect() }",
+            "fn callback() -> fn(i64) -> Validated { Validated }",
+            "static CALLBACK: fn(i64) -> Validated = Validated;",
+        ):
+            with self.subTest(extra=extra):
+                raw = self.observe(base + extra)
+                self.assertTrue(raw["constructor_uses"])
+                with self.assertRaisesRegex(NativeFlowEvidenceError, "constructor function value"):
+                    constructor_scope_ownership(raw, *self.policy(raw))
+        # Even the exact checked owner's body may not expose its raw constructor.
+        inside = base.replace("Validated(value)",
+                              "let _ctor: fn(i64) -> Self = Self; Validated(value)")
+        raw = self.observe(inside)
+        with self.assertRaisesRegex(NativeFlowEvidenceError, "constructor function value"):
+            constructor_scope_ownership(raw, *self.policy(raw))
+
+    def test_actual_local_and_foreign_closure_construction_both_reject(self):
+        from capacity_census_native_construction import constructor_scope_ownership
+
+        for expression in ("(|| Validated(value))()",
+                           "[value].into_iter().map(|v| Validated(v)).next().unwrap()"):
+            with self.subTest(expression=expression):
+                raw = self.observe("""
+struct Validated(i64);
+trait Convert { fn convert(value: i64) -> Self; }
+impl Convert for Validated {
+    fn convert(value: i64) -> Self { EXPR }
+}
+pub fn entry(value: i64) -> i64 { Validated::convert(value).0 }
+""".replace("EXPR", expression))
+                with self.assertRaisesRegex(NativeFlowEvidenceError, "direct governing"):
+                    constructor_scope_ownership(raw, *self.policy(raw))
 
     def test_actual_nested_function_does_not_inherit_conversion_authority(self):
         from capacity_census_native_construction import constructor_scope_ownership
