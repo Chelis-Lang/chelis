@@ -226,8 +226,7 @@ are final forms, justified by this executed contract suite; another variant,
 path, or width-helper owner is not. Existing foundation rows remain unchanged,
 and no new transition debt is authorized. The Phase 0 coverage manifest binds
 these final forms and runs the contract suite; its freeze digest changes for
-that reviewed acceptance addition, not to bless a new debt row. The broader
-Phase 1 command remains unimplemented until its other deliverables are green.
+that reviewed acceptance addition, not to bless a new debt row. The Phase 1 composite below includes this vocabulary contract.
 
 ### C1 runtime element delivery boundary
 
@@ -554,8 +553,7 @@ This is one shippable slice because the new index projections and their emitter
 consumers establish one shared iteration contract. The Phase 0 coverage digest
 changes to bind these commands and controls; its 358 immutable foundation rows
 remain unchanged. Fifteen retired load/store-template owners leave active debt
-(341 to 326); reduced-float and other surviving obligations keep their rows. This supporting
-evidence does not implement or pass the complete Phase 1 receipt/mutation oracle.
+(341 to 326); reduced-float and other surviving obligations keep their rows. The Phase 1 composite below includes this supporting execution surface.
 
 The two new emitter projection helpers are exact final metadata owners in the
 inventory, alongside the existing checked runtime owners. Their int64 declarations
@@ -591,8 +589,7 @@ bijections, expansion axis relationships, canonical scalar coordinates, and
 linear/coordinate range rejection. Executable mutations must detect unchecked
 coordinates and erased target validation. The immutable 358-row foundation is
 preserved; the two retired movement-template rows reduce active debt from 326
-to 324 without adding an owner exception. This extends supporting evidence and
-does not implement the complete Phase 1 receipt oracle.
+to 324 without adding an owner exception. The Phase 1 composite below includes these supporting controls.
 
 #### Generated C padding, shrinking, and striding (#889)
 
@@ -616,12 +613,10 @@ its digest changes for that command registration. The immutable 358-row foundati
 is preserved, and retiring the three raw movement templates reduces active debt
 from 324 to 321. Checked-add/multiply and bounds mutations execute against the
 private metadata owner. No new inventory identity or owner exception is admitted.
-The complete Phase 1 oracle remains a separate deliverable.
+The Phase 1 composite below includes these controls.
 
-After the reduction/Count, sparse, BLAS, and window deliveries below, remaining
-host metadata consumers and the complete Phase 1 execution receipt/mutation oracle
-remain outstanding. Host-only results do not establish
-device execution or close #889/#893. Generated host/device descriptors and
+The consumer deliveries below feed the Phase 1 execution receipt/mutation oracle.
+Host-only results do not establish device execution or close #893. Generated host/device descriptors and
 validated Python/DLPack wrappers remain under #893/#1345; #1288 consumes those
 interfaces and owns their exact discovery and authority registrations.
 
@@ -681,8 +676,7 @@ executed directly from IR because it is produced by AD rather than a Surf builti
 
 The Phase 0 foundation keeps all 358 identities. Replacing thirteen raw sparse
 consumer owners reduces active debt from 313 to 300 without a new exception. The
-coverage freeze adds these executable suites; it does not establish the complete
-Phase 1 execution-receipt oracle or the remaining BLAS/window/host consumers.
+coverage freeze adds these executable suites to the Phase 1 composite below.
 
 
 #### Generated C BLAS submission metadata (#889)
@@ -748,9 +742,8 @@ This delivery preserves the existing f32/static-window-output admission and the
 existing accumulation/NaN/tie behavior. #1298 owns window arithmetic remediation;
 these geometry tests do not establish its full normative contract. The 358-row
 foundation stays identical, and the removed gradient coordinate template reduces
-active debt from 295 to 294 without adding an owner exception. The complete Phase
-1 oracle, remaining host metadata consumers, and Phase 2 ABI/Python/DLPack work
-remain separate obligations.
+active debt from 295 to 294 without adding an owner exception. The Phase 1 composite below includes this geometry surface; Phase 2
+ABI/Python/DLPack work remains separate.
 
 
 #### Generated C JSON ordering scratch (#889)
@@ -772,9 +765,8 @@ owners/bytes. Output-preserving last-iteration return and omitted-owner-release
 mutations must leave live ownership; omitted guard exit must fail with the active
 write-guard error. The source check alone does not prove control-flow cleanup.
 These execution registrations move the frozen Phase 0 contract under B1; its
-immutable foundation and active identities stay unchanged. Literal ingress,
-movement coordinate scratch and source diagnostic identity, the complete Phase 1
-consumer audit/receipt oracle, and Phase 2 remain separate obligations.
+immutable foundation and active identities stay unchanged. The Phase 1 composite
+below includes this ownership contract; Phase 2 remains separate.
 
 #### Generated C literal ingress (#889)
 
@@ -802,9 +794,8 @@ is rejected by the bounded source controls.
 
 The immutable 358-row foundation is unchanged. Removing the literal emitter's raw
 storage/element-spelling templates reduces active debt from 294 to 292 without a
-new identity or owner exception. JSON ordering and movement coordinate scratch,
-the movement source operation diagnostic identity, the complete Phase 1 consumer audit and execution
-receipt/mutation oracle, and Phase 2 descriptors/bindings remain outstanding.
+new identity or owner exception. The Phase 1 composite below includes this
+literal contract; Phase 2 descriptors/bindings remain separate.
 
 #### Immutable movement geometry (#889)
 
@@ -834,9 +825,8 @@ locally shortened tensor and checks exact `expand`/`insert` trap identities. Bar
 scalar expansion extents remain outside the admitted CLI surface under #469.
 The frozen Phase 0 manifest requires these executions; its foundation stays fixed,
 with no new owner exception. This B1 contract amendment adds the explicit movement
-receipt registrations and their negative controls. Full Phase 1 allocation/view/
-copy coverage and its composite receipt oracle remain separate work, as do Phase 2
-descriptors and bindings. This is one geometry slice because the shared plan, all
+receipt registrations and their negative controls in the Phase 1 composite below.
+Phase 2 descriptors and bindings remain separate. This is one geometry slice because the shared plan, all
 five consumers, semantic authority and executable controls must ship together.
 
 #### Checked C shape observation and allocation (#889)
@@ -862,7 +852,7 @@ The vmap CLI control preserves the mapped axis shift. Existing cast, movement,
 elementwise and physical-slot lifetime regressions remain required supporting
 coverage. The B1 manifest adds these named executions and negative controls while
 preserving the immutable foundation and admitting no new inventory owner.
-This slice does not implement the complete Phase 1 consumer/receipt oracle.
+The Phase 1 composite below includes this shape observation contract.
 
 ## C3. One generated host/device descriptor schema
 
@@ -1357,6 +1347,19 @@ retries. Missing, duplicate, ignored, skipped, failing or unselected results
 cannot satisfy the selection; changed executables fail. The isolated JUnit path
 prevents nested CLI tests from replacing the parent receipt. Current test results
 are written alongside their command, source identity and executable digests.
+
+Native execution uses a separately pinned archive from the current
+`cargo build --locked -p chelis-runtime --lib --features ownership-ledger
+--message-format=json` result. The runner verifies its source/manifest/target
+identity, copies it into an exclusive directory, sets `CHELIS_RUNTIME_DIR`, and
+checks its digest after all executions. Each selected direct-link harness honors
+that explicit archive. Eight empty-archive controls must fail at the actual
+linker despite complete older archives in the warm target. Three missing-compiler
+controls prevent native compile checks from returning early; reduced-float BLAS
+cases use the platform toolchain and must execute. The JSON ownership-ledger
+mutation test independently builds/selects its instrumented Cargo artifact.
+This acceptance pin does not resolve the broader production archive discovery
+work in #1354; other consumers retain that issue's obligations.
 
 Two additional optimized production mutations erase the shared planner's exact
 representation or exact capacity conjunct. Their named behavioral assertions

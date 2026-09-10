@@ -7,6 +7,9 @@
 //! We link against the chelis_runtime .a to resolve those symbols.
 
 use chelis_backend_c::{CodegenOptions, MathLib};
+#[path = "../../../tests/support/runtime_archive.rs"]
+mod runtime_archive;
+
 mod support;
 use chelis_ir::ConcreteHostType as HostType;
 use chelis_ir::dag::{
@@ -2012,6 +2015,9 @@ fn find_newest_runtime_archive(deps_dir: &Path) -> std::io::Result<Option<PathBu
 }
 
 fn runtime_lib_path() -> PathBuf {
+    if let Some(archive) = runtime_archive::explicit() {
+        return archive;
+    }
     static PATH: OnceLock<PathBuf> = OnceLock::new();
     PATH.get_or_init(|| {
         let canonical = target_debug_dir().join("libchelis_runtime.a");

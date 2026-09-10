@@ -1,3 +1,5 @@
+#[path = "../../../tests/support/runtime_archive.rs"]
+mod runtime_archive;
 mod support;
 use chelis_ir::dag::{Dag, DimInfo, FusedInput, FusedStep, FusedStepOp, RiscOp, TensorType};
 use chelis_types::types::Prim;
@@ -183,6 +185,9 @@ fn ensure_runtime_static_lib(canonical: &Path) -> std::io::Result<()> {
 }
 
 fn runtime_lib_path() -> PathBuf {
+    if let Some(archive) = runtime_archive::explicit() {
+        return archive;
+    }
     static PATH: OnceLock<PathBuf> = OnceLock::new();
     PATH.get_or_init(|| {
         let canonical = target_debug_dir().join("libchelis_runtime.a");

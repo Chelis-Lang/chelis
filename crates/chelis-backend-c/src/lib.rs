@@ -6,6 +6,9 @@ mod emitted_expr;
 mod host_abi;
 mod host_emit;
 pub mod memory;
+#[cfg(test)]
+#[path = "../../../tests/support/runtime_archive.rs"]
+mod test_runtime_archive;
 pub mod toolchain;
 
 /// Primitive types the C backend's tensor-DAG path can realize.
@@ -377,6 +380,9 @@ mod tests {
     }
 
     fn runtime_library_path() -> PathBuf {
+        if let Some(archive) = crate::test_runtime_archive::explicit() {
+            return archive;
+        }
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let workspace_root = manifest_dir.join("../..");
         let configured_target = env::var_os("CARGO_TARGET_DIR")

@@ -32,6 +32,9 @@
 //!   * `add(t, cast(s, f64))` mixing f64 native + cast-from-f32
 //!   * `cast(add(t, t), f64)` arithmetic-then-cast (widening at end)
 
+#[path = "../../../tests/support/runtime_archive.rs"]
+mod runtime_archive;
+
 use assert_cmd::Command;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -147,8 +150,11 @@ fn chelis_build_c(source: &str, fn_name: &str) -> tempfile::TempDir {
 }
 
 fn gcc_compile_and_run(build_dir: &Path, kernel_c: &Path, main_c: &Path) -> String {
-    let canonical = target_debug_dir().join("libchelis_runtime.a");
-    ensure_runtime_static_lib(&canonical).expect("materialize libchelis_runtime.a");
+    let canonical = runtime_archive::explicit().unwrap_or_else(|| {
+        let archive = target_debug_dir().join("libchelis_runtime.a");
+        ensure_runtime_static_lib(&archive).expect("materialize libchelis_runtime.a");
+        archive
+    });
 
     let bin = build_dir.join("test_bin");
     let compile = StdCommand::new("gcc")

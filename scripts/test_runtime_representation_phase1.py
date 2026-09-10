@@ -9,6 +9,31 @@ from scripts import runtime_representation_phase1 as oracle
 
 
 class ReceiptTests(unittest.TestCase):
+    def test_runtime_archive_requires_current_cargo_artifact_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / 'target/debug/libchelis_runtime.a'
+            archive.parent.mkdir(parents=True)
+            archive.write_bytes(b'current artifact')
+            packet = {'reason': 'compiler-artifact',
+                      'manifest_path': str(root / 'crates/chelis-runtime/Cargo.toml'),
+                      'target': {'name': 'chelis_runtime', 'kind': ['rlib', 'staticlib'],
+                                 'src_path': str(root / 'crates/chelis-runtime/src/lib.rs')},
+                      'features': ['ownership-ledger'], 'filenames': [str(archive)]}
+            with mock.patch.object(oracle, 'ROOT', root), mock.patch.dict(oracle.os.environ, {}, clear=True):
+                self.assertEqual(oracle.runtime_artifact(json.dumps(packet)), archive.resolve())
+                for defect in ('absent', 'ambiguous', 'other_source', 'other_target', 'missing_file', 'missing_ledger'):
+                    changed = copy.deepcopy(packet)
+                    if defect == 'other_source': changed['target']['src_path'] = '/old/src/lib.rs'
+                    if defect == 'other_target': changed['filenames'] = ['/old/libchelis_runtime.a']
+                    if defect == 'missing_file': changed['filenames'][0] += '-absent.a'
+                    if defect == 'missing_ledger': changed['features'] = []
+                    text = json.dumps(changed)
+                    if defect == 'absent': text = '{}'
+                    if defect == 'ambiguous': text += '\n' + text
+                    with self.subTest(defect=defect), self.assertRaises(oracle.OracleFailure):
+                        oracle.runtime_artifact(text)
+
     def test_expected_mutation_failure_requires_the_exact_assertion_case(self):
         selected = ['p::contract::negative']
         valid = '<testsuites><testsuite name="p::contract"><testcase name="negative"><failure>assertion failed: distinct capacities</failure></testcase></testsuite></testsuites>'

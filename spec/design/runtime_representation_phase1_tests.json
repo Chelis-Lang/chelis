@@ -1754,6 +1754,7 @@
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_phase_one_rejects_development_shortcuts",
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_public_command_rejects_development_shortcuts_before_source_validation",
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_python_skip_missing_and_duplicate_success_fail_receipts",
+    "scripts.test_runtime_representation_phase1.ReceiptTests.test_runtime_archive_requires_current_cargo_artifact_identity",
     "scripts.test_runtime_representation_phase1.ReceiptTests.test_selection_requires_current_binary_and_exact_nonempty_census"
   ],
   "planner_mutations": [
@@ -1768,6 +1769,161 @@
       "before": "self.repr == other.repr && self.key.prove_equal(&other.key).is_ok()",
       "after": "self.repr == other.repr",
       "test": "distinct_large_products_do_not_reuse_storage"
+    }
+  ],
+  "native_controls": [
+    {
+      "kind": "empty-runtime-archive",
+      "args": [
+        "-p",
+        "chelis-backend-c",
+        "--lib",
+        "-E",
+        "test(=tests::checked_c_metadata_dag_reshape_executes_under_ubsan)"
+      ],
+      "selected": [
+        "chelis-backend-c::tests::checked_c_metadata_dag_reshape_executes_under_ubsan"
+      ]
+    },
+    {
+      "kind": "empty-runtime-archive",
+      "args": [
+        "-p",
+        "chelis-backend-c",
+        "--test",
+        "exec_compile",
+        "-E",
+        "test(=checked_literals_preserve_every_storage_width_and_reject_count_mismatch)"
+      ],
+      "selected": [
+        "chelis-backend-c::exec_compile::checked_literals_preserve_every_storage_width_and_reject_count_mismatch"
+      ]
+    },
+    {
+      "kind": "empty-runtime-archive",
+      "args": [
+        "-p",
+        "chelis-backend-c",
+        "--test",
+        "dtype_matrix_bf16_f16",
+        "-E",
+        "test(=bf16_add_agrees_with_evaluator)"
+      ],
+      "selected": [
+        "chelis-backend-c::dtype_matrix_bf16_f16::bf16_add_agrees_with_evaluator"
+      ]
+    },
+    {
+      "kind": "empty-runtime-archive",
+      "args": [
+        "-p",
+        "chelis-backend-c",
+        "--test",
+        "fused_in_place_exec",
+        "-E",
+        "test(=fused_in_place_compile_run_reuses_program_owned_storage)"
+      ],
+      "selected": [
+        "chelis-backend-c::fused_in_place_exec::fused_in_place_compile_run_reuses_program_owned_storage"
+      ]
+    },
+    {
+      "kind": "empty-runtime-archive",
+      "args": [
+        "-p",
+        "chelis-cli",
+        "--test",
+        "cbackend_cast_memcpy",
+        "-E",
+        "test(=cbackend_cast_tensor_f32_to_f64)"
+      ],
+      "selected": [
+        "chelis-cli::cbackend_cast_memcpy::cbackend_cast_tensor_f32_to_f64"
+      ]
+    },
+    {
+      "kind": "empty-runtime-archive",
+      "args": [
+        "-p",
+        "chelis-cli",
+        "--test",
+        "cbackend_cast_arithmetic_composition",
+        "-E",
+        "test(=cbackend_add_of_two_casts_f64_from_f32)"
+      ],
+      "selected": [
+        "chelis-cli::cbackend_cast_arithmetic_composition::cbackend_add_of_two_casts_f64_from_f32"
+      ]
+    },
+    {
+      "kind": "empty-runtime-archive",
+      "args": [
+        "-p",
+        "chelis-cli",
+        "--test",
+        "cbackend_reshape_memcpy",
+        "-E",
+        "test(=cbackend_reshape_tensor_f64)"
+      ],
+      "selected": [
+        "chelis-cli::cbackend_reshape_memcpy::cbackend_reshape_tensor_f64"
+      ]
+    },
+    {
+      "kind": "empty-runtime-archive",
+      "args": [
+        "-p",
+        "chelis-cli",
+        "--test",
+        "issue_616_runtime_movement_c_parity",
+        "-E",
+        "test(=issue_616_multi_axis_runtime_pad_matches_c)"
+      ],
+      "selected": [
+        "chelis-cli::issue_616_runtime_movement_c_parity::issue_616_multi_axis_runtime_pad_matches_c"
+      ]
+    },
+    {
+      "kind": "missing-c-compiler",
+      "args": [
+        "-p",
+        "chelis-backend-c",
+        "--test",
+        "dtype_matrix_bf16_f16",
+        "-E",
+        "test(=bf16_matmul_agrees_with_evaluator)"
+      ],
+      "selected": [
+        "chelis-backend-c::dtype_matrix_bf16_f16::bf16_matmul_agrees_with_evaluator"
+      ]
+    },
+    {
+      "kind": "missing-c-compiler",
+      "args": [
+        "-p",
+        "chelis-backend-c",
+        "--test",
+        "fused_compile",
+        "-E",
+        "test(=c_fused_codegen_compiles)"
+      ],
+      "selected": [
+        "chelis-backend-c::fused_compile::c_fused_codegen_compiles"
+      ]
+    },
+    {
+      "kind": "missing-c-compiler",
+      "args": [
+        "-p",
+        "chelis-backend-c",
+        "--test",
+        "fused_compile",
+        "-E",
+        "test(=c_fused_reduce_compiles)"
+      ],
+      "selected": [
+        "chelis-backend-c::fused_compile::c_fused_reduce_compiles"
+      ]
     }
   ]
 }
