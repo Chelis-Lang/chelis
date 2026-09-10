@@ -182,6 +182,9 @@ pub enum RuntimeValue {
         /// Generic cast actualization matches this against the checker-owned
         /// call expression result, including context-fixed empty containers.
         return_type: Option<Expr>,
+        /// The checked function type retains renamed precision binders used
+        /// by body metadata, alongside the signature's declared names.
+        checked_signature: Option<Expr>,
         body: Expr,
         env: UnordMap<String, RuntimeValue>,
         /// Lexically captured concrete precision variables. A call derives a
@@ -748,6 +751,7 @@ fn stamp_def_closure(value: RuntimeValue, name: &str, body: &Expr) -> RuntimeVal
             params,
             param_types,
             return_type,
+            checked_signature,
             body: closure_body,
             env,
             precision_env,
@@ -756,6 +760,7 @@ fn stamp_def_closure(value: RuntimeValue, name: &str, body: &Expr) -> RuntimeVal
             params,
             param_types,
             return_type,
+            checked_signature,
             body: closure_body,
             env,
             precision_env,

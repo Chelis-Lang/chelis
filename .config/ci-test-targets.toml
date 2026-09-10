@@ -113,3 +113,7 @@ name = "issue_1710_c_source_names"
 [[target]]
 package = "chelis-cli"
 name = "issue_1418_recursive_cast_targets"
+
+[[target]]
+package = "chelis-cli"
+name = "issue_1640_value_root_actualization"
