@@ -871,8 +871,13 @@ python3 scripts/gate.py --status [HANDLE]  # the detached run's real verdict
 pre-push gate: fix-in-place, run before every push. CI on the pushed candidate owns
 routine PR validation and must pass before ready-for-review. `--local` is an optional
 way to reproduce checks on the developer's machine; no per-PR run is required.
-The bare full gate remains CI-owned for routine PR validation.
-CI calls `python3 scripts/gate.py <stage>` for each split job.
+The full workspace and broad phase oracles run in `heavy-e2e.yml` daily at
+03:17 UTC and on manual dispatch. Passing PR checks does not certify those
+phase acceptance oracles; dispatch them on the candidate when claiming completion.
+The PR test worker calls `python3 scripts/gate.py ci-fast`: every default-feature
+lib/bin unit target plus the reviewed integrations in `.config/ci-test-targets.toml`.
+The legacy/full/manual gate selections remain available. See
+[`docs/ci_validation.md`](docs/ci_validation.md) for cadence and artifacts.
 `scripts/test_gate.py` pins the complete ordered set of
 single-line `run:` commands permitted in those gate-owned jobs, so shell syntax
 cannot hide an unreviewed command. To see the canonical full list and the
@@ -927,14 +932,16 @@ execute doctests, and the gate deliberately does not use `--workspace --doc`.
 **Doctests only run where something invokes them.** The canonical gate
 invokes doctests for `chelis-types`, `chelis-compiler-api`, and
 `chelis-pipeline-core`. The `backend-sanitizers` job also runs
-`cargo test -p chelis-backend-c` without a filter. A `compile_fail` oracle in
+`cargo test -p chelis-backend-c --lib` and an explicit `--doc` invocation.
+Full backend sanitizer integrations run nightly in `heavy-e2e.yml`. A `compile_fail` oracle in
 another crate runs nowhere until that crate gains an equivalent invocation in
 the same change set.
 
 `scripts/unrepresentable_domain_oracle.py` is chelis#908's authoritative
 completion oracle, and the tracker requires every fix in that class to run
-it in a continuous job. Acceptance is exit 0 with a final `ORACLE: PASS`
-line.
+it continuously. The full command runs in `heavy-e2e.yml` daily at 03:17 UTC
+or on manual dispatch, not in the required PR integration job. Acceptance is
+exit 0 with a final `ORACLE: PASS` line.
 
 `--local` (chelis#360) is an optional local validation command. It runs
 two of the three workspace clippy configurations (`-D warnings`, compile-only): the
@@ -953,8 +960,9 @@ resolved from each member's `Cargo.toml`, not the directory name). The derived c
 list is always printed; "no crate changes detected" means the per-crate stage was
 skipped, not silently empty. The workspace nextest stage is CI-owned: run `--fast`
 before every push, push before the review round so the reviewer and CI see the same
-head, and require CI on the candidate before ready-for-review. CI runs the full suite
-(macOS Smoke is the authoritative workspace oracle). See [`docs/local_macos_environment.md`](docs/local_macos_environment.md)
+head, and require CI on the candidate before ready-for-review. Mac workspace
+validation runs daily at 04:17 UTC in `macos-nightly.yml` and on manual dispatch.
+It is not a required PR check; dispatch it on the branch for Mac-specific changes. See [`docs/local_macos_environment.md`](docs/local_macos_environment.md)
 for why the workspace suite does not belong in the local loop on macOS.
 
 If a cold `--local` run is useful, launch it with
@@ -1107,7 +1115,7 @@ default workspace run.
   Probe with `python3 scripts/preflight_exec_probe.py` (exit 1 wedged, exit 3
   slow). Inside Devenv, use `chelis-exec-preflight`. Run the probe before the
   local workspace nextest stage. If the probe reports degradation, use the
-  macOS Smoke CI stage per
+  manually dispatched `macos-nightly.yml` workflow per
   [`docs/local_macos_environment.md`](docs/local_macos_environment.md).
 
 ### Post-Merge Cleanup

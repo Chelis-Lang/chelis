@@ -301,7 +301,19 @@ impl<'a> EvalContext<'a> {
         self.resolving_top_levels.push(resolved_name.clone());
         let saved_exclusion = self.execution_exclusion;
         self.admit_execution_profile(&expr, &[]);
-        let value = self.eval_expr(&expr);
+        // A checked function alias carries the callable, including a nullary
+        // one. Evaluating its bare var as a value thunk would replace that
+        // callable with its result before the alias is ever invoked.
+        let value = if self
+            .type_env
+            .get(&resolved_name)
+            .is_some_and(|ty| ty.tag() == Some(DeepTag::TFn))
+            && let Some(alias) = var_name(&expr)
+        {
+            self.resolve_top_level(alias)
+        } else {
+            self.eval_expr(&expr)
+        };
         self.execution_exclusion = saved_exclusion;
         self.resolving_top_levels.pop();
         let value = stamp_def_closure(value?, &resolved_name, &expr);
@@ -897,7 +909,7 @@ impl<'a> EvalContext<'a> {
         if let Some(value) = self.tensor_bindings.get(name) {
             return Ok(RuntimeValue::Tensor(value.clone()));
         }
-        if self.lookup_top_level_def(name).is_some() {
+        if let Some((_, definition)) = self.lookup_top_level_def(name) {
             let value = self.resolve_top_level(name)?;
             // A zero-parameter top-level declaration is a value thunk when
             // referenced in expression position. Calls still resolve their
@@ -905,7 +917,11 @@ impl<'a> EvalContext<'a> {
             // and applies it exactly once; a bare `name` consumes its value.
             // This mirrors the checker/lowerer's nullary-def treatment and is
             // required when manifest routing selects the host evaluator.
-            if matches!(&value, RuntimeValue::Closure { params, .. } if params.is_empty()) {
+            // Function-valued aliases carry the callable through argument
+            // and local-binding positions; only a declaration is a thunk.
+            if definition.tag() == Some(DeepTag::Fn)
+                && matches!(&value, RuntimeValue::Closure { params, .. } if params.is_empty())
+            {
                 return self.apply_resolved_callable(value, Vec::new());
             }
             return Ok(value);
@@ -1121,12 +1137,17 @@ impl<'a> EvalContext<'a> {
         // `resolve_top_level` (eval.rs eval_var), so `eval_expr(func)` here would
         // hand back the folded Tensor and `apply_*` would reject it as "value is
         // not callable". Going through `resolve_top_level` bypasses only the
-        // tensor_bindings shadow — a local binding (checked here) still wins, and
-        // a bare non-applied `(var f)` keeps today's eval_var behavior.
+        // tensor_bindings shadow — a local binding (checked here) still wins.
+        // Checked function aliases need the same direct resolution; applying
+        // eval_var's nullary-thunk rule to an alias here would call it twice.
         let callable = if let Some(callee) = var_name(func)
             && !self.bindings.contains_key(callee)
             && let Some((resolved, def_expr)) = self.lookup_top_level_def(callee)
-            && matches!(&def_expr, Expr::List(def_list, _) if tag(def_list) == Some(DeepTag::Fn))
+            && (matches!(&def_expr, Expr::List(def_list, _) if tag(def_list) == Some(DeepTag::Fn))
+                || self
+                    .type_env
+                    .get(&resolved)
+                    .is_some_and(|ty| ty.tag() == Some(DeepTag::TFn)))
         {
             self.resolve_top_level(&resolved)?
         } else {
@@ -1623,7 +1644,7 @@ impl<'a> EvalContext<'a> {
                     .map_err(|trap| trap.to_string())?;
                 Ok(RuntimeValue::from_scalar_value(cast))
             }
-            (RuntimeValue::Tensor(tensor), _) => cast_tensor_value(tensor, target),
+            (RuntimeValue::Tensor(tensor), _) => cast_tensor_value(tensor, target_prim),
             (other, _) => Err(format!(
                 "unsupported cast from {other:?} to {}",
                 target_prim.name()

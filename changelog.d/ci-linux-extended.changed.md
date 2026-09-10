@@ -1,0 +1,1 @@
+Run the exhaustive Linux workspace and broad phase oracles in daily or manually dispatched extended validation, preserving their full acceptance commands while removing them from the PR critical path.

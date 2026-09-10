@@ -31,8 +31,8 @@ on:
       - "scripts/ci_cvc5_cache.py"
       - "scripts/ci_publish_cvc5_release.py"
   schedule:
-    # Weekly safety net: republish if a tag/asset was ever manually deleted.
-    - cron: "0 7 * * 1"
+    # Daily prebuild before Mac validation; Darwin never builds on push.
+    - cron: "17 1 * * *"
 
 permissions:
   contents: write
@@ -171,7 +171,7 @@ jobs:
   build-darwin-arm64:
     name: Build cvc5 (darwin-arm64)
     needs: [plan]
-    if: needs.plan.outputs.missing_darwin_arm64 == 'true'
+    if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && needs.plan.outputs.missing_darwin_arm64 == 'true'
     runs-on: macos-latest
     timeout-minutes: 60
     steps:

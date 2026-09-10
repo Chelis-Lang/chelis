@@ -148,11 +148,20 @@ Use this loop for project files and generated shell output. `fmt` makes the sour
 canonical, `lint --check` catches naming/style drift, and the later commands re-run the
 same gate before doing semantic work.
 
+When the compiled C program hits a runtime arithmetic trap, output from
+preceding effects is retained even when redirected to a pipe or file. The
+program still fails, and effects after the trap do not run.
+
 When `chelis eval --file` runs from inside a Reef package root, ad hoc
 snippet files can import package modules even if the snippet file
 itself lives outside `src/` and does not declare a top-level `module`.
 
 ### Targeted evaluation and root manifests
+
+Function aliases remain callable entries, without display roots of their own.
+Calls through them produce ordinary observable results. A nullary function
+alias remains callable when passed as an argument or stored in a local binding;
+only an actual effect-free nullary definition is automatically observed.
 
 `chelis eval --target eval|c|hip|metal` computes the root manifest against the
 selected backend's capabilities. The default is `eval`. This is useful when a
@@ -167,6 +176,12 @@ the selected `target`, ordered `entries` (`name`, `lane`, and
 selected manifest names in the same order. Tuple roots and statically fixed
 ADT roots use dotted component names. If a lane cannot produce an owed root,
 evaluation exits nonzero instead of returning a partial JSON document.
+
+If evaluation fails after `print` or `debug`, text mode emits the preceding
+transcript on stdout before reporting the error on stderr. Later effects do
+not run and no result roots are printed. With `--json`, failure leaves stdout
+empty and emits the preceding transcript on stderr before the diagnostic;
+successful JSON responses keep the transcript inside the result document.
 
 ### Bounding a slow evaluation
 
@@ -435,6 +450,9 @@ CHB digest.
 - Treat `--allow-style-violations` as a local escape hatch, not part of a package build.
 - In pipe-stage Surf, `x |> f(y)` means `f(x, y)`. Use
   `x |> fn (v) -> f(y, v)` when the piped value belongs later.
+- `chelis surf` rejects a Deep `surf_pipe_stage: "call-first"` marker when
+  removing its parameter would leave a zero-argument call or a free reference
+  to that parameter. It reports the stage error without emitting Surf.
 
 For exact CLI semantics, use the numbered specs plus the CLI
 integration tests in the repo (notably

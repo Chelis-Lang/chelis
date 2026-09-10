@@ -112,6 +112,9 @@ pub struct CompiledExecutionArtifact {
 
 #[derive(Debug, Clone)]
 pub struct CompilerError {
+    /// Output already produced by a failed evaluation, in execution order.
+    /// Empty for failures before execution; never contains fabricated roots.
+    pub transcript: Vec<String>,
     pub stage: String,
     pub errors: Vec<Diagnostic>,
 }
@@ -776,6 +779,7 @@ fn edit_validation_error_to_compiler_error(
     diagnostic.span = location;
     diagnostic.deep_path = deep_path.map(wire_deep_error_path);
     CompilerError {
+        transcript: Vec::new(),
         stage: error.stage().to_string(),
         errors: vec![diagnostic],
     }
@@ -815,6 +819,7 @@ fn replacement_error_to_compiler_error(error: crate::fragment::ReplacementError)
     diagnostic.span = location;
     diagnostic.deep_path = deep_path.map(wire_deep_error_path);
     CompilerError {
+        transcript: Vec::new(),
         stage: error.stage().to_string(),
         errors: vec![diagnostic],
     }
@@ -1551,6 +1556,8 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
 
 /// Opt-in observation of the same strict compilation as [`compile_for_execution`].
 /// The callback sees the actual immutable ownership-verified emission payload.
+/// The separate initial host snapshot is unverified and may contain functions
+/// pruned from that payload; see [`crate::emission_observer::EmissionObservation`].
 /// An observation is not success: later code generation or artifact construction
 /// may still fail. No observer is installed globally or used by ordinary calls.
 #[cfg(feature = "emission-observer")]
@@ -1814,6 +1821,10 @@ fn execution_artifact_from_compiled_observed(
                 deep_span_to_diagnostic(diagnostic.span),
             )
         })?;
+    // Preserve the actual lowering, not a second independently lowered program.
+    // Ordinary compilation does not clone it, even with the feature enabled.
+    #[cfg(feature = "emission-observer")]
+    let observed_host = observer.as_ref().and_then(|_| host_compiled.host.clone());
     let func_name = execution_c_symbol(entry_name);
 
     // Reject host-runtime-only builtins early for any compiled-backend
@@ -1953,6 +1964,7 @@ fn execution_artifact_from_compiled_observed(
                 crate::emission_observer::observe(
                     &mut observer,
                     &compiled.program,
+                    observed_host.as_ref(),
                     crate::emission_observer::SelectedEmission::Dag {
                         unfused: &entry_dag,
                         selected: verified.emission(),
@@ -2055,6 +2067,7 @@ fn execution_artifact_from_compiled_observed(
                 crate::emission_observer::observe(
                     &mut observer,
                     &compiled.program,
+                    observed_host.as_ref(),
                     crate::emission_observer::SelectedEmission::Host(verified.emission()),
                 );
                 let result = chelis_backend_c::codegen_host_program(&verified, &func_name)
@@ -2107,6 +2120,7 @@ fn execution_artifact_from_compiled_observed(
             crate::emission_observer::observe(
                 &mut observer,
                 &compiled.program,
+                observed_host.as_ref(),
                 crate::emission_observer::SelectedEmission::Dag {
                     unfused: &compiled.dag,
                     selected: verified.emission(),
@@ -2194,6 +2208,7 @@ fn execution_artifact_from_compiled_observed(
                 crate::emission_observer::observe(
                     &mut observer,
                     &compiled.program,
+                    observed_host.as_ref(),
                     crate::emission_observer::SelectedEmission::Host(verified.emission()),
                 );
                 let result = chelis_backend_c::codegen_host_program(&verified, &func_name)
@@ -2234,6 +2249,7 @@ fn execution_artifact_from_compiled_observed(
             crate::emission_observer::observe(
                 &mut observer,
                 &compiled.program,
+                observed_host.as_ref(),
                 crate::emission_observer::SelectedEmission::Dag {
                     unfused: &hip_dag,
                     selected: verified.emission(),
@@ -2864,8 +2880,16 @@ fn eval_compiled(
             Some(&bindings),
         )
     }
-    .map_err(eval_stage_error)?;
+    .map_err(|failure| {
+        let mut error = eval_stage_error(failure.message);
+        error.transcript = failure.transcript;
+        error
+    })?;
 
+    let preserve_transcript = |mut error: CompilerError| {
+        error.transcript.clone_from(&host_outcome.transcript);
+        error
+    };
     let roots = observed_entries
         .iter()
         .copied()
@@ -2918,7 +2942,8 @@ fn eval_compiled(
                 .unwrap_or(index);
             Ok((node_id, entry.name.clone(), value))
         })
-        .collect::<Result<Vec<_>>>()?
+        .collect::<Result<Vec<_>>>()
+        .map_err(preserve_transcript)?
         .into_iter()
         .map(|(node_id, name, value)| {
             Ok(EvaluatedRoot {
@@ -2931,7 +2956,8 @@ fn eval_compiled(
                 value: runtime_value_to_schema(&value).map_err(eval_stage_error)?,
             })
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Result<Vec<_>>>()
+        .map_err(preserve_transcript)?;
 
     Ok(EvalResult {
         schema_version: crate::schema::EXECUTION_VALUE_SCHEMA_VERSION,
@@ -3100,6 +3126,7 @@ pub(crate) fn pipeline_rejection_to_compiler_error(
             crate::compiler::check_errors_to_compiler_error("check", &fitness.errors)
         }
         PipelineRejection::Effects { errors } => CompilerError {
+            transcript: Vec::new(),
             stage: "effects".to_string(),
             errors: errors
                 .iter()
@@ -5498,6 +5525,7 @@ pub(crate) fn check_errors_to_compiler_error(stage: &str, errors: &[CheckError])
         .collect::<std::result::Result<Vec<_>, _>>()
     {
         Ok(errors) => CompilerError {
+            transcript: Vec::new(),
             stage: stage.to_string(),
             errors,
         },

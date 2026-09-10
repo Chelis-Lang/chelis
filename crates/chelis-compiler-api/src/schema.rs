@@ -602,6 +602,7 @@ pub(crate) fn stage_error_with_span(
     );
     diagnostic.span = span;
     crate::compiler::CompilerError {
+        transcript: Vec::new(),
         stage: stage.to_owned(),
         errors: vec![diagnostic],
     }
@@ -609,6 +610,7 @@ pub(crate) fn stage_error_with_span(
 
 pub(crate) fn unsupported_stage_error(error: Unsupported) -> crate::compiler::CompilerError {
     crate::compiler::CompilerError {
+        transcript: Vec::new(),
         stage: "compile".to_owned(),
         errors: vec![Diagnostic::unsupported(error)],
     }
@@ -1979,6 +1981,12 @@ pub struct WireRecordPatternField {
 ///   and decoding finalizes through the dtype_semantics module
 ///   (finalize-on-decode; corrupt reduced-float images are a loud
 ///   decode error).
+///   Historical correction (chelis#1269): chelis#759 / PR #1144 subsequently
+///   added `WireRiscOp::CastTrunc` (`kind: "cast_trunc"`, with
+///   `new_precision`) while producers still stamped version 4. That addition
+///   missed its required bump; consumers migrating from before #1144 must
+///   also handle this operation. This records the omission, not an exception
+///   to the version-bump rule.
 /// - `5`: chelis#878 — `WireRiscOp::Pad::fill` changed from a bare f64
 ///   capacity seam to the sealed dtype-tagged scalar payload.
 /// - `6`: chelis#1287 — added the dedicated multi-axis

@@ -2989,12 +2989,6 @@ fn resugar_pipe_stage(expr: &DeepExpr) -> Result<Expr, ResugarError> {
     }
     let is_param = |expr: &Expr| matches!(expr, Expr::Var(name, _) if name == &param.name);
     match *body {
-        Expr::Apply(function, mut arguments, apply_span)
-            if arguments.first().is_some_and(is_param) =>
-        {
-            arguments.remove(0);
-            Ok(Expr::Apply(function, arguments, apply_span))
-        }
         special @ (Expr::Realize(_, _) | Expr::Copy(_, _) | Expr::Cast(_, _, _, _)) => {
             let carries_first = match &special {
                 Expr::Realize(argument, _)
@@ -3029,9 +3023,10 @@ fn resugar_pipe_stage(expr: &DeepExpr) -> Result<Expr, ResugarError> {
 /// the desugarer itself emits (chelis#1197). Operands are resugared
 /// normally and keep their operator spelling.
 ///
-/// `None` means the application cannot carry the stage sugar, which leaves
-/// the ordinary body resugaring to decide the shape and, for an operator or
-/// finite-list body, to fail closed. Two conditions have to hold.
+/// `None` means the application cannot carry the stage sugar. Only the
+/// explicit `realize`/`copy`/`cast` cases remain available; an ordinary
+/// application must fail closed rather than bypass this guard. Two
+/// conditions have to hold.
 ///
 /// The stage parameter must lead an application that still has a further
 /// argument. Stripping it from a lone-argument application would produce

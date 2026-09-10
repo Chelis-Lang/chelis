@@ -371,11 +371,19 @@ pub(crate) fn evaluate_host_program(
     tensor_bindings: &UnordMap<String, RuntimeTensorValue>,
 ) -> Result<RuntimeOutcome, String> {
     evaluate_host_program_filtered(program, tensor_bindings, None, None, None)
+        .map_err(|failure| failure.message)
 }
 
 pub(crate) struct HostEvaluationInputs<'a> {
     pub(crate) roots: &'a UnordMap<String, RuntimeTensorValue>,
     pub(crate) bindings: Option<&'a UnordMap<String, IrTensorValue>>,
+}
+
+/// A failed execution still owes the effects it performed before unwinding.
+#[derive(Debug)]
+pub(crate) struct RuntimeFailure {
+    pub(crate) message: String,
+    pub(crate) transcript: Vec<String>,
 }
 
 /// Evaluate top-level non-fn bindings. When `selected_roots` is `Some`, only
@@ -393,7 +401,7 @@ pub(crate) fn evaluate_host_program_filtered(
     selected_roots: Option<&[String]>,
     manifested_lowered_names: Option<&BTreeMap<String, bool>>,
     bound_evaluation_inputs: Option<&UnordMap<String, IrTensorValue>>,
-) -> Result<RuntimeOutcome, String> {
+) -> Result<RuntimeOutcome, RuntimeFailure> {
     evaluate_host_program_with_library_and_types(
         program,
         &[],
@@ -439,7 +447,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
     inputs: HostEvaluationInputs<'_>,
     selected_roots: Option<&[String]>,
     manifested_lowered_names: Option<&BTreeMap<String, bool>>,
-) -> Result<RuntimeOutcome, String> {
+) -> Result<RuntimeOutcome, RuntimeFailure> {
     let HostEvaluationInputs {
         roots: tensor_bindings,
         bindings: bound_evaluation_inputs,
@@ -552,7 +560,12 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
     };
 
     for name in top_level_order {
-        let _ = ctx.resolve_top_level(&name)?;
+        if let Err(message) = ctx.resolve_top_level(&name) {
+            return Err(RuntimeFailure {
+                message,
+                transcript: ctx.transcript,
+            });
+        }
     }
 
     // Surface host-lane selected callable roots. The arrow-form

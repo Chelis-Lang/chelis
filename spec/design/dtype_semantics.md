@@ -395,6 +395,17 @@ ratified at spec/04 §5.2 in the same change set:
   remaining total IEEE RNE: `cast(9007199254740993i64, f64)` yields
   `9007199254740992.0`, and `cast(16777217i32, f32)` yields `16777216.0`.
   These are explicit ByDesign controls, not a hidden f64 intermediate.
+- Bounded tensor targets (#1564) retain the declaration's precision variable
+  through checking and pass the actualized `Prim` to the host tensor cast.
+  Lowering binds original and checker-renamed formal variables independently
+  from aligned actual types, including scalar dtype witnesses, and from checked
+  result constraints when no argument carries the target. Checked cast-result
+  identities take precedence over unrelated outer binders with the same spelling.
+  The acceptance oracle is `cargo test -p chelis-cli --test
+  issue_1564_bounded_tensor_cast`: eval/generated-C agreement at all eight active
+  numeric target dtypes, truncating-cast parity, and invalid-target rejection.
+  The same-named checker/API suites additionally cover both checker ingresses,
+  exact stored dtypes, integer values beyond 2^53, and Domain/Overflow traps.
 - **Fold rule (the §C2 decline clause, applied to casts):** a
   compile-time constant fold whose cast would trap DECLINES TO FOLD -
   the condition falls to runtime, where the trap fires with its full
@@ -1414,7 +1425,17 @@ an additional serialization surface kind extends §C6's enumerators in the same
 change that introduces it.
 
 The derived identity includes role-discriminating serde attributes and codec
-shape, not just field type spellings. A custom serializer requires an explicit
+shape, not just field type spellings. Its codec identity retains the exact
+serde trait, derived/custom mode, source file and method identities. Incidental
+implementation and method line/column coordinates do not alter that structural
+identity. The execution witness still binds the complete current rustdoc
+artifacts, including those spans, and the actual source bytes and compiled
+artifacts; structural equality cannot reuse a stale witness. Relocation-only
+controls must preserve graph identity while rejecting the old artifact proof,
+and changed source ownership, codecs, methods or numeric shapes must remain
+rejected or change the structural identity. This distinction repairs
+[#1722](https://github.com/Chelis-Lang/chelis/issues/1722) without authorizing a changed
+numeric surface. A custom serializer requires an explicit
 wire-shape adapter checked against executions of the actual serializer and
 decoder. Unsupported custom serialization is an error. The artifact owns the
 discovered shape; a hand-maintained expected list cannot stand in for discovery.

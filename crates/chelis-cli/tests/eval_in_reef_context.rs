@@ -105,6 +105,41 @@ path = "./mylib"
     (dir, root)
 }
 
+/// #1585: the context fast path carries failure effects through the same
+/// API error as plain-file evaluation; compiling a context must not erase them.
+#[test]
+fn cmd_eval_reef_failure_preserves_transcript_channels() {
+    let (_dir, root) = path_dep_package();
+    let entry_path = root.join("failure.ch");
+    write_file(
+        &entry_path,
+        "def run() -> int64 ! { IO } = {\n_ = print(\"before\")\nvalue = floor_div(1i64, 0i64)\n_ = print(\"after\")\nvalue\n}\nout = run()\n",
+    );
+    for json in [false, true] {
+        let mut command = Command::cargo_bin("chelis").expect("binary");
+        command
+            .current_dir(&root)
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(["eval", "--file"])
+            .arg(&entry_path);
+        if json {
+            command.arg("--json");
+        }
+        let output = command.output().expect("eval");
+        let stderr = String::from_utf8(output.stderr).expect("stderr");
+        assert!(!output.status.success(), "{stderr}");
+        assert!(stderr.contains("division by zero"), "{stderr}");
+        assert!(!stderr.contains("after"), "{stderr}");
+        if json {
+            assert!(output.stdout.is_empty());
+            assert!(stderr.starts_with("before\nerror:"), "{stderr}");
+        } else {
+            assert_eq!(output.stdout, b"before\n");
+            assert!(!stderr.contains("before"), "{stderr}");
+        }
+    }
+}
+
 /// Compute the Phase H expected stdout for a `--file` snippet inside a
 /// reef package by running the same `compile_reef_context +
 /// eval_in_context` flow the refactored `cmd_eval` uses, then formatting
