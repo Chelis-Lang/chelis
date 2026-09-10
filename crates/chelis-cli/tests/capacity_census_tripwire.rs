@@ -6422,6 +6422,47 @@ fn relu_identities_are_registered_against_their_exact_authority_atom() {
 }
 
 #[test]
+fn metadata_plan_callables_require_exact_op33_authority() {
+    let root = repo_root();
+    let files = preprocessed_headers(&root.join(INCLUDE_DIR_REL), HEADER_ROOTS);
+    let mut typedefs = BTreeMap::new();
+    for text in files.values() {
+        typedefs.append(&mut collect_typedefs(text));
+    }
+    let rows: Vec<_> = files
+        .iter()
+        .flat_map(|(name, text)| header_rows(name, text, &typedefs))
+        .filter(|row| row.kind == "header-export" && row.id.contains("chelis_metadata_plan_"))
+        .collect();
+    assert_eq!(rows.len(), 10, "complete checked metadata plan API: {rows:?}");
+    let spec = fs::read_to_string(root.join(CONTROLLING_SPEC_REL)).unwrap();
+    let registry = fs::read_to_string(root.join("spec/registry/c_tensor_runtime.md")).unwrap();
+    let normative: BTreeSet<_> = registry
+        .lines()
+        .filter(|line| line.contains("chelis_metadata_plan_"))
+        .map(|line| {
+            let signature = line.split('`').nth(1).expect("exact normative C signature");
+            format!("chelis_runtime.h: {}", canonical_c_tokens(&format!("{signature};")))
+        })
+        .collect();
+    assert_eq!(rows.iter().map(|row| row.id.clone()).collect::<BTreeSet<_>>(), normative);
+    for row in rows {
+        let surface = authority_surface(&row);
+        assert_eq!(
+            capacity_census_authority::classify_final_authority(
+                &surface, final_authority_registries(), &spec,
+            ),
+            Ok(capacity_census_authority::FinalAuthority::NumericOperation { atom: "[05-OP-33]" }),
+        );
+        let mut successor = surface;
+        successor.id = successor.id.replace("chelis_metadata_plan_", "chelis_unchecked_metadata_");
+        assert!(capacity_census_authority::classify_final_authority(
+            &successor, final_authority_registries(), &spec,
+        ).is_err(), "a renamed successor must acquire independent exact authority");
+    }
+}
+
+#[test]
 fn final_surface_has_no_duplicate_prelude_json() {
     assert!(
         prelude_adt_rows().is_empty(),
