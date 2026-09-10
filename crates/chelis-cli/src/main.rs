@@ -2198,21 +2198,39 @@ const EMPTY_PROGRAM_MESSAGE: &str = "empty program: no declarations found";
 /// supplied message; the rest of the report shape mirrors a zero-
 /// node program with score 0.
 fn synthetic_check_report_with_error(message: &str) -> Result<String, Box<dyn std::error::Error>> {
+    synthetic_check_report_with_errors(std::slice::from_ref(&message.to_string()))
+}
+
+/// The same synthetic report, carrying one diagnostic per message.
+///
+/// The style gate is the caller that needs more than one: it reports a
+/// formatting difference and each lint violation as separate issues, and
+/// `spec/01` § Style Gate calls that "a one-issue-per-line diagnostic".
+/// Collapsing them into a single `message` would put a multi-line terminal
+/// transcript into a machine-facing field -- the shape chelis#886 exists to
+/// remove -- and would make `errors.len()` disagree with the number of
+/// problems found.
+fn synthetic_check_report_with_errors(
+    messages: &[String],
+) -> Result<String, Box<dyn std::error::Error>> {
     // chelis#886 [04-FIT-12]: the early-failure path is not a second
     // producer. It builds the same `CheckResult` the checker's path builds
     // and renders it through the same serializer, so a failure that
     // short-circuits the pipeline is transported by the report's type
     // rather than by a template that happens to agree with it.
-    let error = chelis_types::errors::CheckError {
-        kind: chelis_types::errors::CheckErrorKind::Other,
-        message: message.to_string(),
-        severity: 0.5,
-        expected: None,
-        got: None,
-        span_offset: None,
-        span_id: None,
-        suggestions: Vec::new(),
-    };
+    let errors: Vec<chelis_types::errors::CheckError> = messages
+        .iter()
+        .map(|message| chelis_types::errors::CheckError {
+            kind: chelis_types::errors::CheckErrorKind::Other,
+            message: message.clone(),
+            severity: 0.5,
+            expected: None,
+            got: None,
+            span_offset: None,
+            span_id: None,
+            suggestions: Vec::new(),
+        })
+        .collect();
     let report = chelis_types::FitnessReport {
         score: 0.0,
         components: chelis_types::fitness::FitnessComponents {
@@ -2221,7 +2239,7 @@ fn synthetic_check_report_with_error(message: &str) -> Result<String, Box<dyn st
             names: 0.0,
             types: 0.0,
         },
-        errors: vec![error],
+        errors,
         typed_nodes: 0,
         untyped_nodes: 0,
         total_nodes: 0,
@@ -2248,11 +2266,28 @@ fn synthetic_check_report_with_error(message: &str) -> Result<String, Box<dyn st
 /// machine-facing JSON shape is unchanged; only the process exit
 /// status now reflects the errors array.
 ///
-/// Non-zero exit is ALSO produced when the check could not be RUN
-/// to completion (style-gate violation, parser/reef failure, IO
-/// error). Those propagate through `Result::Err` and pick up the
-/// default exit `1` in `main`'s error arm; only the
-/// errors-array-non-empty path uses [`CHECK_ERRORS_EXIT_CODE`].
+/// A failure that stops the check from RUNNING -- an unreadable or
+/// non-UTF-8 file, a style-gate violation, a parse failure, a
+/// preparation failure -- is not an exception to that rule
+/// (chelis#886 [04-FIT-12]). It is reported as a diagnostic in the
+/// same `errors` array and therefore also exits
+/// [`CHECK_ERRORS_EXIT_CODE`]. The exit status is a function of the
+/// errors array and nothing else.
+///
+/// This paragraph used to say the opposite -- that those paths
+/// propagated through `Result::Err` and picked up exit `1`. That was
+/// true until the report started transporting them. `spec/04` §
+/// Gating pins only "`0` iff empty, non-zero otherwise", so both
+/// values conformed; `2` was chosen because the Deep arm already
+/// behaved that way for an unreadable file while the Surf arm did
+/// not.
+///
+/// Exit `1` survives only where no per-file report exists to carry
+/// the failure: `chelis check <dir>` on a directory it cannot
+/// enumerate fails in [`discover_check_files`] before any file is
+/// reached. That is the directory envelope's surface, which
+/// `spec/04` does not specify; chelis#1678 owns it, and §6.4 keeps
+/// its "not fully implemented" caveat until it is resolved.
 fn cmd_check(
     target: &Path,
     show_inferred: bool,
@@ -2397,11 +2432,50 @@ fn cmd_check_one_on_grown_stack(
     show_inferred: bool,
     allow_style_violations: bool,
 ) -> Result<(String, bool), Box<dyn std::error::Error>> {
-    let source = fs::read_to_string(file).ok();
-    if let Some(source) = &source {
-        style_gate::enforce_style_gate(file, source, allow_style_violations)?;
-        emit_advisory_lint_warnings_for_file(file);
+    // chelis#886 [04-FIT-12]: a failure before the checker is transported by
+    // the report, not by a display string on stderr and an empty stdout.
+    //
+    // Both arms below keep writing the human diagnostic to stderr as well.
+    // The atom requires the failure to reach the report; it does not ask for
+    // the terminal message to be taken away, and `spec/01` §Style Gate makes
+    // that stderr line part of the gate's own contract.
+    //
+    // Exit status moves 1 -> 2 on these paths as a consequence, because the
+    // status is derived from this function's `Ok`/`Err` discriminant. §
+    // Gating pins only "`0` iff empty, non-zero otherwise", so both values
+    // conform; 2 is chosen to converge on the Deep arm below, which already
+    // reported an unreadable file this way.
+    let source = match fs::read_to_string(file) {
+        Ok(source) => source,
+        Err(error) => {
+            let message = format!("failed to read {}: {error}", file.display());
+            eprintln!("error: {message}");
+            let json = synthetic_check_report_with_error(&message)?;
+            return Ok((json, true));
+        }
+    };
+    if let Err(rejection) =
+        style_gate::enforce_style_gate_structured(file, &source, allow_style_violations)
+    {
+        // ONE gate run produces both renderings. It used to run the gate a
+        // second time to get structure for the report, and the two runs
+        // disagreed under a concurrent writer: run A rejected (so the process
+        // exited 2) while run B found the file clean, shipping exit 2 with an
+        // empty `errors` array -- the state § Gating says cannot happen, and
+        // exactly the "cannot distinguish no diagnostics from diagnostics not
+        // transported" confusion [04-FIT-12] exists to remove.
+        //
+        // stderr keeps the whole human report, advice line included. The
+        // report gets one diagnostic per issue: that display string is a
+        // terminal transcript -- embedded newlines, an "N issue(s)" plural
+        // placeholder, and the word "build" on a `check` surface -- and
+        // putting it in a machine-facing `message` is the shape chelis#886
+        // removes, not one to reintroduce while closing it.
+        eprintln!("error: {}", rejection.report);
+        let json = synthetic_check_report_with_errors(&rejection.issues)?;
+        return Ok((json, true));
     }
+    emit_advisory_lint_warnings_for_file(file);
     // Deep (`.dp`) ingestion: a standalone `.dp` is already-lowered IR,
     // not a Surf package, so the reef loader below returns `Ok(None)`
     // for it and the monolithic else-arm would feed Deep s-expressions
@@ -2411,17 +2485,10 @@ fn cmd_check_one_on_grown_stack(
     // `cmd_surf`, `cmd_fmt`, and `copy_cost_for_file`.
     let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
     if ext.eq_ignore_ascii_case("dp") {
-        let source = match &source {
-            Some(source) => source,
-            None => {
-                let json = synthetic_check_report_with_error(&format!(
-                    "failed to read {}",
-                    file.display()
-                ))?;
-                return Ok((json, true));
-            }
-        };
-        return cmd_check_one_deep(source, show_inferred);
+        // The unreadable-`.dp` arm that used to live here is gone: the read
+        // above now transports that failure for every extension, which is
+        // what made the Surf and Deep arms disagree in the first place.
+        return cmd_check_one_deep(&source, show_inferred);
     }
     // Wave-1 red-team M1 (#207 follow-up): parse failures used to
     // short-circuit through `?` into the `Err(err)` arm in `main`,
@@ -2470,12 +2537,30 @@ fn cmd_check_one_on_grown_stack(
         if chelis_compiler_api::cache_disabled() {
             None
         } else {
-            chelis_compiler_api::check_layered(
+            // [04-FIT-12]: the layered checker's own failure is transported
+            // too. It used to propagate, so a cache-path failure emitted no
+            // document while the identical monolithic-path failure did.
+            match chelis_compiler_api::check_layered(
                 &prepared.stdlib_decls,
                 prepared.stdlib_source_digest,
                 &prepared.non_stdlib_decls,
-            )
-            .map_err(|e| boxed_string_error(compiler_error_messages(&e)))?
+            ) {
+                Ok(layered) => layered,
+                Err(error) => {
+                    // stderr is kept alongside the report. The atom asks for
+                    // the failure to REACH the report, not for the terminal
+                    // line to be taken away, and this message is the only
+                    // human-facing account of a layered-check failure.
+                    eprintln!("error: {}", compiler_error_messages(&error));
+                    // One diagnostic per compiler error, for the same reason
+                    // the style gate emits one per issue: `compiler_error_messages`
+                    // joins them with "; " for the terminal, and a joined
+                    // string in one `message` makes `errors.len()` disagree
+                    // with the number of problems.
+                    let json = synthetic_check_report_with_errors(&compiler_error_list(&error))?;
+                    return Ok((json, true));
+                }
+            }
         }
     } else {
         None
@@ -2528,7 +2613,11 @@ fn cmd_check_one_on_grown_stack(
             let decls = match &prepared {
                 Some(prepared) => prepared.decls.clone(),
                 None => {
-                    let source = fs::read_to_string(file)?;
+                    // Reuses the source read at the top of this function. It
+                    // used to re-read the file here with `?`, a second
+                    // unreported failure path for the same file
+                    // (chelis#886 [04-FIT-12]).
+                    //
                     // Wave-1 red-team M1 (#207 follow-up): same handling
                     // as the prepared-path parse error above, for the
                     // raw `parse_str` branch used when no reef context
@@ -2551,8 +2640,26 @@ fn cmd_check_one_on_grown_stack(
                 let json = synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE)?;
                 return Ok((json, true));
             }
-            let prepared = chelis_compiler_api::pipeline::prepare_surf_decls(&decls, None)
-                .map_err(|error| boxed_string_error(error.to_string()))?;
+            // [04-FIT-12]: "any preparation failure occurring before type
+            // checking begins" is the atom's own wording, so this is
+            // transported rather than propagated.
+            let prepared = match chelis_compiler_api::pipeline::prepare_surf_decls(&decls, None) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    // stderr kept, as above. A prelude-name collision is
+                    // reported here, and it is the kind of message a person
+                    // reads in a terminal rather than parses out of JSON.
+                    let message = error.to_string();
+                    eprintln!("error: {message}");
+                    let json = synthetic_check_report_with_error(&message)?;
+                    return Ok((json, true));
+                }
+            };
+            // The `?` here is chelis#1664's, not this change's:
+            // `check_prepared_for_cli` became fallible when inferred
+            // signatures gained a typed carrier. It is a [04-FIT-12] bypass
+            // that arrived on `main` during this PR's review, so this change
+            // does not claim to have closed it -- see the PR body.
             check_prepared_for_cli(prepared, show_inferred)?
         };
     assemble_check_json(
@@ -6700,6 +6807,25 @@ impl TestBatchManifestTempfile {
 
     fn path(&self) -> &Path {
         self.file.path()
+    }
+}
+
+/// The same diagnostics as [`compiler_error_messages`], unjoined.
+///
+/// The joined form is the terminal rendering; a machine-facing carrier wants
+/// one entry per diagnostic so the array length is the number of problems
+/// (chelis#886). Falls back to the stage name for the same reason the joined
+/// form does: an empty error list still has to say something.
+fn compiler_error_list(err: &chelis_compiler_api::compiler::CompilerError) -> Vec<String> {
+    let messages: Vec<String> = err
+        .errors
+        .iter()
+        .map(|diagnostic| diagnostic.message.clone())
+        .collect();
+    if messages.is_empty() {
+        vec![err.stage.clone()]
+    } else {
+        messages
     }
 }
 
