@@ -241,6 +241,26 @@ def _check_flow(raw: dict, name: str, obligation: AdapterFlowObligation) -> None
     _require(not problems, f"{name} ownership flow failed: {'; '.join(problems)}")
 
 
+def _registered_implementation(
+    raw: dict, public: str, owner: str, name: str
+) -> DefinitionIdentity:
+    try:
+        return _associated(raw, owner, name)
+    except GraphError as error:
+        raise GraphError(
+            f"registered implementation changed for {public}: {error}"
+        ) from error
+
+
+def _constructor_scope(
+    raw: dict, carrier: DefinitionIdentity, roots: set[DefinitionIdentity]
+) -> ConstructorOwnership:
+    try:
+        return constructor_scope_ownership(raw, carrier, roots)
+    except ValueError as error:
+        raise GraphError(f"native constructor obligation failed: {error}") from error
+
+
 def resolve_native_ownership(
     graph: RustdocGraph,
     evidence: dict,
@@ -280,7 +300,9 @@ def resolve_native_ownership(
         _require(rustdoc_owner == "chelis_python" + owner,
                  f"registered Rustdoc owner changed {public}")
         signatures[public] = _entry_signature(graph, public, signature)
-        registered[public] = _associated(evidence, owner, name)
+        registered[public] = _registered_implementation(
+            evidence, public, owner, name
+        )
 
     model = _definition(evidence, "chelis_python", "::NativeCompiledModel")
     native_tensor = _definition(evidence, "chelis_python", "::NativeTensor")
@@ -406,7 +428,7 @@ def resolve_native_ownership(
          {capsule_into_python}),
     )
     constructor_scopes = tuple(
-        constructor_scope_ownership(evidence, carrier, roots)
+        _constructor_scope(evidence, carrier, roots)
         for carrier, roots in policies
     )
 
