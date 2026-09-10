@@ -255,8 +255,8 @@ impl Convert for Validated {
 }
 pub fn entry(value: i64) -> i64 { Validated::convert(value).0 }
 """
-        self.assertTrue(constructor_scope_ownership(self.observe(base),
-                        *self.policy(self.observe(base))).required_owners)
+        raw = self.observe(base)
+        self.assertTrue(constructor_scope_ownership(raw, *self.policy(raw)).required_owners)
         for extra in (
             "fn callback(v: Vec<i64>) -> Vec<Validated> { v.into_iter().map(Validated).collect() }",
             "fn callback() -> fn(i64) -> Validated { Validated }",
@@ -273,6 +273,45 @@ pub fn entry(value: i64) -> i64 { Validated::convert(value).0 }
         raw = self.observe(inside)
         with self.assertRaisesRegex(NativeFlowEvidenceError, "constructor function value"):
             constructor_scope_ownership(raw, *self.policy(raw))
+
+    def test_unrelated_constructor_is_observed_without_authority_and_mutations_reject(self):
+        from capacity_census_native_construction import constructor_scope_ownership
+
+        raw = self.observe("""
+struct Validated(i64);
+trait Convert { fn convert(value: i64) -> Self; }
+impl Convert for Validated {
+    fn convert(value: i64) -> Self { Validated(value) }
+}
+struct Other(i64);
+fn callback() -> fn(i64) -> Other { Other }
+pub fn entry(value: i64) -> i64 { Validated::convert(value).0 }
+""")
+        policy = self.policy(raw)
+        constructor_scope_ownership(raw, *policy)
+        self.assertTrue(raw["constructor_uses"])
+        for mutation in ("duplicate", "caller", "carrier", "signature", "fields",
+                         "position", "kind", "missing-field"):
+            changed = copy.deepcopy(raw)
+            row = changed["constructor_uses"][0]
+            if mutation == "duplicate":
+                changed["constructor_uses"].append(copy.deepcopy(row))
+            elif mutation == "caller":
+                row["caller"]["open_type_or_const"] = not row["caller"]["open_type_or_const"]
+            elif mutation == "carrier":
+                row["carrier"]["def_path_hash"] = "unrelated-carrier"
+            elif mutation == "signature":
+                row["formal_inputs"] = []
+            elif mutation == "fields":
+                row["fields"][0]["type"]["shape"] = {"tag": "primitive", "name": "f64"}
+            elif mutation == "position":
+                row["operand_index"] = -1
+            elif mutation == "kind":
+                row["kind"] = "Fn"
+            else:
+                del row["cast"]
+            with self.subTest(mutation=mutation), self.assertRaises(NativeFlowEvidenceError):
+                constructor_scope_ownership(changed, *policy)
 
     def test_actual_local_and_foreign_closure_construction_both_reject(self):
         from capacity_census_native_construction import constructor_scope_ownership
