@@ -1431,6 +1431,65 @@ fn remainder_reshape_claims_preserve_dynamic_target() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// Spec/04 §4.7.3 admits any correctly typed int64 target producer. A host
+/// boundary must retain the claim just as the tensor-DAG boundary does.
+#[test]
+fn host_produced_reshape_targets_preserve_declared_claims() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut cases = Vec::new();
+    for (producer, declarations, target) in [
+        ("bitwise", "", "bitand(shape(source, 0i32), 3i64)"),
+        ("metadata", "", "numel(source)"),
+        ("list", "", "len(to_list(source))"),
+        (
+            "helper",
+            "def size(y: tensor[m, f32]) -> int64 = numel(y)\n",
+            "size(source)",
+        ),
+        (
+            "scalar_branch",
+            "",
+            "if eq(shape(source, 0i32), 2i64) then 2i64 else 3i64",
+        ),
+    ] {
+        for n in [2, 3] {
+            for (wrapper, body) in [
+                ("direct", format!("reshape(x, [{target}, 2i64])")),
+                (
+                    "bound_copy",
+                    format!(
+                        "{{\n  size = {target}\n  value = reshape(x, [size, 2i64])\n  copy(value)\n}}"
+                    ),
+                ),
+            ] {
+                call_matrix(
+                    &mut cases,
+                    &format!("host_target.{producer}.{wrapper}.x{n}"),
+                    1686,
+                    &format!(
+                        "{declarations}def f(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = {body}"
+                    ),
+                    "(tensor[d0, f32], tensor[d1, f32]) -> tensor[2, 2, f32]",
+                    vec![vector(n), vector(n * 2)],
+                    if n == 2 {
+                        Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])
+                    } else {
+                        Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"])
+                    },
+                );
+            }
+        }
+    }
+    assert_eq!(cases.len(), 60);
+    let mut failures = Vec::new();
+    for case in cases {
+        let observed = observe(&case);
+        println!("{}: {}", case.id, observed);
+        failures.extend(contract_failures(&case, &observed));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 #[test]
 fn remainder_claims_preserve_hip_host_cli_and_api_execution() {
     assert!(gcc_available(), "C toolchain required; no lane may skip");
