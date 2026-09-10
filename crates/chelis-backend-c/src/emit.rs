@@ -6851,8 +6851,9 @@ mod tests {
             None,
         );
         let c = emit_test_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("in_indices[1] = out_indices[0]"));
-        assert!(c.contains("in_indices[0] = out_indices[1]"));
+        assert!(c.contains("chelis_tensor_permute_plan(t0,"));
+        assert!(c.contains("chelis_movement_index(t1_movement,"));
+        assert!(c.contains("t1_axes[2] = { chelis_scalar_from_bits(CHELIS_DTYPE_I64, (1)), chelis_scalar_from_bits(CHELIS_DTYPE_I64, (0)) }"));
         assert!(!c.contains("t1->strides[0] ="));
     }
 
@@ -6875,9 +6876,9 @@ mod tests {
             None,
         );
         let c = emit_test_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains(
-            "in_indices[d] = d == 0 ? chelis_scalar_from_bits(CHELIS_DTYPE_I64, 0) : out_indices[d]"
-        ));
+        assert!(c.contains("chelis_tensor_expand_plan(t0,"));
+        assert!(c.contains("CHELIS_MOVEMENT_EXPAND"));
+        assert!(c.contains("chelis_movement_index(t1_movement,"));
         assert!(!c.contains("t1->strides[0] ="));
     }
 
@@ -7203,7 +7204,7 @@ mod tests {
         assert!(c.contains(
             "chelis_fill_scalar(t1_write_guard, chelis_scalar_from_bits(CHELIS_DTYPE_F32,"
         ));
-        assert!(c.contains("chelis_tensor_affine_index(t1, coordinates, t1_before, t1_steps)"));
+        assert!(c.contains("chelis_movement_index(t1_movement,"));
     }
 
     #[test]
@@ -7224,7 +7225,7 @@ mod tests {
             None,
         );
         let c = emit_test_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("chelis_tensor_affine_index(t0, coordinates, t1_start, t1_steps)"));
+        assert!(c.contains("chelis_movement_index(t1_movement,"));
     }
 
     /// chelis#368: the `SHRINK_TO_END` full-axis sentinel is an eval-lane
@@ -7271,7 +7272,7 @@ mod tests {
             None,
         );
         let c = emit_test_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("chelis_tensor_affine_index(t0, coordinates, t1_offsets, t1_steps)"));
+        assert!(c.contains("chelis_movement_index(t1_movement,"));
         assert!(!c.contains("t1->strides[0] ="));
     }
 
