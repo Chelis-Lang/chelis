@@ -6674,7 +6674,9 @@ impl<'program> LowerCtx<'program> {
         let first_occurrence = self
             .execution
             .as_ref()
-            .map_or(0, |execution| execution.spine.occurrence_count());
+            .expect("evaluation lowering owns execution metadata")
+            .spine
+            .occurrence_count();
         let profile = evaluation_profile_from_defs(expr, &self.program_defs);
         let compatibility = !matches!(
             profile,
@@ -6715,9 +6717,9 @@ impl<'program> LowerCtx<'program> {
                 ..self
                     .execution
                     .as_ref()
-                    .map_or(first_occurrence, |execution| {
-                        execution.spine.occurrence_count()
-                    }))
+                    .expect("evaluation lowering restores execution metadata")
+                    .spine
+                    .occurrence_count())
                 .map(crate::execution_spine::OccurrenceId)
                 .collect(),
             profile,

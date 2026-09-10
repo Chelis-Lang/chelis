@@ -133,12 +133,11 @@ impl Spine {
                 *node = mapped(*node)?;
             }
         }
+        // The image's exclusive upper bound is zero for an empty graph.
         self.recorded_nodes = remap
             .to_sorted()
             .iter()
-            .map(|(_, node)| node.0 + 1)
-            .max()
-            .unwrap_or(0);
+            .fold(0, |bound, (_, node)| bound.max(node.0 + 1));
         Ok(())
     }
 

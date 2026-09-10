@@ -3079,7 +3079,7 @@ pub struct HostDefEvaluationPlan {
     kernel: HostDefKernel,
     plan: Option<crate::evaluation::EvaluationPlan>,
     profile: crate::evaluation::EvaluationProfile,
-    staged_plan: Option<crate::evaluation::StagedEvaluationPlan>,
+    staged_plan: Option<Box<crate::evaluation::StagedEvaluationPlan>>,
 }
 
 impl HostDefEvaluationPlan {
@@ -3093,7 +3093,7 @@ impl HostDefEvaluationPlan {
         self.profile
     }
     pub fn staged_plan(&self) -> Option<&crate::evaluation::StagedEvaluationPlan> {
-        self.staged_plan.as_ref()
+        self.staged_plan.as_deref()
     }
 }
 
@@ -3186,7 +3186,7 @@ fn host_def_kernel_product(
                     kernel,
                     plan: None,
                     profile,
-                    staged_plan,
+                    staged_plan: staged_plan.map(Box::new),
                 }));
             }
             staged::StagingAttempt::HostControlBoundary => return Ok(None),
