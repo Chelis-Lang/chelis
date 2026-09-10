@@ -6506,7 +6506,7 @@ fn metadata_plan_callables_require_exact_op33_authority() {
         .collect();
     assert_eq!(
         rows.len(),
-        10,
+        11,
         "complete checked metadata plan API: {rows:?}"
     );
     let spec = fs::read_to_string(root.join(CONTROLLING_SPEC_REL)).unwrap();

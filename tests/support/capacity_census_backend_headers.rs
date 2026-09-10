@@ -236,3 +236,65 @@ fn backend_scan_requires_an_actual_preprocessing_lane() {
         "{error}"
     );
 }
+
+#[test]
+fn device_owner_callables_require_exact_op33_authority() {
+    let root = repo_root();
+    let include_dir = planted_include_dir("device-owner-authority", &[]);
+    let runtime = root.join(INCLUDE_DIR_REL);
+    for name in published_headers_on_disk(&runtime) {
+        let destination = include_dir.join(&name);
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::copy(runtime.join(name), destination).unwrap();
+    }
+    for name in ["chelis_device_owner.h", "chelis_device_descriptor.h"] {
+        fs::copy(
+            root.join("crates/chelis-backend-hip/runtime").join(name),
+            include_dir.join(name),
+        )
+        .expect("the published device header must exist");
+    }
+    let mut roots = HEADER_ROOTS.to_vec();
+    roots.push("chelis_device_owner.h");
+    let rows: Vec<_> = scan(
+        &include_dir,
+        &roots,
+        &[c_preprocessor::Environment::native_c()],
+    )
+    .into_iter()
+    .filter(|row| {
+        row.kind == "header-export"
+            && row.id.starts_with("chelis_device_owner.h:")
+    })
+    .collect();
+    fs::remove_dir_all(include_dir).unwrap();
+    assert_eq!(rows.len(), 9, "complete opaque device owner API: {rows:?}");
+    let spec = fs::read_to_string(root.join(CONTROLLING_SPEC_REL)).unwrap();
+    let registry = fs::read_to_string(root.join("spec/registry/c_tensor_runtime.md")).unwrap();
+    let normative: BTreeSet<_> = registry
+        .lines()
+        .filter(|line| line.contains("chelis_device_tensor_"))
+        .map(|line| {
+            let signature = line.split('`').nth(1).expect("exact normative C signature");
+            format!("chelis_device_owner.h: {}", canonical_c_tokens(&format!("{signature};")))
+        })
+        .collect();
+    assert_eq!(rows.iter().map(|row| row.id.clone()).collect::<BTreeSet<_>>(), normative);
+    for row in rows {
+        let surface = authority_surface(&row);
+        assert_eq!(
+            capacity_census_authority::classify_final_authority(
+                &surface, final_authority_registries(), &spec,
+            ),
+            Ok(capacity_census_authority::FinalAuthority::NumericOperation { atom: "[05-OP-33]" }),
+        );
+        let mut successor = surface;
+        successor.id = successor.id.replace("chelis_device_tensor_", "chelis_unchecked_device_");
+        assert!(
+            capacity_census_authority::classify_final_authority(
+                &successor, final_authority_registries(), &spec,
+            ).is_err(),
+            "an unregistered renamed device operation must fail"
+        );
+    }
+}
