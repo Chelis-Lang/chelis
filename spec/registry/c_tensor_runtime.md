@@ -13,6 +13,16 @@ identity; row order is not semantic and no ordinal is part of any identity.
 | rank | `int32_t chelis_tensor_rank(const chelis_tensor *tensor)` |
 | extent | `int64_t chelis_tensor_shape(const chelis_tensor *tensor, int32_t axis)` |
 | element count | `int64_t chelis_tensor_numel(const chelis_tensor *tensor)` |
+| contiguous metadata plan | `chelis_metadata_plan *chelis_metadata_plan_new(chelis_scalar rank, const chelis_scalar *shape, chelis_scalar exemplar)` |
+| strided metadata plan | `chelis_metadata_plan *chelis_metadata_plan_view(chelis_scalar rank, const chelis_scalar *shape, const chelis_scalar *strides, chelis_scalar exemplar, chelis_scalar byte_capacity)` |
+| metadata plan rank | `int32_t chelis_metadata_plan_rank(const chelis_metadata_plan *plan)` |
+| metadata plan shape | `const int64_t *chelis_metadata_plan_shape(const chelis_metadata_plan *plan)` |
+| metadata plan strides | `const int64_t *chelis_metadata_plan_strides(const chelis_metadata_plan *plan)` |
+| metadata plan count | `int64_t chelis_metadata_plan_count(const chelis_metadata_plan *plan)` |
+| metadata plan logical bytes | `int64_t chelis_metadata_plan_byte_count(const chelis_metadata_plan *plan)` |
+| metadata plan dtype | `chelis_dtype chelis_metadata_plan_dtype(const chelis_metadata_plan *plan)` |
+| metadata plan capacity check | `void chelis_metadata_plan_check_capacity(const chelis_metadata_plan *plan, chelis_scalar byte_capacity)` |
+| metadata plan release | `void chelis_metadata_plan_release(chelis_metadata_plan *plan)` |
 | contiguous stride | `int64_t chelis_tensor_stride(const chelis_tensor *tensor, int32_t axis)` |
 | logical byte count | `int64_t chelis_tensor_byte_count(const chelis_tensor *tensor)` |
 | tensor iteration index step | `int64_t chelis_tensor_elementwise_index_step(const chelis_tensor *input, const chelis_tensor *domain)` |

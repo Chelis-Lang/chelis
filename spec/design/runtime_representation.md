@@ -410,7 +410,9 @@ same checked types. All host and device allocation/view paths consume values
 whose fields are private to this owner and whose public constructors validate:
 
 ```rust
-pub struct ShapeMetadata { /* rank, extents, strides, count */ }
+struct CheckedDomain { /* rank, extents, dtype, count, logical bytes */ }
+pub struct ShapeMetadata { /* one domain, canonical strides */ }
+pub struct StridedMetadata { /* one domain, supplied strides, reachable span */ }
 pub struct ElementCount(i64);
 pub struct ByteCount(i64);
 pub struct AllocationBytes(usize);
@@ -424,11 +426,25 @@ they consume the shared checked authority instead of deriving another product,
 byte count, stride, or descriptor validity decision. Python does not link the C
 runtime merely to obtain this validation.
 
-`ShapeMetadata` checks rank/domain agreement, non-negative extents, and checked
-product. Owned contiguous allocation derives checked row-major strides; a view
-retains supplied strides only after proving its reachable maximum byte offset is
-within `byte_capacity`. Rank zero has one element. Any zero extent has zero
-elements. `ByteCount` is checked multiplication of an `ElementCount` and a
+One private `CheckedDomain` constructor checks rank/domain agreement,
+non-negative extents, dtype, element product and logical bytes. Existing
+`ShapeMetadata` owns one such domain and derives canonical row-major strides;
+its contiguous runtime indexing and iteration contracts remain unchanged.
+`StridedMetadata` owns one domain, immutable supplied strides and a checked
+reachable span. It does not contain or reconstruct a second `ShapeMetadata`.
+Both layouts reuse `ElementCount` and `ByteCount`; no consumer duplicates their
+product or representation-width validation.
+
+The zero-offset device view API admits nonnegative int64 strides, including
+broadcast stride zero. Negative strides need an explicit base/offset and minimum
+bound model and are rejected by this API; this is not a language restriction.
+All supplied domains are checked before an empty shortcut. Any zero extent has
+zero reachable bytes without computing unused canonical suffix products; rank
+zero has exactly one element. A nonempty view checks the largest reachable
+element offset, its representation bytes and target projection against the
+storage owner's actual byte capacity. Logical count/bytes remain distinct from
+reachable span, so a broadcast view need not own logical-count-many elements.
+`ByteCount` is checked multiplication of an `ElementCount` and a
 `Repr` width. `AllocationBytes` is a checked target-sized projection performed
 only at allocation/copy submission.
 
@@ -907,6 +923,32 @@ handles or typed views. The checked-in C fragments are generated artifacts with
 byte-for-byte freshness tests. Every published header remains reachable from
 `chelis_runtime.h`; the public-header census sees the same canonical declarations
 in every preprocessing context.
+
+`cargo run -p chelis-abi --example generate_headers -- --write` regenerates the
+fragments; without `--write` it checks freshness. The host-view fragment lives
+under `crates/chelis-abi/generated/` and is embedded into the marked generated
+region of `chelis_runtime.h`, so existing standalone header staging stays valid.
+The private device declaration is generated beside the HIP support header.
+Neither artifact may contain a second handwritten field list.
+
+The HIP support root requires the official `hipblas/hipblas.h` from the same
+supported SDK as the linked hipBLAS library. It does not redeclare SDK types or
+functions when that header is missing. Generated helpers use that SDK's actual
+API: a library symbol's spelling does not establish its argument types. The
+header census preprocesses the complete support root with explicit committed
+SDK fixtures, while hardware acceptance separately records the installed header,
+library, and executed numeric behavior. The environment contract and its
+outstanding evidence live in `docs/local_hip_environment.md`.
+
+The opaque [05-OP-33] `chelis_metadata_plan` C adapter owns a closed contiguous
+or strided metadata variant from `chelis-abi`. Tagged rank/extent/stride and
+exemplar inputs follow the existing shape-reduction-plan ingress convention.
+Its immutable projections supply the generated device packet; packet helpers
+never compute a second product or repair strides after construction. The device
+owner retains the plan and library, proves the supplied allocation capacity,
+and releases both metadata and device storage through that library's finalizer.
+The metadata plan allocates no tensor payload and cannot prove a foreign
+allocation's physical bounds merely from its declared capacity.
 
 Python deletes `CHELIS_MAX_DIM`, `[i32; 8]`, int32 `size`/`storage_size`, and
 `*mut f32` from its device carrier. The HIP support header deletes its matching

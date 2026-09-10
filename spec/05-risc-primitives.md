@@ -1939,7 +1939,7 @@ exact ADT identity by [05-OP-34].
 > accumulator.
 >
 > **[05-OP-33]** `runtime_tensor(value, parameters...) -> result` governs
-> exactly the thirty-two final public C callable identities enumerated in
+> exactly the public C callable identities enumerated in
 > the normative registry `spec/registry/c_tensor_runtime.md`, which this atom
 > incorporates by reference. These
 > signatures are canonical: unboxed axes and rank are `int32_t`; extents, sizes,
@@ -2098,6 +2098,49 @@ exact ADT identity by [05-OP-34].
 > or indices trap `Domain`; unrepresentable metadata or arithmetic traps `Overflow`.
 > Numeric failures use [04-NUM-9]'s canonical line at `int64`, with operation `pad`,
 > `shrink`, `stride`, or `affine_index`, respectively.
+>
+> `chelis_metadata_plan_new` constructs an independently owned, opaque
+> contiguous metadata plan from an exact tagged int64 rank and rank-many exact
+> tagged int64 extents. The canonical tagged exemplar selects the active dtype;
+> its payload is not a tensor value and is not converted. Rank is nonnegative
+> and fits int32. Extents are nonnegative. Construction checks element count,
+> logical representation bytes, canonical suffix strides and target allocation
+> projection before returning. It allocates metadata only, never tensor storage.
+>
+> `chelis_metadata_plan_view` instead retains rank-many exact tagged int64
+> supplied strides and checks its reachable byte span against an exact tagged
+> int64 byte capacity. This zero-offset, forward-capacity API admits only
+> nonnegative strides, including zero; a negative stride traps `Domain`.
+> This admission limit does not restrict language tensor movement semantics.
+> All rank, extent, stride, exemplar and capacity domains are validated before
+> an empty shortcut. Any zero extent has logical count, logical bytes and
+> reachable span zero, without evaluating unused canonical suffix products.
+> Rank zero has one element and requires one representation-width of capacity.
+> For a nonempty view the required span includes the element at the checked
+> maximum offset `sum((extent - 1) * stride)`. Offset, span and logical byte
+> arithmetic are checked independently; broadcast views may require fewer
+> storage bytes than their logical byte count.
+>
+> Both constructors require complete, non-null, properly aligned input arrays
+> for positive rank, and check the rank-many array byte projection before reads.
+> Rank zero admits null arrays. All supplied scalar carriers are canonical.
+> Plans own their immutable metadata and retain no caller array pointers.
+> `chelis_metadata_plan_rank`, `shape`, `strides`, `count`, `byte_count`, and
+> `dtype` return exact immutable observations of that plan; the shape and stride
+> projections are rank-many int64 arrays, null at rank zero, and remain valid
+> only while the plan lives. Count and byte count are logical observations.
+> `chelis_metadata_plan_check_capacity` validates a canonical nonnegative int64
+> capacity and requires that it contain the plan's reachable span, with checked
+> target projection. The caller separately proves the actual allocation and
+> rejects disagreement between its owner and a transported capacity. A plan
+> neither adopts tensor storage nor proves an arbitrary foreign capacity claim.
+> `chelis_metadata_plan_release` consumes the live plan exactly once; all
+> observations require a live plan of the correct kind. These operations have
+> no cotangent or accumulator and change no tensor payload or ownership.
+> Invalid domains trap `Domain`; unrepresentable metadata, offsets, span or
+> target projections trap `Overflow`, using [04-NUM-9]'s canonical int64 failure
+> line with operation `metadata_plan`. Failure precedes payload allocation or
+> access and never returns a repaired or partial plan.
 >
 > `chelis_tensor_reduction_plan` snapshots checked tensor metadata;
 > `chelis_shape_reduction_plan` constructs the corresponding metadata-only virtual
