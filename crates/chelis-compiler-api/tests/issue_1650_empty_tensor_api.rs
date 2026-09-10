@@ -166,18 +166,33 @@ fn separate_signature_calls_keep_declared_and_checked_binders_independent() {
 
 #[test]
 fn separate_signatures_do_not_supply_unrelated_or_conflicting_dtypes() {
-    for source in [
-        "sig make[p: Numeric]: p -> p\ndef make(x) = { unused = to_tensor([]); x }\nout = make(1i64)\n",
-        "sig make[p: Numeric]: p -> tensor[n, p]\ndef make(x) = to_tensor([x, true])\nout = make(1i64)\n",
-    ] {
-        assert!(
-            eval(EvalRequest {
-                source_kind: SourceKind::Surf,
-                source: source.into(),
-                bindings: Default::default(),
-            })
-            .is_err(),
-            "must reject: {source}"
-        );
-    }
+    let error = eval(EvalRequest {
+        source_kind: SourceKind::Surf,
+        source: "sig make[p: Numeric]: p -> p\ndef make(x) = {\n unused = to_tensor([])\n x\n}\nout = make(1i64)\n".into(),
+        bindings: Default::default(),
+    }).expect_err("the argument dtype does not constrain the unrelated empty List");
+    assert_eq!(error.stage, "eval");
+    assert!(
+        error.errors.iter().any(|diagnostic| {
+            diagnostic.kind() == chelis_vocab::DiagnosticKind::EvalError
+                && diagnostic
+                    .message
+                    .contains("to_tensor requires a resolved checked element dtype [05-OP-57]")
+        }),
+        "{error:?}"
+    );
+
+    let error = eval(EvalRequest {
+        source_kind: SourceKind::Surf,
+        source: "sig make[p: Numeric]: p -> tensor[n, p]\ndef make(x) = to_tensor([x, true])\nout = make(1i64)\n".into(),
+        bindings: Default::default(),
+    }).expect_err("a checked signature does not permit heterogeneous List elements");
+    assert!(
+        error.errors.iter().any(|diagnostic| {
+            diagnostic.kind() == chelis_vocab::DiagnosticKind::PrecisionMismatch
+                && diagnostic.message.contains("Numeric")
+                && diagnostic.message.contains("bool")
+        }),
+        "{error:?}"
+    );
 }
