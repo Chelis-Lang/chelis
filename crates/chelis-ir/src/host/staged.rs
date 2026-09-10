@@ -1,0 +1,451 @@
+//! Ordered host scalar sources inside an otherwise ordinary tensor graph.
+//!
+//! Claim construction sees the complete graph. Only this boundary turns it
+//! into independently executable helpers; a placeholder never reaches one.
+use super::{HostParam, HostTypeTerm};
+use crate::dag::{Dag, NodeId, RiscOp, TensorType};
+use chelis_deep::Expr;
+use std::collections::{BTreeMap, BTreeSet};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct HostValueId(pub(crate) usize);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StagingStatus {
+    Searching,
+    HasSources,
+    HostControlBoundary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum StageValue {
+    Tensor(NodeId),
+    Host(HostValueId),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct HostSource {
+    pub before: usize,
+    pub value: StageValue,
+    pub ty: HostTypeTerm,
+    pub expression: Expr,
+    pub captures: Vec<(String, StageValue, HostTypeTerm)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HostStageCapture {
+    pub binding: String,
+    pub value: String,
+    pub ty: HostTypeTerm,
+}
+
+#[derive(Debug, Clone)]
+pub enum HostStage {
+    Source {
+        expression: Expr,
+        captures: Vec<HostStageCapture>,
+        output: String,
+        ty: HostTypeTerm,
+    },
+    Kernel {
+        dag: Dag,
+        outputs: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct HostStagedPlan {
+    stages: Vec<HostStage>,
+    output: String,
+}
+
+impl HostStagedPlan {
+    pub fn stages(&self) -> &[HostStage] {
+        &self.stages
+    }
+    pub fn output(&self) -> &str {
+        &self.output
+    }
+}
+
+pub(crate) fn partition(
+    logical: &Dag,
+    sources: &[HostSource],
+    params: &[HostParam],
+    external_inputs: &BTreeMap<NodeId, String>,
+    host_parameters: &BTreeMap<HostValueId, (String, HostTypeTerm)>,
+) -> Result<HostStagedPlan, String> {
+    let [root] = logical.roots() else {
+        return Err("a staged tensor region must have exactly one tensor result".into());
+    };
+    let mut reserved = params
+        .iter()
+        .map(|p| p.name.clone())
+        .collect::<BTreeSet<_>>();
+    for source in sources {
+        let mut names = chelis_unord::UnordSet::new();
+        super::collect_deep_var_names(&source.expression, &mut names);
+        reserved.extend(names.into_sorted());
+    }
+    let mut names = BTreeMap::new();
+    for node in logical.nodes() {
+        let mut candidate = format!("__checked_stage_{}", node.id.0);
+        while reserved.contains(&candidate) {
+            candidate.push('_');
+        }
+        reserved.insert(candidate.clone());
+        names.insert(StageValue::Tensor(node.id), candidate);
+    }
+    for (id, (name, _)) in host_parameters {
+        names.insert(StageValue::Host(*id), name.clone());
+    }
+    let mut producers = BTreeSet::new();
+    for source in sources {
+        if !producers.insert(source.value) {
+            return Err("a staged value has more than one producer".into());
+        }
+        match source.value {
+            StageValue::Tensor(id) => {
+                if source.before != id.0
+                    || external_inputs.contains_key(&id)
+                    || source.ty
+                        != super::HostTypeTerm::Scalar(super::HostPrecisionTerm::Concrete(
+                            chelis_types::types::Prim::Int64,
+                        ))
+                    || logical.get(id).is_none_or(|node| {
+                        node.output_type != scalar_type() || !matches!(node.op, RiscOp::Load { .. })
+                    })
+                {
+                    return Err("a staged reshape target must have one exact int64 producer".into());
+                }
+            }
+            StageValue::Host(id) => {
+                if host_parameters.contains_key(&id) {
+                    return Err("a host parameter cannot be overwritten by a stage".into());
+                }
+                let mut candidate = format!("__checked_host_{}", id.0);
+                while reserved.contains(&candidate) {
+                    candidate.push('_');
+                }
+                reserved.insert(candidate.clone());
+                names.insert(source.value, candidate);
+            }
+        }
+    }
+    for node in logical.nodes() {
+        if let RiscOp::Load { name } = &node.op {
+            let parameter = external_inputs
+                .get(&node.id)
+                .is_some_and(|declared| declared == name.as_str());
+            let source = producers.contains(&StageValue::Tensor(node.id));
+            if parameter == source {
+                return Err(
+                    "every staged graph input needs exactly one declared or host producer".into(),
+                );
+            }
+        }
+    }
+
+    // Captures and all staged producers are execution roots even when their
+    // final tensor result is discarded. Ordinary graph dependencies retain
+    // every checked extent and the complete list of target producers.
+    let mut live = BTreeSet::new();
+    let mut pending = vec![*root];
+    for source in sources {
+        if let StageValue::Tensor(id) = source.value {
+            pending.push(id);
+        }
+        pending.extend(
+            source
+                .captures
+                .iter()
+                .filter_map(|(_, value, _)| match value {
+                    StageValue::Tensor(id) => Some(*id),
+                    StageValue::Host(_) => None,
+                }),
+        );
+    }
+    while let Some(id) = pending.pop() {
+        if live.insert(id) {
+            let node = logical
+                .get(id)
+                .ok_or("a staged dependency has no producer")?;
+            pending.extend(node.inputs.iter().copied());
+            pending.extend(node.shape_deps.iter().copied());
+        }
+    }
+    let mut stages = Vec::new();
+    let mut available = host_parameters
+        .keys()
+        .map(|id| StageValue::Host(*id))
+        .collect::<BTreeSet<_>>();
+    let mut start = 0;
+    for source in sources {
+        if source.before < start || source.before > logical.nodes().len() {
+            return Err("a staged scalar requires one ordered input producer".into());
+        }
+        append_kernel(
+            logical,
+            start,
+            source.before,
+            &live,
+            &names,
+            &mut available,
+            &mut stages,
+        )?;
+        let captures = source
+            .captures
+            .iter()
+            .map(|(binding, value, ty)| {
+                if !available.contains(value) {
+                    return Err(format!("staged capture `{binding}` precedes its producer"));
+                }
+                Ok(HostStageCapture {
+                    binding: binding.clone(),
+                    value: names[value].clone(),
+                    ty: ty.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        stages.push(HostStage::Source {
+            expression: source.expression.clone(),
+            captures,
+            output: names[&source.value].clone(),
+            ty: source.ty.clone(),
+        });
+        available.insert(source.value);
+        start = source.before + usize::from(matches!(source.value, StageValue::Tensor(_)));
+    }
+    append_kernel(
+        logical,
+        start,
+        logical.nodes().len(),
+        &live,
+        &names,
+        &mut available,
+        &mut stages,
+    )?;
+    if !available.contains(&StageValue::Tensor(*root)) {
+        return Err("a staged tensor result has no executed producer".into());
+    }
+    Ok(HostStagedPlan {
+        stages,
+        output: names[&StageValue::Tensor(*root)].clone(),
+    })
+}
+
+fn append_kernel(
+    logical: &Dag,
+    start: usize,
+    end: usize,
+    live: &BTreeSet<NodeId>,
+    names: &BTreeMap<StageValue, String>,
+    available: &mut BTreeSet<StageValue>,
+    stages: &mut Vec<HostStage>,
+) -> Result<(), String> {
+    let mut dag = Dag::new();
+    let mut remap = BTreeMap::new();
+    let mut outputs = Vec::new();
+    for node in &logical.nodes()[start..end] {
+        if !live.contains(&node.id) {
+            continue;
+        }
+        for &dependency in node.inputs.iter().chain(&node.shape_deps) {
+            if let std::collections::btree_map::Entry::Vacant(entry) = remap.entry(dependency) {
+                if !available.contains(&StageValue::Tensor(dependency)) {
+                    return Err("an executable staged helper contains an unresolved input".into());
+                }
+                let ty = logical
+                    .get(dependency)
+                    .ok_or("missing staged input")?
+                    .output_type
+                    .clone();
+                entry.insert(dag.add_node(
+                    RiscOp::Load {
+                        name: names[&StageValue::Tensor(dependency)].as_str().into(),
+                    },
+                    Vec::new(),
+                    ty,
+                    None,
+                ));
+            }
+        }
+        let id = dag.add_node(
+            node.op.clone(),
+            node.inputs.iter().map(|i| remap[i]).collect(),
+            node.output_type.clone(),
+            node.span_id.clone(),
+        );
+        let copied = dag.node_mut(id).expect("new staged node");
+        copied.merged_spans = node.merged_spans.clone();
+        copied.shape_deps = node.shape_deps.iter().map(|i| remap[i]).collect();
+        remap.insert(node.id, id);
+        available.insert(StageValue::Tensor(node.id));
+        // Export each live intermediate once. Later helpers consume its value,
+        // never replay a growing prefix of the original graph.
+        dag.add_root(id);
+        outputs.push(names[&StageValue::Tensor(node.id)].clone());
+    }
+    if !outputs.is_empty() {
+        stages.push(HostStage::Kernel { dag, outputs });
+    }
+    Ok(())
+}
+
+pub(crate) fn scalar_type() -> TensorType {
+    TensorType {
+        dims: Vec::new(),
+        precision: chelis_types::types::Prim::Int64,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dag::{DimInfo, RtAxis, RtDim};
+    use crate::host_type_state::HostPrecisionTerm;
+    use chelis_types::{scalar_from_i64, types::Prim};
+
+    fn fixture() -> (
+        Dag,
+        Vec<HostSource>,
+        Vec<HostParam>,
+        BTreeMap<NodeId, String>,
+    ) {
+        let mut dag = Dag::new();
+        let tensor = TensorType {
+            dims: vec![DimInfo::Named("n".into(), None)],
+            precision: Prim::F32,
+        };
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            tensor.clone(),
+            None,
+        );
+        let required = dag.add_node(
+            RiscOp::Const {
+                value: scalar_from_i64("reshape", Prim::Int64, 2).unwrap(),
+            },
+            vec![],
+            scalar_type(),
+            None,
+        );
+        let actual = dag.add_node(
+            RiscOp::Load {
+                name: "host-source".into(),
+            },
+            vec![],
+            scalar_type(),
+            None,
+        );
+        let checked = dag.add_node(
+            RiscOp::CheckedReshapeExtent {
+                claims: vec!["2".into()],
+                axis: RtAxis::Lit(0),
+            },
+            vec![actual, required],
+            scalar_type(),
+            None,
+        );
+        let result = dag.add_node(
+            RiscOp::Reshape {
+                new_shape: vec![RtDim::Node(1), RtDim::Lit(2)],
+            },
+            vec![x, checked],
+            TensorType {
+                dims: vec![DimInfo::Named("actual".into(), None), DimInfo::Lit(2)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_root(result);
+        let sources = vec![HostSource {
+            before: actual.0,
+            value: StageValue::Tensor(actual),
+            ty: HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64)),
+            expression: chelis_deep::parser::parse_str("(lit {type: (t-prim {} int64)} 2)")
+                .unwrap()
+                .remove(0),
+            captures: vec![(
+                "x".into(),
+                StageValue::Tensor(x),
+                HostTypeTerm::Tensor(tensor.clone()),
+            )],
+        }];
+        (
+            dag,
+            sources,
+            vec![HostParam {
+                name: "x".into(),
+                ty: HostTypeTerm::Tensor(tensor),
+            }],
+            BTreeMap::from([(x, "x".into())]),
+        )
+    }
+
+    #[test]
+    fn staged_plan_has_one_source_and_no_unresolved_helper_inputs() {
+        let (dag, sources, params, inputs) = fixture();
+        let plan = partition(&dag, &sources, &params, &inputs, &BTreeMap::new()).unwrap();
+        assert_eq!(plan.stages().len(), 3);
+        let mut available = BTreeSet::from(["x".to_owned()]);
+        for stage in plan.stages() {
+            match stage {
+                HostStage::Source {
+                    captures, output, ..
+                } => {
+                    assert!(
+                        captures
+                            .iter()
+                            .all(|capture| available.contains(&capture.value))
+                    );
+                    assert!(available.insert(output.clone()));
+                }
+                HostStage::Kernel { dag, outputs } => {
+                    assert!(crate::verify::verify(dag).is_empty());
+                    for node in dag.nodes() {
+                        if let RiscOp::Load { name } = &node.op {
+                            assert!(available.contains(name.as_str()));
+                        }
+                    }
+                    for output in outputs {
+                        assert!(available.insert(output.clone()));
+                    }
+                }
+            }
+        }
+        assert!(available.contains(plan.output()));
+    }
+
+    #[test]
+    fn staged_plan_rejects_missing_duplicate_wrong_type_and_forward_producers() {
+        let (dag, sources, params, inputs) = fixture();
+        for mutation in [
+            "missing",
+            "duplicate",
+            "dtype",
+            "forward",
+            "parameter_alias",
+        ] {
+            let mut sources = sources.clone();
+            let mut inputs = inputs.clone();
+            match mutation {
+                "missing" => sources.clear(),
+                "duplicate" => sources.push(sources[0].clone()),
+                "dtype" => {
+                    sources[0].ty = HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int32))
+                }
+                "forward" => sources[0].captures[0].1 = StageValue::Tensor(dag.roots()[0]),
+                "parameter_alias" => {
+                    inputs.insert(NodeId(sources[0].before), "host-source".into());
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                partition(&dag, &sources, &params, &inputs, &BTreeMap::new()).is_err(),
+                "{mutation}"
+            );
+        }
+    }
+}

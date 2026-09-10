@@ -33,6 +33,7 @@ enum Expected {
     Tensor(Vec<usize>, Vec<f64>),
     Domain(&'static str, &'static [&'static str]),
     TargetDivisionByZero,
+    ExactTargetDivisionByZero,
     EntryShapeMismatch(&'static str),
     Reject(&'static str),
 }
@@ -749,6 +750,14 @@ fn contract_failures(case: &Case, observation: &Value) -> Vec<String> {
                             } else {
                                 "integer division or remainder by zero"
                             }
+                    })
+            }
+            Expected::ExactTargetDivisionByZero => {
+                run["stage"] == "execute"
+                    && run["success"] == false
+                    && stderr.lines().any(|line| {
+                        line.strip_prefix("error: ").unwrap_or(line)
+                            == "numeric trap: division by zero in floor_div at int64"
                     })
             }
             Expected::EntryShapeMismatch(context) => {
@@ -1481,6 +1490,108 @@ fn host_produced_reshape_targets_preserve_declared_claims() {
         }
     }
     assert_eq!(cases.len(), 60);
+    let mut failures = Vec::new();
+    for case in cases {
+        let observed = observe(&case);
+        println!("{}: {}", case.id, observed);
+        failures.extend(contract_failures(&case, &observed));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn staged_reshape_sources_preserve_captures_and_order() {
+    assert!(gcc_available(), "C toolchain required; no lane may skip");
+    let mut cases = Vec::new();
+    for n in [2, 3] {
+        for (kind, declarations, body) in [
+            (
+                "local_list",
+                "",
+                "{\n  items = to_list(source)\n  size = len(items)\n  reshape(x, [size, 2i64])\n}",
+            ),
+            (
+                "tensor_capture",
+                "",
+                "{\n  doubled = add(source, source)\n  reshape(x, [bitand(numel(doubled), 3i64), 2i64])\n}",
+            ),
+            (
+                "scalar_capture_shadow",
+                "def g(source: int64, x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [bitand(source, 3i64), 2i64])\n",
+                "g(shape(source, 0i32), x)",
+            ),
+            (
+                "repeated_calls",
+                "def g(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [bitand(numel(source), 3i64), 2i64])\n",
+                "{\n  first = g(source, x)\n  second = g(source, x)\n  copy(first)\n}",
+            ),
+        ] {
+            call_matrix(
+                &mut cases,
+                &format!("staged_source.{kind}.x{n}"),
+                1686,
+                &format!(
+                    "{declarations}def f(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = {body}"
+                ),
+                "(tensor[d0, f32], tensor[d1, f32]) -> tensor[2, 2, f32]",
+                vec![vector(n), vector(n * 2)],
+                if n == 2 {
+                    Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])
+                } else {
+                    Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"])
+                },
+            );
+        }
+        call_matrix(
+            &mut cases,
+            &format!("staged_source.untaken_failure.x{n}"),
+            1686,
+            "def f(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [if eq(numel(source), 2i64) then 2i64 else floor_div(numel(source), sub(numel(source), numel(source))), 2i64])",
+            "(tensor[d0, f32], tensor[d1, f32]) -> tensor[2, 2, f32]",
+            vec![vector(n), vector(n * 2)],
+            if n == 2 {
+                Expected::Tensor(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])
+            } else {
+                Expected::ExactTargetDivisionByZero
+            },
+        );
+        call_matrix(
+            &mut cases,
+            &format!("staged_source.discarded.x{n}"),
+            1686,
+            "def g(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [bitand(numel(source), 3i64), 2i64])\ndef f(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[n, f32] = {\n  ignored = g(source, x)\n  x\n}",
+            "(tensor[d0, f32], tensor[d1, f32]) -> tensor[d1, f32]",
+            vec![vector(n), vector(n * 2)],
+            if n == 2 {
+                Expected::Tensor(vec![4], vec![1.0, 2.0, 3.0, 4.0])
+            } else {
+                Expected::Domain("reshape", &["claimed = 2", "reshape axis 0 = 3"])
+            },
+        );
+    }
+    for (kind, targets) in [
+        (
+            "host_then_dag",
+            "bitand(shape(source, 0i32), 3i64), floor_div(shape(x, 0i32), sub(shape(x, 0i32), shape(x, 0i32)))",
+        ),
+        (
+            "dag_then_host",
+            "floor_div(shape(x, 0i32), sub(shape(x, 0i32), shape(x, 0i32))), bitand(shape(source, 0i32), 3i64)",
+        ),
+    ] {
+        call_matrix(
+            &mut cases,
+            &format!("staged_source.{kind}"),
+            1686,
+            &format!(
+                "def f(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [{targets}])"
+            ),
+            "(tensor[d0, f32], tensor[d1, f32]) -> tensor[2, 2, f32]",
+            vec![vector(3), vector(6)],
+            Expected::TargetDivisionByZero,
+        );
+    }
+    assert_eq!(cases.len(), 42);
     let mut failures = Vec::new();
     for case in cases {
         let observed = observe(&case);

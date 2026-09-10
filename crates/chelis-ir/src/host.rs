@@ -3054,6 +3054,9 @@ pub struct RandomLoweringState {
 #[derive(Debug, Clone)]
 pub struct HostDefKernel {
     pub dag: crate::Dag,
+    /// Ordered host scalar sources and checked tensor helpers, when this
+    /// activation cannot execute as one tensor kernel.
+    pub staged: Option<staged::HostStagedPlan>,
     /// Kernel inputs in DAG `Load` order: the referenced params by declared
     /// name and any captured top-level tensor names, each with its declared
     /// `TensorType` after dimension-symbol remapping.
@@ -3113,9 +3116,13 @@ pub fn host_def_kernel(
         return Ok(None);
     };
     let _preflight_guard = TensorHelperPreflightGuard::begin(&signature.body_expr, program);
+    if let Some(staged) = staged_def_kernel(program, &signature)? {
+        return Ok(Some(staged));
+    }
     let expected = match def_body_decision(program, &signature)? {
         DefBodyDecision::Kernel(expected) => expected,
-        DefBodyDecision::Host | DefBodyDecision::TensorVar(..) => return Ok(None),
+        DefBodyDecision::Host => return Ok(None),
+        DefBodyDecision::TensorVar(..) => return Ok(None),
     };
     let (dag, next_random_counter) = lower_kernel_dag(
         &signature.body_expr,
@@ -3144,10 +3151,93 @@ pub fn host_def_kernel(
         .unwrap_or_else(|| expected.clone());
     Ok(Some(HostDefKernel {
         dag,
+        staged: None,
         inputs,
         output,
         params: signature.params,
         next_random_counter,
+    }))
+}
+
+fn staged_def_kernel(
+    program: &CheckedProgram,
+    signature: &HostDefSignature,
+) -> Result<Option<HostDefKernel>, crate::lower::LowerDiagnostic> {
+    let HostTypeTerm::Tensor(expected) = &signature.ret_ty else {
+        return Ok(None);
+    };
+    // This is only a cheap candidate scan. Admission below uses the checked
+    // expression type in its lexical activation, never this spelling scan.
+    let definitions = cached_program_defs(program);
+    let mut pending = vec![&signature.body_expr];
+    let mut visited = BTreeSet::new();
+    let mut reshape = false;
+    let mut host_source = false;
+    while let Some(expression) = pending.pop() {
+        let mut names = UnordSet::new();
+        collect_deep_var_names(expression, &mut names);
+        for name in names.into_sorted() {
+            reshape |= name == "reshape";
+            host_source |= HOST_ONLY_BUILTINS.contains(&name.as_str());
+            if visited.insert(name.clone())
+                && let Some(body) = definitions.get(&name)
+            {
+                pending.push(body);
+            }
+        }
+        fn has_control(expr: &Expr) -> bool {
+            match expr {
+                Expr::List(list, _) => {
+                    matches!(tag(list), Some(DeepTag::If | DeepTag::Match))
+                        || children(list).iter().any(has_control)
+                }
+                Expr::Node(node, _) => {
+                    matches!(node.tag(), DeepTag::If | DeepTag::Match)
+                        || node.children_slice().iter().any(has_control)
+                }
+                Expr::MetaExpr(meta, _) => has_control(&meta.expr),
+                _ => false,
+            }
+        }
+        host_source |= has_control(expression);
+    }
+    if !reshape || !host_source {
+        return Ok(None);
+    }
+    if def_effect_row_forbids_kernel(program, &signature.name)
+        || signature
+            .params
+            .iter()
+            .any(|param| matches!(param.ty, HostTypeTerm::Fn(..)))
+    {
+        return Ok(None);
+    }
+    let context = cached_subexpr_lowering_context(program);
+    let lowered = crate::lower::try_lower_staged_host_region(
+        &signature.body_expr,
+        &signature.params,
+        program,
+        &context,
+        expected,
+    );
+    let Some((dag, plan)) = (match lowered {
+        Ok(lowered) => lowered,
+        Err(diagnostic) if diagnostic.fatal => return Err(diagnostic),
+        Err(_) => return Ok(None),
+    }) else {
+        return Ok(None);
+    };
+    Ok(Some(HostDefKernel {
+        inputs: tensor_helper_inputs(&dag),
+        output: dag
+            .get(dag.roots()[0])
+            .expect("staged root")
+            .output_type
+            .clone(),
+        dag,
+        staged: Some(plan),
+        params: signature.params.clone(),
+        next_random_counter: None,
     }))
 }
 
@@ -3197,7 +3287,7 @@ fn cached_def_effect_rows(
 /// `Some(reason)` keeps the def in host code on both lanes; on C that is the
 /// lane the non-fatal fall-through (chelis#1515) already chose, so the emitted
 /// program is unchanged, which the corpus capture proves rather than assumes.
-fn body_form_the_dag_cannot_carry(
+pub(crate) fn body_form_the_dag_cannot_carry(
     program: &CheckedProgram,
     body: &Expr,
     params: &[HostParam],
@@ -3701,6 +3791,15 @@ fn lower_def_body_kernel(
     signature: &HostDefSignature,
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> Result<Option<HostExpr>, crate::lower::LowerDiagnostic> {
+    if let Some(kernel) = staged_def_kernel(program, signature)? {
+        return lower_staged_host_plan(
+            kernel.staged.as_ref().expect("staged kernel"),
+            program,
+            &signature.scope,
+            tensor_helpers,
+        )
+        .map(Some);
+    }
     let expected = match def_body_decision(program, signature)? {
         DefBodyDecision::Host => return Ok(None),
         DefBodyDecision::TensorVar(name, expected) => {
@@ -4250,6 +4349,133 @@ fn finish_tensor_helper_call(
         args,
         ty: call_ty,
     })
+}
+
+fn lower_staged_host_plan(
+    plan: &staged::HostStagedPlan,
+    program: &CheckedProgram,
+    scope: &UnordMap<String, HostTypeTerm>,
+    helpers: &mut Vec<HostTensorHelper>,
+) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+    let mut scope = scope.clone();
+    let mut bindings = Vec::new();
+    for stage in plan.stages() {
+        match stage {
+            staged::HostStage::Source {
+                expression,
+                captures,
+                output,
+                ty,
+            } => {
+                let mut captured_scope = scope.clone();
+                let mut captured_bindings = Vec::new();
+                for capture in captures {
+                    let value_ty = scope
+                        .get(&capture.value)
+                        .expect("available capture")
+                        .clone();
+                    let mut value =
+                        HostExpr::new(HostExprKind::Var(capture.value.clone(), value_ty.clone()));
+                    if matches!(capture.ty, HostTypeTerm::Scalar(_))
+                        && matches!(value_ty, HostTypeTerm::Tensor(_))
+                    {
+                        value = HostExpr::new(HostExprKind::Builtin {
+                            name: "tensor_to_scalar".into(),
+                            args: vec![value],
+                            ty: capture.ty.clone(),
+                        });
+                    }
+                    captured_bindings.push(HostBinding {
+                        name: capture.binding.clone(),
+                        display_name: None,
+                        display_roots: Vec::new(),
+                        ty: capture.ty.clone(),
+                        value,
+                    });
+                    captured_scope.insert(capture.binding.clone(), capture.ty.clone());
+                }
+                let ty = ty.clone();
+                let body = lower_host_expr_with_expected(
+                    expression,
+                    program,
+                    &captured_scope,
+                    helpers,
+                    Some(&ty),
+                )?;
+                let value = HostExpr::new(HostExprKind::Let {
+                    bindings: captured_bindings,
+                    body: Box::new(body),
+                    ty: ty.clone(),
+                });
+                bindings.push(HostBinding {
+                    name: output.clone(),
+                    display_name: None,
+                    display_roots: Vec::new(),
+                    ty: ty.clone(),
+                    value,
+                });
+                scope.insert(output.clone(), ty);
+            }
+            staged::HostStage::Kernel { dag, outputs } => {
+                let expected = dag
+                    .get(dag.roots()[0])
+                    .expect("kernel root")
+                    .output_type
+                    .clone();
+                let call = finish_tensor_helper_call(dag.clone(), &scope, helpers, expected);
+                let ty = host_expr_type(&call);
+                if outputs.len() == 1 {
+                    bindings.push(HostBinding {
+                        name: outputs[0].clone(),
+                        display_name: None,
+                        display_roots: Vec::new(),
+                        ty: ty.clone(),
+                        value: call,
+                    });
+                    scope.insert(outputs[0].clone(), ty);
+                } else {
+                    let tuple_name = format!("{}__tuple", outputs[0]);
+                    bindings.push(HostBinding {
+                        name: tuple_name.clone(),
+                        display_name: None,
+                        display_roots: Vec::new(),
+                        ty: ty.clone(),
+                        value: call,
+                    });
+                    for (index, (output, root)) in outputs.iter().zip(dag.roots()).enumerate() {
+                        let output_ty = HostTypeTerm::Tensor(
+                            dag.get(*root).expect("kernel output").output_type.clone(),
+                        );
+                        let value = HostExpr::new(HostExprKind::Builtin {
+                            name: "tuple-get".into(),
+                            args: vec![
+                                HostExpr::new(HostExprKind::Var(tuple_name.clone(), ty.clone())),
+                                HostExpr::new(HostExprKind::Int(
+                                    i64::try_from(index).expect("tuple index"),
+                                )),
+                            ],
+                            ty: output_ty.clone(),
+                        });
+                        bindings.push(HostBinding {
+                            name: output.clone(),
+                            display_name: None,
+                            display_roots: Vec::new(),
+                            ty: output_ty.clone(),
+                            value,
+                        });
+                        scope.insert(output.clone(), output_ty);
+                    }
+                }
+            }
+        }
+    }
+    let ty = scope.get(plan.output()).expect("planned result").clone();
+    let body = HostExpr::new(HostExprKind::Var(plan.output().to_owned(), ty.clone()));
+    Ok(HostExpr::new(HostExprKind::Let {
+        bindings,
+        body: Box::new(body),
+        ty,
+    }))
 }
 
 /// Outcome of the structured BLAS-helper recognizer (W6 Task A).
@@ -12095,7 +12321,7 @@ fn collect_tensor_scope(scope: &UnordMap<String, HostTypeTerm>) -> UnordMap<Stri
         .collect()
 }
 
-fn tensor_type_from_host_input(ty: &HostTypeTerm) -> Option<TensorType> {
+pub(crate) fn tensor_type_from_host_input(ty: &HostTypeTerm) -> Option<TensorType> {
     match ty {
         HostTypeTerm::Tensor(tensor) => Some(tensor.clone()),
         HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(prim))
@@ -12131,7 +12357,7 @@ fn host_type_from_tensor_input(ty: &TensorType) -> HostTypeTerm {
 /// route a type arrives by — node metadata, `CheckedProgram` lookup, and the
 /// structural fallbacks — rather than only the metadata funnel. Outside a
 /// specialization the substitution is empty and this is the identity.
-fn expr_host_type(
+pub(crate) fn expr_host_type(
     expr: &Expr,
     program: &CheckedProgram,
     scope: &UnordMap<String, HostTypeTerm>,
@@ -15062,7 +15288,7 @@ fn symbol_name(expr: &Expr) -> Option<&str> {
 /// is harmless (the C emitter's `captured_global_names` is the final
 /// gate — an emitted global is only declared if a function actually
 /// references it).
-fn collect_deep_var_names(expr: &Expr, out: &mut UnordSet<String>) {
+pub(crate) fn collect_deep_var_names(expr: &Expr, out: &mut UnordSet<String>) {
     match expr {
         Expr::List(list, _) => {
             if tag(list) == Some(DeepTag::Var)
@@ -18473,3 +18699,4 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         );
     }
 }
+pub mod staged;

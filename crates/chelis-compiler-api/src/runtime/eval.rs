@@ -326,6 +326,9 @@ impl<'a> EvalContext<'a> {
         params: &[String],
         args: Vec<RuntimeValue>,
     ) -> Result<RuntimeValue, String> {
+        if let Some(plan) = &kernel.staged {
+            return self.apply_staged_host_plan(name, plan, params, args);
+        }
         if params.len() != args.len() {
             return Err(format!(
                 "closure expected {} args, got {}",
@@ -412,6 +415,100 @@ impl<'a> EvalContext<'a> {
             };
         }
         pack_dag_roots(&kernel.dag, &roots, &values, name)
+    }
+
+    fn apply_staged_host_plan(
+        &mut self,
+        name: &str,
+        plan: &chelis_ir::host::staged::HostStagedPlan,
+        params: &[String],
+        args: Vec<RuntimeValue>,
+    ) -> Result<RuntimeValue, String> {
+        use chelis_ir::host::staged::HostStage;
+        use chelis_ir::host_type_state::HostTypeTerm;
+        if params.len() != args.len() {
+            return Err(format!("staged kernel `{name}` argument arity mismatch"));
+        }
+        let mut values: UnordMap<String, RuntimeValue> = params.iter().cloned().zip(args).collect();
+        for stage in plan.stages() {
+            match stage {
+                HostStage::Source {
+                    expression,
+                    captures,
+                    output,
+                    ty,
+                } => {
+                    let saved = std::mem::take(&mut self.bindings);
+                    for capture in captures {
+                        let value = values
+                            .get(&capture.value)
+                            .expect("validated staged capture")
+                            .clone();
+                        let value = match (&capture.ty, value) {
+                            (HostTypeTerm::Scalar(_), RuntimeValue::Tensor(tensor)) => {
+                                RuntimeValue::from_scalar_value(tensor.value.storage().scalar_at(0))
+                            }
+                            (_, value) => value,
+                        };
+                        self.bindings.insert(capture.binding.clone(), value);
+                    }
+                    let result = self.eval_expr(expression);
+                    self.bindings = saved;
+                    let value = result?;
+                    if matches!(
+                        ty,
+                        HostTypeTerm::Scalar(
+                            chelis_ir::host_type_state::HostPrecisionTerm::Concrete(Prim::Int64)
+                        )
+                    ) && !matches!(&value, RuntimeValue::Scalar(payload) if payload.dtype() == Prim::Int64)
+                    {
+                        return Err("staged reshape target did not produce exactly int64".into());
+                    }
+                    values.insert(output.clone(), value);
+                }
+                HostStage::Kernel { dag, outputs } => {
+                    let mut inputs = UnordMap::new();
+                    for node in dag.nodes() {
+                        if let RiscOp::Load { name: input } = &node.op {
+                            let value = match values.get(input.as_str()) {
+                                Some(value) => value.clone(),
+                                None => self.resolve_top_level(input.as_str())?,
+                            };
+                            inputs.insert(
+                                input.as_str().to_owned(),
+                                stage_kernel_argument(
+                                    name,
+                                    input.as_str(),
+                                    &value,
+                                    node.output_type.precision,
+                                )?,
+                            );
+                        }
+                    }
+                    let (computed, counter) =
+                        chelis_ir::eval::eval_tensor_roots_with_strict_random_progress(
+                            dag,
+                            dag.roots(),
+                            self.random_counter,
+                            |input| inputs.get(input).cloned(),
+                        )?;
+                    self.random_counter = counter;
+                    for (output, root) in outputs.iter().zip(dag.roots()) {
+                        let value = computed
+                            .get(root)
+                            .ok_or("staged kernel omitted an output")?
+                            .clone();
+                        values.insert(
+                            output.clone(),
+                            RuntimeValue::Tensor(RuntimeTensorValue::new(value)),
+                        );
+                    }
+                }
+            }
+        }
+        values
+            .remove(plan.output())
+            .ok_or_else(|| "staged kernel omitted its final result".into())
     }
 
     pub(super) fn lookup_top_level_def(&self, name: &str) -> Option<(String, Expr)> {

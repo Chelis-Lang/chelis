@@ -1210,6 +1210,11 @@ fn lower_program_with_context_inner(
 
 fn flatten_binding_into(prefix: &str, value: &LoweredValue, out: &mut UnordMap<String, NodeId>) {
     match value {
+        LoweredValue::Host { .. } => raise_lowering_error(
+            "a host value cannot be exported as a tensor binding",
+            None,
+            None,
+        ),
         LoweredValue::Node(id) => {
             out.insert(prefix.to_string(), *id);
         }
@@ -1411,6 +1416,84 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs(
         );
         (dag, random_counter)
     })
+}
+
+pub(crate) fn try_lower_staged_host_region(
+    expr: &Expr,
+    params: &[crate::host::HostParam],
+    program: &CheckedProgram,
+    context: &SubexprLoweringContext,
+    result_claim: &TensorType,
+) -> Result<Option<(Dag, crate::host::staged::HostStagedPlan)>, LowerDiagnostic> {
+    use crate::host::staged::StagingStatus;
+    let status = std::rc::Rc::new(Cell::new(StagingStatus::Searching));
+    let result = catch_lowering(std::panic::AssertUnwindSafe(|| {
+        let mut ctx = LowerCtx::new(
+            context.program_types.clone(),
+            context.program_defs.clone(),
+            context.program_signatures.clone(),
+            LinearityInfo::default(),
+        );
+        ctx.host_program = Some(program);
+        ctx.host_stage_status = status.clone();
+        let mut names = Vec::new();
+        let mut types = Vec::new();
+        for param in params {
+            if let Some(ty) = crate::host::tensor_type_from_host_input(&param.ty) {
+                let load = ctx.dag.add_node(
+                    RiscOp::Load {
+                        name: param.name.as_str().into(),
+                    },
+                    Vec::new(),
+                    ty.clone(),
+                    None,
+                );
+                ctx.bindings
+                    .insert(param.name.clone(), LoweredValue::Node(load));
+                ctx.host_value_types.insert(load, param.ty.clone());
+                ctx.host_external_inputs.insert(load, param.name.clone());
+                names.push(param.name.clone());
+                types.push(ty);
+            } else {
+                let id = crate::host::staged::HostValueId(ctx.next_host_value);
+                ctx.next_host_value += 1;
+                ctx.host_parameters
+                    .insert(id, (param.name.clone(), param.ty.clone()));
+                ctx.bindings.insert(
+                    param.name.clone(),
+                    LoweredValue::Host {
+                        id,
+                        ty: param.ty.clone(),
+                    },
+                );
+            }
+        }
+        ctx.prepare_parameter_witnesses(&names, &types, None);
+        ctx.binding_witnesses.clear();
+        let result = ctx.lower_expr_with_claim(expr, Some(result_claim));
+        let result = ctx.retain_invocation_witnesses(result, 0);
+        if ctx.host_sources.is_empty() {
+            return None;
+        }
+        let root = result.expect_node("staged host tensor region");
+        ctx.dag.add_root(root);
+        let plan = crate::host::staged::partition(
+            &ctx.dag,
+            &ctx.host_sources,
+            params,
+            &ctx.host_external_inputs,
+            &ctx.host_parameters,
+        )
+        .unwrap_or_else(|error| {
+            raise_lowering_error(error, Some(expr.span()), expr.span_id().map(str::to_owned))
+        });
+        Some((ctx.dag, plan))
+    }));
+    match (result, status.get()) {
+        (Err(_), StagingStatus::HostControlBoundary) => Ok(None),
+        (Err(diagnostic), StagingStatus::HasSources) => Err(diagnostic.fatal()),
+        (result, _) => result,
+    }
 }
 
 fn lower_subexpr_program_inner_impl(
@@ -4048,6 +4131,9 @@ fn rebuild_runtime_list_view(
 fn recursive_list_leaf_nodes(value: &LoweredValue) -> Vec<NodeId> {
     fn walk(value: &LoweredValue, out: &mut Vec<NodeId>) {
         match value {
+            LoweredValue::Host { .. } => {
+                raise_lowering_error("a host value has no tensor cotangent leaves", None, None)
+            }
             LoweredValue::Node(node) => out.push(*node),
             LoweredValue::Adt { .. } if adt_cons_chain_values(value).is_some() => {
                 for item in adt_cons_chain_values(value).expect("guarded above") {
@@ -4080,6 +4166,11 @@ fn rebuild_recursive_list_like(
     leaves: &mut impl Iterator<Item = LoweredValue>,
 ) -> LoweredValue {
     match template {
+        LoweredValue::Host { .. } => raise_lowering_error(
+            "a host value cannot be rebuilt from tensor cotangent leaves",
+            None,
+            None,
+        ),
         LoweredValue::Node(_) => leaves.next().expect("recursive List leaf count mismatch"),
         LoweredValue::Adt { .. } if adt_cons_chain_values(template).is_some() => {
             let items = adt_cons_chain_values(template)
@@ -4811,6 +4902,10 @@ enum CallableExpr {
 #[derive(Clone)]
 enum LoweredValue {
     Node(NodeId),
+    Host {
+        id: crate::host::staged::HostValueId,
+        ty: crate::host_type_state::HostTypeTerm,
+    },
     Tuple(Vec<LoweredValue>),
     /// A statically-known ADT/record value (chelis#520). Constructed by
     /// `lower_record` (record-syntax construction), constructor
@@ -4864,6 +4959,9 @@ impl LoweredValue {
     fn trace_value(&self) -> crate::lowering_trace::Value {
         use crate::lowering_trace::Value;
         match self {
+            Self::Host { .. } => {
+                raise_lowering_error("a host value is not a tensor AD result", None, None)
+            }
             Self::Node(id) => Value::Node(*id),
             Self::Tuple(items) => Value::Tuple(items.iter().map(Self::trace_value).collect()),
             Self::Adt {
@@ -4890,6 +4988,7 @@ impl LoweredValue {
     /// that question while genuinely owning a root.
     fn contributes_no_root(&self) -> bool {
         match self {
+            Self::Host { .. } => true,
             Self::Node(_) => false,
             Self::Tuple(items) => items.iter().all(Self::contributes_no_root),
             Self::Adt { fields, .. } => fields.iter().all(Self::contributes_no_root),
@@ -4898,6 +4997,13 @@ impl LoweredValue {
 
     fn expect_node(&self, context: &str) -> NodeId {
         match self {
+            Self::Host { .. } => raise_lowering_error(
+                format!(
+                    "{context} requires a tensor; a staged host value has no tensor representation"
+                ),
+                None,
+                None,
+            ),
             Self::Node(id) => *id,
             Self::Tuple(_) => raise_lowering_error(
                 format!("{context} expected a single tensor value"),
@@ -4917,6 +5023,7 @@ impl LoweredValue {
 
     fn flatten_nodes(&self) -> Vec<NodeId> {
         match self {
+            Self::Host { .. } => Vec::new(),
             Self::Node(id) => vec![*id],
             Self::Tuple(items) => items.iter().flat_map(Self::flatten_nodes).collect(),
             Self::Adt { fields, .. } => fields.iter().flat_map(Self::flatten_nodes).collect(),
@@ -4928,19 +5035,20 @@ impl LoweredValue {
     fn as_single_node(&self) -> Option<NodeId> {
         match self {
             Self::Node(id) => Some(*id),
-            Self::Tuple(_) | Self::Adt { .. } => None,
+            Self::Tuple(_) | Self::Adt { .. } | Self::Host { .. } => None,
         }
     }
 
     fn tuple_get(&self, index: usize) -> Option<LoweredValue> {
         match self {
             Self::Tuple(items) => items.get(index).cloned(),
-            Self::Node(_) | Self::Adt { .. } => None,
+            Self::Node(_) | Self::Adt { .. } | Self::Host { .. } => None,
         }
     }
 
     fn from_flat(template: &LoweredValue, nodes: &mut dyn Iterator<Item = NodeId>) -> LoweredValue {
         match template {
+            Self::Host { .. } => template.clone(),
             Self::Node(_) => Self::Node(nodes.next().expect("flattened lowered value mismatch")),
             Self::Tuple(items) => Self::Tuple(
                 items
@@ -5102,7 +5210,15 @@ fn permuted_tensor_type(ty: &TensorType, axes: &[usize]) -> TensorType {
     }
 }
 
-struct LowerCtx {
+struct LowerCtx<'program> {
+    host_program: Option<&'program CheckedProgram>,
+    host_sources: Vec<crate::host::staged::HostSource>,
+    host_value_types: BTreeMap<NodeId, crate::host_type_state::HostTypeTerm>,
+    host_external_inputs: BTreeMap<NodeId, String>,
+    host_parameters:
+        BTreeMap<crate::host::staged::HostValueId, (String, crate::host_type_state::HostTypeTerm)>,
+    next_host_value: usize,
+    host_stage_status: std::rc::Rc<Cell<crate::host::staged::StagingStatus>>,
     #[cfg(feature = "lowering-trace")]
     trace: Option<crate::lowering_trace::Collector>,
     dag: Dag,
@@ -5254,7 +5370,7 @@ struct LowerCtx {
     current_span_id: Option<String>,
 }
 
-impl LowerCtx {
+impl<'program> LowerCtx<'program> {
     fn new(
         program_types: impl Into<Arc<BTreeMap<String, TensorType>>>,
         program_defs: impl Into<Arc<BTreeMap<String, Expr>>>,
@@ -5262,6 +5378,15 @@ impl LowerCtx {
         linearity: LinearityInfo,
     ) -> Self {
         Self {
+            host_program: None,
+            host_sources: Vec::new(),
+            host_value_types: BTreeMap::new(),
+            host_external_inputs: BTreeMap::new(),
+            host_parameters: BTreeMap::new(),
+            next_host_value: 0,
+            host_stage_status: std::rc::Rc::new(Cell::new(
+                crate::host::staged::StagingStatus::Searching,
+            )),
             #[cfg(feature = "lowering-trace")]
             trace: None,
             dag: Dag::new(),
@@ -5913,6 +6038,154 @@ impl LowerCtx {
         self.lower_expr_with_claim(expr, None)
     }
 
+    fn host_stage_scope(&self) -> UnordMap<String, crate::host_type_state::HostTypeTerm> {
+        use crate::host_type_state::HostTypeTerm;
+        self.bindings
+            .to_sorted()
+            .into_iter()
+            .filter_map(|(name, value)| {
+                let ty = match value {
+                    LoweredValue::Node(id) => {
+                        self.host_value_types.get(id).cloned().or_else(|| {
+                            self.dag
+                                .get(*id)
+                                .map(|node| HostTypeTerm::Tensor(node.output_type.clone()))
+                        })?
+                    }
+                    LoweredValue::Host { ty, .. } => ty.clone(),
+                    _ => return None,
+                };
+                Some((name.clone(), ty))
+            })
+            .collect()
+    }
+
+    fn stage_host_value(&mut self, expr: &Expr, target: bool) -> Option<LoweredValue> {
+        use crate::host::staged::{HostSource, HostValueId, StageValue};
+        use crate::host_type_state::{HostPrecisionTerm, HostTypeTerm};
+        let program = self.host_program?;
+        if !matches!(
+            stamped_parts(expr),
+            Some((
+                DeepTag::App
+                    | DeepTag::If
+                    | DeepTag::Match
+                    | DeepTag::Access
+                    | DeepTag::TupleGet
+                    | DeepTag::Cast,
+                _,
+                _
+            ))
+        ) {
+            return None;
+        }
+        let scope = self.host_stage_scope();
+        let ty = if target {
+            HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64))
+        } else {
+            crate::host::expr_host_type(expr, program, &scope)
+        };
+        if ty.is_unresolved() || matches!(ty, HostTypeTerm::Tensor(_) | HostTypeTerm::Fn(..)) {
+            return None;
+        }
+        let mut referenced = UnordSet::new();
+        crate::host::collect_deep_var_names(expr, &mut referenced);
+        let host_capture = referenced
+            .to_sorted()
+            .into_iter()
+            .any(|name| matches!(self.bindings.get(name), Some(LoweredValue::Host { .. })));
+        let params = scope
+            .to_sorted()
+            .into_iter()
+            .map(|(name, ty)| crate::host::HostParam {
+                name: name.clone(),
+                ty: ty.clone(),
+            })
+            .collect::<Vec<_>>();
+        let host_form = crate::host::body_form_the_dag_cannot_carry(program, expr, &params)
+            .is_some()
+            || matches!(
+                stamped_parts(expr),
+                Some((
+                    DeepTag::If | DeepTag::Match | DeepTag::Access | DeepTag::TupleGet,
+                    _,
+                    _
+                ))
+            );
+        let opaque = crate::host::tensor_type_from_host_input(&ty).is_none()
+            && collect_cons_chain(expr).is_none();
+        if !host_capture && !host_form && !opaque {
+            return None;
+        }
+        let mut captures = Vec::new();
+        for name in referenced.into_sorted() {
+            if let Some(value) = self.bindings.get(&name) {
+                let captured = match value {
+                    LoweredValue::Node(id) => StageValue::Tensor(*id),
+                    LoweredValue::Host { id, .. } => StageValue::Host(*id),
+                    _ => raise_lowering_error(
+                        "a staged aggregate capture needs an explicit host value",
+                        Some(expr.span()),
+                        expr.span_id().map(str::to_owned),
+                    ),
+                };
+                captures.push((
+                    name.clone(),
+                    captured,
+                    scope.get(&name).expect("capture type").clone(),
+                ));
+            } else if let Some((_, id)) = self
+                .signature_witnesses
+                .iter()
+                .find(|(binder, _)| binder == &name)
+            {
+                captures.push((
+                    name,
+                    StageValue::Tensor(*id),
+                    HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64)),
+                ));
+            }
+        }
+        let before = self.dag.nodes().len();
+        let (value, lowered) =
+            if ty == HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64)) {
+                let id = self.dag.add_node(
+                    RiscOp::Load {
+                        name: format!("__host_source_{}", self.host_sources.len()).into(),
+                    },
+                    Vec::new(),
+                    crate::host::staged::scalar_type(),
+                    expr.span_id().map(str::to_owned),
+                );
+                self.dag.node_mut(id).expect("staged scalar").shape_deps = captures
+                    .iter()
+                    .filter_map(|(_, value, _)| match value {
+                        StageValue::Tensor(id) => Some(*id),
+                        StageValue::Host(_) => None,
+                    })
+                    .collect();
+                self.host_value_types.insert(id, ty.clone());
+                (StageValue::Tensor(id), LoweredValue::Node(id))
+            } else {
+                let id = HostValueId(self.next_host_value);
+                self.next_host_value += 1;
+                (
+                    StageValue::Host(id),
+                    LoweredValue::Host { id, ty: ty.clone() },
+                )
+            };
+        self.host_sources.push(HostSource {
+            before,
+            value,
+            ty,
+            expression: expr.clone(),
+            captures,
+        });
+        self.host_stage_status
+            .set(crate::host::staged::StagingStatus::HasSources);
+        Some(lowered)
+    }
+
     /// A declaration supplies obligations to its returned expression before
     /// lowering can fold the expression's independent extent source.
     fn lower_expr_with_claim(&mut self, expr: &Expr, claim: Option<&TensorType>) -> LoweredValue {
@@ -5944,6 +6217,12 @@ impl LowerCtx {
     }
 
     fn lower_expr_unclaimed(&mut self, expr: &Expr, claim: Option<&TensorType>) -> LoweredValue {
+        if let Some(value) = self.stage_host_value(expr, false) {
+            return value;
+        }
+        let host_ty = self
+            .host_program
+            .map(|program| crate::host::expr_host_type(expr, program, &self.host_stage_scope()));
         // Thread the current Deep node's span_id through any add_node()
         // calls made while lowering this expr or its children. We snapshot
         // the previous span_id and restore it on return so sibling exprs
@@ -5976,6 +6255,28 @@ impl LowerCtx {
                 self.current_span_id.clone(),
             ),
         };
+        if let Some(id) = result.as_single_node() {
+            if let Some(ty) = host_ty.filter(|ty| !ty.is_unresolved()) {
+                self.host_value_types.entry(id).or_insert(ty);
+            }
+            if self.host_program.is_some()
+                && let Some(node) = self.dag.get(id)
+                && let RiscOp::Load { name } = &node.op
+                && !self
+                    .host_sources
+                    .iter()
+                    .any(|source| source.value == crate::host::staged::StageValue::Tensor(id))
+            {
+                if self.host_external_inputs.contains_key(&id)
+                    || self.program_defs.get(name.as_str()).is_some_and(|body| {
+                        !matches!(stamped_parts(body), Some((DeepTag::Fn, _, _)))
+                    })
+                {
+                    self.host_external_inputs
+                        .insert(id, name.as_str().to_owned());
+                }
+            }
+        }
         self.current_span_id = saved_span_id;
         result
     }
@@ -6003,6 +6304,7 @@ impl LowerCtx {
     /// lowering collapses that must still record the parent expr's span.
     fn append_current_span_to_lowered_value(&mut self, value: &LoweredValue) {
         match value {
+            LoweredValue::Host { .. } => {}
             LoweredValue::Node(id) => self.append_current_span_to_existing_node(*id),
             LoweredValue::Tuple(items) => {
                 for item in items {
@@ -6019,6 +6321,9 @@ impl LowerCtx {
 
     fn add_named_roots(&mut self, prefix: &str, value: &LoweredValue) {
         match value {
+            LoweredValue::Host { .. } => {
+                raise_lowering_error("a host value cannot become a tensor root", None, None)
+            }
             LoweredValue::Node(id) if !prefix.contains('.') => {
                 // Top-level def whose body lowered to a single existing
                 // node — no new Store is emitted. This is a region-merge
@@ -6821,6 +7126,11 @@ impl LowerCtx {
 
     fn mark_unresolved_callable_value(&mut self, value: LoweredValue) -> LoweredValue {
         match value {
+            LoweredValue::Host { .. } => raise_lowering_error(
+                "an unresolved callable has no staged host producer",
+                None,
+                None,
+            ),
             LoweredValue::Node(input) => {
                 let ty = self
                     .dag
@@ -7066,6 +7376,11 @@ impl LowerCtx {
         let plans: Vec<GradArgPlan> = actual_args
             .iter()
             .map(|arg| match arg {
+                LoweredValue::Host { .. } => raise_lowering_error(
+                    "an opaque host value has no tensor gradient input",
+                    None,
+                    None,
+                ),
                 LoweredValue::Node(id) => GradArgPlan::Tensor(*id),
                 LoweredValue::Tuple(_) | LoweredValue::Adt { .. } => {
                     let leaf_nodes = recursive_list_leaf_nodes(arg);
@@ -10724,6 +11039,7 @@ impl LowerCtx {
             ));
         }
         match first {
+            LoweredValue::Host { .. } => None,
             LoweredValue::Node(first_node) => {
                 let out_ty = self.dag.get(*first_node)?.output_type.clone();
                 if items.iter().any(|item| {
@@ -12798,6 +13114,15 @@ impl LowerCtx {
         let mut computed_targets = Vec::new();
         let mut srcs = Vec::new();
         for (axis, elem) in elements.iter().enumerate() {
+            if let Some(value) = self.stage_host_value(elem, true) {
+                let actual = value.expect_node("int64 target producer");
+                let slot = inputs.len();
+                inputs.push(actual);
+                computed_targets.push((axis, slot));
+                op_dims.push(RtDim::Node(slot));
+                ty_dims.push(DimInfo::Named(format!("_rt_dim_{}_{axis}", actual.0), None));
+                continue;
+            }
             if extract_int_for_dim(elem).is_none()
                 && (self.is_shape_derived_arith_dim(elem) || self.is_runtime_scalar_var(elem))
             {
@@ -13797,6 +14122,11 @@ impl LowerCtx {
         elems: &[Expr],
     ) -> NodeId {
         match branch {
+            LoweredValue::Host { .. } => raise_lowering_error(
+                "host control flow must execute in its source stage",
+                None,
+                None,
+            ),
             LoweredValue::Node(id) => id,
             LoweredValue::Tuple(_) => self.reject_static_adt(
                 elems,
@@ -13854,6 +14184,15 @@ impl LowerCtx {
         // now-dead condition subgraph is swept by the entry points' DCE.
         if let Some(taken) = self.fold_static_cond(cond) {
             return self.lower_expr(if taken { then_expr } else { else_expr });
+        }
+        if self.host_program.is_some() {
+            self.host_stage_status
+                .set(crate::host::staged::StagingStatus::HostControlBoundary);
+            raise_lowering_error(
+                "dynamic tensor branches retain host control flow; scalar source stages cannot be hoisted out of a branch",
+                Some(cond_expr.span()),
+                self.current_span_id.clone(),
+            );
         }
         let saved_random_path = self.random_path_condition;
         if let Some(parent_path) = saved_random_path {
@@ -14071,6 +14410,7 @@ impl LowerCtx {
     /// `expect_node("copy input")` -- the issue's Blocker 2).
     fn copy_lowered_value(&mut self, value: &LoweredValue) -> LoweredValue {
         match value {
+            LoweredValue::Host { .. } => value.clone(),
             LoweredValue::Node(id) => {
                 let output_type = self
                     .dag

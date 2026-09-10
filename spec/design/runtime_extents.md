@@ -385,6 +385,33 @@ introduced after a value was already produced executes at that call boundary.
 Literal-condition host functions use existing DAG branch pruning while retaining
 their full declaring signature; dynamic host control flow keeps its existing route.
 
+The remaining host-source claim gap in #1686 requires a shared staged function
+plan. A supported scalar `int64` expression that cannot execute in the tensor
+DAG keeps its checked source expression and captures the current activation's
+values explicitly. Its result supplies a fresh typed scalar input in the logical
+DAG. Lowering attaches result claims through that complete graph before splitting
+it into executable helpers; a helper's result metadata cannot reconstruct the
+lost provenance after a split. Existing native arithmetic lowering remains in
+place where it already carries the source correctly.
+
+Stages execute at their original source positions. The preceding graph segment
+materializes each capture once, the existing host evaluator or host C lowering
+evaluates the scalar expression once, and the following segment consumes its
+tagged result. Complete shape-list evaluation precedes checked reshape carriers
+and allocation, including mixed host/DAG producers and discarded results. The
+same plan drives Eval and C; host C emitted for HIP follows it too. Scalar control
+inside a source expression stays within that expression. The plan does not move
+a source out of a tensor branch or make tensor control flow eager.
+
+Plan validation requires exactly one producer for each staged input, available
+captures, matching types, and no unresolved placeholders in executable helpers.
+The plan is regenerated from the checked program and mandatory authored-signature
+ledger at cache admission. Any admitted transform must preserve stage/value
+mapping and execution multiplicity. These obligations are not discharged by the
+native remainder path: the active `host_produced_reshape_targets_preserve_declared_claims`
+fixture records the remaining gap across bitwise, metadata, list, helper and
+scalar-conditional producers, with direct and bound/copied results.
+
 Each activation owns fresh witness nodes. The lowering environment maps the
 signature's binders to these exact nodes and restores that map on return;
 ordinary graph edges, rather than spelling or reachability, carry identity
