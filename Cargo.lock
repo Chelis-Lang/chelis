@@ -779,6 +779,7 @@ name = "chelis-python"
 version = "0.18.6"
 dependencies = [
  "assert_cmd",
+ "chelis-abi",
  "chelis-backend-c",
  "chelis-compiler-api",
  "chelis-vocab",

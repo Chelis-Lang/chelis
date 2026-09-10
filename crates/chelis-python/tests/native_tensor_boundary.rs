@@ -139,6 +139,10 @@ for value in ('1.0', (1,), (1, 0, 0), (-1, 0), (1, -1), (1.5, 0)):
 for value in ('cpu', (1,), (1, 0, 0), (1, -1), (1, 0.5)):
     rejects(lambda: output.__dlpack__(dl_device=value), (TypeError, ValueError))
 assert capsule_name(output.__dlpack__(dl_device=(1, 0), copy=False)) in (b'dltensor', b'dltensor_versioned')
+import enum
+class Device(enum.Enum):
+    CPU = 1
+assert capsule_name(output.__dlpack__(dl_device=(Device.CPU, 0), copy=False)) in (b'dltensor', b'dltensor_versioned')
 rejects(lambda: output.__dlpack__(dl_device=(10, 0), copy=False), (BufferError,))
 "#,
     );
