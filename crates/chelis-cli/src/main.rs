@@ -2431,30 +2431,25 @@ fn cmd_check_one_on_grown_stack(
             return Ok((json, true));
         }
     };
-    if let Err(error) = style_gate::enforce_style_gate(file, &source, allow_style_violations) {
-        // stderr keeps the whole human report unchanged: the joined issue
-        // lines plus the "pass `--allow-style-violations` to bypass" advice.
-        eprintln!("error: {error}");
-        // The REPORT does not get that string. It is a terminal transcript --
-        // embedded newlines, an "N issue(s)" plural placeholder, CLI
-        // remediation advice, and the word "build" on a `check` surface --
-        // and putting it in a machine-facing `message` is the shape
-        // chelis#886 removes, not one to reintroduce while closing it. The
-        // gate already exposes a structured outcome; this uses it, one
-        // diagnostic per issue, so `errors.len()` is the number of problems.
-        let outcome = style_gate::run_gate(file, &source);
-        let mut messages: Vec<String> = Vec::new();
-        if let Some(diff) = &outcome.fmt_diff {
-            messages.push(format!(
-                "{}: not canonically formatted; run `chelis fmt --inplace {}` to fix",
-                diff.path.display(),
-                file.display()
-            ));
-        }
-        for violation in &outcome.lint_violations {
-            messages.push(violation.to_string());
-        }
-        let json = synthetic_check_report_with_errors(&messages)?;
+    if let Err(rejection) =
+        style_gate::enforce_style_gate_structured(file, &source, allow_style_violations)
+    {
+        // ONE gate run produces both renderings. It used to run the gate a
+        // second time to get structure for the report, and the two runs
+        // disagreed under a concurrent writer: run A rejected (so the process
+        // exited 2) while run B found the file clean, shipping exit 2 with an
+        // empty `errors` array -- the state § Gating says cannot happen, and
+        // exactly the "cannot distinguish no diagnostics from diagnostics not
+        // transported" confusion [04-FIT-12] exists to remove.
+        //
+        // stderr keeps the whole human report, advice line included. The
+        // report gets one diagnostic per issue: that display string is a
+        // terminal transcript -- embedded newlines, an "N issue(s)" plural
+        // placeholder, and the word "build" on a `check` surface -- and
+        // putting it in a machine-facing `message` is the shape chelis#886
+        // removes, not one to reintroduce while closing it.
+        eprintln!("error: {}", rejection.report);
+        let json = synthetic_check_report_with_errors(&rejection.issues)?;
         return Ok((json, true));
     }
     emit_advisory_lint_warnings_for_file(file);
@@ -2533,9 +2528,13 @@ fn cmd_check_one_on_grown_stack(
                     // the failure to REACH the report, not for the terminal
                     // line to be taken away, and this message is the only
                     // human-facing account of a layered-check failure.
-                    let message = compiler_error_messages(&error);
-                    eprintln!("error: {message}");
-                    let json = synthetic_check_report_with_error(&message)?;
+                    eprintln!("error: {}", compiler_error_messages(&error));
+                    // One diagnostic per compiler error, for the same reason
+                    // the style gate emits one per issue: `compiler_error_messages`
+                    // joins them with "; " for the terminal, and a joined
+                    // string in one `message` makes `errors.len()` disagree
+                    // with the number of problems.
+                    let json = synthetic_check_report_with_errors(&compiler_error_list(&error))?;
                     return Ok((json, true));
                 }
             }
@@ -6748,6 +6747,25 @@ impl TestBatchManifestTempfile {
 
     fn path(&self) -> &Path {
         self.file.path()
+    }
+}
+
+/// The same diagnostics as [`compiler_error_messages`], unjoined.
+///
+/// The joined form is the terminal rendering; a machine-facing carrier wants
+/// one entry per diagnostic so the array length is the number of problems
+/// (chelis#886). Falls back to the stage name for the same reason the joined
+/// form does: an empty error list still has to say something.
+fn compiler_error_list(err: &chelis_compiler_api::compiler::CompilerError) -> Vec<String> {
+    let messages: Vec<String> = err
+        .errors
+        .iter()
+        .map(|diagnostic| diagnostic.message.clone())
+        .collect();
+    if messages.is_empty() {
+        vec![err.stage.clone()]
+    } else {
+        messages
     }
 }
 

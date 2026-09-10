@@ -234,13 +234,13 @@ fn a_transported_message_is_a_machine_value_not_a_terminal_transcript() {
     // stderr keeps every bit of it. Only the report is constrained.
     let dir = tempdir().expect("tempdir");
 
-    // Two lint violations in one file: the multi-issue case, which is the
-    // one a single joined string would have collapsed.
-    let path = write(
-        &dir,
-        "two.ch",
-        b"def BadName(x:f32)->f32=add(x,x)\ndef AlsoBad(y:f32)->f32=add(y,y)\n",
-    );
+    // A formatting difference AND a lint violation in one file -- the
+    // genuinely mixed case. An earlier fixture here used an uppercase head
+    // (`def BadName`), which is a Surf PARSE error, so `check_fmt` returned
+    // `None` and the file only ever produced lint violations: the fmt branch
+    // of the mapping was never exercised by the test that claimed to cover
+    // the multi-issue case.
+    let path = write(&dir, "both.ch", b"def  _internal(x:f32)->f32=add(x,x)\n");
     let (code, stdout, stderr) = check(&path);
     let report: WireCheckResult =
         serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("{e}; {stdout}"));
@@ -254,11 +254,17 @@ fn a_transported_message_is_a_machine_value_not_a_terminal_transcript() {
     assert_eq!(code, Some(2));
 
     for diagnostic in &report.errors {
-        assert!(
-            !diagnostic.message.contains('\n'),
-            "a transported message is one line; got {:?}",
-            diagnostic.message
-        );
+        // NO control characters, not just no newline. A red-team pass got a
+        // tab, a carriage return and ANSI SGR escapes past the newline-only
+        // version of this check, which is a reminder that banning the one
+        // character the last bug happened to use is not a class.
+        if let Some(bad) = diagnostic.message.chars().find(|c| c.is_control()) {
+            panic!(
+                "a transported message carries no control characters; found \
+                 {bad:?} (U+{:04X}) in {:?}",
+                bad as u32, diagnostic.message
+            );
+        }
         for terminal_only in [
             "issue(s)",
             "--allow-style-violations",
@@ -291,5 +297,43 @@ fn a_transported_message_is_a_machine_value_not_a_terminal_transcript() {
         1,
         "one issue, one diagnostic: {stdout}"
     );
-    assert!(!report.errors[0].message.contains('\n'));
+    assert!(!report.errors[0].message.chars().any(char::is_control));
+}
+
+#[test]
+fn a_non_zero_exit_always_carries_at_least_one_diagnostic() {
+    // The invariant a red-team pass falsified. The style-gate path ran the
+    // gate TWICE, so a file rewritten between the two runs could have run A
+    // reject -- setting the exit status -- while run B found nothing, so the
+    // report shipped exit 2 with an EMPTY errors array. `spec/04` § Gating
+    // says that state cannot exist, and it is precisely the "cannot
+    // distinguish no diagnostics from diagnostics not transported" confusion
+    // [04-FIT-12] exists to remove.
+    //
+    // The repair is structural: one gate run yields both the stderr report
+    // and the per-issue messages, so the two cannot disagree. This asserts
+    // the contract over every failing shape rather than probing a timing
+    // window, which would be flaky and would only ever sample the bug.
+    let dir = tempdir().expect("tempdir");
+    let fixtures: Vec<(&str, Vec<u8>)> = vec![
+        ("ugly.ch", b"def  f(x:f32)->f32=add(x,x)\n".to_vec()),
+        ("both.ch", b"def  _internal(x:f32)->f32=add(x,x)\n".to_vec()),
+        ("parse.ch", b"def f(x: f32) -> f32 = add(x,\n".to_vec()),
+        ("empty.ch", Vec::new()),
+        ("binary.ch", vec![0x80, 0x81, 0xfe, 0xff, 0x0a]),
+        ("bad.dp", b"(this is not deep)\n".to_vec()),
+        ("empty.dp", Vec::new()),
+    ];
+    for (name, bytes) in fixtures {
+        let path = write(&dir, name, &bytes);
+        let (code, stdout, stderr) = check(&path);
+        assert_ne!(code, Some(0), "{name} must fail; stdout={stdout}");
+        let report: WireCheckResult = serde_json::from_str(&stdout)
+            .unwrap_or_else(|e| panic!("{name}: no report ({e}); stderr={stderr}"));
+        assert!(
+            !report.errors.is_empty(),
+            "{name}: exited {code:?} with an EMPTY errors array, which reads \
+             as success to any consumer keying on the array; stdout={stdout}"
+        );
+    }
 }
