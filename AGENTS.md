@@ -871,7 +871,9 @@ python3 scripts/gate.py --status [HANDLE]  # the detached run's real verdict
 pre-push gate: fix-in-place, run before every push. CI on the pushed candidate owns
 routine PR validation and must pass before ready-for-review. `--local` is an optional
 way to reproduce checks on the developer's machine; no per-PR run is required.
-The bare full gate remains CI-owned for routine PR validation.
+The full workspace and broad phase oracles run in `heavy-e2e.yml` daily at
+03:17 UTC and on manual dispatch. Passing PR checks does not certify those
+phase acceptance oracles; dispatch them on the candidate when claiming completion.
 CI calls `python3 scripts/gate.py <stage>` for each split job.
 `scripts/test_gate.py` pins the complete ordered set of
 single-line `run:` commands permitted in those gate-owned jobs, so shell syntax
@@ -933,8 +935,9 @@ the same change set.
 
 `scripts/unrepresentable_domain_oracle.py` is chelis#908's authoritative
 completion oracle, and the tracker requires every fix in that class to run
-it in a continuous job. Acceptance is exit 0 with a final `ORACLE: PASS`
-line.
+it continuously. The full command runs in `heavy-e2e.yml` daily at 03:17 UTC
+or on manual dispatch, not in the required PR integration job. Acceptance is
+exit 0 with a final `ORACLE: PASS` line.
 
 `--local` (chelis#360) is an optional local validation command. It runs
 two of the three workspace clippy configurations (`-D warnings`, compile-only): the

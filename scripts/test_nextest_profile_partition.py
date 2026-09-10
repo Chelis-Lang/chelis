@@ -11,7 +11,8 @@ per-PR integration gate. `.config/nextest.toml` carries three profiles:
   - `ci` excludes that same set plus every complete test binary named by a
     required Phase 0-3 oracle `--test` argument;
   - `nightly` carries the EXACT SAME set as a positive filter, and the
-    `Heavy E2E` workflow runs `cargo nextest run --profile nightly`.
+    profile remains a manual heavy selection. The hosted Linux Extended
+    Validation workflow runs the full workspace with `--ignore-default-filter`.
 
 This file locks the original workspace/nightly split plus the delegation
 contract for binaries named by oracle `--test` arguments. Selector-based
@@ -34,8 +35,8 @@ Three tiers of check:
     two nightly-owned contention cases stay out of it.
 
 The last two classes list different compiled configurations, and that is
-why CI runs them in different jobs. `ProfilePartitionTests` runs on workspace
-shard 1, whose default-feature build is warm; `GeneralizationPartitionTests`
+why nightly CI runs them in different jobs. `ProfilePartitionTests` runs in
+`full-workspace`, whose default-feature build is warm; `GeneralizationPartitionTests`
 runs on generalization shard 1, whose feature-enabled build is warm. Listing
 the generalization lane on the workspace shard recompiled the workspace under
 a second feature set and cost 4.4 hosted minutes per run. Both classes also

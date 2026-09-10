@@ -603,21 +603,13 @@ GATE_WORKER_RUN_COMMANDS = {
         "uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml",
         "python3 scripts/gate.py integration --tests-only "
         "--partition hash:${{ matrix.shard }}/2",
-        ".venv/bin/python -m unittest "
-        "scripts.test_nextest_profile_partition.ProfilePartitionTests",
-        "python3 scripts/gate.py integration --support-only --support-slice frontend",
-        "python3 scripts/gate.py integration --support-only --support-slice domain",
     ),
     # Rule-id: GATE-STAGE-RUNTIME-REPRESENTATION -- chelis#893 Phase 0's oracle
     # is its own gate stage because its release-profile reproducers and serial
     # mutation re-scans cost about eleven hosted minutes, which doubled the
     # workspace shard that used to carry it. The job restores the read-only
     # workspace cache and needs `clang` for the C/Objective-C header lanes.
-    "runtime-representation-phase0-oracle": (
-        "python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1",
-        "python3 scripts/ci_setup_uv_python.py",
-        "python3 scripts/gate.py runtime-representation",
-    ),
+
 }
 
 
@@ -653,22 +645,17 @@ NON_GATE_JOBS = {
     # acceptance driver is CI-owned. It runs beside the workspace suite,
     # while the integration job below aggregates both outcomes under the
     # stable branch-protection context.
-    "dtype-phase3-oracle",
     # Rule-id: GATE-SCOPE-FAITHFUL-OBSERVATION-ORACLE -- the authoritative
     # #732 Phase 2 acceptance driver is a dedicated CI job. It runs beside
     # the workspace and dtype legs and is aggregated under the stable
     # branch-protection context.
-    "faithful-observation-phase2-oracle",
     # Rule-id: GATE-SCOPE-COMPILED-VALUE-OWNERSHIP-ORACLE -- chelis#1286's
     # authoritative Phase 0 detector and typed expected-failure matrix is a
     # dedicated CI job aggregated under the stable integration context.
-    "compiled-value-ownership-phase0-oracle",
     # Rule-id: GATE-SCOPE-GENERALIZE-SWEEP-ORACLE -- chelis#1207's exact
     # sweep-versus-level parity corpus intentionally bypasses nextest's
     # default filter. Four CI-owned shards execute its disjoint partitions;
     # the aggregate retains the stable blocking status context.
-    "generalize-sweep-oracle-shard",
-    "generalize-sweep-oracle",
     "integration",
     # Rule-id: GATE-SCOPE-TEST-TELEMETRY -- this CI-owned aggregate reads
     # nextest artifacts produced by the gate and oracle jobs. It runs no
@@ -1784,6 +1771,8 @@ def _ci_job_block(job: str) -> str:
     """Read a job from its explicitly registered workflow owner."""
     if job in {"macos-workspace-shard", "macos-smoke", "smt-build-darwin-arm64"}:
         return _workflow_job_block(CI_YML.with_name("macos-nightly.yml"), job)
+    if job in {'backend-sanitizers-full', 'dtype-phase3-oracle', 'compiled-value-ownership-phase0-oracle', 'faithful-observation-phase2-oracle', 'generalize-sweep-oracle-shard', 'full-workspace', 'runtime-representation-phase0-oracle', 'integration-support', 'generalize-sweep-oracle'}:
+        return _workflow_job_block(CI_YML.with_name("heavy-e2e.yml"), job)
     return _workflow_job_block(CI_YML, job)
 
 
@@ -1828,16 +1817,11 @@ def _ci_step_block(job_block: str, step_name: str) -> str:
 
 
 def _assert_support_slice_contract(block: str) -> None:
-    for name, shard in (("frontend", 1), ("domain", 2)):
-        step = _ci_step_block(block, f"Gate ({name} support subset)")
-        assert f"        if: matrix.shard == {shard}\n" in step, "each support slice must have one distinct worker"
-        _assert_executable_run_once(
-            step, f"python3 scripts/gate.py integration --support-only --support-slice {name}",
-        )
-    assert block.count("--support-only") == 2, "each support slice must run exactly once"
-    assert block.index("- name: Verify nextest profile coverage") < block.index(
-        "- name: Gate (frontend support subset)"
-    ), "list the default configuration before lowering-trace changes the warm build"
+    assert "slice: [frontend, domain]" in block
+    command = "python3 scripts/gate.py integration --support-only --support-slice ${{ matrix.slice }}"
+    _assert_executable_run_once(block, command)
+    assert block.count("--support-only") == 1
+    assert "    if:" not in block
 
 
 def _workflow_job_block(path: Path, job: str) -> str:
@@ -2075,8 +2059,8 @@ class CiParityTests(unittest.TestCase):
             "--partition hash:${{ matrix.shard }}/2",
             text,
         )
-        self.assertIn("scripts/gate.py integration --support-only", text)
-        self.assertIn("scripts/gate.py runtime-representation", text)
+        self.assertIn("scripts/gate.py integration --support-only", CI_YML.with_name("heavy-e2e.yml").read_text())
+        self.assertIn("scripts/gate.py runtime-representation", CI_YML.with_name("heavy-e2e.yml").read_text())
 
     def test_python_binding_ingress_suite_is_continuous(self):
         text = CI_YML.read_text()
@@ -2149,16 +2133,13 @@ class CiParityTests(unittest.TestCase):
             "needs: [changes, workspace-tests-shard]",
             workspace_block,
         )
-        self.assertIn("needs: [changes]", oracle_block)
-        self.assertEqual(oracle_block.count("    needs:"), 1)
+        self.assertNotIn("    needs:", oracle_block)
+        self.assertEqual(oracle_block.count("    needs:"), 0)
         self.assertNotIn("needs.workspace-tests", oracle_block)
         self.assertNotIn("dtype-phase3-oracle", workspace_block)
         self.assertIn("name: Integration Tests (Linux)", aggregate_block)
         self.assertIn(
-            "needs: [changes, workspace-tests, dtype-phase3-oracle, "
-            "faithful-observation-phase2-oracle, "
-            "compiled-value-ownership-phase0-oracle, "
-            "runtime-representation-phase0-oracle, generalize-sweep-oracle]",
+            "needs: [changes, workspace-tests]",
             aggregate_block,
         )
         self.assertIn("always()", aggregate_block)
@@ -2173,7 +2154,7 @@ class CiParityTests(unittest.TestCase):
         command = ".venv/bin/python scripts/faithful_observation_phase2_oracle.py"
 
         self.assertIn("name: Faithful Observation Phase 2 Oracle", oracle_block)
-        self.assertIn("needs: [changes]", oracle_block)
+        self.assertNotIn("    needs:", oracle_block)
         self.assertIn("contents: read", oracle_block)
         self.assertIn("dtolnay/rust-toolchain@stable", oracle_block)
         self.assertIn("python3 scripts/ci_setup_uv_python.py", oracle_block)
@@ -2185,10 +2166,8 @@ class CiParityTests(unittest.TestCase):
         _assert_executable_run_once(oracle_block, command)
         self.assertNotIn(command, workspace_block)
         self.assertNotIn(command, dtype_block)
-        self.assertIn(
-            "faithful-observation-phase2-oracle=${{ needs.faithful-observation-phase2-oracle.result }}",
-            aggregate_block,
-        )
+        self.assertNotIn("faithful-observation-phase2-oracle", aggregate_block)
+        self.assertIn("faithful-observation-phase2-oracle", _workflow_job_block(CI_YML.with_name("heavy-e2e.yml"), "report"))
 
     def test_compiled_value_ownership_stable_job_invokes_phase2_and_launch_oracles(self):
         workspace_block = _ci_job_block("workspace-tests")
@@ -2205,7 +2184,7 @@ class CiParityTests(unittest.TestCase):
             "name: Compiled Value Ownership Phase 2 Oracle",
             oracle_block,
         )
-        self.assertIn("needs: [changes]", oracle_block)
+        self.assertNotIn("    needs:", oracle_block)
         self.assertIn("contents: read", oracle_block)
         self.assertIn("dtolnay/rust-toolchain@stable", oracle_block)
         self.assertIn("python3 scripts/ci_setup_uv_python.py", oracle_block)
@@ -2218,11 +2197,8 @@ class CiParityTests(unittest.TestCase):
             self.assertNotIn(command, workspace_block)
             self.assertNotIn(command, dtype_block)
             self.assertNotIn(command, faithful_block)
-        self.assertIn(
-            "compiled-value-ownership-phase0-oracle=${{ "
-            "needs.compiled-value-ownership-phase0-oracle.result }}",
-            aggregate_block,
-        )
+        self.assertNotIn("compiled-value-ownership-phase0-oracle", aggregate_block)
+        self.assertIn("compiled-value-ownership-phase0-oracle", _workflow_job_block(CI_YML.with_name("heavy-e2e.yml"), "report"))
 
     def test_runtime_representation_phase0_oracle_is_a_dedicated_gate_job(self):
         workspace_block = _ci_job_block("workspace-tests-shard")
@@ -2235,7 +2211,7 @@ class CiParityTests(unittest.TestCase):
             "name: Runtime Representation Phase 0 Oracle",
             oracle_block,
         )
-        self.assertIn("needs: [changes]", oracle_block)
+        self.assertNotIn("    needs:", oracle_block)
         self.assertIn("contents: read", oracle_block)
         self.assertIn("dtolnay/rust-toolchain@stable", oracle_block)
         self.assertIn("python3 scripts/ci_setup_uv_python.py", oracle_block)
@@ -2253,11 +2229,8 @@ class CiParityTests(unittest.TestCase):
         self.assertNotIn(command, workspace_block)
         self.assertNotIn(command, ownership_block)
         self.assertNotIn("runtime_representation_oracle.py", workspace_block)
-        self.assertIn(
-            "runtime-representation-phase0-oracle=${{ "
-            "needs.runtime-representation-phase0-oracle.result }}",
-            aggregate_block,
-        )
+        self.assertNotIn("runtime-representation-phase0-oracle", aggregate_block)
+        self.assertIn("runtime-representation-phase0-oracle", _workflow_job_block(CI_YML.with_name("heavy-e2e.yml"), "report"))
 
     def test_generalize_sweep_oracle_is_a_sharded_blocking_aggregate(self):
         shard_block = _ci_job_block("generalize-sweep-oracle-shard")
@@ -2280,7 +2253,7 @@ class CiParityTests(unittest.TestCase):
         )
         self.assertIn("fail-fast: false", shard_block)
         self.assertIn("shard: [1, 2, 3, 4]", shard_block)
-        self.assertIn("needs: [changes]", shard_block)
+        self.assertNotIn("    needs:", shard_block)
         self.assertIn("contents: read", shard_block)
         self.assertIn("dtolnay/rust-toolchain@stable", shard_block)
         self.assertIn("python3 scripts/ci_setup_uv_python.py", shard_block)
@@ -2289,7 +2262,7 @@ class CiParityTests(unittest.TestCase):
 
         self.assertIn("name: Typecheck Level Generalization Oracle", oracle_block)
         self.assertIn(
-            "needs: [changes, generalize-sweep-oracle-shard]",
+            "needs: [generalize-sweep-oracle-shard]",
             oracle_block,
         )
         self.assertIn("contents: read", oracle_block)
@@ -2300,10 +2273,8 @@ class CiParityTests(unittest.TestCase):
             "generalize-sweep-oracle-shard="
             "${{ needs.generalize-sweep-oracle-shard.result }}",
         )
-        self.assertIn(
-            "generalize-sweep-oracle=${{ needs.generalize-sweep-oracle.result }}",
-            aggregate_block,
-        )
+        self.assertNotIn("generalize-sweep-oracle", aggregate_block)
+        self.assertIn("generalize-sweep-oracle", _workflow_job_block(CI_YML.with_name("heavy-e2e.yml"), "report"))
 
     def test_generalize_sweep_partition_contract_has_no_gap_or_overlap(self):
         shard_block = _ci_job_block("generalize-sweep-oracle-shard")
@@ -2320,45 +2291,25 @@ class CiParityTests(unittest.TestCase):
         ):
             _assert_generalize_sweep_partition_contract(mutated)
 
-    def test_workspace_suite_is_two_disjoint_shards_with_balanced_support(self):
-        shard_block = _ci_job_block("workspace-tests-shard")
-        aggregate_block = _ci_job_block("workspace-tests")
-        _assert_hash_partition_contract(shard_block, expected_count=2)
-        self.assertIn(
-            "name: Workspace Tests (Linux, shard ${{ matrix.shard }}/2)",
-            shard_block,
-        )
-        self.assertIn("fail-fast: false", shard_block)
-        self.assertIn("scripts/gate.py integration --tests-only", shard_block)
-        self.assertIn("scripts/gate.py integration --support-only", shard_block)
-        _assert_support_slice_contract(shard_block)
-        self.assertIn(
-            "- name: Verify nextest profile coverage\n"
-            "        if: matrix.shard == 1",
-            shard_block,
-        )
-        self.assertIn(
-            "needs: [changes, workspace-tests-shard]",
-            aggregate_block,
-        )
-        self.assertIn("scripts/ci_require_success.py", aggregate_block)
+    def test_workspace_partitions_and_nightly_support_have_separate_owners(self):
+        shard = _ci_job_block("workspace-tests-shard")
+        _assert_hash_partition_contract(shard, expected_count=2)
+        self.assertIn("scripts/gate.py integration --tests-only", shard)
+        self.assertNotIn("--support-only", shard)
+        self.assertNotIn("ProfilePartitionTests", shard)
+        _assert_support_slice_contract(_ci_job_block("integration-support"))
+        self.assertIn("needs: [changes, workspace-tests-shard]", _ci_job_block("workspace-tests"))
 
-    def test_support_slice_contract_rejects_missing_repeated_or_misplaced_work(self):
-        block = _ci_job_block("workspace-tests-shard")
-        frontend = _ci_step_block(block, "Gate (frontend support subset)")
+    def test_support_slice_contract_rejects_missing_repeated_or_skipped_work(self):
+        block = _ci_job_block("integration-support")
         mutations = (
-            block.replace("--support-slice domain", "--support-slice frontend"),
-            block.replace("Gate (domain support subset)\n        if: matrix.shard == 2",
-                          "Gate (domain support subset)\n        if: matrix.shard == 1"),
-            block.replace("--support-only --support-slice domain", "--support-only"),
-            block.replace("- name: Verify nextest profile coverage", "- name: Removed census"),
-            block.replace(frontend, "", 1).replace(
-                "      - name: Verify nextest profile coverage",
-                frontend + "      - name: Verify nextest profile coverage", 1,
-            ),
+            block.replace("slice: [frontend, domain]", "slice: [frontend, frontend]"),
+            block.replace(" --support-slice ${{ matrix.slice }}", ""),
+            block.replace("    steps:", "    if: false\n    steps:"),
+            block + "      - run: python3 scripts/gate.py integration --support-only --support-slice ${{ matrix.slice }}\n",
         )
         for changed in mutations:
-            with self.subTest(workflow=changed), self.assertRaises((AssertionError, ValueError)):
+            with self.subTest(workflow=changed), self.assertRaises(AssertionError):
                 _assert_support_slice_contract(changed)
 
     def test_workspace_junit_shards_merge_before_one_validated_timing_report(self):
@@ -2433,19 +2384,13 @@ class CiParityTests(unittest.TestCase):
         block = _ci_job_block("test-telemetry")
         self.assertIn("name: CI Test Telemetry", block)
         self.assertIn(
-            "needs: [changes, workspace-tests-shard, dtype-phase3-oracle, "
-            "generalize-sweep-oracle-shard]",
+            "needs: [changes, workspace-tests-shard]",
             block,
         )
-        self.assertEqual(block.count("uses: actions/download-artifact@v7"), 7)
+        self.assertEqual(block.count("uses: actions/download-artifact@v7"), 2)
         for artifact in (
             "junit-linux-workspace-1",
             "junit-linux-workspace-2",
-            "junit-linux-dtype",
-            "junit-linux-generalization-1",
-            "junit-linux-generalization-2",
-            "junit-linux-generalization-3",
-            "junit-linux-generalization-4",
         ):
             self.assertIn(f"name: {artifact}", block)
         self.assertIn("scripts/ci_test_telemetry.py", block)
@@ -2721,7 +2666,7 @@ class CiParityTests(unittest.TestCase):
                 self.assertIn(path, block)
                 self.assertIn(key, block)
         self.assertEqual(dtype.count("uses: actions/cache/save@v4"), 1)
-        self.assertIn("github.event_name == 'push'", dtype)
+        self.assertNotIn("github.event_name == 'push'", dtype)
         self.assertIn("github.ref == 'refs/heads/main'", dtype)
         self.assertNotIn("uses: actions/cache/save@v4", generalization)
 
@@ -2973,7 +2918,7 @@ class CiParityTests(unittest.TestCase):
             _assert_read_only_workspace_cache(mutated)
 
     def test_profile_partition_set_math_runs_continuously(self):
-        workspace_block = _ci_job_block("workspace-tests-shard")
+        workspace_block = _ci_job_block("full-workspace")
         generalization_block = _ci_job_block("generalize-sweep-oracle-shard")
         default_census = (
             ".venv/bin/python -m unittest "
@@ -3996,12 +3941,7 @@ class DocsOnlySkipTests(unittest.TestCase):
         "lint-rust",
         "script-unit",
         "workspace-tests-shard",
-        "dtype-phase3-oracle",
-        "faithful-observation-phase2-oracle",
-        "compiled-value-ownership-phase0-oracle",
-        "runtime-representation-phase0-oracle",
-        "generalize-sweep-oracle-shard",
-        "backend-sanitizers",
+                            "backend-sanitizers",
         "smt-build",
         "smt-build-glibc231",
     }
@@ -4010,8 +3950,7 @@ class DocsOnlySkipTests(unittest.TestCase):
     HEAVY_AGGREGATOR_JOBS = {
         "lint-and-unit",
         "workspace-tests",
-        "generalize-sweep-oracle",
-        "integration",
+            "integration",
     }
     # Best-effort reporting aggregates run after failed dependencies but may
     # skip on cancellation because they are not required status contexts.
@@ -4090,10 +4029,7 @@ class DocsOnlySkipTests(unittest.TestCase):
         integration = attrs["integration"]
         self.assertEqual(
             integration.get("needs"),
-            "[changes, workspace-tests, dtype-phase3-oracle, "
-            "faithful-observation-phase2-oracle, "
-            "compiled-value-ownership-phase0-oracle, "
-            "runtime-representation-phase0-oracle, generalize-sweep-oracle]",
+            "[changes, workspace-tests]",
         )
         cond = integration.get("if", "")
         self.assertIn("always()", cond)
@@ -4102,31 +4038,18 @@ class DocsOnlySkipTests(unittest.TestCase):
         self.assertIn("needs.changes.outputs.docs_only != 'true'", cond)
         block = _ci_job_block("integration")
         self.assertIn("needs.workspace-tests.result", block)
-        self.assertIn("needs.dtype-phase3-oracle.result", block)
-        self.assertIn("needs.faithful-observation-phase2-oracle.result", block)
-        self.assertIn(
-            "needs.compiled-value-ownership-phase0-oracle.result",
-            block,
-        )
-        self.assertIn(
-            "needs.runtime-representation-phase0-oracle.result",
-            block,
-        )
-        self.assertIn("needs.generalize-sweep-oracle.result", block)
         self.assertIn("scripts/ci_require_success.py", block)
 
-    def test_generalize_sweep_aggregator_is_fail_closed_and_docs_gated(self):
-        attrs = _parse_job_attrs()
+    def test_generalize_sweep_aggregator_is_fail_closed_nightly(self):
+        attrs = _parse_job_attrs(CI_YML.with_name("heavy-e2e.yml").read_text())
         aggregate = attrs["generalize-sweep-oracle"]
         self.assertEqual(
             aggregate.get("needs"),
-            "[changes, generalize-sweep-oracle-shard]",
+            "[generalize-sweep-oracle-shard]",
         )
         cond = aggregate.get("if", "")
         self.assertIn("always()", cond)
         self.assertNotIn("!cancelled()", cond)
-        self.assertIn("needs.changes.result != 'success'", cond)
-        self.assertIn("needs.changes.outputs.docs_only != 'true'", cond)
         block = _ci_job_block("generalize-sweep-oracle")
         self.assertIn("needs.generalize-sweep-oracle-shard.result", block)
         self.assertIn("scripts/ci_require_success.py", block)
@@ -4157,8 +4080,6 @@ class DocsOnlySkipTests(unittest.TestCase):
             _telemetry_junit_producers(attrs),
             (
                 "workspace-tests-shard",
-                "dtype-phase3-oracle",
-                "generalize-sweep-oracle-shard",
                     ),
         )
 
