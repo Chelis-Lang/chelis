@@ -9,7 +9,7 @@
       "id": "chelis_python::check_json(py: Python<'_>, source: &str, source_kind: &str) -> PyResult<compiler_json::CheckJson>",
       "kind": "binding-pyfunction",
       "authority": "TaggedTransport",
-      "graph_identity": "7a039b541dcd8e91a02058964c51d983a532103c32fda66943dad8570d7ce1b6",
+      "graph_identity": "6bff22f91192ca0597d99c59ca39dabe5123b257b1bb0be4f8cbad23d916d076",
       "contract": "compiler-json/chelis_python::check_json"
     },
     {
@@ -26,7 +26,7 @@
       "id": "chelis_python::compile_json(py: Python<'_>, source: &str, target: &str, source_kind: &str, entry_name: Option<String>) -> PyResult<compiler_json::CompileJson>",
       "kind": "binding-pyfunction",
       "authority": "TaggedTransport",
-      "graph_identity": "23f118d6522bf0e25cb85e117ca4ef181830ca7c85f13646a3bebc8a068f4b31",
+      "graph_identity": "c321883faef9a29c54de57e8d5a62d0b762be3250591299d012c8b3ff0bd2d9b",
       "contract": "compiler-json/chelis_python::compile_json"
     },
     {
@@ -44,7 +44,7 @@
       "id": "chelis_python::desugar_json(py: Python<'_>, source: &str) -> PyResult<compiler_json::DesugarJson>",
       "kind": "binding-pyfunction",
       "authority": "TaggedTransport",
-      "graph_identity": "6328c0d027b92c34ab7983fd0b478c823370b107ce74f61f87f414a1233dbb97",
+      "graph_identity": "f8cdfe982be9a672df017c0edc75ff71864b91fa1f5828f9b6dd9a22357bc909",
       "contract": "compiler-json/chelis_python::desugar_json"
     },
     {
@@ -56,7 +56,7 @@
       "id": "chelis_python::eval_json(py: Python<'_>, source: &str, bindings_json: compiler_json::EvalBindingsJson, source_kind: &str, project_root: Option<&str>) -> PyResult<compiler_json::EvalJson>",
       "kind": "binding-pyfunction",
       "authority": "TaggedTransport",
-      "graph_identity": "d2e77b90f8beb7669718a4b0b624a9c7c83b3a51c8bc5490583a036cd3cb8e7f",
+      "graph_identity": "2035c5bbda61376079fa5a4f3a87f801ecd18871bdf6748b6fbe14142da78dda",
       "contract": "compiler-json/chelis_python::eval_json"
     },
     {

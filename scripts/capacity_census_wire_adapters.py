@@ -427,7 +427,15 @@ class _CodecShapeGraph(RustdocGraph):
                 (self._item(crate, i).get("name"), self._item(crate, i).get("span"))
                 for i in body["items"]
             )
-            found[name] = (actual, derived, span, methods)
+            _require(
+                all(method_span and method_span.get("filename") == source
+                    for _, method_span in methods),
+                "codec method source identity changed",
+            )
+            # The current execution witness retains the complete rustdoc
+            # document (and source/artifact hashes), including every span.
+            # A reviewed structural identity must survive comment-only moves.
+            found[name] = (actual, derived, source, tuple(method for method, _ in methods))
         _require(
             set(found) == required,
             "missing actual serde encoder or decoder",

@@ -496,6 +496,29 @@ class ActualSchemaCodec(unittest.TestCase):
             )
         )
 
+    def test_codec_relocation_preserves_shape_but_invalidates_saved_artifact_proof(self):
+        from capacity_census_wire_schema import SchemaWireGraph, _SchemaShapeGraph
+
+        documents = copy.deepcopy(self.documents)
+        api = documents[1]
+        moved = 0
+        for item in api["index"].values():
+            span = item.get("span")
+            if span and span["filename"] == "crates/chelis-compiler-api/src/schema.rs":
+                span["begin"][0] += 6
+                span["end"][0] += 6
+                moved += 1
+        self.assertGreater(moved, 0)
+        vocabulary = json.loads(self.receipt.canonical.vocabulary)
+        original = _SchemaShapeGraph(self.documents, vocabulary).publication_graph()
+        relocated = _SchemaShapeGraph(documents, vocabulary).publication_graph()
+        self.assertEqual(original.graph.numeric_leaves, relocated.graph.numeric_leaves)
+        self.assertEqual(original.identity, relocated.identity)
+        # Matching structural identity never makes an old execution witness
+        # authoritative for altered rustdoc, including relocated source spans.
+        with self.assertRaisesRegex(GraphError, "does not bind this artifact"):
+            SchemaWireGraph(documents, self.receipt)
+
     def test_complete_public_exports_include_metadata_requests_and_templates(self):
         from capacity_census_wire_schema import SchemaWireGraph
 
