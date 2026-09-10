@@ -492,26 +492,30 @@ fn build_caller_preservation_main_cpp(
     format!(
         r#"#include "chelis_runtime.h"
 #include "chelis_hip_runtime.h"
-extern "C" void {func_name}_device(chelis_gpu_tensor **inputs, int n_in, chelis_gpu_tensor **outputs, int n_out);
+extern "C" void {func_name}_device(const chelis_device_tensor_owner *const *inputs, int32_t n_in, chelis_device_tensor_owner **outputs, int32_t n_out);
 
 int main(void) {{
     int64_t host_shape[1] = {{ 4 }};
-    int device_shape[1] = {{ 4 }};
+    chelis_scalar device_shape[1] = {{ chelis_scalar_from_bits(CHELIS_DTYPE_I64, 4) }};
     chelis_tensor *host_input = chelis_alloc(1, host_shape, CHELIS_DTYPE_F32);
     chelis_tensor_write *host_input_guard = chelis_tensor_begin_write(host_input);
     chelis_write_view host_input_view = chelis_tensor_write_view(host_input_guard);
 {initialization}
     chelis_tensor_end_write(host_input_guard);
-    chelis_gpu_tensor *device_input = chelis_gpu_alloc(1, device_shape, CHELIS_DTYPE_F32);
-    chelis_host_to_device(device_input, host_input);
-    chelis_gpu_tensor *device_inputs[1] = {{ device_input }};
-    chelis_gpu_tensor *device_outputs[1] = {{ 0 }};
+    chelis_device_tensor_owner *device_input = chelis_device_tensor_alloc(chelis_metadata_plan_new(chelis_scalar_from_bits(CHELIS_DTYPE_I64, 1), device_shape, chelis_scalar_from_bits(CHELIS_DTYPE_F32, 0)));
+    chelis_device_tensor_copy_from_host(device_input, host_input);
+    const chelis_device_tensor_owner *device_inputs[1] = {{ device_input }};
+    chelis_device_tensor_owner *device_outputs[1] = {{ 0 }};
     {func_name}_device(device_inputs, 1, device_outputs, 1);
 
     chelis_tensor *host_output = chelis_alloc(1, host_shape, CHELIS_DTYPE_F32);
     chelis_tensor *host_after = chelis_alloc(1, host_shape, CHELIS_DTYPE_F32);
-    chelis_device_to_host(host_output, device_outputs[0]);
-    chelis_device_to_host(host_after, device_input);
+    chelis_tensor_write *output_guard = chelis_tensor_begin_write(host_output);
+    chelis_device_tensor_copy_to_host(output_guard, device_outputs[0]);
+    chelis_tensor_end_write(output_guard);
+    chelis_tensor_write *after_guard = chelis_tensor_begin_write(host_after);
+    chelis_device_tensor_copy_to_host(after_guard, device_input);
+    chelis_tensor_end_write(after_guard);
     chelis_read_view host_output_view = chelis_tensor_read_view(host_output);
     chelis_read_view host_after_view = chelis_tensor_read_view(host_after);
     for (int i = 0; i < 4; i++) {{
@@ -528,8 +532,8 @@ int main(void) {{
     chelis_tensor_release(host_input);
     chelis_tensor_release(host_output);
     chelis_tensor_release(host_after);
-    chelis_gpu_free(device_outputs[0]);
-    chelis_gpu_free(device_input);
+    chelis_device_tensor_release(device_outputs[0]);
+    chelis_device_tensor_release(device_input);
     return 0;
 }}
 "#,
@@ -2303,9 +2307,9 @@ fn compiled_value_ownership_program_owned_reuse() {
     let generated = codegen_hip(&dag, "compiled_value_ownership_program_owned_reuse")
         .expect("program-owned reuse must codegen");
     assert!(
-        generated.c_source.contains(
-            "d_t3 = chelis_gpu_alloc_view(1, (int[]){ 4 }, CHELIS_DTYPE_F32, d_t1->data, d_t1->storage_size);"
-        ),
+        generated
+            .c_source
+            .contains("o_t3 = chelis_device_tensor_borrow(plan_t3, d_t1->data,"),
         "the executed artifact must contain the token-selected alias path"
     );
     assert!(
