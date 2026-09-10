@@ -2639,6 +2639,14 @@ struct SemanticRegistration {
 /// final-authority registry above instead.
 const SEMANTIC_REGISTRATIONS: &[SemanticRegistration] = &[
     SemanticRegistration {
+        callable: "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedDropout::new(input: &TensorStorage, rate: ScalarValue) -> Result<PreparedDropout, NumericKernelError>",
+        atom: "[05-OP-37]",
+    },
+    SemanticRegistration {
+        callable: "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedDropout::apply(&self, seed: u64, ordinal: u64) -> Result<TensorStorage, NumericKernelError>",
+        atom: "[05-OP-37]",
+    },
+    SemanticRegistration {
         callable: "[compiler-builtin-numeric] dropout(input: &tensor[D, p_float], rate: p_float) -> tensor[D, p_float]",
         atom: "[05-OP-37]",
     },
@@ -6365,6 +6373,30 @@ fn fixed_control_dropout_is_registered_against_its_exact_authority_atom() {
     assert_eq!(registration.atom, "[05-OP-37]");
     let spec = fs::read_to_string(repo_root().join(CONTROLLING_SPEC_REL)).unwrap();
     assert!(registration_problem(*registration, &spec).is_none());
+}
+
+#[test]
+fn prepared_dropout_kernel_boundaries_have_exact_semantic_authority() {
+    let spec = fs::read_to_string(repo_root().join(CONTROLLING_SPEC_REL)).unwrap();
+    for callable in [
+        "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedDropout::new(input: &TensorStorage, rate: ScalarValue) -> Result<PreparedDropout, NumericKernelError>",
+        "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedDropout::apply(&self, seed: u64, ordinal: u64) -> Result<TensorStorage, NumericKernelError>",
+    ] {
+        let rows = SEMANTIC_REGISTRATIONS
+            .iter()
+            .filter(|row| row.callable == callable)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows.len(),
+            1,
+            "missing or duplicate kernel boundary: {callable}"
+        );
+        assert_eq!(
+            rows[0].atom, "[05-OP-37]",
+            "wrong kernel authority: {callable}"
+        );
+        assert!(registration_problem(*rows[0], &spec).is_none());
+    }
 }
 
 #[test]

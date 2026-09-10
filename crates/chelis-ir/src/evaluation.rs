@@ -4,8 +4,8 @@
 //! transport. Forward entry, handler scope, and backward replay identity are
 //! recorded by lowering/AD, never recovered from an ordinary graph's shape.
 
-use chelis_types::dtype_semantics::{FloatBinOp, float_binop, tensor_from_scalars};
-use chelis_types::{RawScalar, ScalarValue, cast_raw};
+use chelis_types::dtype_semantics::PreparedDropout;
+use chelis_types::{RawScalar, cast_raw};
 use chelis_unord::UnordMap;
 
 use crate::dag::{Dag, NodeId, RiscOp};
@@ -424,71 +424,29 @@ impl ExecutionFrame<'_> {
         }
         let rate =
             cast_raw("dropout", RawScalar::Float(rate), prim).map_err(|trap| trap.to_string())?;
-        let wide_rate = rate.as_f64_lossy();
-        if !wide_rate.is_finite() || !(0.0..1.0).contains(&wide_rate) {
-            return Err(format!(
-                "numeric trap: domain in dropout at {}",
-                prim.name()
-            ));
-        }
+        let prepared =
+            PreparedDropout::new(input.storage(), rate).map_err(|error| error.to_string())?;
         let key = self.enter(node, seed)?;
-        let one = cast_raw("dropout", RawScalar::Int(1), prim).map_err(|trap| trap.to_string())?;
-        let zero = cast_raw("dropout", RawScalar::Int(0), prim).map_err(|trap| trap.to_string())?;
-        let denominator =
-            float_binop(FloatBinOp::Sub, one, rate).map_err(|trap| trap.to_string())?;
-        let mut output: Vec<ScalarValue> = Vec::with_capacity(input.storage().len());
-        for index in 0..input.storage().len() {
-            let exact_unit = random_unit(key, index as u64);
-            let arithmetic_unit = if prim == chelis_types::types::Prim::F64 {
-                exact_unit
-            } else {
-                (exact_unit as f32) as f64
-            };
-            output.push(if arithmetic_unit < wide_rate {
-                zero
-            } else {
-                float_binop(
-                    FloatBinOp::Div,
-                    input.storage().scalar_at(index),
-                    denominator,
-                )
-                .map_err(|trap| trap.to_string())?
-            });
-        }
-        Ok(TensorValue::from_storage(
-            input.shape.clone(),
-            tensor_from_scalars(prim, &output),
-        ))
+        let output = prepared
+            .apply(key.seed, key.ordinal)
+            .map_err(|error| error.to_string())?;
+        Ok(TensorValue::from_storage(input.shape.clone(), output))
     }
 
-    pub(crate) fn uniform_seed(
+    pub(crate) fn uniform_key(
         &mut self,
         node: NodeId,
         seed: u64,
         active: bool,
-    ) -> Result<u64, String> {
+    ) -> Result<Option<(u64, u64)>, String> {
         if !active {
-            return Ok(seed);
+            return Ok(None);
         }
         let key = self.enter(node, seed)?;
-        // Only shared ordinal accounting is repaired here. UniformLike's
-        // legacy value kernel remains outside this dropout numeric slice.
-        Ok(key.seed ^ key.ordinal.wrapping_mul(0x9e37_79b9_7f4a_7c15))
+        // Return the actual key; the evaluator's existing legacy UniformLike
+        // numerical path owns its seed folding and value kernel.
+        Ok(Some((key.seed, key.ordinal)))
     }
-}
-
-fn splitmix64(mut value: u64) -> u64 {
-    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    value ^ (value >> 31)
-}
-
-fn random_unit(key: DrawKey, index: u64) -> f64 {
-    let word = splitmix64(
-        key.seed ^ splitmix64(key.ordinal).rotate_left(17) ^ splitmix64(index).rotate_left(41),
-    );
-    ((word >> 11) as f64) / ((1u64 << 53) as f64)
 }
 
 #[cfg(test)]
@@ -562,30 +520,8 @@ mod tests {
     #[test]
     fn rounded_f32_unit_keeps_at_the_exact_rate_boundary() {
         let rate = f32::from_bits(0x3e1c_aae7);
-        assert_eq!(
-            splitmix64(42 ^ splitmix64(0).rotate_left(17) ^ splitmix64(0).rotate_left(41)),
-            0x272a_b9a7_3115_2a2c
-        );
-        assert_eq!(
-            (random_unit(
-                DrawKey {
-                    seed: 42,
-                    ordinal: 0
-                },
-                0
-            ) as f32)
-                .to_bits(),
-            rate.to_bits()
-        );
-        assert!(
-            random_unit(
-                DrawKey {
-                    seed: 42,
-                    ordinal: 0
-                },
-                0
-            ) < f64::from(rate)
-        );
+        // The typed numeric owner tests the independent source word/unit;
+        // this consumer check additionally proves draw-entry accounting.
         let mut context = context();
         assert_eq!(
             run(&fixture(&[f64::from(rate)], 1, false), &mut context, 1).unwrap(),

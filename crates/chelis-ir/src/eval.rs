@@ -1940,19 +1940,6 @@ fn eval_tensor_internal<F>(
     live: Option<&[bool]>,
     strict_loads: bool,
     random_counter: u64,
-    load_input: F,
-) -> Result<(UnordMap<NodeId, TensorValue>, u64), String>
-where
-    F: FnMut(&str) -> Option<TensorValue>,
-{
-    eval_tensor_internal_with_plan(dag, live, strict_loads, random_counter, None, load_input)
-}
-
-fn eval_tensor_internal_with_plan<F>(
-    dag: &Dag,
-    live: Option<&[bool]>,
-    strict_loads: bool,
-    random_counter: u64,
     mut execution: Option<&mut crate::evaluation::ExecutionFrame<'_>>,
     mut load_input: F,
 ) -> Result<(UnordMap<NodeId, TensorValue>, u64), String>
@@ -2399,7 +2386,7 @@ where
             // `f64::round`, which rounds half away from zero.
             RiscOp::Round => unary_elementwise(ElementwiseUnOp::Round, &values[&node.inputs[0]])?,
             RiscOp::UniformLike { low, high, seed } => {
-                let effective_seed = if let Some(frame) = execution.as_deref_mut() {
+                let key = if let Some(frame) = execution.as_deref_mut() {
                     let active = match node.inputs.get(1) {
                         Some(activation) => match values[activation].storage().to_raw() {
                             RawTensor::Int(values) if values.len() == 1 => values[0] != 0,
@@ -2411,7 +2398,7 @@ where
                         },
                         None => true,
                     };
-                    frame.uniform_seed(node.id, *seed, active)?
+                    frame.uniform_key(node.id, *seed, active)?
                 } else if let Some(activation) = node.inputs.get(1) {
                     let active = match values[activation].storage().to_raw() {
                         RawTensor::Int(values) if values.len() == 1 => values[0] != 0,
@@ -2423,16 +2410,22 @@ where
                         }
                     };
                     if active {
-                        let effective =
-                            *seed ^ path_random_counter.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-                        path_random_counter = path_random_counter.saturating_add(1);
-                        effective
+                        Some((*seed, path_random_counter))
                     } else {
-                        *seed
+                        None
                     }
                 } else {
-                    *seed
+                    None
                 };
+                // One legacy value-kernel seed fold for both planned keys
+                // and activation-gated legacy execution. No canonical
+                // UniformLike numeric claim is made by plan admission.
+                let effective_seed = key.map_or(*seed, |(raw_seed, path_random_counter)| {
+                    raw_seed ^ path_random_counter.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                });
+                if execution.is_none() && key.is_some() {
+                    path_random_counter = path_random_counter.saturating_add(1);
+                }
                 uniform_like(
                     &values[&node.inputs[0]].shape.clone(),
                     *low,
@@ -2962,7 +2955,7 @@ where
     for id in frame.order() {
         live[id.0] = true;
     }
-    eval_tensor_internal_with_plan(
+    eval_tensor_internal(
         dag,
         Some(&live),
         true,
@@ -2980,8 +2973,15 @@ pub fn eval_tensor_with<F>(
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
-    eval_tensor_internal(dag, None, false, INITIAL_RANDOM_STREAM_ORDINAL, load_input)
-        .map(|(values, _)| values)
+    eval_tensor_internal(
+        dag,
+        None,
+        false,
+        INITIAL_RANDOM_STREAM_ORDINAL,
+        None,
+        load_input,
+    )
+    .map(|(values, _)| values)
 }
 
 pub fn eval_tensor_with_strict<F>(
@@ -2991,8 +2991,15 @@ pub fn eval_tensor_with_strict<F>(
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
-    eval_tensor_internal(dag, None, true, INITIAL_RANDOM_STREAM_ORDINAL, load_input)
-        .map(|(values, _)| values)
+    eval_tensor_internal(
+        dag,
+        None,
+        true,
+        INITIAL_RANDOM_STREAM_ORDINAL,
+        None,
+        load_input,
+    )
+    .map(|(values, _)| values)
 }
 
 pub fn eval_tensor_roots_with<F>(
@@ -3004,8 +3011,15 @@ where
     F: FnMut(&str) -> Option<TensorValue>,
 {
     if roots.is_empty() {
-        return eval_tensor_internal(dag, None, false, INITIAL_RANDOM_STREAM_ORDINAL, load_input)
-            .map(|(values, _)| values);
+        return eval_tensor_internal(
+            dag,
+            None,
+            false,
+            INITIAL_RANDOM_STREAM_ORDINAL,
+            None,
+            load_input,
+        )
+        .map(|(values, _)| values);
     }
     reject_drop_roots(dag, roots)?;
     let live = live_mask_for_roots(dag, roots);
@@ -3014,6 +3028,7 @@ where
         Some(&live),
         false,
         INITIAL_RANDOM_STREAM_ORDINAL,
+        None,
         load_input,
     )
     .map(|(values, _)| values)
@@ -3028,8 +3043,15 @@ where
     F: FnMut(&str) -> Option<TensorValue>,
 {
     if roots.is_empty() {
-        return eval_tensor_internal(dag, None, true, INITIAL_RANDOM_STREAM_ORDINAL, load_input)
-            .map(|(values, _)| values);
+        return eval_tensor_internal(
+            dag,
+            None,
+            true,
+            INITIAL_RANDOM_STREAM_ORDINAL,
+            None,
+            load_input,
+        )
+        .map(|(values, _)| values);
     }
     reject_drop_roots(dag, roots)?;
     let live = live_mask_for_roots(dag, roots);
@@ -3038,6 +3060,7 @@ where
         Some(&live),
         true,
         INITIAL_RANDOM_STREAM_ORDINAL,
+        None,
         load_input,
     )
     .map(|(values, _)| values)
@@ -3056,11 +3079,11 @@ where
     F: FnMut(&str) -> Option<TensorValue>,
 {
     if roots.is_empty() {
-        return eval_tensor_internal(dag, None, true, random_counter, load_input);
+        return eval_tensor_internal(dag, None, true, random_counter, None, load_input);
     }
     reject_drop_roots(dag, roots)?;
     let live = live_mask_for_roots(dag, roots);
-    eval_tensor_internal(dag, Some(&live), true, random_counter, load_input)
+    eval_tensor_internal(dag, Some(&live), true, random_counter, None, load_input)
 }
 
 fn reject_drop_roots(dag: &Dag, roots: &[NodeId]) -> Result<(), String> {
@@ -3183,6 +3206,19 @@ mod tests {
         let expected = uniform_like(&[2], 0.0, 1.0, expected_seed, Prim::F32).unwrap();
         assert_eq!(values[&executed], expected);
         let skipped_expected = uniform_like(&[2], 0.0, 1.0, 17, Prim::F32).unwrap();
+        assert_eq!(values[&skipped], skipped_expected);
+
+        let (values, next) =
+            eval_tensor_roots_with_strict_random_progress(&dag, &roots, u64::MAX, |name| {
+                (name == "template").then(|| TensorValue::from_vec(vec![2], vec![0.0; 2]))
+            })
+            .expect("legacy Random progress retains its saturation boundary");
+        assert_eq!(next, u64::MAX);
+        let expected_seed = 17 ^ u64::MAX.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        assert_eq!(
+            values[&executed],
+            uniform_like(&[2], 0.0, 1.0, expected_seed, Prim::F32).unwrap()
+        );
         assert_eq!(values[&skipped], skipped_expected);
     }
 

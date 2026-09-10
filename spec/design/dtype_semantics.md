@@ -548,6 +548,18 @@ behavior and is exactly what the atom forbids.
 | C emitted helpers (print, dtype switches) | GENERATED from `format_element` / exhaustive matches | [#716], [#723], [#728] |
 | Metal / HIP | capability table only (already honestly typed / cleanly rejecting) | - |
 
+The fixed-control dropout evaluator uses the sealed
+`dtype_semantics::PreparedDropout` boundary. `new(&TensorStorage, ScalarValue)`
+checks the input family, same-dtype rate and [05-OP-37] domain without allocating
+or consuming Random. After actual source-plan forward/replay entry,
+`apply(seed: u64, ordinal: u64)` computes [05-RNG-1]'s unit, arithmetic-width
+comparison, positive dropped zero, and finalized sub/div into `TensorStorage`.
+The numerical owner has no ambient stream or replay authority. Its private
+fields prevent bypassing preparation; the execution plan retains invocation
+keys, source order and failure-prefix accounting. Both exact compiler-kernel
+callables are registered to [05-OP-37] in C6's off-leg semantic registry, with
+presence/authority controls; that stopgap is not a complete Rust API census.
+
 **Performance contract:** finalize is per-buffer monomorphized loops (or
 direct element-type compute once storage is per-dtype), never per-element
 dyn dispatch; `cargo test --workspace` stays inside the ~60s inner-loop
@@ -1751,6 +1763,14 @@ implied by the evaluator's private key table.
 behavior. If your phase needs a frozen contract to change, stop, update
 this document and [#729] first, and say so in the PR - that is the
 protocol, not a failure.
+
+The fixed-control dropout owner consolidation amends C5's kernel boundary with
+the sealed `PreparedDropout::new` / `PreparedDropout::apply` split described
+above. It moves the existing pure numerical implementation into the semantics
+owner without changing numeric bits, source guards, draw timing, public wire
+formats or existing Rust signatures. The exact new kernel registrations and
+their tests accompany this amendment; [05-OP-37] and [05-RNG-1] already govern
+the behavior, so no new numbered atom or capability completion is asserted.
 
 [#1294] adds exact builtin identity incorporation to the existing governing
 operation atoms and authors [05-OP-46..64] for the remaining builtin families.

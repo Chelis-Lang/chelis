@@ -1182,6 +1182,17 @@ seam: foundation rows, active debt, and mutation implementations remain unchange
 The source count and integrity digest include these files, with the existing
 `unregistered-inventory-source` mutation covering the source-list-only move.
 
+The fixed-control dropout plan registers `chelis-ir/src/evaluation.rs` in the
+Phase 0 source universe. Numeric dropout preparation and sampling belong to
+the existing typed semantics owner, while the plan carries only source order,
+raw keys and replay provenance. The shared legacy evaluator retains its actual
+`eval_tensor_internal` arithmetic owner; planned UniformLike keys use that same
+legacy seed fold. This source-list-only freeze move changes the source count
+from 73 to 74 and the corresponding integrity digest, not the 358 foundation
+rows, 292 active-debt rows, classifier rules or mutation implementations.
+The existing `unregistered-inventory-source` mutation covers the additional
+source; no numbered representation semantics change.
+
 ## B2. Invariants at every phase boundary
 
 1. The public C ABI remains [05-OP-31]/[05-OP-44]-exact and
