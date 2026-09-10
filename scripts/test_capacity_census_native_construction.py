@@ -5,7 +5,9 @@ the actual governing conversion/validation methods and prove their behavior.
 """
 
 import copy
+import tempfile
 import unittest
+from pathlib import Path
 
 from capacity_census_native_flow import DefinitionIdentity, NativeFlowEvidenceError
 
@@ -149,3 +151,84 @@ class ConstructorScopes(unittest.TestCase):
                     raw["scope"] = "compiler-json"
                 with self.assertRaises(NativeFlowEvidenceError):
                     self.check(raw)
+
+
+class CompiledConstructorScopes(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from capacity_census_wire_calls import build_driver
+
+        cls.root = Path(__file__).resolve().parent.parent
+        cls.scratch = tempfile.TemporaryDirectory(prefix="native-construction-",
+                                                 dir=cls.root / "target")
+        cls.driver = build_driver(
+            cls.root, cls.root / "target/agents/native-bindings-driver/native-calls-tool"
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.scratch.cleanup()
+
+    def observe(self, source):
+        from capacity_census_wire_calls import analyze_fixture
+
+        return analyze_fixture(self.driver, Path(self.scratch.name), source, {},
+                               scope="native-bindings").raw
+
+    def policy(self, raw):
+        # Select the actual trait implementation rather than an impl ordinal,
+        # a helper's name, or the closure's display path.
+        methods = [item for item in raw["bodies"]
+                   if item["kind"] == "AssocFn"
+                   and item["definition"]["item_name"] == "convert"
+                   and item["implementation"]["trait"]["path"] == "::Convert"
+                   and item["implementation"]["self_type"]["nominal"]["path"]
+                   == "::Validated"]
+        self.assertEqual(len(methods), 1)
+        method = methods[0]
+        return (
+            DefinitionIdentity.from_record(method["implementation"]["self_type"]["nominal"]),
+            {DefinitionIdentity.from_record(method["definition"]): True},
+        )
+
+    def test_actual_nested_conversion_closures_and_unrelated_constructor(self):
+        from capacity_census_native_construction import constructor_scope_ownership
+
+        source = """
+struct Validated(i64);
+trait Convert { fn convert(value: i64) -> Self; }
+impl Convert for Validated {
+    fn convert(value: i64) -> Self {
+        let outer = || { let inner = || Validated(value); inner() };
+        outer()
+    }
+}
+pub fn entry(value: i64) -> i64 { Validated::convert(value).0 }
+"""
+        raw = self.observe(source)
+        result = constructor_scope_ownership(raw, *self.policy(raw))
+        self.assertTrue(result.required_owners)
+        kinds = {DefinitionIdentity.from_record(item["definition"]): item["kind"]
+                 for item in raw["bodies"]}
+        self.assertEqual({kinds[owner] for owner in result.required_owners}, {"Closure"})
+        raw = self.observe(source + "fn convert(value: i64) -> Validated { Validated(value) }")
+        with self.assertRaisesRegex(NativeFlowEvidenceError, "outside"):
+            constructor_scope_ownership(raw, *self.policy(raw))
+
+    def test_actual_nested_function_does_not_inherit_conversion_authority(self):
+        from capacity_census_native_construction import constructor_scope_ownership
+
+        raw = self.observe("""
+struct Validated(i64);
+trait Convert { fn convert(value: i64) -> Self; }
+impl Convert for Validated {
+    fn convert(value: i64) -> Self {
+        fn helper(value: i64) -> Validated { Validated(value) }
+        helper(value)
+    }
+}
+pub fn entry(value: i64) -> i64 { Validated::convert(value).0 }
+""")
+        with self.assertRaisesRegex(NativeFlowEvidenceError, "outside"):
+            constructor_scope_ownership(raw, *self.policy(raw))
+
