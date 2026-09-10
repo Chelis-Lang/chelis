@@ -148,6 +148,14 @@ Use this loop for project files and generated shell output. `fmt` makes the sour
 canonical, `lint --check` catches naming/style drift, and the later commands re-run the
 same gate before doing semantic work.
 
+C builds keep the source stem in output filenames, including names such as
+`simple-shape.ch`. C symbols use ASCII identifier spelling: a stem that starts with
+an ASCII letter and contains only ASCII letters, digits and underscores keeps its
+spelling, except C keywords, `main`, and the reserved `chelis_file_` prefix.
+Other stems become `chelis_file_` followed by the hexadecimal filename bytes.
+For external calls, use the generated header's declaration. This encoding keeps
+`a-b.ch`, `a_b.ch`, and a literal `chelis_file_612d62.ch` distinct.
+
 When the compiled C program hits a runtime arithmetic trap, output from
 preceding effects is retained even when redirected to a pipe or file. The
 program still fails, and effects after the trap do not run.

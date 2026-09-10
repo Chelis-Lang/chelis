@@ -1,5 +1,6 @@
 //! Chelis compiler CLI.
 
+mod c_source_name;
 mod prove;
 mod style_gate;
 
@@ -3387,6 +3388,8 @@ fn cmd_build(
 
     match target {
         BuildTarget::C => {
+            let c_name = c_source_name::CSourceName::from_path(file);
+            let func_name = c_name.symbol();
             if let Some(host_program) = compiled_program.host.as_mut()
                 && (requires_main
                     || chelis_ir::host::host_program_requires_host_backend(host_program)
@@ -3443,7 +3446,7 @@ fn cmd_build(
                     selected,
                 )?;
                 let result = chelis_backend_c::codegen_host_program(&verified, func_name)?;
-                cmd_build_c_result(result, func_name, output, &symbolic_dims, requires_main)
+                cmd_build_c_result(result, &c_name, output, &symbolic_dims, requires_main)
             } else {
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_effect_ops(
@@ -3454,14 +3457,7 @@ fn cmd_build(
                 apply_shared_window_gates(&dag, BuildTarget::C)?;
                 let specialized = chelis_ir::specialize::specialize_for_exact_arithmetic(&dag);
                 let fused = chelis_ir::fuse::fuse(&specialized);
-                cmd_build_c(
-                    fused,
-                    func_name,
-                    file,
-                    output,
-                    &symbolic_dims,
-                    &root_manifest,
-                )
+                cmd_build_c(fused, &c_name, output, &symbolic_dims, &root_manifest)
             }
         }
         BuildTarget::Hip => {
@@ -3750,6 +3746,8 @@ fn cmd_build_deep(
 
     match target {
         BuildTarget::C => {
+            let c_name = c_source_name::CSourceName::from_path(file);
+            let func_name = c_name.symbol();
             if let Some(host_program) = compiled_program.host.as_mut()
                 && (requires_main
                     || chelis_ir::host::host_program_requires_host_backend(host_program)
@@ -3792,7 +3790,7 @@ fn cmd_build_deep(
                     selected,
                 )?;
                 let result = chelis_backend_c::codegen_host_program(&verified, func_name)?;
-                cmd_build_c_result(result, func_name, output, &symbolic_dims, requires_main)
+                cmd_build_c_result(result, &c_name, output, &symbolic_dims, requires_main)
             } else {
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_effect_ops(
@@ -3803,14 +3801,7 @@ fn cmd_build_deep(
                 apply_shared_window_gates(&dag, BuildTarget::C)?;
                 let specialized = chelis_ir::specialize::specialize_for_exact_arithmetic(&dag);
                 let fused = chelis_ir::fuse::fuse(&specialized);
-                cmd_build_c(
-                    fused,
-                    func_name,
-                    file,
-                    output,
-                    &symbolic_dims,
-                    &root_manifest,
-                )
+                cmd_build_c(fused, &c_name, output, &symbolic_dims, &root_manifest)
             }
         }
         BuildTarget::Hip => {
@@ -9531,12 +9522,12 @@ fn cmd_validate(
 
 fn cmd_build_c(
     dag: chelis_ir::dag::Dag,
-    func_name: &str,
-    _file: &std::path::Path,
+    c_name: &c_source_name::CSourceName,
     output: Option<&std::path::Path>,
     symbolic_dims_hint: &[String],
     root_manifest: &chelis_types::manifest::RootManifest,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let func_name = c_name.symbol();
     let symbolic_dims = fallback_symbolic_dims(&dag, &[], symbolic_dims_hint);
     let options = chelis_backend_c::CodegenOptions {
         use_blas: true,
@@ -9558,12 +9549,12 @@ fn cmd_build_c(
             .c_source
             .push_str(&tensor_manifest_observation_driver(func_name, &root_names));
     }
-    cmd_build_c_result(result, func_name, output, &symbolic_dims, requires_main)
+    cmd_build_c_result(result, c_name, output, &symbolic_dims, requires_main)
 }
 
 fn cmd_build_c_result(
     result: chelis_backend_c::CodegenResult,
-    func_name: &str,
+    c_name: &c_source_name::CSourceName,
     output: Option<&std::path::Path>,
     symbolic_dims: &[String],
     requires_main: bool,
@@ -9574,7 +9565,7 @@ fn cmd_build_c_result(
     let c_path = if out_dir.extension().and_then(|e| e.to_str()) == Some("c") {
         out_dir.clone()
     } else {
-        out_dir.join(format!("{func_name}.c"))
+        out_dir.join(c_name.filename())
     };
     let h_path = c_path.with_extension("h");
     if let Some(parent) = c_path.parent() {
