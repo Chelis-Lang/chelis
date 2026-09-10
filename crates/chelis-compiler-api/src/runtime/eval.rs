@@ -2833,7 +2833,11 @@ impl<'a> EvalContext<'a> {
                 let value = args
                     .first()
                     .ok_or_else(|| "print expects 1 argument".to_string())?;
-                self.transcript.push(render_value(value));
+                let line = render_value(value);
+                if let Some(capture) = &self.transcript_capture {
+                    capture.append(line.clone());
+                }
+                self.transcript.push(line);
                 Ok(RuntimeValue::Unit)
             }
             "fail" => {
@@ -2995,7 +2999,11 @@ impl<'a> EvalContext<'a> {
                 let value = args
                     .first()
                     .ok_or_else(|| "debug expects 1 argument".to_string())?;
-                self.transcript.push(render_value(value));
+                let line = render_value(value);
+                if let Some(capture) = &self.transcript_capture {
+                    capture.append(line.clone());
+                }
+                self.transcript.push(line);
                 Ok(value.clone())
             }
             "min_reduce" => {

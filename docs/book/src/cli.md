@@ -225,8 +225,11 @@ does not, a backstop terminates the process and says so:
 error: evaluation timed out after 30s (--timeout); cancellation did not complete within 5s, forced exit
 ```
 
-The suffix is worth reading. It means the process was killed rather than
-unwound, so destructors did not run and buffered output was not flushed.
+The suffix means the process exited without unwinding, so destructors did
+not run. Completed `print` and `debug` output is retained and flushed before
+the timeout diagnostic: stdout in text mode, stderr with `--json`. The same
+rule applies to cooperative cancellation. Output still being rendered when
+the process exits is not a completed effect.
 The usual cause is a machine under heavy load, where the cooperative
 unwind competes for CPU against a fixed wall-clock grace period.
 
