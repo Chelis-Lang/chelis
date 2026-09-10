@@ -9,7 +9,7 @@ per-PR integration gate. `.config/nextest.toml` carries three profiles:
 
   - `default` excludes an explicitly-named heavy-e2e set;
   - `ci` excludes that same set plus every complete test binary named by a
-    required Phase 0-3 oracle `--test` argument;
+    Phase 0-3 oracle `--test` argument;
   - `nightly` carries the EXACT SAME set as a positive filter, and the
     profile remains a manual heavy selection. The hosted Linux Extended
     Validation workflow runs the full workspace with `--ignore-default-filter`.
@@ -218,14 +218,14 @@ class FilterTextTests(unittest.TestCase):
             _norm(_negative_filter_inner(ci_block)),
             expected,
             "the `ci` filter must differ from `default` only by the exact "
-            "complete binaries named by required dtype oracle `--test` arguments",
+            "complete binaries named by dtype oracle `--test` arguments",
         )
 
     def test_ci_only_exclusions_are_executed_by_the_dtype_oracle(self):
         self.assertEqual(
             ORACLE_OWNED_BINARY_IDS,
             _oracle_selected_test_binaries(),
-            "an excluded binary is not selected by the required dtype oracle",
+            "an excluded binary is not selected by the dtype oracle",
         )
 
     def test_inherited_phase0_and_observation_binaries_are_delegated(self):
@@ -492,6 +492,34 @@ class ProfilePartitionTests(unittest.TestCase):
             for owner in dtype_oracle_manifest.OWNERS
         }
 
+    def test_fast_selection_is_a_subset_of_unfiltered_nightly(self):
+        from scripts import ci_test_targets
+        metadata = json.loads(subprocess.run(
+            ["cargo", "metadata", "--no-deps", "--format-version", "1", "--locked"],
+            cwd=REPO_ROOT, check=True, capture_output=True, text=True,
+        ).stdout)
+        selected = ci_test_targets.read_targets(REPO_ROOT / ".config/ci-test-targets.toml")
+        args = ci_test_targets.cargo_args(metadata, selected)
+        def listing(selection):
+            result = subprocess.run(
+                ["cargo", "nextest", "list", *selection, "--profile", "ci-full",
+                 "--ignore-default-filter", "--message-format", "json"],
+                cwd=REPO_ROOT, env=_cargo_environment(), check=True,
+                capture_output=True, text=True, timeout=900,
+            )
+            return json.loads(result.stdout)
+        fast = listing(args)
+        ci_test_targets.validate_listing(fast, metadata, selected)
+        full = listing(["--workspace"])
+        def active(data):
+            return {(binary, name) for binary, suite in data["rust-suites"].items()
+                    for name, info in suite["testcases"].items() if not info["ignored"]}
+        self.assertTrue(active(fast))
+        self.assertLess(active(fast), active(full))
+        self.assertTrue(all(info["filter-match"]["status"] == "matches"
+                            for suite in full["rust-suites"].values()
+                            for info in suite["testcases"].values() if not info["ignored"]))
+
     def _sets(self):
         ci_matches = {k for k, (s, _) in self.ci.items() if s == "matches"}
         nightly_matches = {
@@ -524,8 +552,8 @@ class ProfilePartitionTests(unittest.TestCase):
         self.assertEqual(
             overlap,
             set(),
-            f"{len(overlap)} test(s) are on BOTH the per-PR `ci` gate and "
-            f"the `nightly` gate (double-run, wastes the per-PR budget): "
+            f"{len(overlap)} test(s) are in BOTH the manual `ci` profile and "
+            f"the manual `nightly` profile: "
             f"{sorted(overlap)[:20]}",
         )
 
@@ -536,7 +564,7 @@ class ProfilePartitionTests(unittest.TestCase):
             gap,
             set(),
             f"{len(gap)} non-ignored test(s) are on neither the workspace, "
-            f"nightly, nor required-oracle lanes -- they silently stopped running "
+            f"nightly, nor manual oracle selections -- they silently stopped running "
             f"(dropped coverage): {sorted(gap)[:20]}",
         )
 

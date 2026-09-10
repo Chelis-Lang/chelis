@@ -440,7 +440,7 @@ This file. All design forks resolved before implementation.
 
 - Python `scripts/unrepresentable_domain_oracle.py` (behavioral) - the
   authoritative oracle, run by `scripts/gate.py`'s `integration` stage
-  (hosted CI's `workspace-tests-shard` matrix) and its `--local` subset, and locked
+  (`heavy-e2e.yml` nightly/manual `integration-support` worker) and its `--local` subset, and locked
   there by `scripts/test_gate.py`. Acceptance is exit 0 with a final
   `ORACLE: PASS` line.
 - Python `scripts/test_unrepresentable_domain_oracle.py` (unit tests).
@@ -498,8 +498,9 @@ top-level role restriction at all.
 
 **The oracle is `scripts/unrepresentable_domain_oracle.py`**, wired into
 `scripts/gate.py`'s `integration` stage and its `--local` pre-push subset.
-Hosted CI runs that stage in the `workspace-tests-shard` matrix
-(`Workspace Tests (Linux)`), on every pull request that is not docs-only.
+Hosted CI runs that stage in the `integration-support` matrix of
+`heavy-e2e.yml`, daily at 03:17 UTC and on manual dispatch. Ordinary PRs
+do not run this exhaustive oracle.
 That stage rather than `lint-and-unit` because two obligations run `cargo
 nextest`, which the `lint-rust` worker deliberately does not install.
 Acceptance is exit 0 with a final `ORACLE: PASS` line. Its obligations cover the compiler-API ingress:

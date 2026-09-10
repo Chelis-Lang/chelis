@@ -27,8 +27,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
-ANCHOR = "      - name: Gate (workspace test shard)"
-CACHE_JOB_ANCHOR = "\n  workspace-tests-shard:"
+ANCHOR = "      - name: Gate (units and reviewed integrations)"
+CACHE_JOB_ANCHOR = "\n  ci-fast:"
 
 
 def _load_test_gate():

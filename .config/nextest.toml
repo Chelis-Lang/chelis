@@ -120,6 +120,15 @@ default-filter = '''
 # reports under `target/nextest/<profile>/<path>`.
 path = "junit.xml"
 
+# Cargo target selectors define this lane. The driver ignores default filters
+# and verifies the exact compiled binary/test listing before execution.
+[profile.ci-fast]
+inherits = "default"
+fail-fast = false
+
+[profile.ci-fast.junit]
+path = "junit.xml"
+
 [profile.ci-full]
 inherits = "default"
 fail-fast = false
@@ -140,7 +149,7 @@ path = "junit.xml"
 
 [profile.nightly]
 fail-fast = false
-# The `Heavy E2E` workflow runs `cargo nextest run --profile nightly`. This
+# Manual heavy-only selection; hosted extended validation is unfiltered. This
 # default-filter is exactly the heavy set the `default` profile excludes.
 # The `ci` profile additionally delegates binaries named by oracle `--test`
 # arguments; scripts/test_nextest_profile_partition.py locks that handoff.

@@ -531,7 +531,10 @@ in FIFO ordering. Every run other than
 summary line. Push before the review round; the round reviews the pushed
 head while CI runs, and CI is watched by one background waiter, never a
 polling loop. The full workspace nextest stage is CI-owned: open a
-draft PR early for Linux CI. Full non-ignored workspace and broad phase-oracle
+draft PR early for Linux CI. The `ci-fast` worker runs every default-feature
+lib/bin unit target and the 17 reviewed integrations in
+[`.config/ci-test-targets.toml`](.config/ci-test-targets.toml); see
+[`docs/ci_validation.md`](docs/ci_validation.md) for coverage and artifacts. Full non-ignored workspace and broad phase-oracle
 validation runs daily at 03:17 UTC in `heavy-e2e.yml`, or by manual dispatch on
 a branch; PR checks do not certify those full phase oracles. Mac workspace validation runs daily at 04:17 UTC
 in `macos-nightly.yml`; dispatch it on the branch for Mac-specific validation.
