@@ -425,13 +425,9 @@ const BASELINE: &[Entry] = &[
     ),
     // -- unwrap-or-prim: census rows 13 and 14 converted at Phase 1
     // (lower_cast and lower_transcendental raise; named_axis errors) ----
-    (
-        Pat::UnwrapOrPrim,
-        "crates/chelis-compiler-api/src/runtime/host_ops.rs",
-        2,
-        "to_tensor literal-precision defaults: float literals default to F32 \
-         per spec (int/bool elements override); audited, not a substitution",
-    ),
+    // chelis#1650 removed the two List-conversion dtype defaults: the
+    // checked element dtype is now a required collector input.
+
     // -- elemkind-wildcard-arm: ZERO entries left - census row 5's
     // wildcard deleted at Phase 1 (section C4.1); elem_kind is an
     // exhaustive Result-returning match ---------------------------------
@@ -707,8 +703,9 @@ const BASELINE: &[Entry] = &[
     (
         Pat::RustDebugNumericFormat,
         "crates/chelis-compiler-api/src/runtime/host_ops.rs",
-        35,
-        "declared derived-Debug residue carriers: Err(format!) \
+        30,
+        "chelis#1650 removed five List-conversion Debug interpolations; \
+         declared derived-Debug residue carriers: Err(format!) \
          type-mismatch diagnostics over Value/Prim shapes, the tensor \
          SHAPE debug in render_tensor (elements route through \
          format_element), and cfg(test) assertions; chelis#729 Phase 1 \
