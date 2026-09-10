@@ -2061,6 +2061,23 @@ through and beyond both former limits, a cyclic type, and a planted low
 resource budget; it asserts the complete obligation set or the explicit
 exhaustion error, never a smaller successful proof problem.
 
+The implementation uses a finite proof-type graph shared by raw Deep declarations
+and checker-inferred types. Alias and record references preserve node identity;
+the production collector reports a `TypeTraversal` error on resource exhaustion.
+The budget applies independently to each exported signature and invariant.
+
+LU2's completion oracle is:
+
+```sh
+cargo nextest run -p chelis-prove -p chelis-cli --lib --test issue_872_proof_type_traversal -E 'test(obligations::tests::) or binary(issue_872_proof_type_traversal)' --no-fail-fast
+```
+
+Success is every selected test passing with no ignored tests. The CLI matrix
+crosses alias lengths 32/33 and record depths 16/17 with non-opaque twins;
+the public collector tests add parser-free cycles, complete Option/tuple
+positions, direct producers, and an injected low budget. These tests are part
+of the normal workspace test surface and require no SMT solver.
+
 ### LU3 - canonical iterative compiler list spines ([#906])
 
 Compiler-authored traversal of canonical `Cons`/`Nil` data uses one iterative
