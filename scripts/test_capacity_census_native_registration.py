@@ -76,6 +76,19 @@ class NativeRegistrationControls(unittest.TestCase):
             with self.subTest(mutation=mutation), self.assertRaises(GraphError):
                 validate_native_registration(self.root, changed)
 
+    def test_changed_current_source_invalidates_registration(self):
+        validate_native_registration(self.root, self.packet)
+        self.source.write_bytes(b"changed registrar source\n")
+        with self.assertRaisesRegex(GraphError, "source"):
+            validate_native_registration(self.root, self.packet)
+
+    def test_malformed_packets_fail_as_obligation_errors(self):
+        for changed in (None, [], {}, {**self.packet, "registrations": None},
+                        {**self.packet, "descriptors": [None] * 4},
+                        {**self.packet, "registrations": [None] * 4}):
+            with self.subTest(packet=changed), self.assertRaises(GraphError):
+                validate_native_registration(self.root, changed)
+
 
 class NativeRegistrationExecution(unittest.TestCase):
     @classmethod
@@ -110,20 +123,6 @@ class NativeRegistrationExecution(unittest.TestCase):
             else: changed.processes[1]["command"] = ["unrelated-probe"]
             with self.subTest(mutation=mutation), self.assertRaises(GraphError):
                 changed.validate()
-
-    def test_changed_current_source_invalidates_registration(self):
-        validate_native_registration(self.root, self.packet)
-        self.source.write_bytes(b"changed registrar source\n")
-        with self.assertRaisesRegex(GraphError, "source"):
-            validate_native_registration(self.root, self.packet)
-
-    def test_malformed_packets_fail_as_obligation_errors(self):
-        for changed in (None, [], {}, {**self.packet, "registrations": None},
-                        {**self.packet, "descriptors": [None] * 4},
-                        {**self.packet, "registrations": [None] * 4}):
-            with self.subTest(packet=changed), self.assertRaises(GraphError):
-                validate_native_registration(self.root, changed)
-
 
 if __name__ == "__main__":
     unittest.main()
