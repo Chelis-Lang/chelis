@@ -3479,8 +3479,8 @@ mod tests {
         // identities so they cannot inherit a verifier disposition.
         assert_eq!(
             all.len(),
-            55,
-            "one_of_every_risc_op must list all 55 classified samples"
+            56,
+            "one_of_every_risc_op must list all 56 classified samples"
         );
 
         // The classifier returns a definite bool for every variant (no
@@ -3492,18 +3492,19 @@ mod tests {
         // (5 binary/cmp + 13 unary, including `round`), 5 reductions, 6
         // movement, 4 memory/blas value nodes (Const, ConstTensor, Load,
         // BlasMatmul), and Cast are targetable (34); stochastic (2),
-        // arg-reductions (2), integer floor/trunc division (2), `cast_trunc`
-        // (1, chelis#759), one_hot (1), the `Shape` metadata read (1), sparse
-        // gather/scatter (4, including element-wise `ScatterElements`),
-        // linearity/lifecycle markers + store (4), reduce-window-grad (1),
-        // fused-elem (1), and the dedicated ReLU identity/adjoint (2) are
-        // excluded (21) until Beacon registers their own transformers.
+        // arg-reductions (2), integer floor/trunc division and remainder (3),
+        // `cast_trunc` (1, chelis#759), one_hot (1), the `Shape` metadata read
+        // (1), sparse gather/scatter (4, including element-wise
+        // `ScatterElements`), linearity/lifecycle markers + store (4),
+        // reduce-window-grad (1), fused-elem (1), and the dedicated ReLU
+        // identity/adjoint (2) are excluded (22) until Beacon registers their
+        // own transformers.
         assert_eq!(
             targetable, 34,
             "targetable op count drifted from the pinned WI-2 subset"
         );
         assert_eq!(
-            excluded, 21,
+            excluded, 22,
             "excluded op count drifted from the pinned WI-2 subset"
         );
 
@@ -3537,6 +3538,10 @@ mod tests {
             .is_verifier_targetable(),
             "cast_trunc is piecewise constant with an integer output; it has \
              no real-valued envelope, unlike the checked `cast`"
+        );
+        assert!(
+            !RiscOp::Mod.is_verifier_targetable(),
+            "integer remainder is discrete and has no real-valued envelope"
         );
     }
 
