@@ -3841,6 +3841,125 @@ fn an_overshooting_shrink_span_is_outside_this_slices_cross_lane_claim() {
     assert!(
         c_out.contains("shrink bounds outside input extent"),
         "C's movement plan rejects the span first: {c_out}"
+// chelis#1379: a checked integer-arithmetic `expand`/`insert` size.
+//
+// `spec/04-type-system.md` §4.7.2 puts a "checked integer-arithmetic
+// expression" in the same admissibility list as a parameter, a binding, a cast
+// and a user-function result, and says no stage may reject an extent because
+// of its provenance. §4.7.4 says such an extent is lowered as ordinary typed
+// integer dataflow and that eval, C, HIP and Metal execute the same graph.
+//
+// Before this change the two halves disagreed in opposite directions: the
+// checker admitted `mul(shape(x, 0), 2i64)` as shape-sourced and eval executed
+// an extent of `2n` under a result claimed as `n` with no equality guard,
+// while the compiled lanes refused to lower it at all. The rows below pin both
+// halves at once: the size lowers as an ordinary scalar-input extent, and the
+// claim it sits under is checked at execution on each lane.
+// ---------------------------------------------------------------------------
+
+/// chelis#1379's reproducer in the value-binding root form, with `claim`
+/// naming the declared result extent and `factor` the multiplier applied to
+/// the input's own extent.
+///
+/// With `claim = "n"` and `factor = 2` the computed extent is `2n` under a
+/// result claimed as `n`. With `factor = 1` the same mechanism produces an
+/// extent that AGREES, which is what separates a guard from a lane that traps
+/// on every computed size.
+fn arith_size_source(claim: &str, factor: u32) -> String {
+    format!(
+        "def f(b: tensor[f32], x: tensor[n, f32]) -> tensor[{claim}, f32] = \
+         insert(b, 0, mul(shape(x, 0), {factor}i64))\n\
+         seed = sum(to_tensor([1.0f32]), 0)\n\
+         xs = to_tensor([1.0f32, 2.0f32, 3.0f32])\n\
+         out = f(seed, xs)\n"
+    )
+}
+
+/// expand.arith_size.named_claim.c
+///
+/// EVIDENTIARY STATUS: regression test. Watched failing on the base of this
+/// change, where `chelis build --target c` refused the program outright with
+/// the chelis#469 "cannot materialize as an extent" lowering rejection, so the
+/// fixture could not reach a linked binary at all.
+#[test]
+fn checked_arithmetic_expand_size_under_a_named_claim_agrees_on_every_lane_on_c() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(&dir, "arith_size_c", &arith_size_source("n", 2));
+    assert!(
+        !ok,
+        "the computed extent is 2n under a claim of n, so the binary must fail: {out}"
+    );
+    assert!(
+        out.contains(&domain_trap_line("insert")),
+        "the guard takes the position of the insert that introduces the extent: {out}"
+    );
+    assert!(
+        out.contains("extent `n`: claimed = 3"),
+        "section 4.7's context line carries the claim and the observed value: {out}"
+    );
+}
+
+/// The discriminating twin: the same arithmetic with a factor that AGREES with
+/// the claim executes and produces the declared shape. Without it, a lane that
+/// rejected or trapped on every arithmetic size would pass the row above.
+///
+/// EVIDENTIARY STATUS: disposition lock.
+#[test]
+fn a_checked_arithmetic_expand_size_that_agrees_with_its_claim_executes_on_c() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(&dir, "arith_size_ok_c", &arith_size_source("n", 1));
+    assert!(ok, "the computed extent agrees, so the binary must run: {out}");
+    assert!(
+        out.contains("shape=[3]") && out.contains("data=[1.0, 1.0, 1.0]"),
+        "the agreeing program produces its declared shape exactly: {out}"
+    );
+}
+
+/// expand.arith_size.named_claim.eval
+///
+/// EVIDENTIARY STATUS: regression test. Watched failing on the base of this
+/// change, where `chelis eval --file` printed `out = tensor(shape=[6], ...)`
+/// under the declared `tensor[n, f32]` with `n = 3` and exited zero, while the
+/// compiled lane refused the same program at lowering.
+#[test]
+fn checked_arithmetic_expand_size_under_a_named_claim_agrees_on_every_lane_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = eval_result(&dir, "arith_size_eval.ch", &arith_size_source("n", 2));
+    assert!(
+        !ok,
+        "the computed extent is 2n under a claim of n, so eval must fail: {out}"
+    );
+    assert!(
+        !out.contains("shape=[6]"),
+        "and must not produce the unguarded 2n result chelis#1379 reported: {out}"
+    );
+    assert!(
+        out.contains(&domain_trap_line("insert")),
+        "eval renders [04-NUM-9]'s line for the same guard the C lane emits: {out}"
+    );
+    assert!(
+        out.contains("extent `n`: claimed = 3"),
+        "section 4.7's context line carries the claim and the observed value: {out}"
+    );
+}
+
+/// The discriminating twin on eval, for the same reason as its C sibling.
+///
+/// EVIDENTIARY STATUS: disposition lock.
+#[test]
+fn a_checked_arithmetic_expand_size_that_agrees_with_its_claim_executes_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = eval_result(&dir, "arith_size_ok_eval.ch", &arith_size_source("n", 1));
+    assert!(ok, "the computed extent agrees, so eval must run: {out}");
+    assert!(
+        out.contains("shape=[3]") && out.contains("data=[1.0, 1.0, 1.0]"),
+        "the agreeing program produces its declared shape exactly: {out}"
     );
 }
 
