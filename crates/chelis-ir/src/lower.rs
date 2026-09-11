@@ -4910,6 +4910,10 @@ fn shape_app_operand_axis(expr: &Expr) -> Option<(&Expr, usize)> {
     if tag == DeepTag::Cast {
         return kids.first().and_then(shape_app_operand_axis);
     }
+    // chelis#569: the pipe spelling of the same read.
+    if tag == DeepTag::Pipe {
+        return pipe_shape_read(kids);
+    }
     if app_var_name_and_args(expr).map(|(name, _)| name) != Some("shape") {
         return None;
     }
@@ -4919,6 +4923,61 @@ fn shape_app_operand_axis(expr: &Expr) -> Option<(&Expr, usize)> {
     let axis = kids.get(2).and_then(extract_int_for_dim)?;
     let axis = usize::try_from(axis).ok()?;
     Some((operand, axis))
+}
+
+/// Recognize the pipe spelling of a `shape(operand, axis)` read (chelis#569).
+///
+/// `chelis lint --fix` rewrites `cast(shape(x, cast(0, int32)), int64)` into
+/// `x |> shape(cast(0, int32)) |> cast(int64)`; both denote the same extent,
+/// so one recognizer answers for both and the lint cannot turn a building
+/// program into one the lowerer refuses.
+///
+/// `(pipe {} v s1 .. sn)` denotes `sn(..s1(v))`, and each `s` is the
+/// `(fn {} (params {} p) body)` node the Surf parser synthesizes for a call
+/// stage. The read is recognized when the FIRST stage reads `shape` off its
+/// own parameter and every later stage only re-types the result, which is
+/// what the trailing `|> cast(ty)` stages do. Any other stage returns `None`:
+/// the operand a later stage would name is a computed value, not the tensor
+/// whose axis supplies the extent.
+fn pipe_shape_read(kids: &[Expr]) -> Option<(&Expr, usize)> {
+    let operand = kids.first()?;
+    let mut axis: Option<usize> = None;
+    for stage in &kids[1..] {
+        let (param, body) = pipe_stage_lambda(stage)?;
+        match axis {
+            None => {
+                let (read_operand, read_axis) = shape_app_operand_axis(body)?;
+                if bare_var_name(strip_cast_wrappers(read_operand))? != param {
+                    return None;
+                }
+                axis = Some(read_axis);
+            }
+            Some(_) => {
+                if bare_var_name(strip_cast_wrappers(body))? != param {
+                    return None;
+                }
+            }
+        }
+    }
+    Some((operand, axis?))
+}
+
+/// The parameter name and body of a synthesized unary pipe-stage lambda,
+/// the `(fn {} (params {} p) body)` shape `parse_pipe_stage` produces.
+fn pipe_stage_lambda(stage: &Expr) -> Option<(String, &Expr)> {
+    let (DeepTag::Fn, _, kids) = stamped_parts(stage)? else {
+        return None;
+    };
+    let (DeepTag::Params, _, param_kids) = stamped_parts(kids.first()?)? else {
+        return None;
+    };
+    if param_kids.len() != 1 {
+        return None;
+    }
+    let Some(Expr::Atom(Atom::Name(name), _)) = param_kids.first() else {
+        return None;
+    };
+    Some((name.clone(), kids.get(1)?))
 }
 
 /// If `expr` is `(var {} <name>)`, return `<name>` as a `String`.
@@ -13842,6 +13901,12 @@ impl<'program> LowerCtx<'program> {
         let Some(witness) = self.axis_literal_witness(id, axis) else {
             return false;
         };
+        // chelis#1782: the declared dimension is still stamped on the result,
+        // but a literal whose comparison a named claim already makes records
+        // no second requirement.
+        if self.literal_result_claim_is_entailed(witness, required) {
+            return true;
+        }
         let required = chelis_types::scalar_from_i64(
             "load",
             Prim::Int64,
@@ -13855,6 +13920,129 @@ impl<'program> LowerCtx<'program> {
             requirements.push(required);
         }
         true
+    }
+
+    /// Does a named claim already in the graph make this literal's comparison?
+    ///
+    /// A named claim (chelis#1374/#1376) asserts that two witnesses of one
+    /// activation observe the SAME extent. When the other witness of such a
+    /// claim observes an axis whose extent the lowered graph itself fixes, and
+    /// that fixed extent is the literal this result claims, the two
+    /// obligations are one comparison: `produced == declaring` together with a
+    /// graph-fixed `declaring == required` gives `produced == required`, and a
+    /// produced extent that disagrees with the literal must disagree with the
+    /// declaring witness too. The named guard therefore fires on exactly the
+    /// inputs the literal guard would have, and `spec/04-type-system.md` §4.7
+    /// evaluates each guard once.
+    ///
+    /// chelis#1782 is why that matters. At `def main() = f(...)` the checker
+    /// infers the root's result dimension by instantiating the callee's
+    /// binder against the argument it was bound from, so the root RESTATES the
+    /// callee's named obligation as a literal. Recorded as well, it rendered
+    /// ``extent `2`: claimed = 2, y axis 0 = 3`` ahead of the named guard, and
+    /// the user saw one source and a number where §4.7's [04-NUM-9] asks for
+    /// the two disagreeing sources. Suppressing the restatement keeps the
+    /// check and hands the user the informative half.
+    ///
+    /// The retained guard is not a REORDERING of the two. Section 4.7 does not
+    /// rank independent obligations on one witness, so a blind reorder would
+    /// also move a literal claim nothing else covers; this declines a claim
+    /// only where another guard provably makes the same comparison, which is
+    /// the rule [`Self::entry_covered_witness_claims`] already applies to a
+    /// witness claim `entry_extent_guards` derives.
+    ///
+    /// The extent has to be one the GRAPH fixes rather than one an external
+    /// input promises. An ABI parameter's axis is an interface obligation the
+    /// entry guard checks, not a fact of this graph, so a witness observing
+    /// one is never an entailing partner. An inlined root's arguments are
+    /// constructed in the graph, which is the form chelis#1782 reports; the
+    /// exported-kernel and value-binding forms read parameters and keep every
+    /// literal claim they had.
+    fn literal_result_claim_is_entailed(&self, witness: NodeId, required: usize) -> bool {
+        self.named_claim_partners(witness)
+            .into_iter()
+            .any(|partner| self.graph_fixed_witness_extent(partner) == Some(required))
+    }
+
+    /// Every witness a named claim relates `witness` to, in either direction.
+    ///
+    /// The obligation is attached to the LATER of the two witnesses with a
+    /// backward requirement edge to the earlier, so `witness` can be either
+    /// end; [`Self::add_named_extent_claim`] pushes one claim and one edge
+    /// together, which is the pairing read back here. `witness`'s own claim
+    /// list answers the common case, so the scan for the other direction runs
+    /// only when that list does not.
+    fn named_claim_partners(&self, witness: NodeId) -> Vec<NodeId> {
+        let own: Vec<NodeId> = self
+            .dag
+            .get(witness)
+            .into_iter()
+            .filter_map(|node| match &node.op {
+                RiscOp::ExtentWitness { claims, .. } => Some(
+                    claims
+                        .iter()
+                        .zip(node.inputs.iter().skip(1))
+                        .map(|(_, requirement)| *requirement)
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        if !own.is_empty() {
+            return own;
+        }
+        self.dag
+            .nodes()
+            .iter()
+            .filter_map(|node| {
+                let RiscOp::ExtentWitness { claims, .. } = &node.op else {
+                    return None;
+                };
+                claims
+                    .iter()
+                    .zip(node.inputs.iter().skip(1))
+                    .any(|(_, requirement)| *requirement == witness)
+                    .then_some(node.id)
+            })
+            .collect()
+    }
+
+    /// The extent this witness observes, when the lowered graph fixes it.
+    ///
+    /// The question is one of PROVENANCE, not of the neighbouring operation.
+    /// An earlier form of this decided it by matching the observed node's op
+    /// against `RiscOp::Load`, which a single pass-through hop defeated: red
+    /// team round 1 measured `g(mul(a, a), b)` and `g(cast(a, f32), b)` losing
+    /// their literal guard where `g(a, b)` kept it, so the rule the design doc
+    /// states was not the rule the build had.
+    ///
+    /// [`crate::axis_sources::resolve_axis_extent`] is the existing answer and
+    /// is total over the four origins, so "not fixed" is a decision rather
+    /// than a fallthrough. `Literal` is an extent the graph itself states;
+    /// `ExternalAxis` is an ABI promise, recognised through any number of
+    /// pass-through hops; `ScalarInput` and `OpComputed` are extents no
+    /// compile-time constant states at all. It resolves the same premise
+    /// `entry_covered_witness_claims` resolves for its own question, so the
+    /// two readers cannot disagree about where an extent comes from.
+    fn graph_fixed_witness_extent(&self, witness: NodeId) -> Option<usize> {
+        use crate::axis_sources::ExtentOrigin;
+        let node = self.dag.get(witness)?;
+        let RiscOp::ExtentWitness {
+            axis: RtAxis::Lit(axis),
+            ..
+        } = &node.op
+        else {
+            return None;
+        };
+        let observed = node.inputs.first().copied()?;
+        let axis = usize::try_from(*axis).ok()?;
+        match crate::axis_sources::resolve_axis_extent(&self.dag, observed, axis)? {
+            ExtentOrigin::Literal(extent) => usize::try_from(extent).ok(),
+            ExtentOrigin::ExternalAxis { .. }
+            | ExtentOrigin::ScalarInput { .. }
+            | ExtentOrigin::OpComputed { .. } => None,
+        }
     }
 
     /// chelis#1374/#1376's half: a NAMED claim becomes an equality between the

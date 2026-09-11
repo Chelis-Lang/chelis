@@ -27,6 +27,17 @@
 //! all. That was true of the inlined-root form it measured and over-broad for
 //! the value-binding form, which B2h's rows already used.
 //!
+//! The paragraph above is now history rather than current behaviour, and the
+//! chelis#1782 rows at the end of this file are the reason it has to say so.
+//! PR #1773 gave the inlined root the callee's own declared result claim and
+//! PR #1790 gave it an op-computed one, so a `def main() = f(...)` root is
+//! guarded on both lanes today: chelis#1377's shape, which that paragraph
+//! measured running unguarded at `1a585ba1b`, traps at `d861a6c6f` with
+//! ``extent `4`: claimed = 4, x axis 0 = 5``, which
+//! `an_independent_root_literal_claim_still_names_its_claimed_extent`
+//! asserts. The root rows in this file are therefore guard rows, and they
+//! are marked as such where they sit.
+//!
 //! The order controls belong here for a second reason: ordering a guard
 //! against an in-body trap needs a caller, and a called function's entry sits
 //! exactly where its call sits in the caller's source order.
@@ -3830,5 +3841,1178 @@ fn an_overshooting_shrink_span_is_outside_this_slices_cross_lane_claim() {
     assert!(
         c_out.contains("shrink bounds outside input extent"),
         "C's movement plan rejects the span first: {c_out}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// chelis#1782: a root's restated literal claim defers to the callee's named
+// guard.
+//
+// At `def main() = f(...)` the checker infers the root's result type by
+// instantiating `f`'s dimension binder against the argument it was bound
+// from, so the root's result dimension is the LITERAL that binder
+// monomorphized to. Lowering then recorded that literal as a second
+// obligation on the same produced extent, and because it is a requirement on
+// the witness rather than a claim between two witnesses, it rendered first:
+// the user saw ``extent `2`: claimed = 2, y axis 0 = 3`` where
+// `spec/04-type-system.md` section 4.7's [04-NUM-9] asks for both disagreeing
+// sources, which the callee's own named guard already names.
+//
+// The two obligations are one comparison. The named claim asserts that the
+// produced witness and the declaring witness observe the same extent; the
+// declaring witness here observes a tensor whose extent the lowered graph
+// fixes, and that extent IS the literal. A produced extent disagreeing with
+// the literal therefore disagrees with the declaring witness too, so the
+// named guard fires on exactly the inputs the literal guard would have.
+// Section 4.7 evaluates each guard once, so the one that survives is the one
+// naming both sources.
+//
+// These rows are inlined-root rows, which the file header's older paragraph
+// said could not be guarded at all. PR #1773 and PR #1790 changed that; the
+// header is corrected where it makes the claim.
+// ---------------------------------------------------------------------------
+
+/// chelis#1374's reproducer with the issue's original polymorphic binder, in
+/// the inlined-root form. `n` is a single letter, so it desugars to a
+/// polymorphic dimension variable that inference instantiates against `x`.
+fn polymorphic_named_root_source(x_extent: usize, y_extent: usize) -> String {
+    let list = |n: usize| {
+        (1..=n)
+            .map(|v| format!("{v}.0f32"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "module Repro.PolymorphicNamedRoot\n\
+         def f(b: tensor[f32], x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = insert(b, 0i32, shape(y, 0i32))\n\
+         def main() = f(scalar_to_tensor(7.0f32), to_tensor([{}]), to_tensor([{}]))\n",
+        list(x_extent),
+        list(y_extent)
+    )
+}
+
+/// chelis#1376's reproducer with the issue's original polymorphic binders, in
+/// the inlined-root form. The result's two axes resolve to DIFFERENT
+/// witnesses, so a per-witness reorder would repair the row above and not
+/// this one.
+fn polymorphic_foreign_root_source(x_extent: usize, y_extent: usize) -> String {
+    let list = |n: usize| {
+        (1..=n)
+            .map(|v| format!("{v}.0f32"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "module Repro.PolymorphicForeignRoot\n\
+         def f(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, m, f32] = insert(x, 1i32, shape(x, 0i32))\n\
+         def main() = f(to_tensor([{}]), to_tensor([{}]))\n",
+        list(x_extent),
+        list(y_extent)
+    )
+}
+
+/// A root literal claim with NO named claim over its produced extent: the
+/// callee declares a literal result of its own, so nothing relates two
+/// witnesses and the literal is the only check there is.
+fn independent_literal_root_source(x_extent: usize) -> String {
+    let list = (1..=x_extent)
+        .map(|v| format!("{v}.0f32"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "module Repro.IndependentLiteralRoot\n\
+         def f(b: tensor[f32], x: tensor[rows, f32]) -> tensor[4, f32] = insert(b, 0i32, shape(x, 0i32))\n\
+         def main() = f(scalar_to_tensor(7.0f32), to_tensor([{list}]))\n"
+    )
+}
+
+/// A binding whose entailing extent arrives through the ABI: `g`'s binder `n`
+/// is declared by `f`'s parameter `a`, and `a`'s extent is an input promise
+/// the entry guard checks rather than one the lowered graph fixes.
+///
+/// `a_prim` types `f`'s first parameter and `a_arg` spells what `f` hands
+/// `g`, so one helper produces the direct spelling and the two that put a
+/// node between the parameter and the witness.
+fn abi_promised_entailment_source(a_prim: &str, a_arg: &str, b_extent: usize) -> String {
+    let list = |n: usize, prim: &str| {
+        (1..=n)
+            .map(|v| format!("{v}.0{prim}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "module Repro.AbiPromisedEntailment\n\
+         def g(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = insert(scalar_to_tensor(7.0f32), 0i32, shape(y, 0i32))\n\
+         def f(a: tensor[4, {a_prim}], b: tensor[rows, f32]) -> tensor[4, f32] = g({a_arg}, b)\n\
+         out = f(to_tensor([{}]), to_tensor([{}]))\n",
+        list(4, a_prim),
+        list(b_extent, "f32")
+    )
+}
+
+/// polymorphic.named.root.mismatch (chelis#1782, chelis#1374)
+///
+/// EVIDENTIARY STATUS: regression test. Recorded red at `d861a6c6f`, where
+/// both lanes print ``extent `2`: claimed = 2, y axis 0 = 3`` and the named
+/// guard that names both disagreeing sources never runs. The satisfied half
+/// is a parity control: suppressing the restatement must not stop the
+/// agreeing program from producing its value.
+#[test]
+fn issue_1782_a_root_literal_restating_a_binder_defers_to_the_named_guard_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = eval_result(
+        &dir,
+        "poly_named_root.ch",
+        &polymorphic_named_root_source(2, 3),
+    );
+    assert!(
+        !ok,
+        "`n` is witnessed at 2 and the result is produced at 3: {out}"
+    );
+    assert!(out.contains(&domain_trap_line("load")), "{out}");
+    assert!(
+        out.contains("extent `n`: x axis 0 = 2, y axis 0 = 3"),
+        "the guard the user sees names both disagreeing sources: {out}"
+    );
+    assert!(
+        !out.contains("claimed = 2"),
+        "the root's restatement of `n` records no second guard: {out}"
+    );
+
+    let (ok, out) = eval_result(
+        &dir,
+        "poly_named_root_ok.ch",
+        &polymorphic_named_root_source(3, 3),
+    );
+    assert!(ok, "an agreeing pair of witnesses must execute: {out}");
+    assert!(
+        out.contains("tensor(shape=[3], data=[7.0, 7.0, 7.0])"),
+        "and produce the claimed shape: {out}"
+    );
+}
+
+/// polymorphic.named.root.mismatch on the C lane (chelis#1782, chelis#1374)
+///
+/// EVIDENTIARY STATUS: as its eval twin; recorded red at `d861a6c6f` with the
+/// linked binary printing ``extent `2`: claimed = 2, y axis 0 = 3``. The
+/// context line is asserted byte-for-byte against the eval row's.
+#[test]
+fn issue_1782_a_root_literal_restating_a_binder_defers_to_the_named_guard_on_c() {
+    assert!(
+        gcc_available(),
+        "this row executes a linked program; no lane may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(
+        &dir,
+        "poly_named_root_c",
+        &polymorphic_named_root_source(2, 3),
+    );
+    assert!(
+        !ok,
+        "`n` is witnessed at 2 and the result is produced at 3: {out}"
+    );
+    assert!(out.contains(&domain_trap_line("load")), "{out}");
+    assert!(
+        out.contains("extent `n`: x axis 0 = 2, y axis 0 = 3"),
+        "the guard the user sees names both disagreeing sources: {out}"
+    );
+    assert!(
+        !out.contains("claimed = 2"),
+        "the root's restatement of `n` records no second guard: {out}"
+    );
+
+    let (ok, out) = c_run_result(
+        &dir,
+        "poly_named_root_c_ok",
+        &polymorphic_named_root_source(3, 3),
+    );
+    assert!(ok, "an agreeing pair of witnesses must execute: {out}");
+    assert!(
+        out.contains("tensor(shape=[3], data=[7.0, 7.0, 7.0])"),
+        "and produce the claimed shape: {out}"
+    );
+}
+
+/// polymorphic.foreign.root.mismatch (chelis#1782, chelis#1376)
+///
+/// EVIDENTIARY STATUS: regression test. Recorded red at `d861a6c6f`, where
+/// both lanes print ``extent `3`: claimed = 3, x axis 0 = 2``. This row's
+/// literal and named obligations sit on DIFFERENT witnesses, with the
+/// literal's earlier in the schedule, so it fails for a reorder that repairs
+/// the same-witness row above.
+#[test]
+fn issue_1782_a_root_literal_restating_a_foreign_binder_defers_to_the_named_guard_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = eval_result(
+        &dir,
+        "poly_foreign_root.ch",
+        &polymorphic_foreign_root_source(2, 3),
+    );
+    assert!(
+        !ok,
+        "`m` is witnessed at 3 and the result is produced at 2: {out}"
+    );
+    assert!(out.contains(&domain_trap_line("load")), "{out}");
+    assert!(
+        out.contains("extent `m`: y axis 0 = 3, x axis 0 = 2"),
+        "the guard the user sees names both disagreeing sources: {out}"
+    );
+    assert!(
+        !out.contains("claimed = 3"),
+        "the root's restatement of `m` records no second guard: {out}"
+    );
+
+    let (ok, out) = eval_result(
+        &dir,
+        "poly_foreign_root_ok.ch",
+        &polymorphic_foreign_root_source(2, 2),
+    );
+    assert!(ok, "an agreeing pair of witnesses must execute: {out}");
+    assert!(
+        out.contains("tensor(shape=[2, 2], data=[1.0, 1.0, 2.0, 2.0])"),
+        "and produce the claimed shape: {out}"
+    );
+}
+
+/// polymorphic.foreign.root.mismatch on the C lane (chelis#1782, chelis#1376)
+///
+/// EVIDENTIARY STATUS: as its eval twin; recorded red at `d861a6c6f`.
+#[test]
+fn issue_1782_a_root_literal_restating_a_foreign_binder_defers_to_the_named_guard_on_c() {
+    assert!(
+        gcc_available(),
+        "this row executes a linked program; no lane may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(
+        &dir,
+        "poly_foreign_root_c",
+        &polymorphic_foreign_root_source(2, 3),
+    );
+    assert!(
+        !ok,
+        "`m` is witnessed at 3 and the result is produced at 2: {out}"
+    );
+    assert!(out.contains(&domain_trap_line("load")), "{out}");
+    assert!(
+        out.contains("extent `m`: y axis 0 = 3, x axis 0 = 2"),
+        "the guard the user sees names both disagreeing sources: {out}"
+    );
+    assert!(
+        !out.contains("claimed = 3"),
+        "the root's restatement of `m` records no second guard: {out}"
+    );
+
+    let (ok, out) = c_run_result(
+        &dir,
+        "poly_foreign_root_c_ok",
+        &polymorphic_foreign_root_source(2, 2),
+    );
+    assert!(ok, "an agreeing pair of witnesses must execute: {out}");
+    assert!(
+        out.contains("tensor(shape=[2, 2], data=[1.0, 1.0, 2.0, 2.0])"),
+        "and produce the claimed shape: {out}"
+    );
+}
+
+/// The negative twin, on both lanes in one row so the two renderings are
+/// compared against one another.
+///
+/// A root literal claim is suppressed only when a named claim already makes
+/// the same comparison. Here the callee declares its own literal result, no
+/// named claim relates two witnesses over the produced axis, and the literal
+/// guard is the only check there is: it stays, and it still names the claimed
+/// extent.
+///
+/// The sharper twin a reader might expect, a root that DECLARES a literal
+/// disagreeing with the binder's monomorphization, does not exist: the
+/// checker rejects a root whose declared result disagrees with the type it
+/// infers, so a root literal it accepts always equals the instantiation. That
+/// is measured, not assumed; it is why the suppression's premise holds
+/// whenever the restatement is recognised.
+///
+/// EVIDENTIARY STATUS: disposition lock. Both assertions pass at `d861a6c6f`
+/// and describe behaviour this change must not alter.
+#[test]
+fn an_independent_root_literal_claim_still_names_its_claimed_extent() {
+    assert!(
+        gcc_available(),
+        "this row compares two executed lanes; neither may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = independent_literal_root_source(5);
+    let (eval_ok, eval_out) = eval_result(&dir, "independent_literal_root.ch", &source);
+    let (c_ok, c_out) = c_run_result(&dir, "independent_literal_root_c", &source);
+    assert!(
+        !eval_ok,
+        "a literal claim of 4 over a read of 5 traps: {eval_out}"
+    );
+    assert!(
+        !c_ok,
+        "a literal claim of 4 over a read of 5 traps: {c_out}"
+    );
+    for out in [&eval_out, &c_out] {
+        assert!(out.contains(&domain_trap_line("load")), "{out}");
+        assert!(
+            out.contains("extent `4`: claimed = 4, x axis 0 = 5"),
+            "an independent literal keeps its claimed-extent rendering: {out}"
+        );
+    }
+}
+
+/// The rule's FIRST bound, and the negatives that fix it: an entailing extent
+/// that arrives through the ABI keeps its literal guard, however many
+/// pass-through hops separate the parameter from the witness.
+///
+/// The suppression requires the other witness of the named claim to observe an
+/// axis whose extent the lowered GRAPH fixes. Here `g`'s binder `n` is
+/// declared by `f`'s parameter `a`, whose extent reaches the program as an ABI
+/// input spelled `tensor[4, ...]`: a promise the entry guard checks, not a
+/// fact of this graph. `f`'s own literal claim is therefore recorded, and all
+/// three spellings still render `claimed = 4`.
+///
+/// The three spellings are the finding. An earlier version of this row tested
+/// only `g(a, b)` and the code decided "graph-fixed" by matching the observed
+/// node's op against `RiscOp::Load`, so ONE node between the parameter and the
+/// witness defeated the bound: red team round 1 measured `g(mul(a, a), b)` and
+/// `g(cast(a, f32), b)` rendering ``extent `n`: x axis 0 = 4, y axis 0 = 5``
+/// at `a1b54dbc1`, against ``extent `4`: claimed = 4, y axis 0 = 5`` at
+/// `d861a6c6f`. The repair resolves the observed axis to its ORIGIN with
+/// `axis_sources::resolve_axis_extent`, so an `ExternalAxis` origin is
+/// recognised through any number of pass-through hops.
+///
+/// That bound is deliberate rather than a statement that the obligation is
+/// independent here. The entry guard does pin `a axis 0` to 4, so the named
+/// claim plus that guard entail the literal exactly as they do at an inlined
+/// root; declining only on a graph-fixed extent keeps this change inside the
+/// form chelis#1782 reports and leaves the ABI-promised form untouched.
+///
+/// EVIDENTIARY STATUS: mixed, per row. The `mul` and `cast` spellings are
+/// REGRESSION tests, recorded red at `a1b54dbc1` with the named rendering. The
+/// direct spelling is a DISPOSITION LOCK that passes at `d861a6c6f` and at
+/// `a1b54dbc1`. The entry-guard assertion is a lock on why this is a
+/// rendering finding and not a lost check.
+#[test]
+fn an_abi_promised_entailing_extent_keeps_its_literal_guard() {
+    assert!(
+        gcc_available(),
+        "this row compares two executed lanes; neither may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    for (label, a_prim, a_arg) in [
+        ("direct", "f32", "a"),
+        ("through_mul", "f32", "mul(a, a)"),
+        ("through_cast", "f64", "cast(a, f32)"),
+    ] {
+        let source = abi_promised_entailment_source(a_prim, a_arg, 5);
+        let (eval_ok, eval_out) = eval_result(&dir, &format!("abi_{label}.ch"), &source);
+        let (c_ok, c_out, emitted) =
+            c_run_result_with_source(&dir, &format!("abi_{label}_c"), &source);
+        assert!(
+            !eval_ok,
+            "{label}: a literal claim of 4 over a read of 5 traps: {eval_out}"
+        );
+        assert!(
+            !c_ok,
+            "{label}: a literal claim of 4 over a read of 5 traps: {c_out}"
+        );
+        for out in [&eval_out, &c_out] {
+            assert!(out.contains(&domain_trap_line("load")), "{label}: {out}");
+            assert!(
+                out.contains("extent `4`: claimed = 4, y axis 0 = 5"),
+                "{label}: an ABI-promised entailing extent keeps the literal guard: {out}"
+            );
+        }
+        assert!(
+            emitted.contains("chelis_tensor_shape(inputs[0], 0) != 4"),
+            "{label}: the kernel still checks `a`'s promised extent at entry, which is \
+             why the declined suppression would cost no check: {emitted}"
+        );
+    }
+}
+
+/// The rule's SECOND bound: the two call forms that never inline the callee
+/// into a root render exactly as they did.
+///
+/// A value binding applies the exported kernel, so `f`'s parameters are
+/// `Load`s and no enclosing root contributes an inferred literal. The four
+/// exported-kernel cells of the same two programs,
+/// `polymorphic.{named,foreign}.export.mismatch` on both lanes, are locked by
+/// the preparation baseline rather than repeated here.
+///
+/// EVIDENTIARY STATUS: disposition lock. All four assertions pass at
+/// `d861a6c6f` and describe behaviour this change must not alter.
+#[test]
+fn the_value_binding_form_of_a_polymorphic_binder_is_unchanged() {
+    assert!(
+        gcc_available(),
+        "this row compares two executed lanes; neither may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let named = polymorphic_named_root_source(2, 3).replace("def main() = f(", "out = f(");
+    for (ok, out) in [
+        eval_result(&dir, "poly_named_binding.ch", &named),
+        c_run_result(&dir, "poly_named_binding_c", &named),
+    ] {
+        assert!(!ok, "the exported kernel's entry guard still fires: {out}");
+        assert!(
+            out.contains("extent `n`: x axis 0 = 2, y axis 0 = 3"),
+            "the value-binding form's rendering is unchanged: {out}"
+        );
+    }
+
+    let foreign = polymorphic_foreign_root_source(2, 3).replace("def main() = f(", "out = f(");
+    for (ok, out) in [
+        eval_result(&dir, "poly_foreign_binding.ch", &foreign),
+        c_run_result(&dir, "poly_foreign_binding_c", &foreign),
+    ] {
+        assert!(!ok, "the exported kernel's entry guard still fires: {out}");
+        assert!(
+            out.contains("extent `m`: y axis 0 = 3, x axis 0 = 2"),
+            "the value-binding form's rendering is unchanged: {out}"
+        );
+    }
+}
+
+// ===========================================================================
+// Record-field and pipe shape sources (chelis#1266, chelis#569).
+//
+// Rows `expand.record_projection.size` and `expand.piped_shape_read.lint_fix`.
+//
+// Both issues are one question asked twice: does a `shape(...)` read reach
+// the size slot when it is SPELLED differently. A record field and a pipe
+// stage are both spellings a person and a tool actually produce -- every
+// hydronnx model with more than one input takes its arguments as a record,
+// and `chelis lint --fix` rewrites a nested call chain into a pipe -- and
+// `spec/04-type-system.md` section 4.7.2 admits an extent by what supplies
+// it, never by how it is written: "no stage may reject an extent because of
+// its provenance".
+//
+// The claim these rows carry is admissibility plus execution on both lanes.
+// It is NOT that a declared result NAME survives: `f(inp: Inputs)` under
+// `sig f: Inputs -> tensor[batch, f32]` still checks to `tensor[*, f32]`,
+// because `batch` appears nowhere in the parameter list for unification to
+// bind it to. That erasure is chelis#1397's checker half. The C lane does
+// declare the extent by name from the field's axis (`int64_t batch =
+// chelis_tensor_shape(inputs[0], 0)`), which is what makes the compiled
+// program agree with eval below.
+// ===========================================================================
+
+/// chelis#1266's own reproducer: the projection read inline in the size slot.
+const RECORD_PROJECTION_DIRECT: &str = "module Repro.RecordDirect\n\
+     type Inputs = | Inputs { q: tensor[batch, 4, f32] }\n\
+     sig f: Inputs -> tensor[batch, f32]\n\
+     def f(inp: Inputs) = expand(to_tensor([0.25f32]), 0i32, shape(inp.q, 0i32))\n\
+     out = f(Inputs { q: to_tensor([[1.0f32, 2.0f32, 3.0f32, 4.0f32], \
+     [5.0f32, 6.0f32, 7.0f32, 8.0f32]]) })\n";
+
+/// The same read through a local, the rewrite chelis#1266 reports downstream
+/// applying by hand. It is the control: identical semantics, and the whole
+/// difference is the spelling.
+const RECORD_PROJECTION_ALIAS: &str = "module Repro.RecordAlias\n\
+     type Inputs = | Inputs { q: tensor[batch, 4, f32] }\n\
+     sig f: Inputs -> tensor[batch, f32]\n\
+     def f(inp: Inputs) = { q = inp.q\n\
+     expand(to_tensor([0.25f32]), 0i32, shape(q, 0i32)) }\n\
+     out = f(Inputs { q: to_tensor([[1.0f32, 2.0f32, 3.0f32, 4.0f32], \
+     [5.0f32, 6.0f32, 7.0f32, 8.0f32]]) })\n";
+
+/// A field of a field. The projection resolves through the whole chain, and
+/// each link binds one host local.
+const RECORD_PROJECTION_NESTED: &str = "module Repro.RecordNested\n\
+     type Inner = | Inner { q: tensor[batch, 4, f32] }\n\
+     type Outer = | Outer { inner: Inner }\n\
+     sig f: Outer -> tensor[batch, f32]\n\
+     def f(o: Outer) = expand(to_tensor([0.25f32]), 0i32, shape(o.inner.q, 0i32))\n\
+     out = f(Outer { inner: Inner { q: to_tensor([[1.0f32, 2.0f32, 3.0f32, 4.0f32], \
+     [5.0f32, 6.0f32, 7.0f32, 8.0f32]]) } })\n";
+
+/// The shape chelis#1266 was filed for: `forward(inputs: ForwardInputs)` with
+/// two tensor fields, one sizing a broadcast against the other.
+const RECORD_PROJECTION_FORWARD: &str = "module Repro.RecordForward\n\
+     type ForwardInputs = | ForwardInputs { a: tensor[batch, f32], b: tensor[1, f32] }\n\
+     sig forward: ForwardInputs -> tensor[batch, f32]\n\
+     def forward(inputs: ForwardInputs) = \
+     add(expand(inputs.b, 0i32, shape(inputs.a, 0i32)), inputs.a)\n\
+     out = forward(ForwardInputs { a: to_tensor([1.0f32, 2.0f32, 3.0f32]), \
+     b: to_tensor([0.25f32]) })\n";
+
+/// The record reaches the projecting def as a PARAMETER of another def, so
+/// the base is a runtime value at two removes from the construction.
+const RECORD_PROJECTION_THROUGH_A_DEF: &str = "module Repro.RecordThroughDef\n\
+     type Inputs = | Inputs { q: tensor[batch, 4, f32] }\n\
+     sig inner: Inputs -> tensor[batch, f32]\n\
+     def inner(inp: Inputs) = expand(to_tensor([0.25f32]), 0i32, shape(inp.q, 0i32))\n\
+     sig outer: Inputs -> tensor[batch, f32]\n\
+     def outer(inp: Inputs) = inner(inp)\n\
+     out = outer(Inputs { q: to_tensor([[1.0f32, 2.0f32, 3.0f32, 4.0f32], \
+     [5.0f32, 6.0f32, 7.0f32, 8.0f32]]) })\n";
+
+/// A record built at compile time and projected inside the same body. The
+/// constructor is a compile-time fact, so `lower_access` projects it and the
+/// def keeps its DAG route: no `chelis_adt_get_field` reaches the emitted C.
+const COMPILE_TIME_RECORD_PROJECTION: &str = "module Repro.StaticRecord\n\
+     type Pair = | Pair { lhs: tensor[2, f32], rhs: tensor[2, f32] }\n\
+     sig f: tensor[2, f32] -> tensor[2, f32]\n\
+     def f(x: tensor[2, f32]) = { p = Pair { lhs: x, rhs: to_tensor([10.0f32, 20.0f32]) }\n\
+     add(p.lhs, p.rhs) }\n\
+     out = f(to_tensor([1.0f32, 2.0f32]))\n";
+
+/// chelis#569's `with_pipe_cast` in today's canonical spelling. The v0.18
+/// lambda the issue quotes (`|> fn (p) -> cast(p, int64)`) is now a parse
+/// error; `|> cast(int64)` is what the parser and the formatter produce.
+const PIPED_SHAPE_READ: &str = "module Repro.PipedShapeRead\n\
+     sig broadcast_rows: tensor[a, f32] -> tensor[1, f32] -> tensor[a, f32]\n\
+     def broadcast_rows(x: tensor[a, f32], b: tensor[1, f32]) = \
+     { a_dim = x |> shape(cast(0, int32)) |> cast(int64)\n\
+     expand(b, cast(0, int32), a_dim) }\n\
+     out = broadcast_rows(to_tensor([1.0f32, 2.0f32, 3.0f32]), to_tensor([0.25f32]))\n";
+
+/// chelis#569's `with_direct_cast`: the form that builds, and the one
+/// `prefer-pipe-operator` rewrites. The inputs are bound to names so the only
+/// replacement the fix makes is the shape read under test; a call written
+/// inline would also be piped, and a bare-name pipe stage at a call site
+/// still loses its shape source at lowering (chelis#1791, out of scope here).
+const DIRECT_SHAPE_READ_FOR_LINT_FIX: &str = "sig broadcast_rows: tensor[a, f32] -> tensor[1, f32] -> tensor[a, f32]\n\
+     def broadcast_rows(x: tensor[a, f32], b: tensor[1, f32]) = {\n  \
+     a_dim = cast(shape(x, cast(0, int32)), int64)\n  \
+     expand(b, cast(0, int32), a_dim)\n\
+     }\n\
+     xs = to_tensor([1.0f32, 2.0f32, 3.0f32])\n\
+     bias = to_tensor([0.25f32])\n\
+     out = broadcast_rows(xs, bias)\n";
+
+/// A piped read of a value that is not a tensor. The stage parameter carries
+/// the upstream value's class, so a runtime scalar stays sourceless through
+/// however many stages.
+const PIPED_SOURCELESS_SCALAR: &str = "module Repro.PipedSourceless\n\
+     sig f: tensor[a, f32] -> int32 -> tensor[a, f32]\n\
+     def f(x: tensor[a, f32], k: int32) = { a_dim = k |> cast(int64)\n\
+     expand(to_tensor([0.25f32]), 0i32, a_dim) }\n";
+
+/// The projection with an axis the field does not have.
+const RECORD_PROJECTION_BAD_AXIS: &str = "module Repro.RecordBadAxis\n\
+     type Inputs = | Inputs { q: tensor[batch, 4, f32] }\n\
+     sig f: Inputs -> tensor[batch, f32]\n\
+     def f(inp: Inputs) = expand(to_tensor([0.25f32]), 0i32, shape(inp.q, 2i32))\n";
+
+/// Run a fixture on both lanes and assert they agree byte for byte on the
+/// expected rendering.
+fn assert_both_lanes_render(stem: &str, source: &str, expected: &str) {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(&dir, stem, source);
+    assert!(ok, "the compiled program must run: {out}");
+    assert!(
+        out.contains(expected),
+        "the compiled binary must render {expected}: {out}"
+    );
+    let evaluated = eval(&fixture(&dir, &format!("{stem}_eval.ch"), source));
+    assert!(
+        evaluated.status.success(),
+        "eval must succeed: {}",
+        String::from_utf8_lossy(&evaluated.stderr)
+    );
+    assert_eq!(
+        out,
+        String::from_utf8_lossy(&evaluated.stdout),
+        "the compiled binary and eval must agree byte for byte"
+    );
+}
+
+/// Oracle row `expand.record_projection.size` (chelis#1266).
+///
+/// Both spellings of the same read are admissible sizes that check, evaluate
+/// and build, and the two agree with each other as well as across lanes.
+///
+/// EVIDENTIARY STATUS: regression test, per assertion.
+///   * the direct spelling on CHECK: measured RED on `33cc78e84`, where
+///     `chelis check` scores 0.976 and reports "`expand` size resolves to a
+///     runtime scalar, but no tensor in scope carries it".
+///   * the direct spelling on C: measured RED on `33cc78e84` once the check
+///     arm admitted it, with `unsupported: builtin `expand` on `chelis build`
+///     host emission (codegen:c)`.
+///   * the alias spelling on EVAL: measured RED on `33cc78e84` with "`access`
+///     on a runtime value is not supported by IR lowering".
+///   * the alias spelling on C: measured GREEN on `33cc78e84`; that assertion
+///     is a disposition lock, and it is here because the two spellings must
+///     not diverge again.
+#[test]
+fn a_record_projection_is_an_admissible_expand_size() {
+    assert_both_lanes_render(
+        "record_direct",
+        RECORD_PROJECTION_DIRECT,
+        "shape=[2], data=[0.25, 0.25]",
+    );
+    assert_both_lanes_render(
+        "record_alias",
+        RECORD_PROJECTION_ALIAS,
+        "shape=[2], data=[0.25, 0.25]",
+    );
+    assert_both_lanes_render(
+        "record_nested",
+        RECORD_PROJECTION_NESTED,
+        "shape=[2], data=[0.25, 0.25]",
+    );
+}
+
+/// The record reaches the projecting def through a second def's parameter.
+///
+/// EVIDENTIARY STATUS: regression test. Measured RED on `33cc78e84` with the
+/// same check-lane rejection as the direct spelling.
+#[test]
+fn a_record_field_reached_through_a_def_parameter_is_an_admissible_expand_size() {
+    assert_both_lanes_render(
+        "record_through_def",
+        RECORD_PROJECTION_THROUGH_A_DEF,
+        "shape=[2], data=[0.25, 0.25]",
+    );
+}
+
+/// The shape chelis#1266 names as the reason it matters: a multi-input
+/// forward whose broadcast is sized from a sibling field.
+///
+/// EVIDENTIARY STATUS: regression test. Measured RED on `33cc78e84` with the
+/// check-lane sourceless rejection.
+#[test]
+fn a_multi_input_record_forward_sizes_its_broadcast_from_a_sibling_field() {
+    assert_both_lanes_render(
+        "record_forward",
+        RECORD_PROJECTION_FORWARD,
+        "shape=[3], data=[1.25, 2.25, 3.25]",
+    );
+}
+
+/// The projection becomes the helper's own tensor input, which is what makes
+/// the direct spelling reach the same lowering as the local-alias spelling
+/// rather than a second mechanism.
+///
+/// EVIDENTIARY STATUS: regression test. Measured RED on `33cc78e84`: the
+/// direct spelling emitted no tensor helper at all, because the host lane
+/// rejected `expand` outright.
+#[test]
+fn a_record_projection_becomes_the_tensor_helper_s_own_input() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out_dir = dir.path().join("record_direct_c-out");
+    let build = build_c(
+        &fixture(&dir, "record_direct_c.ch", RECORD_PROJECTION_DIRECT),
+        &out_dir,
+    );
+    assert!(
+        build.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let emitted = fs::read_to_string(out_dir.join("record_direct_c.c")).expect("generated C");
+    // The leading index is the injective part of the name (round 1, P1-1);
+    // the path tail is there so a reader can find the field.
+    assert!(
+        emitted.contains("__host_record_field_0_inp_q"),
+        "the projected field is bound to a host local: {emitted}"
+    );
+    assert!(
+        emitted.contains("input `__host_record_field_0_inp_q` at slot 0"),
+        "and that local is the helper's slot-0 tensor input: {emitted}"
+    );
+    assert!(
+        emitted.contains("int64_t batch = chelis_tensor_shape(inputs[0], 0);"),
+        "the kept extent is declared from the field's own axis: {emitted}"
+    );
+}
+
+/// Negative parity for the decision above: a record whose constructor IS a
+/// compile-time fact keeps the DAG route `lower_access` already serves.
+///
+/// EVIDENTIARY STATUS: regression test for this pull request's own risk.
+/// Measured RED against an intermediate head of this branch, where the new
+/// uncarriable arm fired on a `let`-bound `(record ..)` literal and pushed
+/// the whole def onto the host lane.
+#[test]
+fn a_compile_time_record_projection_keeps_its_dag_route() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out_dir = dir.path().join("static_record-out");
+    let build = build_c(
+        &fixture(&dir, "static_record.ch", COMPILE_TIME_RECORD_PROJECTION),
+        &out_dir,
+    );
+    assert!(
+        build.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let emitted = fs::read_to_string(out_dir.join("static_record.c")).expect("generated C");
+    assert!(
+        !emitted.contains("chelis_adt_get_field"),
+        "a compile-time record is projected at lowering, never through the \
+         runtime ADT accessor: {emitted}"
+    );
+    assert!(
+        !emitted.contains("__host_record_field_"),
+        "and it needs no hoisted host local: {emitted}"
+    );
+    let evaluated = eval(&fixture(
+        &dir,
+        "static_record_eval.ch",
+        COMPILE_TIME_RECORD_PROJECTION,
+    ));
+    assert!(
+        String::from_utf8_lossy(&evaluated.stdout).contains("data=[11.0, 22.0]"),
+        "and it still evaluates: {}",
+        String::from_utf8_lossy(&evaluated.stdout)
+    );
+}
+
+/// Negative parity for the admissible projection: an axis the field does not
+/// have is still rejected, and now for the RIGHT reason.
+///
+/// EVIDENTIARY STATUS: regression test on the reason, disposition lock on the
+/// rejection. Measured on `33cc78e84`: the program was already rejected, but
+/// with the sourceless-size diagnostic, because the walk never resolved the
+/// operand far enough to check its rank. The rejection must stay, and the
+/// diagnostic must now name the axis.
+#[test]
+fn a_record_projection_with_an_out_of_range_axis_is_still_rejected() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let checked = check(&fixture(
+        &dir,
+        "record_bad_axis.ch",
+        RECORD_PROJECTION_BAD_AXIS,
+    ));
+    let report = String::from_utf8_lossy(&checked.stdout).to_string();
+    assert!(
+        report.contains("shape axis 2 is out of bounds for rank 2 tensor"),
+        "the axis bound is what rejects it: {report}"
+    );
+    assert!(
+        !report.contains("no tensor in scope carries it"),
+        "and it is no longer reported as having no shape source: {report}"
+    );
+}
+
+/// Oracle row `expand.piped_shape_read.lint_fix` (chelis#569), positive half.
+///
+/// EVIDENTIARY STATUS: regression test, per assertion.
+///   * CHECK: measured RED on `33cc78e84`, where the pipe node fell to the
+///     classifier's fail-closed default and `chelis check` reported "`expand`
+///     size resolves to the symbolic dimension `a_dim`, but no tensor in
+///     scope carries it".
+///   * EVAL and C: measured RED on `33cc78e84` after the check arm admitted
+///     it, with "`expand` size resolves to `a_dim`, but no in-scope tensor
+///     axis supplies that extent" from the lowerer -- the check-versus-build
+///     disagreement chelis#469 exists to prevent.
+#[test]
+fn the_canonical_piped_shape_read_checks_evaluates_and_builds() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let checked = check(&fixture(&dir, "piped_shape_read.ch", PIPED_SHAPE_READ));
+    assert!(
+        checked.status.success(),
+        "the piped read must check: {}",
+        String::from_utf8_lossy(&checked.stdout)
+    );
+    assert_both_lanes_render(
+        "piped_shape_read",
+        PIPED_SHAPE_READ,
+        "shape=[3], data=[0.25, 0.25, 0.25]",
+    );
+}
+
+/// The row's own name: what `chelis lint --fix` produces must still work.
+///
+/// This runs the real style path -- no `--allow-style-violations`, no
+/// `CHELIS_STYLE_GATE_DISABLE` -- because the defect chelis#569 reports is
+/// that following the style tool breaks a building program.
+///
+/// EVIDENTIARY STATUS: regression test. Measured RED on `33cc78e84`: the
+/// fixture evaluates before the fix, `chelis lint --fix` rewrites the shape
+/// read into the pipe form, and `chelis check` then rejects it.
+#[test]
+fn a_lint_fix_of_a_direct_shape_read_still_checks_evaluates_and_builds() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = fixture(&dir, "lint_fix.ch", DIRECT_SHAPE_READ_FOR_LINT_FIX);
+    let styled = |args: &[&str]| {
+        Command::cargo_bin("chelis")
+            .expect("chelis")
+            .args(args)
+            .output()
+            .expect("styled chelis invocation")
+    };
+    let before = styled(&["eval", "--file", path.to_str().unwrap()]);
+    assert!(
+        String::from_utf8_lossy(&before.stdout).contains("data=[0.25, 0.25, 0.25]"),
+        "the direct spelling works before the fix: {}",
+        String::from_utf8_lossy(&before.stderr)
+    );
+
+    let fixed = styled(&["lint", "--fix", path.to_str().unwrap()]);
+    assert!(
+        String::from_utf8_lossy(&fixed.stdout).contains("fixed 1 replacement"),
+        "the fix rewrites exactly the shape read: {}{}",
+        String::from_utf8_lossy(&fixed.stdout),
+        String::from_utf8_lossy(&fixed.stderr)
+    );
+    let formatted = styled(&["fmt", "--inplace", path.to_str().unwrap()]);
+    assert!(formatted.status.success(), "fmt must succeed");
+    let rewritten = fs::read_to_string(&path).expect("rewritten fixture");
+    assert!(
+        rewritten.contains("a_dim = x |> shape(cast(0, int32)) |> cast(int64)"),
+        "the pipe form is what the tools produce: {rewritten}"
+    );
+
+    let relinted = styled(&["lint", "--check", path.to_str().unwrap()]);
+    assert!(
+        relinted.status.success(),
+        "and the fixed program is lint-clean: {}",
+        String::from_utf8_lossy(&relinted.stderr)
+    );
+    let checked = styled(&["check", path.to_str().unwrap()]);
+    assert!(
+        checked.status.success(),
+        "the fixed program must still check: {}",
+        String::from_utf8_lossy(&checked.stdout)
+    );
+    let evaluated = styled(&["eval", "--file", path.to_str().unwrap()]);
+    assert!(
+        String::from_utf8_lossy(&evaluated.stdout).contains("data=[0.25, 0.25, 0.25]"),
+        "and evaluate to the same tensor: {}",
+        String::from_utf8_lossy(&evaluated.stderr)
+    );
+    let out_dir = dir.path().join("lint_fix-out");
+    let built = styled(&[
+        "build",
+        path.to_str().unwrap(),
+        "--target",
+        "c",
+        "-o",
+        out_dir.to_str().unwrap(),
+    ]);
+    assert!(
+        built.status.success(),
+        "and build: {}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let status = link_generated(&out_dir, "lint_fix.c", "lint_fix");
+    assert!(status.success(), "link failed: {status}");
+    let run = StdCommand::new(out_dir.join("lint_fix"))
+        .output()
+        .expect("run compiled binary");
+    assert!(
+        String::from_utf8_lossy(&run.stdout).contains("data=[0.25, 0.25, 0.25]"),
+        "and run: {}",
+        String::from_utf8_lossy(&run.stdout)
+    );
+}
+
+/// Negative parity for the pipe arm: a piped read of a non-tensor stays
+/// sourceless, with the section 4.7.2 diagnostic unchanged.
+///
+/// EVIDENTIARY STATUS: disposition lock. Measured GREEN on `33cc78e84` and it
+/// must stay green: admitting a pipe stage must not admit the bare runtime
+/// scalar the pipe carries.
+#[test]
+fn a_piped_shape_read_of_a_non_tensor_is_still_sourceless() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let checked = check(&fixture(
+        &dir,
+        "piped_sourceless.ch",
+        PIPED_SOURCELESS_SCALAR,
+    ));
+    let report = String::from_utf8_lossy(&checked.stdout).to_string();
+    assert!(
+        report.contains(
+            "`expand` size resolves to the symbolic dimension `a_dim`, but no tensor in \
+             scope carries it"
+        ),
+        "the piped runtime scalar keeps the section 4.7.2 rejection: {report}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Round-1 repairs (chelis#1266). Both are about the hoist's IDENTITY and its
+// COVERAGE rather than about whether a projection is admissible at all, so
+// they sit beside the rows above rather than in them.
+// ---------------------------------------------------------------------------
+
+/// Two projection paths whose segments join to the same string. `_` separates
+/// segments and also occurs inside field names, so `inputs.features.mask` and
+/// `inputs.features_mask` are the natural collision, not a contrived one: a
+/// nested `features` record beside a sibling `features_mask` is ordinary
+/// model-input shape.
+const COLLIDING_PROJECTION_PATHS: &str = "module Repro.CollidingPaths\n\
+     type Features = | Features { mask: tensor[2, f32] }\n\
+     type ForwardInputs = | ForwardInputs { features: Features, \
+     features_mask: tensor[2, f32] }\n\
+     sig forward: ForwardInputs -> tensor[2, f32]\n\
+     def forward(inputs: ForwardInputs) = add(inputs.features.mask, inputs.features_mask)\n\
+     out = forward(ForwardInputs { features: Features { mask: to_tensor([1.0f32, 2.0f32]) }, \
+     features_mask: to_tensor([10.0f32, 20.0f32]) })\n";
+
+/// The spelling the §4.7.2 diagnostic's own suggestion text asks for: "bind
+/// that read to a `let`".
+const LET_BOUND_RECORD_SHAPE_READ: &str = "module Repro.LetBoundRecordRead\n\
+     type Inputs = | Inputs { q: tensor[batch, f32] }\n\
+     sig f: Inputs -> tensor[batch, f32]\n\
+     def f(inp: Inputs) = { a_dim = cast(shape(inp.q, cast(0, int32)), int64)\n\
+     expand(to_tensor([0.25f32]), 0i32, a_dim) }\n\
+     out = f(Inputs { q: to_tensor([1.0f32, 2.0f32, 3.0f32]) })\n";
+
+/// The same read piped, which is what `chelis lint --fix` makes of it.
+const LET_BOUND_PIPED_RECORD_SHAPE_READ: &str = "module Repro.LetBoundPipedRecordRead\n\
+     type Inputs = | Inputs { q: tensor[batch, f32] }\n\
+     sig f: Inputs -> tensor[batch, f32]\n\
+     def f(inp: Inputs) = \
+     { a_dim = inp.q |> shape(cast(0, int32)) |> cast(int64)\n\
+     expand(to_tensor([0.25f32]), 0i32, a_dim) }\n\
+     out = f(Inputs { q: to_tensor([1.0f32, 2.0f32, 3.0f32]) })\n";
+
+/// A whole `expand` inside a `let` value, whose projection sits two levels
+/// down. This is the spelling that reached the [04-TOT-2] wall the C4
+/// paragraph says the hoist exists to prevent.
+const LET_VALUE_RECORD_EXPAND: &str = "module Repro.LetValueRecordExpand\n\
+     type Inputs = | Inputs { q: tensor[batch, f32], b: tensor[1, f32] }\n\
+     sig f: Inputs -> tensor[batch, f32]\n\
+     def f(inp: Inputs) = \
+     { y = expand(inp.b, cast(0, int32), shape(inp.q, cast(0, int32)))\n\
+     y }\n\
+     out = f(Inputs { q: to_tensor([1.0f32, 2.0f32, 3.0f32]), b: to_tensor([0.5f32]) })\n";
+
+/// Round 1, P1-1. Two distinct projection paths get two distinct locals.
+///
+/// The hoist's identity is the path, never the rendered name, and the name
+/// carries a per-def index so it is injective whatever the segments spell.
+///
+/// EVIDENTIARY STATUS: regression test. Measured RED at `612199377`, where the
+/// dedup keyed on a joined string: both projections rewrote to one local, the
+/// compiled binary printed `[2.0, 4.0]` and exited 0 while eval printed
+/// `[11.0, 22.0]`. On `33cc78e84` this program is correct on C and loudly
+/// refused on eval, so the defect was a regression in both directions at once.
+#[test]
+fn two_record_paths_that_join_to_one_string_get_two_locals() {
+    assert_both_lanes_render(
+        "colliding_paths",
+        COLLIDING_PROJECTION_PATHS,
+        "shape=[2], data=[11.0, 22.0]",
+    );
+}
+
+/// Round 1, P1-2. A projection nested inside a `let` binding's value is
+/// hoisted, and the body that reads it stays whole.
+///
+/// The three spellings are one finding: the exemption skipped the whole bind
+/// VALUE slot instead of only the bare projection, so the checker admitted
+/// sizes the C lane refused.
+///
+/// EVIDENTIARY STATUS: regression test. All three measured RED at
+/// `612199377`: check clean, eval correct, and C rejecting with either
+/// "`expand` size resolves to `a_dim`, but no in-scope tensor axis supplies
+/// that extent" (the first two) or the [04-TOT-2] host-emission wall (the
+/// third). On `33cc78e84` all three were rejected at CHECK, so none of them
+/// is a pre-existing divergence.
+#[test]
+fn a_record_projection_nested_in_a_let_value_is_hoisted() {
+    assert_both_lanes_render(
+        "let_bound_record_read",
+        LET_BOUND_RECORD_SHAPE_READ,
+        "shape=[3], data=[0.25, 0.25, 0.25]",
+    );
+    assert_both_lanes_render(
+        "let_bound_piped_record_read",
+        LET_BOUND_PIPED_RECORD_SHAPE_READ,
+        "shape=[3], data=[0.25, 0.25, 0.25]",
+    );
+    assert_both_lanes_render(
+        "let_value_record_expand",
+        LET_VALUE_RECORD_EXPAND,
+        "shape=[3], data=[0.5, 0.5, 0.5]",
+    );
+}
+
+/// Negative parity for that widening: the alias spelling, whose bind value IS
+/// the bare projection, is still exempt and still emits exactly the C it
+/// emitted before this pull request.
+///
+/// EVIDENTIARY STATUS: disposition lock, and the control on P1-2's repair.
+/// Widening the exemption's inverse too far would add a second alias to a
+/// spelling that already lowers; this pins the bytes against `33cc78e84`.
+#[test]
+fn the_local_alias_spelling_emits_the_same_c_it_always_did() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out_dir = dir.path().join("alias_bytes-out");
+    let build = build_c(
+        &fixture(&dir, "alias_bytes.ch", RECORD_PROJECTION_ALIAS),
+        &out_dir,
+    );
+    assert!(
+        build.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let emitted = fs::read_to_string(out_dir.join("alias_bytes.c")).expect("generated C");
+    assert!(
+        !emitted.contains("__host_record_field_"),
+        "the alias spelling binds its own local and needs no hoisted one: {emitted}"
+    );
+    assert!(
+        emitted.contains("chelis_adt_get_field"),
+        "it still reads the field on the host lane: {emitted}"
+    );
+}
+
+/// Round 1, P1-3. A lambda whose TYPED parameter shadows the record base.
+/// Deep renders a typed parameter as an `UnknownForm` whose head is the name,
+/// which the hand-written shadow reader did not recognize, so the inner
+/// projection was rewritten to the OUTER record's local.
+const TYPED_LAMBDA_SHADOWS_THE_RECORD_BASE: &str = "module Repro.TypedShadow\n\
+     type Inputs = | Inputs { q: tensor[2, f32] }\n\
+     def g(t: tensor[2, f32]) -> tensor[2, f32] = add(t, to_tensor([100.0f32, 100.0f32]))\n\
+     sig f: Inputs -> tensor[2, f32]\n\
+     def f(inp: Inputs) = add(inp.q, \
+     (fn (inp: Inputs) -> g(inp.q))(Inputs { q: to_tensor([7.0f32, 8.0f32]) }))\n\
+     out = f(Inputs { q: to_tensor([1.0f32, 2.0f32]) })\n";
+
+/// The same shadow inside a `let` value, which the round-1 slot-wide exemption
+/// had masked and the narrowed exemption exposed.
+const TYPED_LAMBDA_SHADOW_IN_A_LET_VALUE: &str = "module Repro.TypedShadowLet\n\
+     type Inputs = | Inputs { q: tensor[2, f32] }\n\
+     def g(t: tensor[2, f32]) -> tensor[2, f32] = add(t, to_tensor([100.0f32, 100.0f32]))\n\
+     sig f: Inputs -> tensor[2, f32]\n\
+     def f(inp: Inputs) = \
+     { y = (fn (inp: Inputs) -> g(inp.q))(Inputs { q: to_tensor([7.0f32, 8.0f32]) })\n\
+     add(inp.q, y) }\n\
+     out = f(Inputs { q: to_tensor([1.0f32, 2.0f32]) })\n";
+
+/// The UNTYPED twin. Its binder is a bare name, the spelling the old reader
+/// did handle, so it was correct before and must stay correct.
+const UNTYPED_LAMBDA_SHADOWS_THE_RECORD_BASE: &str = "module Repro.UntypedShadow\n\
+     type Inputs = | Inputs { q: tensor[2, f32] }\n\
+     def g(t: tensor[2, f32]) -> tensor[2, f32] = add(t, to_tensor([100.0f32, 100.0f32]))\n\
+     sig f: Inputs -> tensor[2, f32]\n\
+     def f(inp: Inputs) = add(inp.q, \
+     (fn (inp) -> g(inp.q))(Inputs { q: to_tensor([7.0f32, 8.0f32]) }))\n\
+     out = f(Inputs { q: to_tensor([1.0f32, 2.0f32]) })\n";
+
+/// Round 1, P1-3. A rebinding of the record base suppresses the hoist, in
+/// every binder spelling.
+///
+/// The hoist no longer reconstructs lexical scope from tag shapes. It asks one
+/// question -- is this name bound anywhere under the body -- and answers it
+/// from the closed vocabulary's own `Binder` child role, failing closed on a
+/// spelling it cannot decode. `crates/chelis-ir/src/host.rs`'s
+/// `every_binder_position_in_the_closed_vocabulary_yields_a_name` is the
+/// oracle over that vocabulary; these are the surface programs.
+///
+/// EVIDENTIARY STATUS: regression test for the two typed rows, disposition
+/// lock for the untyped one. Measured at `eccdcb7e2`: the typed lambda gave
+/// eval `[108.0, 110.0]` against compiled C `[102.0, 104.0]`, exit 0 and no
+/// diagnostic, in both the body and the let-value position. The untyped twin
+/// was correct there and on `33cc78e84`.
+#[test]
+fn a_binder_that_shadows_the_record_base_suppresses_the_hoist() {
+    assert_both_lanes_render(
+        "typed_shadow",
+        TYPED_LAMBDA_SHADOWS_THE_RECORD_BASE,
+        "shape=[2], data=[108.0, 110.0]",
+    );
+    assert_both_lanes_render(
+        "typed_shadow_let",
+        TYPED_LAMBDA_SHADOW_IN_A_LET_VALUE,
+        "shape=[2], data=[108.0, 110.0]",
+    );
+    assert_both_lanes_render(
+        "untyped_shadow",
+        UNTYPED_LAMBDA_SHADOWS_THE_RECORD_BASE,
+        "shape=[2], data=[108.0, 110.0]",
+    );
+}
+
+/// Round 2, P1-1. A TYPED lambda parameter that does NOT shadow the record
+/// base. Deep writes it `(t {type: ..})`, an unstamped form whose head is the
+/// name, and the hoist must read it rather than refuse.
+const TYPED_LAMBDA_BESIDE_A_PROJECTION: &str = "module Repro.TypedLambdaBeside\n\
+     type Inputs = | Inputs { q: tensor[batch, f32], b: tensor[1, f32] }\n\
+     def scale(t: tensor[1, f32]) -> tensor[1, f32] = mul(t, t)\n\
+     sig f: Inputs -> tensor[batch, f32]\n\
+     def f(inp: Inputs) = expand((fn (t: tensor[1, f32]) -> scale(t))(inp.b), 0i32, \
+     shape(inp.q, cast(0, int32)))\n\
+     out = f(Inputs { q: to_tensor([1.0f32, 2.0f32, 3.0f32]), b: to_tensor([0.25f32]) })\n";
+
+/// The untyped twin, whose binder the earlier readers did handle.
+const UNTYPED_LAMBDA_BESIDE_A_PROJECTION: &str = "module Repro.UntypedLambdaBeside\n\
+     type Inputs = | Inputs { q: tensor[batch, f32], b: tensor[1, f32] }\n\
+     def scale(t: tensor[1, f32]) -> tensor[1, f32] = mul(t, t)\n\
+     sig f: Inputs -> tensor[batch, f32]\n\
+     def f(inp: Inputs) = expand((fn (t) -> scale(t))(inp.b), 0i32, \
+     shape(inp.q, cast(0, int32)))\n\
+     out = f(Inputs { q: to_tensor([1.0f32, 2.0f32, 3.0f32]), b: to_tensor([0.25f32]) })\n";
+
+/// Round 2, P1-1. A typed binder that does not shadow the record base no
+/// longer stops the hoist.
+///
+/// EVIDENTIARY STATUS: regression test. Measured RED at `2570da8d1`: check
+/// clean, eval `[0.0625, 0.0625, 0.0625]`, and the C lane refusing with
+/// `unsupported: builtin expand on chelis build host emission ... [04-TOT-2]`,
+/// because the reader could not decode `(t {type: ..})` and the hoist was
+/// abandoned for the whole definition. The untyped twin built there, which is
+/// what identified the binder spelling as the cause. On `33cc78e84` the typed
+/// program was rejected at check, so neither lane had it working.
+#[test]
+fn a_typed_binder_beside_a_projection_does_not_stop_the_hoist() {
+    assert_both_lanes_render(
+        "typed_lambda_beside",
+        TYPED_LAMBDA_BESIDE_A_PROJECTION,
+        "shape=[3], data=[0.0625, 0.0625, 0.0625]",
+    );
+    assert_both_lanes_render(
+        "untyped_lambda_beside",
+        UNTYPED_LAMBDA_BESIDE_A_PROJECTION,
+        "shape=[3], data=[0.0625, 0.0625, 0.0625]",
+    );
+}
+
+/// Round 2, P1-1. The two outcomes are told apart in the emitted C, not
+/// inferred from the values.
+///
+/// A definition whose typed binder is merely NEARBY hoists: its C carries the
+/// hoisted local. A definition whose typed binder REBINDS the record base
+/// suppresses that base's projections: its C carries none, and the host lane
+/// emits the read itself. Without this pair a suppressed shadow and an
+/// abandoned hoist look identical from the values alone, which is exactly how
+/// round 1's shadow receipt passed while the reader was broken.
+///
+/// EVIDENTIARY STATUS: regression test on the first assertion, disposition
+/// lock on the second. At `2570da8d1` BOTH emitted zero hoisted locals,
+/// because the reader refused on either program.
+#[test]
+fn a_typed_binder_suppresses_only_the_base_it_rebinds() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let emitted = |stem: &str, source: &str| -> String {
+        let out_dir = dir.path().join(format!("{stem}-out"));
+        let build = build_c(&fixture(&dir, &format!("{stem}.ch"), source), &out_dir);
+        assert!(
+            build.status.success(),
+            "{stem} must build: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        fs::read_to_string(out_dir.join(format!("{stem}.c"))).expect("generated C")
+    };
+    let beside = emitted("typed_beside_c", TYPED_LAMBDA_BESIDE_A_PROJECTION);
+    assert!(
+        beside.contains("__host_record_field_"),
+        "a typed binder beside the projection leaves the hoist alone: {beside}"
+    );
+    let shadowing = emitted("typed_shadow_c", TYPED_LAMBDA_SHADOWS_THE_RECORD_BASE);
+    assert!(
+        !shadowing.contains("__host_record_field_"),
+        "a typed binder that rebinds the base suppresses that base's \
+         projections: {shadowing}"
+    );
+    assert!(
+        shadowing.contains("chelis_adt_get_field"),
+        "and the host lane reads the field itself instead: {shadowing}"
     );
 }

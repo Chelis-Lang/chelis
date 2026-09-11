@@ -545,10 +545,16 @@ class RuntimeExtentOracleTests(unittest.TestCase):
         # B2b-2's own pair left the shortfall with chelis#665's fix.
         self.assertNotIn("expand.kept_axis.op_declared_source.c", shortfall)
         self.assertNotIn("expand.kept_axis.op_declared_source.eval", shortfall)
+        # chelis#1266's record projection and chelis#569's piped read left it
+        # too: the walk resolves a `shape` operand by its type and folds a
+        # `pipe` into the application it denotes, so both spellings execute.
+        self.assertNotIn("expand.record_projection.size", shortfall)
+        self.assertNotIn("expand.piped_shape_read.lint_fix", shortfall)
         # A row whose owning slice has not started, named so this assertion
-        # does not go stale every time a sibling change moves a row: #1266's
-        # record projection is the provenance work B2b-2 explicitly defers.
-        self.assertIn("expand.record_projection.size", shortfall)
+        # does not go stale every time a sibling change moves a row:
+        # chelis#1379's arithmetic over a runtime scalar under a named claim
+        # is the provenance work B2b-2 still defers.
+        self.assertIn("expand.arith_size.named_claim.eval", shortfall)
         self.assertNotEqual(shortfall, ())
         self.assertEqual(ORACLE.exit_shortfall(ORACLE.PHASE_REGISTRY["a"]), ())
 
