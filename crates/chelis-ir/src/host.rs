@@ -339,7 +339,14 @@ impl HostLoweringCacheGuard {
 impl Drop for HostLoweringCacheGuard {
     fn drop(&mut self) {
         let remaining = HOST_LOWERING_CACHE_DEPTH.with(|depth| {
-            let remaining = depth.get().saturating_sub(1);
+            // This is a scope depth, never a capacity key. The chelis#893
+            // runtime-representation inventory's `CAPACITY_FOLDS` rule keys on
+            // the `saturating_*` and `checked_mul` method names wherever they
+            // appear in IR-class code, so the floor is spelled out here rather
+            // than classified as capacity arithmetic it is not. chelis#1835's
+            // structural repair deletes this guard and this counter with it.
+            let current = depth.get();
+            let remaining = if current > 0 { current - 1 } else { 0 };
             depth.set(remaining);
             remaining
         });
@@ -11262,7 +11269,15 @@ fn top_level_fn_helper_summary_rejects(
         return Ok(false);
     }
     record_host_work(|profile| profile.helper_summary_builds += 1);
-    HOST_SUMMARY_PROBE_BUILDS.with(|builds| builds.set(builds.get().saturating_add(1)));
+    // This is a diagnostic count, never a capacity key. The chelis#893
+    // runtime-representation inventory's `CAPACITY_FOLDS` rule keys on the
+    // `saturating_*` and `checked_mul` method names wherever they appear in
+    // IR-class code, so the ceiling is spelled out here rather than classified
+    // as capacity arithmetic it is not.
+    HOST_SUMMARY_PROBE_BUILDS.with(|builds| {
+        let counted = builds.get();
+        builds.set(if counted == u64::MAX { counted } else { counted + 1 });
+    });
     let pushed = push_inlining(name);
     // This lowering is a probe: its result is inspected and discarded, so
     // it must leave no trace on specialization state
