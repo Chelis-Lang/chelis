@@ -125,6 +125,7 @@ jobs:
           path: |
             target/agents/wire-codec-rustdoc
             target/agents/native-bindings-driver
+            target/agents/native-execution-integration
             target/agents/native-owner-integration
             target/graph-fixture-target
           key: ${{ runner.os }}-${{ runner.arch }}-script-execution-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
@@ -140,6 +141,7 @@ jobs:
           path: |
             target/agents/wire-codec-rustdoc
             target/agents/native-bindings-driver
+            target/agents/native-execution-integration
             target/agents/native-owner-integration
             target/graph-fixture-target
           key: ${{ runner.os }}-${{ runner.arch }}-script-execution-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}

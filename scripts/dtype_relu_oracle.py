@@ -100,7 +100,7 @@ def source_contracts() -> tuple[SourceContract, ...]:
             "HIP all-width selection",
             "crates/chelis-backend-hip/src/kernels.rs",
             (
-                "pub fn relu(kernel_name: &str, kind: ElemKind)",
+                "pub fn relu(rank: usize, kernel_name: &str, kind: ElemKind)",
                 "pub fn relu_reduced(",
                 "pub fn relu_adjoint_reduced(",
                 "out[i] = is_positive ? g[idx_g] : (unsigned short)0;",

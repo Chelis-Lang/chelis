@@ -115,6 +115,7 @@ jobs:
           cp target/release/chelis "$staging/bin/"
           cp target/release/libchelis_runtime.a "$staging/lib/"
           cp crates/chelis-runtime/include/chelis_runtime.h "$staging/include/"
+          cp crates/chelis-runtime/include/chelis_runtime_views.h "$staging/include/"
           cp crates/chelis-runtime/include/chelis_runtime_dtype.h "$staging/include/"
           cp crates/chelis-runtime/include/chelis_blas.h "$staging/include/"
           cp crates/chelis-runtime/include/chelis_simd.h "$staging/include/"

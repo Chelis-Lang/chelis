@@ -361,7 +361,7 @@ class NativeExecutionIntegration(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         root = Path(__file__).resolve().parent.parent
-        requested = os.environ.get("CARGO_TARGET_DIR")
+        requested = os.environ.get("CHELIS_NATIVE_EXECUTION_TARGET")
         if not requested:
             raise RuntimeError("native execution integration requires an explicit owned target")
         cls.witness = execution.collect_native_execution(root, Path(requested))

@@ -25,9 +25,11 @@ NIGHTLY_CLASSES = frozenset({
     "test_capacity_census_wire_publication.ActualPublicationArtifacts",
     "test_capacity_census_wire_schema.ActualSchemaCodec",
     "test_capacity_census_native_calls.NativeCompilerCollectionControls",
+    "test_capacity_census_native_execution.NativeExecutionIntegration",
     "test_capacity_census_native_owners.NativeOwnerIntegration",
     "test_regenerate_chelis_std_bundle.RealGeneratorFixedPointTests",
 })
+NATIVE_EXECUTION_TARGET = ROOT / "target/agents/native-execution-integration"
 PROFILE_CLASSES = frozenset({
     "test_nextest_profile_partition.ProfilePartitionTests",
     "test_nextest_profile_partition.GeneralizationPartitionTests",
@@ -129,6 +131,11 @@ def main():
     if args.list:
         return 0
     os.environ.setdefault("CHELIS_CI_TIMING_DIR", str(output / "timings"))
+    if args.selection == "nightly":
+        os.environ.setdefault(
+            "CHELIS_NATIVE_EXECUTION_TARGET",
+            str(NATIVE_EXECUTION_TARGET),
+        )
     with ci_timing.subprocesses():
         result = execute(groups[args.selection])
     return 0 if passed(result, args.selection) else 1

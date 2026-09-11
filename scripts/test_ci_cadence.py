@@ -76,10 +76,9 @@ def assert_extended(test, pr, nightly):
     ]
     test.assertEqual(len(script_cache_steps), 2)
     for step in script_cache_steps:
-        test.assertIn(
-            "target/agents/native-owner-integration",
-            step["with"]["path"].splitlines(),
-        )
+        cached_paths = step["with"]["path"].splitlines()
+        test.assertIn("target/agents/native-execution-integration", cached_paths)
+        test.assertIn("target/agents/native-owner-integration", cached_paths)
     test.assertIn("cargo test -p chelis-cli --test chelis_std_self_test_corpus -- --ignored --nocapture", commands)
     test.assertIn("cargo test -p chelis-backend-c", [s.get("run") for s in jobs["backend-sanitizers-full"]["steps"]])
     support = jobs["integration-support"]
