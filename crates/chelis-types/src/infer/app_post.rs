@@ -233,7 +233,6 @@ pub(super) fn finish_unified_app(
     ) {
         return result;
     }
-    drop(dtype_site);
 
     // chelis#778 follow-up: a shape-computed builtin override derives
     // its result shape from operand shapes and returns

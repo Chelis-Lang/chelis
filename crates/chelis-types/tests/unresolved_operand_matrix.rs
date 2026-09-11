@@ -957,8 +957,7 @@ fn dtype_admissibility_validates_a_late_bound_operand() {
         DtypeCell {
             cell: Cell {
                 route: "mean",
-                resolved_invalid:
-                    "def f(x: tensor[3, int32]) -> tensor[int32] = mean(x, 0i32)\n",
+                resolved_invalid: "def f(x: tensor[3, int32]) -> tensor[int32] = mean(x, 0i32)\n",
                 late_invalid: "def f(x: tensor[3, int32]) -> tensor[int32] = {\n  g = fn (t) -> mean(t, 0i32)\n  g(x)\n}\n",
                 late_valid: "def f(x: tensor[3, f32]) -> tensor[f32] = {\n  g = fn (t) -> mean(t, 0i32)\n  g(x)\n}\n",
                 diagnostic: "mean on operand precision `int32` is not admitted",
@@ -968,8 +967,7 @@ fn dtype_admissibility_validates_a_late_bound_operand() {
         DtypeCell {
             cell: Cell {
                 route: "softmax",
-                resolved_invalid:
-                    "def f(x: tensor[3, int32]) -> tensor[3, int32] = softmax(x, 0i32)\n",
+                resolved_invalid: "def f(x: tensor[3, int32]) -> tensor[3, int32] = softmax(x, 0i32)\n",
                 late_invalid: "def f(x: tensor[3, int32]) -> tensor[3, int32] = {\n  g = fn (t) -> softmax(t, 0i32)\n  g(x)\n}\n",
                 late_valid: "def f(x: tensor[3, f32]) -> tensor[3, f32] = {\n  g = fn (t) -> softmax(t, 0i32)\n  g(x)\n}\n",
                 diagnostic: "softmax on operand precision `int32` is not admitted",
@@ -993,8 +991,7 @@ fn dtype_admissibility_validates_a_late_bound_operand() {
         DtypeCell {
             cell: Cell {
                 route: "uniform_like (non-tensor template)",
-                resolved_invalid:
-                    "def f(x: int32) -> int32 ! {Random} = uniform_like(x, 0.0f32, 1.0f32)\n",
+                resolved_invalid: "def f(x: int32) -> int32 ! {Random} = uniform_like(x, 0.0f32, 1.0f32)\n",
                 late_invalid: "def f(x: int32) -> int32 ! {Random} = {\n  g = fn (t) -> uniform_like(t, 0.0f32, 1.0f32)\n  g(x)\n}\n",
                 late_valid: "def f(x: tensor[3, f32]) -> tensor[3, f32] ! {Random} = {\n  g = fn (t) -> uniform_like(t, 0.0f32, 1.0f32)\n  g(x)\n}\n",
                 diagnostic: "uniform_like expects tensor template input",
@@ -1143,10 +1140,14 @@ fn a_dtype_call_that_suspends_and_then_rejects_eagerly_reports_once() {
     let errors = check(program).expect_err("mod over a float shift amount must be rejected");
     let hits = errors
         .iter()
-        .filter(|e| e.message.contains("mod requires matching integer arguments"))
+        .filter(|e| {
+            e.message
+                .contains("mod requires matching integer arguments")
+        })
         .count();
     assert_eq!(
-        hits, 1,
+        hits,
+        1,
         "the eager rejection must be reported once, not re-reported by the replay; \
          got {hits} copies in:\n{}",
         summary(&errors)
@@ -1158,9 +1159,9 @@ fn a_dtype_call_that_suspends_and_then_rejects_eagerly_reports_once() {
     let errors = check("def f(x: int64) -> int64 = {\n  g = fn (t) -> mod(t, 3i32)\n  g(x)\n}\n")
         .expect_err("mod over a late-bound int64 must be rejected");
     assert!(
-        errors
-            .iter()
-            .any(|e| e.message.contains("mod requires matching integer arguments")),
+        errors.iter().any(|e| e
+            .message
+            .contains("mod requires matching integer arguments")),
         "the late-bound operand's own validation must still run:\n{}",
         summary(&errors)
     );
@@ -1253,9 +1254,9 @@ fn a_late_bound_tensor_precision_is_not_validated_yet() {
     let errors = check("def f(x: tensor[3, int32]) -> tensor[int32] = mean(x, 0i32)\n")
         .expect_err("a settled integer operand must be rejected");
     assert!(
-        errors
-            .iter()
-            .any(|e| e.message.contains("mean on operand precision `int32` is not admitted")),
+        errors.iter().any(|e| e
+            .message
+            .contains("mean on operand precision `int32` is not admitted")),
         "the resolved rejection must still name the dtype policy:\n{}",
         summary(&errors)
     );

@@ -316,8 +316,7 @@ pub(super) fn validate_numeric_and_reduction_arguments(
                     }
                 }
                 _ => {
-                    if let Some((kind, message, hints)) =
-                        operand_dtype_rejection(fname, &resolved)
+                    if let Some((kind, message, hints)) = operand_dtype_rejection(fname, &resolved)
                     {
                         reject!(
                             errors,

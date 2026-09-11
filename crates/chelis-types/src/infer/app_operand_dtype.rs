@@ -102,9 +102,9 @@ pub(super) fn reject_test_assert_close_tensor_operand_dtypes(
             }
             // chelis#1512: the tolerance has no dtype YET.
             Type::Var(_) => {
-            if let Some(site) = suspension {
-                site.register_dtype_admissibility(arg_tys, result_ty, subst, product);
-            }
+                if let Some(site) = suspension {
+                    site.register_dtype_admissibility(arg_tys, result_ty, subst, product);
+                }
             }
             Type::Error(_) => {}
             other => {
@@ -188,9 +188,9 @@ pub(super) fn reject_inadmissible_operand_dtypes(
                 // unification does not bind it and an operand really does
                 // reach this arm unresolved.
                 Type::Var(_) => {
-                if let Some(site) = suspension {
-                    site.register_dtype_admissibility(arg_tys, result_ty, subst, product);
-                }
+                    if let Some(site) = suspension {
+                        site.register_dtype_admissibility(arg_tys, result_ty, subst, product);
+                    }
                 }
                 Type::Error(_) => {}
                 _ => {
@@ -218,9 +218,9 @@ pub(super) fn reject_inadmissible_operand_dtypes(
                 Type::Prim(Prim::F32) => {}
                 // chelis#1512: the bound has no dtype YET.
                 Type::Var(_) => {
-                if let Some(site) = suspension {
-                    site.register_dtype_admissibility(arg_tys, result_ty, subst, product);
-                }
+                    if let Some(site) = suspension {
+                        site.register_dtype_admissibility(arg_tys, result_ty, subst, product);
+                    }
                 }
                 Type::Error(_) => {}
                 _ => {
@@ -278,9 +278,9 @@ pub(super) fn reject_inadmissible_operand_dtypes(
                 Type::Tensor(_, TensorPrec::Concrete(prim)) if prim.is_float() => {}
                 // chelis#1512: not a tensor at a known dtype YET.
                 Type::Var(_) => {
-                if let Some(site) = suspension {
-                    site.register_dtype_admissibility(arg_tys, result_ty, subst, product);
-                }
+                    if let Some(site) = suspension {
+                        site.register_dtype_admissibility(arg_tys, result_ty, subst, product);
+                    }
                 }
                 Type::Tensor(_, TensorPrec::Var(_)) | Type::Error(_) => {}
                 _ => {
@@ -309,9 +309,9 @@ pub(super) fn reject_inadmissible_operand_dtypes(
                     if prim.is_float() && tensor_prim.is_none_or(|input| input == *prim) => {}
                 // chelis#1512: the rate has no dtype YET.
                 Type::Var(_) => {
-                if let Some(site) = suspension {
-                    site.register_dtype_admissibility(arg_tys, result_ty, subst, product);
-                }
+                    if let Some(site) = suspension {
+                        site.register_dtype_admissibility(arg_tys, result_ty, subst, product);
+                    }
                 }
                 Type::Error(_) => {}
                 _ => {
