@@ -93,11 +93,12 @@ pub fn emit_selected(source: &str, entry: &str) -> String {
         entry_name: Some(entry.into()),
     })
     .unwrap_or_else(|e| panic!("{entry}: {e:?}"));
+    let generated_path = format!("{}.c", artifact.compile_result.entry_name);
     artifact
         .compile_result
         .files
         .into_iter()
-        .find(|f| f.path == format!("{entry}.c"))
+        .find(|f| f.path == generated_path)
         .expect("selected C file")
         .contents
 }

@@ -36,6 +36,8 @@ def main(x: tensor[4, f32]) -> tensor[4, f32] = with seed(42i64) {
     let driver = r#"
 int main(void) {
     chelis_tensor *x = input(4);
+    const float input_expected[] = {-3.0f, -1.0f, 1.0f, 3.0f};
+    tensor_bits(x, 4, input_expected);
     chelis_tensor *inputs[] = {x};
     chelis_tensor *first[] = {NULL};
     chelis_tensor *second[] = {NULL};
@@ -44,6 +46,7 @@ int main(void) {
     const float expected[] = {0.0f, -2.0f, 0.0f, 0.0f};
     tensor_bits(first[0], 4, expected);
     tensor_bits(second[0], 4, expected);
+    tensor_bits(x, 4, input_expected);
     chelis_tensor_release(first[0]);
     chelis_tensor_release(second[0]);
     chelis_tensor_release(x);
@@ -95,8 +98,9 @@ result = with seed(42i64) {
     );
     let (summary, stdout) = ownership_support::run_program(&c);
     ownership_support::balanced(&summary);
-    assert!(
-        stdout.contains("[0.0, 2.0, 0.0, 0.0]") && stdout.contains("[2.0, 0.0, 0.0, 0.0]"),
-        "saved-mask replay, nested scopes, and restored next draw must remain observable: {stdout}"
+    assert_eq!(
+        stdout,
+        "result = [tensor(shape=[4], data=[0.0, 2.0, 0.0, 0.0]), tensor(shape=[4], data=[0.0, 2.0, 0.0, 0.0]), tensor(shape=[4], data=[2.0, 2.0, 2.0, 2.0]), tensor(shape=[4], data=[2.0, 0.0, 0.0, 0.0])]\n",
+        "each replay, nested-scope, and restored-stream position must remain observable"
     );
 }
