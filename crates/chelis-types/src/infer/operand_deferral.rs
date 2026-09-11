@@ -64,7 +64,7 @@ impl<'a> UnresolvedOperandSite<'a> {
         }
         product.defer_shape_check(
             DeferredShapeRule::PostApp {
-                site: std::ptr::from_ref(self.list).addr(),
+                site: product.post_app_key(self.list),
                 list: self.list.clone(),
                 kids: self.kids.to_vec(),
                 func_name: self.fname.to_string(),

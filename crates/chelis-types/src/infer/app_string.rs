@@ -11,18 +11,20 @@
 //!
 //! The routing is unchanged. `finish_unified_app` still owns the dispatch and
 //! still builds the deferral site; this module holds the arms and nothing
-//! else. `None` means no route here owns that name, so the caller's own match
-//! runs, and it also carries the one fall-through the original had: the
-//! `string_contains` family checks its arguments and then lets the generic
-//! path decide the result.
+//! else. `None` means the caller's own match runs: either no route here owns
+//! the name, or a route owns it and reached its arm with an EMPTY argument
+//! list, which is the one path through an owned name that decides nothing.
+//! Every owned route with arguments answers `Some`, the `string_contains`
+//! family included: it validates each argument and then returns `bool`.
 
 use super::*;
 
-/// Decide a `string_*` route, or hand the name back.
+/// Decide a string-operand route, or hand the name back.
 ///
 /// `Some` is the route's answer, already reported if it rejected. `None` means
-/// either that no route here owns the name, or that the route validated its
-/// operands and leaves the result to the caller.
+/// the caller decides: no route here owns the name, or one does and was
+/// reached with an empty argument list, which every arm guards with
+/// `arg_tys.first()` or a loop that runs zero times.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn string_route_result(
     fname: &str,

@@ -541,9 +541,9 @@ pub(super) fn finish_unified_app(
             }
             name if string_route_owns(name) => {
                 // chelis#1512: the string-operand group lives in `app_string.rs`.
-                // `None` is its fall-through, which the `string_contains`
-                // family needs: it validates its arguments and leaves the
-                // result to the generic path below.
+                // `None` means it decided nothing, which for a name it owns
+                // happens only on an empty argument list, so the generic path
+                // below runs exactly as it did before the move.
                 if let Some(result) = string_route_result(
                     name, list, &arg_tys, &result_ty, &site, product, subst, errors,
                 ) {
