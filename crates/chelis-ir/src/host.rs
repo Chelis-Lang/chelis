@@ -4,6 +4,7 @@ use chelis_deep::DeepTag;
 use chelis_unord::{UnordMap, UnordSet};
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
+use std::marker::PhantomData;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::sync::Arc;
@@ -319,7 +320,9 @@ fn evict_host_lowering_cache_entries(program_key: usize) {
 /// scope is still using. `Drop` disarms and clears only when the last scope
 /// ends, which is what lets the interpreter hold one across a whole evaluation
 /// while a nested whole-program lowering comes and goes. chelis#1829.
-struct HostLoweringCacheGuard;
+struct HostLoweringCacheGuard {
+    program_key: usize,
+}
 
 impl HostLoweringCacheGuard {
     fn begin(program: &CheckedProgram) -> Self {
@@ -332,7 +335,7 @@ impl HostLoweringCacheGuard {
         }
         HOST_LOWERING_CACHE_DEPTH.with(|active| active.set(depth + 1));
         HOST_LOWERING_CACHE_ACTIVE.with(|active| active.set(true));
-        Self
+        Self { program_key }
     }
 }
 
@@ -353,12 +356,31 @@ impl Drop for HostLoweringCacheGuard {
         if remaining == 0 {
             HOST_LOWERING_CACHE_ACTIVE.with(|active| active.set(false));
             clear_host_lowering_caches();
+        } else {
+            // A scope's rows must not outlive the scope. Evicting only on
+            // `begin` left an inner scope's rows in the caches after its
+            // program was gone, so a later program allocated at the same
+            // address could read them; evicting here as well is what makes
+            // the sentence on `evict_host_lowering_cache_entries` true on
+            // both edges rather than only on entry.
+            evict_host_lowering_cache_entries(self.program_key);
         }
     }
 }
 
 /// A live host-lowering memo scope. See [`begin_host_lowering_cache_scope`].
-pub struct HostLoweringCacheScope(HostLoweringCacheGuard);
+///
+/// The `PhantomData` is the contract, not decoration. The `&'program
+/// CheckedProgram` ties the scope to the program it arms for, so the borrow
+/// checker refuses to drop that program while rows keyed on its address are
+/// still readable. The `*const ()` makes the scope neither `Send` nor `Sync`,
+/// because the caches it arms are thread-locals: dropping the scope on another
+/// thread would leave the arming thread armed forever with rows retained.
+pub struct HostLoweringCacheScope<'program> {
+    /// Held for its `Drop`, never read.
+    _guard: HostLoweringCacheGuard,
+    program: PhantomData<(&'program CheckedProgram, *const ())>,
+}
 
 /// Arm the host-lowering memo for `program` until the returned scope drops.
 ///
@@ -366,8 +388,11 @@ pub struct HostLoweringCacheScope(HostLoweringCacheGuard);
 /// as a tree, so an interpreter that applies imported definitions must hold
 /// one of these for the whole evaluation or pay that expansion per definition
 /// (chelis#1829). The probe's own algorithm is chelis#1835 and is unchanged.
-pub fn begin_host_lowering_cache_scope(program: &CheckedProgram) -> HostLoweringCacheScope {
-    HostLoweringCacheScope(HostLoweringCacheGuard::begin(program))
+pub fn begin_host_lowering_cache_scope(program: &CheckedProgram) -> HostLoweringCacheScope<'_> {
+    HostLoweringCacheScope {
+        _guard: HostLoweringCacheGuard::begin(program),
+        program: PhantomData,
+    }
 }
 
 /// Kernel-decision summary probes on this thread that missed the memo and ran
@@ -16870,6 +16895,90 @@ def bad[b](box: Box[b]) -> bool =
             PROGRAM_DEFS_CACHE.with(|cache| cache.borrow().is_empty()),
             "#1829: the last scope to drop clears the memo"
         );
+    }
+
+    /// chelis#1829 P2-1 (round 1). A scope's rows must not outlive the scope.
+    /// Eviction used to run only on `begin`, so an inner scope's rows stayed in
+    /// the caches after its program was dropped, and a later program allocated
+    /// at that address could read them. The reviewer reproduced exactly that.
+    ///
+    /// This lock establishes the invariant directly rather than by hoping an
+    /// allocator recycles an address: it asserts the inner program's rows are
+    /// present while its scope is live and gone the moment that scope drops,
+    /// which is what makes a recycled address harmless. The presence assertion
+    /// is what stops this passing without measuring anything.
+    ///
+    /// Evidentiary status: DISPOSITION LOCK on the drop-edge eviction added in
+    /// round 1. Against the pre-round head the post-drop assertion fails.
+    #[test]
+    fn issue_1829_dropping_an_inner_scope_evicts_its_own_rows() {
+        let outer = surf_check("module Demo.Outer2\n\ndef outer_fn(x: int64) -> int64 = x\n");
+        let inner = surf_check("module Demo.Inner2\n\ndef inner_fn(x: int64) -> int64 = x\n");
+        let outer_key = &outer as *const CheckedProgram as usize;
+        let inner_key = &inner as *const CheckedProgram as usize;
+        assert_ne!(outer_key, inner_key, "two live programs have two addresses");
+
+        let outer_scope = begin_host_lowering_cache_scope(&outer);
+        cached_program_defs(&outer);
+        {
+            let _inner_scope = begin_host_lowering_cache_scope(&inner);
+            cached_program_defs(&inner);
+            HELPER_SUMMARY_REJECTS_CACHE.with(|cache| {
+                cache
+                    .borrow_mut()
+                    .insert((inner_key, "inner_fn".to_string()), true);
+            });
+            assert!(
+                PROGRAM_DEFS_CACHE.with(|cache| cache.borrow().contains_key(&inner_key)),
+                "#1829: the inner scope must actually populate rows, or this lock \
+                 would pass without measuring anything"
+            );
+        }
+
+        assert!(
+            !PROGRAM_DEFS_CACHE.with(|cache| cache.borrow().contains_key(&inner_key)),
+            "#1829: an inner scope's definition rows must not outlive its drop"
+        );
+        assert_eq!(
+            HELPER_SUMMARY_REJECTS_CACHE.with(|cache| cache
+                .borrow()
+                .get(&(inner_key, "inner_fn".to_string()))
+                .copied()),
+            None,
+            "#1829: an inner scope's program-keyed summary rows must not outlive its drop"
+        );
+        assert!(
+            PROGRAM_DEFS_CACHE.with(|cache| cache.borrow().contains_key(&outer_key)),
+            "#1829: the drop must evict only the dropping scope's program"
+        );
+
+        drop(outer_scope);
+    }
+
+    /// chelis#1829 P2-2 (round 1). `HostLoweringCacheScope` arms thread-local
+    /// caches, so sending one to another thread and dropping it there leaves
+    /// the arming thread armed forever with rows retained. The reviewer proved
+    /// the type satisfied `thread::spawn`'s bound and did exactly that.
+    ///
+    /// This is a COMPILE-TIME lock, not a runtime one: the two blanket impls
+    /// below are ambiguous for any `Send` type, so if the `*const ()` marker is
+    /// ever removed this call stops compiling and the crate's test target fails
+    /// to build. A runtime test cannot assert a negative trait bound.
+    ///
+    /// The companion invariant, that the scope cannot outlive the program it
+    /// arms for, needs no test: the `&'program CheckedProgram` in the scope's
+    /// `PhantomData` makes the borrow checker enforce it.
+    ///
+    /// Evidentiary status: DISPOSITION LOCK on the marker added in round 1.
+    #[test]
+    fn issue_1829_cache_scope_cannot_cross_a_thread() {
+        trait AmbiguousIfSend<Witness> {
+            fn assert_not_send() {}
+        }
+        impl<T: ?Sized> AmbiguousIfSend<()> for T {}
+        impl<T: ?Sized + Send> AmbiguousIfSend<u8> for T {}
+        // Resolves only while `HostLoweringCacheScope` is NOT `Send`.
+        <HostLoweringCacheScope<'_> as AmbiguousIfSend<_>>::assert_not_send();
     }
 
     /// chelis#1829 hazard (2). Cache keys are program addresses, so a scope
