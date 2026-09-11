@@ -56,12 +56,26 @@ fn direct_fixed_entry_pairs_actual_helper_normalization_and_complete_artifact() 
 
 #[test]
 fn gradient_host_capture_comes_from_the_selected_helpers_actual_ad() {
-    let source = r#"
+    for (source, input_count) in [
+        (
+            r#"
 def loss(x: tensor[4,f32]) -> f32 = tensor_to_scalar(sum(dropout(x,0.5f32),0))
 def derivative(x: tensor[4,f32]) -> tensor[4,f32] = with seed(42i64) { grad(loss)(x) }
-"#;
-    let ordinary = compile_for_execution(request(source, "derivative")).unwrap();
-    let captured = compile_for_execution_with_trace(request(source, "derivative"), |observation| {
+"#,
+            1,
+        ),
+        (
+            r#"
+def loss(x: tensor[4,f32], y: tensor[4,f32]) -> f32 =
+  tensor_to_scalar(sum(dropout(mul(x,y),0.5f32),0))
+def derivative(x: tensor[4,f32], y: tensor[4,f32]) -> (tensor[4,f32],tensor[4,f32]) =
+  with seed(42i64) { grad(loss)(x,y) }
+"#,
+            2,
+        ),
+    ] {
+        let ordinary = compile_for_execution(request(source, "derivative")).unwrap();
+        let captured = compile_for_execution_with_trace(request(source, "derivative"), |observation| {
         let SelectedLowering::Host(traces) = observation.lowering else {
             panic!("actual selected host captures");
         };
@@ -84,20 +98,28 @@ def derivative(x: tensor[4,f32]) -> tensor[4,f32] = with seed(42i64) { grad(loss
                     );
                     gradients += trace.executions.len();
                     assert_eq!(trace.executions.len(), trace.applications.len());
+                    for execution in &trace.executions {
+                        assert_eq!(
+                            trace.lowering.gradients[execution.gradient].wrt.len(),
+                            input_count,
+                            "the selected capture retains every ordered differentiated input"
+                        );
+                    }
                 }
             }
         }
         gradients
     })
     .unwrap();
-    assert!(
-        *captured.projection() > 0,
-        "empty captures cannot stand in for actual AD"
-    );
-    assert_eq!(
-        serde_json::to_value(&ordinary).unwrap(),
-        serde_json::to_value(captured.artifact()).unwrap()
-    );
+        assert!(
+            *captured.projection() > 0,
+            "empty captures cannot stand in for actual AD"
+        );
+        assert_eq!(
+            serde_json::to_value(&ordinary).unwrap(),
+            serde_json::to_value(captured.artifact()).unwrap()
+        );
+    }
 }
 
 #[test]
