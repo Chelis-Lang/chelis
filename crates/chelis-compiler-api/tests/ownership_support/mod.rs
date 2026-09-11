@@ -116,7 +116,54 @@ pub fn run_with_peers(source: &str, peers: &[String], driver: &str) -> Value {
     execute_program(&format!("{source}\n{PRELUDE}\n{driver}"), peers).0
 }
 
+#[allow(dead_code)]
+pub fn run_with_stdout(source: &str, driver: &str) -> (Value, String) {
+    execute_program(&format!("{source}\n{PRELUDE}\n{driver}"), &[])
+}
+
+#[allow(dead_code)]
+pub fn run_expect_failure(source: &str, driver: &str) {
+    let source = format!("{source}\n{PRELUDE}\n{driver}");
+    let (_dir, binary) = compile_program(&source, &[]);
+    let output = Command::new(binary).output().expect("execute failing C");
+    assert!(
+        !output.status.success(),
+        "observer sink failure was silent: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn execute_program(source: &str, peers: &[String]) -> (Value, String) {
+    let (_dir, binary) = compile_program(source, peers);
+    let ledger = binary.with_file_name("ledger.jsonl");
+    let output = Command::new(binary)
+        .env("CHELIS_OWNERSHIP_LEDGER_PATH", &ledger)
+        .output()
+        .expect("execute C");
+    assert!(
+        output.status.success(),
+        "C status {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows: Vec<Value> = fs::read_to_string(ledger)
+        .expect("ledger required")
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(rows[0]["schema"], "compiled-value-ownership-ledger-v1");
+    assert_eq!(rows.iter().filter(|r| r["event"] == "summary").count(), 1);
+    let summary = rows.last().expect("summary row").clone();
+    assert_eq!(summary["event"], "summary");
+    assert_eq!(summary["invalid_operations"], 0, "{summary}");
+    (
+        summary,
+        String::from_utf8(output.stdout).expect("utf-8 stdout"),
+    )
+}
+
+fn compile_program(source: &str, peers: &[String]) -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let c = dir.path().join("probe.c");
     fs::write(&c, source).unwrap();
@@ -151,31 +198,7 @@ fn execute_program(source: &str, peers: &[String]) -> (Value, String) {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let ledger = dir.path().join("ledger.jsonl");
-    let output = Command::new(binary)
-        .env("CHELIS_OWNERSHIP_LEDGER_PATH", &ledger)
-        .output()
-        .expect("execute C");
-    assert!(
-        output.status.success(),
-        "C status {}: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let rows: Vec<Value> = fs::read_to_string(ledger)
-        .expect("ledger required")
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    assert_eq!(rows[0]["schema"], "compiled-value-ownership-ledger-v1");
-    assert_eq!(rows.iter().filter(|r| r["event"] == "summary").count(), 1);
-    let summary = rows.last().expect("summary row").clone();
-    assert_eq!(summary["event"], "summary");
-    assert_eq!(summary["invalid_operations"], 0, "{summary}");
-    (
-        summary,
-        String::from_utf8(output.stdout).expect("utf-8 stdout"),
-    )
+    (dir, binary)
 }
 
 pub fn balanced(summary: &Value) {

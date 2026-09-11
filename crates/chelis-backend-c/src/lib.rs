@@ -6,6 +6,8 @@ mod emitted_expr;
 mod host_abi;
 mod host_emit;
 pub mod memory;
+#[cfg(feature = "native-random-observer")]
+mod random_observer;
 #[cfg(test)]
 #[path = "../../../tests/support/runtime_archive.rs"]
 mod test_runtime_archive;

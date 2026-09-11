@@ -65,3 +65,57 @@ Same-compilation AD observation collection, native-state/formal refinement,
 full numerical campaigns and release/School adoption remain later obligations.
 Exact reviewed heads, commands and outcomes belong to this PR's receipts, not
 this scope statement.
+
+## Feature-only native Random observation
+
+The non-default `chelis-compiler-api/native-random-observer` feature forwards to
+the C backend and emits one translation-unit-private observed wrapper beside
+each authored host entry. The published header and ordinary wrapper are
+unchanged. An observed invocation supplies its own synchronous sink, context,
+and exact u64 identity; the wrapper owns both the observer and RNG state on its
+stack. Private host calls and fixed-control tensor helpers receive those two
+pointers together, so reentrant and concurrent invocations cannot share an
+observer or Random frame unless their test driver deliberately supplies the
+same sink context.
+
+Events are taken at the statements that own the runtime values: invocation
+initialization, host seed install/restore, fixed-helper enter/leave, forward
+post-increment, and replay without increment. Every event carries the current
+active flag and exact seed/counter, the complete linked stack of live saved
+frames, and an observer-only continuation made by incrementing a copy. Numeric
+fields use the private `chelis_random_observer_u64` carrier; the test driver
+serializes them as tagged decimal strings and never routes them through a C or
+JSON float. The native successor still wraps. A consumer must reject a
+`UINT64_MAX` counter through its separate nonwrapping check rather than treating
+instrumentation as a change to runtime arithmetic.
+
+Fixed events identify the lowering-selected helper producer and retain its
+producer-owned occurrence, draw, and scope IDs where applicable. Replay has no
+second source occurrence. Host `WithSeed` currently has only span provenance,
+which is not an occurrence authority, so its events say
+`HOST_IDENTITY_UNSUPPORTED` and carry no manufactured source ID. Native-to-source
+matching across that boundary therefore remains unsupported until lowering
+owns an unambiguous mapping.
+
+The sink is called synchronously and may copy or stream the bounded event; the
+generated observer retains no history and performs no allocation. A null sink
+or nonzero sink result aborts the private harness path, so missing output and I/O
+failure cannot become success. The ordinary entry installs no observer and does
+not execute the callback. This is runtime observation of an instrumented
+artifact, not a certificate, native-to-source proof, mask/derivative proof, or
+failure-prefix correspondence result. Evaluator-only invalid rates and
+compile-time Resource admission remain in their owning lanes.
+
+The focused acceptance command is:
+
+```text
+cargo nextest run --locked -p chelis-compiler-api --test native_random_observer --features native-random-observer --test-threads 1 --no-fail-fast
+```
+
+It compiles, links, and executes a nested host/fixed seed program with forward,
+replay, restoration, a following draw, repeated invocations, exact active/saved
+states, complete helper identities, independent missing/pre-increment/replay
+mutants, a failing sink, and a driver-only `UINT64_MAX` rejection control. The
+default-feature backend test separately locks the absence of observer vocabulary
+from emitted C; the feature-on suite also executes the ordinary public wrapper
+and requires that it emit no observation.

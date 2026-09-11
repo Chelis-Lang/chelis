@@ -9,6 +9,9 @@ repository.workspace = true
 [features]
 # Native immutable views at the actual code-generation boundary; default off.
 emission-observer = []
+# Forward the private native Random observer into generated C. No public Rust
+# or generated-header surface depends on this non-default feature.
+native-random-observer = ["chelis-backend-c/native-random-observer"]
 
 [dependencies]
 chelis-unord.workspace = true
