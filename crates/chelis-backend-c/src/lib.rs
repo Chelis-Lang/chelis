@@ -331,22 +331,18 @@ pub fn prepare_host_program_for_codegen(
 pub fn prepare_host_execution_plan_for_codegen(
     plan: chelis_ir::host::HostExecutionPlan,
 ) -> Result<chelis_ir::host::HostExecutionPlan, chelis_types::unsupported::Unsupported> {
-    plan.try_transform(
-        |program| prepare_concrete_host_program_for_codegen(program, false),
-        |detail| {
-            chelis_types::unsupported::Unsupported::new(
-                chelis_types::unsupported::UnsupportedKind::Construct(
-                    "host execution plan".to_string(),
-                ),
-                detail,
+    for helper in &plan.program().global_tensor_helpers {
+        chelis_ir::check_axis_sources(&helper.dag, chelis_types::unsupported::Stage::Codegen("c"))?;
+    }
+    for function in &plan.program().functions {
+        for helper in &function.tensor_helpers {
+            chelis_ir::check_axis_sources(
+                &helper.dag,
                 chelis_types::unsupported::Stage::Codegen("c"),
-                chelis_types::deliberate_rejection!(
-                    "[04-TOT-2]",
-                    "a fixed-control helper schedule must remain bound to the exact rewritten helper payload"
-                ),
-            )
-        },
-    )
+            )?;
+        }
+    }
+    Ok(plan)
 }
 
 fn prepare_concrete_host_program_for_codegen(
