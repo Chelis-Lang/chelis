@@ -599,6 +599,20 @@ command currently fails because `SLICE_PHASES` still requires unregistered
 passing phase or erase outstanding B rows. `--phase a` and `--phase b`
 retain their names and row-transition checks.
 
+Each phase's expected per-test receipts live in the reviewed manifest
+`scripts/runtime_extent_oracle_targets.json`, which the oracle reads to build
+its commands and which `crates/chelis-types/tests/runtime_extent_target_manifest.rs`
+checks against the named sources inside `scripts/gate.py --fast`. After a
+reviewed edit to a phase's generated corpus, regenerate that phase's checked
+baseline with
+`.venv/bin/python scripts/runtime_extent_oracle.py --phase <p> --write-baseline`;
+never hand-edit the file or its digest. `--allow-shortfall` reports a
+recorded row shortfall instead of failing on it, so the nightly
+`runtime-extent-oracle` job can enforce phase B's receipts, digests and
+lattice while its remaining rows land; it ends `RUNTIME EXTENT ORACLE:
+RECEIPTS PASS, ROWS SHORT OF EXIT` rather than PASS, `--phase final` refuses
+it, and B2b-3 drops it from the workflow.
+
 The preparation suite is `crates/chelis-cli/tests/runtime_extent_claim_preparation.rs`.
 Its baseline and full pending acceptance remain separate:
 

@@ -651,6 +651,21 @@ class RuntimeExtentOracleTests(unittest.TestCase):
             self.assertIn("runtime_extent_rows_short=1", printed)
             self.assertIn("runtime_extent_rows_short_list=a:short.row", printed)
 
+    def test_the_final_completion_oracle_refuses_to_allow_a_shortfall(self) -> None:
+        # Regression test: `--phase final` is chelis#1277's completion
+        # command, so the flag that lets the nightly hold a still-landing
+        # phase must be refused there rather than silently accepted. The
+        # refusal precedes the unregistered-phase check, so it is the reason
+        # reported rather than the missing phase `c`.
+        with self.assertRaisesRegex(
+            ORACLE.OracleFailure, "completion oracle and cannot allow a row shortfall"
+        ):
+            ORACLE.validate("final", allow_shortfall=True)
+        self.assertEqual(ORACLE.main(["--phase", "final", "--allow-shortfall"]), 1)
+        # Negative parity: a slice phase still accepts the flag, so the
+        # refusal is about `final` and not about the flag existing.
+        self.assertNotIn("final", ORACLE.SLICE_PHASES)
+
     def test_allow_shortfall_does_not_excuse_a_failing_receipt(self) -> None:
         # Negative parity: the flag downgrades the row shortfall and nothing
         # else. A drifted receipt under it must still fail the run, which is

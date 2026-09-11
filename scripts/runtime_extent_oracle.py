@@ -1208,11 +1208,21 @@ def validate(
     instead of ``PASS_MARKER``, and returns zero. It is what lets a nightly
     job enforce the receipts of a phase whose rows have not all landed;
     without it the phase's real drift and its expected shortfall would be
-    the same red, which is the confusion chelis#1742 is about.
+    the same red, which is the confusion chelis#1742 is about. Phase
+    ``final`` refuses the flag: the completion oracle may not excuse its
+    own short rows.
     """
 
     if phase not in PHASES:
         raise OracleFailure(f"unsupported phase {phase!r}")
+    if phase == "final" and allow_shortfall:
+        # `final` is the class completion oracle. A completion claim that
+        # excuses its own short rows is not a completion claim, so the flag
+        # that lets a nightly hold a still-landing phase is refused here
+        # outright rather than quietly ignored.
+        raise OracleFailure(
+            "phase 'final' is the completion oracle and cannot allow a row shortfall"
+        )
 
     # The lattice binds the whole recorded chain on every invocation, so a
     # leftward move in a later phase fails an earlier phase's run too.
