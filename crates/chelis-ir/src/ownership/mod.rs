@@ -246,6 +246,33 @@ impl<'a> VerifiedDagView<'a> {
         crate::axis_sources::entry_extent_guards(self.dag)
     }
 
+    /// The named witness claims the entry schedule above already compares, so
+    /// an emitter checks each such pair once (`spec/04-type-system.md` §4.7).
+    /// The view answers this for the same reason it answers placement: the
+    /// question needs the class derivation, not the graph.
+    pub fn entry_covered_witness_claims(self) -> Vec<(NodeId, usize)> {
+        crate::axis_sources::entry_covered_witness_claims(self.dag)
+    }
+
+    /// Is this witness retained purely as a section 4.7 entry obligation, with
+    /// nothing reading its value?
+    ///
+    /// A target whose device lane excludes runtime shape reads asks this to
+    /// tell an obligation it can discharge in its host prologue from a read it
+    /// must refuse.
+    pub fn witness_is_entry_obligation(self, id: NodeId) -> bool {
+        crate::axis_sources::witness_is_entry_obligation(self.dag, id)
+    }
+
+    /// The obligations that witness owes, reduced to input reads, or `None`
+    /// when one of them cannot be rendered from the interface alone.
+    pub fn witness_entry_obligations(
+        self,
+        id: NodeId,
+    ) -> Option<Vec<crate::axis_sources::WitnessEntryObligation>> {
+        crate::axis_sources::witness_entry_obligations(self.dag, id)
+    }
+
     /// The unit-extent claims whose guard section 4.7 places at entry.
     ///
     /// The sibling of [`Self::entry_dim_classes`], filtered by the same

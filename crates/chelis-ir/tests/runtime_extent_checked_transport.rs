@@ -49,6 +49,7 @@ fn unit_axis(dag: &mut Dag) -> (NodeId, NodeId, NodeId) {
             parameter: "b".into(),
             axis: RtAxis::Lit(0),
             requirements: vec![scalar_from_i64("load", Prim::Int64, 1).unwrap()],
+            claims: Vec::new(),
         },
         vec![x],
         scalar_type(),

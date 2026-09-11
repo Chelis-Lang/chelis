@@ -509,6 +509,17 @@ impl HipEmitter {
             if e.reduction_inlined.contains(&node.id.0) {
                 continue;
             }
+            // chelis#1374/#1376: an `ExtentWitness` nothing reads was already
+            // discharged in the host prologue above. It has no device value,
+            // so emitting it would reach the [05-SHAPE-1] `todo!` backstop
+            // that stays below for a witness the gate should have refused.
+            // `output_specs` can name the last node when the DAG has no root,
+            // and an emitted output still needs its value.
+            if dag.witness_is_entry_obligation(node.id)
+                && !output_specs.iter().any(|output| output.id == node.id)
+            {
+                continue;
+            }
             if let RiscOp::Load { name } = &node.op {
                 let input_idx = *input_slots
                     .get(name.as_str())
@@ -656,6 +667,13 @@ impl HipEmitter {
 
         for node in dag.nodes() {
             if self.reduction_inlined.contains(&node.id.0) {
+                continue;
+            }
+            // The host prologue already discharged this section 4.7 entry
+            // obligation; see the identical skip in `emit_dag`'s walk.
+            if dag.witness_is_entry_obligation(node.id)
+                && !output_specs.iter().any(|output| output.id == node.id)
+            {
                 continue;
             }
             if let RiscOp::Load { name } = &node.op {
@@ -924,6 +942,81 @@ impl HipEmitter {
             self.line("chelis_numeric_trap(\"numeric trap: domain in load at int64\");");
             self.indent -= 1;
             self.line("}");
+        }
+
+        // chelis#1374/#1376: a witness nothing reads carries a section 4.7
+        // ENTRY obligation, not device work. `reject_unsupported_hip_ops` lets
+        // exactly those through ([05-SHAPE-1] still refuses any witness a
+        // device node reads), and they are discharged here, in the host
+        // prologue, in the same [04-NUM-9] rendering the C emitter produces.
+        // Claims the entry schedule already checks are omitted upstream by
+        // `witness_entry_obligations`, so no comparison is emitted twice.
+        for node in dag.nodes() {
+            if !dag.witness_is_entry_obligation(node.id) {
+                continue;
+            }
+            let Some(obligations) = dag.witness_entry_obligations(node.id) else {
+                continue;
+            };
+            for obligation in obligations {
+                let render = |record: &chelis_ir::axis_sources::ExtentRecord| match record {
+                    chelis_ir::axis_sources::ExtentRecord::Claimed(required) => Some((
+                        "claimed = %lld".to_string(),
+                        format!("(long long){required}"),
+                    )),
+                    chelis_ir::axis_sources::ExtentRecord::Read {
+                        load,
+                        axis,
+                        parameter,
+                    } => {
+                        let RiscOp::Load { name } = &dag.get(*load)?.op else {
+                            return None;
+                        };
+                        let slot = *input_slots.get(name.as_str())?;
+                        let parameter =
+                            chelis_ir::span_sanitize::sanitize_for_format_string(parameter);
+                        Some((
+                            format!("{parameter} axis {axis} = %lld"),
+                            format!("(long long)chelis_tensor_shape(inputs[{slot}], {axis})"),
+                        ))
+                    }
+                };
+                let compare = |record: &chelis_ir::axis_sources::ExtentRecord| match record {
+                    chelis_ir::axis_sources::ExtentRecord::Claimed(required) => {
+                        Some(required.to_string())
+                    }
+                    chelis_ir::axis_sources::ExtentRecord::Read { load, axis, .. } => {
+                        let RiscOp::Load { name } = &dag.get(*load)?.op else {
+                            return None;
+                        };
+                        let slot = *input_slots.get(name.as_str())?;
+                        Some(format!("chelis_tensor_shape(inputs[{slot}], {axis})"))
+                    }
+                };
+                let (Some((first_text, first_value)), Some((second_text, second_value))) =
+                    (render(&obligation.records.0), render(&obligation.records.1))
+                else {
+                    continue;
+                };
+                let (Some(left), Some(right)) = (
+                    compare(&obligation.records.0),
+                    compare(&obligation.records.1),
+                ) else {
+                    continue;
+                };
+                let label = chelis_ir::span_sanitize::sanitize_for_format_string(&obligation.label);
+                let operation = obligation.operation;
+                self.line(&format!("if ({left} != {right}) {{"));
+                self.indent += 1;
+                self.line(&format!(
+                    "fprintf(stderr, \"extent `{label}`: {first_text}, {second_text}\\n\", {first_value}, {second_value});"
+                ));
+                self.line(&format!(
+                    "chelis_numeric_trap(\"numeric trap: domain in {operation} at int64\");"
+                ));
+                self.indent -= 1;
+                self.line("}");
+            }
         }
 
         // Host allocation consumes the published runtime ABI's int64_t shape

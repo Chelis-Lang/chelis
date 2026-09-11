@@ -133,3 +133,15 @@ name = "issue_368_grad_concat_windows"
 [[target]]
 package = "chelis-ir"
 name = "issue_1775_runtime_extent_producer_identity"
+
+[[target]]
+# chelis#1374/#1376: this change's two regression receipts. Both are
+# milliseconds, and without a row here they would run only in the unfiltered
+# nightly, which is not where a regression this pull request introduced should
+# first be caught.
+package = "chelis-compiler-api"
+name = "runtime_extent_authored_claims"
+
+[[target]]
+package = "chelis-compiler-api"
+name = "hip_entry_obligation_witness"

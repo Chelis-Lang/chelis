@@ -797,3 +797,48 @@ fn cache_entry_from_a_different_compiler_build_is_a_clean_miss() {
          not a stale hit"
     );
 }
+
+/// The cache written by the compiler at this pull request's BASE is rejected,
+/// and rejected on the magic line before any positional payload is parsed.
+///
+/// `checked_extent_cache_v18`'s sibling row proves the same gate against a
+/// producer from several versions back. That is a weaker statement than it
+/// looks: a stale-enough file differs in so many ways that a rejection says
+/// little about the gate. These bytes come from the immediately preceding
+/// producer, `e813415d0`, which read them back correctly itself, so nothing
+/// but this change's own version bump separates producer from consumer.
+///
+/// EVIDENTIARY STATUS: disposition lock over genuine old-producer bytes, not a
+/// regression test. `scripts/runtime_extent_cache_compatibility.py` generated
+/// them and executed the old/old, old/current and current/current matrix that
+/// this row cannot: six rows across matching and mismatching reshape,
+/// singleton-broadcast and literal-insert claims, all passing.
+#[test]
+fn the_immediately_preceding_producers_cache_is_rejected_on_its_magic() {
+    use sha2::{Digest, Sha256};
+    let bytes = include_bytes!("fixtures/checked_extent_cache_v19/chelis-ctx-v19.ctx");
+    let producer: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/checked_extent_cache_v19/producer.json"
+    ))
+    .unwrap();
+    assert_eq!(producer["magic"], "CHELIS_CTX_V19");
+    assert_eq!(producer["producer_head"], "e813415d0");
+    assert!(bytes.starts_with(b"CHELIS_CTX_V19\n"));
+    assert_eq!(
+        format!("{:x}", Sha256::digest(bytes)),
+        producer["context_sha256"]
+    );
+    // The producer's own run: it traps on the mismatched reshape claim, which
+    // is #1693's delivered behaviour and is why these bytes are a valid cache
+    // rather than a broken one.
+    assert_eq!(producer["old_result"]["exit"], 1);
+    assert!(
+        producer["old_result"]["stderr"]
+            .as_str()
+            .unwrap()
+            .contains("extent `2`: claimed = 2, reshape axis 0 = 3")
+    );
+    let error = CompiledContext::decode(bytes)
+        .expect_err("a v19 context predates the named claim's transport");
+    assert!(error.contains("magic"), "{error}");
+}

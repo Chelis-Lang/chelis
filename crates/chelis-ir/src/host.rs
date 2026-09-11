@@ -1776,6 +1776,8 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
         result_claim.as_ref(),
         None,
         0,
+        // `scope` is this def's own declared parameter list.
+        true,
     ) {
         Ok((dag, _)) => Some(dag),
         Err(diagnostic) if diagnostic.fatal => {
@@ -3050,7 +3052,7 @@ pub struct RandomLoweringState {
 /// chelis#1277 B2h: the eval interpreter applies a host-lane def through this
 /// kernel, so eval executes exactly the DAG C emits for the def ([05-MOV-1])
 /// and the runtime-extent classes and guards derived from that DAG fire on
-/// both lanes (runtime_extents.md C2.7). The decision is made once, here,
+/// both lanes (runtime_extents.md C2.5). The decision is made once, here,
 /// before any lowering: `Ok(None)` is the host lane, `Ok(Some)` the kernel,
 /// and `Err` a kernel decision whose lowering failed.
 #[derive(Debug, Clone)]
@@ -3913,6 +3915,7 @@ fn lower_kernel_dag(
                 declaring_params.is_some().then_some(expected),
                 None,
                 0,
+                declaring_params.is_some(),
             )?
             .0,
             None,
@@ -3925,6 +3928,7 @@ fn lower_kernel_dag(
                 declaring_params.is_some().then_some(expected),
                 state.seed,
                 state.counter,
+                declaring_params.is_some(),
             )?;
             (dag, Some(counter))
         }

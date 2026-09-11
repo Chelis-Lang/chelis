@@ -25,6 +25,7 @@ fn claimed_witness(dag: &mut Dag, required: &[i64]) -> chelis_ir::dag::NodeId {
                 .iter()
                 .map(|n| scalar_from_i64("load", Prim::Int64, *n).unwrap())
                 .collect(),
+            claims: Vec::new(),
         },
         vec![x],
         TensorType {

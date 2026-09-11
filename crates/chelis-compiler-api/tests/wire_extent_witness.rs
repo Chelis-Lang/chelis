@@ -37,6 +37,7 @@ fn fixture() -> WireDag {
                     parameter: "x".into(),
                     axis: WireRtAxis::Lit { value: 0 },
                     requirements: vec![extent(4), extent(4), extent(9)],
+                    claims: vec![],
                 },
                 inputs: vec![0],
                 output_type: WireTensorType {
@@ -338,4 +339,156 @@ fn remainder_wire_roundtrip_requires_exact_integer_operands() {
             );
         }
     }
+}
+
+/// wire v11 / chelis#1374: a witness's NAMED claim survives transport with its
+/// binder, its role and its requirement edge intact.
+///
+/// The claim sits on the LATER witness and its edge names the earlier one,
+/// which is what `spec/04-type-system.md` §4.7's "due at the later of its two
+/// witnesses" means on the wire. `requirement_declares` is carried rather than
+/// re-derived because either side can be the later one: a result
+/// `-> tensor[rows, cols]` whose set axis reads `shape(x, 0)` declares `cols`
+/// on the later parameter.
+///
+/// EVIDENTIARY STATUS: regression test for the transport; the field did not
+/// exist before this change, so the wire could not represent the obligation.
+fn named_claim_fixture() -> WireDag {
+    let node =
+        |id: u64, op: WireRiscOp, inputs: Vec<u64>, dims, precision: &str, shape_deps: Vec<u64>| {
+            WireDagNode {
+                id,
+                op,
+                inputs,
+                output_type: WireTensorType {
+                    dims,
+                    precision: precision.into(),
+                },
+                shape_deps,
+                span_id: None,
+                merged_spans: vec![],
+            }
+        };
+    let named = |name: &str| {
+        vec![WireDimInfo::Named {
+            name: name.into(),
+            size: None,
+        }]
+    };
+    let witness = |parameter: &str, claims| WireRiscOp::ExtentWitness {
+        site: WireExtentWitnessSite::Caller,
+        parameter: parameter.into(),
+        axis: WireRtAxis::Lit { value: 0 },
+        requirements: vec![],
+        claims,
+    };
+    WireDag {
+        schema_version: WIRE_DAG_SCHEMA_VERSION,
+        roots: vec![4],
+        nodes: vec![
+            node(
+                0,
+                WireRiscOp::Load { name: "x".into() },
+                vec![],
+                named("rows"),
+                "f32",
+                vec![],
+            ),
+            node(1, witness("x", vec![]), vec![0], vec![], "int64", vec![]),
+            node(
+                2,
+                WireRiscOp::Load { name: "y".into() },
+                vec![],
+                named("cols"),
+                "f32",
+                vec![],
+            ),
+            node(
+                3,
+                witness(
+                    "y",
+                    vec![WireExtentClaim {
+                        claim: "rows".into(),
+                        requirement_declares: true,
+                    }],
+                ),
+                vec![2, 1],
+                vec![],
+                "int64",
+                vec![],
+            ),
+            node(
+                4,
+                WireRiscOp::Const { value: integer(9) },
+                vec![],
+                vec![],
+                "int64",
+                vec![3],
+            ),
+        ],
+    }
+}
+
+#[test]
+fn a_named_witness_claim_round_trips_with_its_binder_role_and_edge() {
+    let dag = named_claim_fixture();
+    let json = serde_json::to_value(&dag).expect("named claim must encode");
+    assert_eq!(
+        json["nodes"][3]["op"]["claims"],
+        serde_json::json!([{"claim": "rows", "requirement_declares": true}]),
+        "{json}"
+    );
+    assert_eq!(json["nodes"][3]["inputs"], serde_json::json!([2, 1]));
+    let text = json.to_string();
+    let decoded = WireDag::from_validated_json(&text).expect("named claim must decode");
+    assert_eq!(
+        serde_json::to_value(&decoded).unwrap(),
+        json,
+        "transport must be exact in both directions"
+    );
+
+    // Negative parity, one mutation per rule the decoder enforces.
+    for (name, mutate) in [
+        (
+            "an empty binder identifies no obligation",
+            Box::new(|dag: &mut WireDag| {
+                if let WireRiscOp::ExtentWitness { claims, .. } = &mut dag.nodes[3].op {
+                    claims[0].claim.clear();
+                }
+            }) as Box<dyn Fn(&mut WireDag)>,
+        ),
+        (
+            "a claim without its requirement edge",
+            Box::new(|dag: &mut WireDag| dag.nodes[3].inputs.truncate(1)),
+        ),
+        (
+            "a requirement edge that is not a witness",
+            Box::new(|dag: &mut WireDag| dag.nodes[3].inputs = vec![2, 0]),
+        ),
+        (
+            "a requirement edge that is not earlier",
+            Box::new(|dag: &mut WireDag| dag.nodes[3].inputs = vec![2, 3]),
+        ),
+    ] {
+        let mut bad = named_claim_fixture();
+        mutate(&mut bad);
+        // The encoder validates too, so a malformed claim is refused on the
+        // way out as well as on the way in; either refusal satisfies the rule.
+        let refused = match serde_json::to_value(&bad) {
+            Err(_) => true,
+            Ok(value) => WireDag::from_validated_json(&value.to_string()).is_err(),
+        };
+        assert!(refused, "{name} must be refused, not transported");
+    }
+
+    // A missing `claims` field has no default and fails before the body.
+    let mut raw: serde_json::Value = serde_json::from_str(&text).unwrap();
+    raw["nodes"][3]["op"]
+        .as_object_mut()
+        .unwrap()
+        .remove("claims");
+    assert!(
+        WireDag::from_validated_json(&raw.to_string()).is_err(),
+        "a payload without `claims` must be rejected, never defaulted"
+    );
 }

@@ -4976,6 +4976,17 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                     ),
                 ));
             }
+            // chelis#1374/#1376: a witness nothing READS is not a device
+            // computation. It carries a `spec/04-type-system.md` section 4.7
+            // entry obligation that `retain_invocation_witnesses` kept alive
+            // through a `shape_deps` edge, and the HIP host prologue
+            // discharges it beside the other entry guards. [05-SHAPE-1] still
+            // refuses every witness a device node reads, and refuses this one
+            // too when an obligation does not reduce to input reads.
+            RiscOp::ExtentWitness { .. }
+                if chelis_ir::axis_sources::witness_is_entry_obligation(dag, node.id)
+                    && chelis_ir::axis_sources::witness_entry_obligations(dag, node.id)
+                        .is_some() => {}
             RiscOp::Shape { .. }
             | RiscOp::ExtentWitness { .. }
             | RiscOp::CheckedReshapeExtent { .. }
@@ -6290,6 +6301,7 @@ fn wire_op(op: &RiscOp, precision: Prim) -> WireResult<WireRiscOp> {
             parameter,
             axis: chelis_ir::dag::RtAxis::Lit(axis),
             requirements,
+            claims,
         } => WireRiscOp::ExtentWitness {
             site: match site {
                 chelis_ir::dag::ExtentWitnessSite::Caller => WireExtentWitnessSite::Caller,
@@ -6304,6 +6316,13 @@ fn wire_op(op: &RiscOp, precision: Prim) -> WireResult<WireRiscOp> {
                 .copied()
                 .map(NonnegativeExtent::try_from)
                 .collect::<WireResult<_>>()?,
+            claims: claims
+                .iter()
+                .map(|claim| crate::schema::WireExtentClaim {
+                    claim: claim.claim.clone(),
+                    requirement_declares: claim.requirement_declares,
+                })
+                .collect(),
         },
         RiscOp::CheckedReshapeExtent {
             claims,
@@ -6445,6 +6464,7 @@ mod tests {
                 parameter: "x".into(),
                 axis: RtAxis::Lit(0),
                 requirements,
+                claims: Vec::new(),
             },
             vec![input],
             TensorType {
@@ -6475,7 +6495,7 @@ mod tests {
         let dag = native_wire_witness_fixture();
         let projected = wire_dag(&dag).unwrap();
         let json = serde_json::to_value(&projected).unwrap();
-        assert_eq!(json["schema_version"], 10);
+        assert_eq!(json["schema_version"], 11);
         assert_eq!(
             json["nodes"][1]["op"]["requirements"],
             serde_json::json!([4, 4, 9])

@@ -738,7 +738,7 @@ fn is_local_registry_hash_gap(err: &CompilerError) -> bool {
 /// bincode is positional and a V8 file of either lineage would decode to a
 /// wrong shape; the magic check rejects it before any decode. A V6, V7, or
 /// either V8 file is stale.
-const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V19\n";
+const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V20\n";
 
 /// On-disk format version for the cache envelope. Bumping this tells
 /// `load_if_fresh` to reject older cache files with
@@ -763,7 +763,11 @@ const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V19\n";
 /// V15: that ledger carried a `DeferredShapeObligation` enum rather than a
 /// bare expand constraint, so a comparison result could mirror its operand's
 /// open choice.
-const CACHE_FORMAT_VERSION: u32 = 19;
+///
+/// V20 (chelis#1374/#1376): section 4.7.2's named half is now checked at
+/// execution, so a V19 entry can only describe a program compiled before the
+/// guard existed.
+const CACHE_FORMAT_VERSION: u32 = 20;
 
 /// On-disk envelope for the Phase I cache. The full file layout is:
 ///
@@ -1353,13 +1357,13 @@ mod tests {
 
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes_and_nominal_kinds() {
-        assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V19\n");
-        assert_eq!(CACHE_FORMAT_VERSION, 19);
+        assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V20\n");
+        assert_eq!(CACHE_FORMAT_VERSION, 20);
     }
 
     #[test]
     fn cache_format_version_tracks_the_deferred_ledger_removal() {
-        assert_eq!(CACHE_FORMAT_VERSION, 19);
+        assert_eq!(CACHE_FORMAT_VERSION, 20);
     }
 
     /// chelis#1156: the cache identity must distinguish two BUILDS, not

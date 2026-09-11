@@ -449,6 +449,33 @@ pub enum ExtentWitnessSite {
     LocalExpand,
 }
 
+/// One dimension-binder equality a witness owes against ANOTHER witness.
+///
+/// `spec/04-type-system.md` §4.7.2: a declared result dimension claiming a
+/// named extent that is not statically proven equal to the produced size is
+/// checked at execution and traps `Domain`. Both quantities are input tensor
+/// axes, so §4.7 places the check at function entry, "in declared signature
+/// order, before any other operation of the function runs". The obligation
+/// therefore lives ON a witness rather than in a separate node scheduled
+/// after the body: it becomes due at the later of its two witnesses, which is
+/// the node carrying it, and its requirement edge names the earlier one.
+///
+/// `requirement_declares` records which of the two witnesses DECLARES
+/// `claim`. The declaring witness is not always the earlier one - a result
+/// `-> tensor[rows, cols]` whose set axis reads `shape(x, 0)` has `cols`
+/// declared by the LATER parameter - and the rendering leads with the
+/// declaring side, as `axis_sources::entry_extent_guards` does for the
+/// `Load`-witnessed form of the same contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtentClaim {
+    /// The dimension binder both witnesses must observe equally.
+    pub claim: String,
+    /// True when the requirement edge is the binder's declaring witness and
+    /// this node observed the produced extent; false when this node declares
+    /// the binder and the requirement edge observed the produced extent.
+    pub requirement_declares: bool,
+}
+
 /// A RISC primitive operation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RiscOp {
@@ -716,11 +743,20 @@ pub enum RiscOp {
     /// distinct from the actual input axis read by this scalar operation.
     /// The node is created at call entry, before the callee body, and
     /// its enclosing invocation retains required checks through `shape_deps`.
+    ///
+    /// `claims` carries the NAMED obligations of the same contract, one per
+    /// input edge in `inputs[1..]`, each of which is itself an
+    /// `ExtentWitness`. A literal requirement compares this axis against a
+    /// constant; a named one compares it against another witness's axis. Both
+    /// are checked where this node is scheduled, which is call entry, so
+    /// `spec/04-type-system.md` §4.7's entry placement holds for both without
+    /// a second carrier. See [`ExtentClaim`].
     ExtentWitness {
         site: ExtentWitnessSite,
         parameter: String,
         axis: RtAxis,
         requirements: Vec<chelis_types::ScalarValue>,
+        claims: Vec<ExtentClaim>,
     },
     /// Checks an independently computed reshape target (input 0) against
     /// its declaring witnesses or literal requirements (inputs 1..). Every
@@ -3557,6 +3593,7 @@ mod tests {
                 parameter: "x".into(),
                 axis: RtAxis::Lit(0),
                 requirements: vec![chelis_types::scalar_from_i64("load", Prim::Int64, 4).unwrap()],
+                claims: Vec::new(),
             },
             RiscOp::Sub,
             RiscOp::MinElem,

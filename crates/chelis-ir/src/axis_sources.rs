@@ -1040,7 +1040,7 @@ fn sets_axis(op: &RiscOp, axis: usize) -> bool {
 /// evaluator answer a question the derivation had already answered, and it got
 /// a unit-extent site wrong, because that site's node is the operand and its
 /// operation carries no such axis. The derivation states the answer now, which
-/// is what C2.7 asks for.
+/// is what C2.5 asks for.
 ///
 /// A `Sym` or `Lit` carrier is deliberately absent: neither computes an
 /// extent, and `sets_axis` does not make either a witness on a `Reshape`.
@@ -1561,6 +1561,197 @@ pub enum EntryExtentGuard {
     },
 }
 
+/// The named witness claims an entry guard already checks, as
+/// `(witness node, claim index)`.
+///
+/// chelis#1374 gave `ExtentWitness` named claims so a declared result's named
+/// extent and a binder repeated across parameters are checked in every form:
+/// an inlined root has no `Load` for [`entry_extent_guards`] to group, and a
+/// declared-but-unread parameter has no class member until its witness is
+/// retained. Where both witnesses DO read `Load`s, the class derivation
+/// reaches the same pair and the entry schedule is the better owner: it runs
+/// ahead of the evaluator's symbolic-dim binding, in assigned ABI-slot order.
+/// `spec/04-type-system.md` §4.7 evaluates each guard "exactly once", so the
+/// witness yields there and its claim is left carrying only the retention
+/// that keeps the interface witness, and its ABI slot, alive.
+pub fn entry_covered_witness_claims(dag: &Dag) -> Vec<(NodeId, usize)> {
+    let observed_pair = |node: &crate::dag::DagNode| {
+        let RiscOp::ExtentWitness {
+            axis: RtAxis::Lit(axis),
+            ..
+        } = node.op
+        else {
+            return None;
+        };
+        let load = load_through_casts(dag, node.id, 0).or_else(|| node.inputs.first().copied())?;
+        Some((load, usize::try_from(axis).ok()?))
+    };
+    let guards = entry_extent_guards(dag);
+    let mut covered = Vec::new();
+    for node in dag.nodes() {
+        let RiscOp::ExtentWitness { claims, .. } = &node.op else {
+            continue;
+        };
+        let Some(here) = observed_pair(node) else {
+            continue;
+        };
+        for (index, (recorded, edge)) in claims.iter().zip(node.inputs.iter().skip(1)).enumerate() {
+            let Some(there) = dag.get(*edge).and_then(observed_pair) else {
+                continue;
+            };
+            if guards.iter().any(|guard| {
+                matches!(guard,
+                    EntryExtentGuard::Named { claim, canonical, observed }
+                        if claim == &recorded.claim
+                            && ((*canonical == here && *observed == there)
+                                || (*canonical == there && *observed == here)))
+            }) {
+                covered.push((node.id, index));
+            }
+        }
+    }
+    covered
+}
+
+/// Is this `ExtentWitness` retained purely as an ENTRY OBLIGATION - that is,
+/// does no node ever read its VALUE?
+///
+/// `LowerCtx::retain_invocation_witnesses` keeps a claim-bearing witness alive
+/// by listing it in a `Copy` carrier's `shape_deps`, never by feeding it to
+/// anything, so a witness minted for a declared-but-unread parameter or for a
+/// binder repeated across parameters carries an obligation without carrying a
+/// number anyone computes with. Section 4.7 discharges such an obligation at
+/// function entry, which is host work on every target.
+///
+/// The one data edge that does NOT count is a claim requirement: a witness's
+/// inputs after the first are the earlier witnesses its named claims compare
+/// against, and reading the requirement is part of discharging the same entry
+/// obligation rather than a device computation.
+///
+/// A witness that IS read - the runtime `shape` value read of
+/// `insert(b, 0, shape(y, 0))` - is not an entry obligation, and the HIP
+/// target still refuses it under [05-SHAPE-1].
+pub fn witness_is_entry_obligation(dag: &Dag, id: NodeId) -> bool {
+    if !matches!(
+        dag.get(id).map(|node| &node.op),
+        Some(RiscOp::ExtentWitness { .. })
+    ) {
+        return false;
+    }
+    if dag.roots().contains(&id) {
+        return false;
+    }
+    dag.nodes().iter().all(|node| {
+        node.inputs.iter().enumerate().all(|(index, input)| {
+            *input != id || (index > 0 && matches!(node.op, RiscOp::ExtentWitness { .. }))
+        })
+    })
+}
+
+/// One record inside a [04-NUM-9] extent diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExtentRecord {
+    /// `claimed = N`, the compile-time side of a literal requirement.
+    Claimed(i64),
+    /// `<parameter> axis <axis> = <runtime shape>`, read off an input tensor.
+    Read {
+        load: NodeId,
+        axis: usize,
+        parameter: String,
+    },
+}
+
+/// One section 4.7 obligation carried by an entry-obligation `ExtentWitness`,
+/// reduced to input reads so a host prologue can render it from ABI slots
+/// alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WitnessEntryObligation {
+    /// The label between backticks: a binder for a named claim, the decimal
+    /// extent for a literal requirement.
+    pub label: String,
+    /// The two records in [04-NUM-9] order, declaring side first.
+    pub records: (ExtentRecord, ExtentRecord),
+    /// The operation the `Domain` trap names: `load` or `expand`.
+    pub operation: &'static str,
+}
+
+/// Every obligation an entry-obligation witness owes, or `None` when one of
+/// them cannot be rendered from input reads.
+///
+/// `None` is the fail-closed answer. A target whose device lane cannot host a
+/// witness ([05-SHAPE-1] on HIP) may discharge the witness in its host
+/// prologue only when every obligation reduces to input tensors; otherwise it
+/// refuses, exactly as it did before the witness carried claims.
+///
+/// Claims that [`entry_covered_witness_claims`] already names are omitted:
+/// the entry schedule owns them on every lane, and section 4.7 evaluates each
+/// guard exactly once.
+pub fn witness_entry_obligations(
+    dag: &Dag,
+    witness: NodeId,
+) -> Option<Vec<WitnessEntryObligation>> {
+    let node = dag.get(witness)?;
+    let RiscOp::ExtentWitness {
+        site,
+        requirements,
+        claims,
+        ..
+    } = &node.op
+    else {
+        return None;
+    };
+    let operation = match site {
+        crate::dag::ExtentWitnessSite::Caller => "load",
+        crate::dag::ExtentWitnessSite::LocalExpand => "expand",
+    };
+    let read_for = |id: NodeId| -> Option<ExtentRecord> {
+        let observed = dag.get(id)?;
+        let RiscOp::ExtentWitness {
+            parameter,
+            axis: RtAxis::Lit(axis),
+            ..
+        } = &observed.op
+        else {
+            return None;
+        };
+        let load = load_through_casts(dag, id, 0)?;
+        abi_input_slot(dag, load)?;
+        Some(ExtentRecord::Read {
+            load,
+            axis: usize::try_from(*axis).ok()?,
+            parameter: parameter.clone(),
+        })
+    };
+    let here = read_for(witness)?;
+    let covered = entry_covered_witness_claims(dag);
+    let mut obligations = Vec::new();
+    for required in requirements {
+        let required = required.as_i64_exact()?;
+        obligations.push(WitnessEntryObligation {
+            label: required.to_string(),
+            records: (ExtentRecord::Claimed(required), here.clone()),
+            operation,
+        });
+    }
+    for (index, (claim, edge)) in claims.iter().zip(node.inputs.iter().skip(1)).enumerate() {
+        if covered.contains(&(witness, index)) {
+            continue;
+        }
+        let there = read_for(*edge)?;
+        let records = if claim.requirement_declares {
+            (there, here.clone())
+        } else {
+            (here.clone(), there)
+        };
+        obligations.push(WitnessEntryObligation {
+            label: claim.claim.clone(),
+            records,
+            operation,
+        });
+    }
+    Some(obligations)
+}
+
 /// Section 4.7's individual entry checks in assigned input-slot/axis order.
 /// A named check becomes due at the later of its two witnesses; its canonical
 /// witness remains the declaring one even when that declaration is later.
@@ -1679,13 +1870,13 @@ impl std::fmt::Display for CanonicalExtent {
 
 /// How a consumer reads the extent a local guard observes.
 ///
-/// The derivation states it, because C2.7 puts one answer to one question in
+/// The derivation states it, because C2.5 puts one answer to one question in
 /// one place. The two kinds of local claim observe different quantities: an
 /// equality class compares the extent an operation is ABOUT TO produce, read
 /// from the carrier it was given, and a unit-extent claim compares the extent
 /// its operand ALREADY produced, read from that operand's realized shape. A
 /// consumer that re-derives which of those to read from the site's own `op`
-/// can only get one of them right, which is exactly the divergence C2.7
+/// can only get one of them right, which is exactly the divergence C2.5
 /// forbids.
 ///
 /// The variants also fix WHEN each is readable, and that is not incidental.
@@ -1727,7 +1918,7 @@ pub struct LocalGuardClaim {
 /// introduces the guarded extent" (`spec/04-type-system.md` section 4.7), so
 /// unlike the entry classes these are keyed by node.
 ///
-/// Two lanes read this one function, which is what C2.7's single derivation
+/// Two lanes read this one function, which is what C2.5's single derivation
 /// point means for a local guard: the C emitter places its guard at the
 /// operation it names, and the DAG evaluator checks the same site when that
 /// node produces its value. A second answer computed in either lane could
@@ -1848,7 +2039,7 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
     // extent", which is the `expand` making the claim, not whichever operation
     // happened to produce the operand.
     //
-    // It is derived HERE rather than in the ownership view because C2.7 puts
+    // It is derived HERE rather than in the ownership view because C2.5 puts
     // the local site derivation in one place that both lanes read. S2b added
     // this loop beside the class loop when both lived in the view; the loop is
     // unchanged, and it moves with the function it was appended to.

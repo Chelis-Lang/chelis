@@ -1502,7 +1502,7 @@ impl<'a> EvalContext<'a> {
                 // applied through that kernel, so eval runs the DAG C emits
                 // for it and the runtime-extent classes and guards derived
                 // from that DAG fire on both lanes ([05-MOV-1],
-                // runtime_extents.md C2.7). The host-lane decision for the
+                // runtime_extents.md C2.5). The host-lane decision for the
                 // same def interprets the body below, exactly as before.
                 if let Some(name) = def_name.as_deref()
                     && let Some(kernel) = self.def_kernel(name)?
