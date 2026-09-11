@@ -1776,6 +1776,8 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
         result_claim.as_ref(),
         None,
         0,
+        // `scope` is this def's own declared parameter list.
+        true,
     ) {
         Ok((dag, _)) => Some(dag),
         Err(diagnostic) if diagnostic.fatal => {
@@ -3913,6 +3915,7 @@ fn lower_kernel_dag(
                 declaring_params.is_some().then_some(expected),
                 None,
                 0,
+                declaring_params.is_some(),
             )?
             .0,
             None,
@@ -3925,6 +3928,7 @@ fn lower_kernel_dag(
                 declaring_params.is_some().then_some(expected),
                 state.seed,
                 state.counter,
+                declaring_params.is_some(),
             )?;
             (dag, Some(counter))
         }

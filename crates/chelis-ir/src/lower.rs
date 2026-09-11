@@ -1367,6 +1367,8 @@ pub(crate) fn try_lower_subexpr_program_with_context_and_controls(
             None,
             0,
             true,
+            // The scope is the ambient bindings this subexpression captured.
+            false,
         );
         LoweredSubexprWithControls {
             dag,
@@ -1392,6 +1394,7 @@ pub(crate) fn try_lower_subexpr_program_with_context_and_random_state(
         None,
         random_seed,
         random_counter,
+        false,
     )
 }
 
@@ -1405,6 +1408,7 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs(
     result_claim: Option<&TensorType>,
     random_seed: Option<u64>,
     random_counter: u64,
+    authored_signature: bool,
 ) -> Result<(Dag, u64), LowerDiagnostic> {
     assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
     catch_lowering(|| {
@@ -1416,6 +1420,7 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs(
             random_seed,
             random_counter,
             false,
+            authored_signature,
         );
         (dag, random_counter)
     })
@@ -1489,7 +1494,8 @@ pub(crate) fn try_lower_staged_host_region(
                 );
             }
         }
-        ctx.prepare_parameter_witnesses(&names, &types, None);
+        // A staged host region's inputs are the partition's, not an author's.
+        ctx.prepare_parameter_witnesses(&names, &types, None, false);
         ctx.binding_witnesses.clear();
         let result = ctx.lower_expr_with_claim(expr, Some(result_claim));
         if std::env::var_os("CHELIS_NO_STAGED_CLAIM").is_none() {
@@ -1531,6 +1537,7 @@ fn lower_subexpr_program_inner_impl(
     random_seed: Option<u64>,
     random_counter: u64,
     include_list_controls: bool,
+    authored_signature: bool,
 ) -> (Dag, u64, usize, Vec<RuntimeListCheckDescriptor>) {
     let mut ctx = LowerCtx::new(
         context.program_types.clone(),
@@ -1556,7 +1563,12 @@ fn lower_subexpr_program_inner_impl(
         );
         ctx.bindings.insert(name, LoweredValue::Node(load));
     }
-    ctx.prepare_parameter_witnesses(&parameter_names, &parameter_types, None);
+    ctx.prepare_parameter_witnesses(
+        &parameter_names,
+        &parameter_types,
+        None,
+        authored_signature,
+    );
     // Kernel inputs already have structural interface-axis carriers. Keep
     // those reads intact; explicit checked claims still use signature witnesses.
     ctx.binding_witnesses.clear();
@@ -5350,6 +5362,18 @@ struct LowerCtx<'program> {
     /// are the same extent by construction, not a claim the signature makes,
     /// so relating them states an obligation no signature authored.
     activation_witnesses: Vec<NodeId>,
+    /// Whether the CURRENT activation's parameter list is an authored
+    /// signature, set by [`LowerCtx::prepare_parameter_witnesses`].
+    ///
+    /// `spec/04-type-system.md` section 4.7 reads a repeated binder, and a
+    /// declared result's named extent, as equalities the SIGNATURE asserts.
+    /// Only an author can assert one. A staged host region and a signatureless
+    /// subexpression program are lowered with machine-built parameter lists:
+    /// captured root bindings and marshalled host arguments, whose types spell
+    /// a binder only because the unrelated definitions that produced them did.
+    /// Two such parameters sharing a spelling is a name collision, not a
+    /// claim, so those activations mint none.
+    signature_is_authored: bool,
     local_unit_refinements: BTreeMap<(NodeId, usize), NodeId>,
     /// Unique scalar carriers for computed reshape targets. They are Copy
     /// until a returned axis acquires a claim, then checked in place before
@@ -5494,6 +5518,7 @@ impl<'program> LowerCtx<'program> {
             binding_witnesses: UnordMap::new(),
             signature_witnesses: Vec::new(),
             activation_witnesses: Vec::new(),
+            signature_is_authored: false,
             reshape_targets: BTreeMap::new(),
             local_unit_refinements: BTreeMap::new(),
             invocation_witnesses: Vec::new(),
@@ -6931,6 +6956,7 @@ impl<'program> LowerCtx<'program> {
         let saved_unit_refinements = self.local_unit_refinements.clone();
         let saved_signature_witnesses = self.signature_witnesses.clone();
         let saved_activation_witnesses = self.activation_witnesses.clone();
+        let saved_signature_is_authored = self.signature_is_authored;
         let saved_list_bindings = self.list_bindings.clone();
         let saved_shape_bindings = self.shape_bindings.clone();
         let saved_static_size_bindings = self.static_size_bindings.clone();
@@ -7029,6 +7055,7 @@ impl<'program> LowerCtx<'program> {
         self.local_unit_refinements = saved_unit_refinements;
         self.signature_witnesses = saved_signature_witnesses;
         self.activation_witnesses = saved_activation_witnesses;
+        self.signature_is_authored = saved_signature_is_authored;
         self.list_bindings = saved_list_bindings;
         self.shape_bindings = saved_shape_bindings;
         self.static_size_bindings = saved_static_size_bindings;
@@ -8271,6 +8298,7 @@ impl<'program> LowerCtx<'program> {
         let saved_unit_refinements = self.local_unit_refinements.clone();
         let saved_signature_witnesses = self.signature_witnesses.clone();
         let saved_activation_witnesses = self.activation_witnesses.clone();
+        let saved_signature_is_authored = self.signature_is_authored;
         let call_span = self.current_span_id.clone();
         let saved_list_bindings = self.list_bindings.clone();
         let saved_shape_bindings = self.shape_bindings.clone();
@@ -8474,7 +8502,7 @@ impl<'program> LowerCtx<'program> {
                 )
             })
             .unwrap_or_else(|| expected_return_ty.clone());
-        self.prepare_parameter_witnesses(&param_names, &witness_param_types, call_span);
+        self.prepare_parameter_witnesses(&param_names, &witness_param_types, call_span, true);
         // Each unroll level costs multiple large lowering frames (debug
         // builds overflow the default 8 MB main-thread stack well before the
         // 512-level cap without this). `maybe_grow` at THIS site works where
@@ -8504,6 +8532,7 @@ impl<'program> LowerCtx<'program> {
         self.local_unit_refinements = saved_unit_refinements;
         self.signature_witnesses = saved_signature_witnesses;
         self.activation_witnesses = saved_activation_witnesses;
+        self.signature_is_authored = saved_signature_is_authored;
         self.inlining_active -= 1;
         if let Some(name) = &inlining_name
             && let Some(depth) = self.inlining_depths.get_mut(name)
@@ -8538,6 +8567,7 @@ impl<'program> LowerCtx<'program> {
         let saved_unit_refinements = self.local_unit_refinements.clone();
         let saved_signature = self.signature_witnesses.clone();
         let saved_activation = self.activation_witnesses.clone();
+        let saved_authored = self.signature_is_authored;
         let start = self.invocation_witnesses.len();
         let formal_types = params
             .iter()
@@ -8561,7 +8591,7 @@ impl<'program> LowerCtx<'program> {
                     .unwrap_or_else(Self::default_type)
             })
             .collect::<Vec<_>>();
-        self.prepare_parameter_witnesses(params, &formal_types, self.current_span_id.clone());
+        self.prepare_parameter_witnesses(params, &formal_types, self.current_span_id.clone(), true);
         let claim = function.result_type().map(|ty| {
             Self::type_from_type_expr_with_subst(
                 ty,
@@ -8578,6 +8608,7 @@ impl<'program> LowerCtx<'program> {
         self.local_unit_refinements = saved_unit_refinements;
         self.signature_witnesses = saved_signature;
         self.activation_witnesses = saved_activation;
+        self.signature_is_authored = saved_authored;
         result
     }
 
@@ -12714,15 +12745,22 @@ impl<'program> LowerCtx<'program> {
     /// DCE — otherwise a `shape(x, ...)`-only-referenced `x` is eliminated and
     /// the symbolic dim it declares loses its source (silent wrong shape in
     /// the backend).
+    ///
+    /// `authored_signature` says whether `params`/`formal_types` came from a
+    /// signature a person wrote. Only then do the binder spellings carry
+    /// `spec/04-type-system.md` section 4.7's equality assertions; see
+    /// [`LowerCtx::signature_is_authored`].
     fn prepare_parameter_witnesses(
         &mut self,
         params: &[String],
         formal_types: &[TensorType],
         span: Option<String>,
+        authored_signature: bool,
     ) {
         self.binding_witnesses.clear();
         self.signature_witnesses.clear();
         self.activation_witnesses.clear();
+        self.signature_is_authored = authored_signature;
         self.local_unit_refinements.clear();
         for (name, formal_type) in params.iter().zip(formal_types) {
             let Some(input) = self
@@ -12774,9 +12812,20 @@ impl<'program> LowerCtx<'program> {
                         // exists even when the body never reads this
                         // parameter. The check becomes due at this, the later,
                         // witness, and its requirement names the earlier one.
-                        Some(declared) => {
+                        //
+                        // Only an AUTHORED signature asserts it. A machine-built
+                        // parameter list repeats a spelling by coincidence, and
+                        // minting there relates two unrelated extents: a
+                        // synthesized multi-root kernel took `batch` and `seq`
+                        // off the several definitions that produced its captured
+                        // roots and trapped a correct program.
+                        Some(declared) if authored_signature => {
                             self.add_named_extent_claim(witness, declared, binder.clone(), true)
                         }
+                        // The binder is already declared in this activation and
+                        // the list is machine-built: record nothing and leave
+                        // the first declaration standing.
+                        Some(_) => {}
                         None => self.signature_witnesses.push((binder.clone(), witness)),
                     }
                 }
@@ -13116,6 +13165,9 @@ impl<'program> LowerCtx<'program> {
     /// the graph and records nothing: that is the ordinary pass-through
     /// `-> tensor[rows, f32]` over a read of `rows`'s own parameter.
     fn preserve_named_result_axis(&mut self, id: NodeId, axis: usize, binder: &str) -> bool {
+        if !self.signature_is_authored {
+            return false;
+        }
         let Some(declaring) = self.signature_witness(binder) else {
             return false;
         };
@@ -14035,6 +14087,7 @@ impl<'program> LowerCtx<'program> {
         let saved_unit_refinements = self.local_unit_refinements.clone();
         let saved_signature_witnesses = self.signature_witnesses.clone();
         let saved_activation_witnesses = self.activation_witnesses.clone();
+        let saved_signature_is_authored = self.signature_is_authored;
         let call_span = self.current_span_id.clone();
         let saved_list_bindings = self.list_bindings.clone();
         let saved_shape_bindings = self.shape_bindings.clone();
@@ -14124,7 +14177,7 @@ impl<'program> LowerCtx<'program> {
                 Some((name, formal))
             })
             .unzip();
-        self.prepare_parameter_witnesses(&params, &formal_types, call_span);
+        self.prepare_parameter_witnesses(&params, &formal_types, call_span, true);
         let result = self.lower_expr_with_claim(&elems[3], declared_result.as_ref());
         if let Some(ty) = &declared_result {
             self.preserve_declared_result(&result, ty);
@@ -14134,6 +14187,7 @@ impl<'program> LowerCtx<'program> {
         self.local_unit_refinements = saved_unit_refinements;
         self.signature_witnesses = saved_signature_witnesses;
         self.activation_witnesses = saved_activation_witnesses;
+        self.signature_is_authored = saved_signature_is_authored;
         self.bindings = saved; // Restore scope
         self.list_bindings = saved_list_bindings;
         self.shape_bindings = saved_shape_bindings;
