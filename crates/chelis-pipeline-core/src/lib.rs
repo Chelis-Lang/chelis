@@ -100,8 +100,8 @@ pub use artifacts::{
     RootCountContext, RootMetadata, SemanticContext, SemanticRejection, TensorRootNames,
 };
 pub use lower::{
-    LoweredLibrary, lower_checked, lower_checked_for_evaluation, lower_checked_with_context,
-    lower_checked_with_evaluation_context, lower_library,
+    LoweredLibrary, lower_checked, lower_checked_for_c_execution, lower_checked_for_evaluation,
+    lower_checked_with_context, lower_checked_with_evaluation_context, lower_library,
 };
 pub use semantic::{
     analyze_prepared, analyze_prepared_library, analyze_prepared_library_with_base,

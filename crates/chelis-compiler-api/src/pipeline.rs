@@ -376,6 +376,25 @@ pub fn lower_checked(
     result.map_err(PipelineRejection::from)
 }
 
+/// C host selection preserves fixed-control plans from the actual lowering;
+/// ordinary sources retain the core's value-root validation.
+pub fn lower_checked_for_c_execution(
+    checked: CheckedCompilation,
+    manifest: &chelis_types::manifest::RootManifest,
+    mode: LoweringMode,
+) -> Result<
+    (
+        LoweredCompilation,
+        Option<chelis_ir::host::HostExecutionPlan>,
+    ),
+    PipelineRejection,
+> {
+    pipeline_bail_if_cancelled("lower")?;
+    let result = chelis_pipeline_core::lower_checked_for_c_execution(checked, manifest, mode);
+    pipeline_bail_if_cancelled("lower")?;
+    result.map_err(PipelineRejection::from)
+}
+
 /// Lower a context-checked compilation against its library DAG.
 pub fn lower_checked_with_context(
     checked: ContextCheckedCompilation<'_>,
