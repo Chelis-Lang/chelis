@@ -1221,3 +1221,56 @@ fn dtype_routes_caught_before_the_validator_keep_their_verdict() {
         );
     }
 }
+
+/// The residual half of this class, tracked as chelis#1805: a tensor operand
+/// whose PRECISION resolves after the route runs.
+///
+/// The suspension above waits on `shape_operand_awaits_binding`, which answers
+/// true for `Type::Var` and `Type::Ref` alone. A `Type::Tensor` already carries
+/// its outer constructor, so the ledger treats it as ready the moment it is
+/// seen, whatever its precision variable still holds, and this ledger therefore
+/// cannot carry the case. Repairing it needs either a readiness predicate that
+/// also waits on a free `TensorPrec::Var`, which changes when every existing
+/// entry replays, or a second ledger: a design decision rather than an
+/// extension of the arm split, which is why chelis#1805 owns it.
+///
+/// NOT a disposition lock on desired behaviour. It pins a KNOWN HOLE so the
+/// suite says out loud what this pull request does not close, and it is the
+/// test chelis#1805 turns red on when it is repaired. Read a failure here as
+/// that repair landing, and move the assertion to the rejecting side.
+#[test]
+fn a_late_bound_tensor_precision_is_not_validated_yet() {
+    // The precision of the empty literal is a free `TensorPrec::Var` when the
+    // reduction's dtype rule reads it; the declared result binds it to `int32`
+    // afterwards, and nothing re-consults the policy.
+    check("def f() -> tensor[int32] = mean(to_tensor([]), 0i32)\n").expect(
+        "chelis#1805: an integer `mean` over a late-bound precision is still accepted; if this \
+         now rejects, that issue is fixed and this assertion moves",
+    );
+
+    // The control, and the reason the row above is a hole rather than a policy:
+    // the same operand with its precision settled first is rejected.
+    let errors = check("def f(x: tensor[3, int32]) -> tensor[int32] = mean(x, 0i32)\n")
+        .expect_err("a settled integer operand must be rejected");
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("mean on operand precision `int32` is not admitted")),
+        "the resolved rejection must still name the dtype policy:\n{}",
+        summary(&errors)
+    );
+
+    // The neighbouring route is NOT exposed, which is what makes chelis#1805 a
+    // bounded residual rather than a blanket one: `softmax` preserves its
+    // operand's precision, so signature unification binds it before the
+    // validator runs.
+    let errors = check("def f() -> tensor[3, int32] = softmax(to_tensor([]), 0i32)\n")
+        .expect_err("softmax binds its operand precision through unification first");
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("softmax on operand precision `int32`")),
+        "softmax must still reject through the same policy:\n{}",
+        summary(&errors)
+    );
+}
