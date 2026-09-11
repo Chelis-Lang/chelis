@@ -9,6 +9,164 @@ use chelis_ir::host::RandomLoweringState;
 use chelis_types::types::Prim;
 use chelis_unord::UnordMap;
 
+// #1764: admission and lowering must specialize the same typed rate, before AD.
+fn typed_rate_plan(source: &str) -> Result<EvaluationPlan, String> {
+    let declarations = chelis_surf::parser::parse_str(source).unwrap();
+    let checked =
+        chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(&declarations))
+            .unwrap();
+    let context = RandomExecutionContext::new(RandomLoweringState {
+        seed: Some(42),
+        counter: 0,
+    });
+    let product = chelis_ir::host::host_def_evaluation_plan(&checked, "sample", &context)
+        .map_err(|error| error.to_string())?
+        .ok_or("no tensor kernel")?;
+    if product.profile() != chelis_ir::evaluation::EvaluationProfile::FixedControl {
+        return Err(format!("unexpected profile: {:?}", product.profile()));
+    }
+    product
+        .plan()
+        .cloned()
+        .ok_or("no fixed-control plan".into())
+}
+
+#[test]
+fn typed_static_rate_specializes_helpers_and_gradient_captures() {
+    for (dtype, prim) in [
+        ("f16", Prim::F16),
+        ("bf16", Prim::Bf16),
+        ("f32", Prim::F32),
+        ("f64", Prim::F64),
+    ] {
+        for body in [
+            "keep(x, cast(0.5, p))",
+            "{ rate = cast(0.5, p)\n alias = rate\n keep(x, alias) }",
+            "{ rate = cast(0.5, DTYPE)\n loss = fn (v: tensor[8, DTYPE]) -> tensor_to_scalar(sum(keep(v, rate), 0i32))\n grad(loss)(x) }",
+        ] {
+            let (wrapper, entry) = if body.contains("DTYPE") {
+                (String::new(), body.replace("DTYPE", dtype))
+            } else {
+                (
+                    format!("def wrapper[p: Float](x: tensor[8, p]) -> tensor[8, p] = {body}"),
+                    "wrapper(x)".to_owned(),
+                )
+            };
+            let source = format!(
+                "def keep[p: Float](x: tensor[8, p], rate: p) -> tensor[8, p] = dropout(x, rate)\n\
+                 {wrapper}\n\
+                 def sample(x: tensor[8, {dtype}]) -> tensor[8, {dtype}] = {entry}"
+            );
+            let plan = typed_rate_plan(&source).unwrap_or_else(|error| panic!("{source}\n{error}"));
+            let input = chelis_types::finalize_tensor(
+                "test",
+                prim,
+                chelis_types::RawTensor::Float(vec![1.0; 8]),
+            )
+            .unwrap();
+            let mut context = RandomExecutionContext::new(RandomLoweringState {
+                seed: Some(42),
+                counter: 0,
+            });
+            for ordinal in 0..2 {
+                let values = eval_tensor_plan_with_strict(&plan, &mut context, |_| {
+                    Some(TensorValue::from_storage(vec![8], input.clone()))
+                })
+                .unwrap();
+                let expected = (0..8)
+                    .map(|index| {
+                        let word = splitmix64(
+                            42 ^ splitmix64(ordinal).rotate_left(17)
+                                ^ splitmix64(index).rotate_left(41),
+                        );
+                        if word >> 63 == 0 { 0.0 } else { 2.0 }
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    values[&plan.dag_for_inspection().roots()[0]].to_f64_lossy_vec(),
+                    expected
+                );
+                assert_eq!(context.state().counter, ordinal + 1);
+            }
+        }
+    }
+}
+
+#[test]
+fn typed_static_rate_preserves_source_width_and_distinct_call_bindings() {
+    let source = "def keep[p: Float](x: tensor[8, p], rate: p) -> tensor[8, p] = dropout(x, rate)\n\
+                  def sample(x: tensor[8, f64]) -> tensor[8, f64] = {\n\
+                    first = keep(x, cast(0.1f32, f64))\n\
+                    second = keep(x, 0.1f64)\n add(first, second)\n }";
+    let plan = typed_rate_plan(source).unwrap();
+    let rates = plan
+        .dag_for_inspection()
+        .nodes()
+        .iter()
+        .filter_map(|node| {
+            if let RiscOp::Dropout { rate, .. } = node.op {
+                Some(rate)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(rates, vec![f64::from(0.1f32), 0.1f64]);
+}
+
+#[test]
+fn typed_static_rate_does_not_duplicate_arguments() {
+    let (body, expected) = ("keep(dropout(x, 0.5f32), 0.25f32)", vec![0.5, 0.25]);
+    let source = format!(
+        "def keep[p: Float](x: tensor[8, p], rate: p) -> tensor[8, p] = dropout(x, rate)\n\
+            def sample(x: tensor[8, f32]) -> tensor[8, f32] = {body}"
+    );
+    let plan = typed_rate_plan(&source).unwrap();
+    let rates = plan
+        .dag_for_inspection()
+        .nodes()
+        .iter()
+        .filter_map(|node| {
+            if let RiscOp::Dropout { rate, .. } = node.op {
+                Some(rate)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(rates, expected, "{source}");
+    let mut context = RandomExecutionContext::new(RandomLoweringState {
+        seed: Some(42),
+        counter: 0,
+    });
+    eval_tensor_plan_with_strict(&plan, &mut context, |_| {
+        Some(TensorValue::from_vec(vec![8], vec![1.0; 8]))
+    })
+    .unwrap();
+    assert_eq!(context.state().counter, expected.len() as u64);
+}
+
+#[test]
+fn typed_static_rate_rejects_runtime_formals_and_shadowed_aliases() {
+    for body in [
+        "dropout(x, rate)",
+        "{ alias = 0.5f32\n alias = rate\n dropout(x, alias) }",
+        "{ alias = 0.5f32\n f = fn (alias: f32) -> dropout(x, alias)\n f(rate) }",
+        "{ neg = fn (unused: f32) -> rate\n dropout(x, neg(0.5f32)) }",
+        "{ alias = 0.5f32\n f = fn (v: tensor[8, f32]) -> dropout(v, alias)\n alias = 0.25f32\n f(x) }",
+        "{ alias = 0.5f32\n loss = fn (v: tensor[8, f32]) -> tensor_to_scalar(sum(dropout(v, alias), 0i32))\n alias = 0.25f32\n grad(loss)(x) }",
+    ] {
+        let source = format!("def sample(x: tensor[8, f32], rate: f32) -> tensor[8, f32] = {body}");
+        let error = typed_rate_plan(&source).unwrap_err();
+        assert!(
+            error.contains("RuntimeRate")
+                || error.contains("statically-resolvable")
+                || error == "no tensor kernel",
+            "{source}\n{error}"
+        );
+    }
+}
+
 fn evaluate(rate: f64, seed: u64, count: usize) -> Result<Vec<f64>, String> {
     let mut context = RandomExecutionContext::new(RandomLoweringState {
         seed: Some(seed),

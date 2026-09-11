@@ -10,6 +10,33 @@ use chelis_compiler_api::schema::{
 use std::collections::BTreeMap;
 
 #[test]
+fn generic_static_rate_cast_keeps_precise_public_rejection_until_host_transport() {
+    for dtype in ["f32", "f64"] {
+        let source = format!(
+            "def keep[p: Float](x: tensor[4, p]) -> tensor[4, p] = dropout(x, cast(0.5, p))\n\
+             def main() = with seed(42i64) {{ keep(to_tensor([1.0{dtype}, 1.0{dtype}, 1.0{dtype}, 1.0{dtype}])) }}"
+        );
+        let error = eval_selected(
+            EvalRequest {
+                source_kind: SourceKind::Surf,
+                source,
+                bindings: BTreeMap::new(),
+            },
+            &["main".into()],
+        )
+        .unwrap_err();
+        assert_eq!(error.stage, "lower", "{error:?}");
+        assert!(error.transcript.is_empty());
+        assert!(
+            error.errors.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("requires a statically-resolvable rate")),
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
 fn fixed_dropout_composes_with_host_produced_checked_reshape_targets() {
     use chelis_compiler_api::compiler::{eval_in_context, prepare_eval_in_context};
     use chelis_compiler_api::{COMPILER_VERSION, compile_reef_context};
