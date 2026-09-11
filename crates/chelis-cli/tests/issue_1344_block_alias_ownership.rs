@@ -122,17 +122,17 @@ fn eval_stdout(source: &str, stem: &str) -> String {
 /// `signature {` to the closing brace, so a retain or release in another
 /// function (or `main`'s root cleanup) cannot satisfy an assertion here.
 fn emitted_function<'a>(emitted: &'a str, signature: &str) -> &'a str {
-    let (head, params) = signature
+    let (head, _params) = signature
         .split_once('(')
         .expect("function signature has parameters");
-    let (ret, name) = head
+    let (_ret, name) = head
         .rsplit_once(' ')
         .expect("function signature has a return type and name");
-    let definition = format!("{ret} {name}__chelis_owned_body({params} {{");
-    let start = emitted
-        .find(&definition)
-        .unwrap_or_else(|| panic!("emitted C defines `{definition}`:\n{emitted}"));
-    let rest = &emitted[start..];
+    // chelis#1820: located by NAME, not by the full signature. chelis#1799
+    // added a `chelis_rng_state` parameter to every host body, and the old
+    // full-signature needle then missed the definition and failed before this
+    // row counted anything. The parameter list is not what the row asserts.
+    let rest = common::host_body_definition(emitted, &format!("{name}__chelis_owned_body"));
     let end = rest.find("\n}").expect("function is closed");
     &rest[..end]
 }
@@ -458,5 +458,48 @@ fn outer_returning_call_into_a_value_temp_is_retained_and_claimed() {
         count_in(f_body, "chelis_string_release("),
         0,
         "the result owner leaves through `f`'s return:\n{f_body}"
+    );
+}
+
+/// Disposition lock for `common::host_body_definition`, the shared locator this
+/// file and three siblings reach through `emitted_function`. It runs on
+/// synthetic C rather than on an emission, because neither case it holds is
+/// reachable from today's emitter -- which is exactly why an emitted-code test
+/// could not hold them, and why the locator's original comment asserted they
+/// could not happen instead of checking.
+///
+/// Two ways the locator can misread. A match with no left word boundary accepts
+/// `g_run__chelis_owned_body(` as `run__chelis_owned_body`, and the decoy's
+/// body then satisfies a caller's assertions for the wrong reason. And taking
+/// the FIRST `)` as the end of the parameter list mistakes a nested parenthesis
+/// for the end of the signature: the `{` test then fails, the loop runs out,
+/// and the helper panics that the body is not emitted here -- a confident,
+/// loud, wrong diagnosis about a body that is present. That is chelis#1808's
+/// own misdiagnosis one layer down.
+///
+/// Both measured RED against the pre-fold helper, which took the first `)` and
+/// had no boundary check: the suffix case returned the decoy's body, and the
+/// nested case panicked with "the body is not emitted here".
+#[test]
+fn the_shared_host_body_locator_reads_the_definition_and_not_a_look_alike() {
+    let suffix_decoy = concat!(
+        "void g_run__chelis_owned_body(chelis_tensor* x) { decoy; }\n",
+        "void run__chelis_owned_body(chelis_tensor* x);\n",
+        "void run__chelis_owned_body(chelis_tensor* x) { real; }\n",
+    );
+    let body = common::host_body_definition(suffix_decoy, "run__chelis_owned_body");
+    assert!(
+        body.contains("real;") && !body.contains("decoy;"),
+        "a symbol ending in the searched name is not the searched body:\n{body}"
+    );
+
+    let nested_parameter = concat!(
+        "void run__chelis_owned_body(void (*emit)(int), chelis_tensor* x);\n",
+        "void run__chelis_owned_body(void (*emit)(int), chelis_tensor* x) { real; }\n",
+    );
+    let body = common::host_body_definition(nested_parameter, "run__chelis_owned_body");
+    assert!(
+        body.contains("real;"),
+        "a nested parenthesis in the parameter list does not end the signature:\n{body}"
     );
 }

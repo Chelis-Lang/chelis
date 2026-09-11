@@ -163,17 +163,17 @@ fn emitted_function<'a>(emitted: &'a str, signature: &str) -> &'a str {
     // Anchor on the opening brace: every compiled function is also
     // forward-declared, and matching the bare signature slices the
     // declaration plus whatever function happens to follow it.
-    let (head, params) = signature
+    let (head, _params) = signature
         .split_once('(')
         .expect("function signature has parameters");
-    let (ret, name) = head
+    let (_ret, name) = head
         .rsplit_once(' ')
         .expect("function signature has a return type and name");
-    let definition = format!("{ret} {name}__chelis_owned_body({params} {{");
-    let start = emitted
-        .find(&definition)
-        .unwrap_or_else(|| panic!("emitted C defines `{definition}`:\n{emitted}"));
-    let rest = &emitted[start..];
+    // chelis#1820: located by NAME, not by the full signature. chelis#1799
+    // added a `chelis_rng_state` parameter to every host body, and the old
+    // full-signature needle then missed the definition and failed before this
+    // row counted anything. The parameter list is not what the row asserts.
+    let rest = common::host_body_definition(emitted, &format!("{name}__chelis_owned_body"));
     let end = rest.find("\n}").expect("function is closed");
     &rest[..end]
 }
