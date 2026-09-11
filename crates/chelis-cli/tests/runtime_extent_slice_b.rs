@@ -722,16 +722,18 @@ fn a_synthesized_kernel_parameter_collision_emits_no_guard() {
 /// ``symbolic dim `x` mismatch`` and `abort()` rather than [04-NUM-9] and
 /// `chelis_numeric_trap`. Both lanes derive the comparison from the same
 /// `derive_dim_witnesses` classes, so the equality is checked either way and no
-/// program runs unguarded; only the spelling diverges. Exact HIP rendering is
-/// chelis#1112's, and this row locks the legacy form until that lands rather
-/// than asserting the [04-NUM-9] form it does not yet produce.
+/// program runs unguarded; only the spelling diverges. chelis#1786 owns that
+/// divergence, and this row locks the legacy form until it lands rather than
+/// asserting the [04-NUM-9] form HIP does not yet produce. (chelis#1112 is the
+/// HIP runtime's `chelis_gpu_alloc` int-extent signature, an extent-WIDTH issue
+/// that changes no diagnostic text; it cannot close this row.)
 ///
 /// EVIDENTIARY STATUS: regression test for the BUILD, disposition lock for the
 /// spelling. Measured red at `01c6e33a1`, where the build failed with
 /// "`chelis build --target hip` does not support the runtime `shape` value
 /// read; lowered node 2 requires it."
 #[test]
-fn an_entry_obligation_witness_emits_the_legacy_hip_guard_pending_1112() {
+fn an_entry_obligation_witness_emits_the_legacy_hip_guard_pending_1786() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = fixture(
         &dir,
