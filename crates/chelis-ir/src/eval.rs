@@ -3188,12 +3188,20 @@ fn computed_axis_extent_value(
             // is readable here because the operand is one of this node's
             // producers. `resolve_eval_pairs` resolves the same two bounds
             // against the same shape when the operation itself runs.
-            let extent = node
+            //
+            // An absent operand or axis is a malformed graph that `verify`
+            // rejects, and the guard declines rather than substituting a
+            // number for it: a fabricated extent would compare a claim
+            // against a value nothing produced, and the operation's own
+            // failure is the one that names the defect.
+            let Some(extent) = node
                 .inputs
                 .first()
                 .and_then(|id| values.get(id))
                 .and_then(|operand| operand.shape.get(*operand_axis).copied())
-                .unwrap_or(0);
+            else {
+                return Ok(None);
+            };
             let start = resolve_eval_bound(start, node, values, extent)?;
             let end = resolve_eval_bound(end, node, values, extent)?;
             Ok(end.checked_sub(start).filter(|span| *span > 0))
