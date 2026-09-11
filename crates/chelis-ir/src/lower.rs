@@ -1695,11 +1695,14 @@ pub(crate) fn try_lower_subexpr_evaluation_with_ordered_inputs(
         scoped_types,
         context,
         result_claim,
-        authored_signature,
         execution,
-        crate::evaluation::ResourcePolicy::Legacy,
-        #[cfg(feature = "lowering-trace")]
-        None,
+        SubexprLoweringOptions {
+            include_list_controls: false,
+            authored_signature,
+            resource_policy: crate::evaluation::ResourcePolicy::Legacy,
+            #[cfg(feature = "lowering-trace")]
+            trace: None,
+        },
     )
 }
 
@@ -1716,11 +1719,14 @@ pub(crate) fn try_lower_subexpr_c_execution_with_ordered_inputs(
         scoped_types,
         context,
         result_claim,
-        authored_signature,
         execution,
-        crate::evaluation::ResourcePolicy::RecordRequirements,
-        #[cfg(feature = "lowering-trace")]
-        None,
+        SubexprLoweringOptions {
+            include_list_controls: false,
+            authored_signature,
+            resource_policy: crate::evaluation::ResourcePolicy::RecordRequirements,
+            #[cfg(feature = "lowering-trace")]
+            trace: None,
+        },
     )
 }
 
@@ -1745,10 +1751,13 @@ pub(crate) fn try_lower_subexpr_c_execution_with_ordered_inputs_and_trace(
         scoped_types,
         context,
         result_claim,
-        authored_signature,
         execution,
-        crate::evaluation::ResourcePolicy::RecordRequirements,
-        Some(collector.clone()),
+        SubexprLoweringOptions {
+            include_list_controls: false,
+            authored_signature,
+            resource_policy: crate::evaluation::ResourcePolicy::RecordRequirements,
+            trace: Some(collector.clone()),
+        },
     )?;
     Ok((plan, collector.finish_helper()))
 }
@@ -1758,13 +1767,11 @@ fn try_lower_subexpr_evaluation_with_ordered_inputs_impl(
     scoped_types: Vec<(String, TensorType)>,
     context: &SubexprLoweringContext,
     result_claim: Option<&TensorType>,
-    authored_signature: bool,
     execution: &crate::evaluation::RandomExecutionContext,
-    resource_policy: crate::evaluation::ResourcePolicy,
-    #[cfg(feature = "lowering-trace")] trace: Option<crate::lowering_trace::Collector>,
+    options: SubexprLoweringOptions,
 ) -> Result<crate::evaluation::EvaluationPlan, LowerDiagnostic> {
-    if let crate::evaluation::EvaluationProfile::Legacy(reason) =
-        context.evaluation_profile_with_resource_policy(expr, &scoped_types, resource_policy)
+    if let crate::evaluation::EvaluationProfile::Legacy(reason) = context
+        .evaluation_profile_with_resource_policy(expr, &scoped_types, options.resource_policy)
         && reason != crate::evaluation::LegacyEvaluationReason::NoDropout
     {
         return Err(LowerDiagnostic::new(
@@ -1787,13 +1794,7 @@ fn try_lower_subexpr_evaluation_with_ordered_inputs_impl(
             context,
             result_claim,
             state,
-            SubexprLoweringOptions {
-                include_list_controls: false,
-                authored_signature,
-                resource_policy,
-                #[cfg(feature = "lowering-trace")]
-                trace,
-            },
+            options,
             Some(&mut metadata),
         );
         crate::evaluation::EvaluationPlan::new(
