@@ -44,6 +44,22 @@ class ContractTests(unittest.TestCase):
                 oracle.check_options(argv)
         oracle.check_options(["--phase", "2"])
 
+    def test_python_leg_is_platform_invariant_and_bounded_to_phase_two(self):
+        args = dict(oracle.phase2_legs())[
+            "Python host device and DLPack boundaries"
+        ]
+        self.assertEqual(
+            args,
+            (
+                "-p",
+                "chelis-python",
+                "-E",
+                oracle.PYTHON_BOUNDARY_FILTER,
+            ),
+        )
+        self.assertNotIn("compiled_host_outputs_have_no_runtime_metadata_leaks", args[-1])
+        self.assertNotIn("manual_", args[-1])
+
     def test_selection_digest_binds_every_exact_test_identity(self):
         selected = ["package::binary::negative", "package::binary::positive"]
         digest = oracle.selection_digest(selected)

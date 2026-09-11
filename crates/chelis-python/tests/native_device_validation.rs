@@ -75,10 +75,10 @@ fn run_case(rank: usize, body: &str) {
     }
     run_shape(shape, body);
 }
-fn run_shape(shape: Vec<i32>, body: &str) {
+fn run_shape(shape: Vec<i64>, body: &str) {
     run_outputs(shape, 1, body);
 }
-fn run_outputs(shape: Vec<i32>, output_count: usize, body: &str) {
+fn run_outputs(shape: Vec<i64>, output_count: usize, body: &str) {
     let dir = support::capture::ArtifactDirectory::new().unwrap();
     let source = dir.path().join("device.c");
     let library = dir
@@ -168,7 +168,7 @@ source = Tensor()
 }
 #[test]
 fn dynamic_device_owners_preserve_rank_device_and_input_lifetime() {
-    for rank in [0, 1, 9, 33] {
+    for rank in [0, 1, 8, 9, 33] {
         run_case(
             rank,
             r#"
@@ -177,6 +177,9 @@ assert type(output) is native.NativeTensor
 assert output.shape == shape
 assert output.__dlpack_device__() == (10, 1)
 assert all(type(component) is int for component in output.__dlpack_device__())
+capsule = output.__dlpack__(stream=0, max_version=(1, 0), copy=False)
+del capsule
+assert fixture.fixture_syncs() == 1
 assert fixture.fixture_imports() == 1 and fixture.fixture_calls() == 1
 assert fixture.fixture_live() == 1
 ref = weakref.ref(source)
@@ -188,6 +191,46 @@ assert ref() is None and fixture.fixture_live() == 0
 "#,
         );
     }
+}
+
+#[test]
+fn device_paths_preserve_large_empty_extent_without_narrowing() {
+    run_shape(
+        vec![0, 1_i64 << 33],
+        r#"
+source.offset = 8
+source.empty_pointer = True
+output = model(source)
+assert output.shape == [0, 1 << 33]
+assert output.__dlpack_device__() == (10, 1)
+capsule = output.__dlpack__(stream=0, max_version=(1, 0), copy=False)
+del capsule
+assert fixture.fixture_imports() == 1 and fixture.fixture_calls() == 1
+assert fixture.fixture_syncs() == 1
+del output; gc.collect()
+assert fixture.fixture_live() == 0
+"#,
+    );
+}
+
+#[test]
+fn extent_outside_int64_rejects_before_device_import_or_entry() {
+    run_shape(
+        vec![0, i64::MAX],
+        r#"
+source.shape = [0, 1 << 63]
+source.strides = [1, 1]
+source.offset = 8
+source.empty_pointer = True
+try:
+    model(source)
+    raise AssertionError('out-of-domain device extent admitted')
+except (OverflowError, ValueError):
+    pass
+assert fixture.fixture_imports() == 0 and fixture.fixture_calls() == 0
+assert fixture.fixture_live() == 0
+"#,
+    );
 }
 #[test]
 fn invalid_storage_offset_capacity_and_context_never_reach_import_or_entry() {

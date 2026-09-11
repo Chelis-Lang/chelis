@@ -1614,9 +1614,11 @@ Final line: `RUNTIME REPRESENTATION PHASE 2: PASS`.
 
 The implementation is `scripts/runtime_representation_phase2.py`.
 `runtime_representation_phase2_tests.json` freezes five Python contract cases
-and 273 current Rust selections: 33 shared-ABI tests, six metadata-plan C API
-tests, 79 HIP descriptor/owner tests, 145 Python binding tests, and ten
-backend-header census tests. The command first obtains a complete fresh Phase 1
+and 237 current Rust selections: 33 shared-ABI tests, six metadata-plan C API
+tests, 79 HIP descriptor/owner tests, 109 platform-invariant Python binding
+tests, and ten backend-header census tests. The Python leg names its integration
+binaries and relevant internal ownership tests explicitly rather than freezing
+platform-only package tests. The command first obtains a complete fresh Phase 1
 receipt, then lists and executes each Phase 2 cohort with zero retries and
 verifies unchanged test artifacts and source identity. The only recorded
 non-execution is the exact HIP hardware command above; CPU SDK-fixture execution

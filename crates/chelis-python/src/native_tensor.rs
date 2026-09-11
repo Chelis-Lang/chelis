@@ -283,14 +283,15 @@ pub(super) fn execute_checked(py: Python<'_>, admitted: &CompiledInputs) -> RawO
             let pointers = py.allow_threads(move || execution.run()).0;
             let mut owners = Vec::with_capacity(pointers.len());
             for pointer in pointers {
-                let owner = NonNull::new(pointer).map(|ptr| {
-                    TensorOwner::Cpu(Arc::new(CpuTensorHandle {
-                        ptr,
-                        api: *api,
-                        _library: Arc::clone(&admitted.library),
-                    }))
-                });
-                owners.push(owner);
+                let Some(ptr) = NonNull::new(pointer) else {
+                    owners.push(None);
+                    continue;
+                };
+                owners.push(Some(TensorOwner::Cpu(Arc::new(CpuTensorHandle {
+                    ptr,
+                    api: *api,
+                    _library: Arc::clone(&admitted.library),
+                }))));
             }
             owners
         }

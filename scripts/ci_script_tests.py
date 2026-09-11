@@ -25,6 +25,7 @@ NIGHTLY_CLASSES = frozenset({
     "test_capacity_census_wire_publication.ActualPublicationArtifacts",
     "test_capacity_census_wire_schema.ActualSchemaCodec",
     "test_capacity_census_native_calls.NativeCompilerCollectionControls",
+    "test_capacity_census_native_owners.NativeOwnerIntegration",
     "test_regenerate_chelis_std_bundle.RealGeneratorFixedPointTests",
 })
 PROFILE_CLASSES = frozenset({

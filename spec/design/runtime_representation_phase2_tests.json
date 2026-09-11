@@ -51,10 +51,12 @@
       "name": "Python host device and DLPack boundaries",
       "args": [
         "-p",
-        "chelis-python"
+        "chelis-python",
+        "-E",
+        "binary_id(/^chelis-python::(binding_payloads|capacity_census_bindings|compiler_json_payloads|execution_wire_facade|native_device_validation|native_execution_capture|native_manifest_dimensions|native_output_validation|native_python_environment|native_registration_probe|native_tensor_boundary)$/) | test(/^(native_dlpack_owner_tests::mismatched_dlpack_request_rejects_and_releases_only_its_retained_owner|native_tensor::tests::validated_owner_supports_foreign_consumer_threads|tests::binding_constructor_metadata_tracks_actual_pyo3_slots|tests::compiled_host_binding_executes_rank_zero_one_eight_and_nine|tests::compiled_manifest_version_admission_precedes_metadata_and_library_use|tests::dtype_mappings_are_exhaustive_and_reject_unknown_tags|tests::element_count_reports_shapes_outside_the_int64_extent_domain|tests::execution_dtype_gate_is_target_aware|tests::host_dimension_backing_accepts_rank_zero_and_rank_above_eight|tests::host_input_validation_accepts_rank_zero_empty_and_canonical_strides|tests::host_tensor_is_opaque_and_read_view_has_the_exact_fixed_layout|tests::native_shape_admission_checks_exact_int64_extents|tests::unloading_an_artifact_whose_kernel_ran_does_not_abort_the_process)$/)"
       ],
-      "selected_count": 147,
-      "selected_sha256": "5ac1d17395d875d8f5c029f876da69e9a120c5736d0a4830e144cb3a4bcf6e62"
+      "selected_count": 109,
+      "selected_sha256": "c3fd0ab56cab8c2c97ae2a369a848634599a7cc7877a13d9b82d70d49051e7c0"
     },
     {
       "name": "backend runtime-header capacity census",

@@ -23,6 +23,13 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(set.union(*identities), {t.id() for t in runner.flatten(suite)})
         self.assertTrue(all(identities))
         self.assertIn("test_regenerate_chelis_std_bundle.RealGeneratorFixedPointTests.test_two_real_debug_regenerations_reach_a_byte_fixed_point", identities[1])
+        native_owner = {
+            name
+            for name in set.union(*identities)
+            if name.startswith("test_capacity_census_native_owners.NativeOwnerIntegration.")
+        }
+        self.assertTrue(native_owner)
+        self.assertTrue(native_owner <= identities[1])
         for name in identities[0]:
             self.assertNotIn(name.rsplit(".", 1)[0], runner.NIGHTLY_CLASSES)
         self.assertTrue(identities[2] <= runner.census_controls())

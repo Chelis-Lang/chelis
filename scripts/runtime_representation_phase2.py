@@ -19,7 +19,43 @@ from scripts.dtype_builtin_atom_closure_oracle import source_identity
 ROOT = phase1.ROOT
 OracleFailure = phase1.OracleFailure
 MANIFEST = ROOT / "spec/design/runtime_representation_phase2_tests.json"
-MANIFEST_SHA256 = "f030e891e1c2c4b217d8855a46c1aaf0fdc6d7735bcf7679b9a227bbe9eb6483"
+MANIFEST_SHA256 = "54c99fc30afcf2b9615b91459ab0dc28f1983ee79ac0d9b2a177cb9489053cbd"
+
+PYTHON_BOUNDARY_BINARIES = (
+    "binding_payloads",
+    "capacity_census_bindings",
+    "compiler_json_payloads",
+    "execution_wire_facade",
+    "native_device_validation",
+    "native_execution_capture",
+    "native_manifest_dimensions",
+    "native_output_validation",
+    "native_python_environment",
+    "native_registration_probe",
+    "native_tensor_boundary",
+)
+PYTHON_BOUNDARY_UNIT_TESTS = (
+    "native_dlpack_owner_tests::mismatched_dlpack_request_rejects_and_releases_only_its_retained_owner",
+    "native_tensor::tests::validated_owner_supports_foreign_consumer_threads",
+    "tests::binding_constructor_metadata_tracks_actual_pyo3_slots",
+    "tests::compiled_host_binding_executes_rank_zero_one_eight_and_nine",
+    "tests::compiled_manifest_version_admission_precedes_metadata_and_library_use",
+    "tests::dtype_mappings_are_exhaustive_and_reject_unknown_tags",
+    "tests::element_count_reports_shapes_outside_the_int64_extent_domain",
+    "tests::execution_dtype_gate_is_target_aware",
+    "tests::host_dimension_backing_accepts_rank_zero_and_rank_above_eight",
+    "tests::host_input_validation_accepts_rank_zero_empty_and_canonical_strides",
+    "tests::host_tensor_is_opaque_and_read_view_has_the_exact_fixed_layout",
+    "tests::native_shape_admission_checks_exact_int64_extents",
+    "tests::unloading_an_artifact_whose_kernel_ran_does_not_abort_the_process",
+)
+PYTHON_BOUNDARY_FILTER = (
+    "binary_id(/^chelis-python::("
+    + "|".join(PYTHON_BOUNDARY_BINARIES)
+    + ")$/) | test(/^("
+    + "|".join(PYTHON_BOUNDARY_UNIT_TESTS)
+    + ")$/)"
+)
 
 
 def check_options(argv):
@@ -64,7 +100,7 @@ def phase2_legs():
         ),
         (
             "Python host device and DLPack boundaries",
-            ("-p", "chelis-python"),
+            ("-p", "chelis-python", "-E", PYTHON_BOUNDARY_FILTER),
         ),
         (
             "backend runtime-header capacity census",
