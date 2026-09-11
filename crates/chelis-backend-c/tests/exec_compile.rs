@@ -7939,3 +7939,119 @@ int main(void) {
         "{invalid:?}"
     );
 }
+
+/// A one-parameter host function `the_fn(a) = diagonal(a, 0, 1)` whose declared
+/// result carries `declared` on its single axis (chelis#1739).
+fn host_diagonal_program(operand: Vec<usize>, declared: usize) -> HostProgram {
+    let operand_ty = host_tensor(operand);
+    let result_ty = TensorType {
+        dims: vec![DimInfo::Lit(declared)],
+        precision: Prim::F32,
+    };
+    let axis = |value: i64| HostExpr::new(HostExprKind::Int(value));
+    let body = HostExpr::new(HostExprKind::Builtin {
+        name: "diagonal".to_string(),
+        args: vec![
+            HostExpr::new(HostExprKind::Var(
+                "a".to_string(),
+                HostType::Tensor(operand_ty.clone()),
+            )),
+            axis(0),
+            axis(1),
+        ],
+        ty: HostType::Tensor(result_ty.clone()),
+    });
+    HostProgram {
+        globals: Vec::new(),
+        global_tensor_helpers: Vec::new(),
+        functions: vec![HostFunction {
+            name: "the_fn".to_string(),
+            params: vec![HostParam {
+                name: "a".to_string(),
+                ty: HostType::Tensor(operand_ty),
+            }],
+            ret_ty: HostType::Tensor(result_ty),
+            body,
+            tensor_helpers: Vec::new(),
+            origin: HostFunctionOrigin::Authored,
+            specialization: None,
+            summary_rejections: Vec::new(),
+        }],
+        summary_rejections: Vec::new(),
+    }
+}
+
+/// chelis#1739, driven under the sanitizers. A host-lane function whose declared
+/// result extent the body cannot produce aborts at its return boundary with the
+/// `[04-NUM-9]` `Domain` rendering, and the same function with an agreeing
+/// declaration returns its exact result.
+///
+/// The host lane has no `ExtentWitness`, so this guard is the only thing between
+/// a wrong declaration and a silent wrong answer. Driven here rather than only
+/// through the CLI so the added shape read and `fprintf` run under
+/// `-fsanitize=address,undefined`.
+#[test]
+fn host_declared_result_extent_guard_traps_and_executes_under_sanitizers() {
+    for (rows, declared, expect_trap) in [(2usize, 3usize, true), (3, 3, false), (5, 4, false)] {
+        let source = emit_host_program(
+            &host_diagonal_program(vec![rows, 4], declared),
+            "host_result_extent",
+        )
+        .unwrap();
+        let harness = format!(
+            r#"
+#include <stdio.h>
+#include "chelis_runtime.h"
+chelis_tensor *the_fn(chelis_tensor *);
+int main(void) {{
+    int64_t dims[2] = {{{rows}, 4}};
+    chelis_tensor *a = chelis_alloc(2, dims, CHELIS_DTYPE_F32);
+    chelis_tensor_write *guard = chelis_tensor_begin_write(a);
+    float *data = (float *)chelis_tensor_write_view(guard).data;
+    for (int i = 0; i < {rows} * 4; ++i) data[i] = (float)(i + 1);
+    chelis_tensor_end_write(guard);
+    chelis_tensor *out = the_fn(a);
+    chelis_read_view view = chelis_tensor_read_view(out);
+    printf("RETURNED %lld\n", (long long)view.count);
+    chelis_tensor_release(out);
+    chelis_tensor_release(a);
+    return 0;
+}}
+"#
+        );
+        let run = checked_indexing_run(&source, &harness);
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        let stdout = String::from_utf8_lossy(&run.stdout);
+        if expect_trap {
+            assert!(
+                !run.status.success(),
+                "a declared {declared} over min({rows}, 4) must abort: {stdout}{stderr}"
+            );
+            assert!(
+                stderr.contains("numeric trap: domain in diagonal at int64"),
+                "the frozen [04-NUM-9] line: {stderr}"
+            );
+            assert!(
+                stderr.contains(&format!(
+                    "extent `{declared}`: claimed = {declared}, diagonal axis 0 = {}",
+                    rows.min(4)
+                )),
+                "the accompanying context line: {stderr}"
+            );
+            assert!(
+                !stdout.contains("RETURNED"),
+                "the guard runs BEFORE the result reaches the caller: {stdout}"
+            );
+        } else {
+            assert!(
+                run.status.success(),
+                "an agreeing declaration must execute: {stdout}{stderr}"
+            );
+            assert_eq!(
+                stdout,
+                format!("RETURNED {}\n", rows.min(4)),
+                "and return its exact result: {stderr}"
+            );
+        }
+    }
+}

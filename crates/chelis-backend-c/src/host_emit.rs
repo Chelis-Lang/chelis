@@ -1624,6 +1624,50 @@ fn append_unreachable_fn_abort_stub(
     Ok(())
 }
 
+/// chelis#1739. A host-lane function whose declared result carries a literal
+/// extent gets that extent compared against the tensor it actually produces,
+/// at the function's return boundary.
+///
+/// The host lane has no `ExtentWitness`: `diagonal`, `sort`, `where` and the
+/// rest of `HOST_ONLY_BUILTINS` never reach a `RiscOp`, so the DAG lane's
+/// literal-result claim cannot see them and a declaration the body cannot
+/// satisfy executed silently. The guard belongs here rather than inside a
+/// `chelis_tensor_*` kernel, because the literal lives on the enclosing
+/// signature and a per-builtin check would be a second guard model.
+///
+/// `[04-NUM-9]`'s `<op>` slot is the canonical name of the operation that
+/// introduces the guarded extent, so the guard is emitted only when the body IS
+/// a direct builtin application and that name is known. A block-bodied or
+/// call-bodied return has no such name and is deliberately left unguarded;
+/// `crates/chelis-cli/tests/issue_1739_diagonal_runtime_bound.rs` locks that
+/// residual.
+fn declared_result_extent_guard(function: &HostFunction) -> Vec<String> {
+    let HostAbiType::Tensor(ty) = &function.ret_ty else {
+        return Vec::new();
+    };
+    let HostExprKind::Builtin { name, .. } = &function.body.kind else {
+        return Vec::new();
+    };
+    let op = chelis_ir::span_sanitize::sanitize_for_format_string(name);
+    let mut lines = Vec::new();
+    for (axis, dim) in ty.dims.iter().enumerate() {
+        let DimInfo::Lit(required) = dim else {
+            continue;
+        };
+        lines.push(format!(
+            "    if (chelis_tensor_shape(__result, {axis}) != {required}) {{"
+        ));
+        lines.push(format!(
+            "        fprintf(stderr, \"extent `{required}`: claimed = {required}, {op} axis {axis} = %lld\\n\", (long long)chelis_tensor_shape(__result, {axis}));"
+        ));
+        lines.push(format!(
+            "        chelis_numeric_trap(\"numeric trap: domain in {op} at int64\");"
+        ));
+        lines.push("    }".to_string());
+    }
+    lines
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_function(
     out: &mut Vec<String>,
@@ -1717,6 +1761,7 @@ fn emit_function(
     emitter.emit_terminal_site(terminal, Some("__result"))?;
     emitter.finish_expression_sites()?;
     out.extend(emitter.lines);
+    out.extend(declared_result_extent_guard(function));
     out.push("    return __result;".to_string());
     out.push("}".to_string());
 
