@@ -11276,7 +11276,11 @@ fn top_level_fn_helper_summary_rejects(
     // as capacity arithmetic it is not.
     HOST_SUMMARY_PROBE_BUILDS.with(|builds| {
         let counted = builds.get();
-        builds.set(if counted == u64::MAX { counted } else { counted + 1 });
+        builds.set(if counted == u64::MAX {
+            counted
+        } else {
+            counted + 1
+        });
     });
     let pushed = push_inlining(name);
     // This lowering is a probe: its result is inspected and discarded, so
