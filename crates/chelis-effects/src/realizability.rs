@@ -1857,11 +1857,24 @@ mod tests {
     /// where the removed `DeepTag::DName` arm returned true for `*`.
     #[test]
     fn a_runtime_extent_is_not_an_unresolved_observation_parameter() {
-        let wildcard = chelis_deep::parser::parse_and_stamp_type(
-            "(t-tensor {} (d-name {} *) (t-prim {} f32))",
-        )
-        .expect("wildcard tensor type");
-        assert!(!type_expr_has_unresolved_observation_parameter(&wildcard));
+        for (label, source) in [
+            ("rank one", "(t-tensor {} (d-name {} *) (t-prim {} f32))"),
+            (
+                "beside a concrete axis",
+                "(t-tensor {} (d-lit {} 2) (d-name {} *) (t-prim {} f32))",
+            ),
+            (
+                "under a nullary function result",
+                "(t-fn {} (t-tensor {} (d-name {} *) (t-prim {} f32)))",
+            ),
+        ] {
+            let expr = chelis_deep::parser::parse_and_stamp_type(source)
+                .unwrap_or_else(|error| panic!("{label}: {error:?}"));
+            assert!(
+                !type_expr_has_unresolved_observation_parameter(&expr),
+                "{label} must be a resolved runtime extent"
+            );
+        }
     }
 
     /// Negative parity for the test above, and a disposition lock rather than
@@ -1890,12 +1903,6 @@ mod tests {
                 "{label} must stay an unresolved observation parameter"
             );
         }
-        // A concrete extent beside a wildcard one stays observable too.
-        let concrete = chelis_deep::parser::parse_and_stamp_type(
-            "(t-tensor {} (d-lit {} 2) (d-name {} *) (t-prim {} f32))",
-        )
-        .expect("mixed tensor type");
-        assert!(!type_expr_has_unresolved_observation_parameter(&concrete));
     }
 
     #[test]
