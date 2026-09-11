@@ -373,8 +373,13 @@ pub(crate) fn evaluate_host_program(
     program: &CheckedProgram,
     tensor_bindings: &UnordMap<String, RuntimeTensorValue>,
 ) -> Result<RuntimeOutcome, String> {
-    evaluate_host_program_filtered(program, tensor_bindings, None, None)
+    evaluate_host_program_filtered(program, tensor_bindings, None, None, None)
         .map_err(|failure| failure.message)
+}
+
+pub(crate) struct HostEvaluationInputs<'a> {
+    pub(crate) roots: &'a UnordMap<String, RuntimeTensorValue>,
+    pub(crate) bindings: Option<&'a UnordMap<String, IrTensorValue>>,
 }
 
 /// A failed execution still owes the effects it performed before unwinding.
@@ -398,12 +403,16 @@ pub(crate) fn evaluate_host_program_filtered(
     tensor_bindings: &UnordMap<String, RuntimeTensorValue>,
     selected_roots: Option<&[String]>,
     manifested_lowered_names: Option<&BTreeMap<String, bool>>,
+    bound_evaluation_inputs: Option<&UnordMap<String, IrTensorValue>>,
 ) -> Result<RuntimeOutcome, RuntimeFailure> {
     evaluate_host_program_with_library_and_types(
         program,
         None,
         None,
-        tensor_bindings,
+        HostEvaluationInputs {
+            roots: tensor_bindings,
+            bindings: bound_evaluation_inputs,
+        },
         selected_roots,
         manifested_lowered_names,
     )
@@ -436,10 +445,14 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
     program: &CheckedProgram,
     library: Option<&CheckedProgram>,
     library_lowered_names: Option<&BTreeMap<String, bool>>,
-    tensor_bindings: &UnordMap<String, RuntimeTensorValue>,
+    inputs: HostEvaluationInputs<'_>,
     selected_roots: Option<&[String]>,
     manifested_lowered_names: Option<&BTreeMap<String, bool>>,
 ) -> Result<RuntimeOutcome, RuntimeFailure> {
+    let HostEvaluationInputs {
+        roots: tensor_bindings,
+        bindings: bound_evaluation_inputs,
+    } = inputs;
     let empty_types = BTreeMap::new();
     let library_exprs = library.map(CheckedProgram::exprs).unwrap_or(&[]);
     let library_type_env = library
@@ -561,6 +574,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         resolving_top_levels: Vec::new(),
         random_seed: None,
         random_counter: 0,
+        execution_exclusion: None,
         cancel: chelis_types::current_cancel_token(),
     };
 
@@ -662,6 +676,17 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
                 .map(|value| stamp_def_closure(value, name, body))
         });
         let applied = callable.and_then(|closure| {
+            // Some fixed dropout bodies (for example a negated literal rate)
+            // retain the legacy Host lane. Bind their declared selected-call
+            // inputs explicitly; never substitute Unit for an entered operand.
+            // Other Host APIs keep their existing argument disposition.
+            let fixed = match &closure {
+                RuntimeValue::Closure { body, .. } => {
+                    ctx.execution_profile(body, &ctx.top_level_defs)
+                        == chelis_ir::evaluation::EvaluationProfile::FixedControl
+                }
+                _ => false,
+            };
             let args = match &closure {
                 RuntimeValue::Closure { params, .. } => params
                     .iter()
@@ -670,6 +695,13 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
                             .get(param)
                             .cloned()
                             .map(RuntimeValue::Tensor)
+                            .or_else(|| {
+                                fixed
+                                    .then(|| bound_evaluation_inputs?.get(param).cloned())
+                                    .flatten()
+                                    .map(RuntimeTensorValue::new)
+                                    .map(RuntimeValue::Tensor)
+                            })
                             .unwrap_or(RuntimeValue::Unit)
                     })
                     .collect(),
@@ -980,18 +1012,47 @@ struct EvalContext<'a> {
     /// DAG draws no Random and is reused across applications. A Random-drawing
     /// kernel is re-lowered per application and never cached (see
     /// `EvalContext::def_kernel`).
-    def_kernels: UnordMap<String, Option<std::sync::Arc<chelis_ir::host::HostDefKernel>>>,
+    def_kernels: UnordMap<String, Option<std::sync::Arc<DefEvaluationKernel>>>,
     transcript: Vec<String>,
     transcript_capture: Option<crate::TranscriptCapture>,
     resolving_top_levels: Vec<String>,
     random_seed: Option<u64>,
     random_counter: u64,
+    /// An explicitly excluded caller keeps all nested dispatch legacy. This
+    /// is an admission decision, not recovery from a plan error.
+    execution_exclusion: Option<chelis_ir::evaluation::LegacyEvaluationReason>,
     /// Cooperative cancellation flag (chelis#914), captured ONCE from the
     /// thread-local install point at construction so the per-node-visit
     /// check in [`Self::eval_expr`] is a relaxed atomic load rather than a
     /// TLS lookup. `None` — the default when no caller installed a token —
     /// makes the check a single `Option` discriminant test.
     cancel: Option<chelis_types::CancelToken>,
+}
+
+enum DefEvaluationKernel {
+    Legacy(chelis_ir::host::HostDefKernel),
+    Planned(chelis_ir::host::HostDefEvaluationPlan),
+}
+
+impl DefEvaluationKernel {
+    fn kernel_for_inspection(&self) -> &chelis_ir::host::HostDefKernel {
+        match self {
+            Self::Legacy(kernel) => kernel,
+            Self::Planned(plan) => plan.kernel_for_inspection(),
+        }
+    }
+    fn plan(&self) -> Option<&chelis_ir::evaluation::EvaluationPlan> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Planned(plan) => plan.plan(),
+        }
+    }
+    fn staged_plan(&self) -> Option<&chelis_ir::evaluation::StagedEvaluationPlan> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Planned(plan) => plan.staged_plan(),
+        }
+    }
 }
 
 fn tag(list: &List) -> Option<DeepTag> {

@@ -227,10 +227,17 @@ pub(super) fn reject_inadmissible_operand_dtypes(
         && fname == "dropout"
     {
         *checked_route_observed = true;
+        let tensor_prim = arg_tys
+            .first()
+            .and_then(|ty| match type_for_readonly_check(ty, subst) {
+                Type::Tensor(_, TensorPrec::Concrete(prim)) => Some(prim),
+                _ => None,
+            });
         if let Some(first_arg) = arg_tys.first() {
             let resolved = type_for_readonly_check(first_arg, subst);
             match &resolved {
-                Type::Tensor(_, _) | Type::Var(_) | Type::Error(_) => {}
+                Type::Tensor(_, TensorPrec::Concrete(prim)) if prim.is_float() => {}
+                Type::Tensor(_, TensorPrec::Var(_)) | Type::Var(_) | Type::Error(_) => {}
                 _ => {
                     return reject(
                         errors,
@@ -238,7 +245,10 @@ pub(super) fn reject_inadmissible_operand_dtypes(
                             CheckErrorKind::TypeMismatch,
                             with_macro_provenance(
                                 &deep::Expr::List(list.clone(), zero_span()),
-                                format!("dropout expects tensor input, got {}", resolved),
+                                format!(
+                                    "dropout expects a tensor at an active float dtype, got {}",
+                                    resolved
+                                ),
                             ),
                             vec![],
                         ),
@@ -250,7 +260,9 @@ pub(super) fn reject_inadmissible_operand_dtypes(
         if let Some(rate_arg) = arg_tys.get(1) {
             let resolved = subst.apply(rate_arg);
             match &resolved {
-                Type::Prim(Prim::F32) | Type::Var(_) | Type::Error(_) => {}
+                Type::Prim(prim)
+                    if prim.is_float() && tensor_prim.is_none_or(|input| input == *prim) => {}
+                Type::Var(_) | Type::Error(_) => {}
                 _ => {
                     return reject(
                         errors,
@@ -258,7 +270,10 @@ pub(super) fn reject_inadmissible_operand_dtypes(
                             CheckErrorKind::TypeMismatch,
                             with_macro_provenance(
                                 &deep::Expr::List(list.clone(), zero_span()),
-                                format!("dropout expects f32 rate, got {}", resolved),
+                                format!(
+                                    "dropout rate must have the input tensor's active float dtype, got {}",
+                                    resolved
+                                ),
                             ),
                             vec![],
                         ),

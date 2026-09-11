@@ -3074,6 +3074,31 @@ pub struct HostDefKernel {
     pub next_random_counter: Option<u64>,
 }
 
+/// Evaluator-only transport; the public/serialized legacy kernel is not
+/// extended with fields whose loss could change Random execution.
+#[derive(Debug, Clone)]
+pub struct HostDefEvaluationPlan {
+    kernel: HostDefKernel,
+    plan: Option<crate::evaluation::EvaluationPlan>,
+    profile: crate::evaluation::EvaluationProfile,
+    staged_plan: Option<Box<crate::evaluation::StagedEvaluationPlan>>,
+}
+
+impl HostDefEvaluationPlan {
+    pub fn kernel_for_inspection(&self) -> &HostDefKernel {
+        &self.kernel
+    }
+    pub fn plan(&self) -> Option<&crate::evaluation::EvaluationPlan> {
+        self.plan.as_ref()
+    }
+    pub fn profile(&self) -> crate::evaluation::EvaluationProfile {
+        self.profile
+    }
+    pub fn staged_plan(&self) -> Option<&crate::evaluation::StagedEvaluationPlan> {
+        self.staged_plan.as_deref()
+    }
+}
+
 /// What `lower_host_function` and [`host_def_kernel`] both start from.
 struct HostDefSignature {
     name: String,
@@ -3106,6 +3131,24 @@ pub fn host_def_kernel(
     name: &str,
     random: Option<RandomLoweringState>,
 ) -> Result<Option<HostDefKernel>, crate::lower::LowerDiagnostic> {
+    host_def_kernel_product(program, name, random, None)
+        .map(|product| product.map(|product| product.kernel))
+}
+
+pub fn host_def_evaluation_plan(
+    program: &CheckedProgram,
+    name: &str,
+    context: &crate::evaluation::RandomExecutionContext,
+) -> Result<Option<HostDefEvaluationPlan>, crate::lower::LowerDiagnostic> {
+    host_def_kernel_product(program, name, Some(context.state()), Some(context))
+}
+
+fn host_def_kernel_product(
+    program: &CheckedProgram,
+    name: &str,
+    random: Option<RandomLoweringState>,
+    execution: Option<&crate::evaluation::RandomExecutionContext>,
+) -> Result<Option<HostDefEvaluationPlan>, crate::lower::LowerDiagnostic> {
     // The declaration's own name is the key for every per-def fact (the
     // effect row, the call graph); a caller may hand in a shorter spelling
     // that `find_top_level_def_named` resolves.
@@ -3131,24 +3174,78 @@ pub fn host_def_kernel(
         return Ok(None);
     };
     let _preflight_guard = TensorHelperPreflightGuard::begin(&signature.body_expr, program);
-    match staged_def_kernel(program, &signature, random)? {
-        staged::StagingAttempt::Ready(kernel) => return Ok(Some(kernel)),
-        staged::StagingAttempt::HostControlBoundary => return Ok(None),
-        staged::StagingAttempt::NotApplicable => {}
+    let profile = match execution {
+        Some(_) => cached_subexpr_lowering_context(program).evaluation_profile(
+            &signature.body_expr,
+            &signature
+                .params
+                .iter()
+                .map(|param| param.name.clone())
+                .collect::<Vec<_>>(),
+        ),
+        None => crate::evaluation::EvaluationProfile::Legacy(
+            crate::evaluation::LegacyEvaluationReason::LegacyApi,
+        ),
+    };
+    // Claims are constructed before partitioning, while the evaluator keeps
+    // the source-owned Random associations across those same stage cuts.
+    let mut staged_plan = None;
+    {
+        let execution_out = (profile == crate::evaluation::EvaluationProfile::FixedControl)
+            .then_some(&mut staged_plan);
+        match staged_def_kernel_product(program, &signature, random, execution_out)? {
+            staged::StagingAttempt::Ready(kernel) => {
+                return Ok(Some(HostDefEvaluationPlan {
+                    kernel,
+                    plan: None,
+                    profile,
+                    staged_plan: staged_plan.map(Box::new),
+                }));
+            }
+            staged::StagingAttempt::HostControlBoundary => return Ok(None),
+            staged::StagingAttempt::NotApplicable => {}
+        }
     }
-    let expected = match def_body_decision(program, &signature)? {
+    let expected = match def_body_decision_impl(
+        program,
+        &signature,
+        profile == crate::evaluation::EvaluationProfile::FixedControl,
+    )? {
         DefBodyDecision::Kernel(expected) => expected,
         DefBodyDecision::Host => return Ok(None),
         DefBodyDecision::TensorVar(..) => return Ok(None),
     };
-    let (dag, next_random_counter) = lower_kernel_dag(
-        &signature.body_expr,
-        program,
-        &signature.scope,
-        Some(&signature.params),
-        &expected,
-        random,
-    )?;
+    let plan = if profile == crate::evaluation::EvaluationProfile::FixedControl {
+        let context = cached_subexpr_lowering_context(program);
+        let plan = crate::lower::try_lower_subexpr_evaluation_with_ordered_inputs(
+            &signature.body_expr,
+            kernel_scope_types(&signature.scope, Some(&signature.params)),
+            &context,
+            Some(&expected),
+            execution.expect("fixed profile is only selected by the evaluator"),
+        )?;
+        let rebound =
+            remap_tensor_helper_dim_symbols(plan.dag_for_inspection(), &signature.scope, &expected);
+        Some(
+            plan.rebind_dimensions(rebound).map_err(|message| {
+                crate::lower::LowerDiagnostic::new(message, None, None).fatal()
+            })?,
+        )
+    } else {
+        None
+    };
+    let (dag, next_random_counter) = if let Some(plan) = &plan {
+        (plan.dag_for_inspection().clone(), None)
+    } else {
+        lower_kernel_dag(
+            &signature.body_expr,
+            program,
+            &signature.scope,
+            Some(&signature.params),
+            &expected,
+            random,
+        )?
+    };
     if let Some(builtin) = kernel_dag_loads_builtin(&dag) {
         return Err(crate::lower::LowerDiagnostic::new(
             format!(
@@ -3166,13 +3263,18 @@ pub fn host_def_kernel(
         .and_then(|id| dag.get(*id))
         .map(|node| node.output_type.clone())
         .unwrap_or_else(|| expected.clone());
-    Ok(Some(HostDefKernel {
-        dag,
-        staged: None,
-        inputs,
-        output,
-        params: signature.params,
-        next_random_counter,
+    Ok(Some(HostDefEvaluationPlan {
+        kernel: HostDefKernel {
+            dag,
+            staged: None,
+            inputs,
+            output,
+            params: signature.params,
+            next_random_counter,
+        },
+        plan,
+        profile,
+        staged_plan: None,
     }))
 }
 
@@ -3180,6 +3282,15 @@ fn staged_def_kernel(
     program: &CheckedProgram,
     signature: &HostDefSignature,
     random: Option<RandomLoweringState>,
+) -> Result<staged::StagingAttempt<HostDefKernel>, crate::lower::LowerDiagnostic> {
+    staged_def_kernel_product(program, signature, random, None)
+}
+
+fn staged_def_kernel_product(
+    program: &CheckedProgram,
+    signature: &HostDefSignature,
+    random: Option<RandomLoweringState>,
+    execution_out: Option<&mut Option<crate::evaluation::StagedEvaluationPlan>>,
 ) -> Result<staged::StagingAttempt<HostDefKernel>, crate::lower::LowerDiagnostic> {
     use staged::StagingAttempt;
     let HostTypeTerm::Tensor(expected) = &signature.ret_ty else {
@@ -3239,6 +3350,7 @@ fn staged_def_kernel(
         &context,
         expected,
         random,
+        execution_out,
     );
     let lowered = match lowered {
         Ok(lowered) => lowered,
@@ -3314,11 +3426,13 @@ pub(crate) fn body_form_the_dag_cannot_carry(
     program: &CheckedProgram,
     body: &Expr,
     params: &[HostParam],
+    evaluation_dropout: bool,
 ) -> Option<String> {
     let defs = cached_program_defs(program);
     let mut walk = UncarriableWalk {
         defs: &defs,
         visited: UnordSet::new(),
+        evaluation_dropout,
         scopes: vec![
             params
                 .iter()
@@ -3335,6 +3449,7 @@ pub(crate) fn body_form_the_dag_cannot_carry(
 struct UncarriableWalk<'a> {
     defs: &'a BTreeMap<String, Expr>,
     visited: UnordSet<String>,
+    evaluation_dropout: bool,
     scopes: Vec<UnordMap<String, bool>>,
 }
 
@@ -3367,6 +3482,7 @@ impl UncarriableWalk<'_> {
                 let name = kids.first().and_then(symbol_name)?;
                 if self.bound(name).is_some()
                     || BUILTIN_NAMES.contains(&name)
+                    || (self.evaluation_dropout && name == "dropout")
                     || name.chars().next().is_some_and(char::is_uppercase)
                 {
                     return None;
@@ -3419,7 +3535,9 @@ impl UncarriableWalk<'_> {
                     // the checker has already bound every value name. A callee
                     // that is neither a builtin nor a definition is walked as a
                     // name and reported as unresolvable.
-                    if BUILTIN_NAMES.contains(&name) {
+                    if BUILTIN_NAMES.contains(&name)
+                        || (self.evaluation_dropout && name == "dropout")
+                    {
                         return kids
                             .iter()
                             .skip(1)
@@ -3734,6 +3852,14 @@ fn def_body_decision(
     program: &CheckedProgram,
     signature: &HostDefSignature,
 ) -> Result<DefBodyDecision, crate::lower::LowerDiagnostic> {
+    def_body_decision_impl(program, signature, false)
+}
+
+fn def_body_decision_impl(
+    program: &CheckedProgram,
+    signature: &HostDefSignature,
+    evaluation_dropout: bool,
+) -> Result<DefBodyDecision, crate::lower::LowerDiagnostic> {
     let body_expr = &signature.body_expr;
     // Skip the tensor-helper path when any param is callable: the DAG
     // helper has no representation for fn-pointer inputs and would otherwise
@@ -3763,7 +3889,9 @@ fn def_body_decision(
     // A form the kernel lowering cannot carry keeps the def in host code on
     // both lanes, decided here rather than discovered by a failed lowering
     // (chelis#1277 B2h; the classes the byte-identity corpus found).
-    if body_form_the_dag_cannot_carry(program, body_expr, &signature.params).is_some() {
+    if body_form_the_dag_cannot_carry(program, body_expr, &signature.params, evaluation_dropout)
+        .is_some()
+    {
         return Ok(DefBodyDecision::Host);
     }
     if any_callable_param
@@ -3897,15 +4025,7 @@ fn lower_kernel_dag(
     random: Option<RandomLoweringState>,
 ) -> Result<(crate::Dag, Option<u64>), crate::lower::LowerDiagnostic> {
     let context = cached_subexpr_lowering_context(program);
-    let scope_types = match declaring_params {
-        Some(params) => params
-            .iter()
-            .filter_map(|param| {
-                tensor_type_from_host_input(&param.ty).map(|ty| (param.name.clone(), ty))
-            })
-            .collect(),
-        None => collect_tensor_scope(scope).into_sorted(),
-    };
+    let scope_types = kernel_scope_types(scope, declaring_params);
     let (dag, next_random_counter) = match random {
         None => (
             crate::lower::try_lower_subexpr_program_with_ordered_inputs(
@@ -3937,6 +4057,21 @@ fn lower_kernel_dag(
         remap_tensor_helper_dim_symbols(&dag, scope, expected),
         next_random_counter,
     ))
+}
+
+fn kernel_scope_types(
+    scope: &UnordMap<String, HostTypeTerm>,
+    declaring_params: Option<&[HostParam]>,
+) -> Vec<(String, TensorType)> {
+    match declaring_params {
+        Some(params) => params
+            .iter()
+            .filter_map(|param| {
+                tensor_type_from_host_input(&param.ty).map(|ty| (param.name.clone(), ty))
+            })
+            .collect(),
+        None => collect_tensor_scope(scope).into_sorted(),
+    }
 }
 
 /// The declared parameters, their host types, the declared result type and

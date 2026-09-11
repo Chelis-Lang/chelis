@@ -40,6 +40,7 @@ use std::fmt;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 
 use crate::compiler::{CompilerError, bail_if_cancelled, cancelled_or};
 use crate::schema::{Diagnostic, GeneralKind};
@@ -147,8 +148,10 @@ impl ContextHash {
 /// - `library_dag`: lowered library DAG carrier (Phase F). Used by
 ///   `lower_program_with_context`.
 ///
-/// All five fields are populated once by `compile_reef_context` and
-/// thereafter treated as immutable. Cheap to clone (the heavy state is
+/// Source artifacts are populated once by `compile_reef_context` and
+/// thereafter treated as immutable. The evaluator memo is derived lazily
+/// from the accepted source, never from serialized graph metadata.
+/// Cheap to clone (the heavy state is
 /// `Arc`-shared inside `TypeEnv`).
 #[derive(Debug, Clone)]
 pub struct CompiledContext {
@@ -169,6 +172,7 @@ pub struct CompiledContext {
     pub(crate) library: crate::pipeline::CheckedLibrary,
     /// Lowered library carrier. Feeds `lower_program_with_context`.
     pub(crate) library_dag: crate::pipeline::LoweredLibrary,
+    evaluation_library: Arc<OnceLock<chelis_ir::lower::EvaluationLibrary>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -231,11 +235,29 @@ impl<'de> Deserialize<'de> for CompiledContext {
             reef_state: wire.reef_state,
             library,
             library_dag,
+            evaluation_library: Arc::new(OnceLock::new()),
         })
     }
 }
 
 impl CompiledContext {
+    pub(crate) fn evaluation_library(
+        &self,
+    ) -> Result<&chelis_ir::lower::EvaluationLibrary, chelis_ir::lower::LowerDiagnostic> {
+        if let Some(library) = self.evaluation_library.get() {
+            return Ok(library);
+        }
+        let library =
+            chelis_ir::lower::try_lower_program_to_evaluation_library(self.library.program())?;
+        // A concurrent first caller may have installed the same immutable
+        // source-derived product. Do not memoize a cancellation or error.
+        let _ = self.evaluation_library.set(library);
+        Ok(self
+            .evaluation_library
+            .get()
+            .expect("successful evaluation library initialization"))
+    }
+
     pub(crate) fn checked_library(&self) -> &crate::pipeline::CheckedLibrary {
         &self.library
     }
@@ -1134,6 +1156,7 @@ pub fn compile_reef_context(
         reef_state,
         library,
         library_dag,
+        evaluation_library: Arc::new(OnceLock::new()),
     })
 }
 
@@ -1511,6 +1534,22 @@ mod tests {
             ctx.reef_state.package_root,
             restored.reef_state.package_root
         );
+    }
+
+    #[test]
+    fn evaluation_library_memo_is_shared_source_only_and_not_serialized() {
+        let (_dir, root) = path_dep_fixture();
+        let context = compile_reef_context(Path::new("/tmp/x"), &root).unwrap();
+        let bytes = context.encode().unwrap();
+        assert!(context.evaluation_library.get().is_none());
+        let library = context.evaluation_library().unwrap();
+        let cloned = context.clone();
+        assert!(std::ptr::eq(library, cloned.evaluation_library().unwrap()));
+        assert_eq!(context.encode().unwrap(), bytes);
+        let restored = CompiledContext::decode(&bytes).unwrap();
+        assert!(restored.evaluation_library.get().is_none());
+        restored.evaluation_library().unwrap();
+        assert_eq!(restored.encode().unwrap(), bytes);
     }
 
     #[test]

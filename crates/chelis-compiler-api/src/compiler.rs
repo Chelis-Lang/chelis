@@ -2496,6 +2496,17 @@ fn compile_rewritten_decls_in_context(
         .map_err(|error| cancelled_or("effects", error))?;
     bail_if_cancelled("linearity")?;
     bail_if_cancelled("lower")?;
+    let evaluation_program = if target == Target::Eval {
+        let evaluation_library = context.evaluation_library().map_err(|error| {
+            pipeline_rejection_to_compiler_error(crate::pipeline::PipelineRejection::Lower(error))
+        })?;
+        Some(
+            crate::pipeline::lower_checked_with_evaluation_context(&checked, evaluation_library)
+                .map_err(|error| pipeline_rejection_to_compiler_error(error.into()))?,
+        )
+    } else {
+        None
+    };
     let lowered = crate::pipeline::lower_checked_with_context(
         checked,
         &context.library_dag,
@@ -2531,6 +2542,7 @@ fn compile_rewritten_decls_in_context(
     Ok(CompiledSource {
         program: ManifestedProgram::new(new_checked, manifest, target),
         dag: lowered_parts.dag,
+        evaluation_program,
         tensor_root_names: new_tensor_root_names,
         named_roots: lowered_parts.named_roots,
         forward_node_index: lowered_parts.forward_node_index,
@@ -2703,7 +2715,7 @@ fn eval_compiled(
         compiled,
         bindings.keys().map(String::as_str),
         selected_root_names,
-    );
+    )?;
     let manifest = effective_program.manifest();
     let selected =
         selected_root_names.map(|roots| roots.iter().cloned().collect::<BTreeSet<String>>());
@@ -2759,8 +2771,42 @@ fn eval_compiled(
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    // Eligibility is selected before execution. Metadata/selection failures
+    // inside the fixed-control profile are errors, never legacy recovery.
+    let execution = if let Some(program) = &compiled.evaluation_program {
+        let names = tensor_entries
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect::<Vec<_>>();
+        match program
+            .profile_for_roots(&names)
+            .map_err(eval_stage_error)?
+        {
+            chelis_ir::evaluation::EvaluationProfile::FixedControl => {
+                Some(program.select_roots(&names).map_err(eval_stage_error)?)
+            }
+            chelis_ir::evaluation::EvaluationProfile::Legacy(_) => None,
+            _ => return Err(eval_stage_error("unknown evaluation profile".into())),
+        }
+    } else {
+        None
+    };
+    let active_dag = execution.as_ref().map_or(&compiled.dag, |selected| {
+        selected.plan().dag_for_inspection()
+    });
     let tensor_values = if roots.is_empty() {
         UnordMap::new()
+    } else if let Some(selected) = &execution {
+        let mut context = chelis_ir::evaluation::RandomExecutionContext::new(
+            chelis_ir::host::RandomLoweringState {
+                seed: None,
+                counter: 0,
+            },
+        );
+        eval::eval_tensor_plan_with_strict(selected.plan(), &mut context, |name| {
+            bindings.get(name).cloned()
+        })
+        .map_err(eval_stage_error)?
     } else {
         eval::eval_tensor_roots_with_strict(&compiled.dag, &roots, |name| {
             bindings.get(name).cloned()
@@ -2771,20 +2817,25 @@ fn eval_compiled(
     let mut tensor_values_by_name = UnordMap::<String, RuntimeTensorValue>::new();
     for entry in &tensor_entries {
         let name = crate::pipeline::IrName::new(entry.name.as_str());
-        let node_id = compiled.named_roots.get(&name).ok_or_else(|| {
-            unavailable_root_error(
-                entry,
-                "the Tensor-lane root is absent from the lowered named-root map",
+        let node_id = execution
+            .as_ref()
+            .map_or_else(
+                || compiled.named_roots.get(&name),
+                |selected| selected.roots().get(entry.name.as_str()),
             )
-        })?;
+            .ok_or_else(|| {
+                unavailable_root_error(
+                    entry,
+                    "the Tensor-lane root is absent from the lowered named-root map",
+                )
+            })?;
         let value = tensor_values.get(node_id).ok_or_else(|| {
             unavailable_root_error(
                 entry,
                 "the Tensor evaluator returned no value for the owed root",
             )
         })?;
-        let precision = compiled
-            .dag
+        let precision = active_dag
             .get(*node_id)
             .map(|node| node.output_type.precision)
             .ok_or_else(|| {
@@ -2830,7 +2881,10 @@ fn eval_compiled(
             compiled.checked(),
             Some(&library.checked),
             Some(&library.lowered_names),
-            &tensor_values_by_name,
+            crate::runtime::HostEvaluationInputs {
+                roots: &tensor_values_by_name,
+                bindings: Some(&bindings),
+            },
             host_selected_root_names,
             Some(&manifested_lowered_names),
         )
@@ -2840,6 +2894,7 @@ fn eval_compiled(
             &tensor_values_by_name,
             host_selected_root_names,
             Some(&manifested_lowered_names),
+            Some(&bindings),
         )
     }
     .map_err(|failure| {
@@ -3140,6 +3195,7 @@ pub fn result_envelope<T>(result: Result<T>) -> crate::schema::ApiEnvelope<T> {
 struct CompiledSource {
     program: ManifestedProgram,
     dag: Dag,
+    evaluation_program: Option<chelis_ir::lower::EvaluationProgram>,
     // Callable function-entry selection is a separate surface from value-root
     // observation. Keep the pipeline's typed set for that API; eval/build
     // observation below consumes `program.manifest` exclusively.
@@ -3190,7 +3246,7 @@ fn manifested_program_for_eval<'a>(
     compiled: &CompiledSource,
     binding_names: impl Iterator<Item = &'a str>,
     selected_root_names: Option<&[String]>,
-) -> ManifestedProgram {
+) -> Result<ManifestedProgram> {
     let available = binding_names.collect::<UnordSet<_>>();
     let candidate_names = selected_root_names
         .map(|names| {
@@ -3328,6 +3384,54 @@ fn manifested_program_for_eval<'a>(
     }
 
     route_tensor_inputs_from_dag(&mut manifest, &compiled.dag, &compiled.named_roots);
+    if let Some(program) = &compiled.evaluation_program {
+        let mut roots_by_def = BTreeMap::<String, Vec<String>>::new();
+        for entry in &manifest.entries {
+            if entry.lane == Lane::Tensor {
+                roots_by_def
+                    .entry(entry.def_name.clone())
+                    .or_default()
+                    .push(entry.name.clone());
+            }
+        }
+        for (def, names) in roots_by_def {
+            if names.iter().any(|name| {
+                compiled
+                    .named_roots
+                    .get(&crate::pipeline::IrName::new(name.as_str()))
+                    .is_none()
+            }) {
+                // Missing owed roots retain the existing manifest-authority
+                // error at observation, after selected-root filtering. This
+                // is not recovery from missing execution metadata.
+                continue;
+            }
+            if program
+                .profile_for_roots(&names)
+                .map_err(eval_stage_error)?
+                == chelis_ir::evaluation::EvaluationProfile::FixedControl
+            {
+                let selected = program.select_roots(&names).map_err(eval_stage_error)?;
+                let required = selected
+                    .plan()
+                    .dag_for_inspection()
+                    .nodes()
+                    .iter()
+                    .filter_map(|node| match &node.op {
+                        RiscOp::Load { name } => Some(name.as_str().to_owned()),
+                        _ => None,
+                    })
+                    .collect::<BTreeSet<_>>();
+                for entry in manifest
+                    .entries
+                    .iter_mut()
+                    .filter(|entry| entry.def_name == def)
+                {
+                    entry.required_inputs.clone_from(&required);
+                }
+            }
+        }
+    }
     let declaration_order = checked_def_order(compiled.checked());
     manifest.entries.sort_by_key(|entry| {
         declaration_order
@@ -3335,11 +3439,11 @@ fn manifested_program_for_eval<'a>(
             .copied()
             .unwrap_or(usize::MAX)
     });
-    ManifestedProgram::new(
+    Ok(ManifestedProgram::new(
         compiled.checked().clone(),
         manifest,
         compiled.program.target(),
-    )
+    ))
 }
 
 fn type_is_tensor_runtime_input(ty: &chelis_types::types::Type) -> bool {
@@ -3541,6 +3645,14 @@ fn compile_source_scoped(
         checked_program,
         &realizability_result,
     );
+    let evaluation_program = if target == Target::Eval {
+        Some(
+            crate::pipeline::lower_checked_for_evaluation(lowered.checked())
+                .map_err(|error| pipeline_rejection_to_compiler_error(error.into()))?,
+        )
+    } else {
+        None
+    };
     let lowered_parts = lowered.into_parts();
     let (_, _, checked, root_metadata) = lowered_parts.checked.into_parts();
     route_tensor_inputs_from_dag(
@@ -3552,6 +3664,7 @@ fn compile_source_scoped(
     Ok(CompiledSource {
         program: ManifestedProgram::new(checked, manifest, target),
         dag: lowered_parts.dag,
+        evaluation_program,
         tensor_root_names: root_metadata.tensor_names().clone(),
         named_roots: lowered_parts.named_roots,
         forward_node_index: lowered_parts.forward_node_index,
