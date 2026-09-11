@@ -1228,10 +1228,32 @@ fn the_host_body_locator_reads_the_definition_and_not_a_look_alike() {
 
 /// Negative parity for the locator: a forward declaration with no definition
 /// is the emission actually leaving the host lane, and must still panic.
+///
+/// Caught rather than declared `#[should_panic]`, because the oracle's
+/// `cli_slice_b` row selects this file whole and compares libtest's printed
+/// names against the reviewed manifest. libtest prints a `should_panic` test
+/// as `<name> - should panic`, which the manifest cannot carry without
+/// disagreeing with `runtime_extent_target_manifest.rs`, the reader that
+/// takes the same names out of this source.
 #[test]
-#[should_panic(expected = "no definition of `run__chelis_owned_body`")]
 fn the_host_body_locator_refuses_a_forward_declaration_alone() {
-    host_body_definition("void run__chelis_owned_body(int a);\n", "run__chelis_owned_body");
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let outcome = std::panic::catch_unwind(|| {
+        host_body_definition("void run__chelis_owned_body(int a);\n", "run__chelis_owned_body")
+    });
+    std::panic::set_hook(previous);
+    let payload = outcome.expect_err("a declaration with no definition must panic");
+    let message = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .expect("panic payload is a string");
+    assert!(
+        message.contains("no definition of `run__chelis_owned_body`")
+            && message.contains("means it moved off it"),
+        "the panic must name the symbol and the lane it left: {message}"
+    );
 }
 
 /// Supplement the executed output checks with the emitted statement order:
