@@ -1213,9 +1213,8 @@ fn the_host_body_locator_reads_the_definition_and_not_a_look_alike() {
         "void run__chelis_owned_body(int a) { real; }\n",
     );
     assert!(
-        host_body_definition(decoy, "run__chelis_owned_body").starts_with(
-            "run__chelis_owned_body(int a) { real;"
-        ),
+        host_body_definition(decoy, "run__chelis_owned_body")
+            .starts_with("run__chelis_owned_body(int a) { real;"),
         "a symbol ENDING in the wanted name is a different function"
     );
 
@@ -1240,7 +1239,10 @@ fn the_host_body_locator_refuses_a_forward_declaration_alone() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let outcome = std::panic::catch_unwind(|| {
-        host_body_definition("void run__chelis_owned_body(int a);\n", "run__chelis_owned_body")
+        host_body_definition(
+            "void run__chelis_owned_body(int a);\n",
+            "run__chelis_owned_body",
+        )
     });
     std::panic::set_hook(previous);
     let payload = outcome.expect_err("a declaration with no definition must panic");
