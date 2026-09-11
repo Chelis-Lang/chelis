@@ -1,0 +1,1 @@
+Add an opt-in compiler API that pairs actual selected helper lowering/AD observations with the final successful C artifact. Normal compilation, existing observer layouts and shell/wire interfaces are unchanged; the observations are not correctness certificates.

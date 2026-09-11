@@ -11184,8 +11184,7 @@ fn lower_recursive_generic_call(
             &param_tys,
             &ret_ty,
             program,
-            tensor_helpers.collect_execution,
-            tensor_helpers.collect_trace,
+            tensor_helpers,
         )?;
         let lowered_args = args
             .iter()
@@ -11468,8 +11467,7 @@ fn ensure_mono_specialization(
     param_tys: &[HostTypeTerm],
     ret_ty: &HostTypeTerm,
     program: &CheckedProgram,
-    collect_execution: bool,
-    collect_trace: bool,
+    tensor_helpers: &TensorHelperSink,
 ) -> Result<String, crate::lower::LowerDiagnostic> {
     let canonical_key = mono_specialization_key(name, param_tys, ret_ty);
     if let Some(symbol) =
@@ -11558,8 +11556,8 @@ fn ensure_mono_specialization(
         fn_expr: body,
         program,
         spec_scope: &spec_scope,
-        collect_execution,
-        collect_trace,
+        collect_execution: tensor_helpers.collect_execution,
+        collect_trace: tensor_helpers.collect_trace,
     });
     MONO_SPECIALIZATIONS.with(|state| {
         state.borrow_mut().in_progress.pop();
@@ -19034,6 +19032,37 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             vec![DimInfo::Named("n".into(), None)],
             "the pass input remains an immutable historical snapshot"
         );
+        #[cfg(feature = "lowering-trace")]
+        {
+            let collector = crate::lowering_trace::Collector::new_helper();
+            collector.normalization(
+                &before,
+                &before,
+                before.clone(),
+                &before,
+                &UnordMap::new(),
+                &UnordMap::new(),
+            );
+            collector.helper_result(before.roots(), crate::lowering_trace::Value::Node(root));
+            let mut trace = collector.finish_helper();
+            trace.record_dimension_rebinding(&after);
+            let normalization = &trace.lowering.normalization;
+            for historical in [
+                &normalization.before_dce,
+                &normalization.after_dce,
+                &normalization.after_copies,
+                &normalization.after_drops,
+            ] {
+                assert_eq!(
+                    bincode::serialize(historical).unwrap(),
+                    bincode::serialize(&before).unwrap()
+                );
+            }
+            assert_eq!(
+                bincode::serialize(trace.after_dimension_rebinding.as_ref().unwrap()).unwrap(),
+                bincode::serialize(&after).unwrap(),
+            );
+        }
     }
 
     #[test]

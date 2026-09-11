@@ -1766,10 +1766,10 @@ fn try_lower_subexpr_evaluation_with_ordered_inputs_impl(
             SubexprLoweringOptions {
                 include_list_controls: false,
                 authored_signature,
+                #[cfg(feature = "lowering-trace")]
+                trace,
             },
             Some(&mut metadata),
-            #[cfg(feature = "lowering-trace")]
-            trace,
         );
         crate::evaluation::EvaluationPlan::new(
             dag,
@@ -1846,9 +1846,9 @@ pub(crate) fn try_lower_subexpr_program_with_context_and_controls(
                 include_list_controls: true,
                 // The scope is the ambient bindings this subexpression captured.
                 authored_signature: false,
+                #[cfg(feature = "lowering-trace")]
+                trace: None,
             },
-            None,
-            #[cfg(feature = "lowering-trace")]
             None,
         );
         LoweredSubexprWithControls {
@@ -1896,8 +1896,10 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs(
         scoped_bindings,
         context,
         result_claim,
-        random_seed,
-        random_counter,
+        crate::host::RandomLoweringState {
+            seed: random_seed,
+            counter: random_counter,
+        },
         authored_signature,
         #[cfg(feature = "lowering-trace")]
         None,
@@ -1920,8 +1922,10 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs_and_trace(
         scoped_bindings,
         context,
         result_claim,
-        random_seed,
-        random_counter,
+        crate::host::RandomLoweringState {
+            seed: random_seed,
+            counter: random_counter,
+        },
         authored_signature,
         Some(collector.clone()),
     )?;
@@ -1933,8 +1937,7 @@ fn try_lower_subexpr_program_with_ordered_inputs_impl(
     scoped_bindings: Vec<(String, TensorType)>,
     context: &SubexprLoweringContext,
     result_claim: Option<&TensorType>,
-    random_seed: Option<u64>,
-    random_counter: u64,
+    random: crate::host::RandomLoweringState,
     authored_signature: bool,
     #[cfg(feature = "lowering-trace")] trace: Option<crate::lowering_trace::Collector>,
 ) -> Result<(Dag, u64), LowerDiagnostic> {
@@ -1946,17 +1949,14 @@ fn try_lower_subexpr_program_with_ordered_inputs_impl(
             scoped_bindings,
             context,
             result_claim,
-            crate::host::RandomLoweringState {
-                seed: random_seed,
-                counter: random_counter,
-            },
+            random,
             SubexprLoweringOptions {
                 include_list_controls: false,
                 authored_signature,
+                #[cfg(feature = "lowering-trace")]
+                trace,
             },
             None,
-            #[cfg(feature = "lowering-trace")]
-            trace,
         );
         (dag, random_counter)
     }))
@@ -2081,15 +2081,16 @@ pub(crate) fn try_lower_staged_host_region(
 
 /// What one subexpression lowering is, beyond its expression and its scope.
 ///
-/// Both fields are facts about the CALLER, not about the body: whether the
+/// These fields are facts about the CALLER, not about the body: whether the
 /// runtime list controls belong in this DAG, and whether the scope came from a
 /// signature someone wrote. Neither is recoverable from the expression, and
 /// passing them as bare positional booleans made the call sites unreadable.
-#[derive(Clone, Copy)]
 struct SubexprLoweringOptions {
     include_list_controls: bool,
     /// See [`LowerCtx::signature_is_authored`].
     authored_signature: bool,
+    #[cfg(feature = "lowering-trace")]
+    trace: Option<crate::lowering_trace::Collector>,
 }
 
 fn lower_subexpr_program_inner_impl(
@@ -2100,11 +2101,12 @@ fn lower_subexpr_program_inner_impl(
     random: crate::host::RandomLoweringState,
     options: SubexprLoweringOptions,
     execution_out: Option<&mut Option<crate::evaluation::ExecutionMetadata>>,
-    #[cfg(feature = "lowering-trace")] trace: Option<crate::lowering_trace::Collector>,
 ) -> (Dag, u64, usize, Vec<RuntimeListCheckDescriptor>) {
     let SubexprLoweringOptions {
         include_list_controls,
         authored_signature,
+        #[cfg(feature = "lowering-trace")]
+        trace,
     } = options;
     let mut ctx = LowerCtx::new(
         context.program_types.clone(),

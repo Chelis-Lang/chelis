@@ -192,7 +192,7 @@ def derivative(x: tensor[3, f32], y: tensor[3, f32])
 }
 
 #[test]
-fn named_axis_helper_records_dimension_rebinding_without_rewriting_pass_snapshots() {
+fn named_axis_helper_records_the_retained_dimension_rebinding_output() {
     let program = manifested(
         r#"
 def named_twice[n](x: tensor[n, f32]) -> tensor[n, f32] = add(x, x)
@@ -215,14 +215,11 @@ def selected(
         .function_helper_trace("selected", 0)
         .unwrap()
         .expect("selected helper trace");
-    let before = &trace.lowering.normalization.after_drops;
     let after = trace
         .after_dimension_rebinding
         .as_ref()
         .expect("actual host rebinding output");
     same_dag(after, &helper.dag);
-    let before_again = &trace.lowering.normalization.after_drops;
-    same_dag(before_again, before);
 }
 
 #[test]
