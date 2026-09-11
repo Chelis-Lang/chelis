@@ -10,7 +10,9 @@ use chelis_unord::UnordMap;
 
 use crate::dag::{Dag, NodeId, RiscOp};
 use crate::eval::TensorValue;
-use crate::execution_spine::{Control, FullOccurrenceId, OccurrenceId, SourceKind, Spine, Step};
+#[cfg(any(test, feature = "lowering-trace"))]
+use crate::execution_spine::OccurrenceId;
+use crate::execution_spine::{Control, FullOccurrenceId, SourceKind, Spine, Step};
 use crate::host::RandomLoweringState;
 
 /// Source admission is decided before evaluation. Legacy selection is never
@@ -937,23 +939,26 @@ mod tests {
         assert!(plan.metadata.spine.has_full_sidecar_for_test());
         assert!(plan.source_for_inspection().is_empty());
         assert_eq!(plan.steps_for_inspection(), [Step::Node(NodeId(0))]);
-        let observed = plan.full_spine_for_inspection();
-        assert!(matches!(
-            observed.source.as_slice(),
-            [crate::lowering_trace::FullSourceOccurrence {
-                id: crate::lowering_trace::SourceEventId(0),
-                kind: crate::lowering_trace::FullSourceKind::Requirement(device),
-            }] if device == "cpu:author-device"
-        ));
-        assert!(matches!(
-            observed.steps.as_slice(),
-            [
-                crate::lowering_trace::FullStep::Requirement {
-                    occurrence: crate::lowering_trace::SourceEventId(0)
-                },
-                crate::lowering_trace::FullStep::Node(NodeId(0))
-            ]
-        ));
+        #[cfg(feature = "lowering-trace")]
+        {
+            let observed = plan.full_spine_for_inspection();
+            assert!(matches!(
+                observed.source.as_slice(),
+                [crate::lowering_trace::FullSourceOccurrence {
+                    id: crate::lowering_trace::SourceEventId(0),
+                    kind: crate::lowering_trace::FullSourceKind::Requirement(device),
+                }] if device == "cpu:author-device"
+            ));
+            assert!(matches!(
+                observed.steps.as_slice(),
+                [
+                    crate::lowering_trace::FullStep::Requirement {
+                        occurrence: crate::lowering_trace::SourceEventId(0)
+                    },
+                    crate::lowering_trace::FullStep::Node(NodeId(0))
+                ]
+            ));
+        }
 
         for corruption in 0..3 {
             let mut damaged = plan.clone();
@@ -975,6 +980,14 @@ mod tests {
     #[test]
     fn full_source_ids_do_not_alias_random_occurrence_ids() {
         let plan = resource_fixture("cpu:author-device", true);
+        assert_eq!(
+            plan.metadata
+                .spine
+                .full_source_ids_for_test()
+                .map(|id| id.0)
+                .collect::<Vec<_>>(),
+            [0, 1]
+        );
         assert!(matches!(
             plan.source_for_inspection(),
             [crate::execution_spine::Occurrence {
@@ -982,20 +995,23 @@ mod tests {
                 kind: SourceKind::Forward { .. },
             }]
         ));
-        let observed = plan.full_spine_for_inspection();
-        assert!(matches!(
-            observed.source.as_slice(),
-            [
-                crate::lowering_trace::FullSourceOccurrence {
-                    id: crate::lowering_trace::SourceEventId(0),
-                    kind: crate::lowering_trace::FullSourceKind::Requirement(_),
-                },
-                crate::lowering_trace::FullSourceOccurrence {
-                    id: crate::lowering_trace::SourceEventId(1),
-                    kind: crate::lowering_trace::FullSourceKind::Forward { .. },
-                }
-            ]
-        ));
+        #[cfg(feature = "lowering-trace")]
+        {
+            let observed = plan.full_spine_for_inspection();
+            assert!(matches!(
+                observed.source.as_slice(),
+                [
+                    crate::lowering_trace::FullSourceOccurrence {
+                        id: crate::lowering_trace::SourceEventId(0),
+                        kind: crate::lowering_trace::FullSourceKind::Requirement(_),
+                    },
+                    crate::lowering_trace::FullSourceOccurrence {
+                        id: crate::lowering_trace::SourceEventId(1),
+                        kind: crate::lowering_trace::FullSourceKind::Forward { .. },
+                    }
+                ]
+            ));
+        }
     }
 
     #[test]
@@ -1041,40 +1057,44 @@ mod tests {
                 .collect::<Vec<_>>(),
             [0, 1, 2]
         );
-        let full = plan.full_spine_for_inspection();
         assert_eq!(
-            full.source
-                .iter()
-                .map(|event| event.id.0)
+            plan.metadata
+                .spine
+                .full_source_ids_for_test()
+                .map(|id| id.0)
                 .collect::<Vec<_>>(),
             [0, 1, 2, 3]
         );
-        assert!(matches!(
-            full.source[2].kind,
-            crate::lowering_trace::FullSourceKind::Requirement(ref device)
-                if device == "cpu:late-promotion"
-        ));
-        let position = |wanted| {
-            full.steps
-                .iter()
-                .position(|step| match (wanted, step) {
-                    (0, crate::lowering_trace::FullStep::Control { occurrence, .. }) => {
-                        occurrence.0 == 0
-                    }
-                    (1, crate::lowering_trace::FullStep::Node(node)) => *node == draw,
-                    (2, crate::lowering_trace::FullStep::Requirement { occurrence }) => {
-                        occurrence.0 == 2
-                    }
-                    (3, crate::lowering_trace::FullStep::Control { occurrence, .. }) => {
-                        occurrence.0 == 3
-                    }
-                    _ => false,
-                })
-                .unwrap()
-        };
-        assert!(position(0) < position(1));
-        assert!(position(1) < position(2));
-        assert!(position(2) < position(3));
+        #[cfg(feature = "lowering-trace")]
+        {
+            let full = plan.full_spine_for_inspection();
+            assert!(matches!(
+                full.source[2].kind,
+                crate::lowering_trace::FullSourceKind::Requirement(ref device)
+                    if device == "cpu:late-promotion"
+            ));
+            let position = |wanted| {
+                full.steps
+                    .iter()
+                    .position(|step| match (wanted, step) {
+                        (0, crate::lowering_trace::FullStep::Control { occurrence, .. }) => {
+                            occurrence.0 == 0
+                        }
+                        (1, crate::lowering_trace::FullStep::Node(node)) => *node == draw,
+                        (2, crate::lowering_trace::FullStep::Requirement { occurrence }) => {
+                            occurrence.0 == 2
+                        }
+                        (3, crate::lowering_trace::FullStep::Control { occurrence, .. }) => {
+                            occurrence.0 == 3
+                        }
+                        _ => false,
+                    })
+                    .unwrap()
+            };
+            assert!(position(0) < position(1));
+            assert!(position(1) < position(2));
+            assert!(position(2) < position(3));
+        }
     }
 
     #[test]
