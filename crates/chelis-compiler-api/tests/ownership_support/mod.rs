@@ -107,6 +107,7 @@ pub fn run(source: &str, driver: &str) -> Value {
     run_with_peers(source, &[], driver)
 }
 
+#[allow(dead_code)]
 pub fn run_program(source: &str) -> (Value, String) {
     execute_program(source, &[])
 }
