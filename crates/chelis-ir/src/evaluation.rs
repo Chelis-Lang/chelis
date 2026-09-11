@@ -302,7 +302,6 @@ impl VerifiedEvaluationPlan {
     pub fn emission(&self) -> crate::ownership::VerifiedDagView<'_> {
         self.ownership.emission()
     }
-
     /// Consume the sealed graph and borrow its own execution information for
     /// one emission. The view cannot outlive this callback; no constructor
     /// permits pairing a view with a different graph for this entry point.

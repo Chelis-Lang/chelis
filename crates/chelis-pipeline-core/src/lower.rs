@@ -59,6 +59,52 @@ pub fn lower_checked(
     finish_isolated_lowering(checked, mode, lower_result)
 }
 
+/// Select fixed-control C host execution before legacy value-only lowering.
+/// A selected host payload has no independently emitted top-level DAG, hence
+/// no positional root binding. Ordinary programs retain the existing lowering
+/// and root-count guards; a failed collecting lowerer is never a recovery hint.
+/// `AllowHostBackend` asks for the CLI's host selection policy: it permits a
+/// nonfatal raw-lowering decline only when the collected host requires that
+/// backend. Otherwise the CLI remains strict. `AllowHostOnly` is unchanged.
+pub fn lower_checked_for_c_execution(
+    checked: CheckedCompilation,
+    manifest: &chelis_types::manifest::RootManifest,
+    mode: LoweringMode,
+) -> Result<
+    (
+        LoweredCompilation,
+        Option<chelis_ir::host::HostExecutionPlan>,
+    ),
+    CoreLowerError,
+> {
+    let (_, host) =
+        chelis_ir::host::try_lower_execution_program_with_manifest(checked.program(), manifest)
+            .map_err(CoreLowerError::Lower)?;
+    let lowered = if host
+        .as_ref()
+        .is_some_and(|plan| plan.has_execution_helpers())
+    {
+        finish_lowering(
+            checked,
+            Dag::new(),
+            &BTreeSet::new(),
+            RootCountContext::Program,
+            RootBindingMode::SelectedHostBackend,
+        )?
+    } else {
+        let mode = if mode == LoweringMode::AllowHostBackend
+            && !host.as_ref().is_some_and(|plan| {
+                chelis_ir::host::host_program_requires_host_backend(plan.program())
+            }) {
+            LoweringMode::Strict
+        } else {
+            mode
+        };
+        lower_checked(checked, mode)?
+    };
+    Ok((lowered, host))
+}
+
 /// Additive evaluator products derived from the same sealed checked source.
 /// Ordinary lowering/cache carriers remain unchanged and cannot stand in for
 /// this non-serialized execution transport.
@@ -289,6 +335,51 @@ mod tests {
         LoweredProgram {
             dag,
             rootless_defs: BTreeSet::new(),
+        }
+    }
+
+    #[test]
+    fn c_execution_ingress_keeps_ordinary_root_binding_guards() {
+        let checked = checked_compilation(
+            "(def {} identity (fn {} (params {} (x {type: (t-tensor {} (d-name {} n) (t-prim {} f32))})) (var {} x)))",
+        );
+        let realizability = chelis_effects::realizability::infer_realizability(
+            checked.program(),
+            &[chelis_types::types::Prim::F32],
+        );
+        let manifest =
+            chelis_effects::realizability::compute_root_manifest(checked.program(), &realizability);
+        let ordinary = lower_checked(checked.clone(), LoweringMode::Strict).unwrap();
+        for mode in [LoweringMode::AllowHostOnly, LoweringMode::AllowHostBackend] {
+            let (actual, plan) =
+                lower_checked_for_c_execution(checked.clone(), &manifest, mode).unwrap();
+            assert!(
+                !plan
+                    .as_ref()
+                    .is_some_and(|plan| plan.has_execution_helpers())
+            );
+            assert_eq!(actual.named_roots(), ordinary.named_roots());
+            assert_eq!(actual.forward_node_index(), ordinary.forward_node_index());
+            assert_eq!(actual.dag().nodes().len(), ordinary.dag().nodes().len());
+            for (actual, original) in actual.dag().nodes().iter().zip(ordinary.dag().nodes()) {
+                assert_eq!(actual.id, original.id);
+                assert_eq!(actual.op, original.op);
+                assert_eq!(actual.inputs, original.inputs);
+                assert_eq!(actual.output_type, original.output_type);
+                assert_eq!(actual.shape_deps, original.shape_deps);
+                assert_eq!(actual.reusable_input, original.reusable_input);
+            }
+            assert_eq!(actual.dag().roots(), ordinary.dag().roots());
+            let mut malformed = checked.clone();
+            malformed
+                .root_metadata
+                .tensor_names
+                .0
+                .push(IrName::new("phantom"));
+            assert!(matches!(
+                lower_checked_for_c_execution(malformed, &manifest, mode),
+                Err(CoreLowerError::RootCount { .. })
+            ));
         }
     }
 
