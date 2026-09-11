@@ -431,13 +431,15 @@ impl HipEmitter {
                 .collect(),
             extra_peak_device_bytes_estimate: 0,
             device_entrypoint_mode: false,
-            kernel_rank: dag
+            kernel_rank: match dag
                 .nodes()
                 .iter()
                 .map(|node| node.output_type.dims.len())
                 .max()
-                .unwrap_or(0)
-                .max(1),
+            {
+                Some(rank) => rank.max(1),
+                None => 1,
+            },
         };
 
         // First pass: collect all needed kernel sources by walking the DAG.
