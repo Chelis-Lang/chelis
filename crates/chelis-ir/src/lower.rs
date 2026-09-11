@@ -13828,9 +13828,13 @@ impl<'program> LowerCtx<'program> {
         };
         for (axis, dim) in declared.dims.iter().enumerate() {
             let resolved = match dim {
-                DimInfo::Lit(required) => self.preserve_literal_result_axis(id, axis, *required),
+                DimInfo::Lit(required) => {
+                    self.preserve_literal_result_axis(id, axis, *required)
+                        || self.preserve_op_computed_result_axis(id, axis, None)
+                }
                 DimInfo::Named(binder, _) if !binder.is_empty() && binder != "*" => {
                     self.preserve_named_result_axis(id, axis, binder)
+                        || self.preserve_op_computed_result_axis(id, axis, Some(binder))
                 }
                 _ => false,
             };
@@ -13838,6 +13842,64 @@ impl<'program> LowerCtx<'program> {
                 self.dag.node_mut(id).expect("result").output_type.dims[axis] = dim.clone();
             }
         }
+    }
+
+    /// chelis#1397's declaration half: keep a declared result dimension over an
+    /// extent the OPERATION computes.
+    ///
+    /// The witness arms above both need a witness that OBSERVED the produced
+    /// extent, and an [`AxisSource::OpComputed`] axis has none: no input
+    /// carries the extent, so `axis_literal_witness` and
+    /// `axis_interface_witness` both decline and the declared dimension was
+    /// dropped, leaving the lowered result carrying the synthesized
+    /// `_rt_shrink_dim_N_A` instead of the `tensor[2, f32]` the user wrote.
+    /// Measured before this arm: `def f(x: tensor[rows, f32]) -> tensor[2, f32]
+    /// = shrink(x, [[1i64, shape(x, 0i32)]])` printed `shape=[3]` and exited
+    /// zero on both lanes.
+    ///
+    /// So this arm records NO requirement edge. Section 4.7 places the check at
+    /// "the source position of the operation that introduces the guarded
+    /// extent", and `local_dim_guard_sites`' op-computed arm is that site; a
+    /// witness comparison would be a second, differently placed check of the
+    /// same claim.
+    ///
+    /// Two conditions, and both are about not stamping a claim nothing checks:
+    ///
+    /// - `axis_sources::op_computed_axis_extent` must admit the owner. It is
+    ///   the SAME call the guard site makes, so an unadmitted owner keeps its
+    ///   existing disposition rather than gaining a claim with no guard, which
+    ///   on the evaluator would be a silently wrong shape.
+    /// - A NAMED claim must be declared by a parameter of this AUTHORED
+    ///   signature. `signature_is_authored` is PR #1773's gate and a
+    ///   synthesized multi-root kernel stamps nothing; `signature_witness`
+    ///   requires the binder to be a parameter axis of the same activation, so
+    ///   the class has an interface member to be canonical and the lane has the
+    ///   binder in its `runtime_dims`. A result name declared NOWHERE else is
+    ///   the checker's fresh-extent representation under section 4.7.2 and is
+    ///   still published as `*`, which reaches neither this arm nor a class.
+    fn preserve_op_computed_result_axis(
+        &mut self,
+        id: NodeId,
+        axis: usize,
+        binder: Option<&str>,
+    ) -> bool {
+        use crate::axis_sources::AxisSource;
+        if let Some(binder) = binder
+            && (!self.signature_is_authored || self.signature_witness(binder).is_none())
+        {
+            return false;
+        }
+        let Some(AxisSource::OpComputed { axis: computed, .. }) =
+            crate::axis_sources::output_axis_sources(&self.dag, id)
+                .get(axis)
+                .cloned()
+        else {
+            return false;
+        };
+        let Some(node) = self.dag.get(id) else {
+            return false;
+        };
+        crate::axis_sources::op_computed_axis_extent(&node.op, computed).is_some()
     }
 
     /// chelis#1377's half: a literal claim becomes a tagged requirement on the

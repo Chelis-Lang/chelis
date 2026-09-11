@@ -923,9 +923,9 @@
   "shrink.binding.mismatch": {
     "c": {
       "stage": "execute",
-      "stderr": "",
-      "stdout": "out = tensor(shape=[3], data=[2.0, 3.0, 4.0])",
-      "success": true
+      "stderr": "extent `2`: claimed = 2, shrink axis 0 = 3\nnumeric trap: domain in shrink at int64",
+      "stdout": "",
+      "success": false
     },
     "check": {
       "errors": [],
@@ -937,9 +937,9 @@
     },
     "eval": {
       "stage": "execute",
-      "stderr": "",
-      "stdout": "out = tensor(shape=[3], data=[2.0, 3.0, 4.0])",
-      "success": true
+      "stderr": "error: extent `2`: claimed = 2, shrink axis 0 = 3\nnumeric trap: domain in shrink at int64",
+      "stdout": "",
+      "success": false
     },
     "issue": 1397
   },
@@ -969,9 +969,9 @@
   "shrink.export.mismatch": {
     "c": {
       "stage": "execute",
-      "stderr": "",
-      "stdout": "out = tensor(shape=[3], data=[2, 3, 4])",
-      "success": true
+      "stderr": "extent `2`: claimed = 2, shrink axis 0 = 3\nnumeric trap: domain in shrink at int64",
+      "stdout": "",
+      "success": false
     },
     "check": {
       "errors": [],
@@ -1005,7 +1005,7 @@
   "shrink.root.mismatch": {
     "c": {
       "stage": "execute",
-      "stderr": "Domain: movement target shape mismatch\nnumeric trap: domain in shrink at int64",
+      "stderr": "extent `2`: claimed = 2, shrink axis 0 = 3\nnumeric trap: domain in shrink at int64",
       "stdout": "",
       "success": false
     },
@@ -1020,9 +1020,9 @@
     },
     "eval": {
       "stage": "execute",
-      "stderr": "",
-      "stdout": "main = tensor(shape=[3], data=[2.0, 3.0, 4.0])",
-      "success": true
+      "stderr": "error: extent `2`: claimed = 2, shrink axis 0 = 3\nnumeric trap: domain in shrink at int64",
+      "stdout": "",
+      "success": false
     },
     "issue": 1397
   },

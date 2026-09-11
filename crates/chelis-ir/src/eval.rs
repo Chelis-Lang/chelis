@@ -2313,12 +2313,31 @@ where
         // existed.
         if let Some(sites) = local_guard_sites.get(&node.id) {
             for (axis, claim) in sites {
-                let crate::axis_sources::LocalGuardObservation::Carrier(carrier) = &claim.observed
-                else {
-                    continue;
+                // Exhaustive on purpose: a future observation kind has to say
+                // here whether it is readable before the node runs, rather
+                // than falling through a wildcard and disappearing from this
+                // lane while the C lane keeps emitting it.
+                let observed = match &claim.observed {
+                    crate::axis_sources::LocalGuardObservation::Carrier(carrier) => {
+                        resolve_eval_bound(carrier, node, &values, 0)?
+                    }
+                    crate::axis_sources::LocalGuardObservation::ComputedExtent(computed) => {
+                        match computed_axis_extent_value(computed, node, &values)? {
+                            Some(extent) => extent,
+                            // A span that selects nothing computes no extent.
+                            // The operation's own domain rejection owns that
+                            // failure and runs first on both lanes (the C
+                            // runtime's movement plan rejects the span before
+                            // this site is reached), so the guard yields
+                            // rather than comparing a fabricated number.
+                            None => continue,
+                        }
+                    }
+                    // Read only after the node has produced its value; taken
+                    // by the loop at the foot of the body.
+                    crate::axis_sources::LocalGuardObservation::RealizedExtent => continue,
                 };
-                let observed = resolve_eval_bound(carrier, node, &values, 0)?;
-                local_guard_verdict(node.id.0, *axis, claim, observed, &runtime_dims)?;
+                local_guard_verdict(*axis, claim, observed, &mut runtime_dims)?;
             }
         }
 
@@ -3046,7 +3065,7 @@ where
                 let Some(&observed) = value.shape.get(*axis) else {
                     continue;
                 };
-                local_guard_verdict(node.id.0, *axis, claim, observed, &runtime_dims)?;
+                local_guard_verdict(*axis, claim, observed, &mut runtime_dims)?;
             }
         }
         values.insert(node.id, value);
@@ -3063,48 +3082,47 @@ where
 /// section 4.7's context on its own preceding line, in the C lane's wording:
 /// the two lanes report one guard.
 ///
-/// A binder this lane has not bound supplies no value, so the site is skipped
-/// rather than compared against an invented number.
+/// A binder this lane has not bound yet is BOUND from the first site that
+/// observes it, and every later site is compared against that value. That is
+/// C2.4's rule for a class whose canonical value no literal resolves: the
+/// first member is canonical and the rest guard against it.
 ///
-/// The C lane does NOT match that skip, and saying so is the point. Once
+/// This mirrors the C lane case for case rather than describing it. Once
 /// control reaches `emit_runtime_dim_site`'s GUARD branch it consults no
 /// binding table and emits its comparison against the binder unconditionally,
-/// so where this lane skips, C would emit an identifier its prologue may never
-/// declare. What keeps that from being a live divergence is not the absence of
-/// such a class - one is easy to build, with a `Load` whose only axis is a
-/// literal and two op-declared members - but the branch above it.
-/// `runtime_dim_sites` (`chelis-backend-c/src/emit.rs`) makes the FIRST
-/// op-declared occurrence of a symbol no `Load` declares a DECLARE site, so
-/// `emit_runtime_dim_site` returns before the guard branch for exactly the
-/// symbols this lane has not bound; a later site for that symbol compares
-/// against a variable by then declared. The eval mirror is the `runtime_dims`
-/// insert in the same loop, which binds the same symbol when the same node
-/// evaluates. The lanes line up case by case.
+/// so a lane that SKIPPED an unbound binder would leave C comparing against an
+/// identifier and this lane comparing against nothing. `runtime_dim_sites`
+/// (`chelis-backend-c/src/emit.rs`) makes the FIRST op-declared occurrence of a
+/// symbol no `Load` declares a DECLARE site, emitting `int64_t m = <extent>;`
+/// before its guard; the `runtime_dims` insert below is that declaration on
+/// this lane, at the same site and from the same observed value.
 ///
-/// The residual window is a derivation site for a symbol nothing declares.
-/// Neither this author nor a reviewer could construct one. It stays a latent
-/// asymmetry in one derivation's two consumers, recorded rather than papered
-/// over, and closing it means giving the derivation the answer rather than
-/// adding a second test in either lane.
+/// The residual this replaces was a derivation site for a symbol nothing
+/// declares, recorded rather than closed because no reviewer could construct a
+/// reaching class. Admitting op-computed members makes one buildable - two axes
+/// of one `shrink` under a result name no parameter declares - so the asymmetry
+/// between the two consumers is removed here instead of being re-recorded.
 fn local_guard_verdict(
-    node_id: usize,
     axis: usize,
     claim: &crate::axis_sources::LocalGuardClaim,
     observed: usize,
-    runtime_dims: &UnordMap<String, usize>,
+    runtime_dims: &mut UnordMap<String, usize>,
 ) -> Result<(), String> {
     let claimed = match &claim.canonical {
         crate::axis_sources::CanonicalExtent::Resolved(value) => *value,
         crate::axis_sources::CanonicalExtent::Binder(name) => match runtime_dims.get(name) {
             Some(value) => *value,
-            None => return Ok(()),
+            None => {
+                runtime_dims.insert(name.clone(), observed);
+                observed
+            }
         },
     };
     if observed != claimed {
         return Err(format!(
-            "extent `{}`: claimed = {claimed}, node {node_id} axis {axis} = {observed}\n\
+            "extent `{}`: claimed = {claimed}, {} axis {axis} = {observed}\n\
              numeric trap: domain in {} at int64",
-            claim.claim, claim.op,
+            claim.claim, claim.op, claim.op,
         ));
     }
     Ok(())
@@ -3147,6 +3165,40 @@ where
     F: FnMut(&str) -> Option<TensorValue>,
 {
     eval_tensor_internal(dag, None, true, 0, Some(frame), load_input).map(|(values, _)| values)
+}
+
+/// The extent an op-computed axis is about to produce, read from the site
+/// node's own bounds before that node runs.
+///
+/// `None` means the operation computes no extent here: a `shrink` span whose
+/// start is not below its end selects nothing, and the operation's own domain
+/// rejection owns that failure on both lanes.
+fn computed_axis_extent_value(
+    computed: &crate::axis_sources::ComputedAxisExtent,
+    node: &DagNode,
+    values: &UnordMap<NodeId, TensorValue>,
+) -> Result<Option<usize>, String> {
+    match computed {
+        crate::axis_sources::ComputedAxisExtent::ShrinkSpan {
+            start,
+            end,
+            operand_axis,
+        } => {
+            // `RtDim::ToEnd` resolves to the OPERAND's realized extent, which
+            // is readable here because the operand is one of this node's
+            // producers. `resolve_eval_pairs` resolves the same two bounds
+            // against the same shape when the operation itself runs.
+            let extent = node
+                .inputs
+                .first()
+                .and_then(|id| values.get(id))
+                .and_then(|operand| operand.shape.get(*operand_axis).copied())
+                .unwrap_or(0);
+            let start = resolve_eval_bound(start, node, values, extent)?;
+            let end = resolve_eval_bound(end, node, values, extent)?;
+            Ok(end.checked_sub(start).filter(|span| *span > 0))
+        }
+    }
 }
 
 pub fn eval_tensor_with<F>(

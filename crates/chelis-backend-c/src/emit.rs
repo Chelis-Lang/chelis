@@ -6003,6 +6003,16 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         // an extent under [05-DIM-1]. Section 4.7's required context - the
         // disagreeing names, the axis and each observed value - is its own
         // `fprintf`, so the trap line stays exactly one line.
+        //
+        // That context names the OPERATION rather than the node id. Section
+        // 4.7 asks for "the names of the disagreeing sources", binding "the
+        // information conveyed and not the bytes rendered", and a node id is
+        // not a source name: `spec/06` section 5.2-5.4's dead-code and
+        // common-subexpression passes renumber nodes, so the same defect
+        // printed a different number depending on what else the program
+        // contained. Every other extent diagnostic on both lanes already
+        // spells it `<source> axis <axis> = <value>`; this was the last pair
+        // that did not.
         // The comparison operand is the class's CANONICAL VALUE, supplied by
         // the derivation: the binder name where a lane declares one, the
         // literal the checker resolved the claim to otherwise. The emitter
@@ -6033,7 +6043,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             self.line(&format!("if (({extent_expr}) != {operand}) {{"));
             self.indent += 1;
             self.line(&format!(
-                "fprintf(stderr, \"extent `{name_fmt}`: claimed = %lld, node {id} axis {axis} = %lld\\n\", (long long)({operand}), (long long)({extent_expr}));"
+                "fprintf(stderr, \"extent `{name_fmt}`: claimed = %lld, {op} axis {axis} = %lld\\n\", (long long)({operand}), (long long)({extent_expr}));"
             ));
             self.line(&format!(
                 "chelis_numeric_trap(\"numeric trap: domain in {op} at int64\");"

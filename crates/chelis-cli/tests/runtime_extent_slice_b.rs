@@ -864,44 +864,38 @@ fn every_local_member_of_one_class_is_guarded_at_its_operation_on_c() {
         !emitted.contains("chelis: runtime dim `seq` mismatch"),
         "no local guard keeps the legacy rendering"
     );
-    let guarded_sites = [
-        (12, 0),
-        (16, 0),
-        (20, 0),
-        (24, 2),
-        (25, 0),
-        (29, 1),
-        (32, 1),
-        (35, 0),
-        (39, 0),
-        (55, 0),
-        (56, 0),
-        (57, 0),
-        (60, 0),
-        (65, 0),
-        (81, 0),
-        (82, 0),
-        (83, 0),
-    ];
+    // Seventeen sites, pinned by operation and axis. The list was
+    // `[(12, 0), (16, 0), (20, 0), (24, 2), (25, 0), (29, 1), (32, 1),
+    // (35, 0), (39, 0), (55, 0), (56, 0), (57, 0), (60, 0), (65, 0), (81, 0),
+    // (82, 0), (83, 0)]` while the context named a node id, and this multiset
+    // is that list with the node component dropped: fourteen on axis 0, two on
+    // axis 1, one on axis 2, every one of them an `insert`. Section 4.7 binds
+    // the information conveyed rather than the bytes, and a node id is neither
+    // a source name nor stable under `spec/06` section 5.2-5.4's renumbering
+    // passes, so the rendering names the operation. What the multiset still
+    // proves is what this row exists for: the COUNT of guarded local members
+    // and the axis each one reads.
+    let guarded_sites = [(0usize, 14usize), (1, 2), (2, 1)];
     assert_eq!(
         emitted.matches("extent `seq`: claimed = ").count(),
-        guarded_sites.len()
+        guarded_sites.iter().map(|(_, count)| count).sum::<usize>()
     );
-    for (node, axis) in guarded_sites {
+    for (axis, count) in guarded_sites {
         assert_eq!(
             emitted
                 .matches(&format!(
-                    "extent `seq`: claimed = %lld, node {node} axis {axis} = %lld"
+                    "extent `seq`: claimed = %lld, insert axis {axis} = %lld"
                 ))
                 .count(),
-            1
+            count,
+            "axis {axis} keeps its guarded members"
         );
     }
     assert_eq!(
         emitted
             .matches(&format!("{}\");", domain_trap_line("insert")))
             .count(),
-        guarded_sites.len(),
+        guarded_sites.iter().map(|(_, count)| count).sum::<usize>(),
         "each local guard renders [04-NUM-9] naming its operation"
     );
 }
@@ -1927,7 +1921,10 @@ fn a_local_unit_extent_claim_traps_at_its_operation_on_eval() {
         "the trap line names the operation that introduces the claim: {stderr}"
     );
     // Byte-exact, and on the operand's node id: this is the site's key, the
-    // same one the C emitter renders.
+    // same one the C emitter renders. This row's failure comes from the
+    // `ExtentWitness` LocalExpand transport (chelis#1686), whose context
+    // spelling is that mechanism's and is unchanged by B2b-0b's local-guard
+    // rendering.
     assert!(
         stderr.contains("extent `1`: claimed = 1, node 4 axis 0 = 2"),
         "section 4.7's context names the SITE, so the two lanes agree text for \
@@ -2829,39 +2826,70 @@ fn an_exported_stride_under_an_inlined_uniform_parameter_builds_and_runs() {
 // `spec/04-type-system.md` section 4.7 places a guard that compares "an extent
 // an operation computes" at the source position of that operation, "after its
 // producers and before the first allocation or element access whose shape
-// depends on the guarded extent". `shrink` mints a fresh extent on every
-// symbolic axis (the same section's movement paragraph), so a declared result
-// over a runtime-bound `shrink` is a claim about a value no input carries and
-// no carrier states: it has to be computed from the operation's own bounds and
-// compared before the operation allocates.
+// depends on the guarded extent". Its movement paragraph makes `shrink` the
+// owner whose symbolic axes "always mint fresh extents", so a declared result
+// over a runtime-bound `shrink` claims a value no input carries and no carrier
+// states: it has to be computed from the operation's own bounds and compared
+// before the operation allocates.
 //
-// The fixtures below are value bindings for the reason the file header gives:
-// a `def main() = f(...)` root inlines `f`, and only a binding applies the
-// exported kernel. The `shrink.{export,binding,root}` rows in
-// `runtime_extent_claim_preparation.rs` cover all three call forms.
+// The fixtures are value bindings for the reason the file header gives: only a
+// binding applies the exported kernel. The `shrink.{export,binding,root}` rows
+// in `runtime_extent_claim_preparation.rs` cover all three call forms.
 // ---------------------------------------------------------------------------
 
-/// `f(x: tensor[rows]) -> tensor[2]` over a runtime-bound shrink: chelis#1397's
-/// declaration half. `SHAPE_DERIVED_LEN` is the caller's actual extent, so the
-/// shrink produces `SHAPE_DERIVED_LEN - 1` against a declared 2.
-fn shape_derived_declared_result_source(len: usize) -> String {
+/// A rank-1 f32 tensor literal holding `1.0 .. len`.
+fn vector_literal(len: usize) -> String {
     let values = (1..=len)
         .map(|v| format!("{v}.0f32"))
         .collect::<Vec<_>>()
         .join(", ");
+    format!("to_tensor([{values}])")
+}
+
+/// A `side` x `side` f32 tensor literal holding `1.0 .. side*side`.
+fn square_literal(side: usize) -> String {
+    let rows = (0..side)
+        .map(|r| {
+            let row = (0..side)
+                .map(|c| format!("{}.0f32", r * side + c + 1))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[{row}]")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("to_tensor([{rows}])")
+}
+
+/// A `side` x `side` f32 tensor literal of ones.
+fn ones_literal(side: usize) -> String {
+    let rows = (0..side)
+        .map(|_| {
+            let row = vec!["1.0f32"; side].join(", ");
+            format!("[{row}]")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("to_tensor([{rows}])")
+}
+
+/// `f(x: tensor[rows]) -> tensor[2]` over a runtime-bound shrink: chelis#1397's
+/// declaration half. The shrink produces `len - 1` against a declared 2.
+fn shape_derived_declared_result_source(len: usize) -> String {
     format!(
         "def f(x: tensor[rows, f32]) -> tensor[2, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
-         out = f(to_tensor([{values}]))\n"
+         out = f({})\n",
+        vector_literal(len)
     )
 }
 
 /// expand.shape_derived.declared_result_survives.eval.
 ///
-/// EVIDENTIARY STATUS: regression test for both assertions. Measured on the
-/// base `fd6fc6f5d`, the mismatching program printed
+/// EVIDENTIARY STATUS: regression test for both mismatch assertions. Measured
+/// on the base `fd6fc6f5d`, the mismatching program printed
 /// `out = tensor(shape=[3], data=[2.0, 3.0, 4.0])` and exited zero under a
-/// declared `tensor[2, f32]`; the lowered result carried the synthesized
-/// `_rt_shrink_dim_2_0` rather than the declared literal, so no class and no
+/// declared `tensor[2, f32]`: the actualized result carried the synthesized
+/// `_rt_shrink_dim_N_0` instead of the declared literal, so no class and no
 /// guard existed. The satisfied row is the non-vacuity control and passed on
 /// the base.
 #[test]
@@ -2901,10 +2929,10 @@ fn a_shape_derived_bound_keeps_its_declared_result_dimension_on_eval() {
 
 /// expand.shape_derived.declared_result_survives.c.
 ///
-/// EVIDENTIARY STATUS: regression test for both assertions, with the same
-/// base measurement as its eval twin (`shape=[3]`, exit zero). The emitted-C
-/// ordering assertion is also a regression assertion: no comparison against
-/// the declared 2 existed in the emitted source at all.
+/// EVIDENTIARY STATUS: regression test for the mismatch assertions, with the
+/// same base measurement as its eval twin (`shape=[3]`, exit zero). The
+/// emitted-C ordering assertion is a regression assertion too: no comparison
+/// against the declared 2 existed in the emitted source at all.
 #[test]
 fn a_shape_derived_bound_keeps_its_declared_result_dimension_on_c() {
     assert!(
@@ -2954,27 +2982,27 @@ fn a_shape_derived_bound_keeps_its_declared_result_dimension_on_c() {
     );
 }
 
-/// A named result bound by a parameter binder, over a runtime-bound shrink:
-/// the class holds one `Load` axis and one op-computed axis.
+/// A class holding two interface witnesses for `n` and one op-computed witness
+/// for the same claim. Two parameters declare `n` so its witnesses survive as
+/// an entry obligation (chelis#1374); the third witness is the shrink result,
+/// which no input carries.
 fn load_and_op_output_class_source(len: usize) -> String {
-    let values = (1..=len)
-        .map(|v| format!("{v}.0f32"))
-        .collect::<Vec<_>>()
-        .join(", ");
     format!(
-        "def f(x: tensor[n, f32], y: tensor[k, f32]) -> tensor[n, f32] = \
+        "def f(x: tensor[n, f32], p: tensor[n, f32], y: tensor[k, f32]) -> tensor[n, f32] = \
          shrink(y, [[1i64, shape(y, 0i32)]])\n\
-         out = f(to_tensor([1.0f32, 2.0f32]), to_tensor([{values}]))\n"
+         out = f(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32]), {})\n",
+        vector_literal(len)
     )
 }
 
-/// class.load_op_output.eval: one interface witness and one op-computed
-/// witness share a class, and the op-computed member is the one guarded.
+/// class.load_op_output.eval: an interface witness and an op-computed witness
+/// share a class, and the op-computed member is the one guarded.
 ///
-/// EVIDENTIARY STATUS: regression test for both assertions. On the base the
-/// mismatching program printed `out = tensor(shape=[3], data=[2.0, 3.0, 4.0])`
-/// and exited zero under a declared `tensor[n, f32]` with `n = 2`; the result
-/// axis carried `_rt_shrink_dim_2_0`, so no class joined it to `x`'s axis.
+/// EVIDENTIARY STATUS: regression test for the mismatch assertions. On the base
+/// the mismatching program printed `out = tensor(shape=[3], data=[2.0, 3.0,
+/// 4.0])` and exited zero under a declared `tensor[n, f32]` with `n = 2`,
+/// because the result axis carried a synthesized name rather than `n` and so
+/// joined no class. The satisfied row passed on the base.
 #[test]
 fn load_and_op_output_members_share_one_guarded_class_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2998,68 +3026,60 @@ fn load_and_op_output_members_share_one_guarded_class_on_eval() {
     assert!(out.contains(&domain_trap_line("shrink")), "{out}");
     assert!(
         out.contains("extent `n`: claimed = 2, shrink axis 0 = 3"),
-        "the canonical member supplies the claimed value and the op-computed \
+        "the interface witness supplies the claimed value and the op-computed \
          member supplies the observed one: {out}"
     );
 }
 
-/// Two op-computed axes of ONE shrink in one class, with an interface member
-/// as the canonical witness.
-fn two_op_output_class_source(side: usize) -> String {
-    let rows = (0..side)
-        .map(|r| {
-            let row = (0..side)
-                .map(|c| format!("{}.0f32", r * side + c + 1))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("[{row}]")
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
+/// Two op-computed axes of ONE shrink in one class, against an interface
+/// member as the canonical witness. `x`'s two axes both declare `n`.
+fn two_op_output_class_source(n: usize, side: usize) -> String {
     format!(
         "def f(x: tensor[n, n, f32], y: tensor[a, b, f32]) -> tensor[n, n, f32] = \
-         add(shrink(y, [[1i64, shape(y, 0i32)], [1i64, shape(y, 1i32)]]), x)\n\
-         out = f(to_tensor([[1.0f32, 1.0f32], [1.0f32, 1.0f32]]), to_tensor([{rows}]))\n"
+         shrink(y, [[1i64, shape(y, 0i32)], [1i64, shape(y, 1i32)]])\n\
+         out = f({}, {})\n",
+        ones_literal(n),
+        square_literal(side)
     )
 }
 
 /// class.op_output_op_output.eval.
 ///
-/// EVIDENTIARY STATUS: regression test. On the base the mismatching program
-/// failed with `tensor shapes must match for elementwise op, got [3, 3] vs
-/// [2, 2]` - the CONSUMER's failure, which section 4.7 exists to preempt:
-/// "an independent effect or trap that [...] follows it is observed only if
-/// the guard passes". The satisfied row passed on the base and is the
-/// non-vacuity control.
+/// EVIDENTIARY STATUS: regression test for the mismatch assertions. On the base
+/// the mismatching program printed `out = tensor(shape=[3, 3], ...)` and exited
+/// zero under a declared `tensor[n, n, f32]` with `n = 2`. The
+/// declaration-order assertion is a regression assertion against the reversed
+/// member order the untied sort key produced: two axes of one node sorted
+/// `[axis 1, axis 0]`, so axis 1 was canonical and reported first.
 #[test]
 fn two_op_output_members_guard_against_the_canonical_member_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (ok, out) = eval_result(&dir, "opout2_ok.ch", &two_op_output_class_source(3));
+    let (ok, out) = eval_result(&dir, "opout2_ok.ch", &two_op_output_class_source(2, 3));
     assert!(ok, "a shrink that produces 2x2 executes: {out}");
     assert!(
-        out.contains("shape=[2, 2]") && out.contains("data=[6.0, 7.0, 9.0, 10.0]"),
+        out.contains("shape=[2, 2]") && out.contains("data=[5.0, 6.0, 8.0, 9.0]"),
         "and produces exactly the declared shape: {out}"
     );
 
-    let (ok, out) = eval_result(&dir, "opout2_bad.ch", &two_op_output_class_source(4));
+    let (ok, out) = eval_result(&dir, "opout2_bad.ch", &two_op_output_class_source(2, 4));
     assert!(!ok, "a shrink that produces 3x3 under `n` = 2 traps: {out}");
     assert!(out.contains(&domain_trap_line("shrink")), "{out}");
     assert!(
         out.contains("extent `n`: claimed = 2, shrink axis 0 = 3"),
-        "the FIRST member in declaration order is reported, so two axes of one \
-         node do not tie: {out}"
+        "both op-computed members are guarded against the interface member, \
+         and section 4.7's declaration order reports axis 0 first: {out}"
     );
     assert!(
-        !out.contains("shapes must match for elementwise op"),
-        "and the guard preempts the consumer's own failure: {out}"
+        !out.contains("shrink axis 1 = 3\nextent"),
+        "the first failing guard stops the evaluation: {out}"
     );
 }
 
-/// class.op_output_op_output.c.
+/// class.op_output_op_output.c: the same row on the compiled lane.
 ///
-/// EVIDENTIARY STATUS: regression test. On the base the linked binary aborted
-/// with `chelis: elementwise operand shape mismatch at node 7 axis 0`, the
-/// consumer's failure rather than the claim's.
+/// EVIDENTIARY STATUS: regression test, same base measurement as its eval twin
+/// (`shape=[3, 3]`, exit zero). The emitted-guard count is a regression
+/// assertion for the per-axis site key.
 #[test]
 fn two_op_output_members_guard_against_the_canonical_member_on_c() {
     assert!(
@@ -3067,66 +3087,66 @@ fn two_op_output_members_guard_against_the_canonical_member_on_c() {
         "this row executes a linked program; no lane may skip"
     );
     let dir = tempfile::tempdir().expect("tempdir");
-    let (ok, out) = c_run_result(&dir, "opout2_ok_c", &two_op_output_class_source(3));
+    let (ok, out) = c_run_result(&dir, "opout2_ok_c", &two_op_output_class_source(2, 3));
     assert!(ok, "a shrink that produces 2x2 executes: {out}");
     assert!(
-        out.contains("shape=[2, 2]") && out.contains("data=[6.0, 7.0, 9.0, 10.0]"),
+        out.contains("shape=[2, 2]") && out.contains("data=[5.0, 6.0, 8.0, 9.0]"),
         "and produces exactly the declared shape: {out}"
     );
 
-    let (ok, out) = c_run_result(&dir, "opout2_bad_c", &two_op_output_class_source(4));
+    let (ok, out, emitted) =
+        c_run_result_with_source(&dir, "opout2_bad_c", &two_op_output_class_source(2, 4));
     assert!(!ok, "the linked binary must trap: {out}");
     assert!(out.contains(&domain_trap_line("shrink")), "{out}");
     assert!(
         out.contains("extent `n`: claimed = 2, shrink axis 0 = 3"),
         "the C lane renders the same context as eval: {out}"
     );
-    assert!(
-        !out.contains("elementwise operand shape mismatch"),
-        "and the guard preempts the consumer's own failure: {out}"
+    assert_eq!(
+        emitted.matches("shrink axis 0 = %lld").count(),
+        1,
+        "one guard for axis 0: {emitted}"
+    );
+    assert_eq!(
+        emitted.matches("shrink axis 1 = %lld").count(),
+        1,
+        "and one for axis 1, so a member is neither duplicated nor dropped: {emitted}"
     );
 }
 
-/// `f(a, a)`: `splice_dag` maps both parameters of `f(n, n)` to one `NodeId`,
-/// and the two identical shrinks become one node.
-fn splice_f_of_n_n_source(side: usize) -> String {
-    let rows = (0..side)
-        .map(|r| {
-            let row = (0..side)
-                .map(|c| format!("{}.0f32", r * side + c + 1))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("[{row}]")
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
+/// `f(a, a)`: `splice_dag` maps both parameters of `f(n, n)` to one `NodeId`.
+/// `start` is 0 for the satisfied form and 1 for the refuted one, so the same
+/// spliced call shape produces both verdicts.
+fn splice_f_of_n_n_source(start: usize, side: usize) -> String {
     format!(
         "def f(x: tensor[n, n, f32], y: tensor[n, n, f32]) -> tensor[n, n, f32] = \
-         add(shrink(x, [[1i64, shape(x, 0i32)], [1i64, shape(x, 1i32)]]), \
-         shrink(y, [[1i64, shape(y, 0i32)], [1i64, shape(y, 1i32)]]))\n\
-         a = to_tensor([{rows}])\n\
-         out = f(a, a)\n"
+         shrink(add(x, y), [[{start}i64, shape(x, 0i32)], [{start}i64, shape(x, 1i32)]])\n\
+         a = {}\n\
+         out = f(a, a)\n",
+        square_literal(side)
     )
 }
 
 /// class.splice_f_of_n_n.eval: one member per `(node, axis)`, not one per
 /// referencing parameter, and the members of one node stay in axis order.
 ///
-/// EVIDENTIARY STATUS: regression test for the trap assertions. On the base
-/// the program printed `out = tensor(shape=[2, 2], data=[10.0, 12.0, 16.0,
-/// 18.0])` and exited zero under a declared `tensor[n, n, f32]` with `n = 3`.
-/// The "exactly one trap line" assertion is also a regression assertion
-/// against the duplicate a per-parameter member would produce.
+/// EVIDENTIARY STATUS: regression test for the mismatch assertions. On the base
+/// the refuted program printed `out = tensor(shape=[2, 2], ...)` and exited
+/// zero under a declared `tensor[n, n, f32]` with `n = 3`. The single-trap-line
+/// assertion is a regression assertion against the duplicate a per-parameter
+/// member would produce.
 #[test]
 fn splicing_f_of_n_n_yields_one_member_per_output_axis_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (ok, out) = eval_result(&dir, "splice_ok.ch", &splice_f_of_n_n_source(2));
+    let (ok, out) = eval_result(&dir, "splice_ok.ch", &splice_f_of_n_n_source(0, 3));
+    assert!(ok, "a full-axis span agrees with `n` on both axes: {out}");
     assert!(
-        ok,
-        "the claim holds when the shrink cannot shorten the axis below `n`: {out}"
+        out.contains("out = tensor(shape=[3, 3]")
+            && out.contains("data=[2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0]"),
+        "and the spliced parameter is added to itself exactly once: {out}"
     );
 
-    let (ok, out) = eval_result(&dir, "splice_bad.ch", &splice_f_of_n_n_source(3));
+    let (ok, out) = eval_result(&dir, "splice_bad.ch", &splice_f_of_n_n_source(1, 3));
     assert!(!ok, "a 3x3 actual shrunk to 2x2 under `n` = 3 traps: {out}");
     assert!(
         out.contains("extent `n`: claimed = 3, shrink axis 0 = 2"),
@@ -3144,8 +3164,8 @@ fn splicing_f_of_n_n_yields_one_member_per_output_axis_on_eval() {
 
 /// class.splice_f_of_n_n.c: the same row on the compiled lane.
 ///
-/// EVIDENTIARY STATUS: regression test, same base measurement as its eval
-/// twin (`shape=[2, 2]`, exit zero).
+/// EVIDENTIARY STATUS: regression test, same base measurement as its eval twin
+/// (`shape=[2, 2]`, exit zero).
 #[test]
 fn splicing_f_of_n_n_yields_one_member_per_output_axis_on_c() {
     assert!(
@@ -3153,14 +3173,15 @@ fn splicing_f_of_n_n_yields_one_member_per_output_axis_on_c() {
         "this row executes a linked program; no lane may skip"
     );
     let dir = tempfile::tempdir().expect("tempdir");
-    let (ok, out) = c_run_result(&dir, "splice_ok_c", &splice_f_of_n_n_source(2));
+    let (ok, out) = c_run_result(&dir, "splice_ok_c", &splice_f_of_n_n_source(0, 3));
+    assert!(ok, "a full-axis span agrees with `n` on both axes: {out}");
     assert!(
-        ok,
-        "the claim holds when the shrink cannot shorten the axis below `n`: {out}"
+        out.contains("out = tensor(shape=[3, 3]"),
+        "and produces the declared shape: {out}"
     );
 
     let (ok, out, emitted) =
-        c_run_result_with_source(&dir, "splice_bad_c", &splice_f_of_n_n_source(3));
+        c_run_result_with_source(&dir, "splice_bad_c", &splice_f_of_n_n_source(1, 3));
     assert!(!ok, "a 3x3 actual shrunk to 2x2 under `n` = 3 traps: {out}");
     assert!(
         out.contains("extent `n`: claimed = 3, shrink axis 0 = 2"),
@@ -3178,27 +3199,40 @@ fn splicing_f_of_n_n_yields_one_member_per_output_axis_on_c() {
     );
 }
 
-/// A class whose only members are op-computed axes and whose binder no
-/// interface value declares: `m` is named only in the result.
-fn unbound_binder_class_source() -> String {
-    "def f(y: tensor[a, b, f32]) -> tensor[m, m, f32] = \
-     shrink(y, [[1i64, shape(y, 0i32)], [1i64, shape(y, 1i32)]])\n\
-     out = f(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32], \
-     [7.0f32, 8.0f32, 9.0f32], [10.0f32, 11.0f32, 12.0f32]]))\n"
-        .to_owned()
+/// A class whose only members are op-computed axes, under a binder no
+/// interface witness of the kernel declares: `n`'s single declaring parameter
+/// is unread, so it carries no entry obligation and its `Load` does not reach
+/// the kernel DAG.
+fn unbound_binder_class_source(rows: usize, cols: usize) -> String {
+    let values = (0..rows)
+        .map(|r| {
+            let row = (0..cols)
+                .map(|c| format!("{}.0f32", r * cols + c + 1))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[{row}]")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "def f(x: tensor[n, f32], y: tensor[a, b, f32]) -> tensor[n, n, f32] = \
+         shrink(y, [[1i64, shape(y, 0i32)], [1i64, shape(y, 1i32)]])\n\
+         out = f(to_tensor([1.0f32, 2.0f32]), to_tensor([{values}]))\n"
+    )
 }
 
 /// The lane-agreement row for the residual `local_guard_verdict`'s doc comment
-/// records: eval skipped a site whose binder it had not bound while C emitted
-/// its comparison unconditionally, and only the C emitter's DECLARE branch
-/// kept the two lanes aligned. Admitting op-computed members adds sites for
-/// exactly the symbols that branch covers, so the two lanes are asserted
-/// against each other here rather than separately.
+/// used to record: this lane SKIPPED a site whose binder it had not bound while
+/// C emitted its comparison unconditionally, and only the C emitter's DECLARE
+/// branch kept the two aligned. Admitting op-computed members makes such a
+/// class reachable from source, so this lane now binds the binder from the
+/// first site and guards the rest against it, which is what C already did.
 ///
 /// EVIDENTIARY STATUS: regression test. On the base BOTH lanes printed
 /// `out = tensor(shape=[3, 2], ...)` and exited zero under a declared
-/// `tensor[m, m, f32]`, because the two result axes carried two DIFFERENT
-/// synthesized names and therefore formed no class at all.
+/// `tensor[n, n, f32]`, because the two result axes carried two DIFFERENT
+/// synthesized names and therefore formed no class at all. The byte-identical
+/// comparison between the two lanes is the assertion this row exists for.
 #[test]
 fn an_op_computed_class_with_an_unbound_binder_agrees_across_lanes() {
     assert!(
@@ -3206,14 +3240,26 @@ fn an_op_computed_class_with_an_unbound_binder_agrees_across_lanes() {
         "this row compares two executed lanes; neither may skip"
     );
     let dir = tempfile::tempdir().expect("tempdir");
-    let source = unbound_binder_class_source();
-    let (eval_ok, eval_out) = eval_result(&dir, "unbound_binder.ch", &source);
-    let (c_ok, c_out) = c_run_result(&dir, "unbound_binder_c", &source);
-    assert!(!eval_ok, "the 4x3 actual shrinks to 3x2: {eval_out}");
-    assert!(!c_ok, "the 4x3 actual shrinks to 3x2: {c_out}");
-    // The first axis declares the binder; the second is the guard, exactly as
-    // the C emitter's declare/guard split already decides.
-    let context = "extent `m`: claimed = 3, shrink axis 1 = 2";
+    let square = unbound_binder_class_source(4, 4);
+    let (eval_ok, eval_out) = eval_result(&dir, "unbound_ok.ch", &square);
+    let (c_ok, c_out) = c_run_result(&dir, "unbound_ok_c", &square);
+    assert!(eval_ok, "a 3x3 span agrees with itself: {eval_out}");
+    assert!(c_ok, "a 3x3 span agrees with itself: {c_out}");
+    for (lane, out) in [("eval", &eval_out), ("c", &c_out)] {
+        assert!(
+            out.contains("shape=[3, 3]"),
+            "{lane}: the declared square shape: {out}"
+        );
+    }
+
+    let oblong = unbound_binder_class_source(4, 3);
+    let (eval_ok, eval_out) = eval_result(&dir, "unbound_bad.ch", &oblong);
+    let (c_ok, c_out) = c_run_result(&dir, "unbound_bad_c", &oblong);
+    assert!(!eval_ok, "a 4x3 actual shrinks to 3x2: {eval_out}");
+    assert!(!c_ok, "a 4x3 actual shrinks to 3x2: {c_out}");
+    // Axis 0 declares the binder, axis 1 is the guard: the same declare/guard
+    // split the C emitter's `runtime_dim_sites` already decided.
+    let context = "extent `n`: claimed = 3, shrink axis 1 = 2";
     for (lane, out) in [("eval", &eval_out), ("c", &c_out)] {
         assert!(
             out.contains(&domain_trap_line("shrink")),
@@ -3223,13 +3269,9 @@ fn an_op_computed_class_with_an_unbound_binder_agrees_across_lanes() {
     }
 }
 
-/// The op-computed guard-order pair. `MISMATCHED_SHRINK` produces 3 under a
-/// declared 2, and the independent effect sits on one side of the shrink.
+/// The op-computed guard-order pair: a declared 2 over a shrink that produces
+/// `len - 1`, with the independent effect on one side of the guarded call.
 fn op_computed_effect_order_source(len: usize, effect_first: bool) -> String {
-    let values = (1..=len)
-        .map(|v| format!("{v}.0f32"))
-        .collect::<Vec<_>>()
-        .join(", ");
     let effect = "_ = print(\"effect\")";
     let shrunk = "narrowed = f(x)";
     let (first, second) = if effect_first {
@@ -3244,12 +3286,13 @@ fn op_computed_effect_order_source(len: usize, effect_first: bool) -> String {
          \x20 {second}\n\
          \x20 narrowed\n\
          }}\n\
-         out = run(to_tensor([{values}]))\n"
+         out = run({})\n",
+        vector_literal(len)
     )
 }
 
-/// guard_order.op_computed.effect_before.c: an effect that precedes the
-/// guarded operation in source order is observed even though the guard traps.
+/// guard_order.op_computed.effect_before.c: an effect that precedes the guarded
+/// operation in source order is observed even though the guard traps.
 ///
 /// EVIDENTIARY STATUS: regression test. On the base neither variant trapped at
 /// all, so neither direction of the order was observable.
@@ -3277,8 +3320,8 @@ fn an_effect_before_an_op_computed_guard_runs_when_the_guard_traps_on_c() {
 /// guard_order.op_computed.effect_after.c: an effect that follows the guarded
 /// operation is observed only if the guard passes.
 ///
-/// EVIDENTIARY STATUS: regression test, with the preceding-effect row as its
-/// non-vacuity control and the agreeing variant below as the second.
+/// EVIDENTIARY STATUS: regression test, with the preceding-effect row as one
+/// non-vacuity control and the agreeing variant below as the other.
 #[test]
 fn an_effect_after_an_op_computed_guard_does_not_run_when_the_guard_traps_on_c() {
     assert!(
@@ -3311,6 +3354,44 @@ fn an_effect_after_an_op_computed_guard_does_not_run_when_the_guard_traps_on_c()
     );
 }
 
+/// A result name declared NOWHERE else is not a claim this change can stamp:
+/// the checker publishes it as `*` under section 4.7.2's fresh-extent rule, so
+/// it reaches neither the declaration arm nor a class, and the program runs.
+///
+/// EVIDENTIARY STATUS: disposition lock, not a regression test. This is the
+/// base behaviour and this change preserves it deliberately: the wildcard
+/// result is chelis#1397's OTHER half (a wildcard-returning root), and keeping
+/// it unguarded is what leaves chelis#1378's `vmap` witness executable.
+#[test]
+fn a_result_name_no_parameter_declares_is_not_stamped_as_a_claim() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = "def f(y: tensor[k, f32]) -> tensor[m, f32] = shrink(y, [[1i64, shape(y, 0i32)]])\n\
+                  out = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]))\n";
+    let path = fixture(&dir, "free_result_name.ch", source);
+    let checked = Command::cargo_bin("chelis")
+        .expect("chelis")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "check",
+            "--show-inferred",
+            "--allow-style-violations",
+            path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("check");
+    let report = String::from_utf8_lossy(&checked.stdout).to_string();
+    assert!(
+        report.contains("(tensor[d0, f32]) -> tensor[*, f32]"),
+        "the checker still publishes the free result name as a wildcard: {report}"
+    );
+    let (ok, out) = eval_result(&dir, "free_result_name_run.ch", source);
+    assert!(ok, "and the program executes unguarded: {out}");
+    assert!(
+        out.contains("shape=[3]") && out.contains("data=[2.0, 3.0, 4.0]"),
+        "producing the extent the operation computed: {out}"
+    );
+}
+
 /// The unadmitted op-computed owners, stated as a lock rather than left to be
 /// discovered. `spec/04-type-system.md` section 4.7 makes a non-unit `stride`
 /// step and non-zero `pad` mint fresh extents exactly as `shrink` does, and
@@ -3318,8 +3399,8 @@ fn an_effect_after_an_op_computed_guard_does_not_run_when_the_guard_traps_on_c()
 /// rather than newly silent.
 ///
 /// EVIDENTIARY STATUS: disposition lock, not a regression test. The behaviour
-/// asserted here is the base behaviour and this change does not alter it;
-/// the row exists so that admitting either owner has to update this test.
+/// asserted here is the base behaviour and this change does not alter it; the
+/// row exists so that admitting either owner has to update this test.
 #[test]
 fn pad_and_stride_op_computed_extents_remain_unadmitted() {
     let dir = tempfile::tempdir().expect("tempdir");

@@ -1495,7 +1495,15 @@ fn split_by_scope(
             let mut buckets: Vec<(u128, Vec<OrderedMember>)> = Vec::new();
             for entry in members {
                 let mask = reach.get(entry.node).copied().unwrap_or(u128::MAX);
-                let mut merged: Vec<OrderedMember> = vec![entry];
+                // Absorb every intersecting bucket, then append the new entry,
+                // so a merged bucket stays in derivation order. Pushing the
+                // entry first and appending the buckets after it REVERSED the
+                // group, which the sort below could not undo through a tie:
+                // three axes of one node came out [2, 1, 0]. The sort key now
+                // carries the axis, so this no longer decides anything on its
+                // own, and it is kept order-preserving because the next tie to
+                // be introduced would silently inherit the reversal.
+                let mut merged: Vec<OrderedMember> = Vec::new();
                 let mut merged_mask = mask;
                 buckets.retain_mut(|(bucket_mask, bucket)| {
                     if *bucket_mask & merged_mask != 0 {
@@ -1506,6 +1514,7 @@ fn split_by_scope(
                         true
                     }
                 });
+                merged.push(entry);
                 buckets.push((merged_mask, merged));
             }
             buckets
@@ -1589,16 +1598,28 @@ pub fn derive_dim_witnesses(dag: &Dag) -> Vec<RuntimeDimClass> {
 /// axis claiming a literal already owes a guard.
 /// The sort key C2.4 rule 1 defines: interface members before local ones,
 /// interface members by assigned ABI input slot, every remaining tie by node
-/// position.
-type OrderKey = (bool, Option<(usize, usize)>, usize);
+/// position and then by the member's own axis.
+///
+/// The axis component is not decoration. `slot` is `Some` only for an
+/// [`AxisSource::ExternalAxis`] member, and it already carries that member's
+/// axis; every OTHER kind sorts with `slot = None`, so two axes of ONE node
+/// tied on `(true, None, node)`. Measured before it was added: a `shrink`
+/// whose two axes both claim `n` produced members `[(node, 1), (node, 0)]`,
+/// and a `reshape` with three such axes produced `[2, 1, 0]` - the canonical
+/// member of the class was the LAST axis, and the guards ran in reverse
+/// declaration order, which `spec/04-type-system.md` section 4.7 fixes:
+/// "Guards ready at the same source position are evaluated in declaration
+/// order."
+type OrderKey = (bool, Option<(usize, usize)>, usize, usize);
 
 /// A member together with the key that orders it.
 ///
 /// `slot` is the declaring `Load`'s assigned ABI input slot and axis for an interface
 /// member and `None` for a local one, so sorting on `(slot.is_none(), slot,
-/// node)` puts every interface member ahead of every local one, orders the
-/// interface group by assigned slot, and breaks every remaining tie by node
-/// position. That is C2.4 rule 1 in one key.
+/// node, axis)` puts every interface member ahead of every local one, orders
+/// the interface group by assigned slot, and breaks every remaining tie by
+/// node position and then by declaration order within that node. That is C2.4
+/// rule 1 in one key.
 struct OrderedMember {
     slot: Option<(usize, usize)>,
     node: usize,
@@ -1635,11 +1656,11 @@ impl OrderedMember {
         });
         let slot =
             input_axis.and_then(|(load, axis)| abi_input_slot(dag, load).map(|slot| (slot, axis)));
-        (slot.is_none(), slot, self.node)
+        (slot.is_none(), slot, self.node, self.member.axis)
     }
 
     fn key(&self) -> OrderKey {
-        (self.slot.is_none(), self.slot, self.node)
+        (self.slot.is_none(), self.slot, self.node, self.member.axis)
     }
 }
 
@@ -2322,6 +2343,39 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
             // contains a number. Literal-source proofs were handled by
             // is_member; unsupported observation kinds remain outside this
             // carrier consumer.
+            // An op-computed axis is the third observation kind, and it is
+            // admitted HERE rather than by widening the carrier filter below,
+            // because it has no carrier: the operation derives the extent from
+            // its own output-shape rule. [`op_computed_axis_extent`] is the one
+            // admission answer, shared with lowering's declared-result stamp so
+            // a claim cannot be stamped onto an axis with no site to check it.
+            if let AxisSource::OpComputed { axis: computed, .. } = &member.source {
+                let Some(node) = dag.get(member.node) else {
+                    continue;
+                };
+                // `OpComputed` names this node and this axis (C4.1 rejects any
+                // other pairing), so the member's axis IS the axis to compute.
+                let Some(observed) = op_computed_axis_extent(&node.op, *computed) else {
+                    // An unadmitted owner - `pad` with non-zero padding,
+                    // `stride` with a non-unit step, a `reshape` binding a
+                    // symbol it does not compute - keeps the disposition it
+                    // had: no site before this arm existed and none after.
+                    continue;
+                };
+                sites.push((
+                    (member.node.0, member.axis),
+                    LocalGuardClaim {
+                        claim: name.clone(),
+                        canonical: match resolved {
+                            Some(value) => CanonicalExtent::Resolved(value),
+                            None => CanonicalExtent::Binder(name.clone()),
+                        },
+                        op: crate::grad::risc_op_name(&node.op),
+                        observed: LocalGuardObservation::ComputedExtent(observed),
+                    },
+                ));
+                continue;
+            }
             if !matches!(
                 member.source,
                 AxisSource::InputAxis { .. } | AxisSource::ScalarInput { .. }
@@ -2343,8 +2397,8 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
                 // claim executed unguarded on every lane.
                 //
                 // External declarations retain their existing entry checks.
-                // OpComputed sources need independent observations beyond
-                // these carriers; B2b-0b still owns that separate extension.
+                // OpComputed sources are admitted by the arm above, which
+                // supplies the independent observation these carriers cannot.
                 continue;
             }
             let Some(node) = dag.get(member.node) else {

@@ -331,6 +331,7 @@
         "a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_eval",
         "a_nullary_kernel_whose_inlined_parameter_is_sized_by_a_stride_builds_and_runs",
         "a_positional_expand_replaces_a_unit_axis_instead_of_inserting_on_eval",
+        "a_result_name_no_parameter_declares_is_not_stamped_as_a_claim",
         "a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_eval",
         "a_same_tensor_read_under_a_foreign_claim_is_guarded_on_eval",
         "a_shape_derived_bound_keeps_its_declared_result_dimension_on_c",

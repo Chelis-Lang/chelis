@@ -11660,14 +11660,23 @@ fn actualize_tensor_helper_types(
                         (crate::dag::RtDim::Node(_), crate::dag::RtDim::Node(_))
                         | (crate::dag::RtDim::Node(_), crate::dag::RtDim::Lit(_))
                         | (crate::dag::RtDim::Lit(_), crate::dag::RtDim::Node(_)) => {
-                            Some(crate::dag::DimInfo::Named(
-                                reserve_runtime_dim_name(
-                                    occupied_dim_names,
-                                    "shrink",
-                                    node_id,
-                                    axis,
-                                ),
-                                None,
+                            // chelis#1397: a DECLARED extent on this axis is
+                            // a claim, and minting a fresh symbol over it
+                            // discards the claim rather than discharging it.
+                            // `unresolved_axis` mints only when the node
+                            // carries no usable dimension of its own, which
+                            // is the same rule the `pad` arm above already
+                            // applies; the claim it keeps is guarded at this
+                            // operation by `local_dim_guard_sites`'
+                            // op-computed arm, so the extent is checked
+                            // rather than trusted.
+                            Some(unresolved_axis(
+                                "shrink",
+                                node_id,
+                                axis,
+                                input.dims.len(),
+                                fallback,
+                                occupied_dim_names,
                             ))
                         }
                         // `ToEnd` is an `end`-only marker; `Sym` is a
