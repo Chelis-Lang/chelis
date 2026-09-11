@@ -1,5 +1,6 @@
 """Lock daily ownership of exhaustive CI without running a Rust build."""
 import copy
+import re
 from pathlib import Path
 import unittest
 
@@ -13,6 +14,27 @@ MOVED = {
     "runtime-representation-phase0-oracle": "python3 scripts/gate.py runtime-representation",
     "generalize-sweep-oracle-shard": "cargo nextest run --workspace --profile ci-full --ignore-default-filter --features chelis-types/generalize-sweep-oracle",
 }
+
+
+def assert_complete_hash_partition(test, job, command):
+    """Require the shard matrix to cover the command's hash partition once.
+
+    A nextest `--partition hash:N/M` hides nothing: every listed test lands
+    in exactly one partition, so the union of shards 1..M is the whole
+    selection. That only holds while the matrix really enumerates 1..M, and
+    that is what this checks. It deliberately does not care what M is.
+    """
+    shards = job["strategy"]["matrix"]["shard"]
+    partition = re.search(
+        r"--partition hash:\$\{\{ matrix\.shard \}\}/(\d+)", command
+    )
+    test.assertIsNotNone(partition, "sharded job without a hash partition")
+    count = int(partition.group(1))
+    test.assertEqual(
+        shards,
+        list(range(1, count + 1)),
+        "the shard matrix must cover every nextest hash partition exactly once",
+    )
 
 
 def assert_extended(test, pr, nightly):
@@ -49,7 +71,16 @@ def assert_extended(test, pr, nightly):
             if step.get("run", "").startswith(("cargo ", "python3 scripts/gate.py")):
                 test.assertFalse(step.get("continue-on-error", False))
                 if "--ignored" in step["run"]:
-                    test.assertEqual(step.get("if"), "always()")
+                    # `always()` keeps a manual gate running after an earlier
+                    # step failed. On a partitioned job it is not part of the
+                    # partition, so it also names the one shard that owns it
+                    # rather than repeating on every shard.
+                    test.assertEqual(
+                        step.get("if"),
+                        "always() && matrix.shard == 1"
+                        if "strategy" in job
+                        else "always()",
+                    )
                 else:
                     test.assertNotIn("if", step)
     full = jobs["full-workspace"]
@@ -58,10 +89,15 @@ def assert_extended(test, pr, nightly):
     test.assertFalse(capacity(full))
     test.assertFalse(capacity(jobs["generalize-sweep-oracle-shard"]))
     test.assertEqual(len(capacity(jobs["dtype-phase3-oracle"])), 1)
-    test.assertNotIn("strategy", full)
+    # chelis#1819: one unsharded run of this selection has never finished
+    # inside any budget, so it never reported a verdict at all. The selection
+    # is unchanged and still unfiltered; it executes as four disjoint hash
+    # partitions of itself.
+    workspace_suite = "cargo nextest run --workspace --profile ci-full --ignore-default-filter --no-fail-fast -E 'not (binary_id(/^chelis-compiler-api::capacity_census_wire$/) | binary_id(/^chelis-python::capacity_census_bindings$/))' --partition hash:${{ matrix.shard }}/4"
     commands = [s.get("run") for s in full["steps"]]
     test.assertIn("cargo build --workspace --lib --bins", commands)
-    test.assertIn("cargo nextest run --workspace --profile ci-full --ignore-default-filter --no-fail-fast -E 'not (binary_id(/^chelis-compiler-api::capacity_census_wire$/) | binary_id(/^chelis-python::capacity_census_bindings$/))'", commands)
+    test.assertIn(workspace_suite, commands)
+    assert_complete_hash_partition(test, full, workspace_suite)
     test.assertIn(".venv/bin/python scripts/ci_script_tests.py nightly", [s.get("run") for s in jobs["script-nightly"]["steps"]])
     test.assertIn("cargo test -p chelis-cli --test chelis_std_self_test_corpus -- --ignored --nocapture", commands)
     test.assertIn("cargo test -p chelis-backend-c", [s.get("run") for s in jobs["backend-sanitizers-full"]["steps"]])
@@ -161,18 +197,66 @@ class ExtendedCadenceTests(unittest.TestCase):
             with self.subTest(job=name), self.assertRaises(AssertionError):
                 assert_extended(self, self.pr, nightly)
 
-    def test_filtered_or_sharded_full_workspace_is_rejected(self):
-        for mutation in ("filter", "shard"):
+    def test_filtered_or_incompletely_partitioned_full_workspace_is_rejected(self):
+        # What this guard protects is that no default filter can hide a newly
+        # added target from the nightly, and that everything the selection
+        # lists still executes. A `--ignore-default-filter` drop breaks the
+        # first; an incomplete `--partition hash:N/M` matrix breaks the second.
+        # A complete partition breaks neither -- every listed test lands in
+        # exactly one shard -- so sharding itself is no longer the mutation
+        # under test. chelis#1819.
+        def nextest_step(job):
+            return next(
+                step
+                for step in job["steps"]
+                if step.get("run", "").startswith("cargo nextest run")
+            )
+
+        for mutation in (
+            "filter",
+            "missing-shard",
+            "extra-shard",
+            "partition-count",
+            "partition-dropped",
+            "matrix-dropped",
+        ):
             nightly = copy.deepcopy(self.nightly)
             job = nightly["jobs"]["full-workspace"]
-            if mutation == "shard":
-                job["strategy"] = {"matrix": {"shard": [1, 2]}}
+            if mutation == "filter":
+                step = nextest_step(job)
+                step["run"] = step["run"].replace(" --ignore-default-filter", "")
+            elif mutation == "missing-shard":
+                job["strategy"]["matrix"]["shard"] = [1, 2, 3]
+            elif mutation == "extra-shard":
+                job["strategy"]["matrix"]["shard"] = [1, 2, 3, 4, 5]
+            elif mutation == "partition-count":
+                step = nextest_step(job)
+                step["run"] = step["run"].replace(
+                    "matrix.shard }}/4", "matrix.shard }}/2"
+                )
+            elif mutation == "partition-dropped":
+                step = nextest_step(job)
+                step["run"] = step["run"].split(" --partition ")[0]
             else:
-                for step in job["steps"]:
-                    if step.get("run", "").startswith("cargo nextest run"):
-                        step["run"] = step["run"].replace(" --ignore-default-filter", "")
-            with self.assertRaises(AssertionError):
+                del job["strategy"]
+            with self.subTest(mutation=mutation), self.assertRaises(
+                (AssertionError, KeyError)
+            ):
                 assert_extended(self, self.pr, nightly)
+
+    def test_a_complete_hash_partition_is_accepted_at_any_width(self):
+        # Positive parity for the narrowing above: the guard must not reject a
+        # partition merely for being one. Any width is a complete partition as
+        # long as the matrix enumerates it; the reviewed width itself is pinned
+        # by the verbatim command in `assert_extended`.
+        for width in (2, 4, 6):
+            with self.subTest(width=width):
+                assert_complete_hash_partition(
+                    self,
+                    {"strategy": {"matrix": {"shard": list(range(1, width + 1))}}},
+                    "cargo nextest run --workspace "
+                    f"--partition hash:${{{{ matrix.shard }}}}/{width}",
+                )
 
     def test_census_cannot_silently_return_to_full_workspace(self):
         nightly = copy.deepcopy(self.nightly)

@@ -29,7 +29,10 @@ Three tiers of check:
     `cargo nextest list` for the `ci` and `nightly` profiles plus the
     full unfiltered list and asserts the partition. It is skipped when
     `cargo`/`cargo nextest` is unavailable, and is `slow`-tolerant
-    (listing compiles test binaries on a cold tree).
+    (listing compiles test binaries on a cold tree). "Unfiltered" means
+    `--ignore-default-filter`, the flag the hosted jobs themselves pass;
+    omitting `--profile` does NOT mean unfiltered, because nextest then
+    applies the `default` profile and its `default-filter` (chelis#1781).
   - `GeneralizationPartitionTests` lists the explicit generalization lane,
     `--features chelis-types/generalize-sweep-oracle`, and asserts that the
     two nightly-owned contention cases stay out of it.
@@ -292,18 +295,29 @@ def _have_nextest() -> bool:
     return out.returncode == 0
 
 
-def _list_profile(profile: str | None) -> dict[str, tuple[str, bool]]:
-    """Run `cargo nextest list` for `profile` (or the implicit default
-    when `None`) and return `binary_id::test -> (filter_status,
-    ignored)`.
+def _list_profile(profile: str) -> dict[str, tuple[str, bool]]:
+    """Run `cargo nextest list` for `profile` and return
+    `binary_id::test -> (filter_status, ignored)`.
 
     nextest's `list --message-format json` annotates each testcase with
     `filter-match.status` ("matches" / "mismatch") relative to the
     profile's `default-filter`, and an `ignored` flag.
+
+    The profile is required. Omitting it selects `default`, whose
+    `default-filter` marks the nightly-owned set "mismatch"; a caller that
+    wanted the complete corpus and read that listing silently lost those
+    tests. Use `_list_filterset` for the unfiltered basis instead.
     """
-    cmd = ["cargo", "nextest", "list", "--workspace", "--message-format", "json"]
-    if profile is not None:
-        cmd += ["--profile", profile]
+    cmd = [
+        "cargo",
+        "nextest",
+        "list",
+        "--workspace",
+        "--profile",
+        profile,
+        "--message-format",
+        "json",
+    ]
     result = subprocess.run(
         cmd,
         cwd=REPO_ROOT,
@@ -485,7 +499,10 @@ class ProfilePartitionTests(unittest.TestCase):
     def setUpClass(cls):
         cls.ci = _list_profile("ci")
         cls.nightly = _list_profile("nightly")
-        cls.full = _list_profile(None)
+        # The complete corpus, on the `--ignore-default-filter` basis the
+        # hosted workspace and dtype jobs run on. Every test matches, so a
+        # "matches" status here means "exists", not "survived a filter".
+        cls.full = _list_filterset("all()")
         cls.dtype_flat = _list_filterset(
             dtype_oracle_manifest.flattened_filter(sys.executable)
         )
@@ -647,6 +664,12 @@ class ProfilePartitionTests(unittest.TestCase):
         )
 
     def test_linux_workspace_and_dtype_cover_the_complete_census_partition(self):
+        # `full-workspace` runs `--ignore-default-filter -E 'not (census)'`
+        # and `dtype-phase3-oracle` executes the census, so between them no
+        # test is in neither and none is in both. Both sides of that equality
+        # are listed on the one basis those jobs use; comparing an unfiltered
+        # selection against a default-profile listing subtracted the 17
+        # nightly-owned tests from one side only (chelis#1781).
         active = lambda listing: {k for k, (status, ignored) in listing.items() if status == "matches" and not ignored}
         full = active(self.full)
         census = {k for k in full if k.startswith(("chelis-compiler-api::capacity_census_wire::", "chelis-python::capacity_census_bindings::"))}
