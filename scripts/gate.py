@@ -312,6 +312,7 @@ CLIPPY_SOLVER_FREE_FEATURES: list[str] = [
     "cargo", "clippy", "--workspace", "--all-targets", "--features",
     "chelis-backend-c/sleef,"
     "chelis-compiler-api/compilation-trace,"
+    "chelis-compiler-api/native-random-observer,"
     "chelis-e2e/hip-local-gpu,"
     "chelis-ir/lowering-trace,"
     "chelis-prove/clarabel,"
@@ -498,8 +499,10 @@ LOWERING_TRACE_TESTS: list[str] = [
 
 EMISSION_OBSERVER_TESTS: list[str] = [
     "cargo", "nextest", "run", "-p", "chelis-compiler-api", "--features",
-    "compilation-trace", "--lib", "--test", "emission_observer",
+    "compilation-trace,native-random-observer", "--lib", "--test", "emission_observer",
     "--test", "execution_artifact_metadata", "--test", "compilation_trace",
+    "--test", "native_random_observer",
+    "--test", "fixed_control_c",
 ]
 
 STAGES: dict[str, list[list[str]]] = {

@@ -119,3 +119,13 @@ mutants, a failing sink, and a driver-only `UINT64_MAX` rejection control. The
 default-feature backend test separately locks the absence of observer vocabulary
 from emitted C; the feature-on suite also executes the ordinary public wrapper
 and requires that it emit no observation.
+
+Standalone sealed tensor kernels retain their existing ABI and emit no observer
+operations, even with the feature enabled: they have no host invocation observer.
+The feature-enabled integration-support command runs both
+`native_random_observer` and the existing `fixed_control_c` numerical suite;
+the latter also runs in the default-feature PR selection. Feature execution is
+owned by the nightly/manual `heavy-e2e.yml` frontend support slice, not ordinary
+PR success. The solver-free Clippy configurations compile the observer feature.
+This is one delivery slice: the private callback carrier, state-owner hooks,
+and compile/run tests are useful only together; the feature adds no release ABI.

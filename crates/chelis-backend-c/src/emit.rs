@@ -706,8 +706,6 @@ impl CEmitter {
                     "int __chelis_fixed_active = (__chelis_rng != NULL && __chelis_rng->active);",
                 );
                 e.line("if (__chelis_fixed_active) { __chelis_fixed_seed = __chelis_rng->seed; __chelis_fixed_counter = __chelis_rng->counter; }");
-            } else {
-                e.line("int __chelis_fixed_active = 0;");
             }
         }
         let ordinary_steps;
@@ -745,7 +743,7 @@ impl CEmitter {
                     let scope = scope.index();
                     e.line(&format!("uint64_t __chelis_saved_seed_{scope} = __chelis_fixed_seed, __chelis_saved_counter_{scope} = __chelis_fixed_counter;"));
                     #[cfg(feature = "native-random-observer")]
-                    {
+                    if private_random_context {
                         e.line(&format!(
                             "int __chelis_saved_active_{scope} = __chelis_fixed_active;"
                         ));
@@ -763,7 +761,7 @@ impl CEmitter {
                         "__chelis_fixed_seed = {seed}ULL; __chelis_fixed_counter = 0ULL;"
                     ));
                     #[cfg(feature = "native-random-observer")]
-                    {
+                    if private_random_context {
                         e.line("__chelis_fixed_active = 1;");
                         e.line(&crate::random_observer::record(
                             "",
@@ -786,7 +784,7 @@ impl CEmitter {
                     let scope = scope.index();
                     e.line(&format!("__chelis_fixed_seed = __chelis_saved_seed_{scope}; __chelis_fixed_counter = __chelis_saved_counter_{scope};"));
                     #[cfg(feature = "native-random-observer")]
-                    {
+                    if private_random_context {
                         e.line(&format!(
                             "__chelis_fixed_active = __chelis_saved_active_{scope};"
                         ));
@@ -820,23 +818,27 @@ impl CEmitter {
                 let index = draw.index();
                 e.line(&format!("uint64_t __chelis_draw_seed_{index} = __chelis_fixed_seed, __chelis_draw_ordinal_{index} = __chelis_fixed_counter++;"));
                 #[cfg(feature = "native-random-observer")]
-                e.line(&crate::random_observer::record(
-                    "",
-                    "CHELIS_RANDOM_OBSERVER_FORWARD",
-                    "CHELIS_RANDOM_OBSERVER_FIXED_IDENTITY",
-                    &format!("\"{func_name_fmt}\""),
-                    forward_occurrences.get(&node.id.0).copied(),
-                    Some(index),
-                    draw_scopes.get(&index).copied(),
-                    "(chelis_rng_state){__chelis_fixed_seed, __chelis_fixed_counter, __chelis_fixed_active}",
-                    Some((
-                        &format!("__chelis_draw_seed_{index}"),
-                        &format!("__chelis_draw_ordinal_{index}"),
-                    )),
-                ));
+                if private_random_context {
+                    e.line(&crate::random_observer::record(
+                        "",
+                        "CHELIS_RANDOM_OBSERVER_FORWARD",
+                        "CHELIS_RANDOM_OBSERVER_FIXED_IDENTITY",
+                        &format!("\"{func_name_fmt}\""),
+                        forward_occurrences.get(&node.id.0).copied(),
+                        Some(index),
+                        draw_scopes.get(&index).copied(),
+                        "(chelis_rng_state){__chelis_fixed_seed, __chelis_fixed_counter, __chelis_fixed_active}",
+                        Some((
+                            &format!("__chelis_draw_seed_{index}"),
+                            &format!("__chelis_draw_ordinal_{index}"),
+                        )),
+                    ));
+                }
             }
             #[cfg(feature = "native-random-observer")]
-            if let Some(RandomSite::Replay { draw }) = execution.and_then(|view| view.site(node.id))
+            if private_random_context
+                && let Some(RandomSite::Replay { draw }) =
+                    execution.and_then(|view| view.site(node.id))
             {
                 let index = draw.index();
                 e.line(&crate::random_observer::record(
