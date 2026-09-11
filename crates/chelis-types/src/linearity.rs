@@ -1916,6 +1916,13 @@ fn free_vars(expr: &Expr, params: &[String]) -> Vec<String> {
     free.into_sorted()
 }
 
+/// Runtime variable references not bound inside the expression, in stable order.
+/// Type/effect metadata is not executable code. This is the same lexical
+/// binding analysis used to identify captures for ownership checking.
+pub fn free_runtime_variables(expr: &Expr) -> Vec<String> {
+    free_vars(expr, &[])
+}
+
 fn collect_free_vars(expr: &Expr, bound: &mut Vec<UnordSet<String>>, free: &mut UnordSet<String>) {
     match expr {
         Expr::Atom(_, _) | Expr::Map(_, _) => {}

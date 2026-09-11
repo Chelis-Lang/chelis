@@ -4,6 +4,10 @@ version = 1
 
 [[target]]
 package = "chelis-compiler-api"
+name = "resource_target_admission"
+
+[[target]]
+package = "chelis-compiler-api"
 name = "issue_1738_transcript_capture"
 
 [[target]]
