@@ -11666,18 +11666,38 @@ fn actualize_tensor_helper_types(
                             // `unresolved_axis` mints only when the node
                             // carries no usable dimension of its own, which
                             // is the same rule the `pad` arm above already
-                            // applies; the claim it keeps is guarded at this
-                            // operation by `local_dim_guard_sites`'
-                            // op-computed arm, so the extent is checked
-                            // rather than trusted.
-                            Some(unresolved_axis(
-                                "shrink",
-                                node_id,
-                                axis,
-                                input.dims.len(),
-                                fallback,
-                                occupied_dim_names,
-                            ))
+                            // applies.
+                            //
+                            // Keeping the claim is only safe when something
+                            // checks it, so the admission is ASKED rather than
+                            // assumed: `op_computed_axis_extent` is the one
+                            // answer `local_dim_guard_sites` uses to decide
+                            // whether this axis gets a guard site. Until this
+                            // call existed the coupling was structural - only
+                            // `shrink` reaches this arm, and `shrink` is the
+                            // one admitted owner - so removing `shrink` from
+                            // admission would have kept the claim with nothing
+                            // to enforce it, silently.
+                            if crate::axis_sources::op_computed_axis_extent(op, axis).is_some() {
+                                Some(unresolved_axis(
+                                    "shrink",
+                                    node_id,
+                                    axis,
+                                    input.dims.len(),
+                                    fallback,
+                                    occupied_dim_names,
+                                ))
+                            } else {
+                                Some(crate::dag::DimInfo::Named(
+                                    reserve_runtime_dim_name(
+                                        occupied_dim_names,
+                                        "shrink",
+                                        node_id,
+                                        axis,
+                                    ),
+                                    None,
+                                ))
+                            }
                         }
                         // `ToEnd` is an `end`-only marker; `Sym` is a
                         // `Reshape` target only; and `InputAxis` belongs only

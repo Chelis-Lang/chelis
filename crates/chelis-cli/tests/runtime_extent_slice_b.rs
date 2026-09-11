@@ -3424,3 +3424,169 @@ fn pad_and_stride_op_computed_extents_remain_unadmitted() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Round 1's two confirmed findings, pinned.
+// ---------------------------------------------------------------------------
+
+/// The binder's only declaring parameter is unread, so nothing enforces the
+/// claim the signature makes about the result.
+fn unread_declaring_parameter_source() -> String {
+    "def f(w: tensor[n, f32], x: tensor[r, f32]) -> tensor[n, f32] = \
+     shrink(x, [[1i64, shape(x, 0i32)]])\n\
+     out = f(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]))\n"
+        .to_owned()
+}
+
+/// A named result claim is preserved but NOT enforced when the binder's only
+/// declaring parameter is unread. `n` is 2 at the call and the shrink produces
+/// 3, and both lanes return the 3.
+///
+/// The reason is structural rather than a missing check. `signature_witness`
+/// asks the signature, so the stamp lands; but chelis#1773 mints one witness
+/// per declared parameter axis and relates two only when a binder repeats, so
+/// `w`'s lone witness is dead, elimination takes it and `w`'s `Load` with it,
+/// and the kernel is never given `w` at all. The claim therefore has one
+/// member, which C2.4 does not make a class. Enforcing it needs the unread
+/// parameter's extent to cross the kernel ABI, which is the mechanism
+/// chelis#1773 deliberately did not add and this slice does not add either.
+///
+/// EVIDENTIARY STATUS: disposition lock, not a regression test. This is the
+/// base behaviour, unchanged by this slice: the guard admission, the
+/// declaration stamp and the ordering key all leave it exactly here. The row
+/// exists so the gap is a recorded limit on the claim rather than something a
+/// later reader has to rediscover, and so that closing it has to delete this
+/// test deliberately. Tracked by chelis#1397, which stays open.
+#[test]
+fn an_unread_declaring_parameter_leaves_its_named_claim_unenforced() {
+    assert!(
+        gcc_available(),
+        "this row compares two executed lanes; neither may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = unread_declaring_parameter_source();
+    let (eval_ok, eval_out) = eval_result(&dir, "unread_declarer.ch", &source);
+    let (c_ok, c_out) = c_run_result(&dir, "unread_declarer_c", &source);
+    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(
+            ok,
+            "{lane}: the claim is unenforced, so the program runs: {out}"
+        );
+        assert!(
+            out.contains("shape=[3]") && out.contains("data=[2.0, 3.0, 4.0]"),
+            "{lane}: and returns the extent the operation computed: {out}"
+        );
+        assert!(
+            !out.contains("extent `n`"),
+            "{lane}: no guard claims to have checked it: {out}"
+        );
+    }
+}
+
+/// A `shrink` whose span selects nothing, under a declared literal.
+fn empty_span_source(len: usize) -> String {
+    format!(
+        "def f(x: tensor[rows, f32]) -> tensor[2, f32] = \
+         shrink(x, [[shape(x, 0i32), shape(x, 0i32)]])\n\
+         out = f({})\n",
+        vector_literal(len)
+    )
+}
+
+/// An empty span is the OPERATION's domain rejection, and neither lane may
+/// report it as a claim mismatch.
+///
+/// `ShapeMetadata::shrunk` rejects only `end < start`, so `start == end` builds
+/// a movement plan of extent 0 and the C guard used to run first, answering
+/// `extent `2`: claimed = 2, shrink axis 0 = 0` while the evaluator named the
+/// span. The evaluator was already right: its guard declines a span it cannot
+/// compute an extent from, and the `Shrink` arm reports it. The C emitter now
+/// emits the operation's own empty-range rejection ahead of the plan.
+///
+/// EVIDENTIARY STATUS: regression test for the C assertions, which reported the
+/// claim on the reviewed head `cab086ef4`. Disposition lock for the eval
+/// assertions, which already named the span there. The two lanes still word the
+/// rejection differently, which is the operation's pre-existing diagnostic and
+/// not this slice's.
+#[test]
+fn an_empty_shrink_span_is_the_operations_rejection_on_both_lanes() {
+    assert!(
+        gcc_available(),
+        "this row compares two executed lanes; neither may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = empty_span_source(4);
+    let (eval_ok, eval_out) = eval_result(&dir, "empty_span.ch", &source);
+    let (c_ok, c_out) = c_run_result(&dir, "empty_span_c", &source);
+    assert!(
+        !eval_ok,
+        "an empty span does not produce a value: {eval_out}"
+    );
+    assert!(!c_ok, "an empty span does not produce a value: {c_out}");
+    for (lane, out) in [("eval", &eval_out), ("c", &c_out)] {
+        assert!(
+            !out.contains("claimed = 2"),
+            "{lane}: the span is out of domain, so no lane may attribute it to \
+             the claim: {out}"
+        );
+    }
+    assert!(
+        eval_out.contains("shrink axis 0 bound [4, 4] is empty or inverted"),
+        "eval names the span: {eval_out}"
+    );
+    assert!(
+        c_out.contains(&domain_trap_line("shrink")),
+        "C raises the operation's own trap: {c_out}"
+    );
+}
+
+/// A `shrink` whose end exceeds the operand's extent, under a declared literal.
+fn end_beyond_operand_source(len: usize) -> String {
+    format!(
+        "def f(x: tensor[rows, f32]) -> tensor[2, f32] = \
+         shrink(x, [[1i64, add(shape(x, 0i32), 3i64)]])\n\
+         out = f({})\n",
+        vector_literal(len)
+    )
+}
+
+/// The limit of this slice's cross-lane claim, pinned rather than implied.
+///
+/// `spec/05-risc-primitives.md` section 2.4.2 makes "a shrink range overshoot"
+/// an error every execution mode reports with matching language, and the two
+/// lanes do not match here: C's movement plan rejects the span before the guard
+/// site, while the evaluator's guard runs first and reports the claim. The
+/// evaluator cannot simply decline, because its own answer to an overshooting
+/// span is the `assert!` in `eval::shrink` (chelis#523), so declining would
+/// trade a guard naming the wrong reason for a panic.
+///
+/// This slice therefore bounds its cross-lane claim to IN-DOMAIN spans and
+/// pins both dispositions here. Closing the divergence belongs to chelis#523.
+///
+/// EVIDENTIARY STATUS: disposition lock for both lanes, not a regression test.
+/// Neither assertion describes an improvement; both describe a limit, and the
+/// test exists so that fixing chelis#523 has to update it.
+#[test]
+fn an_overshooting_shrink_span_is_outside_this_slices_cross_lane_claim() {
+    assert!(
+        gcc_available(),
+        "this row compares two executed lanes; neither may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = end_beyond_operand_source(4);
+    let (eval_ok, eval_out) = eval_result(&dir, "end_beyond.ch", &source);
+    let (c_ok, c_out) = c_run_result(&dir, "end_beyond_c", &source);
+    assert!(
+        !eval_ok,
+        "an overshoot does not produce a value: {eval_out}"
+    );
+    assert!(!c_ok, "an overshoot does not produce a value: {c_out}");
+    assert!(
+        eval_out.contains("extent `2`: claimed = 2, shrink axis 0 = 6"),
+        "eval's guard runs first and names the claim (chelis#523): {eval_out}"
+    );
+    assert!(
+        c_out.contains("shrink bounds outside input extent"),
+        "C's movement plan rejects the span first: {c_out}"
+    );
+}

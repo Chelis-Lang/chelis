@@ -13870,13 +13870,34 @@ impl<'program> LowerCtx<'program> {
     ///   existing disposition rather than gaining a claim with no guard, which
     ///   on the evaluator would be a silently wrong shape.
     /// - A NAMED claim must be declared by a parameter of this AUTHORED
-    ///   signature. `signature_is_authored` is PR #1773's gate and a
-    ///   synthesized multi-root kernel stamps nothing; `signature_witness`
-    ///   requires the binder to be a parameter axis of the same activation, so
-    ///   the class has an interface member to be canonical and the lane has the
-    ///   binder in its `runtime_dims`. A result name declared NOWHERE else is
-    ///   the checker's fresh-extent representation under section 4.7.2 and is
-    ///   still published as `*`, which reaches neither this arm nor a class.
+    ///   signature. `signature_is_authored` is PR #1773's gate, so a
+    ///   synthesized multi-root kernel stamps nothing, and `signature_witness`
+    ///   requires the binder to be a parameter axis of the same activation.
+    ///
+    ///   That is NOT enough to make the claim ENFORCEABLE, and an earlier
+    ///   version of this comment said it was ("so the class has an interface
+    ///   member to be canonical"). `signature_witness` asks the SIGNATURE, not
+    ///   the graph. For `f(w: tensor[n, f32], x: tensor[r, f32]) ->
+    ///   tensor[n, f32]` with `w` unread, PR #1773 mints `w`'s witness, nothing
+    ///   relates it to a second one, so it is dead: elimination removes it with
+    ///   `w`'s `Load`, and the kernel is not even GIVEN `w`. The claim then has
+    ///   one member, which C2.4 does not make a class, and no lane can compare
+    ///   it against anything. The program returns the extent the operation
+    ///   computed, at exit zero, on both lanes.
+    ///
+    ///   Declining the stamp there would change nothing observable, which is
+    ///   measured rather than argued: without it the result axis is anonymous,
+    ///   and `remap_tensor_helper_dim_symbols`' root retyping writes the
+    ///   declared name onto an anonymous root axis anyway, so the emitted C is
+    ///   byte-identical either way. Enforcing the claim instead needs the
+    ///   unread parameter's extent to cross the kernel ABI, which is a
+    ///   mechanism this slice does not have and chelis#1397 keeps open.
+    ///   `an_unread_declaring_parameter_leaves_its_named_claim_unenforced`
+    ///   pins the disposition rather than leaving it to be rediscovered.
+    ///
+    ///   A result name declared NOWHERE else is a third case: it is the
+    ///   checker's fresh-extent representation under section 4.7.2 and is still
+    ///   published as `*`, which reaches neither this arm nor a class.
     fn preserve_op_computed_result_axis(
         &mut self,
         id: NodeId,

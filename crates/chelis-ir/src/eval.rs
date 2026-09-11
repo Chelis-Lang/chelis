@@ -2324,12 +2324,23 @@ where
                     crate::axis_sources::LocalGuardObservation::ComputedExtent(computed) => {
                         match computed_axis_extent_value(computed, node, &values)? {
                             Some(extent) => extent,
-                            // A span that selects nothing computes no extent.
-                            // The operation's own domain rejection owns that
-                            // failure and runs first on both lanes (the C
-                            // runtime's movement plan rejects the span before
-                            // this site is reached), so the guard yields
-                            // rather than comparing a fabricated number.
+                            // A span that selects nothing computes no extent,
+                            // so the guard yields rather than comparing a
+                            // fabricated number: an empty span is the
+                            // OPERATION's domain rejection, and attributing it
+                            // to a claim mismatch names the wrong defect.
+                            //
+                            // An earlier version of this comment justified the
+                            // decline by saying the C runtime's movement plan
+                            // rejects such a span before the site is reached.
+                            // That is false and was checkable:
+                            // `ShapeMetadata::shrunk` rejects only `end <
+                            // start`, so `start == end` builds a plan of extent
+                            // 0 and C's guard ran first, reporting `shrink axis
+                            // 0 = 0` against the claim. The C emitter now emits
+                            // the operation's own empty-range rejection ahead
+                            // of the plan, which is what makes the two lanes
+                            // agree on WHICH failure this is.
                             None => continue,
                         }
                     }
@@ -3173,6 +3184,16 @@ where
 /// `None` means the operation computes no extent here: a `shrink` span whose
 /// start is not below its end selects nothing, and the operation's own domain
 /// rejection owns that failure on both lanes.
+///
+/// A span whose END exceeds the operand's extent is NOT declined, and that is
+/// a deliberate limit rather than an oversight. It is out of domain too, and
+/// `spec/05-risc-primitives.md` section 2.4.2 makes "a shrink range overshoot"
+/// an error every execution mode reports with matching language. But this lane
+/// answers such a span with the `assert!` in `shrink` (chelis#523), so
+/// declining here would trade a guard reporting the wrong reason for a panic,
+/// which is worse. The claim this slice makes is therefore bounded to
+/// IN-DOMAIN spans, the two out-of-domain dispositions are pinned by receipts,
+/// and closing the divergence belongs to chelis#523.
 fn computed_axis_extent_value(
     computed: &crate::axis_sources::ComputedAxisExtent,
     node: &DagNode,
