@@ -1545,18 +1545,17 @@ fn execution_host_requires_host_backend(
         .unwrap_or(false))
 }
 
+type CliLoweredBuildProgram = (
+    chelis_ir::Dag,
+    Option<chelis_ir::host::ConcreteHostProgram>,
+    Option<chelis_ir::host::HostExecutionPlan>,
+);
+
 fn lower_build_program_for_cli(
     checked: &chelis_compiler_api::pipeline::CheckedCompilation,
     manifest: &chelis_types::manifest::RootManifest,
     target: BuildTarget,
-) -> Result<
-    (
-        chelis_ir::Dag,
-        Option<chelis_ir::host::ConcreteHostProgram>,
-        Option<chelis_ir::host::HostExecutionPlan>,
-    ),
-    Box<dyn std::error::Error>,
-> {
+) -> Result<CliLoweredBuildProgram, Box<dyn std::error::Error>> {
     if target == BuildTarget::C {
         // This mode asks the shared pipeline to select the CLI's ordinary
         // host/strict policy from the actual collected host. Planned helpers
