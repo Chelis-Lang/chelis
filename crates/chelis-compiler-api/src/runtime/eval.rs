@@ -25,7 +25,7 @@ use super::*;
 /// `[04-NUM-9]`'s `<op>` slot takes the canonical name of the operation that
 /// introduces the guarded extent. A body that returns a block, a user call, or
 /// a variable has no such name, so the return-boundary guard does not fire for
-/// it (chelis#1739 residual, locked by
+/// it (chelis#1771, locked on both lanes by
 /// `crates/chelis-cli/tests/issue_1739_diagonal_runtime_bound.rs`).
 fn direct_builtin_head(body: &Expr) -> Option<&str> {
     let Some((DeepTag::App, kids)) = tagged_expr_children(body) else {

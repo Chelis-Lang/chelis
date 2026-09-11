@@ -1638,9 +1638,10 @@ fn append_unreachable_fn_abort_stub(
 /// `[04-NUM-9]`'s `<op>` slot is the canonical name of the operation that
 /// introduces the guarded extent, so the guard is emitted only when the body IS
 /// a direct builtin application and that name is known. A block-bodied or
-/// call-bodied return has no such name and is deliberately left unguarded;
+/// call-bodied return has no such name and is deliberately left unguarded
+/// (chelis#1771);
 /// `crates/chelis-cli/tests/issue_1739_diagonal_runtime_bound.rs` locks that
-/// residual.
+/// residual on both lanes.
 fn declared_result_extent_guard(function: &HostFunction) -> Vec<String> {
     let HostAbiType::Tensor(ty) = &function.ret_ty else {
         return Vec::new();

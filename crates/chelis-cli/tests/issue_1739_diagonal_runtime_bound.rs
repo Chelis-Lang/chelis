@@ -26,8 +26,8 @@
 //! Because the slot names an operation, the guard fires only where that
 //! operation is known: when the function's return expression IS a direct
 //! builtin application. A block-bodied or call-bodied return is deliberately
-//! left unguarded in this pull request, and
-//! `a_block_bodied_return_is_not_guarded_and_is_residual` locks that.
+//! left unguarded here and tracked as chelis#1771, which
+//! `a_block_bodied_return_is_not_guarded_and_is_residual` and its C twin lock.
 //!
 //! # Evidentiary status
 //!
@@ -204,7 +204,7 @@ fn eval_traps_on_the_inlined_main_root() {
 /// pull request emits no guard for it: the same disagreement that traps through
 /// a direct builtin return still executes silently here. The row exists so the
 /// gap is measured rather than assumed, and so that closing it turns this test
-/// red on purpose. Tracked as residual on chelis#1739.
+/// red on purpose. Tracked as chelis#1771.
 #[test]
 fn a_block_bodied_return_is_not_guarded_and_is_residual() {
     let dir = tempdir().expect("tempdir");
@@ -219,8 +219,9 @@ fn a_block_bodied_return_is_not_guarded_and_is_residual() {
     );
 }
 
-/// RESIDUAL LOCK, C lane. The same gap, lane-symmetric: neither lane guards a
-/// block-bodied return, so the two lanes still agree with each other.
+/// RESIDUAL LOCK, C lane, chelis#1771, and A PASS HERE IS NOT EVIDENCE OF
+/// CORRECTNESS EITHER. The same gap, lane-symmetric: neither lane guards a
+/// block-bodied return, so the two lanes still agree on the wrong answer.
 #[test]
 fn the_c_lane_leaves_a_block_bodied_return_unguarded_too() {
     if !gcc_available() {
