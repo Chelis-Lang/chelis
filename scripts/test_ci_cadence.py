@@ -72,14 +72,18 @@ def assert_extended(test, pr, nightly):
                 test.assertFalse(step.get("continue-on-error", False))
                 if "--ignored" in step["run"]:
                     # `always()` keeps a manual gate running after an earlier
-                    # step failed. On a partitioned job it is not part of the
-                    # partition, so it also names the one shard that owns it
-                    # rather than repeating on every shard.
+                    # step failed. On a hash-partitioned job it is not part of
+                    # the partition, so it also names the one shard that owns
+                    # it rather than repeating on every shard. Keyed on the
+                    # shard matrix specifically: a job matrixed on something
+                    # else, as `integration-support` is on `slice`, has no
+                    # `matrix.shard`, and demanding that condition of it would
+                    # force a future `--ignored` step onto a test that is never
+                    # true, so the step would never run.
+                    sharded = "shard" in job.get("strategy", {}).get("matrix", {})
                     test.assertEqual(
                         step.get("if"),
-                        "always() && matrix.shard == 1"
-                        if "strategy" in job
-                        else "always()",
+                        "always() && matrix.shard == 1" if sharded else "always()",
                     )
                 else:
                     test.assertNotIn("if", step)

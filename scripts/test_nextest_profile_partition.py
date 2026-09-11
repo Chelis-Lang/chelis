@@ -666,7 +666,9 @@ class ProfilePartitionTests(unittest.TestCase):
     def test_linux_workspace_and_dtype_cover_the_complete_census_partition(self):
         # `full-workspace` runs `--ignore-default-filter -E 'not (census)'`
         # and `dtype-phase3-oracle` executes the census, so between them no
-        # test is in neither and none is in both. Both sides of that equality
+        # test is in neither and no census test is in both. They are not
+        # globally disjoint: the dtype oracle also owns non-census binaries,
+        # which is what the sibling coverage test above records. Both sides
         # are listed on the one basis those jobs use; comparing an unfiltered
         # selection against a default-profile listing subtracted the 17
         # nightly-owned tests from one side only (chelis#1781).
