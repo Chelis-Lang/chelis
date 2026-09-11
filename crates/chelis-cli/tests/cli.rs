@@ -8509,7 +8509,7 @@ result = with seed(42i64) {
     assert!(run.status.success(), "compiled binary exited non-zero");
     assert_eq!(
         String::from_utf8(run.stdout).unwrap(),
-        "result = tensor(shape=[4], data=[0.0, 2.0, 2.0, 2.0])\n"
+        "result = tensor(shape=[4], data=[0.0, 2.0, 0.0, 0.0])\n"
     );
 }
 

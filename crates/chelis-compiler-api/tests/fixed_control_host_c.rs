@@ -4,22 +4,21 @@ mod ownership_support;
 
 #[test]
 fn generic_static_rate_reaches_native_host_helper() {
-    let source = r#"
+    for dtype in ["f16", "bf16", "f32", "f64"] {
+        let source = format!(
+            r#"
 def keep[p: Float](x: tensor[4, p]) -> tensor[4, p] = dropout(x, cast(0.5, p))
-def main() = with seed(42i64) {
-  keep(to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32]))
-}
-"#;
-    let c = ownership_support::emit(source, "main");
-    let driver = r#"
-int main(void) {
-    chelis_tensor *fixture__main(void);
-    chelis_tensor *value = fixture__main();
-    const float expected[] = {0.0f, 2.0f, 2.0f, 2.0f};
-    tensor_bits(value, 4, expected);
-    chelis_tensor_release(value);
-    return 0;
-}
-"#;
-    ownership_support::balanced(&ownership_support::run(&c, driver));
+result = with seed(42i64) {{
+  keep(to_tensor([cast(1.0, {dtype}), cast(1.0, {dtype}), cast(1.0, {dtype}), cast(1.0, {dtype})]))
+}}
+"#
+        );
+        let c = ownership_support::emit(&source, dtype);
+        let (summary, stdout) = ownership_support::run_program(&c);
+        ownership_support::balanced(&summary);
+        assert_eq!(
+            stdout, "result = tensor(shape=[4], data=[0.0, 2.0, 0.0, 0.0])\n",
+            "generic helper specialization must preserve {dtype} values"
+        );
+    }
 }

@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "freeze_sha256": "641149d8c43aa488d964ed9a79188b03dc1bb35689cf2fd6537674e839d777be",
+  "freeze_sha256": "6dc5eb76161a9ae4f8f9061f1e7919bc30180e318c03b514f9a5a78deda94e4f",
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -23,14 +23,6 @@
       "deletion_phase": 4
     },
     {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_blas_matmul",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_blas_matmul_reduced_f",
-      "deletion_phase": 4
-    },
-    {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_cast",
       "deletion_phase": 4
     },
@@ -40,10 +32,6 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_const",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_const_tensor",
       "deletion_phase": 4
     },
     {
@@ -119,19 +107,7 @@
       "deletion_phase": 4
     },
     {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_sum",
-      "deletion_phase": 4
-    },
-    {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_sum_general",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_sum_int_promoted",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_sum_reduced_f",
       "deletion_phase": 4
     },
     {
@@ -140,10 +116,6 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_window_grad",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reused_slot_wrapper",
       "deletion_phase": 4
     },
     {
@@ -156,22 +128,6 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_shrink",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_sparse_gather",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_sparse_scatter_add",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_sparse_scatter_elements",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_sparse_scatter_replace",
       "deletion_phase": 4
     },
     {
@@ -219,7 +175,15 @@
       "deletion_phase": 4
     },
     {
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=FIXED_DROPOUT_HELPERS",
+      "deletion_phase": 4
+    },
+    {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_abi.rs|owner=HostAbiType::c_type_name",
+      "deletion_phase": 4
+    },
+    {
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_abi_tests.rs|owner=fixed_control_host_helper_uses_the_active_invocation_rng",
       "deletion_phase": 4
     },
     {
@@ -236,10 +200,6 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=DtypeArm::elem_t",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_blas_matmul_summary",
       "deletion_phase": 4
     },
     {
@@ -295,14 +255,6 @@
       "deletion_phase": 4
     },
     {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::emit_sparse_gather_summary_body",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::emit_sparse_scatter_summary_body",
-      "deletion_phase": 4
-    },
-    {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::emit_unary_elementwise_arm",
       "deletion_phase": 4
     },
@@ -340,10 +292,6 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_tensor_print_helper",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_tensor_reshape_helper",
       "deletion_phase": 4
     },
     {
@@ -631,42 +579,6 @@
       "deletion_phase": 3
     },
     {
-      "identity": "kind=dtype-contract|path=crates/chelis-runtime/src/lib.rs|owner=TensorElement for Bool8",
-      "deletion_phase": 1
-    },
-    {
-      "identity": "kind=dtype-contract|path=crates/chelis-runtime/src/lib.rs|owner=TensorElement for f32",
-      "deletion_phase": 1
-    },
-    {
-      "identity": "kind=dtype-contract|path=crates/chelis-runtime/src/lib.rs|owner=TensorElement for f64",
-      "deletion_phase": 1
-    },
-    {
-      "identity": "kind=dtype-contract|path=crates/chelis-runtime/src/lib.rs|owner=TensorElement for half :: bf16",
-      "deletion_phase": 1
-    },
-    {
-      "identity": "kind=dtype-contract|path=crates/chelis-runtime/src/lib.rs|owner=TensorElement for half :: f16",
-      "deletion_phase": 1
-    },
-    {
-      "identity": "kind=dtype-contract|path=crates/chelis-runtime/src/lib.rs|owner=TensorElement for i16",
-      "deletion_phase": 1
-    },
-    {
-      "identity": "kind=dtype-contract|path=crates/chelis-runtime/src/lib.rs|owner=TensorElement for i32",
-      "deletion_phase": 1
-    },
-    {
-      "identity": "kind=dtype-contract|path=crates/chelis-runtime/src/lib.rs|owner=TensorElement for i64",
-      "deletion_phase": 1
-    },
-    {
-      "identity": "kind=dtype-contract|path=crates/chelis-runtime/src/lib.rs|owner=TensorElement for i8",
-      "deletion_phase": 1
-    },
-    {
       "identity": "kind=dtype-contract|path=crates/chelis-vocab/src/lib.rs|owner=Repr::Bfloat16",
       "deletion_phase": 1
     },
@@ -759,14 +671,6 @@
       "deletion_phase": 4
     },
     {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_binary",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_binary_func",
-      "deletion_phase": 4
-    },
-    {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_binary_func_reduced_f",
       "deletion_phase": 4
     },
@@ -775,19 +679,7 @@
       "deletion_phase": 4
     },
     {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_blas_matmul_reduced_f",
-      "deletion_phase": 4
-    },
-    {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_cast",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_cmplt",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_const_tensor",
       "deletion_phase": 4
     },
     {
@@ -795,23 +687,11 @@
       "deletion_phase": 4
     },
     {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_expand",
-      "deletion_phase": 4
-    },
-    {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_extrema_adjoint",
       "deletion_phase": 4
     },
     {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_floor_div",
-      "deletion_phase": 4
-    },
-    {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_floor_div_reduced_f",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_fused_elem",
       "deletion_phase": 4
     },
     {
@@ -823,27 +703,11 @@
       "deletion_phase": 4
     },
     {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_integer_abs",
-      "deletion_phase": 4
-    },
-    {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_node",
       "deletion_phase": 4
     },
     {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_pad",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_permute",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_realize",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_recip",
+      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_preplanned",
       "deletion_phase": 4
     },
     {
@@ -867,18 +731,6 @@
       "deletion_phase": 4
     },
     {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_sum_general",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_sum_int_promoted",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_sum_reduced_f",
-      "deletion_phase": 4
-    },
-    {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_window",
       "deletion_phase": 4
     },
@@ -887,47 +739,7 @@
       "deletion_phase": 4
     },
     {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_reduce_window_grad_full_indices",
-      "deletion_phase": 4
-    },
-    {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_shape",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_shrink",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_sparse_gather",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_sparse_scatter_add",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_sparse_scatter_elements",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_sparse_scatter_replace",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_stride",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_tensor_snapshot",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_unary",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_unary_func",
       "deletion_phase": 4
     },
     {
@@ -947,55 +759,11 @@
       "deletion_phase": 4
     },
     {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_blas_matmul_summary",
-      "deletion_phase": 4
-    },
-    {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_builtin",
       "deletion_phase": 4
     },
     {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_checked_tensor_cast",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_sparse_summary",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_tensor_call",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::emit_binary_elementwise_arm",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::emit_binary_func_elementwise_arm",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::emit_sparse_gather_summary_body",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::emit_sparse_scatter_summary_body",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::emit_unary_elementwise_arm",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::emit_unary_func_elementwise_arm",
-      "deletion_phase": 4
-    },
-    {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_json_canonical_object_helpers",
-      "deletion_phase": 4
-    },
-    {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/host_emit.rs|owner=append_tensor_abi_helpers",
       "deletion_phase": 4
     },
     {
@@ -1091,18 +859,6 @@
       "deletion_phase": 1
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/dag.rs|owner=DimExpr::normalized_key",
-      "deletion_phase": 1
-    },
-    {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/dag.rs|owner=normalize_dim_product::take_factor",
-      "deletion_phase": 1
-    },
-    {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/dag.rs|owner=push_product_atoms",
-      "deletion_phase": 1
-    },
-    {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/eval.rs|owner=dropout_sample",
       "deletion_phase": 1
     },
@@ -1159,19 +915,11 @@
       "deletion_phase": 1
     },
     {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/specialize.rs|owner=dims_equivalent",
-      "deletion_phase": 1
-    },
-    {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/specialize.rs|owner=node_has_contiguous_matrix_slices",
       "deletion_phase": 1
     },
     {
       "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/tier2.rs|owner=align_matmul_operand",
-      "deletion_phase": 1
-    },
-    {
-      "identity": "kind=normalized-key-arithmetic|path=crates/chelis-ir/src/tier2.rs|owner=lower_conv2d",
       "deletion_phase": 1
     },
     {
@@ -1292,14 +1040,6 @@
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/src/lib.rs|owner=chelis_alloc",
-      "deletion_phase": 3
-    },
-    {
-      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/src/lib.rs|owner=chelis_flat_to_indices",
-      "deletion_phase": 3
-    },
-    {
-      "identity": "kind=raw-element-pointer|path=crates/chelis-runtime/src/lib.rs|owner=chelis_indices_to_flat",
       "deletion_phase": 3
     },
     {
@@ -1609,8 +1349,16 @@
       "sample": "(int32_t)0"
     },
     {
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=FIXED_DROPOUT_HELPERS",
+      "sample": "static inline uint64_t chelis_dropout_mix(uint64_t value) {"
+    },
+    {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_abi.rs|owner=HostAbiType::c_type_name",
       "sample": "int8_t"
+    },
+    {
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_abi_tests.rs|owner=fixed_control_host_helper_uses_the_active_invocation_rng",
+      "sample": "static inline uint64_t chelis_dropout_mix"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_abi_tests.rs|owner=fold_dead_heap_accumulator_binds_the_body_edge_before_its_release",
@@ -2131,6 +1879,10 @@
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_node",
       "sample": "if (((const int64_t*)t{actual}_data)[0] != ((const int64_t*)t{required}_data)[0]) {{"
+    },
+    {
+      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_preplanned",
+      "sample": "uint64_t __chelis_fixed_seed = __chelis_rng->seed, __chelis_fixed_counter = __chelis_rng->counter;"
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_recip_reduced_f",

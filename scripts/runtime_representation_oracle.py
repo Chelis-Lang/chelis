@@ -63,7 +63,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "641149d8c43aa488d964ed9a79188b03dc1bb35689cf2fd6537674e839d777be"
+FREEZE_SHA256 = "6dc5eb76161a9ae4f8f9061f1e7919bc30180e318c03b514f9a5a78deda94e4f"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"

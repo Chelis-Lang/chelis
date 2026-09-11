@@ -723,21 +723,11 @@ fn append_uniform_sample_helper(out: &mut Vec<String>) {
 }
 
 fn append_fixed_dropout_helpers(out: &mut Vec<String>) {
-    out.push("static inline uint64_t chelis_dropout_mix(uint64_t value) {".to_string());
-    out.push("    value += 0x9E3779B97F4A7C15ULL;".to_string());
-    out.push("    value = (value ^ (value >> 30)) * 0xBF58476D1CE4E5B9ULL;".to_string());
-    out.push("    value = (value ^ (value >> 27)) * 0x94D049BB133111EBULL;".to_string());
-    out.push("    return value ^ (value >> 31);".to_string());
-    out.push("}".to_string());
-    out.push("static inline double chelis_dropout_unit(uint64_t seed, uint64_t ordinal, uint64_t index) {".to_string());
-    out.push("    uint64_t call = chelis_dropout_mix(ordinal);".to_string());
-    out.push("    uint64_t element = chelis_dropout_mix(index);".to_string());
-    out.push("    uint64_t word = chelis_dropout_mix(seed ^ ((call << 17) | (call >> 47)) ^ ((element << 41) | (element >> 23)));".to_string());
-    out.push("    return (double)(word >> 11) / (double)(1ULL << 53);".to_string());
-    out.push("}".to_string());
-    out.push("static inline float chelis_dropout_unit_f32(uint64_t seed, uint64_t ordinal, uint64_t index) {".to_string());
-    out.push("    return (float)chelis_dropout_unit(seed, ordinal, index);".to_string());
-    out.push("}".to_string());
+    out.extend(
+        crate::emit::FIXED_DROPOUT_HELPERS
+            .iter()
+            .map(|line| line.to_string()),
+    );
 }
 
 /// Translation-unit-local support for Std.Io.Json's canonical object

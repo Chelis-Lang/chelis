@@ -19,6 +19,26 @@ use chelis_types::{CheckedCastKind, CheckedCastPlan, ElementRef, NumericTrap, Sc
 
 use crate::memory::{MemoryPlan, NodeMemoryKind};
 
+pub(crate) const FIXED_DROPOUT_HELPERS: &[&str] = &[
+    "/* CHELIS_DROPOUT_HELPERS_BEGIN */",
+    "static inline uint64_t chelis_dropout_mix(uint64_t value) {",
+    "    value += 0x9E3779B97F4A7C15ULL;",
+    "    value = (value ^ (value >> 30)) * 0xBF58476D1CE4E5B9ULL;",
+    "    value = (value ^ (value >> 27)) * 0x94D049BB133111EBULL;",
+    "    return value ^ (value >> 31);",
+    "}",
+    "static inline double chelis_dropout_unit(uint64_t seed, uint64_t ordinal, uint64_t index) {",
+    "    uint64_t call = chelis_dropout_mix(ordinal);",
+    "    uint64_t element = chelis_dropout_mix(index);",
+    "    uint64_t word = chelis_dropout_mix(seed ^ ((call << 17) | (call >> 47)) ^ ((element << 41) | (element >> 23)));",
+    "    return (double)(word >> 11) / (double)(1ULL << 53);",
+    "}",
+    "static inline float chelis_dropout_unit_f32(uint64_t seed, uint64_t ordinal, uint64_t index) {",
+    "    return (float)chelis_dropout_unit(seed, ordinal, index);",
+    "}",
+    "/* CHELIS_DROPOUT_HELPERS_END */",
+];
+
 fn unsupported_verified_dag_action(node: NodeId, detail: &str) -> Unsupported {
     Unsupported::new(
         UnsupportedKind::Op("Drop".to_string()),
@@ -523,23 +543,9 @@ impl CEmitter {
         e.line("}");
         e.line("/* CHELIS_UNIFORM_HELPERS_END */");
         if execution.is_some() {
-            e.line("/* CHELIS_DROPOUT_HELPERS_BEGIN */");
-            e.line("static inline uint64_t chelis_dropout_mix(uint64_t value) {");
-            e.line("    value += 0x9E3779B97F4A7C15ULL;");
-            e.line("    value = (value ^ (value >> 30)) * 0xBF58476D1CE4E5B9ULL;");
-            e.line("    value = (value ^ (value >> 27)) * 0x94D049BB133111EBULL;");
-            e.line("    return value ^ (value >> 31);");
-            e.line("}");
-            e.line("static inline double chelis_dropout_unit(uint64_t seed, uint64_t ordinal, uint64_t index) {");
-            e.line("    uint64_t call = chelis_dropout_mix(ordinal);");
-            e.line("    uint64_t element = chelis_dropout_mix(index);");
-            e.line("    uint64_t word = chelis_dropout_mix(seed ^ ((call << 17) | (call >> 47)) ^ ((element << 41) | (element >> 23)));");
-            e.line("    return (double)(word >> 11) / (double)(1ULL << 53);");
-            e.line("}");
-            e.line("static inline float chelis_dropout_unit_f32(uint64_t seed, uint64_t ordinal, uint64_t index) {");
-            e.line("    return (float)chelis_dropout_unit(seed, ordinal, index);");
-            e.line("}");
-            e.line("/* CHELIS_DROPOUT_HELPERS_END */");
+            for line in FIXED_DROPOUT_HELPERS {
+                e.line(line);
+            }
         }
         // [05-OP-31]/[05-OP-44] make every published host tensor descriptor
         // canonical row-major storage.  The old runtime ABI exposed mutable
