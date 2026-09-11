@@ -390,9 +390,16 @@ pub struct CompiledProgram {
 #[derive(Debug)]
 pub struct HostExecutionPlan {
     program: ConcreteHostProgram,
-    global: Vec<Option<crate::evaluation::ExecutionMetadata>>,
-    functions: Vec<Vec<Option<crate::evaluation::ExecutionMetadata>>>,
+    global: Vec<HelperExecutionMetadata>,
+    functions: Vec<Vec<HelperExecutionMetadata>>,
 }
+
+pub(crate) type HelperExecutionMetadata = Option<crate::evaluation::ExecutionMetadata>;
+pub(crate) type HostExecutionMetadata = (
+    Vec<HelperExecutionMetadata>,
+    Vec<Vec<HelperExecutionMetadata>>,
+);
+type HostExecutionParts = (ConcreteHostProgram, HostExecutionMetadata);
 
 impl HostExecutionPlan {
     pub fn program(&self) -> &ConcreteHostProgram {
@@ -529,14 +536,8 @@ impl HostExecutionPlan {
         Ok(())
     }
 
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        ConcreteHostProgram,
-        Vec<Option<crate::evaluation::ExecutionMetadata>>,
-        Vec<Vec<Option<crate::evaluation::ExecutionMetadata>>>,
-    ) {
-        (self.program, self.global, self.functions)
+    pub(crate) fn into_parts(self) -> HostExecutionParts {
+        (self.program, (self.global, self.functions))
     }
 }
 
@@ -2000,15 +2001,17 @@ pub fn preferred_tensor_entry_name(program: &ConcreteHostProgram) -> Option<&str
         .map(|function| function.name.as_str())
 }
 
-fn named_tensor_entry_lowering_inputs(
-    program: &CheckedProgram,
-    name: &str,
-) -> Option<(
+type NamedTensorEntryLoweringInputs = (
     Expr,
     Vec<(String, TensorType)>,
     Option<TensorType>,
     Arc<BTreeMap<String, Expr>>,
-)> {
+);
+
+fn named_tensor_entry_lowering_inputs(
+    program: &CheckedProgram,
+    name: &str,
+) -> Option<NamedTensorEntryLoweringInputs> {
     let defs = cached_program_defs(program);
     let body = lookup_program_def(&defs, name)?.clone();
     let Expr::List(list, _) = &body else {
@@ -10739,16 +10742,16 @@ fn ensure_mono_specialization(
             ret_ty: ret_ty.clone(),
         });
     });
-    let lowered = lower_mono_specialized_function(
-        &symbol,
-        spec_params,
+    let lowered = lower_mono_specialized_function(MonoSpecializedFunctionInput {
+        symbol: &symbol,
+        params: spec_params,
         ret_ty,
-        &body_expr,
-        body,
+        body_expr: &body_expr,
+        fn_expr: body,
         program,
-        &spec_scope,
+        spec_scope: &spec_scope,
         collect_execution,
-    );
+    });
     MONO_SPECIALIZATIONS.with(|state| {
         state.borrow_mut().in_progress.pop();
     });
@@ -10757,16 +10760,30 @@ fn ensure_mono_specialization(
     Ok(symbol)
 }
 
-fn lower_mono_specialized_function(
-    symbol: &str,
-    mut params: Vec<HostParam>,
-    ret_ty: &HostTypeTerm,
-    body_expr: &Expr,
-    fn_expr: &Expr,
-    program: &CheckedProgram,
-    spec_scope: &UnordMap<String, HostTypeTerm>,
+struct MonoSpecializedFunctionInput<'a> {
+    symbol: &'a str,
+    params: Vec<HostParam>,
+    ret_ty: &'a HostTypeTerm,
+    body_expr: &'a Expr,
+    fn_expr: &'a Expr,
+    program: &'a CheckedProgram,
+    spec_scope: &'a UnordMap<String, HostTypeTerm>,
     collect_execution: bool,
+}
+
+fn lower_mono_specialized_function(
+    input: MonoSpecializedFunctionInput<'_>,
 ) -> Result<LoweredHostFunction, crate::lower::LowerDiagnostic> {
+    let MonoSpecializedFunctionInput {
+        symbol,
+        mut params,
+        ret_ty,
+        body_expr,
+        fn_expr,
+        program,
+        spec_scope,
+        collect_execution,
+    } = input;
     let body_expr = inline_local_callable_lets(body_expr);
     let mut fn_tensor_helpers = TensorHelperSink::new(collect_execution);
     // chelis#1201: pin this specialization's type variables for the body.

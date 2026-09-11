@@ -1404,17 +1404,14 @@ pub fn lower_host_execution_ownership(
     manifested: &ManifestedProgram,
     plan: crate::host::HostExecutionPlan,
 ) -> Result<HostOwnershipProgram, OwnershipError> {
-    let (host, global, functions) = plan.into_parts();
-    lower_host_ownership_with_execution(manifested, host, Some((global, functions)))
+    let (host, execution) = plan.into_parts();
+    lower_host_ownership_with_execution(manifested, host, Some(execution))
 }
 
 fn lower_host_ownership_with_execution(
     manifested: &ManifestedProgram,
     mut host: ConcreteHostProgram,
-    execution: Option<(
-        Vec<Option<crate::evaluation::ExecutionMetadata>>,
-        Vec<Vec<Option<crate::evaluation::ExecutionMetadata>>>,
-    )>,
+    execution: Option<crate::host::HostExecutionMetadata>,
 ) -> Result<HostOwnershipProgram, OwnershipError> {
     let root_bindings = lower::materialize_manifest_roots(&mut host, manifested.manifest())?;
     let mut sites = ir::HostSiteBuilder::default();
@@ -1643,10 +1640,7 @@ fn host_payload<P: EmissionPayload>(
 
 fn lower_nested_dags(
     host: &ConcreteHostProgram,
-    execution: Option<(
-        Vec<Option<crate::evaluation::ExecutionMetadata>>,
-        Vec<Vec<Option<crate::evaluation::ExecutionMetadata>>>,
-    )>,
+    execution: Option<crate::host::HostExecutionMetadata>,
 ) -> Result<Vec<NestedDagProof>, OwnershipError> {
     let (global_execution, function_execution) = execution.unwrap_or_else(|| {
         (
