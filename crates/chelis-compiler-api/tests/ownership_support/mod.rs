@@ -107,66 +107,17 @@ pub fn run(source: &str, driver: &str) -> Value {
 }
 
 pub fn run_program(source: &str) -> (Value, String) {
-    let dir = tempfile::tempdir().unwrap();
-    let c = dir.path().join("probe.c");
-    fs::write(&c, source).unwrap();
-    let binary = dir.path().join("probe");
-    let mut cc = Command::new("cc");
-    cc.args(["-std=c11", "-O0"])
-        .arg(&c)
-        .arg("-I")
-        .arg(root().join("crates/chelis-runtime/include"))
-        .arg(runtime())
-        .args(["-lm", "-lpthread"]);
-    if cfg!(target_os = "macos") {
-        cc.args([
-            "-framework",
-            "Accelerate",
-            "-framework",
-            "Security",
-            "-framework",
-            "CoreFoundation",
-        ]);
-    } else {
-        cc.arg("-ldl");
-    }
-    let output = cc.arg("-o").arg(&binary).output().expect("compile C");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let ledger = dir.path().join("ledger.jsonl");
-    let output = Command::new(binary)
-        .env("CHELIS_OWNERSHIP_LEDGER_PATH", &ledger)
-        .output()
-        .expect("execute C");
-    assert!(
-        output.status.success(),
-        "C status {}: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let rows: Vec<Value> = fs::read_to_string(ledger)
-        .expect("ledger required")
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    assert_eq!(rows[0]["schema"], "compiled-value-ownership-ledger-v1");
-    assert_eq!(
-        rows.iter().filter(|row| row["event"] == "summary").count(),
-        1
-    );
-    (
-        rows.last().expect("summary row").clone(),
-        String::from_utf8(output.stdout).expect("utf-8 stdout"),
-    )
+    execute_program(source, &[])
 }
 
 pub fn run_with_peers(source: &str, peers: &[String], driver: &str) -> Value {
+    execute_program(&format!("{source}\n{PRELUDE}\n{driver}"), peers).0
+}
+
+fn execute_program(source: &str, peers: &[String]) -> (Value, String) {
     let dir = tempfile::tempdir().unwrap();
     let c = dir.path().join("probe.c");
-    fs::write(&c, format!("{source}\n{PRELUDE}\n{driver}")).unwrap();
+    fs::write(&c, source).unwrap();
     let binary = dir.path().join("probe");
     let mut cc = Command::new("cc");
     cc.args(["-std=c11", "-O0"])
@@ -216,10 +167,13 @@ pub fn run_with_peers(source: &str, peers: &[String], driver: &str) -> Value {
         .collect();
     assert_eq!(rows[0]["schema"], "compiled-value-ownership-ledger-v1");
     assert_eq!(rows.iter().filter(|r| r["event"] == "summary").count(), 1);
-    let summary = rows.last().unwrap().clone();
+    let summary = rows.last().expect("summary row").clone();
     assert_eq!(summary["event"], "summary");
     assert_eq!(summary["invalid_operations"], 0, "{summary}");
-    summary
+    (
+        summary,
+        String::from_utf8(output.stdout).expect("utf-8 stdout"),
+    )
 }
 
 pub fn balanced(summary: &Value) {

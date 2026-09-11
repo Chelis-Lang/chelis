@@ -1222,6 +1222,17 @@ classifier rules and mutation implementations. The existing
 `unregistered-inventory-source` mutation covers the additional source; no
 numbered representation semantics change.
 
+The fixed-control host transport extends that same Phase 0 freeze with three
+closed, scanner-visible owners: the single shared C dropout sampler prelude,
+its private host-helper execution witness, and the inherited RNG load/store in
+`CEmitter::emit_preplanned`. The immutable foundation moves from 358 to 361
+rows and active debt from 290 to 293; no classifier, source-universe rule, or
+deletion phase is weakened. The digest binds those exact identities. The
+existing backend-element-spelling and load-store-template controlled mutations
+remain the closed-world negative witnesses: an additional spelling or state
+template still fails as an unclassified identity. This amendment changes no
+public C descriptor, dtype tag, width, or numbered representation semantics.
+
 The typed static-rate profile registers `chelis-ir/src/lower/static_controls.rs`
 in the Phase 0 source universe (70 Rust sources and seven headers). It consumes
 checked dtype facts and existing typed scalar carriers without inspecting
