@@ -657,6 +657,27 @@ fn a_conditionally_ignored_test_is_refused_rather_than_counted() {
 }
 
 #[test]
+fn a_test_under_a_conditional_module_is_refused_rather_than_counted() {
+    // The gate sits on the module rather than on the test, so the refusal
+    // has to be inherited down the traversal. Without the inherited arm this
+    // test would be counted as unconditionally present. `#[cfg(test)] mod
+    // tests` is the exception and stays readable, which the `#[path]`
+    // inventory case covers.
+    let root = workspace_root();
+    let row = fixture_row_over(
+        "conditional_fixture.rs",
+        serde_json::json!({"mode": "substring", "value": "its_module_feature"}),
+        &["gated_module::present_only_under_its_module_feature"],
+        false,
+    );
+    let error = check_row(&root, &row).expect_err("a test under a cfg module must be refused");
+    assert!(
+        error.contains("gated_module::present_only_under_its_module_feature carries #[cfg(feature"),
+        "{error}"
+    );
+}
+
+#[test]
 fn a_row_naming_a_missing_source_is_rejected() {
     let root = workspace_root();
     let mut row = fixture_row(
