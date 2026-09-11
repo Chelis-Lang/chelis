@@ -1169,9 +1169,13 @@ result-packing and normalization boundaries. The pre-normalization helper result
 retains its tuple/ADT structure and exact ordered, duplicate-split root IDs. It
 adds execution-splice mappings
 for occurrence, draw and scope identities, because the existing
-`Application.remap` intentionally carries node identities only. Normalization
-execution observations refer to the graphs already held by the ordinary trace
-rather than adding another independently pairable graph layer.
+`Application.remap` intentionally carries node identities only. Execution
+normalization observations are present only for helpers already lowered through
+the fixed-control execution path; observing an ordinary helper neither creates
+execution metadata nor changes its AD or normalization route. Historical pass
+snapshots remain immutable. When host lowering later rebinds helper dimensions,
+the trace records that actual boundary output separately instead of rewriting
+the earlier snapshots retroactively.
 
 Helper products are appended only after the helper succeeds. A rejected or
 speculative lowering therefore contributes no observation. Function projection

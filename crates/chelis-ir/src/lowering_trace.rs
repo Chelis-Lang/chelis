@@ -190,48 +190,25 @@ pub struct HelperLoweringTrace {
     pub lowering: LoweringTrace,
     pub executions: Vec<ExecutionGradient>,
     pub applications: Vec<ExecutionApplication>,
-    pub normalization: ExecutionNormalization,
+    /// Execution-spine observations are present only when this helper was
+    /// actually lowered through the fixed-control execution path. Ordinary
+    /// helper observation must not manufacture execution metadata.
+    pub normalization: Option<ExecutionNormalization>,
     /// Every root after helper-local result packing and before normalization,
     /// in ABI order.
     pub packed_roots: Vec<NodeId>,
     /// The helper result structure whose leaves are `packed_roots` entries.
     pub packed_result: Value,
+    /// The actual output of the later host dimension-rebinding boundary.
+    /// `None` is explicit when this trace did not pass through that boundary
+    /// (for example, a hostless named-entry plan).
+    pub after_dimension_rebinding: Option<Dag>,
 }
 
 impl HelperLoweringTrace {
-    pub(crate) fn rebind_dimensions(
-        mut self,
-        rebind: impl Fn(&Dag) -> Dag,
-    ) -> Result<Self, String> {
-        for gradient in &mut self.lowering.gradients {
-            gradient.forward = rebind(&gradient.forward);
-            gradient.backward = rebind(&gradient.backward);
-            if let Some(application) = &mut gradient.application {
-                application.specialized = rebind(&application.specialized);
-                application.before_splice = rebind(&application.before_splice);
-                application.after_splice = rebind(&application.after_splice);
-                application.after_packing = rebind(&application.after_packing);
-            }
-        }
-        let normalization = &mut self.lowering.normalization;
-        normalization.before_dce = rebind(&normalization.before_dce);
-        normalization.after_dce = rebind(&normalization.after_dce);
-        normalization.after_copies = rebind(&normalization.after_copies);
-        normalization.after_drops = rebind(&normalization.after_drops);
-        self.executions = self
-            .executions
-            .into_iter()
-            .map(|execution| {
-                let forward = rebind(execution.forward.dag_for_inspection());
-                let backward = rebind(execution.backward.dag_for_inspection());
-                Ok(ExecutionGradient {
-                    gradient: execution.gradient,
-                    forward: execution.forward.rebind_dimensions(forward)?,
-                    backward: execution.backward.rebind_dimensions(backward)?,
-                })
-            })
-            .collect::<Result<_, String>>()?;
-        Ok(self)
+    pub(crate) fn record_dimension_rebinding(&mut self, dag: &Dag) {
+        assert!(self.after_dimension_rebinding.is_none());
+        self.after_dimension_rebinding = Some(dag.clone());
     }
 }
 
@@ -299,6 +276,12 @@ impl Collector {
     }
 
     pub(crate) fn new_helper() -> Self {
+        let collector = Self::new();
+        collector.state.borrow_mut().contexts[0].kind = ContextKind::Helper;
+        collector
+    }
+
+    pub(crate) fn new_execution_helper() -> Self {
         let collector = Self::new_execution();
         collector.state.borrow_mut().contexts[0].kind = ContextKind::Helper;
         collector
@@ -357,12 +340,7 @@ impl Collector {
     pub(crate) fn finish_helper(self) -> HelperLoweringTrace {
         let executions = std::mem::take(&mut self.state.borrow_mut().executions);
         let applications = std::mem::take(&mut self.state.borrow_mut().execution_applications);
-        let normalization = self
-            .state
-            .borrow_mut()
-            .execution_normalization
-            .take()
-            .expect("successful helper lowering records execution normalization");
+        let normalization = self.state.borrow_mut().execution_normalization.take();
         let (packed_roots, packed_result) = self
             .state
             .borrow_mut()
@@ -376,6 +354,7 @@ impl Collector {
             normalization,
             packed_roots,
             packed_result,
+            after_dimension_rebinding: None,
         }
     }
 

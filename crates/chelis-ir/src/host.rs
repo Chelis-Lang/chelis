@@ -4567,8 +4567,11 @@ fn lower_def_body_kernel(
                 crate::lower::LowerDiagnostic::new(message, None, None).fatal()
             })?;
             #[cfg(feature = "lowering-trace")]
-            let trace =
-                trace.map(|trace| rebind_helper_lowering_trace(trace, &signature.scope, &expected));
+            let mut trace = trace;
+            #[cfg(feature = "lowering-trace")]
+            if let Some(trace) = &mut trace {
+                trace.record_dimension_rebinding(plan.dag_for_inspection());
+            }
             let (dag, execution) = plan.into_parts();
             return Ok(Some(finish_tensor_helper_product(
                 dag,
@@ -4619,8 +4622,10 @@ fn lower_def_body_kernel(
         #[cfg(feature = "lowering-trace")]
         Ok(((dag, _), trace)) => {
             let dag = remap_tensor_helper_dim_symbols(&dag, &signature.scope, &expected);
-            let trace =
-                trace.map(|trace| rebind_helper_lowering_trace(trace, &signature.scope, &expected));
+            let mut trace = trace;
+            if let Some(trace) = &mut trace {
+                trace.record_dimension_rebinding(&dag);
+            }
             (dag, trace)
         }
         #[cfg(not(feature = "lowering-trace"))]
@@ -5136,7 +5141,11 @@ fn lower_tensor_helper_product(
                 )
             });
             #[cfg(feature = "lowering-trace")]
-            let trace = trace.map(|trace| rebind_helper_lowering_trace(trace, scope, expected));
+            let mut trace = trace;
+            #[cfg(feature = "lowering-trace")]
+            if let Some(trace) = &mut trace {
+                trace.record_dimension_rebinding(plan.dag_for_inspection());
+            }
             let (dag, metadata) = plan.into_parts();
             return Some(LoweredTensorHelper {
                 dag,
@@ -5161,7 +5170,8 @@ fn lower_tensor_helper_product(
                 Err(_) => return None,
             };
         let dag = remap_tensor_helper_dim_symbols(&dag, scope, expected);
-        let trace = rebind_helper_lowering_trace(trace, scope, expected);
+        let mut trace = trace;
+        trace.record_dimension_rebinding(&dag);
         return Some(LoweredTensorHelper {
             dag,
             execution: None,
@@ -12261,21 +12271,6 @@ fn remap_tensor_helper_dim_symbols(
         }
     }
     actualize_tensor_helper_types(&remapped, scope)
-}
-
-#[cfg(feature = "lowering-trace")]
-fn rebind_helper_lowering_trace(
-    trace: crate::lowering_trace::HelperLoweringTrace,
-    scope: &UnordMap<String, HostTypeTerm>,
-    expected_output: &TensorType,
-) -> crate::lowering_trace::HelperLoweringTrace {
-    trace
-        .rebind_dimensions(|dag| remap_tensor_helper_dim_symbols(dag, scope, expected_output))
-        .unwrap_or_else(|message| {
-            crate::lower::raise_fatal_lowering_diagnostic(
-                crate::lower::LowerDiagnostic::new(message, None, None).fatal(),
-            )
-        })
 }
 
 fn actualize_tensor_helper_types(

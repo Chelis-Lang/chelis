@@ -1717,7 +1717,7 @@ pub(crate) fn try_lower_subexpr_evaluation_with_ordered_inputs_and_trace(
     ),
     LowerDiagnostic,
 > {
-    let collector = crate::lowering_trace::Collector::new_helper();
+    let collector = crate::lowering_trace::Collector::new_execution_helper();
     let plan = try_lower_subexpr_evaluation_with_ordered_inputs_impl(
         expr,
         scoped_types,
@@ -2118,17 +2118,7 @@ fn lower_subexpr_program_inner_impl(
     }
     ctx.random_seed = random.seed;
     ctx.random_counter = random.counter;
-    let observe_execution = execution_out.is_some() || {
-        #[cfg(feature = "lowering-trace")]
-        {
-            trace.is_some()
-        }
-        #[cfg(not(feature = "lowering-trace"))]
-        {
-            false
-        }
-    };
-    if observe_execution {
+    if execution_out.is_some() {
         ctx.execution = Some(crate::evaluation::ExecutionMetadata::new(random.seed));
     }
     // Pre-create every scoped input before body lowering. Declared helpers
@@ -2238,7 +2228,7 @@ fn lower_subexpr_program_inner_impl(
         }
     }
     let next_random_counter = ctx.random_counter;
-    if observe_execution {
+    if execution_out.is_some() {
         let (dag, metadata) = normalize_evaluation_dag_with_trace(
             ctx.dag,
             ctx.execution.expect("plan lowering metadata"),
@@ -2250,10 +2240,26 @@ fn lower_subexpr_program_inner_impl(
         }
         return (dag, next_random_counter, value_root_count, list_checks);
     }
-    let dce_dag = crate::optimize::dead_code_eliminate(&ctx.dag);
-    let (copy_dag, _) = insert_copy_nodes_for_consuming_fanout(&dce_dag);
+    #[cfg(feature = "lowering-trace")]
+    let before_dce = trace.as_ref().map(|_| ctx.dag.clone());
+    let (dce_dag, dce_remap) = crate::optimize::dead_code_eliminate_with_remap(&ctx.dag);
+    let (copy_dag, copy_remap) = insert_copy_nodes_for_consuming_fanout(&dce_dag);
+    #[cfg(feature = "lowering-trace")]
+    let after_copies = trace.as_ref().map(|_| copy_dag.clone());
+    let after_drops = insert_drop_nodes_for_unconsumed_values(copy_dag);
+    #[cfg(feature = "lowering-trace")]
+    if let Some(trace) = &trace {
+        trace.normalization(
+            &before_dce.expect("helper trace before DCE"),
+            &dce_dag,
+            after_copies.expect("helper trace after copies"),
+            &after_drops,
+            &dce_remap,
+            &copy_remap,
+        );
+    }
     (
-        insert_drop_nodes_for_unconsumed_values(copy_dag),
+        after_drops,
         next_random_counter,
         value_root_count,
         list_checks,
@@ -2278,11 +2284,14 @@ fn normalize_evaluation_dag_with_trace(
     #[cfg(feature = "lowering-trace")] trace: Option<&crate::lowering_trace::Collector>,
 ) -> (Dag, crate::evaluation::ExecutionMetadata) {
     execution.spine.record_nodes(&dag);
-    execution.spine.retain_nodes(|node| {
-        !matches!(
-            dag.get(node).map(|node| &node.op),
-            Some(RiscOp::Load { .. })
-        )
+    execution.spine.retain_nodes(|node| match dag.get(node).map(|node| &node.op) {
+        Some(RiscOp::Load { .. }) => false,
+        Some(RiscOp::ExtentWitness {
+            requirements,
+            claims,
+            ..
+        }) if requirements.is_empty() && claims.is_empty() => false,
+        _ => true,
     });
     #[cfg(feature = "lowering-trace")]
     let before_dce_execution =

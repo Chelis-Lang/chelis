@@ -81,7 +81,10 @@ def discarded(x: tensor[3, f32], flag: bool) -> (tensor[3, f32], bool) =
             .unwrap()
             .expect("opt-in helper trace");
         same_dag(
-            &trace.lowering.normalization.after_drops,
+            trace
+                .after_dimension_rebinding
+                .as_ref()
+                .expect("host helper records final dimension rebinding"),
             &traced_function.tensor_helpers[0].dag,
         );
     }
@@ -181,17 +184,21 @@ def derivative(x: tensor[3, f32], y: tensor[3, f32])
                 .collect()
         )
     );
-    same_dag(&trace.lowering.normalization.after_drops, &helper.dag);
+    same_dag(
+        trace.after_dimension_rebinding.as_ref().unwrap(),
+        &helper.dag,
+    );
 }
 
 #[test]
-fn helper_packing_keeps_duplicate_cotangent_slots_as_distinct_ordered_roots() {
+fn named_axis_helper_records_dimension_rebinding_without_rewriting_pass_snapshots() {
     let program = manifested(
         r#"
-def loss(x: tensor[3, f32], y: tensor[3, f32]) -> f32 =
-  tensor_to_scalar(sum(add(x, y), 0))
-def derivative(x: tensor[3, f32], y: tensor[3, f32])
-  -> (tensor[3, f32], tensor[3, f32]) = grad(loss)(x, y)
+def selected(
+  x: tensor[batch, inner, f32],
+  w: tensor[inner, output, f32],
+  flag: bool
+) -> (tensor[batch, output, f32], bool) = (matmul(x, w), flag)
 "#,
     );
     let (_, plan) = try_lower_manifested_execution_program_with_trace(&program).unwrap();
@@ -200,19 +207,49 @@ def derivative(x: tensor[3, f32], y: tensor[3, f32])
         .program()
         .functions
         .iter()
-        .find(|function| function.name == "derivative")
-        .expect("derivative function");
+        .find(|function| function.name == "selected")
+        .expect("selected function");
     let helper = &function.tensor_helpers[0];
     let trace = plan
-        .function_helper_trace("derivative", 0)
+        .function_helper_trace("selected", 0)
         .unwrap()
-        .expect("derivative helper trace");
-    let gradient = &trace.lowering.gradients[0];
-    assert_eq!(gradient.gradients.len(), 2);
-    assert_eq!(
-        gradient.gradients[&gradient.wrt[0]], gradient.gradients[&gradient.wrt[1]],
-        "the actual AD pass shares the equal cotangents before helper packing"
+        .expect("selected helper trace");
+    let before = &trace.lowering.normalization.after_drops;
+    let after = trace
+        .after_dimension_rebinding
+        .as_ref()
+        .expect("actual host rebinding output");
+    same_dag(after, &helper.dag);
+    assert_ne!(
+        bincode::serialize(before).unwrap(),
+        bincode::serialize(after).unwrap(),
+        "the discriminator must exercise a nonidentity dimension rebinding"
     );
+    let before_again = &trace.lowering.normalization.after_drops;
+    same_dag(before_again, before);
+}
+
+#[test]
+fn helper_packing_keeps_duplicate_cotangent_slots_as_distinct_ordered_roots() {
+    let program = manifested(
+        r#"
+def duplicated(x: tensor[3, f32], flag: bool)
+  -> (tensor[3, f32], tensor[3, f32], bool) = (x, x, flag)
+"#,
+    );
+    let (_, plan) = try_lower_manifested_execution_program_with_trace(&program).unwrap();
+    let plan = plan.expect("host execution plan");
+    let function = plan
+        .program()
+        .functions
+        .iter()
+        .find(|function| function.name == "duplicated")
+        .expect("duplicated function");
+    let helper = &function.tensor_helpers[0];
+    let trace = plan
+        .function_helper_trace("duplicated", 0)
+        .unwrap()
+        .expect("duplicated helper trace");
     assert_eq!(
         trace.packed_roots,
         trace.lowering.normalization.before_dce.roots()
@@ -306,8 +343,12 @@ def derivative(x: tensor[32, f32]) -> tensor[32, f32] = grad(loss)(x)
                 .any(|occurrence| occurrence.id == *target)
         );
     }
-    assert!(!trace.normalization.before_dce.steps.is_empty());
-    assert!(!trace.normalization.after_drops.steps.is_empty());
+    let normalization = trace
+        .normalization
+        .as_ref()
+        .expect("fixed-control helper records execution normalization");
+    assert!(!normalization.before_dce.steps.is_empty());
+    assert!(!normalization.after_drops.steps.is_empty());
 }
 
 #[test]
@@ -335,5 +376,6 @@ def derivative(x: tensor[3, f32]) -> tensor[3, f32] = grad(loss)(x)
         .unwrap()
         .expect("successful helper trace");
     assert_eq!(trace.lowering.gradients.len(), 1);
-    assert_eq!(trace.executions.len(), 1);
+    assert!(trace.executions.is_empty());
+    assert!(trace.normalization.is_none());
 }
