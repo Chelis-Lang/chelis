@@ -528,3 +528,42 @@ fn a_type_alias_at_the_bound_is_accepted() {
         "diagonal on tensor[n, 4] declared as the alias Row = tensor[4, f32]",
     );
 }
+
+/// REGRESSION TEST (round 1 P2). A declaration whose RANK disagrees is a
+/// signature mismatch, not a bound violation. Reading an axis out of it anyway
+/// reported "the result extent is at most 4" for `tensor[n, 4, 5] ->
+/// tensor[7]`, naming a repair that would not fix the program, and the error
+/// type that path returns then suppressed the accurate diagnostic. The bound
+/// now stands down on a rank disagreement and unification reports it.
+#[test]
+fn a_rank_disagreement_reports_the_signature_mismatch_not_the_bound() {
+    let message = sole_dimension_mismatch(
+        "def f(x: tensor[n, 4, 5, f32]) -> tensor[7, f32] = diagonal(x, 0, 1)\n",
+        "diagonal on tensor[n, 4, 5] over axes (0, 1) declared as the rank-1 tensor[7]",
+    );
+    assert!(
+        message.contains("body doesn't match declared signature")
+            && message.contains("tensor[7, f32]"),
+        "a rank disagreement must reject as the signature mismatch it is, got {message}"
+    );
+    assert!(
+        !message.contains("at most"),
+        "the bound must not speak for a rank error, got {message}"
+    );
+}
+
+/// DISPOSITION LOCK, the control for the row above. With the RANK agreeing, the
+/// same operand and axes keep the bound: the retained axis is bounded by the
+/// literal 4 and a declared `tensor[9, 5]` is rejected as unreachable. Proves
+/// the precondition narrowed the bound to rank agreement and did not disable it
+/// for rank-2 results.
+#[test]
+fn a_rank_agreeing_declaration_still_carries_the_bound() {
+    assert_bound_rejection(
+        "def f(x: tensor[n, 4, 5, f32]) -> tensor[9, 5, f32] = diagonal(x, 0, 1)\n",
+        "diagonal on tensor[n, 4, 5] over axes (0, 1) declared as tensor[9, 5]",
+        1,
+        4,
+        9,
+    );
+}

@@ -71,6 +71,19 @@ fn inlined_main_root(declared: usize, operand: &str) -> String {
     )
 }
 
+/// Root form: the literal result extent spelled through a TYPE ALIAS. The
+/// checker resolves the alias, the C emitter reads the resolved ABI type, and
+/// round 1 found the interpreter reading the syntactic annotation instead, so
+/// the two lanes disagreed on exactly this spelling.
+fn alias_root(declared: usize, operand: &str) -> String {
+    format!(
+        "type Row = tensor[{declared}, f32]\n\
+         def d(x: tensor[n, 4, f32]) -> Row = diagonal(x, 0, 1)\n\
+         m = to_tensor({operand})\n\
+         out = d(m)\n"
+    )
+}
+
 /// Root form: the same declaration on a function whose return expression is a
 /// BLOCK rather than a direct builtin application. The residual witness.
 fn block_bodied_root(declared: usize, operand: &str) -> String {
@@ -196,6 +209,59 @@ fn eval_traps_on_the_inlined_main_root() {
     let (ok, stdout, stderr) = eval_source(&dir, "below-main", &source);
     assert!(!ok, "eval must trap; stdout was {stdout}");
     assert_bound_trap(&stderr, 3, 0, 2, "eval");
+}
+
+/// REGRESSION TEST (round 1 P1). An aliased declaration traps on eval exactly
+/// as the spelled-out one does. Before the fold, this row returned
+/// `shape=[2]` and exited zero while the C lane trapped: a parity break the
+/// pull request itself introduced, on a four-line program.
+#[test]
+fn eval_traps_when_the_declared_literal_is_spelled_through_an_alias() {
+    let dir = tempdir().expect("tempdir");
+    let source = alias_root(3, TWO_BY_FOUR);
+    check_scores_one(&dir, "alias-below", &source);
+    let (ok, stdout, stderr) = eval_source(&dir, "alias-below", &source);
+    assert!(!ok, "eval must trap through the alias; stdout was {stdout}");
+    assert_bound_trap(&stderr, 3, 0, 2, "eval");
+}
+
+/// DISPOSITION LOCK, C lane, and measured as one: this row was green on both
+/// sides of the P1 fold, because the C emitter already read the resolved ABI
+/// type. It is here so the pair proves AGREEMENT rather than one lane's
+/// behaviour, which is the property P1 broke.
+#[test]
+fn the_c_lane_traps_when_the_declared_literal_is_spelled_through_an_alias() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempdir().expect("tempdir");
+    let (ran, output) = build_link_run(&dir, "c_alias", &alias_root(3, TWO_BY_FOUR));
+    assert!(!ran, "the C lane must abort through the alias: {output}");
+    assert_bound_trap(&output, 3, 0, 2, "the C lane");
+}
+
+/// DISPOSITION LOCK. The aliased declaration the runtime DOES satisfy executes
+/// exactly, on both lanes, so the alias rows prove a guard rather than a
+/// blanket refusal of aliased results.
+#[test]
+fn both_lanes_execute_exactly_through_an_alias_when_the_extents_agree() {
+    let dir = tempdir().expect("tempdir");
+    let source = alias_root(3, THREE_BY_FOUR);
+    let (ok, stdout, stderr) = eval_source(&dir, "alias-equal", &source);
+    assert!(ok, "eval must execute; stderr was {stderr}");
+    assert!(
+        stdout.contains("out = tensor(shape=[3], data=[1.0, 6.0, 11.0])"),
+        "the satisfied aliased claim must produce its exact result, got {stdout}"
+    );
+    if !gcc_available() {
+        return;
+    }
+    let (ran, output) = build_link_run(&dir, "c_alias_equal", &source);
+    assert!(ran, "the C lane must execute: {output}");
+    assert!(
+        output.contains("shape=[3], data=[1.0, 6.0, 11.0]"),
+        "the C lane must agree with the evaluator, got {output}"
+    );
 }
 
 /// RESIDUAL LOCK, not a regression test, and a PASS HERE IS NOT A GUARANTEE OF
@@ -438,6 +504,12 @@ fn the_census_reader_finds_a_guard_that_is_there() {
 /// no shipped example does today, so this change adds no guard to the corpus
 /// and surfaces no pre-existing declaration divergence.
 ///
+/// A function the checker already proved statically (two literal selected axes)
+/// still gets a compare it cannot fail. That is kept rather than special-cased:
+/// the guard reads the declared ABI type, and teaching it which declarations the
+/// checker had already settled would make it depend on checker state the ABI
+/// does not carry.
+///
 /// `examples/illustrative/` is excluded by the repository's example-corpus
 /// policy: it is deliberately not on the executable Phase 0 path.
 ///
@@ -453,10 +525,21 @@ fn no_shipped_example_gains_a_return_boundary_guard() {
         .filter(|path| path.extension().is_some_and(|ext| ext == "ch"))
         .collect();
     examples.sort();
-    assert!(
-        examples.len() >= 20,
-        "the corpus walk must actually find the examples, got {}",
-        examples.len()
+    // The EXACT count, not a floor (round 1 P3). A floor lets the corpus shrink
+    // by a third while the census keeps reporting nothing, which is the same
+    // failure shape as a reader that stops finding guards. There is no example
+    // manifest to read this from, so the number is pinned here: change it in
+    // the same commit that adds or removes an executable example, and read the
+    // census result before you do.
+    const EXECUTABLE_PHASE_0_EXAMPLES: usize = 31;
+    assert_eq!(
+        examples.len(),
+        EXECUTABLE_PHASE_0_EXAMPLES,
+        "the census must cover every executable Phase 0 example; found {:?}",
+        examples
+            .iter()
+            .filter_map(|path| path.file_name())
+            .collect::<Vec<_>>()
     );
 
     let mut census: Vec<String> = Vec::new();

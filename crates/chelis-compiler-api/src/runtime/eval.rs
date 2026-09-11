@@ -47,6 +47,10 @@ fn direct_builtin_head(body: &Expr) -> Option<&str> {
 ///
 /// A rank disagreement is NOT this guard's business: the checker owns rank, and
 /// reporting it here would duplicate a verdict with a worse message.
+///
+/// `declared` is the CHECKED result type where one exists, not the syntactic
+/// annotation, so an aliased declaration carries the same verdict as its
+/// expansion and agrees with the C emitter, which reads the resolved ABI type.
 fn declared_result_extent_trap(
     declared: Option<&Expr>,
     body: &Expr,
@@ -1645,9 +1649,22 @@ impl<'a> EvalContext<'a> {
                 // chelis#1739: the host lane's return boundary is where a
                 // declared literal extent meets the value that has to satisfy
                 // it. See `declared_result_extent_trap`.
-                if let Some(trap) =
-                    declared_result_extent_trap(return_type.as_ref(), &body, &produced)
-                {
+                //
+                // The CHECKED signature's result wins over the syntactic
+                // annotation, because the two spell the same declaration
+                // differently: `-> Row` for `type Row = tensor[3, f32]` reaches
+                // `return_type` as a bare name and reaches the checked
+                // signature as the resolved `t-tensor`. The C emitter reads the
+                // resolved `HostAbiType::Tensor`, so reading the syntax here
+                // made the two lanes disagree on exactly the alias spelling
+                // (round 1 P1). `return_type` remains the fallback for a
+                // closure the checker recorded no signature for.
+                let declared_result = checked_signature
+                    .as_ref()
+                    .and_then(checked_function_children)
+                    .and_then(<[Expr]>::last)
+                    .or(return_type.as_ref());
+                if let Some(trap) = declared_result_extent_trap(declared_result, &body, &produced) {
                     return Err(trap);
                 }
                 Ok(produced)

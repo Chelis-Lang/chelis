@@ -22,6 +22,7 @@ use super::*;
 #[allow(clippy::too_many_arguments)]
 fn declared_result_literal(
     result_axis: usize,
+    result_rank: usize,
     expected_result: Option<&Type>,
     list: &deep::List,
     env: &Env,
@@ -30,19 +31,30 @@ fn declared_result_literal(
     subst: &Subst,
     errors: &mut DiagnosticSink<'_>,
 ) -> Option<i64> {
-    fn literal_at(ty: &Type, axis: usize) -> Option<i64> {
+    // The rank-equality precondition matters as much as the literal does. A
+    // declaration whose RANK disagrees is already a signature mismatch, and the
+    // checker reports it with the two full tensor types. Reading an axis out of
+    // it anyway turns `tensor[n, 4, 5] -> tensor[7]` into "the result extent is
+    // at most 4", which names a repair that would not fix the program, and the
+    // `Type::Error` this path returns then suppresses the accurate diagnostic
+    // (round 1 P2). Rank belongs to unification; the bound stands down.
+    let literal_at = |ty: &Type| -> Option<i64> {
         let Type::Tensor(dims, _) = ty else {
             return None;
         };
-        match dims.get(axis)? {
+        if dims.len() != result_rank {
+            return None;
+        }
+        match dims.get(result_axis)? {
             Dim::Lit(value) => Some(*value),
             Dim::Name(_) | Dim::Var(_) | Dim::Wildcard | Dim::Rank(_) => None,
         }
-    }
+    };
 
     if let Some(found) = expected_result
         .map(|expected| subst.apply(expected))
-        .and_then(|expected| literal_at(&expected, result_axis))
+        .as_ref()
+        .and_then(&literal_at)
     {
         return Some(found);
     }
@@ -60,7 +72,7 @@ fn declared_result_literal(
         errors,
     );
     errors.retain_since(checkpoint, |_| false);
-    literal_at(&resolved.ok()?, result_axis)
+    literal_at(&resolved.ok()?)
 }
 
 /// chelis#1739. `[05-OP-33]` replaces the retained axis extent with the smaller
@@ -75,6 +87,7 @@ fn declared_result_literal(
 #[allow(clippy::too_many_arguments)]
 fn reject_unreachable_diagonal_extent(
     operand: &Type,
+    inferred: &Type,
     axis1: usize,
     axis2: usize,
     list: &deep::List,
@@ -86,8 +99,12 @@ fn reject_unreachable_diagonal_extent(
     expected_result: Option<&Type>,
 ) -> Option<Type> {
     let (result_axis, source_axis, bound) = diagonal_result_bound(operand, axis1, axis2)?;
+    let Type::Tensor(inferred_dims, _) = inferred else {
+        return None;
+    };
     let declared = declared_result_literal(
         result_axis,
+        inferred_dims.len(),
         expected_result,
         list,
         env,
@@ -1094,6 +1111,7 @@ pub(super) fn finish_unified_app(
                         // declaration.
                         if let Some(rejection) = reject_unreachable_diagonal_extent(
                             &diagonal_operand,
+                            &ty,
                             axis1,
                             axis2,
                             list,
