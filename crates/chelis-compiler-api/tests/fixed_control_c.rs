@@ -10,10 +10,6 @@ use chelis_types::types::Prim;
 use chelis_unord::UnordMap;
 
 fn plan(source: &str, prim: Prim, count: usize) -> EvaluationPlan {
-    let expr = chelis_deep::parser::parse_str(source)
-        .unwrap()
-        .pop()
-        .unwrap();
     let inputs = [(
         "x".into(),
         TensorType {
@@ -23,6 +19,14 @@ fn plan(source: &str, prim: Prim, count: usize) -> EvaluationPlan {
     )]
     .into_iter()
     .collect();
+    plan_with_inputs(source, inputs)
+}
+
+fn plan_with_inputs(source: &str, inputs: UnordMap<String, TensorType>) -> EvaluationPlan {
+    let expr = chelis_deep::parser::parse_str(source)
+        .unwrap()
+        .pop()
+        .unwrap();
     chelis_ir::lower::try_lower_subexpr_evaluation_plan(
         &expr,
         inputs,
@@ -34,6 +38,89 @@ fn plan(source: &str, prim: Prim, count: usize) -> EvaluationPlan {
         }),
     )
     .unwrap()
+}
+
+#[test]
+fn native_empty_and_zero_rate_calls_consume_one_ordinal_before_the_next_draw() {
+    // Independent [05-RNG-1] reference: neither the evaluator nor its sampler
+    // supplies these expected bits. The unused first result must still draw.
+    fn mix(mut word: u64) -> u64 {
+        word = word.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        word = (word ^ (word >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        word = (word ^ (word >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        word ^ (word >> 31)
+    }
+    for seed in [42_i64, -1, i64::MIN] {
+        let expected = (0..32_u64)
+            .map(|index| {
+                let word = mix((seed as u64) ^ mix(1).rotate_left(17) ^ mix(index).rotate_left(41));
+                let unit = ((word >> 11) as f64 / ((1_u64 << 53) as f64)) as f32;
+                if unit < 0.5 { "0u" } else { "0x40000000u" }
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        for count in [0, 32] {
+            for rate in ["0.0", "0.5"] {
+                let source = format!(
+                    "(handle-effect {{effect: random}} (lit {{type: (t-prim {{}} int64)}} {seed}) \
+                     (let {{}} (bind {{}} discarded (app {{}} (var {{}} dropout) \
+                     (var {{}} prefix) (lit {{type: (t-prim {{}} f32)}} {rate}))) \
+                     (app {{}} (var {{}} dropout) (var {{}} x) \
+                     (lit {{type: (t-prim {{}} f32)}} 0.5))))"
+                );
+                let inputs = [("prefix", count), ("x", 32)]
+                    .into_iter()
+                    .map(|(name, extent)| {
+                        (
+                            name.into(),
+                            TensorType {
+                                dims: vec![DimInfo::Lit(extent)],
+                                precision: Prim::F32,
+                            },
+                        )
+                    })
+                    .collect();
+                let artifact = chelis_backend_c::codegen_evaluation_with_options(
+                    plan_with_inputs(&source, inputs)
+                        .verify_ownership()
+                        .unwrap(),
+                    "sample",
+                    Default::default(),
+                )
+                .unwrap();
+                assert_eq!(artifact.input_labels, ["prefix", "x"]);
+                let driver = format!(
+                    r#"
+int main(void) {{
+    int64_t prefix_n = {count}, n = 32;
+    chelis_tensor *inputs[] = {{
+        chelis_alloc(1, &prefix_n, CHELIS_DTYPE_F32),
+        chelis_alloc(1, &n, CHELIS_DTYPE_F32)
+    }};
+    for (int i = 0; i < 2; ++i) {{
+        chelis_tensor_write *write = chelis_tensor_begin_write(inputs[i]);
+        chelis_fill_scalar(write, chelis_scalar_from_bits(CHELIS_DTYPE_F32, 0x3f800000u));
+        chelis_tensor_end_write(write);
+    }}
+    const uint32_t expected[] = {{{expected}}};
+    for (int repeat = 0; repeat < 4; ++repeat) {{
+        chelis_tensor *outputs[1];
+        sample(inputs, 2, outputs, 1);
+        chelis_read_view view = chelis_tensor_read_view(outputs[0]);
+        assert(view.dtype == CHELIS_DTYPE_F32 && view.count == n);
+        assert(memcmp(view.data, expected, sizeof(expected)) == 0);
+        chelis_tensor_release(outputs[0]);
+    }}
+    chelis_tensor_release(inputs[0]);
+    chelis_tensor_release(inputs[1]);
+    return 0;
+}}
+"#
+                );
+                ownership_support::balanced(&ownership_support::run(&artifact.c_source, &driver));
+            }
+        }
+    }
 }
 
 #[test]
@@ -52,7 +139,9 @@ fn sealed_native_dropout_matches_evaluator_and_restarts_each_public_invocation()
             let input = chelis_types::finalize_tensor(
                 "test",
                 prim,
-                chelis_types::RawTensor::Float(vec![1.0; count]),
+                chelis_types::RawTensor::Float(
+                    (0..count).map(|i| (i as f64 + 1.0) / 7.0).collect(),
+                ),
             )
             .unwrap();
             let mut context = RandomExecutionContext::new(RandomLoweringState {
@@ -67,26 +156,25 @@ fn sealed_native_dropout_matches_evaluator_and_restarts_each_public_invocation()
             })
             .unwrap();
             let output = &values[&plan.dag_for_inspection().roots()[0]];
-            let expected = output
-                .to_f64_lossy_vec()
-                .into_iter()
-                .map(|x| {
-                    let bits = match prim {
-                        Prim::F32 => (x as f32).to_bits() as u64,
-                        Prim::F64 => x.to_bits(),
-                        Prim::F16 => half::f16::from_f64(x).to_bits() as u64,
-                        Prim::Bf16 => half::bf16::from_f64(x).to_bits() as u64,
-                        _ => unreachable!(),
-                    };
-                    format!("0x{bits:x}ULL")
-                })
-                .collect::<Vec<_>>()
-                .join(",");
-            let expected = if expected.is_empty() {
-                "0".into()
-            } else {
-                expected
+            let bits = |values: Vec<f64>| {
+                let words = values
+                    .into_iter()
+                    .map(|x| {
+                        let bits = match prim {
+                            Prim::F32 => (x as f32).to_bits() as u64,
+                            Prim::F64 => x.to_bits(),
+                            Prim::F16 => half::f16::from_f64(x).to_bits() as u64,
+                            Prim::Bf16 => half::bf16::from_f64(x).to_bits() as u64,
+                            _ => unreachable!(),
+                        };
+                        format!("0x{bits:x}ULL")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                if words.is_empty() { "0".into() } else { words }
             };
+            let expected = bits(output.to_f64_lossy_vec());
+            let input_bits = bits(input.to_f64_lossy_vec());
             let artifact = chelis_backend_c::codegen_evaluation_with_options(
                 plan.verify_ownership().unwrap(),
                 "sample",
@@ -97,9 +185,13 @@ fn sealed_native_dropout_matches_evaluator_and_restarts_each_public_invocation()
                 r#"
 int main(void) {{
     int64_t n = {count};
+    const {ctype} original[] = {{{input_bits}}};
+    chelis_scalar elements[{capacity}];
+    for (int64_t i = 0; i < n; ++i)
+        elements[i] = chelis_scalar_from_bits({tag}, original[i]);
     chelis_tensor *x = chelis_alloc(1, &n, {tag});
     chelis_tensor_write *write = chelis_tensor_begin_write(x);
-    chelis_fill_scalar(write, chelis_scalar_from_bits({tag}, {one}ULL));
+    chelis_tensor_write_literal(write, chelis_scalar_from_bits(CHELIS_DTYPE_I64, n), elements);
     chelis_tensor_end_write(write);
     const {ctype} expected[] = {{{expected}}};
     for (int repeat = 0; repeat < 4; ++repeat) {{
@@ -109,20 +201,23 @@ int main(void) {{
         assert(view.dtype == {tag} && view.count == n);
         if (n) assert(memcmp(view.data, expected, n * sizeof({ctype})) == 0);
         chelis_tensor_release(outputs[0]);
+        if (n) assert(memcmp(chelis_tensor_read_view(x).data, original, n * sizeof({ctype})) == 0);
     }}
     chelis_tensor_release(x);
     return 0;
 }}
 "#,
-                one = match prim {
-                    Prim::F32 => 0x3f800000_u64,
-                    Prim::F64 => 0x3ff0000000000000,
-                    Prim::F16 => 0x3c00,
-                    Prim::Bf16 => 0x3f80,
-                    _ => unreachable!(),
-                }
+                capacity = count.max(1),
             );
             ownership_support::balanced(&ownership_support::run(&artifact.c_source, &driver));
+            if prim == Prim::F32 && count == 32 {
+                let reciprocal = artifact.c_source.replace(
+                    " / chelis_f32_from_bits(0x3f666666u)",
+                    " * (1.0f / chelis_f32_from_bits(0x3f666666u))",
+                );
+                assert_ne!(reciprocal, artifact.c_source);
+                assert_native_value_failure(&reciprocal, &driver);
+            }
         }
     }
 }
@@ -254,17 +349,7 @@ int main(void) {{
                 "(__chelis_fixed_counter++ + 1ULL)",
             );
             assert_ne!(wrong_draw, artifact.c_source);
-            let failure = std::panic::catch_unwind(|| ownership_support::run(&wrong_draw, &driver))
-                .expect_err("wrong ordinal must fail the executed C value assertion");
-            let message = failure
-                .downcast_ref::<String>()
-                .map(String::as_str)
-                .or_else(|| failure.downcast_ref::<&str>().copied())
-                .expect("failure message");
-            assert!(
-                message.starts_with("C status"),
-                "must fail execution, not compilation: {message}"
-            );
+            assert_native_value_failure(&wrong_draw, &driver);
             let release = artifact
                 .c_source
                 .lines()
@@ -277,6 +362,20 @@ int main(void) {{
     }
 }
 
+fn assert_native_value_failure(source: &str, driver: &str) {
+    let failure = std::panic::catch_unwind(|| ownership_support::run(source, driver))
+        .expect_err("mutation must fail the executed C value assertion");
+    let message = failure
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| failure.downcast_ref::<&str>().copied())
+        .expect("failure message");
+    assert!(
+        message.starts_with("C status"),
+        "must fail execution, not compilation: {message}"
+    );
+}
+
 #[test]
 fn native_dropout_preserves_signed_zero_and_nonfinite_classes() {
     // [05-OP-37]: a dropped value is +0, even for NaN/infinity; kept
@@ -284,7 +383,15 @@ fn native_dropout_preserves_signed_zero_and_nonfinite_classes() {
     // not part of the rational pathwise derivative theorem.
     let input: Vec<f32> = (0..32)
         .map(|i| {
-            [0.0, -0.0, -1.0, f32::INFINITY, f32::NEG_INFINITY, f32::NAN, 1.0][i % 7]
+            [
+                0.0,
+                -0.0,
+                -1.0,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                f32::NAN,
+                1.0,
+            ][i % 7]
         })
         .collect();
     for rate in ["0.0", "0.5"] {
@@ -314,9 +421,12 @@ fn native_dropout_preserves_signed_zero_and_nonfinite_classes() {
             assert_eq!(expected[1].to_bits(), (-0.0_f32).to_bits());
             assert!(expected[3].is_infinite() && expected[5].is_nan());
         } else {
-            assert!(input.iter().zip(&expected).any(|(before, after)| {
-                !before.is_finite() && after.to_bits() == 0
-            }));
+            assert!(
+                input
+                    .iter()
+                    .zip(&expected)
+                    .any(|(before, after)| { !before.is_finite() && after.to_bits() == 0 })
+            );
         }
         let artifact = chelis_backend_c::codegen_evaluation_with_options(
             plan.verify_ownership().unwrap(),
@@ -384,4 +494,30 @@ fn public_native_entry_does_not_invent_an_inherited_random_context() {
     .err()
     .expect("unhandled export must reject");
     assert!(error.to_string().contains("inherited Random"), "{error}");
+}
+
+#[test]
+fn native_entry_rejects_invalid_stored_rates_even_for_empty_inputs() {
+    for (dtype, prim) in [
+        ("f16", Prim::F16),
+        ("bf16", Prim::Bf16),
+        ("f32", Prim::F32),
+        ("f64", Prim::F64),
+    ] {
+        for rate in ["-0.5", "1.0"] {
+            let source = format!(
+                "(handle-effect {{effect: random}} (lit {{type: (t-prim {{}} int64)}} 42) \
+                 (app {{}} (var {{}} dropout) (var {{}} x) \
+                 (lit {{type: (t-prim {{}} {dtype})}} {rate})))"
+            );
+            let error = chelis_backend_c::codegen_evaluation_with_options(
+                plan(&source, prim, 0).verify_ownership().unwrap(),
+                "sample",
+                Default::default(),
+            )
+            .err()
+            .expect("invalid static rate cannot produce an artifact");
+            assert!(error.to_string().contains("domain in dropout"), "{error}");
+        }
+    }
 }
