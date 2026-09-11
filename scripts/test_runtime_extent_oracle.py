@@ -536,9 +536,12 @@ class RuntimeExtentOracleTests(unittest.TestCase):
                 output.getvalue().splitlines()[-1], ORACLE.PASS_MARKER
             )
 
-    def test_phase_b_is_registered_but_not_yet_at_exit(self) -> None:
-        # Slice B's rows reach exit one owning change at a time, so
-        # `--phase b` must keep failing honestly while any remains short.
+    def test_every_phase_b_row_has_reached_exit(self) -> None:
+        # Slice B's rows reached exit one owning change at a time, and this
+        # assertion tracked the remainder at each step so `--phase b` kept
+        # failing honestly while any row was still short. The last of them has
+        # now landed, so the shortfall is empty and the honest assertion is
+        # equality rather than a naming of what is left.
         shortfall = ORACLE.exit_shortfall(ORACLE.PHASE_REGISTRY["b"])
         self.assertNotIn("ir.axis_source.cardinality", shortfall)
         self.assertNotIn("shrink.elementwise_const.build", shortfall)
@@ -550,13 +553,16 @@ class RuntimeExtentOracleTests(unittest.TestCase):
         # `pipe` into the application it denotes, so both spellings execute.
         self.assertNotIn("expand.record_projection.size", shortfall)
         self.assertNotIn("expand.piped_shape_read.lint_fix", shortfall)
-        # A row whose owning slice has not started, named so this assertion
-        # does not go stale every time a sibling change moves a row:
         # chelis#1379's arithmetic over a runtime scalar under a named claim
-        # is the provenance work B2b-2 still defers.
-        self.assertIn("expand.arith_size.named_claim.eval", shortfall)
-        self.assertNotEqual(shortfall, ())
+        # was the last row, and it left with the lowering's admission of an
+        # ordinary node-valued extent.
+        self.assertNotIn("expand.arith_size.named_claim.c", shortfall)
+        self.assertNotIn("expand.arith_size.named_claim.eval", shortfall)
+        self.assertEqual(shortfall, ())
         self.assertEqual(ORACLE.exit_shortfall(ORACLE.PHASE_REGISTRY["a"]), ())
+        # Phase b's ROWS are at exit; `--phase final` is a separate question
+        # and still refuses because `SLICE_PHASES` requires an unregistered
+        # `c`. Retiring that requirement is B2b-3's, not this assertion's.
 
     def test_authoritative_run_rejects_dirty_worktree(self) -> None:
         def runner(argv: tuple[str, ...], **_kwargs: object) -> subprocess.CompletedProcess[str]:

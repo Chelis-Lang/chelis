@@ -372,10 +372,9 @@ fn classify_size_in(expr: &deep::Expr, ctx: &SizeCtx<'_>) -> SizeClass {
 }
 
 /// Combine the size classes of an integer-arithmetic application's
-/// operands (chelis#397/#469). `Sourceless` is absorbing (a sum/product
-/// touching a sourceless scalar is itself sourceless); a `ShapeSourced`
-/// operand makes the whole expression `ShapeSourced` (the extent is
-/// recoverable from that tensor); all-`Static` operands stay `Static`.
+/// operands (chelis#397/#469/#1379). `combine_arith_classes` below states the
+/// fold and owns the rule; this arm decides only whether the callee is one of
+/// the arithmetic builtins.
 ///
 /// A non-arithmetic `app` — any other function call, e.g. `ident(a_dim)` or
 /// a user `def` — produces a runtime value with NO shape source the backend
@@ -404,20 +403,47 @@ fn classify_arith_app(kids: &[deep::Expr], ctx: &SizeCtx<'_>) -> SizeClass {
 }
 
 /// The integer-arithmetic builtins the provenance walk follows.
-const INT_ARITH: &[&str] = &["add", "sub", "mul", "div", "mod", "neg"];
+///
+/// The same operator set the shared static folder walks
+/// (`fold_static_int_expr`), because the two decide one question about one
+/// category: whether an expression is checked integer arithmetic. They
+/// disagreed on the two integer division primitives, and `spec/05` section 2.1
+/// makes those the ONLY way to divide an int64 extent, `div` being float-only.
+/// A static `floor_div(4i64, 2i64)` therefore folded and was admitted while a
+/// runtime `floor_div(shape(x, 0), 2i64)` was rejected as sourceless: the same
+/// operator on the same category, decided opposite ways by two enumerations
+/// (chelis#1379).
+const INT_ARITH: &[&str] = &[
+    "add",
+    "sub",
+    "mul",
+    "div",
+    "floor_div",
+    "trunc_div",
+    "mod",
+    "neg",
+];
 
-/// Fold operand classes under the absorbing-`Sourceless` rule, shared by the
-/// application and bare-pipe-stage spellings of the same arithmetic.
+/// Fold operand classes, shared by the application and bare-pipe-stage
+/// spellings of the same arithmetic.
+///
+/// A `ShapeSourced` operand makes the whole expression `ShapeSourced`, because
+/// the extent is computable from that tensor and whatever it is combined with.
+/// `Sourceless` decides only an expression with no admissible operand at all,
+/// and all-`Static` operands stay `Static`. `Sourceless` used to be absorbing,
+/// which rejected `add(shape(x, 0), k)` at check even though both lanes execute
+/// it (chelis#1379). The pipe spelling reaches this through the same fold, so
+/// the two spellings cannot answer differently.
 fn combine_arith_classes(classes: impl Iterator<Item = SizeClass>) -> SizeClass {
     let operand_classes: Vec<SizeClass> = classes.collect();
+    if operand_classes.contains(&SizeClass::ShapeSourced) {
+        return SizeClass::ShapeSourced;
+    }
     if operand_classes.contains(&SizeClass::Sourceless) {
         return SizeClass::Sourceless;
     }
     if operand_classes.contains(&SizeClass::Unknown) {
         return SizeClass::Unknown;
-    }
-    if operand_classes.contains(&SizeClass::ShapeSourced) {
-        return SizeClass::ShapeSourced;
     }
     SizeClass::Static
 }
