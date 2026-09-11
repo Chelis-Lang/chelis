@@ -82,7 +82,7 @@
       "id": "chelis_python::CompiledModel::__call__(self: &Self, py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<CompiledTensorResults>",
       "kind": "binding-pymethod",
       "authority": "TaggedTransport",
-      "graph_identity": "145f6171ab92604937286877cdef2c1ed8a79f66d4b9a4975beef986a57a6674",
+      "graph_identity": "e3a84285cbd056eb71fcb5c9f6018e1d0f0d76e5c71731d87e07f10f8f7411b3",
       "contract": "native/compiled-tensor-call"
     },
     {
@@ -122,7 +122,7 @@
       "id": "chelis_python::NativeTensor::__dlpack__(self: &Self, stream: Option<DLPackStreamRequest>, max_version: Option<DLPackVersionRequest>, dl_device: Option<DLPackDeviceRequest>, copy: Option<bool>) -> PyResult<DLPackCapsule>",
       "kind": "binding-pymethod",
       "authority": "TaggedTransport",
-      "graph_identity": "e0dcf8744becf469b2b70a55a162cc97f13947a1d436f94285c8f225706c6add",
+      "graph_identity": "ec9e416c22c94f2c17ba5c2bb4833fb3f1918935da2fbbaf6f1774cb4a84a551",
       "contract": "native/dlpack-capsule"
     },
     {
@@ -132,7 +132,7 @@
       "id": "chelis_python::NativeTensor::__dlpack_device__(self: &Self) -> DLPackDevice",
       "kind": "binding-pymethod",
       "authority": "TaggedTransport",
-      "graph_identity": "b187c6dbffdc948f357e3187bd16703b8683531aad04c771a222f8c7c7cd1693",
+      "graph_identity": "e3eacd75d0c4fbf722a6bb3ca368339355be20e2599009bd61a23dcebee26bdd",
       "contract": "native/dlpack-device"
     },
     {
@@ -149,7 +149,7 @@
       "id": "chelis_python::NativeTensor::shape(self: &Self) -> Vec<i64>",
       "kind": "binding-pymethod",
       "authority": "NumericOperation",
-      "graph_identity": "2e76b917ed641bd9502ffd1eafff75f14a2559a641305242680427f888a0f3f0",
+      "graph_identity": "d6958c69e64f763ff078d6963ee88c6b49504eb55937553a686ae57e6bc98513",
       "contract": "[05-OP-45]"
     }
   ]
