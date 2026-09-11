@@ -2259,7 +2259,9 @@ Suggestions are structured data in the fitness report JSON, not just strings.
 
 ### 6.4 Fitness Report Format
 
-`chelis check` emits one JSON document per checked input. It is a
+`chelis check` emits one JSON document per invocation: the report below
+for a file target, or the directory envelope (§ Directory mode) for a
+directory target. It is a
 machine-facing contract rather than an illustration: reward surfaces,
 conformance corpora, and downstream tooling consume it, so a change to its
 shape is a change to a published interface.
@@ -2276,8 +2278,6 @@ shape is a change to a published interface.
 > path that bypasses the report and emits a display string is not
 > conforming: a consumer cannot distinguish "no diagnostics" from
 > "the diagnostics were not transported".
-
-(Not fully implemented; tracked by chelis#886.)
 
 #### Document fields
 
@@ -2402,6 +2402,97 @@ Illustrative of the shape only; the atoms above are normative.
 > non-empty `errors` list, and `score < 1`. The fitness report adds no separate
 > name-resolution wire field: these invariants govern the existing
 > `components.names`, `errors`, and `unresolved_names` fields.
+
+#### Directory mode
+
+`chelis check <dir>` checks every source file under a directory and emits
+one document for the whole invocation, the directory envelope. The envelope
+carries the per-file reports defined above; it is not a second report
+format.
+
+| field | type | presence |
+|---|---|---|
+| `files` | array of entry | always, possibly empty |
+| `errors` | array of diagnostic (§ Diagnostic fields) | always, possibly empty |
+
+Each entry carries:
+
+| field | type | presence |
+|---|---|---|
+| `file` | string | always |
+| `report` | the report above | always |
+
+> **[04-FIT-19]** The directory envelope SHALL be produced by serializing
+> one typed value that holds every per-file report as a member, under
+> [04-FIT-11]. An envelope assembled from separately rendered report
+> documents is not conforming. `files` and `errors` are both present in
+> every envelope, including an empty one.
+
+> **[04-FIT-20]** The corpus of a directory target is every checkable file
+> the walk reaches from it. The walk follows symbolic links wherever they
+> resolve, including to directories and to locations outside the target.
+> Below the target, it excludes every entry whose name begins with `.` and
+> every directory named `target`; the target itself is never excluded. The
+> name test applies to the entry's own name before any link is resolved, so
+> an excluded link contributes nothing, whatever it resolves to. A checkable
+> file is a regular file, reached directly or through links, whose name ends
+> in `.ch` or `.dp`.
+>
+> The walk visits each file and each directory at most once, identified by
+> its canonical path, and the first path in walk order ([04-FIT-22]) names
+> it. A file reached by several paths is therefore one entry, and a link
+> cycle or a link back to a visited directory adds nothing.
+>
+> An entry the walk cannot resolve is a checkable file when its own name is
+> one: it is an entry, and its report carries the failure that naming it
+> directly would. Otherwise it contributes nothing when its referent does
+> not exist, and is a walk failure under [04-FIT-23] when it cannot be
+> resolved for any other reason.
+
+> **[04-FIT-21]** Each entry's `file` is the file's path relative to the
+> target, its components joined by `/` on every host, and its `report` is
+> that file's report. Every entry SHALL carry a report: a file that cannot be
+> read, formatted, parsed, or checked is an entry whose report carries the
+> failure under [04-FIT-12], never an entry carrying a message in place of a
+> report. A relative path that is not valid UTF-8 cannot be written as
+> `file`, and no replacement character or other substitution may stand in
+> for it: such a file is not an entry, and the walk reports it under
+> [04-FIT-23].
+
+> **[04-FIT-22]** `files` is in walk order: a depth-first pre-order
+> traversal that visits the entries of each directory in ascending order of
+> the byte sequence of the name the host reports, the order [05-HOST-4]
+> fixes for `list_dir`. That order is not a sort of the relative paths: a
+> directory `a` and everything under it precede a sibling file `a.ch`,
+> although the path `a.ch` sorts before `a/b.ch`.
+
+> **[04-FIT-23]** A failure that belongs to no single file SHALL be reported
+> as a diagnostic in the envelope's `errors`. In directory mode, [04-FIT-12]
+> is met by an entry's report for a failure of that file, and by the
+> envelope's `errors` for a failure of the walk; neither is replaced by an
+> empty or truncated document or by a display string. A directory the walk
+> cannot read, whether the target or a directory below it, reached directly
+> or through links, contributes one `directory_walk_error` diagnostic naming
+> that directory. So does each entry [04-FIT-20] makes a walk failure, and
+> each path [04-FIT-21] cannot represent. The walk continues past every one
+> of them: each checkable file it can still reach is an entry. An unreadable
+> target therefore yields an envelope with no entries and one diagnostic. The reports of the readable files are additional
+> information, not a partial success; the envelope still fails under
+> [04-FIT-25].
+
+> **[04-FIT-24]** An empty corpus is a failure. When the walk completes
+> without a [04-FIT-23] diagnostic and the corpus is empty, `errors` SHALL
+> carry one `empty_corpus` diagnostic, whose message names the target and
+> reports the checkable files that [04-FIT-20]'s exclusions removed.
+> Emptiness is judged once, over the whole walk: an empty directory below a
+> non-empty corpus contributes nothing. When a [04-FIT-23] diagnostic is
+> present, that diagnostic accounts for the result and no `empty_corpus`
+> diagnostic is added, because the walk has not established that the corpus
+> is empty.
+
+> **[04-FIT-25]** Directory mode SHALL exit `0` if and only if the
+> envelope's `errors` and every entry's report `errors` are all empty, and
+> otherwise `2`. Directory mode has no other exit status.
 
 ### 6.5 Source Identity In Diagnostics
 

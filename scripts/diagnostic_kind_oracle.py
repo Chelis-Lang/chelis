@@ -129,20 +129,20 @@ fn diagnostic_kind_oracle_mutation(mut diagnostic: crate::schema::Diagnostic) {
 def mutate_diagnostic_vocabulary(source: str) -> str:
     replacements = (
         (
-            "    TypeTotality,\n}\n\nimpl DiagnosticKind",
-            "    TypeTotality,\n    Phase3OracleKind,\n}\n\nimpl DiagnosticKind",
+            "    EmptyCorpus,\n}\n\nimpl DiagnosticKind",
+            "    EmptyCorpus,\n    Phase3OracleKind,\n}\n\nimpl DiagnosticKind",
         ),
         (
-            "    pub const ALL: [Self; 52] = [",
-            "    pub const ALL: [Self; 53] = [",
+            "    pub const ALL: [Self; 54] = [",
+            "    pub const ALL: [Self; 55] = [",
         ),
         (
-            "        Self::TypeTotality,\n    ];",
-            "        Self::TypeTotality,\n        Self::Phase3OracleKind,\n    ];",
+            "        Self::EmptyCorpus,\n    ];",
+            "        Self::EmptyCorpus,\n        Self::Phase3OracleKind,\n    ];",
         ),
         (
-            '            Self::TypeTotality => "TypeTotality",\n',
-            '            Self::TypeTotality => "TypeTotality",\n'
+            '            Self::EmptyCorpus => "empty_corpus",\n',
+            '            Self::EmptyCorpus => "empty_corpus",\n'
             '            Self::Phase3OracleKind => "phase3_oracle_kind",\n',
         ),
     )
