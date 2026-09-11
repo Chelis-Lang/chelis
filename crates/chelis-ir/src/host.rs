@@ -373,6 +373,20 @@ pub struct CompiledProgram {
 /// associations for its fixed-control tensor helpers. The program's public
 /// representation stays unchanged; only consuming ownership/codegen APIs can
 /// retain the private associations.
+///
+/// ```compile_fail
+/// use chelis_ir::host::HostExecutionPlan;
+/// fn replace_helper(mut plan: HostExecutionPlan) {
+///     plan.program().global_tensor_helpers.clear();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use chelis_ir::host::{ConcreteHostProgram, HostExecutionPlan};
+/// fn substitute(plan: HostExecutionPlan, forged: ConcreteHostProgram) {
+///     let _ = plan.project(forged);
+/// }
+/// ```
 #[derive(Debug)]
 pub struct HostExecutionPlan {
     program: ConcreteHostProgram,
