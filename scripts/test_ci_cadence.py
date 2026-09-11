@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 NEXTEST_CONFIG = ROOT / ".config/nextest.toml"
 # A `cargo nextest` command naming its profile literally, anywhere a hosted job
 # can reach: the workflow files themselves, and the CI-invoked Python drivers.
-PROFILE_CALL = re.compile(r"--profile[\"',\s]+([a-z][a-z0-9-]*)")
+PROFILE_CALL = re.compile(r"--profile[\"',\s=]+([a-z][a-z0-9-]*)")
 # Named by `.config/nextest.toml` as the unattended heavy-e2e selection. No
 # workflow invokes it by that literal today; requiring the backstop anyway
 # means a job that starts using it cannot arrive without one.
@@ -177,13 +177,22 @@ def assert_extended(test, pr, nightly):
 
 
 def unattended_nextest_profiles():
-    """Every nextest profile a hosted job names in a literal `--profile`.
+    """Every nextest profile a hosted job names in a LITERAL `--profile`.
 
-    Scans the workflow files and the CI-invoked Python drivers. Profiles
-    selected through a variable -- `runtime-representation` and
-    `builtin-atom-closure`, both invoked from acceptance oracles that own their
-    own failure semantics and that also run on a developer workstation -- are
-    deliberately out of this set and are not discovered by this scan.
+    That is what this set is, and it is narrower than "every profile an
+    unattended job uses". `runtime-representation` and `builtin-atom-closure`
+    are selected through a variable, so the scan cannot see them, and
+    `runtime-representation` is in fact run unattended by heavy-e2e's
+    `runtime-representation-phase0-oracle` job, whose display name chelis#1828
+    moved to "Runtime Representation Phase 2 Oracle"; the job id is cited here
+    because the display name has now moved twice.
+    They stay out because both ALSO run on a developer workstation,
+    which is the chelis#1607 contention case that keeps `default` uncapped; a
+    profile-wide cap would reach those local runs too. That is the whole
+    reason. They are not excluded for owning their own failure semantics --
+    `runtime_representation_phase1.py` passes no `timeout=` to `subprocess.run`,
+    so an endless row there reproduces chelis#1831 rather than being contained.
+    Residual recorded on chelis#1829.
     """
     found = set(ALWAYS_UNATTENDED)
     sources = sorted((ROOT / ".github/workflows").glob("*.yml"))
