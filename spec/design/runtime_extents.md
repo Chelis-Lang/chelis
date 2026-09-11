@@ -576,9 +576,14 @@ Both binding and DECLARATION consumers now read the derivation.
 deleted; `op_declared_output_axes`, `shape_source_for_axis` and
 `op_internal_symbolic_dims` retain five other callers and their migration is a
 separate slice. A declaration comes from `resolve_axis_extent`'s terminal
-`ExtentOrigin`: an entry-suppliable literal or input axis goes in the prologue,
-and anything else is declared at the operation that produces it, which is how a
-kept axis forwards its exact input axis without renaming the claim it carries.
+`ExtentOrigin`: an input tensor's axis goes in the prologue, and an extent an
+operation produces is declared at that operation, which is how a kept axis
+forwards its exact input axis without renaming the claim it carries. Choosing
+among a name's candidate axes follows where a declaration can GO, not which
+answer is most certain: an input axis wins, an operation-produced extent comes
+next because it names a site, and a literal comes last because no lane declares
+an entry literal today, so preferring one over an available site would leave
+the name undeclared.
 #665 was a declaration-consumer failure and did not close because an entry
 guard passed; it closes because the kept name is declared from its source. A
 name that resolves to no origin is a typed receipt from

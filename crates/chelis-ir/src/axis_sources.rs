@@ -926,15 +926,18 @@ fn resolve_class_supplied_extent(
 /// origin, exactly as the legacy walk's `bind_symbol_from_any_load` accepted
 /// one.
 ///
-/// Selection among an name's candidate axes has one rule beyond node order:
-/// an origin the function ENTRY can supply wins. A `Literal` or an
-/// `ExternalAxis` is available before any operation runs, so declaring from
-/// it dominates every reference to the name; an `OpComputed` or
-/// `ScalarInput` origin exists only once its operation has run. Where a name
-/// has both - a signature binder that a movement operation also stamps on a
-/// fresh axis - the entry origin declares and the derivation's guards
-/// compare the two, which is the split the legacy walk made by asking
-/// whether the name was "also Load-carried".
+/// Selection among a name's candidate axes has one rule beyond node order,
+/// and it is ordered by where a lane can actually put the declaration. An
+/// `ExternalAxis` wins outright: it is an input tensor's axis, readable from
+/// shape metadata before any operation runs, so declaring from it dominates
+/// every reference to the name. That is the split the legacy walk made by
+/// asking whether the name was "also Load-carried", and the derivation's
+/// guards still compare it against any operation that stamps the same name on
+/// a fresh axis. An `OpComputed` or `ScalarInput` comes next, because it
+/// names the operation that produces the extent and so names a site. A
+/// `Literal` comes LAST despite being the most certain answer, because it
+/// names no site at all: no lane declares an entry literal today, so choosing
+/// one over an available site would leave the name undeclared.
 ///
 /// A name with no resolvable origin is absent here and listed by
 /// [`unresolved_dim_names`] instead, so a consumer fails closed with a
@@ -995,9 +998,11 @@ impl ExtentOrigin {
     }
 }
 
-/// The origin of one name, over every output axis that carries it.
+/// The origin of one name, over every output axis that carries it, in the
+/// preference order [`dim_extent_origins`] documents.
 fn resolve_named_dim_origin(dag: &Dag, name: &str) -> Option<ExtentOrigin> {
-    let mut fallback: Option<ExtentOrigin> = None;
+    let mut local: Option<ExtentOrigin> = None;
+    let mut literal: Option<ExtentOrigin> = None;
     for node in dag.nodes() {
         for (axis, dim) in node.output_type.dims.iter().enumerate() {
             if !matches!(dim, DimInfo::Named(other, _) if other == name) {
@@ -1006,18 +1011,19 @@ fn resolve_named_dim_origin(dag: &Dag, name: &str) -> Option<ExtentOrigin> {
             let Some(origin) = resolve_axis_extent(dag, node.id, axis) else {
                 continue;
             };
-            if matches!(
-                origin,
-                ExtentOrigin::Literal(_) | ExtentOrigin::ExternalAxis { .. }
-            ) {
-                return Some(origin);
-            }
-            if fallback.is_none() {
-                fallback = Some(origin);
+            match origin {
+                ExtentOrigin::ExternalAxis { .. } => return Some(origin),
+                ExtentOrigin::Literal(_) if literal.is_none() => literal = Some(origin),
+                ExtentOrigin::OpComputed { .. } | ExtentOrigin::ScalarInput { .. }
+                    if local.is_none() =>
+                {
+                    local = Some(origin)
+                }
+                _ => {}
             }
         }
     }
-    fallback
+    local.or(literal)
 }
 
 /// The stamped extent claim a class groups by.

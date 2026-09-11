@@ -1729,66 +1729,40 @@ impl CEmitter {
             }
         }
 
-        // DECLARATIONS come from the axis SOURCE (chelis#1277 C4.4). An
-        // origin the entry can supply is one of two kinds, and both are
-        // declared here because both are available before any operation of
-        // the function runs: an input tensor's axis, read from shape
-        // metadata, and a compile-time literal.
+        // DECLARATIONS come from the axis SOURCE (chelis#1277 C4.4), and
+        // what the ENTRY can declare is one kind: an input tensor's axis,
+        // read from shape metadata before any operation of the function
+        // runs. `spec/04-type-system.md` section 4.7 orders entry work by
+        // "the assigned ABI input slot", so these follow `input_slots` and
+        // then the axis. Every declaration here dominates every reference, so
+        // the order is determinism rather than correctness.
         //
-        // The literal arm is what chelis#1556 needed. A nullary kernel has no
-        // `Load` at all, so a name the lowerer stamped on an inlined
-        // parameter's axis had nothing to recover it from and the walk
-        // panicked; resolving the axis's source answers `3` in two hops and
-        // the declaration follows.
-        //
-        // `spec/04-type-system.md` section 4.7 orders entry work by "the
-        // assigned ABI input slot", so the input-axis declarations follow
-        // `input_slots` and then the axis, with the literals after them in
-        // first-reference order. Every declaration here dominates every
-        // reference, so the order is about determinism rather than about
-        // correctness.
-        struct EntryDimDeclaration {
-            /// The declaring input's assigned ABI slot and axis, absent for a
-            /// literal extent, which no input supplies.
-            slot: Option<(usize, usize)>,
-            name: String,
-            extent: String,
-        }
-        let mut entry_dim_declarations: Vec<EntryDimDeclaration> = Vec::new();
+        // A `Literal` origin is deliberately NOT declared here, and that is a
+        // narrowing rather than an oversight. Declaring one would put a
+        // second C element-type spelling in this function, which the runtime
+        // representation inventory reads as a new seam under a new owner, and
+        // growing that frozen foundation is a contract change rather than a
+        // repair. Nothing measured needs it: chelis#1556, the shape that
+        // would have used it, does not reproduce. A literal-origin name that
+        // no operation site declares reaches the `declared_dim_names`
+        // invariant below and is refused with a receipt, which is what the
+        // occurrence walk did with a panic. Residual under chelis#1372.
+        let mut entry_dim_declarations: Vec<((usize, usize), String)> = Vec::new();
         for (name, origin) in dag.dim_extent_origins() {
-            match origin {
-                chelis_ir::axis_sources::ExtentOrigin::ExternalAxis { load, axis } => {
-                    let Some(RiscOp::Load { name: label }) = dag.get(load).map(|node| &node.op)
-                    else {
-                        continue;
-                    };
-                    let slot = input_slots[label.as_str()];
-                    entry_dim_declarations.push(EntryDimDeclaration {
-                        slot: Some((slot, axis)),
-                        name,
-                        extent: format!("chelis_tensor_shape(inputs[{slot}], {axis})"),
-                    });
-                }
-                chelis_ir::axis_sources::ExtentOrigin::Literal(value) => {
-                    entry_dim_declarations.push(EntryDimDeclaration {
-                        slot: None,
-                        name,
-                        extent: value.to_string(),
-                    });
-                }
-                chelis_ir::axis_sources::ExtentOrigin::OpComputed { .. }
-                | chelis_ir::axis_sources::ExtentOrigin::ScalarInput { .. } => {}
-            }
+            let chelis_ir::axis_sources::ExtentOrigin::ExternalAxis { load, axis } = origin else {
+                continue;
+            };
+            let Some(RiscOp::Load { name: label }) = dag.get(load).map(|node| &node.op) else {
+                continue;
+            };
+            entry_dim_declarations.push(((input_slots[label.as_str()], axis), name));
         }
-        entry_dim_declarations.sort_by(|left, right| {
-            left.slot
-                .is_none()
-                .cmp(&right.slot.is_none())
-                .then_with(|| left.slot.cmp(&right.slot))
-        });
-        for declaration in entry_dim_declarations {
-            let EntryDimDeclaration { name, extent, .. } = declaration;
-            self.line(&format!("int64_t {name} = {extent};"));
+        entry_dim_declarations.sort_by_key(|entry| entry.0);
+        for ((canonical_slot, canonical_axis), name) in entry_dim_declarations {
+            self.line(&format!(
+                "int64_t {} = chelis_tensor_shape(inputs[{canonical_slot}], {canonical_axis});",
+                name
+            ));
             self.declared_dim_names.insert(name);
         }
 
@@ -5990,14 +5964,18 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         let Some(names) = self.runtime_dim_sites.get(&(id, axis)).cloned() else {
             return;
         };
-        let mut source = extent_expr.to_string();
+        // Every name reads `extent_expr`, and after the first that variable
+        // holds the name declared before it, so two spellings of one extent
+        // land as `int64_t b = a;` rather than as a second read of the same
+        // expression.
+        let mut extent_expr = extent_expr.to_string();
         for name in names {
             if self.declared_dim_names.contains(&name) {
                 continue;
             }
             self.declared_dim_names.insert(name.clone());
-            self.line(&format!("int64_t {name} = {source};"));
-            source = name;
+            self.line(&format!("int64_t {name} = {extent_expr};"));
+            extent_expr = name;
         }
     }
 
