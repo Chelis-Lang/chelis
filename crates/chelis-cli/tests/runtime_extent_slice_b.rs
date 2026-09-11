@@ -3860,12 +3860,16 @@ fn an_overshooting_shrink_span_is_outside_this_slices_cross_lane_claim() {
 // of its provenance. §4.7.4 says such an extent is lowered as ordinary typed
 // integer dataflow and that eval, C, HIP and Metal execute the same graph.
 //
-// Before this change the two halves disagreed in opposite directions: the
-// checker admitted `mul(shape(x, 0), 2i64)` as shape-sourced and eval executed
-// an extent of `2n` under a result claimed as `n` with no equality guard,
-// while the compiled lanes refused to lower it at all. The rows below pin both
-// halves at once: the size lowers as an ordinary scalar-input extent, and the
-// claim it sits under is checked at execution on each lane.
+// Before this change the checker admitted `mul(shape(x, 0), 2i64)` as
+// shape-sourced and no lane could run it. Measured on `6dbbbf2bc`, by reverting
+// both source trees and rebuilding: under the value-binding root below, eval and
+// the C lane BOTH exit 1 with the chelis#469 lowering rejection; under a
+// `def main()` root, which inlines and takes the host path, eval exits 101 with
+// empty stdout and stderr, a suppressed `UnrepresentableDag` raise escaping as a
+// silent panic. chelis#1379 records eval printing `shape=[6]` unguarded, and
+// that is no longer what either root does. The rows below pin the repair: the
+// size lowers as an ordinary scalar-input extent, and the claim it sits under is
+// checked at execution on each lane.
 // ---------------------------------------------------------------------------
 
 /// chelis#1379's reproducer in the value-binding root form, with `claim`
@@ -3938,9 +3942,12 @@ fn a_checked_arithmetic_expand_size_that_agrees_with_its_claim_executes_on_c() {
 /// expand.arith_size.named_claim.eval
 ///
 /// EVIDENTIARY STATUS: regression test. Watched failing on the base of this
-/// change, where `chelis eval --file` printed `out = tensor(shape=[6], ...)`
-/// under the declared `tensor[n, f32]` with `n = 3` and exited zero, while the
-/// compiled lane refused the same program at lowering.
+/// change, where `chelis eval --file` exited 1 with the chelis#469 lowering
+/// rejection, the same refusal the compiled lane gave. It did NOT print
+/// `shape=[6]`: this root is a value binding, so eval routes it through the
+/// same lowering the C lane uses. Only the `def main()` root reaches the host
+/// path, and on the base that one exits 101 with empty output rather than
+/// printing an unguarded result.
 #[test]
 fn checked_arithmetic_expand_size_under_a_named_claim_agrees_on_every_lane_on_eval() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -5195,9 +5202,13 @@ fn a_checked_arithmetic_expand_size_is_guarded_in_the_expand_position_on_eval() 
     );
 }
 
-/// `sub`, `div` and a nested `add` reach the same admission and the same guard
-/// as `mul`. The walk combines operand classes rather than matching a spelling,
-/// so a repair keyed to one operator would leave the rest rejecting.
+/// `sub`, `floor_div`, `trunc_div`, `mod`, `neg` and nested combinations reach
+/// the same admission and the same guard as `mul`. The walk combines operand
+/// classes rather than matching a spelling, so a repair keyed to one operator
+/// would leave the rest rejecting. `div` is absent deliberately:
+/// `spec/05-risc-primitives.md` section 2.1 makes it float-only, so it cannot
+/// carry an `int64` extent and a row for it would fail on precision before
+/// reaching the size class.
 ///
 /// Each row states the arithmetic and the extent it computes from `n = 4`.
 ///
@@ -5388,18 +5399,23 @@ fn a_bare_runtime_scalar_expand_size_is_still_sourceless() {
     );
 }
 
-/// A computed size that goes NEGATIVE traps before allocation, which is what
-/// `spec/04-type-system.md` section 4.7.2 requires of a runtime negative size.
+/// A computed size that goes NEGATIVE traps before allocation on BOTH lanes,
+/// which is what `spec/04-type-system.md` section 4.7.2 requires of a runtime
+/// negative size. What the two lanes do NOT share is the rendering, and this
+/// row and its C twin below exist as a pair so that divergence is visible
+/// rather than implied by one lane's text.
 ///
-/// The RENDERING is not section 4.7's: the size shares the `RtDim::Node`
-/// carrier with `stride` and `slice` bounds, so it reports through that
-/// carrier's message, which says "movement bound" about an `insert` size and is
-/// not [04-NUM-9]'s `numeric trap` form. Newly reachable through chelis#1379's
-/// admission, because the only node-valued sizes before it came from extent
-/// witnesses, which carry real axis extents and are never negative. Tracked by
-/// chelis#1802; repairing it here would change text shared with rows this
-/// change does not own, so the wording is locked below and that issue has to
-/// update the lock.
+/// Eval reports through the `RtDim::Node` carrier it shares with `stride` and
+/// `slice` bounds, so it says "movement bound" about an `insert` size and never
+/// renders [04-NUM-9]'s form. C renders [04-NUM-9]'s form with section 4.7's
+/// context line and never renders the movement-bound message. Under a free
+/// result dim C says "Domain: expansion axis or extent outside domain" instead
+/// of the claim line, while eval's text does not change at all. Newly reachable
+/// through chelis#1379's admission, because the only node-valued sizes before
+/// it came from extent witnesses, which carry real axis extents and are never
+/// negative. Tracked by chelis#1802; repairing it would change text shared with
+/// rows this change does not own, so both lanes are locked here and that issue
+/// has to update both locks.
 ///
 /// EVIDENTIARY STATUS: disposition lock on the rendering, regression test on
 /// the trap. On `fc5b6aa99` the program was refused at lowering, so no lane
@@ -5421,5 +5437,129 @@ fn a_computed_expand_size_that_goes_negative_traps_before_allocation_on_eval() {
     assert!(
         !out.contains("shape=["),
         "and nothing is allocated before the trap: {out}"
+    );
+}
+
+/// The C twin of the negative-extent row, and the half that makes chelis#1802 a
+/// LANE DIVERGENCE rather than a wording problem: this lane renders
+/// [04-NUM-9]'s form with section 4.7's context, and the words "movement bound"
+/// appear nowhere in it.
+///
+/// EVIDENTIARY STATUS: disposition lock on the rendering, regression test on
+/// the trap. Measured on this head; on `6dbbbf2bc` the program did not build.
+#[test]
+fn a_computed_expand_size_that_goes_negative_traps_before_allocation_on_c() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = "def f(b: tensor[f32], x: tensor[n, f32]) -> tensor[n, f32] = \
+                  insert(b, 0, sub(shape(x, 0), 5i64))\n\
+                  seed = sum(to_tensor([1.0f32]), 0)\n\
+                  xs = to_tensor([1.0f32, 2.0f32])\n\
+                  out = f(seed, xs)\n";
+    let (ok, out) = c_run_result(&dir, "arith_negative_c", source);
+    assert!(!ok, "an extent of -3 must not produce a value: {out}");
+    assert!(
+        out.contains(&domain_trap_line("insert"))
+            && out.contains("extent `n`: claimed = 2, insert axis 0 = -3"),
+        "C renders [04-NUM-9]'s form with section 4.7's context: {out}"
+    );
+    assert!(
+        !out.contains("movement bound"),
+        "and never the movement-bound message eval uses for the same program \
+         (chelis#1802 is a lane divergence, not one wording): {out}"
+    );
+    assert!(
+        !out.contains("shape=["),
+        "nothing is allocated before the trap: {out}"
+    );
+}
+
+/// The same negative extent under a FREE result dim, where C loses the claim
+/// line and falls back to the operation's own domain message while eval's text
+/// is unchanged. Without this row the divergence above could be read as "C
+/// always names the claim", which is not what either lane does.
+///
+/// EVIDENTIARY STATUS: disposition lock, both lanes. Measured on this head.
+#[test]
+fn a_negative_computed_size_under_a_free_result_dim_diverges_by_lane() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = "def f(b: tensor[f32], x: tensor[n, f32]) -> tensor[m, f32] = \
+                  insert(b, 0, sub(shape(x, 0), 5i64))\n\
+                  seed = sum(to_tensor([1.0f32]), 0)\n\
+                  xs = to_tensor([1.0f32, 2.0f32])\n\
+                  out = f(seed, xs)\n";
+    let (c_ok, c_out) = c_run_result(&dir, "arith_negative_free_c", source);
+    let (eval_ok, eval_out) = eval_result(&dir, "arith_negative_free_eval.ch", source);
+    assert!(
+        !c_ok && !eval_ok,
+        "neither lane produces a value: {c_out} {eval_out}"
+    );
+    assert!(
+        c_out.contains("Domain: expansion axis or extent outside domain")
+            && c_out.contains(&domain_trap_line("insert")),
+        "with no claim to name, C reports the operation's own domain: {c_out}"
+    );
+    assert!(
+        eval_out.contains("must be a non-negative integer, got -3"),
+        "eval's rendering does not change with the claim shape: {eval_out}"
+    );
+}
+
+/// The C twin of the operator row. The eval row above covers the whole family;
+/// this one links and runs a binary for a disagreeing and an agreeing member of
+/// it, which is what lets the claim say the family "executes on eval and C"
+/// rather than "on eval, and on C for `mul`".
+///
+/// Two members rather than six: each row here compiles and links a binary, and
+/// the property under test is that the operator reaches the same admission and
+/// the same guard on this lane, not that every spelling has its own C process.
+///
+/// EVIDENTIARY STATUS: regression test. Both were refused at lowering on
+/// `6dbbbf2bc` with the chelis#469 rejection.
+#[test]
+fn checked_arithmetic_operators_reach_the_same_guard_on_c() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = |size: &str| {
+        format!(
+            "def f(b: tensor[f32], x: tensor[n, f32]) -> tensor[n, f32] = insert(b, 0, {size})\n\
+             seed = sum(to_tensor([1.0f32]), 0)\n\
+             xs = to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32])\n\
+             out = f(seed, xs)\n"
+        )
+    };
+
+    // `floor_div` is the operator the shared static folder already walked and
+    // the provenance walk did not, so it is the one whose admission this change
+    // added; 4 / 2 = 2 disagrees with the claim of 4.
+    let (ok, out) = c_run_result(
+        &dir,
+        "arith_op_floor_div_c",
+        &source("floor_div(shape(x, 0), 2i64)"),
+    );
+    assert!(!ok, "2 under a claim of 4 must not produce a value: {out}");
+    assert!(
+        out.contains(&domain_trap_line("insert"))
+            && out.contains("extent `n`: claimed = 4, insert axis 0 = 2"),
+        "`floor_div` reaches the same guard on C as on eval: {out}"
+    );
+
+    // The agreeing control, nested so the walk has to combine three operands.
+    let (ok, out) = c_run_result(
+        &dir,
+        "arith_op_nested_ok_c",
+        &source("mul(floor_div(shape(x, 0), 2i64), 2i64)"),
+    );
+    assert!(ok, "the nested form agrees, so the binary must run: {out}");
+    assert!(
+        out.contains("shape=[4]"),
+        "and produces the declared shape exactly: {out}"
     );
 }

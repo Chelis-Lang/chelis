@@ -729,10 +729,15 @@ The recorded phase-B corpus has 57 rows, 2 of them short of exit:
 #1266/#569's and both owned by B2b-2. This is baseline metadata, not a fresh
 execution receipt; `--phase b --allow-shortfall` prints the same pair as
 `runtime_extent_rows_short` and `runtime_extent_rows_short_list`, which is the
-count to quote, because it is the oracle's own accounting and a hand count of
-the JSON's `phase_b` column reaches a different number by treating
-`shrink.elementwise_const.build`'s registered `typed_unsupported(#1482)` as a
-shortfall. The op-computed local guards moved seven rows
+count to quote. A hand count of the JSON's `phase_b` column reaches 5 instead,
+because that column holds 52 `executes_exactly` and five other values, only two
+of which are shortfalls. `expand.positional.replacement.non_unit_source_static`
+and `shrink.to_end.nonzero_start` are `rejects_exactly`, which is an exit state:
+those programs are SUPPOSED to be rejected and a row that stopped rejecting them
+would be the defect. `shrink.elementwise_const.build` is a registered
+`typed_unsupported(#1482)`, an owned receipt rather than an unexplained gap. Only
+`expand.piped_shape_read.lint_fix` and `expand.record_projection.size`, the two
+`nonconforming_rejection` rows, are short. The op-computed local guards moved seven rows
 (`expand.shape_derived.declared_result_survives.{c,eval}`,
 `class.load_op_output.eval`, `class.op_output_op_output.{c,eval}` and
 `class.splice_f_of_n_n.{c,eval}`) and the six `shrink.*` preparation cells, and
