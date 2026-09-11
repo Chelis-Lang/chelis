@@ -3925,7 +3925,10 @@ fn a_checked_arithmetic_expand_size_that_agrees_with_its_claim_executes_on_c() {
     }
     let dir = tempfile::tempdir().expect("tempdir");
     let (ok, out) = c_run_result(&dir, "arith_size_ok_c", &arith_size_source("n", 1));
-    assert!(ok, "the computed extent agrees, so the binary must run: {out}");
+    assert!(
+        ok,
+        "the computed extent agrees, so the binary must run: {out}"
+    );
     assert!(
         out.contains("shape=[3]") && out.contains("data=[1.0, 1.0, 1.0]"),
         "the agreeing program produces its declared shape exactly: {out}"
@@ -5233,7 +5236,9 @@ fn every_checked_arithmetic_operator_is_an_admissible_expand_size_on_eval() {
         } else {
             assert!(
                 out.contains(&domain_trap_line("insert"))
-                    && out.contains(&format!("extent `n`: claimed = 4, insert axis 0 = {extent}")),
+                    && out.contains(&format!(
+                        "extent `n`: claimed = 4, insert axis 0 = {extent}"
+                    )),
                 "`{size}` disagrees, so its guard names both sides: {out}"
             );
         }
@@ -5256,7 +5261,10 @@ fn arithmetic_over_two_tensors_is_guarded_against_the_value_it_computes_on_eval(
                   ys = to_tensor([1.0f32, 2.0f32])\n\
                   out = f(seed, xs, ys)\n";
     let (ok, out) = eval_result(&dir, "arith_two_tensors.ch", source);
-    assert!(!ok, "3 + 2 under a claim of 3 must not produce a value: {out}");
+    assert!(
+        !ok,
+        "3 + 2 under a claim of 3 must not produce a value: {out}"
+    );
     assert!(
         out.contains("extent `n`: claimed = 3, insert axis 0 = 5"),
         "the observed side is the sum, not either operand's own axis: {out}"
@@ -5348,7 +5356,10 @@ fn arithmetic_over_a_scalar_with_no_tensor_source_is_still_sourceless() {
              out = f(seed, 3i64)\n"
         );
         let (ok, out) = eval_result(&dir, &format!("{name}.ch"), &source);
-        assert!(!ok, "`{size}` has no shape source and must be rejected: {out}");
+        assert!(
+            !ok,
+            "`{size}` has no shape source and must be rejected: {out}"
+        );
         assert!(
             out.contains("`insert` size resolves to a runtime scalar, but no tensor in scope")
                 && out.contains("chelis#469"),
