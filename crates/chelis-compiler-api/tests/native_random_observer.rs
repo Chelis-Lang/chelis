@@ -12,6 +12,7 @@ fn observed_source() -> String {
 def fixed_loss(x: tensor[4, f32]) -> f32 = with seed(7i64) {
   tensor_to_scalar(sum(dropout(x, 0.5f32), 0))
 }
+
 def run(x: tensor[4, f32]) -> (tensor[4, f32], tensor[4, f32], tensor[4, f32]) = with seed(42i64) {
   replayed = grad(fixed_loss)(x)
   nested = with seed(99i64) { dropout(x, 0.5f32) }
@@ -23,41 +24,73 @@ def run(x: tensor[4, f32]) -> (tensor[4, f32], tensor[4, f32], tensor[4, f32]) =
     )
 }
 
+#[test]
+fn authored_observer_spellings_do_not_collide_with_private_support_or_wrappers() {
+    let source = ownership_support::emit_selected(
+        r#"
+def victim(x: f32) -> f32 = x
+def victim__chelis_observed(x: f32) -> f32 = x
+def chelis_random_observer(x: f32) -> f32 = x
+def chelis_random_observer_record(x: f32) -> f32 = x
+def chelis_random_observer_state_of(x: f32) -> f32 = x
+def run(x: f32) -> f32 = add(add(victim(x), victim__chelis_observed(x)), add(chelis_random_observer(x), add(chelis_random_observer_record(x), chelis_random_observer_state_of(x))))
+"#,
+        "run",
+    );
+    let driver = r#"
+static int count_event(void *context, const __chelis_random_observer_event *event) {
+    assert(event->kind == __CHELIS_RANDOM_OBSERVER_INVOCATION_INIT);
+    ++*(int *)context;
+    return 0;
+}
+int main(void) {
+    chelis_tensor *receipt = input(1);
+    int count = 0;
+    assert(run(2.0f) == 10.0f);
+    assert(__chelis_observed_run(2.0f, count_event, &count, 11ULL) == 10.0f);
+    assert(count == 1);
+    chelis_tensor_release(receipt);
+    return 0;
+}
+"#;
+    ownership_support::balanced(&ownership_support::run(&source, driver));
+}
+
 const JSON_SINK: &str = r#"
-static const char *event_name(chelis_random_observer_event_kind kind) {
+static const char *event_name(__chelis_random_observer_event_kind kind) {
     switch (kind) {
-        case CHELIS_RANDOM_OBSERVER_INVOCATION_INIT: return "invocation_init";
-        case CHELIS_RANDOM_OBSERVER_HOST_INSTALL: return "host_install";
-        case CHELIS_RANDOM_OBSERVER_HOST_RESTORE: return "host_restore";
-        case CHELIS_RANDOM_OBSERVER_FIXED_ENTER: return "fixed_enter";
-        case CHELIS_RANDOM_OBSERVER_FIXED_LEAVE: return "fixed_leave";
-        case CHELIS_RANDOM_OBSERVER_FORWARD: return "forward";
-        case CHELIS_RANDOM_OBSERVER_REPLAY: return "replay";
+        case __CHELIS_RANDOM_OBSERVER_INVOCATION_INIT: return "invocation_init";
+        case __CHELIS_RANDOM_OBSERVER_HOST_INSTALL: return "host_install";
+        case __CHELIS_RANDOM_OBSERVER_HOST_RESTORE: return "host_restore";
+        case __CHELIS_RANDOM_OBSERVER_FIXED_ENTER: return "fixed_enter";
+        case __CHELIS_RANDOM_OBSERVER_FIXED_LEAVE: return "fixed_leave";
+        case __CHELIS_RANDOM_OBSERVER_FORWARD: return "forward";
+        case __CHELIS_RANDOM_OBSERVER_REPLAY: return "replay";
     }
     return "invalid";
 }
-static int put_u64(FILE *out, chelis_random_observer_u64 value) {
+static int put_u64(FILE *out, __chelis_random_observer_u64 value) {
     return fprintf(out, "{\"u64\":\"%" PRIu64 "\"}", value.value) < 0 ? -1 : 0;
 }
-static int put_state(FILE *out, chelis_random_observer_state state) {
+static int put_state(FILE *out, __chelis_random_observer_state state) {
     if (!state.active) return fputs("{\"active\":false,\"seed\":null,\"counter\":null}", out) < 0 ? -1 : 0;
     if (fputs("{\"active\":true,\"seed\":", out) < 0 || put_u64(out, state.seed) ||
         fputs(",\"counter\":", out) < 0 || put_u64(out, state.counter) || fputc('}', out) == EOF) return -1;
     return 0;
 }
-static int json_sink(void *context, const chelis_random_observer_event *event) {
+static int json_sink(void *context, const __chelis_random_observer_event *event) {
     FILE *out = (FILE *)context;
-    const chelis_random_observer_frame *frames[16];
+    const __chelis_random_observer_frame *frames[16];
     size_t depth = 0;
-    for (const chelis_random_observer_frame *frame = event->saved; frame != NULL; frame = frame->previous) {
+    for (const __chelis_random_observer_frame *frame = event->saved; frame != NULL; frame = frame->previous) {
         if (depth == 16) return -1;
         frames[depth++] = frame;
     }
     if (fprintf(out, "{\"schema\":\"chelis-native-random-observation-v1\",\"invocation\":") < 0 ||
         put_u64(out, event->invocation) || fputs(",\"sequence\":", out) < 0 ||
         put_u64(out, event->sequence) || fprintf(out, ",\"event\":\"%s\",\"identity\":\"%s\",\"producer\":",
-            event_name(event->kind), event->identity == CHELIS_RANDOM_OBSERVER_FIXED_IDENTITY ? "fixed" :
-            event->identity == CHELIS_RANDOM_OBSERVER_HOST_IDENTITY_UNSUPPORTED ? "unsupported_host" : "invocation") < 0) return -1;
+            event_name(event->kind), event->identity == __CHELIS_RANDOM_OBSERVER_FIXED_IDENTITY ? "fixed" :
+            event->identity == __CHELIS_RANDOM_OBSERVER_HOST_IDENTITY_UNSUPPORTED ? "unsupported_host" : "invocation") < 0) return -1;
     if (event->producer != NULL) {
         if (fprintf(out, "\"%s\"", event->producer) < 0) return -1;
     } else if (fputs("null", out) < 0) return -1;
@@ -70,7 +103,7 @@ static int json_sink(void *context, const chelis_random_observer_event *event) {
     if (fputs(",\"state\":", out) < 0 || put_state(out, event->state) || fputs(",\"saved\":[", out) < 0) return -1;
     for (size_t i = depth; i > 0; --i) {
         if (i != depth && fputc(',', out) == EOF) return -1;
-        if (put_state(out, chelis_random_observer_state_of(frames[i - 1]->state))) return -1;
+        if (put_state(out, __chelis_random_observer_state_of(frames[i - 1]->state))) return -1;
     }
     if (fputs("],\"used\":", out) < 0) return -1;
     if (event->has_used) {
@@ -91,12 +124,12 @@ fn driver(invocation: u64, sink: &str) -> String {
     format!(
         r#"
 {JSON_SINK}
-static int selected_sink(void *context, const chelis_random_observer_event *event) {{
+static int selected_sink(void *context, const __chelis_random_observer_event *event) {{
     {sink}
 }}
 int main(void) {{
     chelis_tensor *x = input(4);
-    chelis_tuple *result = run__chelis_observed(x, selected_sink, stdout, {invocation}ULL);
+    chelis_tuple *result = __chelis_observed_run(x, selected_sink, stdout, {invocation}ULL);
     chelis_tuple_release(result);
     chelis_tensor_release(x);
     return 0;
@@ -257,7 +290,7 @@ fn expected_rows() -> Vec<Value> {
 #[test]
 fn nested_host_and_fixed_frames_record_actual_forward_replay_and_restoration() {
     let c = observed_source();
-    assert!(c.contains("static chelis_tuple* run__chelis_observed("));
+    assert!(c.contains("static chelis_tuple* __chelis_observed_run("));
     let (summary, stdout) =
         ownership_support::run_with_stdout(&c, &driver(17, "return json_sink(context, event);"));
     ownership_support::balanced(&summary);
@@ -301,7 +334,7 @@ typedef struct {{ FILE *stream; uint64_t invocation; }} observer_task;
 static void *run_observed(void *raw) {{
     observer_task *task = (observer_task *)raw;
     chelis_tensor *x = input(4);
-    chelis_tuple *result = run__chelis_observed(x, json_sink, task->stream, task->invocation);
+    chelis_tuple *result = __chelis_observed_run(x, json_sink, task->stream, task->invocation);
     chelis_tuple_release(result);
     chelis_tensor_release(x);
     return NULL;
@@ -342,7 +375,7 @@ int main(void) {{
 fn feature_on_ordinary_public_call_emits_no_observation() {
     let c = observed_source();
     assert!(c.contains("chelis_tuple* run(chelis_tensor* x)"));
-    assert!(c.contains("static chelis_tuple* run__chelis_observed("));
+    assert!(c.contains("static chelis_tuple* __chelis_observed_run("));
     let driver = r#"
 int main(void) {
     chelis_tensor *x = input(4);
@@ -391,12 +424,12 @@ fn rejection_only_max_counter_mutant_wraps_native_copy_and_fails_nonwrapping_che
 {JSON_SINK}
 int main(void) {{
     chelis_tensor *x = input(1);
-    chelis_random_observer observer = {{json_sink, stdout, {{31ULL}}, {{0ULL}}, NULL}};
+    __chelis_random_observer observer = {{json_sink, stdout, {{31ULL}}, {{0ULL}}, NULL}};
     chelis_rng_state rejection_only = {{5ULL, UINT64_MAX, 1}};
-    chelis_random_observer_record(
+    __chelis_random_observer_record(
         &observer,
-        CHELIS_RANDOM_OBSERVER_FORWARD,
-        CHELIS_RANDOM_OBSERVER_FIXED_IDENTITY,
+        __CHELIS_RANDOM_OBSERVER_FORWARD,
+        __CHELIS_RANDOM_OBSERVER_FIXED_IDENTITY,
         "rejection-only-mutant",
         1, 0ULL, 1, 0ULL, 1, 0ULL,
         rejection_only,

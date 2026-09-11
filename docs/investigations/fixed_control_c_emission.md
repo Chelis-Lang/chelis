@@ -83,7 +83,7 @@ initialization, host seed install/restore, fixed-helper enter/leave, forward
 post-increment, and replay without increment. Every event carries the current
 active flag and exact seed/counter, the complete linked stack of live saved
 frames, and an observer-only continuation made by incrementing a copy. Numeric
-fields use the private `chelis_random_observer_u64` carrier; the test driver
+fields use the private `__chelis_random_observer_u64` carrier; the test driver
 serializes them as tagged decimal strings and never routes them through a C or
 JSON float. The native successor still wraps. A consumer must reject a
 `UINT64_MAX` counter through its separate nonwrapping check rather than treating

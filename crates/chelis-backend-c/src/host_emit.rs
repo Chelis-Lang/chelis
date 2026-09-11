@@ -2031,14 +2031,14 @@ fn emit_function(
         #[cfg(feature = "native-random-observer")]
         {
             let observed_params = if wrapper_params.is_empty() {
-                "chelis_random_observer_sink __chelis_sink, void *__chelis_sink_context, uint64_t __chelis_invocation".to_string()
+                "__chelis_random_observer_sink __chelis_sink, void *__chelis_sink_context, uint64_t __chelis_invocation".to_string()
             } else {
                 format!(
-                    "{wrapper_params}, chelis_random_observer_sink __chelis_sink, void *__chelis_sink_context, uint64_t __chelis_invocation"
+                    "{wrapper_params}, __chelis_random_observer_sink __chelis_sink, void *__chelis_sink_context, uint64_t __chelis_invocation"
                 )
             };
             out.push(format!(
-                "static {} {}__chelis_observed({observed_params}) {{",
+                "static {} __chelis_observed_{}({observed_params}) {{",
                 c_type(&function.ret_ty)?,
                 emitted_name
             ));
@@ -3880,8 +3880,8 @@ impl<'a> HostEmitter<'a> {
                 #[cfg(feature = "native-random-observer")]
                 self.lines.push(crate::random_observer::record(
                     &self.indent,
-                    "CHELIS_RANDOM_OBSERVER_HOST_INSTALL",
-                    "CHELIS_RANDOM_OBSERVER_HOST_IDENTITY_UNSUPPORTED",
+                    "__CHELIS_RANDOM_OBSERVER_HOST_INSTALL",
+                    "__CHELIS_RANDOM_OBSERVER_HOST_IDENTITY_UNSUPPORTED",
                     "NULL",
                     None,
                     None,
@@ -3900,8 +3900,8 @@ impl<'a> HostEmitter<'a> {
                     ));
                     self.lines.push(crate::random_observer::record(
                         &self.indent,
-                        "CHELIS_RANDOM_OBSERVER_HOST_RESTORE",
-                        "CHELIS_RANDOM_OBSERVER_HOST_IDENTITY_UNSUPPORTED",
+                        "__CHELIS_RANDOM_OBSERVER_HOST_RESTORE",
+                        "__CHELIS_RANDOM_OBSERVER_HOST_IDENTITY_UNSUPPORTED",
                         "NULL",
                         None,
                         None,

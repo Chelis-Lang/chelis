@@ -5,7 +5,7 @@
 //! the observer cannot retain an unbounded event history in generated code.
 
 pub(crate) const PRIVATE_PARAM: &str =
-    "chelis_rng_state *__chelis_rng, chelis_random_observer *__chelis_observer";
+    "chelis_rng_state *__chelis_rng, __chelis_random_observer *__chelis_observer";
 pub(crate) const PRIVATE_ARGS: &[&str] = &["__chelis_rng", "__chelis_observer"];
 
 pub(crate) fn append_support(out: &mut Vec<String>) {
@@ -14,22 +14,22 @@ pub(crate) fn append_support(out: &mut Vec<String>) {
 
 pub(crate) fn append_inactive_context(out: &mut Vec<String>, indent: &str) {
     out.push(format!(
-        "{indent}chelis_random_observer *__chelis_observer = NULL;"
+        "{indent}__chelis_random_observer *__chelis_observer = NULL;"
     ));
 }
 
 pub(crate) fn append_observed_context(out: &mut Vec<String>, indent: &str) {
     out.push(format!("{indent}if (__chelis_sink == NULL) {{ abort(); }}"));
     out.push(format!(
-        "{indent}chelis_random_observer __chelis_observer_local = {{__chelis_sink, __chelis_sink_context, {{__chelis_invocation}}, {{0ULL}}, NULL}};"
+        "{indent}__chelis_random_observer __chelis_observer_local = {{__chelis_sink, __chelis_sink_context, {{__chelis_invocation}}, {{0ULL}}, NULL}};"
     ));
     out.push(format!(
-        "{indent}chelis_random_observer *__chelis_observer = &__chelis_observer_local;"
+        "{indent}__chelis_random_observer *__chelis_observer = &__chelis_observer_local;"
     ));
     out.push(record(
         indent,
-        "CHELIS_RANDOM_OBSERVER_INVOCATION_INIT",
-        "CHELIS_RANDOM_OBSERVER_INVOCATION_IDENTITY",
+        "__CHELIS_RANDOM_OBSERVER_INVOCATION_INIT",
+        "__CHELIS_RANDOM_OBSERVER_INVOCATION_IDENTITY",
         "NULL",
         None,
         None,
@@ -46,7 +46,7 @@ pub(crate) fn push_frame(
 ) -> Vec<String> {
     vec![
         format!(
-            "{indent}chelis_random_observer_frame {frame_var} = {{{saved_state_expression}, __chelis_observer != NULL ? __chelis_observer->saved : NULL}};"
+            "{indent}__chelis_random_observer_frame {frame_var} = {{{saved_state_expression}, __chelis_observer != NULL ? __chelis_observer->saved : NULL}};"
         ),
         format!(
             "{indent}if (__chelis_observer != NULL) {{ __chelis_observer->saved = &{frame_var}; }}"
@@ -80,7 +80,7 @@ pub(crate) fn record(
         None => ("0", "0ULL", "0ULL"),
     };
     format!(
-        "{indent}chelis_random_observer_record(__chelis_observer, {event}, {identity}, {producer}, {has_occurrence}, {occurrence}, {has_draw}, {draw}, {has_scope}, {scope}, {state_expression}, {has_used}, {used_seed}, {used_counter});"
+        "{indent}__chelis_random_observer_record(__chelis_observer, {event}, {identity}, {producer}, {has_occurrence}, {occurrence}, {has_draw}, {draw}, {has_scope}, {scope}, {state_expression}, {has_used}, {used_seed}, {used_counter});"
     )
 }
 
@@ -92,68 +92,68 @@ fn optional_u64(value: Option<usize>) -> (&'static str, String) {
 }
 
 const SUPPORT: &str = r#"/* CHELIS_NATIVE_RANDOM_OBSERVER_BEGIN */
-typedef struct { uint64_t value; } chelis_random_observer_u64;
+typedef struct { uint64_t value; } __chelis_random_observer_u64;
 typedef struct {
     int active;
-    chelis_random_observer_u64 seed;
-    chelis_random_observer_u64 counter;
-} chelis_random_observer_state;
-typedef struct chelis_random_observer_frame {
+    __chelis_random_observer_u64 seed;
+    __chelis_random_observer_u64 counter;
+} __chelis_random_observer_state;
+typedef struct __chelis_random_observer_frame {
     chelis_rng_state state;
-    const struct chelis_random_observer_frame *previous;
-} chelis_random_observer_frame;
+    const struct __chelis_random_observer_frame *previous;
+} __chelis_random_observer_frame;
 typedef enum {
-    CHELIS_RANDOM_OBSERVER_INVOCATION_INIT,
-    CHELIS_RANDOM_OBSERVER_HOST_INSTALL,
-    CHELIS_RANDOM_OBSERVER_HOST_RESTORE,
-    CHELIS_RANDOM_OBSERVER_FIXED_ENTER,
-    CHELIS_RANDOM_OBSERVER_FIXED_LEAVE,
-    CHELIS_RANDOM_OBSERVER_FORWARD,
-    CHELIS_RANDOM_OBSERVER_REPLAY
-} chelis_random_observer_event_kind;
+    __CHELIS_RANDOM_OBSERVER_INVOCATION_INIT,
+    __CHELIS_RANDOM_OBSERVER_HOST_INSTALL,
+    __CHELIS_RANDOM_OBSERVER_HOST_RESTORE,
+    __CHELIS_RANDOM_OBSERVER_FIXED_ENTER,
+    __CHELIS_RANDOM_OBSERVER_FIXED_LEAVE,
+    __CHELIS_RANDOM_OBSERVER_FORWARD,
+    __CHELIS_RANDOM_OBSERVER_REPLAY
+} __chelis_random_observer_event_kind;
 typedef enum {
-    CHELIS_RANDOM_OBSERVER_INVOCATION_IDENTITY,
-    CHELIS_RANDOM_OBSERVER_HOST_IDENTITY_UNSUPPORTED,
-    CHELIS_RANDOM_OBSERVER_FIXED_IDENTITY
-} chelis_random_observer_identity_kind;
+    __CHELIS_RANDOM_OBSERVER_INVOCATION_IDENTITY,
+    __CHELIS_RANDOM_OBSERVER_HOST_IDENTITY_UNSUPPORTED,
+    __CHELIS_RANDOM_OBSERVER_FIXED_IDENTITY
+} __chelis_random_observer_identity_kind;
 typedef struct {
-    chelis_random_observer_event_kind kind;
-    chelis_random_observer_identity_kind identity;
+    __chelis_random_observer_event_kind kind;
+    __chelis_random_observer_identity_kind identity;
     const char *producer;
-    chelis_random_observer_u64 invocation;
-    chelis_random_observer_u64 sequence;
+    __chelis_random_observer_u64 invocation;
+    __chelis_random_observer_u64 sequence;
     int has_occurrence;
-    chelis_random_observer_u64 occurrence;
+    __chelis_random_observer_u64 occurrence;
     int has_draw;
-    chelis_random_observer_u64 draw;
+    __chelis_random_observer_u64 draw;
     int has_scope;
-    chelis_random_observer_u64 scope;
-    chelis_random_observer_state state;
-    const chelis_random_observer_frame *saved;
+    __chelis_random_observer_u64 scope;
+    __chelis_random_observer_state state;
+    const __chelis_random_observer_frame *saved;
     int has_used;
-    chelis_random_observer_u64 used_seed;
-    chelis_random_observer_u64 used_counter;
+    __chelis_random_observer_u64 used_seed;
+    __chelis_random_observer_u64 used_counter;
     int has_continuation;
-    chelis_random_observer_u64 continuation_seed;
-    chelis_random_observer_u64 continuation_counter;
-    chelis_random_observer_u64 continuation_successor;
-} chelis_random_observer_event;
-typedef int (*chelis_random_observer_sink)(void *, const chelis_random_observer_event *);
+    __chelis_random_observer_u64 continuation_seed;
+    __chelis_random_observer_u64 continuation_counter;
+    __chelis_random_observer_u64 continuation_successor;
+} __chelis_random_observer_event;
+typedef int (*__chelis_random_observer_sink)(void *, const __chelis_random_observer_event *);
 typedef struct {
-    chelis_random_observer_sink sink;
+    __chelis_random_observer_sink sink;
     void *sink_context;
-    chelis_random_observer_u64 invocation;
-    chelis_random_observer_u64 sequence;
-    const chelis_random_observer_frame *saved;
-} chelis_random_observer;
-static inline chelis_random_observer_state chelis_random_observer_state_of(chelis_rng_state state) {
-    chelis_random_observer_state observed = {state.active, {state.seed}, {state.counter}};
+    __chelis_random_observer_u64 invocation;
+    __chelis_random_observer_u64 sequence;
+    const __chelis_random_observer_frame *saved;
+} __chelis_random_observer;
+static inline __chelis_random_observer_state __chelis_random_observer_state_of(chelis_rng_state state) {
+    __chelis_random_observer_state observed = {state.active, {state.seed}, {state.counter}};
     return observed;
 }
-static inline void chelis_random_observer_record(
-    chelis_random_observer *observer,
-    chelis_random_observer_event_kind kind,
-    chelis_random_observer_identity_kind identity,
+static inline void __chelis_random_observer_record(
+    __chelis_random_observer *observer,
+    __chelis_random_observer_event_kind kind,
+    __chelis_random_observer_identity_kind identity,
     const char *producer,
     int has_occurrence,
     uint64_t occurrence,
@@ -168,10 +168,10 @@ static inline void chelis_random_observer_record(
 ) {
     if (observer == NULL) return;
     chelis_rng_state continuation = state;
-    chelis_random_observer_event event = {
+    __chelis_random_observer_event event = {
         kind, identity, producer, observer->invocation, observer->sequence,
         has_occurrence, {occurrence}, has_draw, {draw}, has_scope, {scope},
-        chelis_random_observer_state_of(state), observer->saved,
+        __chelis_random_observer_state_of(state), observer->saved,
         has_used, {used_seed}, {used_counter},
         continuation.active, {continuation.seed}, {continuation.counter}, {0ULL}
     };

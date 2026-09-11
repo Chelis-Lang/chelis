@@ -48,7 +48,7 @@ fn private_random_context_param() -> &'static str {
 
 #[cfg(feature = "native-random-observer")]
 fn private_random_context_param() -> &'static str {
-    ", chelis_rng_state *__chelis_rng, chelis_random_observer *__chelis_observer"
+    ", chelis_rng_state *__chelis_rng, __chelis_random_observer *__chelis_observer"
 }
 
 fn unsupported_verified_dag_action(node: NodeId, detail: &str) -> Unsupported {
@@ -765,8 +765,8 @@ impl CEmitter {
                         e.line("__chelis_fixed_active = 1;");
                         e.line(&crate::random_observer::record(
                             "",
-                            "CHELIS_RANDOM_OBSERVER_FIXED_ENTER",
-                            "CHELIS_RANDOM_OBSERVER_FIXED_IDENTITY",
+                            "__CHELIS_RANDOM_OBSERVER_FIXED_ENTER",
+                            "__CHELIS_RANDOM_OBSERVER_FIXED_IDENTITY",
                             &format!("\"{func_name_fmt}\""),
                             Some(_occurrence.index()),
                             None,
@@ -794,8 +794,8 @@ impl CEmitter {
                         ));
                         e.line(&crate::random_observer::record(
                             "",
-                            "CHELIS_RANDOM_OBSERVER_FIXED_LEAVE",
-                            "CHELIS_RANDOM_OBSERVER_FIXED_IDENTITY",
+                            "__CHELIS_RANDOM_OBSERVER_FIXED_LEAVE",
+                            "__CHELIS_RANDOM_OBSERVER_FIXED_IDENTITY",
                             &format!("\"{func_name_fmt}\""),
                             Some(_occurrence.index()),
                             None,
@@ -821,8 +821,8 @@ impl CEmitter {
                 if private_random_context {
                     e.line(&crate::random_observer::record(
                         "",
-                        "CHELIS_RANDOM_OBSERVER_FORWARD",
-                        "CHELIS_RANDOM_OBSERVER_FIXED_IDENTITY",
+                        "__CHELIS_RANDOM_OBSERVER_FORWARD",
+                        "__CHELIS_RANDOM_OBSERVER_FIXED_IDENTITY",
                         &format!("\"{func_name_fmt}\""),
                         forward_occurrences.get(&node.id.0).copied(),
                         Some(index),
@@ -843,8 +843,8 @@ impl CEmitter {
                 let index = draw.index();
                 e.line(&crate::random_observer::record(
                     "",
-                    "CHELIS_RANDOM_OBSERVER_REPLAY",
-                    "CHELIS_RANDOM_OBSERVER_FIXED_IDENTITY",
+                    "__CHELIS_RANDOM_OBSERVER_REPLAY",
+                    "__CHELIS_RANDOM_OBSERVER_FIXED_IDENTITY",
                     &format!("\"{func_name_fmt}\""),
                     None,
                     Some(index),
