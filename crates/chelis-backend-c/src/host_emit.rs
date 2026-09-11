@@ -1618,22 +1618,21 @@ fn append_helper(
     helper_name: &str,
 ) -> Result<HelperRequirements, Unsupported> {
     let helper_name = random_helper_name(helper_name);
-    if verified.execution().is_none() {
-        if let Some((_input_name, _input_ty)) =
+    if verified.execution().is_none()
+        && let Some((_input_name, _input_ty)) =
             verified_identity_helper_input(helper, verified.dag())
-        {
-            out.push(format!(
+    {
+        out.push(format!(
                 "static void {}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out, chelis_rng_state *__chelis_rng) {{",
                 helper_name,
             ));
-            out.push("    (void)n_in;".to_string());
-            out.push("    (void)n_out;".to_string());
-            out.push("    (void)__chelis_rng;".to_string());
-            out.push("    outputs[0] = inputs[0];".to_string());
-            out.push("}".to_string());
-            out.push(String::new());
-            return Ok(HelperRequirements::default());
-        }
+        out.push("    (void)n_in;".to_string());
+        out.push("    (void)n_out;".to_string());
+        out.push("    (void)__chelis_rng;".to_string());
+        out.push("    outputs[0] = inputs[0];".to_string());
+        out.push("}".to_string());
+        out.push(String::new());
+        return Ok(HelperRequirements::default());
     }
 
     // Tensor helpers are TU-internal: they are only called from within this
@@ -1663,8 +1662,10 @@ fn append_helper(
     // redefinition. We filter the prelude out here and rely on
     // `emit_host_program` to emit exactly one copy at file scope.
     let mut skipping_helper_prelude = false;
-    let mut requirements = HelperRequirements::default();
-    requirements.needs_fixed_dropout_helpers = verified.execution().is_some();
+    let mut requirements = HelperRequirements {
+        needs_fixed_dropout_helpers: verified.execution().is_some(),
+        ..HelperRequirements::default()
+    };
     for line in helper_src.lines() {
         if line.starts_with("#include ") {
             if line.contains("\"chelis_blas.h\"") {
