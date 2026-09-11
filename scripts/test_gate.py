@@ -2343,6 +2343,13 @@ class CiParityTests(unittest.TestCase):
                 "junit-linux-generalization-${{ matrix.shard }}",
                 "target/nextest/ci-full/junit.xml",
             ),
+            # chelis#1819: the nightly workspace suite is a four-way hash
+            # partition, so its report is one artifact per shard. A shared
+            # name would collide on upload and strand the telemetry download.
+            "full-workspace": (
+                "junit-linux-full-${{ matrix.shard }}",
+                "target/nextest/ci-full/junit.xml",
+            ),
             "macos-workspace-shard": (
                 "junit-macos-workspace-${{ matrix.shard }}",
                 "target/nextest/ci-full/junit.xml",
@@ -2837,6 +2844,14 @@ class CiParityTests(unittest.TestCase):
         # shard recompiled the workspace a second time (4.4 hosted minutes).
         self.assertNotIn("GeneralizationPartitionTests", workspace_block)
         self.assertNotIn("ProfilePartitionTests", generalization_block)
+        # Both jobs are partitioned, and neither census is part of its job's
+        # partition: each lists the whole workspace once. One shard owns it,
+        # or four runners repeat the same listing.
+        self.assertIn(
+            "- name: Verify nextest profile coverage\n"
+            "        if: matrix.shard == 1",
+            workspace_block,
+        )
         self.assertIn(
             "- name: Verify generalization lane selection\n"
             "        if: matrix.shard == 1",
