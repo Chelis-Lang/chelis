@@ -424,23 +424,12 @@ jobs:
           shared-key: linux-workspace
           save-if: false
 
-      # Phase A must PASS, and does: its `symbolic_window` target runs
-      # `issue_368_runtime_symbolic_window_grad_is_half_everywhere`, whose
-      # `grad` lowering regressed in chelis#1693 and was repaired under
-      # chelis#1775. A red here is again the signal that a row is short or a
-      # receipt drifted, not a known outstanding regression. Do not add
-      # `continue-on-error`.
-      - name: Runtime extent oracle (phase A)
-        run: .venv/bin/python scripts/runtime_extent_oracle.py --phase a
-
-      # Phase B must PASS too. Every row chelis#1277's B2b slices recorded
-      # short has reached an exit state, so the B2b-3 flip dropped
-      # `--allow-shortfall` from this step: a row that falls back to a start
-      # state now fails the job rather than being reported under
-      # `RECEIPTS PASS, ROWS SHORT OF EXIT`. A drifted receipt, a moved
-      # digest or a failing test fails it as before.
-      - name: Runtime extent oracle (phase B)
-        run: .venv/bin/python scripts/runtime_extent_oracle.py --phase b
+      # One step, because `--phase final` is chelis#1277's completion oracle:
+      # it runs both registered phases' deduplicated targets, refuses
+      # `--allow-shortfall` outright, and prints each phase's corpus digest
+      # beside the combined one.
+      - name: Runtime extent oracle (completion)
+        run: .venv/bin/python scripts/runtime_extent_oracle.py --phase final
 
   generalize-sweep-oracle-shard:
     name: Typecheck Level Generalization Oracle (shard ${{ matrix.shard }}/4)
