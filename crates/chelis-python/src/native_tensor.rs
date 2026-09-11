@@ -50,7 +50,11 @@ impl ShapeBindings {
                     // The imported owner retains the shared checked immutable
                     // plan. Preflight its observation before borrowing the array.
                     let raw = unsafe { (input.handle.api.view)(input.handle.ptr.as_ptr()) };
-                    if raw.is_null() || raw.addr() % std::mem::align_of::<ChelisGpuTensor>() != 0 {
+                    if raw.is_null()
+                        || !raw
+                            .addr()
+                            .is_multiple_of(std::mem::align_of::<ChelisGpuTensor>())
+                    {
                         return Err(PyValueError::new_err(
                             "invalid imported device metadata view",
                         ));
@@ -70,7 +74,10 @@ impl ShapeBindings {
                         &[]
                     } else {
                         if view.shape.is_null()
-                            || view.shape.addr() % std::mem::align_of::<i64>() != 0
+                            || !view
+                                .shape
+                                .addr()
+                                .is_multiple_of(std::mem::align_of::<i64>())
                         {
                             return Err(PyValueError::new_err(
                                 "invalid imported device shape pointer",
@@ -84,12 +91,13 @@ impl ShapeBindings {
         }
         for spec in &manifest.outputs {
             for dim in &spec.dims {
-                if let Some(name) = &dim.name {
-                    if name != "*" && !bindings.values.contains_key(name) {
-                        return Err(PyValueError::new_err(format!(
-                            "output dimension `{name}` has no admitted extent binding"
-                        )));
-                    }
+                if let Some(name) = &dim.name
+                    && name != "*"
+                    && !bindings.values.contains_key(name)
+                {
+                    return Err(PyValueError::new_err(format!(
+                        "output dimension `{name}` has no admitted extent binding"
+                    )));
                 }
             }
         }
@@ -126,12 +134,13 @@ impl ShapeBindings {
     }
     fn require(&self, spec: &ExecutionTensorSpec, shape: &[i64]) -> PyResult<()> {
         for (dim, &extent) in spec.dims.iter().zip(shape) {
-            if let Some(name) = &dim.name {
-                if name != "*" && self.values.get(name) != Some(&extent) {
-                    return Err(PyValueError::new_err(format!(
-                        "returned dimension `{name}` disagrees with its admitted extent"
-                    )));
-                }
+            if let Some(name) = &dim.name
+                && name != "*"
+                && self.values.get(name) != Some(&extent)
+            {
+                return Err(PyValueError::new_err(format!(
+                    "returned dimension `{name}` disagrees with its admitted extent"
+                )));
             }
         }
         Ok(())
@@ -274,14 +283,13 @@ pub(super) fn execute_checked(py: Python<'_>, admitted: &CompiledInputs) -> RawO
             let pointers = py.allow_threads(move || execution.run()).0;
             let mut owners = Vec::with_capacity(pointers.len());
             for pointer in pointers {
-                let owner = match NonNull::new(pointer) {
-                    Some(ptr) => Some(TensorOwner::Cpu(Arc::new(CpuTensorHandle {
+                let owner = NonNull::new(pointer).map(|ptr| {
+                    TensorOwner::Cpu(Arc::new(CpuTensorHandle {
                         ptr,
                         api: *api,
                         _library: Arc::clone(&admitted.library),
-                    }))),
-                    None => None,
-                };
+                    }))
+                });
                 owners.push(owner);
             }
             owners
@@ -447,7 +455,10 @@ impl ValidatedTensor {
                     ));
                 }
                 let packet = (handle.api.view)(handle.ptr.as_ptr());
-                if packet.is_null() || packet.addr() % std::mem::align_of::<ChelisGpuTensor>() != 0
+                if packet.is_null()
+                    || !packet
+                        .addr()
+                        .is_multiple_of(std::mem::align_of::<ChelisGpuTensor>())
                 {
                     return Err(PyValueError::new_err(
                         "null or misaligned device output packet",
@@ -469,8 +480,14 @@ impl ValidatedTensor {
                 if rank != 0 {
                     if packet.shape.is_null()
                         || packet.strides.is_null()
-                        || packet.shape.addr() % std::mem::align_of::<i64>() != 0
-                        || packet.strides.addr() % std::mem::align_of::<i64>() != 0
+                        || !packet
+                            .shape
+                            .addr()
+                            .is_multiple_of(std::mem::align_of::<i64>())
+                        || !packet
+                            .strides
+                            .addr()
+                            .is_multiple_of(std::mem::align_of::<i64>())
                     {
                         return Err(PyValueError::new_err(
                             "null or misaligned device output shape/strides",

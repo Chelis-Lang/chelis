@@ -9,6 +9,7 @@ use std::{
     sync::OnceLock,
 };
 
+#[allow(dead_code)] // Shared test module: not every integration-test binary needs Python paths.
 #[derive(serde::Deserialize)]
 pub struct Environment {
     paths: Vec<String>,
@@ -16,6 +17,7 @@ pub struct Environment {
     version: (u8, u8),
 }
 
+#[allow(dead_code)] // Used only by the integration-test binaries that validate interpreter setup.
 pub fn query_environment(executable: &Path) -> Result<Environment, String> {
     let output = Command::new(executable)
         .args([
@@ -53,6 +55,7 @@ print(json.dumps(dict(paths=paths, package_paths=packages, version=sys.version_i
     Ok(environment)
 }
 
+#[allow(dead_code)] // Device-only fixtures use run_case without importing Python packages.
 pub fn initialize() -> &'static Environment {
     static ENVIRONMENT: OnceLock<Environment> = OnceLock::new();
     ENVIRONMENT.get_or_init(|| {
