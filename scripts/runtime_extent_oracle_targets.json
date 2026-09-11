@@ -1,0 +1,368 @@
+{
+  "schema_version": 1,
+  "targets": [
+    {
+      "phase": "a",
+      "id": "ir",
+      "package": "chelis-ir",
+      "kind": "test",
+      "file": "crates/chelis-ir/tests/runtime_extent_slice_a.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "input_axis_eval_does_not_read_tensor_elements",
+        "input_axis_expand_verifies_and_evaluates_from_shape_metadata",
+        "input_axis_owner_and_slot_validation_fail_closed",
+        "input_axis_vmap_shifts_literal_axis",
+        "movement_ops_reject_unowned_runtime_extent_inputs",
+        "node_expand_verifies_and_evaluates_from_int64_scalar_input",
+        "vmap_keeps_shape_bound_shared_and_shifts_its_axis",
+        "vmap_rejects_element_derived_extent",
+        "vmap_shares_shape_extent_across_bound_and_ordinary_uses",
+        "zero_literal_expand_is_valid_and_empty"
+      ]
+    },
+    {
+      "phase": "a",
+      "id": "host_actualization",
+      "package": "chelis-ir",
+      "kind": "lib",
+      "file": "crates/chelis-ir/src/host.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "host::tests::tensor_helper_actualization_declines_input_axis_for_shrink_and_stride"
+      ]
+    },
+    {
+      "phase": "a",
+      "id": "cli",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/runtime_extent_slice_a.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "bare_dimension_binder_executes_and_builds_without_symbolic_dim_ice",
+        "insert_def_body_wrong_rank_names_the_callee",
+        "negative_extent_remains_a_static_type_error",
+        "shape_sourced_insert_rejects_wrong_rank_ascription",
+        "stale_extent_guidance_is_removed_but_axis_guidance_stays_int32",
+        "vmap_accepts_shape_and_shared_scalar_extent_sources",
+        "vmap_rejects_element_derived_extent_at_public_checker",
+        "vmap_rejects_helper_result_derived_from_tensor_elements",
+        "vmap_shape_bound_with_concrete_batch_emits_c_without_to_end_ice",
+        "zero_extent_is_check_clean_and_evaluates_to_empty_tensor"
+      ],
+      "note": "`insert_def_body_wrong_rank_names_the_callee` is NOT a receipt for any phase-a row. The row it sits beside, `expand.rank_ascription`, asserts that a wrong-rank ascription is refused, which `shape_sourced_insert_rejects_wrong_rank_ascription` proves; the def-body test asserts something else, that on the route where a declared result reaches the call as an expected result the diagnostic names the callee, and it pins chelis#1277 S2a's own seed extension. It is listed only because this target runs the whole file and the receipt check requires the observed test set to EQUAL the expected one."
+    },
+    {
+      "phase": "a",
+      "id": "runtime_negative",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_616_runtime_reshape_c_parity.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "issue_616_runtime_reshape_negative_extent_errs_in_both_lanes"
+      ]
+    },
+    {
+      "phase": "a",
+      "id": "rank_poly",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/rank_poly_tier3.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "issue_383_vmap_two_stage_named_reduce_regression_matrix"
+      ]
+    },
+    {
+      "phase": "a",
+      "id": "symbolic_window",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_368_grad_concat_windows.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "issue_368_runtime_symbolic_window_grad_is_half_everywhere"
+      ]
+    },
+    {
+      "phase": "a",
+      "id": "wire",
+      "package": "chelis-compiler-api",
+      "kind": "test",
+      "file": "crates/chelis-compiler-api/tests/wire_dag_v7_runtime_extents.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "v6_display_string_expand_payload_is_rejected_before_op_decode",
+        "v7_expand_rejects_forbidden_carriers_slots_and_cardinality",
+        "v7_input_axis_rejects_negative_or_out_of_range_axes_and_forbidden_owners",
+        "v7_input_axis_round_trips_as_typed_structure",
+        "v7_movement_ops_reject_unowned_runtime_extent_inputs",
+        "v7_node_extent_round_trips_only_from_rank_zero_int64",
+        "v7_shrink_rejects_a_to_end_end_over_a_non_zero_start"
+      ]
+    },
+    {
+      "phase": "a",
+      "id": "wire_capacity",
+      "package": "chelis-compiler-api",
+      "kind": "test",
+      "file": "crates/chelis-compiler-api/tests/capacity_census_wire.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "adding_or_removing_a_public_serialized_f64_field_changes_the_census",
+        "capacity_census_authority::tests::a_static_wire_descriptor_cannot_supply_verified_transport_authority",
+        "capacity_census_authority::tests::duplicate_numeric_registration_is_not_one_authority",
+        "capacity_census_authority::tests::each_exact_final_class_is_recognized",
+        "capacity_census_authority::tests::nonnumeric_registration_cannot_hide_numeric_flags",
+        "capacity_census_authority::tests::numeric_registration_requires_exact_normative_atom_and_anchor",
+        "capacity_census_authority::tests::tagged_transport_registration_is_exact_in_every_descriptor_field",
+        "capacity_census_authority::tests::zero_or_multiple_final_classes_fail",
+        "capacity_census_wire_verifier::tests::wire_baseline_rejects_exception_fields_and_nonfinal_classes",
+        "capacity_census_wire_verifier::tests::wire_rows_cannot_erase_capacity_or_duplicate_an_identity",
+        "managed_python::tests::absent_configuration_uses_checkout_venv",
+        "managed_python::tests::existing_non_python_configuration_is_rejected",
+        "managed_python::tests::external_configured_interpreter_wins",
+        "managed_python::tests::invalid_explicit_configuration_does_not_fall_back",
+        "managed_python::tests::missing_fallback_diagnostic_names_path_and_uv_setup",
+        "managed_python::tests::relative_configured_interpreter_resolves_from_workspace",
+        "verified_wire_authority_cannot_be_replaced_by_a_descriptor_or_baseline",
+        "wire_schema_numeric_fields_match_the_reviewed_baseline"
+      ]
+    },
+    {
+      "phase": "a",
+      "id": "hip_codegen",
+      "package": "chelis-backend-hip",
+      "kind": "test",
+      "file": "crates/chelis-backend-hip/tests/codegen_structure.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "s5_input_axis_expand_reads_witness_metadata"
+      ]
+    },
+    {
+      "phase": "a",
+      "id": "hip_accept",
+      "package": "chelis-compiler-api",
+      "kind": "lib",
+      "file": "crates/chelis-compiler-api/src/compiler.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "compiler::tests::hip_seam_accepts_input_axis_expand_extent"
+      ]
+    },
+    {
+      "phase": "a",
+      "id": "hip_reject",
+      "package": "chelis-compiler-api",
+      "kind": "lib",
+      "file": "crates/chelis-compiler-api/src/compiler.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "compiler::tests::hip_seam_rejects_node_valued_expand_with_issue_1298_receipt"
+      ]
+    },
+    {
+      "phase": "a",
+      "id": "metal_accept",
+      "package": "chelis-compiler-api",
+      "kind": "lib",
+      "file": "crates/chelis-compiler-api/src/compiler.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "compiler::metal_runtime_dim_reject_tests::metal_seam_accepts_input_axis_expand_extent"
+      ]
+    },
+    {
+      "phase": "a",
+      "id": "metal_reject",
+      "package": "chelis-compiler-api",
+      "kind": "lib",
+      "file": "crates/chelis-compiler-api/src/compiler.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "compiler::metal_runtime_dim_reject_tests::metal_seam_rejects_node_valued_expand_with_issue_1383_receipt"
+      ]
+    },
+    {
+      "phase": "a",
+      "id": "hip_manual_inventory",
+      "package": "chelis-backend-hip",
+      "kind": "test",
+      "file": "crates/chelis-backend-hip/tests/gpu_correctness.rs",
+      "selector": {
+        "mode": "substring",
+        "value": "g5_"
+      },
+      "expected": [
+        "g5_expand_add_stride_zero",
+        "g5_input_axis_expand_executes_from_witness_metadata"
+      ],
+      "list_only": true,
+      "note": "The HIP hardware gate's inventory. `--ignored --list` names the two manual tests without running them, so every test this row selects must carry `#[ignore]`; the hardware command the oracle prints is what actually executes them."
+    },
+    {
+      "phase": "b",
+      "id": "ir_sources",
+      "package": "chelis-ir",
+      "kind": "test",
+      "file": "crates/chelis-ir/tests/runtime_extent_slice_b_sources.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "binding_a_to_end_bound_rejects_a_start_that_is_not_literal_zero",
+        "every_risc_op_yields_exactly_one_source_per_output_axis",
+        "expand_insert_maps_later_output_axes_to_input_minus_one",
+        "external_axis_names_the_exact_load_not_a_string_match",
+        "full_axis_symbolic_shrink_is_op_computed_not_pass_through",
+        "identity_stride_one_and_zero_pad_pass_the_input_axis_through",
+        "input_axis_and_scalar_input_sources_validate_their_slots",
+        "omitted_or_duplicated_output_axis_source_fails_before_emission",
+        "op_declared_axis_on_an_expand_input_flows_through_the_kept_output_axis",
+        "reduction_and_count_shift_kept_output_axes_back_to_their_input_axis",
+        "to_end_shrink_end_requires_a_literal_zero_start",
+        "unsupported_but_well_typed_mapping_yields_the_registered_receipt_not_an_ice"
+      ]
+    },
+    {
+      "phase": "b",
+      "id": "ir_classes",
+      "package": "chelis-ir",
+      "kind": "test",
+      "file": "crates/chelis-ir/tests/runtime_extent_slice_b_classes.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "every_rebuild_pass_preserves_the_derived_classes"
+      ],
+      "note": "`runtime_extent_slice_b_classes.rs` locks the DERIVATION rather than any lane's output, and it is where C5 property 7's rebuild-survival property is expressible at all: the derivation is a `chelis-ir` entry point and `chelis-cli` has no `chelis-ir` dependency to call it before and after a pass. The row's receipt therefore carries an `ir_classes.` prefix. Named with `--exact` rather than run whole, for the reason `exec_c` gives: the receipt check requires the observed test set to EQUAL the expected one, and that file holds thirty-odd derivation tests this phase's oracle does not own."
+    },
+    {
+      "phase": "b",
+      "id": "literal_claim",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/runtime_extent_claim_preparation.rs",
+      "selector": {
+        "mode": "substring",
+        "value": "literal_"
+      },
+      "expected": [
+        "literal_claim_transport_survives_nested_and_unused_calls",
+        "literal_extent_example_contract",
+        "literal_result_claim_contract"
+      ]
+    },
+    {
+      "phase": "b",
+      "id": "cli_broadcast",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/runtime_extent_claim_preparation.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "singleton_broadcast_contract"
+      ]
+    },
+    {
+      "phase": "b",
+      "id": "cli_slice_b",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/runtime_extent_slice_b.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "a_class_with_no_movement_bound_consumer_still_guards_on_c",
+        "a_class_with_no_movement_bound_consumer_still_guards_on_eval",
+        "a_fresh_binder_over_a_node_valued_reshape_target_executes_on_both_lanes",
+        "a_later_trap_is_preempted_by_the_extent_guard_on_eval",
+        "a_literal_claim_over_a_runtime_read_traps_at_entry_on_eval",
+        "a_literal_claim_over_an_agreeing_runtime_read_executes_on_eval",
+        "a_local_unit_extent_claim_is_guarded_on_the_hip_host_lowering",
+        "a_local_unit_extent_claim_traps_at_its_operation_on_c",
+        "a_local_unit_extent_claim_traps_at_its_operation_on_eval",
+        "a_node_valued_reshape_target_that_agrees_with_its_claim_executes_on_c",
+        "a_node_valued_reshape_target_that_agrees_with_its_claim_executes_on_eval",
+        "a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_c",
+        "a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_eval",
+        "a_positional_expand_replaces_a_unit_axis_instead_of_inserting_on_eval",
+        "a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_eval",
+        "a_static_non_unit_source_under_a_same_rank_claim_is_a_type_error",
+        "a_zero_positional_replacement_declares_an_empty_axis_on_c",
+        "a_zero_positional_replacement_declares_an_empty_axis_on_eval",
+        "an_earlier_trap_preempts_the_extent_guard_on_eval",
+        "an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_c",
+        "an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_eval",
+        "an_effect_before_the_guard_runs_when_the_guard_traps_on_c",
+        "an_effect_before_the_guard_runs_when_the_guard_traps_on_eval",
+        "an_op_declared_witness_reaches_the_hip_prologue_without_panicking",
+        "c_independent_trap_after_a_mismatch_loses",
+        "c_independent_trap_before_a_mismatch_wins",
+        "every_local_member_of_one_class_is_guarded_at_its_operation_on_c",
+        "issue_597_positional_same_rank_replacement_executes_on_c",
+        "load_load_named_class_guards_every_non_canonical_member_on_eval",
+        "runtime_bound_shrink_consumed_elementwise_reports_a_typed_receipt",
+        "runtime_bound_shrink_relu_builds_and_matches_eval_exactly",
+        "the_guard_order_fixture_reaches_its_later_trap_when_the_claim_agrees_on_eval",
+        "two_classes_sharing_one_node_keep_separate_guards_on_c",
+        "two_classes_sharing_one_node_keep_separate_guards_on_eval",
+        "two_expands_over_one_operand_axis_share_one_guard"
+      ]
+    },
+    {
+      "phase": "b",
+      "id": "exec_c",
+      "package": "chelis-backend-c",
+      "kind": "test",
+      "file": "crates/chelis-backend-c/tests/exec_compile.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "a_literal_claim_over_a_runtime_read_traps_at_entry_on_c",
+        "a_local_class_guards_at_its_operation_and_renders_the_numeric_trap",
+        "a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_c",
+        "an_all_interface_class_runs_when_its_witnesses_agree",
+        "an_all_interface_class_traps_at_entry_when_its_witnesses_disagree",
+        "entry_guards_run_in_assigned_slot_order_not_claim_name_order",
+        "local_reshape_guards_follow_declaration_order",
+        "numeric_local_extent_claims_execute_exactly"
+      ],
+      "note": "A CLI-rooted program is not the exported kernel: `def main() = f(...)` over literal tensors inlines the def, every extent becomes a literal, and the classes disappear, so guard placement and rendering on C are proved by DRIVEN rows that compile the exported kernel and call it with runtime inputs. This target is where those rows live. `exec_compile` is a large shared binary, so this target names its rows with `--exact` rather than running the whole file: the receipt check requires the observed set to EQUAL the expected one, and an unfiltered run would tie this phase's oracle to every unrelated numeric row in that file."
+    }
+  ]
+}

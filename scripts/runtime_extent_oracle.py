@@ -40,9 +40,11 @@ from typing import Callable, Mapping, Sequence
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BASELINE_PATH = REPO_ROOT / "scripts/runtime_extent_oracle_baseline.json"
 BASELINE_PATH_PHASE_B = REPO_ROOT / "scripts/runtime_extent_oracle_baseline_phase_b.json"
+TARGETS_PATH = REPO_ROOT / "scripts/runtime_extent_oracle_targets.json"
 PHASES = ("a", "b", "c", "final")
 SLICE_PHASES = ("a", "b", "c")
 PASS_MARKER = "RUNTIME EXTENT ORACLE: PASS"
+SHORT_MARKER = "RUNTIME EXTENT ORACLE: RECEIPTS PASS, ROWS SHORT OF EXIT"
 HIP_HARDWARE_COMMAND = (
     "scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness -- "
     "--ignored --test-threads=1"
@@ -428,7 +430,7 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "expand.foreign_claim.same_tensor_set_axis.c",
             "silent_unguarded",
             "silent_unguarded",
-            "cli_slice_b.a_same_tensor_read_under_a_foreign_claim_is_guarded_on_c",
+            "cli_slice_b.issue_1376_same_tensor_read_under_a_foreign_claim_is_guarded_on_c",
         ),
         _row(
             "expand.foreign_claim.same_tensor_set_axis.eval",
@@ -452,13 +454,13 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "expand.literal_claim.cross_tensor_read.c",
             "lane_divergent",
             "lane_divergent",
-            "cli_slice_b.issue_1374_cross_tensor_read_traps_on_c",
+            "cli_slice_b.a_literal_claim_over_a_cross_tensor_read_traps_on_c",
         ),
         _row(
             "expand.literal_claim.cross_tensor_read.eval",
             "lane_divergent",
             "lane_divergent",
-            "cli_slice_b.a_literal_claim_over_a_cross_tensor_read_guards_on_every_lane_on_eval",
+            "cli_slice_b.a_literal_claim_over_a_cross_tensor_read_traps_on_eval",
         ),
         _row(
             "expand.literal_claim.inlined_root.c",
@@ -492,7 +494,7 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "expand.named_claim.cross_tensor_read.c",
             "silent_unguarded",
             "silent_unguarded",
-            "cli_slice_b.issue_1376_same_tensor_read_under_a_foreign_claim_traps_on_c",
+            "cli_slice_b.issue_1374_cross_tensor_read_under_a_named_claim_is_guarded_on_c",
         ),
         _row(
             "expand.named_claim.cross_tensor_read.eval",
@@ -718,339 +720,190 @@ def corpus_digest(rows: Sequence[CorpusRow], phase: str) -> str:
     return hashlib.sha256(canonical_corpus_bytes(rows, phase)).hexdigest()
 
 
-def _capacity_tests() -> tuple[str, ...]:
-    return (
-        "a_typed_permanent_disposition_cannot_move_between_families",
-        "adding_or_removing_a_public_serialized_f64_field_changes_the_census",
-        "capacity_census_authority::tests::duplicate_numeric_registration_is_not_one_authority",
-        "capacity_census_authority::tests::each_exact_final_class_is_recognized",
-        "capacity_census_authority::tests::nonnumeric_registration_cannot_hide_numeric_flags",
-        "capacity_census_authority::tests::numeric_registration_requires_exact_normative_atom_and_anchor",
-        "capacity_census_authority::tests::tagged_transport_registration_is_exact_in_every_descriptor_field",
-        "capacity_census_authority::tests::zero_or_multiple_final_classes_fail",
-        "count_wire_axes_are_registered_without_inheriting_the_permanent_disposition",
-        "managed_python::tests::absent_configuration_uses_checkout_venv",
-        "managed_python::tests::existing_non_python_configuration_is_rejected",
-        "managed_python::tests::external_configured_interpreter_wins",
-        "managed_python::tests::invalid_explicit_configuration_does_not_fall_back",
-        "managed_python::tests::missing_fallback_diagnostic_names_path_and_uv_setup",
-        "managed_python::tests::relative_configured_interpreter_resolves_from_workspace",
-        "permanent_wire_disposition_is_bound_to_the_complete_descriptor_set",
-        "wire_schema_numeric_fields_match_the_reviewed_baseline",
+def render_baseline(spec: PhaseSpec) -> str:
+    """The exact bytes one phase's checked baseline file must hold.
+
+    The baseline is derived data: every field comes from the reviewed
+    ``generated_phase_<p>_corpus()``. Writing it by hand is how chelis#1588
+    and chelis#1742 both started, so ``--write-baseline`` renders it and a
+    self-test asserts the checked files are byte-identical to this rendering.
+    The digest is never typed; it is always ``corpus_digest``'s answer for
+    the corpus the writer is serializing.
+    """
+
+    payload = {
+        "schema_version": 1,
+        "corpus_sha256": corpus_digest(spec.corpus, spec.phase),
+        "rows": [
+            {
+                "id": row.id,
+                "baseline": row.baseline,
+                f"phase_{spec.phase}": row.exit_state,
+                "receipt": row.receipt,
+            }
+            for row in spec.corpus
+        ],
+    }
+    return json.dumps(payload, indent=2) + "\n"
+
+
+def write_baseline(phase: str, registry: Mapping[str, PhaseSpec] | None = None) -> Path:
+    """Rewrite one phase's checked baseline from its generated corpus.
+
+    This regenerates derived data after a reviewed corpus edit. It is not a
+    way to silence a digest-drift failure: the reviewed source is the corpus
+    in this file, and phase A's digest stays pinned by
+    ``FROZEN_PHASE_A_DIGEST`` in the self-test suite, which this writer
+    cannot move.
+    """
+
+    active = PHASE_REGISTRY if registry is None else registry
+    spec = active.get(phase)
+    if spec is None:
+        raise OracleFailure(f"phase {phase!r} has no registered corpus to write")
+    spec.baseline_path.write_text(render_baseline(spec))
+    return spec.baseline_path
+
+
+_SELECTOR_MODES = ("all", "substring", "exact")
+_TARGET_KINDS = ("test", "lib")
+_ROW_REQUIRED = {"phase", "id", "package", "kind", "file", "selector", "expected"}
+_ROW_OPTIONAL = {"list_only", "note"}
+
+
+def load_target_manifest(path: Path | None = None) -> tuple[Mapping[str, object], ...]:
+    """Read and structurally validate the reviewed test-target manifest.
+
+    The manifest holds one row per cargo target the oracle runs: which test
+    binary it selects, how it selects, and the exact set of per-test receipts
+    that selection must produce. Two independent readers enforce it. This one
+    turns each row into the command the oracle executes, so the command and
+    the expectation cannot disagree. The other is
+    ``crates/chelis-types/tests/runtime_extent_target_manifest.rs``, which
+    parses the named sources and fails ``--fast`` when a rename, an addition
+    under a substring selector, or a new ``#[ignore]`` moves a row's real
+    inventory away from ``expected``. Before chelis#1742 the expectations were
+    Python tuples that only this oracle read, and two merges drifted them.
+    """
+
+    manifest_path = TARGETS_PATH if path is None else path
+    try:
+        payload = json.loads(manifest_path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise OracleFailure(f"cannot read target manifest {manifest_path}: {error}") from error
+    if not isinstance(payload, dict) or set(payload) != {"schema_version", "targets"}:
+        raise OracleFailure("target manifest must contain exactly schema_version and targets")
+    if payload["schema_version"] != 1:
+        raise OracleFailure(f"unsupported target manifest schema {payload['schema_version']!r}")
+    rows = payload["targets"]
+    if not isinstance(rows, list) or not rows:
+        raise OracleFailure("target manifest must hold a non-empty targets list")
+    seen: set[tuple[str, str]] = set()
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise OracleFailure(f"target manifest row {index} is not an object")
+        keys = set(row)
+        if not _ROW_REQUIRED <= keys or not keys <= _ROW_REQUIRED | _ROW_OPTIONAL:
+            raise OracleFailure(f"target manifest row {index} has the wrong fields: {sorted(keys)}")
+        if row["phase"] not in PHASES:
+            raise OracleFailure(f"target manifest row {index} names unknown phase {row['phase']!r}")
+        if row["kind"] not in _TARGET_KINDS:
+            raise OracleFailure(f"target manifest row {index} has unknown kind {row['kind']!r}")
+        identity = (row["phase"], row["id"])
+        if identity in seen:
+            raise OracleFailure(f"target manifest repeats target {identity[1]!r} in phase {identity[0]!r}")
+        seen.add(identity)
+        selector = row["selector"]
+        if not isinstance(selector, dict) or selector.get("mode") not in _SELECTOR_MODES:
+            raise OracleFailure(f"target {row['id']!r} has an unknown selector {selector!r}")
+        if selector["mode"] == "substring":
+            if set(selector) != {"mode", "value"} or not isinstance(selector["value"], str):
+                raise OracleFailure(f"target {row['id']!r} needs one substring selector value")
+        elif set(selector) != {"mode"}:
+            raise OracleFailure(f"target {row['id']!r} carries an unused selector value")
+        expected = row["expected"]
+        if (
+            not isinstance(expected, list)
+            or not expected
+            or not all(isinstance(name, str) for name in expected)
+        ):
+            raise OracleFailure(f"target {row['id']!r} must name at least one expected test")
+        if sorted(expected) != list(expected) or len(set(expected)) != len(expected):
+            raise OracleFailure(f"target {row['id']!r} expected tests must be sorted and unique")
+        source = row["file"]
+        if not isinstance(source, str) or not source.startswith(f"crates/{row['package']}/"):
+            raise OracleFailure(f"target {row['id']!r} file must live under its own package")
+        if not (REPO_ROOT / source).is_file():
+            raise OracleFailure(f"target {row['id']!r} names a missing source file {source!r}")
+        if row["kind"] == "test" and f"crates/{row['package']}/tests/" not in source:
+            raise OracleFailure(f"target {row['id']!r} is an integration target outside tests/")
+    return tuple(rows)
+
+
+def target_argv(row: Mapping[str, object]) -> tuple[str, ...]:
+    """The exact cargo command one manifest row selects.
+
+    Filters come before ``--`` and harness flags after it, so the selector is
+    the only thing that decides which tests run.
+    """
+
+    selector = row["selector"]
+    mode = selector["mode"]
+    if mode == "exact":
+        filters = list(row["expected"])
+    elif mode == "substring":
+        filters = [selector["value"]]
+    else:
+        filters = []
+    if row["kind"] == "test":
+        target = Path(row["file"]).stem
+        head = ["cargo", "test", "-p", row["package"], "--test", target, *filters]
+    else:
+        head = ["cargo", "test", "-p", row["package"], "--lib", *filters]
+    if row.get("list_only"):
+        tail = ["--ignored", "--list"]
+    elif mode == "exact":
+        tail = ["--exact", "--nocapture"]
+    else:
+        tail = ["--nocapture"]
+    return tuple([*head, "--", *tail])
+
+
+def manifest_targets(
+    phase: str, rows: Sequence[Mapping[str, object]] | None = None
+) -> tuple[TestTarget, ...]:
+    manifest = load_target_manifest() if rows is None else tuple(rows)
+    selected = tuple(row for row in manifest if row["phase"] == phase)
+    if not selected:
+        raise OracleFailure(f"target manifest registers no target for phase {phase!r}")
+    return tuple(
+        TestTarget(
+            id=str(row["id"]),
+            argv=target_argv(row),
+            expected_tests=tuple(row["expected"]),
+            list_only=bool(row.get("list_only", False)),
+        )
+        for row in selected
     )
 
 
 def self_test_target(python: str = sys.executable) -> TestTarget:
-    """The oracle's own unit suite. Shared by every phase, so run once."""
+    """The oracle's own unit suite. Shared by every phase, so run once.
+
+    It declares no expected tests, so it is the one target the manifest does
+    not own: ``validate_target_receipt`` checks only its exit status, and
+    there is no per-test expectation that could drift.
+    """
 
     return TestTarget("self_tests", (python, "scripts/test_runtime_extent_oracle.py"))
 
 
 def phase_a_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
-    return (
-        self_test_target(python),
-        TestTarget(
-            "ir",
-            ("cargo", "test", "-p", "chelis-ir", "--test", "runtime_extent_slice_a", "--", "--nocapture"),
-            (
-                "input_axis_eval_does_not_read_tensor_elements",
-                "input_axis_expand_verifies_and_evaluates_from_shape_metadata",
-                "input_axis_owner_and_slot_validation_fail_closed",
-                "input_axis_vmap_shifts_literal_axis",
-                "movement_ops_reject_unowned_runtime_extent_inputs",
-                "node_expand_verifies_and_evaluates_from_int64_scalar_input",
-                "vmap_keeps_shape_bound_shared_and_shifts_its_axis",
-                "vmap_rejects_element_derived_extent",
-                "vmap_shares_shape_extent_across_bound_and_ordinary_uses",
-                "zero_literal_expand_is_valid_and_empty",
-            ),
-        ),
-        TestTarget(
-            "host_actualization",
-            (
-                "cargo",
-                "test",
-                "-p",
-                "chelis-ir",
-                "--lib",
-                "host::tests::tensor_helper_actualization_declines_input_axis_for_shrink_and_stride",
-                "--",
-                "--exact",
-                "--nocapture",
-            ),
-            (
-                "host::tests::tensor_helper_actualization_declines_input_axis_for_shrink_and_stride",
-            ),
-        ),
-        TestTarget(
-            "cli",
-            ("cargo", "test", "-p", "chelis-cli", "--test", "runtime_extent_slice_a", "--", "--nocapture"),
-            # `insert_def_body_wrong_rank_names_the_callee` is NOT a receipt
-            # for any phase-a row. The row it sits beside,
-            # `expand.rank_ascription`, asserts that a wrong-rank ascription is
-            # refused, which `shape_sourced_insert_rejects_wrong_rank_ascription`
-            # proves; the def-body test asserts something else, that on the
-            # route where a declared result reaches the call as an expected
-            # result the diagnostic names the callee, and it pins chelis#1277
-            # S2a's own seed extension. It is listed only because this target
-            # runs the whole file and the receipt check requires the observed
-            # test set to EQUAL the expected one.
-            (
-                "bare_dimension_binder_executes_and_builds_without_symbolic_dim_ice",
-                "insert_def_body_wrong_rank_names_the_callee",
-                "negative_extent_remains_a_static_type_error",
-                "shape_sourced_insert_rejects_wrong_rank_ascription",
-                "stale_extent_guidance_is_removed_but_axis_guidance_stays_int32",
-                "vmap_accepts_shape_and_shared_scalar_extent_sources",
-                "vmap_rejects_element_derived_extent_at_public_checker",
-                "vmap_rejects_helper_result_derived_from_tensor_elements",
-                "vmap_shape_bound_with_concrete_batch_emits_c_without_to_end_ice",
-                "zero_extent_is_check_clean_and_evaluates_to_empty_tensor",
-            ),
-        ),
-        TestTarget(
-            "runtime_negative",
-            (
-                "cargo", "test", "-p", "chelis-cli", "--test",
-                "issue_616_runtime_reshape_c_parity",
-                "issue_616_runtime_reshape_negative_extent_errs_in_both_lanes",
-                "--", "--exact", "--nocapture",
-            ),
-            ("issue_616_runtime_reshape_negative_extent_errs_in_both_lanes",),
-        ),
-        TestTarget(
-            "rank_poly",
-            (
-                "cargo", "test", "-p", "chelis-cli", "--test", "rank_poly_tier3",
-                "issue_383_vmap_two_stage_named_reduce_regression_matrix", "--", "--exact", "--nocapture",
-            ),
-            ("issue_383_vmap_two_stage_named_reduce_regression_matrix",),
-        ),
-        TestTarget(
-            "symbolic_window",
-            (
-                "cargo", "test", "-p", "chelis-cli", "--test",
-                "issue_368_grad_concat_windows",
-                "issue_368_runtime_symbolic_window_grad_is_half_everywhere",
-                "--", "--exact", "--nocapture",
-            ),
-            ("issue_368_runtime_symbolic_window_grad_is_half_everywhere",),
-        ),
-        TestTarget(
-            "wire",
-            ("cargo", "test", "-p", "chelis-compiler-api", "--test", "wire_dag_v7_runtime_extents", "--", "--nocapture"),
-            (
-                "v6_display_string_expand_payload_is_rejected_before_op_decode",
-                "v7_expand_rejects_forbidden_carriers_slots_and_cardinality",
-                "v7_input_axis_rejects_negative_or_out_of_range_axes_and_forbidden_owners",
-                "v7_input_axis_round_trips_as_typed_structure",
-                "v7_movement_ops_reject_unowned_runtime_extent_inputs",
-                "v7_node_extent_round_trips_only_from_rank_zero_int64",
-                "v7_shrink_rejects_a_to_end_end_over_a_non_zero_start",
-            ),
-        ),
-        TestTarget(
-            "wire_capacity",
-            ("cargo", "test", "-p", "chelis-compiler-api", "--test", "capacity_census_wire", "--", "--nocapture"),
-            _capacity_tests(),
-        ),
-        TestTarget(
-            "hip_codegen",
-            (
-                "cargo", "test", "-p", "chelis-backend-hip", "--test", "codegen_structure",
-                "s5_input_axis_expand_reads_witness_metadata", "--", "--exact", "--nocapture",
-            ),
-            ("s5_input_axis_expand_reads_witness_metadata",),
-        ),
-        TestTarget(
-            "hip_accept",
-            (
-                "cargo", "test", "-p", "chelis-compiler-api", "--lib",
-                "compiler::tests::hip_seam_accepts_input_axis_expand_extent", "--", "--exact", "--nocapture",
-            ),
-            ("compiler::tests::hip_seam_accepts_input_axis_expand_extent",),
-        ),
-        TestTarget(
-            "hip_reject",
-            (
-                "cargo", "test", "-p", "chelis-compiler-api", "--lib",
-                "compiler::tests::hip_seam_rejects_node_valued_expand_with_issue_1298_receipt",
-                "--", "--exact", "--nocapture",
-            ),
-            ("compiler::tests::hip_seam_rejects_node_valued_expand_with_issue_1298_receipt",),
-        ),
-        TestTarget(
-            "metal_accept",
-            (
-                "cargo", "test", "-p", "chelis-compiler-api", "--lib",
-                "compiler::metal_runtime_dim_reject_tests::metal_seam_accepts_input_axis_expand_extent",
-                "--", "--exact", "--nocapture",
-            ),
-            ("compiler::metal_runtime_dim_reject_tests::metal_seam_accepts_input_axis_expand_extent",),
-        ),
-        TestTarget(
-            "metal_reject",
-            (
-                "cargo", "test", "-p", "chelis-compiler-api", "--lib",
-                "compiler::metal_runtime_dim_reject_tests::metal_seam_rejects_node_valued_expand_with_issue_1383_receipt",
-                "--", "--exact", "--nocapture",
-            ),
-            ("compiler::metal_runtime_dim_reject_tests::metal_seam_rejects_node_valued_expand_with_issue_1383_receipt",),
-        ),
-        TestTarget(
-            "hip_manual_inventory",
-            (
-                "cargo", "test", "-p", "chelis-backend-hip", "--test", "gpu_correctness",
-                "g5_", "--", "--ignored", "--list",
-            ),
-            (
-                "g5_expand_add_stride_zero",
-                "g5_input_axis_expand_executes_from_witness_metadata",
-            ),
-            list_only=True,
-        ),
-    )
+    return (self_test_target(python), *manifest_targets("a"))
 
 
 def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
-    return (
-        self_test_target(python),
-        TestTarget(
-            "ir_sources",
-            (
-                "cargo", "test", "-p", "chelis-ir", "--test",
-                "runtime_extent_slice_b_sources", "--", "--nocapture",
-            ),
-            (
-                "every_risc_op_yields_exactly_one_source_per_output_axis",
-                "binding_a_to_end_bound_rejects_a_start_that_is_not_literal_zero",
-                "expand_insert_maps_later_output_axes_to_input_minus_one",
-                "external_axis_names_the_exact_load_not_a_string_match",
-                "full_axis_symbolic_shrink_is_op_computed_not_pass_through",
-                "identity_stride_one_and_zero_pad_pass_the_input_axis_through",
-                "input_axis_and_scalar_input_sources_validate_their_slots",
-                "omitted_or_duplicated_output_axis_source_fails_before_emission",
-                "op_declared_axis_on_an_expand_input_flows_through_the_kept_output_axis",
-                "reduction_and_count_shift_kept_output_axes_back_to_their_input_axis",
-                "to_end_shrink_end_requires_a_literal_zero_start",
-                "unsupported_but_well_typed_mapping_yields_the_registered_receipt_not_an_ice",
-            ),
-        ),
-        # `runtime_extent_slice_b_classes.rs` locks the DERIVATION rather than
-        # any lane's output, and it is where C5 property 7's rebuild-survival
-        # property is expressible at all: the derivation is a `chelis-ir`
-        # entry point and `chelis-cli` has no `chelis-ir` dependency to call
-        # it before and after a pass. The row's receipt therefore carries an
-        # `ir_classes.` prefix. Named with `--exact` rather than run whole,
-        # for the reason `exec_c` below gives: the receipt check requires the
-        # observed test set to EQUAL the expected one, and that file holds
-        # thirty-odd derivation tests this phase's oracle does not own.
-        TestTarget(
-            "ir_classes",
-            (
-                "cargo", "test", "-p", "chelis-ir", "--test",
-                "runtime_extent_slice_b_classes", "--", "--nocapture", "--exact",
-                "every_rebuild_pass_preserves_the_derived_classes",
-            ),
-            ("every_rebuild_pass_preserves_the_derived_classes",),
-        ),
-        TestTarget(
-            "literal_claim",
-            (
-                "cargo", "test", "-p", "chelis-cli", "--test",
-                "runtime_extent_claim_preparation", "literal_", "--", "--nocapture",
-            ),
-            ("literal_claim_transport_survives_nested_and_unused_calls", "literal_result_claim_contract"),
-        ),
-        TestTarget(
-            "cli_broadcast",
-            (
-                "cargo", "test", "-p", "chelis-cli", "--test",
-                "runtime_extent_claim_preparation", "singleton_broadcast_contract",
-                "--", "--nocapture", "--exact",
-            ),
-            ("singleton_broadcast_contract",),
-        ),
-        TestTarget(
-            "cli_slice_b",
-            (
-                "cargo", "test", "-p", "chelis-cli", "--test",
-                "runtime_extent_slice_b", "--", "--nocapture",
-            ),
-            (
-                "a_class_with_no_movement_bound_consumer_still_guards_on_c",
-                "a_class_with_no_movement_bound_consumer_still_guards_on_eval",
-                "a_fresh_binder_over_a_node_valued_reshape_target_executes_on_both_lanes",
-                "a_later_trap_is_preempted_by_the_extent_guard_on_eval",
-                "a_literal_claim_over_a_runtime_read_traps_at_entry_on_eval",
-                "a_literal_claim_over_an_agreeing_runtime_read_executes_on_eval",
-                "a_local_unit_extent_claim_is_guarded_on_the_hip_host_lowering",
-                "a_local_unit_extent_claim_traps_at_its_operation_on_c",
-                "a_local_unit_extent_claim_traps_at_its_operation_on_eval",
-                "a_node_valued_reshape_target_that_agrees_with_its_claim_executes_on_c",
-                "a_node_valued_reshape_target_that_agrees_with_its_claim_executes_on_eval",
-                "a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_c",
-                "a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_eval",
-                "a_positional_expand_replaces_a_unit_axis_instead_of_inserting_on_eval",
-                "a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_eval",
-                "a_static_non_unit_source_under_a_same_rank_claim_is_a_type_error",
-                "a_zero_positional_replacement_declares_an_empty_axis_on_c",
-                "a_zero_positional_replacement_declares_an_empty_axis_on_eval",
-                "an_earlier_trap_preempts_the_extent_guard_on_eval",
-                "an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_c",
-                "an_effect_after_the_guard_does_not_run_when_the_guard_traps_on_eval",
-                "an_effect_before_the_guard_runs_when_the_guard_traps_on_c",
-                "an_effect_before_the_guard_runs_when_the_guard_traps_on_eval",
-                "an_op_declared_witness_reaches_the_hip_prologue_without_panicking",
-                "c_independent_trap_after_a_mismatch_loses",
-                "c_independent_trap_before_a_mismatch_wins",
-                "every_local_member_of_one_class_is_guarded_at_its_operation_on_c",
-                "issue_597_positional_same_rank_replacement_executes_on_c",
-                "load_load_named_class_guards_every_non_canonical_member_on_eval",
-                "runtime_bound_shrink_consumed_elementwise_reports_a_typed_receipt",
-                "runtime_bound_shrink_relu_builds_and_matches_eval_exactly",
-                "the_guard_order_fixture_reaches_its_later_trap_when_the_claim_agrees_on_eval",
-                "two_classes_sharing_one_node_keep_separate_guards_on_c",
-                "two_classes_sharing_one_node_keep_separate_guards_on_eval",
-                "two_expands_over_one_operand_axis_share_one_guard",
-            ),
-        ),
-        # A CLI-rooted program is not the exported kernel: `def main() =
-        # f(...)` over literal tensors inlines the def, every extent becomes a
-        # literal, and the classes disappear, so guard placement and rendering
-        # on C are proved by DRIVEN rows that compile the exported kernel and
-        # call it with runtime inputs. This target is where those rows live.
-        # `exec_compile` is a large shared binary, so this target names its
-        # rows with `--exact` rather than running the whole file: the
-        # receipt check requires the observed set to EQUAL the expected one,
-        # and an unfiltered run would tie this phase's oracle to every
-        # unrelated numeric row in that file.
-        TestTarget(
-            "exec_c",
-            (
-                "cargo", "test", "-p", "chelis-backend-c", "--test",
-                "exec_compile", "--", "--nocapture", "--exact",
-                "a_literal_claim_over_a_runtime_read_traps_at_entry_on_c",
-                "a_local_class_guards_at_its_operation_and_renders_the_numeric_trap",
-                "a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_c",
-                "an_all_interface_class_runs_when_its_witnesses_agree",
-                "an_all_interface_class_traps_at_entry_when_its_witnesses_disagree",
-                "entry_guards_run_in_assigned_slot_order_not_claim_name_order",
-                "local_reshape_guards_follow_declaration_order",
-                "numeric_local_extent_claims_execute_exactly",
-            ),
-            (
-                "a_literal_claim_over_a_runtime_read_traps_at_entry_on_c",
-                "a_local_class_guards_at_its_operation_and_renders_the_numeric_trap",
-                "a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_c",
-                "an_all_interface_class_runs_when_its_witnesses_agree",
-                "an_all_interface_class_traps_at_entry_when_its_witnesses_disagree",
-                "entry_guards_run_in_assigned_slot_order_not_claim_name_order",
-                "local_reshape_guards_follow_declaration_order",
-                "numeric_local_extent_claims_execute_exactly",
-            ),
-        ),
-    )
+    return (self_test_target(python), *manifest_targets("b"))
 
 
 PHASE_A_DEFERRED: Mapping[str, str] = {
@@ -1343,7 +1196,21 @@ def validate(
     registry: Mapping[str, PhaseSpec] | None = None,
     targets: Sequence[TestTarget] | None = None,
     require_clean: bool = True,
+    allow_shortfall: bool = False,
 ) -> tuple[str, str]:
+    """Run one phase's obligations and report.
+
+    ``allow_shortfall`` separates the two ways a phase can be red. Every
+    receipt, digest and lattice obligation still fails the run. Only the
+    recorded row shortfall, which is the tracker's published state rather
+    than a regression, is downgraded to a report: the run prints the head,
+    the corpus digests and the rows still short, ends with ``SHORT_MARKER``
+    instead of ``PASS_MARKER``, and returns zero. It is what lets a nightly
+    job enforce the receipts of a phase whose rows have not all landed;
+    without it the phase's real drift and its expected shortfall would be
+    the same red, which is the confusion chelis#1742 is about.
+    """
+
     if phase not in PHASES:
         raise OracleFailure(f"unsupported phase {phase!r}")
 
@@ -1374,8 +1241,8 @@ def validate(
     shortfall = [
         (spec.phase, row_id) for spec in selected for row_id in exit_shortfall(spec)
     ]
-    if shortfall:
-        listed = ", ".join(f"{p}:{row}" for p, row in shortfall)
+    listed = ", ".join(f"{p}:{row}" for p, row in shortfall)
+    if shortfall and not allow_shortfall:
         raise OracleFailure(
             f"phase {phase!r} has {len(shortfall)} row(s) short of an exit state: {listed}"
         )
@@ -1393,16 +1260,50 @@ def validate(
         )
     print(f"runtime_extent_corpus_sha256={digest}", flush=True)
     print(f"runtime_extent_hip_manual_gate={HIP_HARDWARE_COMMAND}", flush=True)
-    print(PASS_MARKER, flush=True)
+    if shortfall:
+        print(f"runtime_extent_rows_short={len(shortfall)}", flush=True)
+        print(f"runtime_extent_rows_short_list={listed}", flush=True)
+        print(SHORT_MARKER, flush=True)
+    else:
+        print(PASS_MARKER, flush=True)
     return head, digest
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description=(
+            "Runtime-extent class oracle for chelis#1277. Phase A's wire "
+            "capacity leg executes the Python binding facade, so the "
+            "interpreter it runs under needs that facade's dependencies: "
+            "uv pip install --python .venv/bin/python -r "
+            "bindings/python/pyproject.toml. Without them the leg fails with "
+            "a ModuleNotFoundError that reads like a census defect."
+        )
+    )
     parser.add_argument("--phase", required=True, choices=PHASES)
+    parser.add_argument(
+        "--allow-shortfall",
+        action="store_true",
+        help=(
+            "report a recorded row shortfall instead of failing on it, so a "
+            "job can enforce a phase's receipts while its rows are still "
+            "landing; every other obligation still fails the run"
+        ),
+    )
+    parser.add_argument(
+        "--write-baseline",
+        action="store_true",
+        help=(
+            "rewrite the selected phase's checked baseline from its generated "
+            "corpus instead of validating, for use after a reviewed corpus edit"
+        ),
+    )
     args = parser.parse_args(argv)
     try:
-        validate(args.phase)
+        if args.write_baseline:
+            print(f"wrote {write_baseline(args.phase)}", flush=True)
+            return 0
+        validate(args.phase, allow_shortfall=args.allow_shortfall)
     except OracleFailure as error:
         print(f"RUNTIME EXTENT ORACLE: FAIL: {error}", file=sys.stderr)
         return 1
