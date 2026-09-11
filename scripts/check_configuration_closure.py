@@ -290,6 +290,19 @@ UNCOMPILED_EXCEPTIONS: tuple[UncompiledException, ...] = (
         reason="standalone rejection fixtures; compiling them is the test",
         owning_gate="scripts/check_pipeline_core_compile_fail.py",
     ),
+    UncompiledException(
+        directory="crates/chelis-types/tests/fixtures/runtime_extent_manifest",
+        reason=(
+            "parsed rather than compiled: the runtime-extent target manifest "
+            "tripwire reads these as source text to exercise its own rejection "
+            "cases, so no configuration ever builds them"
+        ),
+        owning_gate="crates/chelis-types/tests/runtime_extent_target_manifest.rs",
+        sources=(
+            "crates/chelis-types/tests/fixtures/runtime_extent_manifest/included_fixture.rs",
+            "crates/chelis-types/tests/fixtures/runtime_extent_manifest/target_fixture.rs",
+        ),
+    ),
 )
 
 
