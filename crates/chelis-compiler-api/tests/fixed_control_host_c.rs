@@ -100,10 +100,7 @@ result = with seed(42i64) {
     ownership_support::balanced(&summary);
     assert_eq!(
         stdout,
-        "result.0 = tensor(shape=[4], data=[0.0, 2.0, 0.0, 0.0])\n\
-result.1 = tensor(shape=[4], data=[0.0, 2.0, 0.0, 0.0])\n\
-result.2 = tensor(shape=[4], data=[2.0, 2.0, 2.0, 2.0])\n\
-result.3 = tensor(shape=[4], data=[2.0, 0.0, 0.0, 0.0])\n",
+        "result = [tensor(shape=[4], data=[0.0, 2.0, 0.0, 0.0]), tensor(shape=[4], data=[0.0, 2.0, 0.0, 0.0]), tensor(shape=[4], data=[2.0, 2.0, 2.0, 2.0]), tensor(shape=[4], data=[2.0, 0.0, 0.0, 0.0])]\n",
         "each replay, nested-scope, and restored-stream position must remain observable"
     );
 }
