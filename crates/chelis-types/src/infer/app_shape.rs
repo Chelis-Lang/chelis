@@ -184,7 +184,7 @@ pub(super) fn infer_expand_app(
     // and arithmetic spellings.
     let size_class = kids
         .get(3)
-        .map(|arg| classify_expand_size(arg, env))
+        .map(|arg| classify_expand_size(arg, env, adt_reg))
         .unwrap_or(SizeClass::Unknown);
     let result_ty = Type::Var(vg.fresh_tvar());
     check_expand_signature(

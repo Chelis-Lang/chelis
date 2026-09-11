@@ -568,7 +568,7 @@
   "polymorphic.foreign.root.mismatch": {
     "c": {
       "stage": "execute",
-      "stderr": "extent `3`: claimed = 3, x axis 0 = 2\nnumeric trap: domain in load at int64",
+      "stderr": "extent `m`: y axis 0 = 3, x axis 0 = 2\nnumeric trap: domain in load at int64",
       "stdout": "",
       "success": false
     },
@@ -583,7 +583,7 @@
     },
     "eval": {
       "stage": "execute",
-      "stderr": "error: extent `3`: claimed = 3, x axis 0 = 2\nnumeric trap: domain in load at int64",
+      "stderr": "error: extent `m`: y axis 0 = 3, x axis 0 = 2\nnumeric trap: domain in load at int64",
       "stdout": "",
       "success": false
     },
@@ -698,7 +698,7 @@
   "polymorphic.named.root.mismatch": {
     "c": {
       "stage": "execute",
-      "stderr": "extent `2`: claimed = 2, y axis 0 = 3\nnumeric trap: domain in load at int64",
+      "stderr": "extent `n`: x axis 0 = 2, y axis 0 = 3\nnumeric trap: domain in load at int64",
       "stdout": "",
       "success": false
     },
@@ -713,7 +713,7 @@
     },
     "eval": {
       "stage": "execute",
-      "stderr": "error: extent `2`: claimed = 2, y axis 0 = 3\nnumeric trap: domain in load at int64",
+      "stderr": "error: extent `n`: x axis 0 = 2, y axis 0 = 3\nnumeric trap: domain in load at int64",
       "stdout": "",
       "success": false
     },
@@ -760,9 +760,9 @@
     },
     "eval": {
       "stage": "execute",
-      "stderr": "error: `access` on a runtime value is not supported by IR lowering; only a compile-time-known record construction can be projected (field `q`)",
-      "stdout": "",
-      "success": false
+      "stderr": "",
+      "stdout": "out = tensor(shape=[2], data=[0.25, 0.25])",
+      "success": true
     },
     "issue": 1266
   },
@@ -795,31 +795,24 @@
   },
   "record.direct": {
     "c": {
-      "stage": "build",
-      "stderr": "error: Check errors: Type errors: [CheckError { kind: DimensionMismatch, message: \"`expand` size resolves to a runtime scalar, but no tensor in scope carries it. Runtime extents use exact `int64`; source the value from an in-scope tensor dimension or a `shape(tensor, int32-axis)` read. A bare runtime scalar has no shape identity to attach to the result yet. Tracked by Chelis-Lang/chelis#469 (spec/04-type-system.md \u00a74.7.2)\", suggestions: [\"Source the extent from a tensor in scope with `shape(x, cast(axis, int32))`, bind that read to a `let`, or use an exact `int64` literal extent.\"], severity: 0.8, expected: None, got: None, span_offset: None, span_id: None }]",
-      "stdout": "",
-      "success": false
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "out = tensor(shape=[2], data=[0.25, 0.25])",
+      "success": true
     },
     "check": {
-      "errors": [
-        {
-          "kind": "DimensionMismatch",
-          "message": "`expand` size resolves to a runtime scalar, but no tensor in scope carries it. Runtime extents use exact `int64`; source the value from an in-scope tensor dimension or a `shape(tensor, int32-axis)` read. A bare runtime scalar has no shape identity to attach to the result yet. Tracked by Chelis-Lang/chelis#469 (spec/04-type-system.md \u00a74.7.2)",
-          "severity": 0.8,
-          "suggestions": [
-            "Source the extent from a tensor in scope with `shape(x, cast(axis, int32))`, bind that read to a `let`, or use an exact `int64` literal extent."
-          ]
-        }
-      ],
-      "score": 0.976,
-      "signatures": {},
-      "success": false
+      "errors": [],
+      "score": 1,
+      "signatures": {
+        "f": "(Inputs) -> tensor[*, f32]"
+      },
+      "success": true
     },
     "eval": {
       "stage": "execute",
-      "stderr": "error: Type errors: [CheckError { kind: DimensionMismatch, message: \"`expand` size resolves to a runtime scalar, but no tensor in scope carries it. Runtime extents use exact `int64`; source the value from an in-scope tensor dimension or a `shape(tensor, int32-axis)` read. A bare runtime scalar has no shape identity to attach to the result yet. Tracked by Chelis-Lang/chelis#469 (spec/04-type-system.md \u00a74.7.2)\", suggestions: [\"Source the extent from a tensor in scope with `shape(x, cast(axis, int32))`, bind that read to a `let`, or use an exact `int64` literal extent.\"], severity: 0.8, expected: None, got: None, span_offset: None, span_id: None }]",
-      "stdout": "",
-      "success": false
+      "stderr": "",
+      "stdout": "out = tensor(shape=[2], data=[0.25, 0.25])",
+      "success": true
     },
     "issue": 1266
   },

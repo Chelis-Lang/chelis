@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "335d4b6a119ae25e3428e3e0f9b0ccec40dd4be1c1a0119594dcbbdca321f14f",
+  "corpus_sha256": "b21aeac04dcf6796288f388beb79ef6d0d48f24ae45ee42711e4b83245527152",
   "rows": [
     {
       "id": "claim.literal.nested_and_unused.eval_c",
@@ -89,13 +89,13 @@
     {
       "id": "expand.arith_size.named_claim.c",
       "baseline": "lane_divergent",
-      "phase_b": "lane_divergent",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.checked_arithmetic_expand_size_under_a_named_claim_agrees_on_every_lane_on_c"
     },
     {
       "id": "expand.arith_size.named_claim.eval",
       "baseline": "lane_divergent",
-      "phase_b": "lane_divergent",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.checked_arithmetic_expand_size_under_a_named_claim_agrees_on_every_lane_on_eval"
     },
     {
@@ -179,7 +179,7 @@
     {
       "id": "expand.piped_shape_read.lint_fix",
       "baseline": "nonconforming_rejection",
-      "phase_b": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.the_canonical_piped_shape_read_checks_evaluates_and_builds"
     },
     {
@@ -233,7 +233,7 @@
     {
       "id": "expand.record_projection.size",
       "baseline": "nonconforming_rejection",
-      "phase_b": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_record_projection_is_an_admissible_expand_size"
     },
     {

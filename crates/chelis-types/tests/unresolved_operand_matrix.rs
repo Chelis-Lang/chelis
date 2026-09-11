@@ -877,3 +877,477 @@ fn a_call_that_suspends_and_then_rejects_eagerly_reports_once() {
         "the late-bound operand's own validation must still run"
     );
 }
+
+/// A dtype-admissibility route's four cells.
+///
+/// [`Cell`] above carries three of them. What makes these calls valid or
+/// invalid is the OPERAND's own dtype rather than one of the call's other
+/// arguments, so the declaration differs between the valid and invalid
+/// programs and the fourth cell has to name its own program instead of
+/// reusing the invalid one's declaration.
+struct DtypeCell {
+    cell: Cell,
+    /// Resolved control on the accepting side: the route admits this dtype.
+    resolved_valid: &'static str,
+}
+
+fn run_dtype_cell(row: &DtypeCell) {
+    // Cell 1 (resolved, valid): DISPOSITION LOCK. Green before the repair; it
+    // is here so a repair that rejects admissible dtypes is caught.
+    check(row.resolved_valid).unwrap_or_else(|e| {
+        panic!(
+            "{}: a valid resolved call must check:\n{}",
+            row.cell.route,
+            summary(&e)
+        )
+    });
+    run_cell(&row.cell);
+
+    // Round 1 P3-1. The shared harness above matches the diagnostic by
+    // SUBSTRING, so a drift in the message tail, or a second diagnostic
+    // appearing beside it, would pass. These routes relocate a decision rather
+    // than restate it, so the two renderings are compared whole: same count,
+    // same kind, same message. Measured equal on all eleven routes.
+    let eager = check(row.cell.resolved_invalid).expect_err("checked by run_cell");
+    let late = check(row.cell.late_invalid).expect_err("checked by run_cell");
+    assert_eq!(
+        summary(&eager),
+        summary(&late),
+        "{}: the late-bound call must produce the SAME diagnostics as the resolved one, whole \
+         and in the same number, not merely a superset containing the fragment",
+        row.cell.route
+    );
+}
+
+/// chelis#1512's remaining class: the dtype-admissibility validators.
+///
+/// These three run at the head of `finish_unified_app`, before the route
+/// dispatch that owns the deferral site, and each admitted a `Type::Var`
+/// operand and walked away. Every `late_invalid` program below was MEASURED
+/// accepted at score 1 with an empty error list on `6dbbbf2bc`, and every
+/// `resolved_invalid` twin rejected there with the diagnostic named.
+///
+/// REGRESSION TEST for the `late_invalid` cell of every row; DISPOSITION LOCK
+/// for the two valid cells.
+#[test]
+fn dtype_admissibility_validates_a_late_bound_operand() {
+    for row in [
+        // `operand_dtype_rejection`, reached from the TENSOR_OPS loop: the
+        // transcendentals are float-only on a host scalar too.
+        DtypeCell {
+            cell: Cell {
+                route: "sqrt",
+                resolved_invalid: "def f(x: int32) -> int32 = sqrt(x)\n",
+                late_invalid: "def f(x: int32) -> int32 = {\n  g = fn (t) -> sqrt(t)\n  g(x)\n}\n",
+                late_valid: "def f(x: f32) -> f32 = {\n  g = fn (t) -> sqrt(t)\n  g(x)\n}\n",
+                diagnostic: "sqrt does not accept argument type int32 in this context",
+            },
+            resolved_valid: "def f(x: f32) -> f32 = sqrt(x)\n",
+        },
+        // The logical operations are bool-only, and the arithmetic ones are
+        // exactly not-bool ([04-NUM-4]). Both directions, so a repair cannot
+        // satisfy one by widening the other.
+        DtypeCell {
+            cell: Cell {
+                route: "and",
+                resolved_invalid: "def f(x: int32) -> int32 = and(x, x)\n",
+                late_invalid: "def f(x: int32) -> int32 = {\n  g = fn (t) -> and(t, t)\n  g(x)\n}\n",
+                late_valid: "def f(x: bool) -> bool = {\n  g = fn (t) -> and(t, t)\n  g(x)\n}\n",
+                diagnostic: "and does not accept argument type int32 in this context",
+            },
+            resolved_valid: "def f(x: bool) -> bool = and(x, x)\n",
+        },
+        DtypeCell {
+            cell: Cell {
+                route: "add",
+                resolved_invalid: "def f(x: bool) -> bool = add(x, x)\n",
+                late_invalid: "def f(x: bool) -> bool = {\n  g = fn (t) -> add(t, t)\n  g(x)\n}\n",
+                late_valid: "def f(x: int32) -> int32 = {\n  g = fn (t) -> add(t, t)\n  g(x)\n}\n",
+                diagnostic: "add on bool operands is not admitted",
+            },
+            resolved_valid: "def f(x: int32) -> int32 = add(x, x)\n",
+        },
+        // The reduction family's own dtype rule, reached from the first-argument
+        // arm of `validate_numeric_and_reduction_arguments`.
+        DtypeCell {
+            cell: Cell {
+                route: "mean",
+                resolved_invalid: "def f(x: tensor[3, int32]) -> tensor[int32] = mean(x, 0i32)\n",
+                late_invalid: "def f(x: tensor[3, int32]) -> tensor[int32] = {\n  g = fn (t) -> mean(t, 0i32)\n  g(x)\n}\n",
+                late_valid: "def f(x: tensor[3, f32]) -> tensor[f32] = {\n  g = fn (t) -> mean(t, 0i32)\n  g(x)\n}\n",
+                diagnostic: "mean on operand precision `int32` is not admitted",
+            },
+            resolved_valid: "def f(x: tensor[3, f32]) -> tensor[f32] = mean(x, 0i32)\n",
+        },
+        DtypeCell {
+            cell: Cell {
+                route: "softmax",
+                resolved_invalid: "def f(x: tensor[3, int32]) -> tensor[3, int32] = softmax(x, 0i32)\n",
+                late_invalid: "def f(x: tensor[3, int32]) -> tensor[3, int32] = {\n  g = fn (t) -> softmax(t, 0i32)\n  g(x)\n}\n",
+                late_valid: "def f(x: tensor[3, f32]) -> tensor[3, f32] = {\n  g = fn (t) -> softmax(t, 0i32)\n  g(x)\n}\n",
+                diagnostic: "softmax on operand precision `int32` is not admitted",
+            },
+            resolved_valid: "def f(x: tensor[3, f32]) -> tensor[3, f32] = softmax(x, 0i32)\n",
+        },
+        // `reject_inadmissible_operand_dtypes`. `uniform_like`'s template
+        // parameter is a bare type variable in the builtin scheme, so a
+        // late-bound operand REACHES the route still unresolved rather than
+        // being bound by signature unification first.
+        DtypeCell {
+            cell: Cell {
+                route: "uniform_like (non-float template)",
+                resolved_invalid: "def f(x: tensor[3, int32]) -> tensor[3, int32] ! {Random} = uniform_like(x, 0.0f32, 1.0f32)\n",
+                late_invalid: "def f(x: tensor[3, int32]) -> tensor[3, int32] ! {Random} = {\n  g = fn (t) -> uniform_like(t, 0.0f32, 1.0f32)\n  g(x)\n}\n",
+                late_valid: "def f(x: tensor[3, f32]) -> tensor[3, f32] ! {Random} = {\n  g = fn (t) -> uniform_like(t, 0.0f32, 1.0f32)\n  g(x)\n}\n",
+                diagnostic: "uniform_like expects a float tensor template",
+            },
+            resolved_valid: "def f(x: tensor[3, f32]) -> tensor[3, f32] ! {Random} = uniform_like(x, 0.0f32, 1.0f32)\n",
+        },
+        DtypeCell {
+            cell: Cell {
+                route: "uniform_like (non-tensor template)",
+                resolved_invalid: "def f(x: int32) -> int32 ! {Random} = uniform_like(x, 0.0f32, 1.0f32)\n",
+                late_invalid: "def f(x: int32) -> int32 ! {Random} = {\n  g = fn (t) -> uniform_like(t, 0.0f32, 1.0f32)\n  g(x)\n}\n",
+                late_valid: "def f(x: tensor[3, f32]) -> tensor[3, f32] ! {Random} = {\n  g = fn (t) -> uniform_like(t, 0.0f32, 1.0f32)\n  g(x)\n}\n",
+                diagnostic: "uniform_like expects tensor template input",
+            },
+            resolved_valid: "def f(x: tensor[3, f32]) -> tensor[3, f32] ! {Random} = uniform_like(x, 0.0f32, 1.0f32)\n",
+        },
+        // `integer_binop_result_type`: the binary operators decide the call's
+        // RESULT type, not only its admissibility, and their operands are three
+        // independent type variables in the builtin scheme.
+        DtypeCell {
+            cell: Cell {
+                route: "mod",
+                resolved_invalid: "def f(x: int64) -> int64 = mod(x, 3i32)\n",
+                late_invalid: "def f(x: int64) -> int64 = {\n  g = fn (t) -> mod(t, 3i32)\n  g(x)\n}\n",
+                late_valid: "def f(x: int32) -> int32 = {\n  g = fn (t) -> mod(t, 3i32)\n  g(x)\n}\n",
+                diagnostic: "mod requires matching integer arguments, got int64 and int32",
+            },
+            resolved_valid: "def f(x: int32) -> int32 = mod(x, 3i32)\n",
+        },
+        DtypeCell {
+            cell: Cell {
+                route: "bitand",
+                resolved_invalid: "def f(x: int64) -> int64 = bitand(x, 3i32)\n",
+                late_invalid: "def f(x: int64) -> int64 = {\n  g = fn (t) -> bitand(t, 3i32)\n  g(x)\n}\n",
+                late_valid: "def f(x: int32) -> int32 = {\n  g = fn (t) -> bitand(t, 3i32)\n  g(x)\n}\n",
+                diagnostic: "bitand requires matching integer arguments, got int64 and int32",
+            },
+            resolved_valid: "def f(x: int32) -> int32 = bitand(x, 3i32)\n",
+        },
+        // The shift operators, whose admissibility was two boolean
+        // disjunctions rather than match arms until this repair.
+        DtypeCell {
+            cell: Cell {
+                route: "shl",
+                resolved_invalid: "def f(x: f32) -> f32 = shl(x, 1i32)\n",
+                late_invalid: "def f(x: f32) -> f32 = {\n  g = fn (t) -> shl(t, 1i32)\n  g(x)\n}\n",
+                late_valid: "def f(x: int32) -> int32 = {\n  g = fn (t) -> shl(t, 1i32)\n  g(x)\n}\n",
+                diagnostic: "shl requires integer lhs and shift amount, got f32 and int32",
+            },
+            resolved_valid: "def f(x: int32) -> int32 = shl(x, 1i32)\n",
+        },
+        DtypeCell {
+            cell: Cell {
+                route: "shr",
+                resolved_invalid: "def f(x: f32) -> f32 = shr(x, 1i32)\n",
+                late_invalid: "def f(x: f32) -> f32 = {\n  g = fn (t) -> shr(t, 1i32)\n  g(x)\n}\n",
+                late_valid: "def f(x: int32) -> int32 = {\n  g = fn (t) -> shr(t, 1i32)\n  g(x)\n}\n",
+                diagnostic: "shr requires integer lhs and shift amount, got f32 and int32",
+            },
+            resolved_valid: "def f(x: int32) -> int32 = shr(x, 1i32)\n",
+        },
+    ] {
+        run_dtype_cell(&row);
+    }
+}
+
+/// The dtype half of the per-route-kind acceptance boundary.
+///
+/// A dtype-admissibility validator's operand is not required to carry a shape,
+/// so a lambda that is never applied keeps its unconstrained result and is
+/// accepted in silence, exactly as the collection, host and string routes are.
+/// The validation is not lost: it runs at each binding instead, which is the
+/// cell the table above asserts.
+///
+/// DISPOSITION LOCK: every program here was accepted on `6dbbbf2bc` and must
+/// stay accepted. It is the cell that took the standard library out when a
+/// first attempt at this repair rejected an operand that never binds.
+#[test]
+fn a_never_bound_dtype_operand_is_accepted() {
+    for (route, program) in [
+        (
+            "sqrt",
+            "def f() -> int32 = {\n  g = fn (t) -> sqrt(t)\n  1i32\n}\n",
+        ),
+        (
+            "mod",
+            "def f() -> int32 = {\n  g = fn (t) -> mod(t, 3i32)\n  1i32\n}\n",
+        ),
+        (
+            "shl",
+            "def f() -> int32 = {\n  g = fn (t) -> shl(t, 1i32)\n  1i32\n}\n",
+        ),
+        (
+            "uniform_like",
+            "def f() -> int32 = {\n  g = fn (t) -> uniform_like(t, 0.0f32, 1.0f32)\n  1i32\n}\n",
+        ),
+    ] {
+        check(program).unwrap_or_else(|e| {
+            panic!(
+                "{route}: a dtype operand that never binds must be accepted, not reported:\n{}",
+                summary(&e)
+            )
+        });
+    }
+}
+
+/// An error operand keeps its early return here too: the upstream failure is
+/// reported once and the dtype validator adds nothing on top of it.
+///
+/// A suspended call whose sibling operand is an error witness is the hazard:
+/// the witness never binds, the readiness predicate ignores it, and a replay
+/// would print the route's own diagnostic against a type the program never
+/// really had. DISPOSITION LOCK on `6dbbbf2bc`'s verdict, and the negative
+/// twin of every cell in the table above.
+#[test]
+fn an_error_operand_suppresses_the_dtype_routes_own_diagnostic() {
+    for (route, program) in [
+        ("sqrt", "def f(x: f32) -> f32 = sqrt(nope(x))\n"),
+        ("mod", "def f(x: int32) -> int32 = mod(nope(x), 3i32)\n"),
+        ("shl", "def f(x: int32) -> int32 = shl(nope(x), 1i32)\n"),
+        (
+            "add",
+            "def f(x: int32) -> int32 = {\n  g = fn (t) -> add(t, nope(x))\n  g(x)\n}\n",
+        ),
+    ] {
+        let errors = check(program).expect_err("the unbound callee is an error");
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("unbound variable: nope")),
+            "{route}: the upstream error must be reported:\n{}",
+            summary(&errors)
+        );
+        assert!(
+            !errors.iter().any(|e| e.message.contains(route)
+                && !e.message.contains("unbound variable")
+                && !e.message.contains("declared signature")),
+            "{route}: an error operand must not also produce the route's own diagnostic:\n{}",
+            summary(&errors)
+        );
+    }
+}
+
+/// A dtype validator that suspends on one operand and then rejects on another
+/// in the same eager pass reports that rejection ONCE.
+///
+/// `mod(t, 3.0f32)` reaches the rejecting arm while `t` is still a variable,
+/// so the call both registers a suspension and fails, and a replay would
+/// re-run the same validator against the same argument list. Asserting the
+/// COUNT is the point: every cell above uses `.any(...)` and would pass either
+/// way. REGRESSION TEST against the shape chelis#1512's round 1 measured on
+/// the string routes.
+#[test]
+fn a_dtype_call_that_suspends_and_then_rejects_eagerly_reports_once() {
+    let program = "def f(x: int32) -> int32 = {\n  g = fn (t) -> mod(t, 3.0f32)\n  g(x)\n}\n";
+    let errors = check(program).expect_err("mod over a float shift amount must be rejected");
+    let hits = errors
+        .iter()
+        .filter(|e| {
+            e.message
+                .contains("mod requires matching integer arguments")
+        })
+        .count();
+    assert_eq!(
+        hits,
+        1,
+        "the eager rejection must be reported once, not re-reported by the replay; \
+         got {hits} copies in:\n{}",
+        summary(&errors)
+    );
+
+    // NEGATIVE TWIN. Cancelling a failed call's suspension must not cancel a
+    // call that did not fail eagerly: the same operator, invalid only in the
+    // operand that binds late, still rejects.
+    let errors = check("def f(x: int64) -> int64 = {\n  g = fn (t) -> mod(t, 3i32)\n  g(x)\n}\n")
+        .expect_err("mod over a late-bound int64 must be rejected");
+    assert!(
+        errors.iter().any(|e| e
+            .message
+            .contains("mod requires matching integer arguments")),
+        "the late-bound operand's own validation must still run:\n{}",
+        summary(&errors)
+    );
+}
+
+/// The dtype routes whose late-bound form was ALREADY rejected before this
+/// repair, each by a rule that runs ahead of the validator.
+///
+/// `trunc_div`, `div`, `dropout` and `test_assert_close_tensor` all declare a
+/// concrete or restricted operand in the builtin scheme, so signature
+/// unification binds the operand before `finish_unified_app` runs and the
+/// validator never sees a variable. `sum`'s late-bound axis is caught by the
+/// reduction's own axis rule.
+///
+/// DISPOSITION LOCK, not a regression test: every verdict here was measured on
+/// `6dbbbf2bc` and must not move. Suspending a decision relocates it, and these
+/// are the programs where an over-broad suspension would silently stop
+/// rejecting.
+#[test]
+fn dtype_routes_caught_before_the_validator_keep_their_verdict() {
+    for (route, program, diagnostic) in [
+        (
+            "trunc_div",
+            "def f(x: f32) -> f32 = {\n  g = fn (t) -> trunc_div(t, 2.0f32)\n  g(x)\n}\n",
+            "trunc_div on float operand precision `f32` is not admitted",
+        ),
+        (
+            "div",
+            "def f(x: int32) -> int32 = {\n  g = fn (t) -> div(t, 2i32)\n  g(x)\n}\n",
+            "div on integer operand precision `int32` is not admitted",
+        ),
+        (
+            "sum (non-tensor operand)",
+            "def f(x: int32) -> int32 = {\n  g = fn (t) -> sum(t, 0i32)\n  g(x)\n}\n",
+            "sum expects tensor input, got int32",
+        ),
+        (
+            "dropout",
+            "def f(x: tensor[3, int32]) -> tensor[3, int32] ! {Random} = {\n  g = fn (t) -> dropout(t, 0.5f32)\n  g(x)\n}\n",
+            "tensor precision mismatch: f32 vs int32",
+        ),
+        (
+            "test_assert_close_tensor",
+            "def test_a(x: tensor[3, f32]) -> unit ! {Test} = {\n  g = fn (t) -> test_assert_close_tensor(t, t, 0.01f64, \"m\")\n  g(x)\n}\n",
+            "tensor precision mismatch: f64 vs f32",
+        ),
+        (
+            "sum (late-bound axis)",
+            "def f(x: f32) -> tensor[f32] = {\n  g = fn (a) -> sum(to_tensor([1.0f32, 2.0f32, 3.0f32]), a)\n  g(x)\n}\n",
+            "is neither a compile-time constant nor a named axis",
+        ),
+    ] {
+        let errors = check(program).expect_err(&format!("{route}: this program must be rejected"));
+        assert!(
+            errors.iter().any(|e| e.message.contains(diagnostic)),
+            "{route}: the verdict must not move, expected {diagnostic:?}, got:\n{}",
+            summary(&errors)
+        );
+    }
+}
+
+/// The residual half of this class, tracked as chelis#1805: a tensor operand
+/// whose PRECISION resolves after the route runs.
+///
+/// The suspension above waits on `shape_operand_awaits_binding`, which answers
+/// true for `Type::Var` and `Type::Ref` alone. A `Type::Tensor` already carries
+/// its outer constructor, so the ledger treats it as ready the moment it is
+/// seen, whatever its precision variable still holds, and this ledger therefore
+/// cannot carry the case. Repairing it needs either a readiness predicate that
+/// also waits on a free `TensorPrec::Var`, which changes when every existing
+/// entry replays, or a second ledger: a design decision rather than an
+/// extension of the arm split, which is why chelis#1805 owns it.
+///
+/// The first assertion is NOT a lock on desired behaviour. It pins a KNOWN HOLE
+/// so the suite says out loud what this pull request does not close, and it is
+/// the assertion chelis#1805 turns red. Read a failure there as that repair
+/// landing, and move it to the rejecting side. The second is an ordinary
+/// DISPOSITION LOCK: both were measured accepting and rejecting respectively on
+/// `6dbbbf2bc`.
+#[test]
+fn a_late_bound_tensor_precision_is_not_validated_yet() {
+    // chelis#1805. A reduction's result does not determine its operand, so
+    // nothing here ever binds the empty literal's precision to the `int32` the
+    // declaration names, and the dtype policy is never consulted against it.
+    // Measured ACCEPTED on `6dbbbf2bc` and still accepted here.
+    check("def f() -> tensor[int32] = mean(to_tensor([]), 0i32)\n").expect(
+        "chelis#1805: an integer `mean` over a late-bound precision is still accepted; if this \
+         now rejects, that issue is fixed and this assertion moves",
+    );
+
+    // DISPOSITION LOCK, and the reason the assertion above is a hole rather
+    // than a policy: the same operand with its precision settled first is
+    // rejected. Measured REJECTED on `6dbbbf2bc`.
+    let errors = check("def f(x: tensor[3, int32]) -> tensor[int32] = mean(x, 0i32)\n")
+        .expect_err("a settled integer operand must be rejected");
+    assert!(
+        errors.iter().any(|e| e
+            .message
+            .contains("mean on operand precision `int32` is not admitted")),
+        "the resolved rejection must still name the dtype policy:\n{}",
+        summary(&errors)
+    );
+}
+
+/// Round 1 P2-1: this pull request NARROWS acceptance on the empty tensor
+/// literal, and the narrowing was neither recorded nor covered.
+///
+/// A shape- and dtype-preserving route ties its result to its operand, so a
+/// declaration that names the result determines the operand as well. The call
+/// is suspended while the operand is still a variable, the declaration binds
+/// it, and the replay then consults the dtype policy against the bound type.
+/// The three programs below were MEASURED accepted at score 1 on `6dbbbf2bc`
+/// and are rejected here.
+///
+/// This is why the sibling above is a bounded residual rather than a blanket
+/// one, and it strengthens `Closes #1512` rather than qualifying it: an empty
+/// literal under a reducing route keeps its hole, an empty literal under a
+/// preserving route does not.
+///
+/// REGRESSION TEST, every assertion. The earlier spelling of this file asserted
+/// the `softmax` row inside the chelis#1805 lock with a mechanism sentence that
+/// was false ("signature unification binds it before the validator runs";
+/// unification did not bind it, and the base accepts the program).
+#[test]
+fn an_empty_literal_the_declared_result_determines_is_now_validated() {
+    for (route, program, diagnostic) in [
+        (
+            "softmax",
+            "def f() -> tensor[3, int32] = softmax(to_tensor([]), 0i32)\n",
+            "softmax on operand precision `int32` is not admitted",
+        ),
+        (
+            "sqrt",
+            "def f() -> tensor[3, int32] = sqrt(to_tensor([]))\n",
+            "sqrt on operand precision `int32` is not admitted",
+        ),
+        (
+            "add",
+            "def f() -> tensor[3, bool] = add(to_tensor([]), to_tensor([]))\n",
+            "add on bool operands is not admitted",
+        ),
+    ] {
+        let errors = check(program).expect_err(&format!(
+            "{route}: an empty literal the declaration determines must now be validated"
+        ));
+        assert!(
+            errors.iter().any(|e| e.message.contains(diagnostic)),
+            "{route}: the narrowed rejection must name the dtype policy, got:\n{}",
+            summary(&errors)
+        );
+    }
+
+    // NEGATIVE TWIN. The narrowing is a dtype verdict, not a rejection of the
+    // empty literal: the same programs at an admissible dtype still check.
+    // DISPOSITION LOCK, accepted on `6dbbbf2bc` and here.
+    for (route, program) in [
+        (
+            "softmax",
+            "def f() -> tensor[3, f32] = softmax(to_tensor([]), 0i32)\n",
+        ),
+        ("sqrt", "def f() -> tensor[3, f32] = sqrt(to_tensor([]))\n"),
+        (
+            "mean",
+            "def f() -> tensor[f32] = mean(to_tensor([]), 0i32)\n",
+        ),
+    ] {
+        check(program).unwrap_or_else(|e| {
+            panic!(
+                "{route}: an admissible dtype over an empty literal must still check:\n{}",
+                summary(&e)
+            )
+        });
+    }
+}
