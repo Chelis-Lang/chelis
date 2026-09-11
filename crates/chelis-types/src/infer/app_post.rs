@@ -1089,12 +1089,15 @@ pub(super) fn finish_unified_app(
                         }
                         return Type::Tensor(then_dims.clone(), then_prec.clone());
                     }
-                    (Type::Var(_), _, _)
-                    | (_, Type::Var(_), _)
-                    | (_, _, Type::Var(_))
-                    | (Type::Error(_), _, _)
-                    | (_, Type::Error(_), _)
-                    | (_, _, Type::Error(_)) => return result_ty,
+                    // chelis#1512: an upstream failure keeps the early
+                    // return, so the cascade still suppresses. Order matters:
+                    // a triple carrying both must suppress, not suspend.
+                    (Type::Error(_), _, _) | (_, Type::Error(_), _) | (_, _, Type::Error(_)) => {
+                        return result_ty;
+                    }
+                    (Type::Var(_), _, _) | (_, Type::Var(_), _) | (_, _, Type::Var(_)) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                    }
                     _ => {
                         return report(
                             errors,
@@ -1299,12 +1302,15 @@ pub(super) fn finish_unified_app(
                             ),
                         );
                     }
-                    (Type::Var(_), _, _)
-                    | (_, Type::Var(_), _)
-                    | (_, _, Type::Var(_))
-                    | (Type::Error(_), _, _)
-                    | (_, Type::Error(_), _)
-                    | (_, _, Type::Error(_)) => return result_ty,
+                    // chelis#1512: an upstream failure keeps the early
+                    // return, so the cascade still suppresses. Order matters:
+                    // a triple carrying both must suppress, not suspend.
+                    (Type::Error(_), _, _) | (_, Type::Error(_), _) | (_, _, Type::Error(_)) => {
+                        return result_ty;
+                    }
+                    (Type::Var(_), _, _) | (_, Type::Var(_), _) | (_, _, Type::Var(_)) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                    }
                     _ => {
                         return report(
                             errors,
@@ -1523,20 +1529,26 @@ pub(super) fn finish_unified_app(
                 }
                 let list_arg = subst.apply(&arg_tys[0]);
                 let index_arg = subst.apply(&arg_tys[1]);
-                if !matches!(index_arg, Type::Prim(prec) if prec.is_integer())
-                    && !matches!(index_arg, Type::Var(_) | Type::Error(_))
-                {
-                    return report(
-                        errors,
-                        CheckError::new(
-                            CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
-                                format!("index expects integer index, got {index_arg}"),
+                match &index_arg {
+                    Type::Prim(prec) if prec.is_integer() => {}
+                    // chelis#1512: not an integer YET. Suspending the call
+                    // re-enters this route once the operand binds, so this
+                    // same guard decides against a settled type.
+                    Type::Var(_) => site.register(&arg_tys, &result_ty, product),
+                    Type::Error(_) => {}
+                    other => {
+                        return report(
+                            errors,
+                            CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    format!("index expects integer index, got {other}"),
+                                ),
+                                vec![],
                             ),
-                            vec![],
-                        ),
-                    );
+                        );
+                    }
                 }
                 match list_arg {
                     Type::Adt(name, mut args) if name == "List" && args.len() == 1 => {
@@ -1681,11 +1693,14 @@ pub(super) fn finish_unified_app(
                         }
                         return Type::Adt("List".to_string(), vec![subst.apply(&lhs_args[0])]);
                     }
-                    (Type::Var(_), _)
-                    | (_, Type::Var(_))
-                    | (Type::Error(_), _)
-                    | (_, Type::Error(_)) => {
+                    // chelis#1512: an upstream failure keeps the early
+                    // return, so the cascade still suppresses. Order matters:
+                    // an (Error, Var) pair must suppress, not suspend.
+                    (Type::Error(_), _) | (_, Type::Error(_)) => {
                         return result_ty;
+                    }
+                    (Type::Var(_), _) | (_, Type::Var(_)) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
                     }
                     (lhs, rhs) => {
                         return report(
@@ -1721,20 +1736,26 @@ pub(super) fn finish_unified_app(
                     (Type::Tensor(dims, precision), Type::Adt(name, args))
                         if name == "List" && args.len() == 1 =>
                     {
-                        if !matches!(&args[0], Type::Prim(prec) if prec.is_integer())
-                            && !matches!(&args[0], Type::Var(_) | Type::Error(_))
-                        {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        "split expects List[int] sizes".to_string(),
+                        match &args[0] {
+                            Type::Prim(prec) if prec.is_integer() => {}
+                            // chelis#1512: not an integer YET. Suspending the
+                            // call re-enters this route once the element type
+                            // binds, so this same guard decides against it.
+                            Type::Var(_) => site.register(&arg_tys, &result_ty, product),
+                            Type::Error(_) => {}
+                            _ => {
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            "split expects List[int] sizes".to_string(),
+                                        ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ),
-                            );
+                                );
+                            }
                         }
                         // Negative axes index from the end.
                         // Issue #216: cast-aware so a
@@ -1770,11 +1791,14 @@ pub(super) fn finish_unified_app(
                             vec![Type::Tensor(piece_dims, precision)],
                         );
                     }
-                    (Type::Var(_), _)
-                    | (_, Type::Var(_))
-                    | (Type::Error(_), _)
-                    | (_, Type::Error(_)) => {
+                    // chelis#1512: an upstream failure keeps the early
+                    // return, so the cascade still suppresses. Order matters:
+                    // an (Error, Var) pair must suppress, not suspend.
+                    (Type::Error(_), _) | (_, Type::Error(_)) => {
                         return result_ty;
+                    }
+                    (Type::Var(_), _) | (_, Type::Var(_)) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
                     }
                     (tensor_ty, sizes_ty) => {
                         return report(
@@ -1800,20 +1824,26 @@ pub(super) fn finish_unified_app(
                 let op_name = func_name.as_deref().unwrap_or("collection helper");
                 let list_arg = subst.apply(&arg_tys[0]);
                 let count_arg = subst.apply(&arg_tys[1]);
-                if !matches!(count_arg, Type::Prim(prec) if prec.is_integer())
-                    && !matches!(count_arg, Type::Var(_) | Type::Error(_))
-                {
-                    return report(
-                        errors,
-                        CheckError::new(
-                            CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
-                                format!("{op_name} expects integer count, got {count_arg}"),
+                match &count_arg {
+                    Type::Prim(prec) if prec.is_integer() => {}
+                    // chelis#1512: not an integer YET. Suspending the call
+                    // re-enters this route once the operand binds, so this
+                    // same guard decides against a settled type.
+                    Type::Var(_) => site.register(&arg_tys, &result_ty, product),
+                    Type::Error(_) => {}
+                    other => {
+                        return report(
+                            errors,
+                            CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    format!("{op_name} expects integer count, got {other}"),
+                                ),
+                                vec![],
                             ),
-                            vec![],
-                        ),
-                    );
+                        );
+                    }
                 }
                 match list_arg {
                     Type::Adt(name, args) if name == "List" && args.len() == 1 => {
@@ -1844,20 +1874,26 @@ pub(super) fn finish_unified_app(
                 }
                 let list_arg = subst.apply(&arg_tys[0]);
                 let count_arg = subst.apply(&arg_tys[1]);
-                if !matches!(count_arg, Type::Prim(prec) if prec.is_integer())
-                    && !matches!(count_arg, Type::Var(_) | Type::Error(_))
-                {
-                    return report(
-                        errors,
-                        CheckError::new(
-                            CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
-                                format!("chunk expects integer size, got {count_arg}"),
+                match &count_arg {
+                    Type::Prim(prec) if prec.is_integer() => {}
+                    // chelis#1512: not an integer YET. Suspending the call
+                    // re-enters this route once the operand binds, so this
+                    // same guard decides against a settled type.
+                    Type::Var(_) => site.register(&arg_tys, &result_ty, product),
+                    Type::Error(_) => {}
+                    other => {
+                        return report(
+                            errors,
+                            CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    format!("chunk expects integer size, got {other}"),
+                                ),
+                                vec![],
                             ),
-                            vec![],
-                        ),
-                    );
+                        );
+                    }
                 }
                 match list_arg {
                     Type::Adt(name, args) if name == "List" && args.len() == 1 => {
@@ -2282,11 +2318,14 @@ pub(super) fn finish_unified_app(
                             vec![Type::Tuple(vec![lhs_args[0].clone(), rhs_args[0].clone()])],
                         );
                     }
-                    (Type::Var(_), _)
-                    | (_, Type::Var(_))
-                    | (Type::Error(_), _)
-                    | (_, Type::Error(_)) => {
+                    // chelis#1512: an upstream failure keeps the early
+                    // return, so the cascade still suppresses. Order matters:
+                    // an (Error, Var) pair must suppress, not suspend.
+                    (Type::Error(_), _) | (_, Type::Error(_)) => {
                         return result_ty;
+                    }
+                    (Type::Var(_), _) | (_, Type::Var(_)) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
                     }
                     (lhs, rhs) => {
                         return report(
@@ -2594,11 +2633,14 @@ pub(super) fn finish_unified_app(
                             vec![subst.apply(&lhs_args[0]), subst.apply(&lhs_args[1])],
                         );
                     }
-                    (Type::Var(_), _)
-                    | (_, Type::Var(_))
-                    | (Type::Error(_), _)
-                    | (_, Type::Error(_)) => {
+                    // chelis#1512: an upstream failure keeps the early
+                    // return, so the cascade still suppresses. Order matters:
+                    // an (Error, Var) pair must suppress, not suspend.
+                    (Type::Error(_), _) | (_, Type::Error(_)) => {
                         return result_ty;
+                    }
+                    (Type::Var(_), _) | (_, Type::Var(_)) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
                     }
                     (lhs_ty, rhs_ty) => {
                         return report(

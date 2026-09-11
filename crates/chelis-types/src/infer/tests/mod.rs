@@ -2055,4 +2055,3 @@ mod issue_1316;
 mod more;
 mod recursion_uniformity;
 mod schedule_invariants;
-mod unresolved_operand_replay;

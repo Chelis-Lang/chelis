@@ -141,7 +141,14 @@ pub(super) fn defer_or_check_shape_route(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
 ) -> Type {
-    if matches!(type_for_readonly_check(&arg_tys[0], subst), Type::Var(_)) {
+    // chelis#1512: ANY unresolved operand, not just the tensor. These routes
+    // check their axis, stride, bounds and window arguments too, and an arm
+    // that admitted a variable there let a non-int32 `permute` axis and a
+    // non-int64 `stride` step through while the tensor operand was settled.
+    if arg_tys
+        .iter()
+        .any(|ty| matches!(type_for_readonly_check(ty, subst), Type::Var(_)))
+    {
         let result = Type::Var(vg.fresh_tvar());
         product.defer_shape_check(
             DeferredShapeRule::ShapeRoute {
