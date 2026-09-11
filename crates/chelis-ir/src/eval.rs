@@ -2151,7 +2151,7 @@ where
     // mirror of the C backend's runtime equality-abort guard).
     let op_declared_axes = crate::dag::op_declared_axes_by_node(&bound_dag);
     // chelis#1277 C1.3: the eval lane's LOCAL guards, from the same
-    // `local_dim_guard_sites` the C emitter reads (C2.7). Derived from `dag`
+    // `local_dim_guard_sites` the C emitter reads (C2.5). Derived from `dag`
     // and not from `bound_dag` for the same reason the entry guards are:
     // binding rewrites a resolved `Named(n, None)` to `Named(n, Some(4))`, and
     // the derivation reads a member's own dim to decide whether the checker

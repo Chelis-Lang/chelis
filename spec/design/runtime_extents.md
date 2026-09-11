@@ -56,9 +56,6 @@ obligations: computed reshape claims and broadcast unit preconditions survive
 inlining, graph rewrites and cache transport. Their bounded oracle retains
 independent declaration, value and failure assertions. Remaining failure boundaries:
 
-- #1374/#1376: lowering may drop the argument whose axis witnesses the result
-  claim. Root reachability cannot recover a signature that is no longer
-  represented, and an unread argument still owes its signature check.
 - #1397: checked function stamps now retain the declared result; movement
   execution still owes its guard and general wildcard-returning roots can
   disappear from eval and entry emission. #1378's public vmap witness remains
@@ -213,7 +210,11 @@ to its kernel even when the body reads none of their elements. They are shape
 inputs, not copied payloads. Inlining replaces the formal Load by the actual
 axis dependency and retains the obligation and its introducing call position.
 No guard attempts to reconstruct a dropped argument from a similarly named
-survivor. #1374/#1376's caller preservation is explicitly owned by B2b-1.
+survivor. A declared result's NAMED claim is carried by the witness that
+observed the produced extent, as a named claim against the witness that
+declares the binder, so the obligation survives every call form and reaches a
+declared-but-unread parameter, whose interface witness the claim retains
+(#1374, #1376, #1566's unread residual).
 
 The same claim/source derivation is available before any deleting rewrite
 for its liveness decision and after the last rewrite for emission. An
@@ -466,8 +467,9 @@ reshape obligation. HIP entry selection retains the checked realizability lane
 through helper extraction on both CLI and API paths. The host C artifact is
 executed independently in the oracle; genuine tensor roots still select device
 emission. HIP device execution remains with the platform owners.
-WireDag v10 carries both checked operations and integer remainder. Stdlib/library/context cache
-versions 17/13/19 require the authored signature ledger and revalidate it
+WireDag v11 carries both checked operations, integer remainder and the named
+claims an extent witness owes against another witness. Stdlib/library/context cache
+versions 18/14/20 require the authored signature ledger and revalidate it
 against fresh lowering. Missing fields and a forged ledger with a valid
 checksum and unchanged proof identity reject at admission.
 
@@ -779,7 +781,7 @@ All are Slice B work under #1277 unless expressly separated.
 | owner | entry | deliverable and exit |
 |---|---|---|
 | B2b-0b: remaining local guards | merged B2r/S2b and #1658's broadcast preparation repair | guard literal and resolved numeric claims from independent local size sources; op-computed local extents; exact positive/negative C/Eval rows |
-| B2b-1: claim transport | C2 contract and red fixtures; integrates B2b-0b | preserve the shipped helper-order and C2.4 checked-reshape/unit receipts (#1686/#1687); finish general scoped checked/lowered identities, explicit caller witnesses, multi-claim axes, rebuild/wire transport and migrated binding consumers; #1374/#1376/#1566, #1397's declaration-erasure half, with #1377's literal call/inlined-root exit established by the witness subset |
+| B2b-1: claim transport | C2 contract and red fixtures; integrates B2b-0b | preserve the shipped helper-order and C2.4 checked-reshape/unit receipts (#1686/#1687); finish general scoped checked/lowered identities, explicit caller witnesses, multi-claim axes, rebuild/wire transport and migrated binding consumers; #1397's declaration-erasure half, with #1377's literal call/inlined-root exit established by the witness subset. Named result claims and the unread signature witness (#1374, #1376, #1566) are delivered |
 | B2b-root: root execution | can start independently; acceptance composes B2b-1 | #1397's general wildcard-root boundary; run or diagnose every accepted root; unlock and reverify #1378's exact public value witness |
 | B2b-2: sources and acceptance | guards and claim transport for every newly admitted row | finish declaration sources (#665/#1556), supply #1482's missing shape source, remove provenance restrictions (#1266/#569/#1379), then remove unused `shape_deps` |
 | B2b-3: phase exit | preceding host repairs and per-row platform dispositions | register actual passing receipts, correct measured stale baselines, retire phase c from final selection; phase b/final remain red until their named obligations pass |

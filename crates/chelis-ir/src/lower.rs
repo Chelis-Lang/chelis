@@ -6061,7 +6061,7 @@ impl<'program> LowerCtx<'program> {
     /// stamped dim is the claim the program makes about that axis; deriving it
     /// from the size instead would make the claim and its source the same
     /// value, and the derived equality class would then owe no runtime guard
-    /// (`spec/design/runtime_extents.md` C2.4, C2.7). Only when the stamp is
+    /// (`spec/design/runtime_extents.md` C2.4, C2.5). Only when the stamp is
     /// unusable does the size supply the dim.
     ///
     /// Precision comes from the operand chain rather than from the stamp, for

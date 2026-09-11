@@ -1040,7 +1040,7 @@ fn sets_axis(op: &RiscOp, axis: usize) -> bool {
 /// evaluator answer a question the derivation had already answered, and it got
 /// a unit-extent site wrong, because that site's node is the operand and its
 /// operation carries no such axis. The derivation states the answer now, which
-/// is what C2.7 asks for.
+/// is what C2.5 asks for.
 ///
 /// A `Sym` or `Lit` carrier is deliberately absent: neither computes an
 /// extent, and `sets_axis` does not make either a witness on a `Reshape`.
@@ -1731,13 +1731,13 @@ impl std::fmt::Display for CanonicalExtent {
 
 /// How a consumer reads the extent a local guard observes.
 ///
-/// The derivation states it, because C2.7 puts one answer to one question in
+/// The derivation states it, because C2.5 puts one answer to one question in
 /// one place. The two kinds of local claim observe different quantities: an
 /// equality class compares the extent an operation is ABOUT TO produce, read
 /// from the carrier it was given, and a unit-extent claim compares the extent
 /// its operand ALREADY produced, read from that operand's realized shape. A
 /// consumer that re-derives which of those to read from the site's own `op`
-/// can only get one of them right, which is exactly the divergence C2.7
+/// can only get one of them right, which is exactly the divergence C2.5
 /// forbids.
 ///
 /// The variants also fix WHEN each is readable, and that is not incidental.
@@ -1779,7 +1779,7 @@ pub struct LocalGuardClaim {
 /// introduces the guarded extent" (`spec/04-type-system.md` section 4.7), so
 /// unlike the entry classes these are keyed by node.
 ///
-/// Two lanes read this one function, which is what C2.7's single derivation
+/// Two lanes read this one function, which is what C2.5's single derivation
 /// point means for a local guard: the C emitter places its guard at the
 /// operation it names, and the DAG evaluator checks the same site when that
 /// node produces its value. A second answer computed in either lane could
@@ -1900,7 +1900,7 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
     // extent", which is the `expand` making the claim, not whichever operation
     // happened to produce the operand.
     //
-    // It is derived HERE rather than in the ownership view because C2.7 puts
+    // It is derived HERE rather than in the ownership view because C2.5 puts
     // the local site derivation in one place that both lanes read. S2b added
     // this loop beside the class loop when both lived in the view; the loop is
     // unchanged, and it moves with the function it was appended to.

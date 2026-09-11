@@ -3050,7 +3050,7 @@ pub struct RandomLoweringState {
 /// chelis#1277 B2h: the eval interpreter applies a host-lane def through this
 /// kernel, so eval executes exactly the DAG C emits for the def ([05-MOV-1])
 /// and the runtime-extent classes and guards derived from that DAG fire on
-/// both lanes (runtime_extents.md C2.7). The decision is made once, here,
+/// both lanes (runtime_extents.md C2.5). The decision is made once, here,
 /// before any lowering: `Ok(None)` is the host lane, `Ok(Some)` the kernel,
 /// and `Err` a kernel decision whose lowering failed.
 #[derive(Debug, Clone)]

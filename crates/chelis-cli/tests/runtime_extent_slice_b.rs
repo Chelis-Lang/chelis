@@ -1004,7 +1004,7 @@ fn load_load_named_class_guards_every_non_canonical_member_on_eval() {
 // `derive_dim_witnesses`, and those are two sibling groupings in
 // `axis_sources.rs` that differ in their guard filter over one shared
 // primitive, `output_axis_sources`, which answers where an axis's extent comes
-// from. That shared primitive is what C2.7's one-derivation property is about.
+// from. That shared primitive is what C2.5's one-derivation property is about.
 // Byte identity of the rendered line is therefore something these receipts
 // MEASURE, by asserting the same literal string on each lane, and not
 // something a single shared call already guarantees.
@@ -1090,7 +1090,7 @@ fn a_class_with_no_movement_bound_consumer_still_guards_on_eval() {
 ///
 /// EVIDENTIARY STATUS: disposition lock, as its eval twin. The row's own
 /// content is the LANE AGREEMENT: the compiled binary must render the
-/// identical context line, which C2.7 requires because both lanes read one
+/// identical context line, which C2.5 requires because both lanes read one
 /// derivation.
 #[test]
 fn a_class_with_no_movement_bound_consumer_still_guards_on_c() {
