@@ -222,3 +222,64 @@ fn hip_cli_gates_a_count_helper_with_the_full_device_policy() {
     );
     assert!(!stderr.contains("reached emission"), "{stderr}");
 }
+
+/// The `build-deep` lane runs the same four gate call sites as `build`. The
+/// fixture is desugared with `chelis deep` and built from the `.dp`, so both
+/// `cmd_build_deep` sites (Metal and HIP) stop at the gate with the typed
+/// chelis#1306 receipt instead of reaching an emitter.
+#[test]
+fn build_deep_gates_a_count_helper_with_the_full_device_policy() {
+    let temp = tempdir().expect("temporary source and output directory");
+    let surf = temp.path().join("count_sub.ch");
+    std::fs::write(
+        &surf,
+        "mask: tensor[2, 3, bool] = [[true, false, true], [false, true, true]]\n\
+         rows: tensor[2, int64] = sub(count(&mask, 1), count(&mask, 1))\n",
+    )
+    .expect("write Count-plus-sub fixture");
+    let desugared = Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["deep", surf.to_str().expect("UTF-8 fixture path")])
+        .output()
+        .expect("chelis deep runs");
+    assert!(
+        desugared.status.success(),
+        "{}",
+        String::from_utf8_lossy(&desugared.stderr)
+    );
+    let deep = temp.path().join("count_sub.dp");
+    std::fs::write(&deep, &desugared.stdout).expect("write desugared fixture");
+
+    for (target, gate_marker) in [
+        ("metal", "does not yet support exact `sub`"),
+        ("hip", "early capability gate"),
+    ] {
+        let output_dir = temp.path().join(format!("count-sub-deep-{target}"));
+        let result = Command::cargo_bin("chelis")
+            .expect("chelis binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args([
+                "build",
+                deep.to_str().expect("UTF-8 fixture path"),
+                "--target",
+                target,
+                "--output",
+                output_dir.to_str().expect("UTF-8 output path"),
+            ])
+            .output()
+            .expect("chelis build runs");
+        assert!(
+            !result.status.success(),
+            "{target} build-deep of a Count helper carrying `sub` must not build:\n{}",
+            String::from_utf8_lossy(&result.stdout)
+        );
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(
+            stderr.contains("unimplemented chelis#1306:"),
+            "{target}: {stderr}"
+        );
+        assert!(stderr.contains(gate_marker), "{target}: {stderr}");
+        assert!(!stderr.contains("reached emission"), "{target}: {stderr}");
+    }
+}

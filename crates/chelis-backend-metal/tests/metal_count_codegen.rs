@@ -304,3 +304,39 @@ fn metal_host_program_rejects_an_external_helper_outside_the_manifest() {
     );
     assert!(rendered.contains("deliberate [04-TOT-2]"), "{rendered}");
 }
+
+/// Disposition lock on the runtime helper's body, not a regression test: Metal
+/// zero-fills a fresh `StorageModeShared` buffer today, so no executable path
+/// can observe the `memset`. It is defense against a future reusing
+/// allocator, and this lock is what keeps it from being deleted as dead code.
+#[test]
+fn metal_status_word_helper_zeroes_the_buffer_it_returns() {
+    let header = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/runtime/chelis_metal_runtime.h"
+    ))
+    .expect("Metal runtime header is readable");
+    let signature = "static inline id<MTLBuffer> chelis_metal_alloc_status_word(size_t bytes) {";
+    let start = header
+        .find(signature)
+        .expect("the status-word helper keeps its byte-count signature");
+    let body = &header[start + signature.len()..];
+    let body = &body[..body.find("\n}").expect("helper body closes")];
+    assert!(
+        body.contains("chelis_metal_alloc(bytes)"),
+        "the status word is allocated through the shared allocator at the caller's width:\n{body}"
+    );
+    assert!(
+        body.contains("memset([buf contents], 0, bytes);"),
+        "the status word must be zeroed through the untyped contents pointer before it is returned:\n{body}"
+    );
+    assert!(
+        body.find("memset").expect("zeroing present")
+            < body.find("return buf").expect("returns the buffer"),
+        "zeroing must precede the return:\n{body}"
+    );
+    assert!(
+        !body.contains("sizeof"),
+        "the helper spells no width of its own:\n{body}"
+    );
+}

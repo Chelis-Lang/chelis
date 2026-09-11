@@ -548,7 +548,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/05-risc-primitives.md",
         "### 2.1 Elementwise Binary",
         "### 2.4 Movement",
-        "2bdc8d00efa6f872299e596f825046b670f5bcd0bfb60718e5f34afae1259c33",
+        "53a56bb68ec04334105f5c84e8eb499d101007bc657f4c9b36a2ec32630402b2",
     ),
     "logical builtin contract": (
         "spec/05-risc-primitives.md",
