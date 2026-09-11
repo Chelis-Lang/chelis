@@ -66,7 +66,9 @@ independent declaration, value and failure assertions. Remaining failure boundar
   cause is the checker leaving the variable free at a concretely applied root.
   #1378's public vmap witness is no longer masked and executes with its exact
   value on both lanes.
-- #1266/#569: the provenance walk still rejects equivalent field/pipe forms.
+- #1266/#569 are admitted: the walk resolves a `shape` operand by its TYPE, so
+  a record field's tensor answers where the ADT base could not, and it folds a
+  `pipe` into the staged application it denotes.
 - #1379: local op-computed extents have guard sites, and `shrink` is the
   admitted owner. What remains is acceptance: the lowering still rejects an
   arithmetic expand size, so the admitted guard has nothing to check there.
@@ -659,11 +661,38 @@ fixes. Deleting a declaration mechanism that holds a
 loud-unsupported census site shrinks that site's baseline in the same change,
 under `spec/design/loud_unsupported.md` B1, which owns that rule.
 
-Record projection also needs an executable lowering route: the preparation
-alias fixture passes checking and C execution after #1658, but eval still
-refuses runtime record `access`. B2b-2 owns materializing the field's tensor
-as the actual shape input on that runtime-record route; #1266 requires both
-spelling variants to execute, not merely that the provenance error disappear.
+Record projection also needs an executable lowering route, and the route
+B2b-2 built is a routing decision plus a host local rather than a runtime
+record in the DAG. `body_form_the_dag_cannot_carry` already reported a `match`
+on a runtime scrutinee; the `access` sibling was missing, so the two lanes
+answered "is this def a kernel" differently -- C absorbed the failed kernel
+lowering and fell through to host code (#1515) while eval propagated it. With
+the decision shared, a tensor-typed projection of a runtime record inside a
+host def body binds to a local before the tensor helper is attempted, and the
+helper takes that local as its own tensor input. That IS materializing the
+field's tensor as the actual shape input, and it is the prologue-local rewrite
+#1266 reports downstream applying by hand.
+
+The binding is not unconditional, and both exits are loud rather than wrong. A
+base name an inner binder also rebinds keeps ALL of its projections where they
+are, because the walk asks whether the name is bound anywhere under the body
+rather than reconstructing lexical scope; such a program needs the
+prologue-local rewrite it needed before, and the C lane names the construct
+under [04-TOT-2] instead of substituting the wrong tensor. A binder position
+the walk cannot read a name from abandons the hoist for that def entirely, on
+the same reasoning. The enumerable part of the claim is the oracle beside the
+reader: it builds seven binder spellings from Surf source through the parser
+and the desugarer, and asserts each yields its name. Those seven are a typed
+parameter, an untyped parameter, two typed parameters, a typed parameter named
+after a Deep tag (which the desugarer emits as `^{:type ..} name`), a `let`
+binding, a `match` pattern binder and a pipe stage. Every fixture goes through
+the parser rather than being constructed, because a reader checked against a
+shape the parser never emits proves nothing about the shape it always emits. The necessity is the one #1266
+names: both spelling variants must execute, and the direct spelling otherwise
+leaves `expand` to a C host vocabulary that deliberately has no emission for
+it ([04-TOT-2]). A record whose constructor is a compile-time fact keeps its
+DAG route, which is what `is_static_constructor` now answers for a `(record
+..)` literal as well as for an uppercase constructor application.
 
 Only after these consumers and guards protect the admitted domain may B2b-2
 remove `SizeClass`, `classify_expand_size`, `classify_arith_app`,
@@ -767,8 +796,7 @@ routes. They assert exact signatures where applicable, shapes, values and
 failure context. Phase B registers this execution receipt as
 `expand.positional.replacement.shape_size.eval_c`. The broader 55-case
 baseline changed at #1619 only in the two #1619 C results and #1266's
-record-alias C result: all three now execute with their expected values. The
-record-alias Eval failure and direct-field failures remain; #1266 is still open.
+record-alias C result: all three now execute with their expected values.
 
 chelis#1397's wildcard-root repair moves two further cells of that 55, taking
 the unmet count from 10 to 8. `wildcard.root` and `vmap.shape` both execute on
@@ -777,8 +805,19 @@ Eval and C with their contract values, `main = tensor(shape=[2], data=[2.0,
 remaining eight were `polymorphic.named.root.mismatch.{eval,c}` (#1374) and
 `polymorphic.foreign.root.mismatch.{eval,c}` (#1376), which #1782's deferred
 root restatement then met, and `record.direct.{check,eval,c}` with
-`record.alias.eval` (#1266), which stand. #1397's own `shrink.*` declaration
-cells are met.
+`record.alias.eval` (#1266), which #1266/#569 meet below. #1397's own
+`shrink.*` declaration cells are met.
+
+chelis#1266/#569 move the four record cells: `record.direct` on check, Eval
+and C, and `record.alias` on Eval. All four now execute `[0.25, 0.25]`, taking
+the unmet count from eight to four. Measured with the ignored acceptance
+runner rather than counted by hand:
+`cargo nextest run -p chelis-cli --test runtime_extent_claim_preparation
+--run-ignored all -E 'test(claimed_extent_contract)'` reports
+`55 cases, 4 unmet contract cells`. The four are
+`polymorphic.named.root.mismatch.{eval,c}` (#1374) and
+`polymorphic.foreign.root.mismatch.{eval,c}` (#1376), each trapping with a
+claimed-versus-observed extent where the contract expects execution.
 
 The merged B2b-0b numeric kernel repair compares literal and resolved named
 claims against independent nonnegative runtime sizes at live `Expand` and
@@ -896,7 +935,7 @@ All are Slice B work under #1277 unless expressly separated.
 | B2b-0b: remaining local guards | merged B2r/S2b and #1658's broadcast preparation repair | guard literal and resolved numeric claims from independent local size sources; op-computed local extents; exact positive/negative C/Eval rows. The op-computed admission and #1397's declaration half are delivered for `shrink` at the OUTERMOST activation (exported def, value binding, inlined root); `pad` and `stride` remain unadmitted owners. A helper whose parameter-bound NAMED result is consumed inside another def's body keeps its claim erased by the enclosing signature's own result name and is residual under #1800; the literal half survives that nesting |
 | B2b-1: claim transport | C2 contract and red fixtures; integrates B2b-0b | preserve the shipped helper-order and C2.4 checked-reshape/unit receipts (#1686/#1687); finish general scoped checked/lowered identities, explicit caller witnesses, multi-claim axes, rebuild/wire transport and migrated binding consumers; #1397's declaration-erasure half, with #1377's literal call/inlined-root exit established by the witness subset. Named result claims and the unread signature witness (#1374, #1376, #1566) are delivered, and a root's restated literal claim defers to them when a graph-fixed extent entails it, never when an ABI parameter's axis does, decided by `resolve_axis_extent`'s origin rather than by the neighbouring operation (#1782) |
 | B2b-root: root execution | can start independently; acceptance composes B2b-1 | #1397's general wildcard-root boundary is closed: a nullary root whose result type carries a runtime extent is kept in the root manifest, so eval renders it and the C host emits an entry. On eval and C such a root is admitted and sized by the runtime rather than needing a sizing diagnosis, because the manifest print path sizes from the realized extent and never materializes a static buffer; guards and device capability diagnostics still apply, and an empty realized bound renders differently per lane under #1795. #1378's exact public value witness is unlocked and reverified. A root that keeps an unresolved dim variable is still dropped and is residual under #1801 |
-| B2b-2: sources and acceptance | guards and claim transport for every newly admitted row | declaration sources are finished (#665/#1556/#1566); supply #1482's missing shape source, remove provenance restrictions (#1266/#569/#1379). `shape_deps` removal moves out of this row and is residual under #1372, which must now also migrate B2b-0b's declaring-parameter dependency rather than drop it |
+| B2b-2: sources and acceptance | guards and claim transport for every newly admitted row | declaration sources are finished (#665/#1556/#1566); supply #1482's missing shape source, remove the remaining provenance restriction (#1379; #1266/#569's field and pipe spellings are admitted). `shape_deps` removal moves out of this row and is residual under #1372, which must now also migrate B2b-0b's declaring-parameter dependency rather than drop it |
 | B2b-3: phase exit | preceding host repairs and per-row platform dispositions | register actual passing receipts, correct measured stale baselines, retire phase c from final selection; phase b/final remain red until their named obligations pass |
 | #1512 audit | no dependency on the B2b carrier or withdrawn C | enumerate reachable non-expand unresolved producers and consumer decisions; resolved/unresolved positive and negative pairs; distinguish error cascade suppression; assign each surviving defect a repair under #1512 |
 

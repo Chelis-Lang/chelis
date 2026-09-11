@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "335d4b6a119ae25e3428e3e0f9b0ccec40dd4be1c1a0119594dcbbdca321f14f",
+  "corpus_sha256": "8152b4af4fd8bb41c1bc07e49ce45c4efa89689200ada851fef0a16472cc0194",
   "rows": [
     {
       "id": "claim.literal.nested_and_unused.eval_c",
@@ -179,7 +179,7 @@
     {
       "id": "expand.piped_shape_read.lint_fix",
       "baseline": "nonconforming_rejection",
-      "phase_b": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.the_canonical_piped_shape_read_checks_evaluates_and_builds"
     },
     {
@@ -233,7 +233,7 @@
     {
       "id": "expand.record_projection.size",
       "baseline": "nonconforming_rejection",
-      "phase_b": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_record_projection_is_an_admissible_expand_size"
     },
     {

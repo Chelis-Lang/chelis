@@ -2732,7 +2732,7 @@ pub(super) fn infer_top_level(
         // sourceless runtime scalar. Classified against the pre-binding scope.
         // The `Sourceless`/`Unknown` arm CLEARS any stale provenance so a
         // re-bind to a sourceless RHS does not inherit an earlier entry.
-        match classify_expand_size(&kids[1], env) {
+        match classify_expand_size(&kids[1], env, adt_reg) {
             SizeClass::Static => {
                 if let Some(value) =
                     fold_static_int_expr(&kids[1], |bound| env.static_size_value(bound))

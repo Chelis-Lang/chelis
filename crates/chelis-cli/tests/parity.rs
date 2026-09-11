@@ -572,6 +572,12 @@ fn parity_integer_functions() {
     drive_parity(&examples_root().join("integer_functions.ch"), true);
 }
 
+/// chelis#1266: the record-projection broadcast a multi-input forward writes.
+#[test]
+fn parity_record_input_broadcast() {
+    drive_parity(&examples_root().join("record_input_broadcast.ch"), true);
+}
+
 #[test]
 fn parity_recursive_cast_targets() {
     drive_parity(&examples_root().join("recursive_cast_targets.ch"), true);
@@ -721,6 +727,7 @@ fn parity_corpus_is_complete() {
         "opaque_invariants.ch",
         "opaque_invariants_simplex.ch",
         "rank_poly_borrow.ch",
+        "record_input_broadcast.ch",
         "recursive_cast_targets.ch",
         "recursive_generic.ch",
         "resource_target_cpu.ch",

@@ -389,7 +389,7 @@ pub(super) fn infer_let(
                 // The `Sourceless`/`Unknown` arm CLEARS any stale provenance so
                 // a re-bind to a sourceless RHS — `len = shape(x, 0); len = k`
                 // (BLOCKER B) — does not inherit the earlier shape-sourced entry.
-                match classify_expand_size(rhs_expr, &let_env) {
+                match classify_expand_size(rhs_expr, &let_env, adt_reg) {
                     SizeClass::Static => {
                         if let Some(value) =
                             fold_static_int_expr(rhs_expr, |bound| let_env.static_size_value(bound))
