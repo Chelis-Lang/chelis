@@ -1643,8 +1643,7 @@ pub fn witness_is_entry_obligation(dag: &Dag, id: NodeId) -> bool {
     }
     dag.nodes().iter().all(|node| {
         node.inputs.iter().enumerate().all(|(index, input)| {
-            *input != id
-                || (index > 0 && matches!(node.op, RiscOp::ExtentWitness { .. }))
+            *input != id || (index > 0 && matches!(node.op, RiscOp::ExtentWitness { .. }))
         })
     })
 }

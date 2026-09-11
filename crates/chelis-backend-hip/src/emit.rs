@@ -955,16 +955,15 @@ impl HipEmitter {
             if !dag.witness_is_entry_obligation(node.id) {
                 continue;
             }
-            let Some(obligations) =
-                dag.witness_entry_obligations(node.id)
-            else {
+            let Some(obligations) = dag.witness_entry_obligations(node.id) else {
                 continue;
             };
             for obligation in obligations {
                 let render = |record: &chelis_ir::axis_sources::ExtentRecord| match record {
-                    chelis_ir::axis_sources::ExtentRecord::Claimed(required) => {
-                        Some((format!("claimed = %lld"), format!("(long long){required}")))
-                    }
+                    chelis_ir::axis_sources::ExtentRecord::Claimed(required) => Some((
+                        "claimed = %lld".to_string(),
+                        format!("(long long){required}"),
+                    )),
                     chelis_ir::axis_sources::ExtentRecord::Read {
                         load,
                         axis,
@@ -1005,8 +1004,7 @@ impl HipEmitter {
                 ) else {
                     continue;
                 };
-                let label =
-                    chelis_ir::span_sanitize::sanitize_for_format_string(&obligation.label);
+                let label = chelis_ir::span_sanitize::sanitize_for_format_string(&obligation.label);
                 let operation = obligation.operation;
                 self.line(&format!("if ({left} != {right}) {{"));
                 self.indent += 1;

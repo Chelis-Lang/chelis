@@ -584,12 +584,12 @@ fn a_synthesized_kernel_parameter_collision_emits_no_guard() {
 /// the HIP device lane and the program emits.
 ///
 /// chelis#1374's repeated-binder claim keeps a declared-but-unread parameter's
-/// interface witness alive, and every ordinary signature that repeats a binder
-/// - `def f(a: tensor[batch, in_dim], b: tensor[in_dim, out_dim])` among them -
-/// acquires one. Before the entry-obligation split the HIP gate read that
-/// witness as the runtime `shape` value read [05-SHAPE-1] excludes and refused
-/// the whole build, which would have made this PR a breaking change to the HIP
-/// target for most programs.
+/// interface witness alive. So does every ordinary signature that repeats a
+/// binder, `def f(a: tensor[batch, in_dim], b: tensor[in_dim, out_dim])`
+/// included. Before the entry-obligation split the HIP gate read that witness
+/// as the runtime `shape` value read [05-SHAPE-1] excludes and refused the
+/// whole build, which would have made this pull request a breaking change to
+/// the HIP target for most programs.
 ///
 /// This is an EMITTED-SOURCE receipt. HIP hardware execution is blocked on this
 /// workstation (`docs/local_hip_environment.md` covers the manual gates that

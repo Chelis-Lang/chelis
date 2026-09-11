@@ -1366,9 +1366,11 @@ pub(crate) fn try_lower_subexpr_program_with_context_and_controls(
             None,
             None,
             0,
-            true,
-            // The scope is the ambient bindings this subexpression captured.
-            false,
+            SubexprLoweringOptions {
+                include_list_controls: true,
+                // The scope is the ambient bindings this subexpression captured.
+                authored_signature: false,
+            },
         );
         LoweredSubexprWithControls {
             dag,
@@ -1419,8 +1421,10 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs(
             result_claim,
             random_seed,
             random_counter,
-            false,
-            authored_signature,
+            SubexprLoweringOptions {
+                include_list_controls: false,
+                authored_signature,
+            },
         );
         (dag, random_counter)
     })
@@ -1529,6 +1533,19 @@ pub(crate) fn try_lower_staged_host_region(
     }
 }
 
+/// What one subexpression lowering is, beyond its expression and its scope.
+///
+/// Both fields are facts about the CALLER, not about the body: whether the
+/// runtime list controls belong in this DAG, and whether the scope came from a
+/// signature someone wrote. Neither is recoverable from the expression, and
+/// passing them as bare positional booleans made the call sites unreadable.
+#[derive(Clone, Copy)]
+struct SubexprLoweringOptions {
+    include_list_controls: bool,
+    /// See [`LowerCtx::signature_is_authored`].
+    authored_signature: bool,
+}
+
 fn lower_subexpr_program_inner_impl(
     expr: &Expr,
     scoped_bindings: Vec<(String, TensorType)>,
@@ -1536,9 +1553,12 @@ fn lower_subexpr_program_inner_impl(
     result_claim: Option<&TensorType>,
     random_seed: Option<u64>,
     random_counter: u64,
-    include_list_controls: bool,
-    authored_signature: bool,
+    options: SubexprLoweringOptions,
 ) -> (Dag, u64, usize, Vec<RuntimeListCheckDescriptor>) {
+    let SubexprLoweringOptions {
+        include_list_controls,
+        authored_signature,
+    } = options;
     let mut ctx = LowerCtx::new(
         context.program_types.clone(),
         context.program_defs.clone(),
@@ -1563,12 +1583,7 @@ fn lower_subexpr_program_inner_impl(
         );
         ctx.bindings.insert(name, LoweredValue::Node(load));
     }
-    ctx.prepare_parameter_witnesses(
-        &parameter_names,
-        &parameter_types,
-        None,
-        authored_signature,
-    );
+    ctx.prepare_parameter_witnesses(&parameter_names, &parameter_types, None, authored_signature);
     // Kernel inputs already have structural interface-axis carriers. Keep
     // those reads intact; explicit checked claims still use signature witnesses.
     ctx.binding_witnesses.clear();
