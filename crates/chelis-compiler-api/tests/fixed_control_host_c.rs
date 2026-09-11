@@ -249,6 +249,32 @@ result = with seed(42i64) {
 }
 
 #[test]
+fn cpu_resource_gradient_compiles_and_executes_without_a_runtime_resource_action() {
+    let c = ownership_support::emit_selected(
+        r#"
+def loss(x: tensor[4, f32]) -> f32 = with device("cpu:author-device") {
+  with seed(42i64) { tensor_to_scalar(sum(dropout(x, 0.5f32), 0)) }
+}
+def derivative(x: tensor[4, f32]) -> tensor[4, f32] = grad(loss)(x)
+"#,
+        "derivative",
+    );
+    let driver = r#"
+int main(void) {
+    chelis_tensor *x = input(4);
+    chelis_tensor *outputs[] = {NULL};
+    outputs[0] = derivative(x);
+    const float expected[] = {0.0f, 2.0f, 0.0f, 0.0f};
+    tensor_bits(outputs[0], 4, expected);
+    chelis_tensor_release(outputs[0]);
+    chelis_tensor_release(x);
+    return 0;
+}
+"#;
+    ownership_support::balanced(&ownership_support::run(&c, driver));
+}
+
+#[test]
 fn tensor_loss_gradient_tuple_does_not_feed_the_next_dropout_helper() {
     let c = ownership_support::emit(
         r#"

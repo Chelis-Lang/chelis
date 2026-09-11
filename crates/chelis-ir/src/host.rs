@@ -711,6 +711,22 @@ impl HostExecutionPlan {
     }
 
     #[cfg(feature = "lowering-trace")]
+    pub fn global_helper_full_spine(
+        &self,
+        helper: usize,
+    ) -> Result<Option<crate::lowering_trace::FullSpineObservation>, String> {
+        self.global
+            .get(helper)
+            .map(|product| {
+                product
+                    .execution
+                    .as_ref()
+                    .map(|execution| execution.spine.full_observation())
+            })
+            .ok_or_else(|| format!("global helper {helper} has no execution-plan origin"))
+    }
+
+    #[cfg(feature = "lowering-trace")]
     pub fn function_helper_trace(
         &self,
         function: &str,
@@ -725,6 +741,31 @@ impl HostExecutionPlan {
         self.functions[index]
             .get(helper)
             .map(|product| product.trace.as_ref())
+            .ok_or_else(|| {
+                format!("function `{function}` helper {helper} has no execution-plan origin")
+            })
+    }
+
+    #[cfg(feature = "lowering-trace")]
+    pub fn function_helper_full_spine(
+        &self,
+        function: &str,
+        helper: usize,
+    ) -> Result<Option<crate::lowering_trace::FullSpineObservation>, String> {
+        let index = self
+            .program
+            .functions
+            .iter()
+            .position(|candidate| candidate.name == function)
+            .ok_or_else(|| format!("function `{function}` has no execution-plan origin"))?;
+        self.functions[index]
+            .get(helper)
+            .map(|product| {
+                product
+                    .execution
+                    .as_ref()
+                    .map(|execution| execution.spine.full_observation())
+            })
             .ok_or_else(|| {
                 format!("function `{function}` helper {helper} has no execution-plan origin")
             })
@@ -2350,7 +2391,7 @@ pub fn lower_named_tensor_entry_execution_plan(
     lower_named_tensor_entry_execution_with(
         program,
         name,
-        crate::lower::try_lower_subexpr_evaluation_with_ordered_inputs,
+        crate::lower::try_lower_subexpr_c_execution_with_ordered_inputs,
     )
 }
 
@@ -2368,7 +2409,7 @@ pub fn lower_named_tensor_entry_execution_plan_with_trace(
     lower_named_tensor_entry_execution_with(
         program,
         name,
-        crate::lower::try_lower_subexpr_evaluation_with_ordered_inputs_and_trace,
+        crate::lower::try_lower_subexpr_c_execution_with_ordered_inputs_and_trace,
     )
 }
 
@@ -2396,7 +2437,7 @@ fn lower_named_tensor_entry_execution_with<T>(
         defs,
         Arc::new(crate::lower::collect_top_level_sigs(program.exprs())),
     );
-    let profile = context.evaluation_profile(&body_expr, &scope);
+    let profile = context.c_execution_profile(&body_expr, &scope);
     match profile {
         crate::evaluation::EvaluationProfile::Legacy(
             crate::evaluation::LegacyEvaluationReason::NoDropout,
@@ -4668,7 +4709,7 @@ fn lower_def_body_kernel(
     if tensor_helpers.collect_execution {
         let context = cached_subexpr_lowering_context(program);
         let scoped = kernel_scope_types(&signature.scope, Some(&signature.params));
-        if context.evaluation_profile(&signature.body_expr, &scoped)
+        if context.c_execution_profile(&signature.body_expr, &scoped)
             == crate::evaluation::EvaluationProfile::FixedControl
         {
             let planning = crate::evaluation::RandomExecutionContext::new(RandomLoweringState {
@@ -4678,7 +4719,7 @@ fn lower_def_body_kernel(
             #[cfg(feature = "lowering-trace")]
             let (plan, trace) = if tensor_helpers.collect_trace {
                 let (plan, trace) =
-                    crate::lower::try_lower_subexpr_evaluation_with_ordered_inputs_and_trace(
+                    crate::lower::try_lower_subexpr_c_execution_with_ordered_inputs_and_trace(
                         &signature.body_expr,
                         scoped,
                         &context,
@@ -4689,7 +4730,7 @@ fn lower_def_body_kernel(
                 (plan, Some(trace))
             } else {
                 (
-                    crate::lower::try_lower_subexpr_evaluation_with_ordered_inputs(
+                    crate::lower::try_lower_subexpr_c_execution_with_ordered_inputs(
                         &signature.body_expr,
                         scoped,
                         &context,
@@ -4701,7 +4742,7 @@ fn lower_def_body_kernel(
                 )
             };
             #[cfg(not(feature = "lowering-trace"))]
-            let plan = crate::lower::try_lower_subexpr_evaluation_with_ordered_inputs(
+            let plan = crate::lower::try_lower_subexpr_c_execution_with_ordered_inputs(
                 &signature.body_expr,
                 scoped,
                 &context,
@@ -5687,7 +5728,7 @@ fn lower_tensor_helper_product(
     if collect_execution {
         let context = cached_subexpr_lowering_context(program);
         let scoped = collect_tensor_scope(scope).into_sorted();
-        if context.evaluation_profile(expr, &scoped)
+        if context.c_execution_profile(expr, &scoped)
             == crate::evaluation::EvaluationProfile::FixedControl
         {
             let planning = crate::evaluation::RandomExecutionContext::new(RandomLoweringState {
@@ -5696,7 +5737,7 @@ fn lower_tensor_helper_product(
             });
             #[cfg(feature = "lowering-trace")]
             let lowered = if collect_trace {
-                crate::lower::try_lower_subexpr_evaluation_with_ordered_inputs_and_trace(
+                crate::lower::try_lower_subexpr_c_execution_with_ordered_inputs_and_trace(
                     expr,
                     scoped,
                     &context,
@@ -5706,7 +5747,7 @@ fn lower_tensor_helper_product(
                 )
                 .map(|(plan, trace)| (plan, Some(trace)))
             } else {
-                crate::lower::try_lower_subexpr_evaluation_with_ordered_inputs(
+                crate::lower::try_lower_subexpr_c_execution_with_ordered_inputs(
                     expr,
                     scoped,
                     &context,
@@ -5717,7 +5758,7 @@ fn lower_tensor_helper_product(
                 .map(|plan| (plan, None))
             };
             #[cfg(not(feature = "lowering-trace"))]
-            let lowered = crate::lower::try_lower_subexpr_evaluation_with_ordered_inputs(
+            let lowered = crate::lower::try_lower_subexpr_c_execution_with_ordered_inputs(
                 expr,
                 scoped,
                 &context,

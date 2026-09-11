@@ -295,6 +295,114 @@ def derivative(x: tensor[32, f32]) -> tensor[32, f32] = grad(loss)(x)
 }
 
 #[test]
+fn resource_requirement_survives_actual_ad_splice() {
+    use chelis_ir::lowering_trace::{FullSourceKind, FullStep};
+
+    let program = manifested(
+        r#"
+def loss(x: tensor[4, f32]) -> f32 = with device("cpu:author-device") {
+  with seed(42i64) { tensor_to_scalar(sum(dropout(x, 0.5f32), 0)) }
+}
+def derivative(x: tensor[4, f32]) -> tensor[4, f32] = grad(loss)(x)
+"#,
+    );
+    let (_, plan) = try_lower_manifested_execution_program_with_trace(&program).unwrap();
+    let plan = plan.expect("C execution host plan");
+    let trace = plan
+        .function_helper_trace("derivative", 0)
+        .unwrap()
+        .expect("selected derivative helper trace");
+    let execution = trace.executions.first().expect("actual gradient execution");
+
+    let kinds = |plan: &chelis_ir::evaluation::EvaluationPlan| {
+        plan.full_spine_for_inspection()
+            .source
+            .into_iter()
+            .map(|event| match event.kind {
+                FullSourceKind::Requirement(device) => format!("require:{device}"),
+                FullSourceKind::Control(chelis_ir::execution_spine::Control::Enter {
+                    scope,
+                    seed,
+                }) => format!("enter:{}:{seed}", scope.index()),
+                FullSourceKind::Forward { draw, scope, .. } => {
+                    format!("forward:{}:{}", draw.index(), scope.index())
+                }
+                FullSourceKind::Control(chelis_ir::execution_spine::Control::Leave { scope }) => {
+                    format!("leave:{}", scope.index())
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let expected = [
+        "require:cpu:author-device",
+        "enter:1:42",
+        "forward:0:1",
+        "leave:1",
+    ];
+    assert_eq!(kinds(&execution.forward), expected);
+    assert_eq!(kinds(&execution.backward), expected);
+    assert_eq!(
+        execution
+            .backward
+            .source_for_inspection()
+            .iter()
+            .map(|event| event.id.index())
+            .collect::<Vec<_>>(),
+        [0, 1, 2],
+        "legacy occurrence IDs remain random-only after AD"
+    );
+    let final_spine = plan
+        .function_helper_full_spine("derivative", 0)
+        .unwrap()
+        .expect("selected helper full spine");
+    assert_eq!(
+        final_spine
+            .source
+            .iter()
+            .map(|event| event.id.0)
+            .collect::<Vec<_>>(),
+        [0, 1, 2, 3],
+        "AD splice rebases the distinct full-source namespace once"
+    );
+    assert!(matches!(
+        final_spine.source[0].kind,
+        FullSourceKind::Requirement(ref device) if device == "cpu:author-device"
+    ));
+    assert_eq!(
+        execution
+            .backward
+            .full_spine_for_inspection()
+            .steps
+            .iter()
+            .filter(|step| matches!(step, FullStep::Requirement { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        execution
+            .backward
+            .dag_for_inspection()
+            .nodes()
+            .iter()
+            .filter(|node| matches!(node.op, RiscOp::Dropout { .. }))
+            .count(),
+        2,
+        "backward replay adds a node but no source occurrence"
+    );
+    assert_eq!(
+        trace
+            .applications
+            .first()
+            .expect("actual grad splice")
+            .remap
+            .occurrences
+            .len(),
+        3,
+        "the legacy remap remains random-only"
+    );
+}
+
+#[test]
 fn failed_helper_attempt_returns_no_trace_and_cannot_pollute_the_next_compilation() {
     let rejected = manifested(
         r#"

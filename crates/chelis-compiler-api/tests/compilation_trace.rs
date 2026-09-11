@@ -127,6 +127,7 @@ fn ordinary_compilation_keeps_its_lane_and_explicitly_missing_capture() {
     for source in [
         "def main(x: tensor[4,f32]) -> tensor[4,f32] = mul(x,x)",
         "def main(x: f32) -> f32 = x + 1.0f32",
+        "def main(x: tensor[4,f32]) -> tensor[4,f32] = with device(\"cpu:ordinary\") { mul(x,x) }",
     ] {
         let ordinary = compile_for_execution(request(source, "main")).unwrap();
         let captured = compile_for_execution_with_trace(request(source, "main"), |observation| {
@@ -143,6 +144,89 @@ fn ordinary_compilation_keeps_its_lane_and_explicitly_missing_capture() {
             serde_json::to_value(captured.artifact()).unwrap()
         );
     }
+}
+
+#[test]
+fn main_selected_cpu_resource_trace_excludes_an_unused_gpu_sibling() {
+    use chelis_ir::lowering_trace::FullSourceKind;
+
+    let source = r#"
+def loss(x: tensor[4,f32]) -> f32 = with device("cpu:trace") {
+  with seed(42i64) { tensor_to_scalar(sum(dropout(x,0.5f32),0)) }
+}
+def derivative(x: tensor[4,f32]) -> tensor[4,f32] = grad(loss)(x)
+def unused_gpu(x: tensor[4,f32]) -> tensor[4,f32] = with device("gpu:0") { mul(x,x) }
+def main(x: tensor[4,f32], flag: bool) -> (tensor[4,f32], bool) = (derivative(x), flag)
+"#;
+    let ordinary = compile_for_execution(request(source, "main")).unwrap();
+    let traced = compile_for_execution_with_trace(request(source, "main"), |observation| {
+        let SelectedLowering::Host(traces) = observation.lowering else {
+            panic!("selected host trace");
+        };
+        let mut requirements = Vec::new();
+        for (_, helpers) in traces.full_function_spines() {
+            for spine in helpers.iter().flatten() {
+                requirements.extend(spine.source.iter().filter_map(|event| match &event.kind {
+                    FullSourceKind::Requirement(device) => Some(device.clone()),
+                    _ => None,
+                }));
+            }
+        }
+        requirements
+    })
+    .unwrap();
+    assert_eq!(traced.projection(), &["cpu:trace".to_owned()]);
+    assert_eq!(
+        serde_json::to_value(ordinary).unwrap(),
+        serde_json::to_value(traced.artifact()).unwrap()
+    );
+}
+
+#[test]
+fn direct_gradient_with_unused_gpu_sibling_is_an_explicit_selection_boundary() {
+    let source = r#"
+def loss(x: tensor[4,f32]) -> f32 = with device("cpu:trace") {
+  with seed(42i64) { tensor_to_scalar(sum(dropout(x,0.5f32),0)) }
+}
+def derivative(x: tensor[4,f32]) -> tensor[4,f32] = grad(loss)(x)
+def unused_gpu(x: tensor[4,f32]) -> tensor[4,f32] = with device("gpu:0") { mul(x,x) }
+"#;
+    let ordinary = compile_for_execution(request(source, "derivative")).unwrap_err();
+    let mut projections = 0;
+    let traced = compile_for_execution_with_trace(request(source, "derivative"), |_| {
+        projections += 1;
+    })
+    .unwrap_err();
+    assert_eq!(projections, 0);
+    assert_eq!(ordinary.stage, "effects");
+    assert_eq!(traced.stage, ordinary.stage);
+    assert_eq!(
+        serde_json::to_value(traced.errors).unwrap(),
+        serde_json::to_value(ordinary.errors).unwrap()
+    );
+}
+
+#[test]
+fn selected_gpu_resource_rejects_before_trace_projection() {
+    let source = r#"
+def loss(x: tensor[4,f32]) -> f32 = with device("gpu:0") {
+  with seed(42i64) { tensor_to_scalar(sum(dropout(x,0.5f32),0)) }
+}
+def derivative(x: tensor[4,f32]) -> tensor[4,f32] = grad(loss)(x)
+"#;
+    let ordinary = compile_for_execution(request(source, "derivative")).unwrap_err();
+    let mut projections = 0;
+    let traced = compile_for_execution_with_trace(request(source, "derivative"), |_| {
+        projections += 1;
+    })
+    .unwrap_err();
+    assert_eq!(projections, 0);
+    assert_eq!(ordinary.stage, "effects");
+    assert_eq!(traced.stage, ordinary.stage);
+    assert_eq!(
+        serde_json::to_value(traced.errors).unwrap(),
+        serde_json::to_value(ordinary.errors).unwrap()
+    );
 }
 
 #[test]
