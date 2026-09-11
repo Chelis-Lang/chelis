@@ -355,21 +355,19 @@ fn remainder_wire_roundtrip_requires_exact_integer_operands() {
 /// exist before this change, so the wire could not represent the obligation.
 fn named_claim_fixture() -> WireDag {
     let node =
-        |id: u64, op: WireRiscOp, inputs: Vec<u64>, dims, shape_deps: Vec<u64>| WireDagNode {
-            id,
-            op,
-            inputs,
-            output_type: WireTensorType {
-                dims,
-                precision: if id % 2 == 0 && id < 4 {
-                    "f32".into()
-                } else {
-                    "int64".into()
+        |id: u64, op: WireRiscOp, inputs: Vec<u64>, dims, precision: &str, shape_deps: Vec<u64>| {
+            WireDagNode {
+                id,
+                op,
+                inputs,
+                output_type: WireTensorType {
+                    dims,
+                    precision: precision.into(),
                 },
-            },
-            shape_deps,
-            span_id: None,
-            merged_spans: vec![],
+                shape_deps,
+                span_id: None,
+                merged_spans: vec![],
+            }
         };
     let named = |name: &str| {
         vec![WireDimInfo::Named {
@@ -393,14 +391,16 @@ fn named_claim_fixture() -> WireDag {
                 WireRiscOp::Load { name: "x".into() },
                 vec![],
                 named("rows"),
+                "f32",
                 vec![],
             ),
-            node(1, witness("x", vec![]), vec![0], vec![], vec![]),
+            node(1, witness("x", vec![]), vec![0], vec![], "int64", vec![]),
             node(
                 2,
                 WireRiscOp::Load { name: "y".into() },
                 vec![],
                 named("cols"),
+                "f32",
                 vec![],
             ),
             node(
@@ -414,6 +414,7 @@ fn named_claim_fixture() -> WireDag {
                 ),
                 vec![2, 1],
                 vec![],
+                "int64",
                 vec![],
             ),
             node(
@@ -421,6 +422,7 @@ fn named_claim_fixture() -> WireDag {
                 WireRiscOp::Const { value: integer(9) },
                 vec![],
                 vec![],
+                "int64",
                 vec![3],
             ),
         ],
