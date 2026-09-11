@@ -3841,6 +3841,10 @@ fn an_overshooting_shrink_span_is_outside_this_slices_cross_lane_claim() {
     assert!(
         c_out.contains("shrink bounds outside input extent"),
         "C's movement plan rejects the span first: {c_out}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // chelis#1379: a checked integer-arithmetic `expand`/`insert` size.
 //
 // `spec/04-type-system.md` §4.7.2 puts a "checked integer-arithmetic
@@ -3897,8 +3901,8 @@ fn checked_arithmetic_expand_size_under_a_named_claim_agrees_on_every_lane_on_c(
         "the guard takes the position of the insert that introduces the extent: {out}"
     );
     assert!(
-        out.contains("extent `n`: claimed = 3"),
-        "section 4.7's context line carries the claim and the observed value: {out}"
+        out.contains("extent `n`: claimed = 3, insert axis 0 = 6"),
+        "section 4.7's context line names both disagreeing sides: {out}"
     );
 }
 
@@ -3944,8 +3948,9 @@ fn checked_arithmetic_expand_size_under_a_named_claim_agrees_on_every_lane_on_ev
         "eval renders [04-NUM-9]'s line for the same guard the C lane emits: {out}"
     );
     assert!(
-        out.contains("extent `n`: claimed = 3"),
-        "section 4.7's context line carries the claim and the observed value: {out}"
+        out.contains("extent `n`: claimed = 3, insert axis 0 = 6"),
+        "section 4.7's context line names both disagreeing sides, text for text \
+         with the C lane: {out}"
     );
 }
 
@@ -5133,5 +5138,267 @@ fn a_typed_binder_suppresses_only_the_base_it_rebinds() {
     assert!(
         shadowing.contains("chelis_adt_get_field"),
         "and the host lane reads the field itself instead: {shadowing}"
+    );
+}
+/// The same arithmetic in the `expand` position rather than the `insert` one.
+/// `expand` takes its result dim from the CHECKER's stamped type while `insert`
+/// derives it from the size, so the two reach the guard by different routes and
+/// a repair that served only one would leave the other unguarded.
+///
+/// EVIDENTIARY STATUS: regression test. Watched failing on `fc5b6aa99`, where
+/// the same chelis#469 rejection refused the build.
+#[test]
+fn a_checked_arithmetic_expand_size_is_guarded_in_the_expand_position_on_c() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = "def f(b: tensor[1, f32], x: tensor[n, f32]) -> tensor[n, f32] = \
+                  expand(b, 0, mul(shape(x, 0), 2i64))\n\
+                  xs = to_tensor([1.0f32, 2.0f32, 3.0f32])\n\
+                  out = f(to_tensor([7.0f32]), xs)\n";
+    let (ok, out) = c_run_result(&dir, "arith_size_expand_c", source);
+    assert!(!ok, "2n under a claim of n must not produce a value: {out}");
+    assert!(
+        out.contains(&domain_trap_line("expand"))
+            && out.contains("extent `n`: claimed = 3, expand axis 0 = 6"),
+        "the guard names `expand`, the operation that introduces the extent: {out}"
+    );
+}
+
+/// The `expand` position on eval, byte-identical to its C sibling.
+///
+/// EVIDENTIARY STATUS: regression test, watched failing on `fc5b6aa99`.
+#[test]
+fn a_checked_arithmetic_expand_size_is_guarded_in_the_expand_position_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = "def f(b: tensor[1, f32], x: tensor[n, f32]) -> tensor[n, f32] = \
+                  expand(b, 0, mul(shape(x, 0), 2i64))\n\
+                  xs = to_tensor([1.0f32, 2.0f32, 3.0f32])\n\
+                  out = f(to_tensor([7.0f32]), xs)\n";
+    let (ok, out) = eval_result(&dir, "arith_size_expand_eval.ch", source);
+    assert!(!ok, "2n under a claim of n must not produce a value: {out}");
+    assert!(
+        out.contains(&domain_trap_line("expand"))
+            && out.contains("extent `n`: claimed = 3, expand axis 0 = 6"),
+        "eval renders the same line the C lane emits: {out}"
+    );
+}
+
+/// `sub`, `div` and a nested `add` reach the same admission and the same guard
+/// as `mul`. The walk combines operand classes rather than matching a spelling,
+/// so a repair keyed to one operator would leave the rest rejecting.
+///
+/// Each row states the arithmetic and the extent it computes from `n = 4`.
+///
+/// EVIDENTIARY STATUS: regression test. Every row was refused at lowering on
+/// `fc5b6aa99` with the chelis#469 rejection.
+#[test]
+fn every_checked_arithmetic_operator_is_an_admissible_expand_size_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // (size expression, extent it computes, agrees with the claim `n` = 4)
+    let rows = [
+        ("sub(shape(x, 0), 1i64)", 3, false),
+        ("floor_div(shape(x, 0), 2i64)", 2, false),
+        ("trunc_div(shape(x, 0), 4i64)", 1, false),
+        ("mod(shape(x, 0), 3i64)", 1, false),
+        ("neg(neg(shape(x, 0)))", 4, true),
+        ("add(sub(shape(x, 0), 1i64), 1i64)", 4, true),
+        ("mul(floor_div(shape(x, 0), 2i64), 2i64)", 4, true),
+    ];
+    for (index, (size, extent, agrees)) in rows.iter().enumerate() {
+        let source = format!(
+            "def f(b: tensor[f32], x: tensor[n, f32]) -> tensor[n, f32] = insert(b, 0, {size})\n\
+             seed = sum(to_tensor([1.0f32]), 0)\n\
+             xs = to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32])\n\
+             out = f(seed, xs)\n"
+        );
+        let (ok, out) = eval_result(&dir, &format!("arith_op_{index}.ch"), &source);
+        assert_eq!(
+            ok, *agrees,
+            "`{size}` computes {extent} under a claim of 4: {out}"
+        );
+        if *agrees {
+            assert!(
+                out.contains("shape=[4]"),
+                "`{size}` agrees, so it produces the declared shape: {out}"
+            );
+        } else {
+            assert!(
+                out.contains(&domain_trap_line("insert"))
+                    && out.contains(&format!("extent `n`: claimed = 4, insert axis 0 = {extent}")),
+                "`{size}` disagrees, so its guard names both sides: {out}"
+            );
+        }
+    }
+}
+
+/// Arithmetic that combines TWO tensors' axes under a claim matching one of
+/// them is guarded against the value the arithmetic computes, not against
+/// either operand's own axis. `n = 3` and `m = 2` give `3 + 2 = 5` under a
+/// claim of 3, so the line must report 5.
+///
+/// EVIDENTIARY STATUS: regression test. Refused at lowering on `fc5b6aa99`.
+#[test]
+fn arithmetic_over_two_tensors_is_guarded_against_the_value_it_computes_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = "def f(b: tensor[f32], x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = \
+                  insert(b, 0, add(shape(x, 0), shape(y, 0)))\n\
+                  seed = sum(to_tensor([1.0f32]), 0)\n\
+                  xs = to_tensor([1.0f32, 2.0f32, 3.0f32])\n\
+                  ys = to_tensor([1.0f32, 2.0f32])\n\
+                  out = f(seed, xs, ys)\n";
+    let (ok, out) = eval_result(&dir, "arith_two_tensors.ch", source);
+    assert!(!ok, "3 + 2 under a claim of 3 must not produce a value: {out}");
+    assert!(
+        out.contains("extent `n`: claimed = 3, insert axis 0 = 5"),
+        "the observed side is the sum, not either operand's own axis: {out}"
+    );
+    assert!(
+        !out.contains("insert axis 0 = 2") && !out.contains("insert axis 0 = 3"),
+        "and neither operand's extent is reported in its place: {out}"
+    );
+}
+
+/// A shape read mixed with a runtime scalar PARAMETER is admissible, and the
+/// scalar's value reaches the guard. This is the row the checker change exists
+/// for: `add(shape(x, 0), k)` has one operand with a real shape source and one
+/// with none, and the arithmetic walk used to let the sourceless operand poison
+/// the whole expression.
+///
+/// EVIDENTIARY STATUS: regression test. On `fc5b6aa99` both spellings were
+/// refused at CHECK with "`insert` size resolves to a runtime scalar", so
+/// neither lane ever saw the program.
+#[test]
+fn a_shape_read_mixed_with_a_runtime_scalar_is_an_admissible_expand_size_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = |k: &str| {
+        format!(
+            "def f(b: tensor[f32], x: tensor[n, f32], k: int64) -> tensor[n, f32] = \
+             insert(b, 0, add(shape(x, 0), k))\n\
+             seed = sum(to_tensor([1.0f32]), 0)\n\
+             xs = to_tensor([1.0f32, 2.0f32, 3.0f32])\n\
+             out = f(seed, xs, {k})\n"
+        )
+    };
+    // The control first, so the row proves a guard and not a broken lane.
+    let (ok, out) = eval_result(&dir, "scalar_mix_ok.ch", &source("0i64"));
+    assert!(ok, "k = 0 gives n + 0 = n, which agrees: {out}");
+    assert!(
+        out.contains("shape=[3]") && out.contains("data=[1.0, 1.0, 1.0]"),
+        "the agreeing program produces its declared shape exactly: {out}"
+    );
+
+    let (ok, out) = eval_result(&dir, "scalar_mix_trap.ch", &source("2i64"));
+    assert!(!ok, "k = 2 gives n + 2 = 5 under a claim of 3: {out}");
+    assert!(
+        out.contains("extent `n`: claimed = 3, insert axis 0 = 5"),
+        "the scalar parameter's value reaches the guard: {out}"
+    );
+}
+
+/// A def-returned scalar mixed with a shape read is admissible for the same
+/// reason. A user `def` is opaque to the checker's walk, so it classifies as
+/// sourceless; the shape read beside it is what makes the expression
+/// admissible.
+///
+/// EVIDENTIARY STATUS: regression test. Refused at CHECK on `fc5b6aa99`.
+#[test]
+fn a_def_returned_scalar_mixed_with_a_shape_read_is_an_admissible_expand_size_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = "def g(x: tensor[n, f32]) -> int64 = shape(x, 0)\n\
+                  def f(b: tensor[f32], x: tensor[n, f32]) -> tensor[n, f32] = \
+                  insert(b, 0, add(shape(x, 0), g(x)))\n\
+                  seed = sum(to_tensor([1.0f32]), 0)\n\
+                  xs = to_tensor([1.0f32, 2.0f32, 3.0f32])\n\
+                  out = f(seed, xs)\n";
+    let (ok, out) = eval_result(&dir, "def_returned_mix.ch", source);
+    assert!(!ok, "n + n = 6 under a claim of 3 must not run: {out}");
+    assert!(
+        out.contains("extent `n`: claimed = 3, insert axis 0 = 6"),
+        "the def's returned extent reaches the guard: {out}"
+    );
+}
+
+/// The negative that bounds the checker change: arithmetic with NO admissible
+/// operand stays sourceless, with its diagnostic unchanged. Without this row a
+/// rule that simply stopped rejecting arithmetic would pass every positive
+/// above while admitting a size no lane can source.
+///
+/// EVIDENTIARY STATUS: disposition lock. Measured identical on `fc5b6aa99` and
+/// on this head; the behaviour is deliberately unchanged.
+#[test]
+fn arithmetic_over_a_scalar_with_no_tensor_source_is_still_sourceless() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for (name, size) in [
+        ("bare_scalar_arith", "add(k, 1i64)"),
+        ("bare_scalar_mul", "mul(k, 2i64)"),
+        ("bare_scalar_nested", "add(mul(k, 2i64), 1i64)"),
+    ] {
+        let source = format!(
+            "def f(b: tensor[f32], k: int64) -> tensor[m, f32] = insert(b, 0, {size})\n\
+             seed = sum(to_tensor([1.0f32]), 0)\n\
+             out = f(seed, 3i64)\n"
+        );
+        let (ok, out) = eval_result(&dir, &format!("{name}.ch"), &source);
+        assert!(!ok, "`{size}` has no shape source and must be rejected: {out}");
+        assert!(
+            out.contains("`insert` size resolves to a runtime scalar, but no tensor in scope")
+                && out.contains("chelis#469"),
+            "`{size}` keeps the section 4.7.2 sourceless diagnostic verbatim: {out}"
+        );
+    }
+}
+
+/// A bare runtime scalar is still rejected too. `add(k, 1i64)` above and a bare
+/// `k` are the same class, and a change that admitted arithmetic by weakening
+/// the leaf rule rather than the combination rule would separate them.
+///
+/// EVIDENTIARY STATUS: disposition lock. Unchanged from `fc5b6aa99`.
+#[test]
+fn a_bare_runtime_scalar_expand_size_is_still_sourceless() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = "def f(b: tensor[f32], k: int64) -> tensor[m, f32] = insert(b, 0, k)\n\
+                  seed = sum(to_tensor([1.0f32]), 0)\n\
+                  out = f(seed, 3i64)\n";
+    let (ok, out) = eval_result(&dir, "bare_scalar.ch", source);
+    assert!(!ok, "a bare runtime scalar size must be rejected: {out}");
+    assert!(
+        out.contains("`insert` size resolves to the symbolic dimension `k`")
+            && out.contains("chelis#469"),
+        "with the bare-symbol wording of the same diagnostic: {out}"
+    );
+}
+
+/// A computed size that goes NEGATIVE traps before allocation, which is what
+/// `spec/04-type-system.md` section 4.7.2 requires of a runtime negative size.
+///
+/// The RENDERING is not section 4.7's: the size shares the `RtDim::Node`
+/// carrier with `stride` and `slice` bounds, so it reports through that
+/// carrier's message, which says "movement bound" about an `insert` size and is
+/// not [04-NUM-9]'s `numeric trap` form. Newly reachable through chelis#1379's
+/// admission and tracked separately; repairing it here would change text shared
+/// with rows this change does not own.
+///
+/// EVIDENTIARY STATUS: disposition lock on the rendering, regression test on
+/// the trap. On `fc5b6aa99` the program was refused at lowering, so no lane
+/// reached a negative extent at all.
+#[test]
+fn a_computed_expand_size_that_goes_negative_traps_before_allocation_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = "def f(b: tensor[f32], x: tensor[n, f32]) -> tensor[n, f32] = \
+                  insert(b, 0, sub(shape(x, 0), 5i64))\n\
+                  seed = sum(to_tensor([1.0f32]), 0)\n\
+                  xs = to_tensor([1.0f32, 2.0f32])\n\
+                  out = f(seed, xs)\n";
+    let (ok, out) = eval_result(&dir, "arith_negative.ch", source);
+    assert!(!ok, "an extent of -3 must not produce a value: {out}");
+    assert!(
+        out.contains("must be a non-negative integer, got -3"),
+        "the negative extent is reported with the value it computed: {out}"
+    );
+    assert!(
+        !out.contains("shape=["),
+        "and nothing is allocated before the trap: {out}"
     );
 }
