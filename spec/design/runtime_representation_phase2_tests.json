@@ -3,6 +3,7 @@
   "python_selected": [
     "scripts.test_runtime_representation_phase2.ContractTests.test_exact_phase_two_leg_inventory_is_bounded_to_the_deliverable",
     "scripts.test_runtime_representation_phase2.ContractTests.test_phase_two_rejects_development_shortcuts",
+    "scripts.test_runtime_representation_phase2.ContractTests.test_python_leg_is_platform_invariant_and_bounded_to_phase_two",
     "scripts.test_runtime_representation_phase2.ContractTests.test_selection_digest_binds_every_exact_test_identity",
     "scripts.test_runtime_representation_phase2.ReceiptTests.test_manifest_requires_exact_commands_selection_hashes_and_manual_boundary",
     "scripts.test_runtime_representation_phase2.ReceiptTests.test_phase_one_precedes_every_phase_two_execution_and_receipt_is_current"
