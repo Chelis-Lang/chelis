@@ -522,6 +522,14 @@ build also rejects runtime-symbolic windowed axes and bf16/f16 (cast to f32 firs
 Effects are inferred and checked after types, before lowering. The style gate and
 `chelis check` report effect rows per function.
 
+The C/HIP compiler APIs check Resource regions against their selected target
+before emitting an artifact or invoking an emission observer. Entry-scoped C
+compilation checks the selected source dependency closure, with lexical locals
+excluded from helper resolution; whole-program emission checks all definitions.
+Contextual compilation retains its existing callable-lane limitations:
+region-bearing imported helpers can decline before a tensor entry is selected.
+That decline is not evidence of successful Resource validation or support.
+
 ---
 
 ## 9. Transformations — `spec/06-transformations.md`

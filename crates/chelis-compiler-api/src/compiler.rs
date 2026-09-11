@@ -1801,6 +1801,43 @@ fn execution_artifact_from_compiled(
     )
 }
 
+/// Check actual checked-source Resource regions, never labels inferred from
+/// lowered nodes (where the handler is already erased). Entry selection uses
+/// the source dependency pruner with the checker's lexical binding analysis.
+/// Contextual entry checks include the stored library, without making unused
+/// library helpers impose requirements on the selected artifact.
+fn validate_compiled_resource_target(
+    compiled: &CompiledSource,
+    target: BuildTarget,
+    entry: Option<&str>,
+) -> Result<()> {
+    let mut expressions = compiled
+        .library_runtime
+        .as_ref()
+        .map(|library| library.checked.annotated_exprs().to_vec())
+        .unwrap_or_default();
+    expressions.extend_from_slice(compiled.checked().annotated_exprs());
+    let expressions = match entry {
+        Some(entry) => crate::prune::prune_checked_runtime_to_entry(expressions, entry),
+        None => expressions,
+    };
+    chelis_effects::validate_build_target_expressions(&expressions, target.as_str()).map_err(
+        |errors| CompilerError {
+            transcript: Vec::new(),
+            stage: "effects".into(),
+            errors: errors
+                .iter()
+                .map(|error| {
+                    Diagnostic::from_effect_error(
+                        error,
+                        crate::schema::numbers::UnitInterval::new(0.8).expect("constant severity"),
+                    )
+                })
+                .collect(),
+        },
+    )
+}
+
 fn execution_artifact_from_compiled_observed(
     compiled: CompiledSource,
     target: CompileTarget,
@@ -1936,7 +1973,8 @@ fn execution_artifact_from_compiled_observed(
                 None
             };
 
-            if let Some((_entry, entry_dag)) = scoped_entry {
+            if let Some((entry, entry_dag)) = scoped_entry {
+                validate_compiled_resource_target(&compiled, build_target, Some(entry))?;
                 // Fix 2: the entry-scoped symbol is the fixed, collision-free
                 // `chelis_main` so a def named `main`/`free`/`chelis_*` links.
                 let entry_symbol = EXECUTION_ENTRY_C_SYMBOL;
@@ -2041,6 +2079,14 @@ fn execution_artifact_from_compiled_observed(
                     _ => None,
                 };
                 let host_program = projected_host_program.as_ref().unwrap_or(host_program);
+                let resource_entry = match (&entry_lane_decline, strictness) {
+                    (
+                        Some(EntryLaneDecline::NotTensorSignature { entry }),
+                        EntryStrictness::Strict,
+                    ) => Some(entry.as_str()),
+                    _ => None,
+                };
+                validate_compiled_resource_target(&compiled, build_target, resource_entry)?;
                 reject_unsupported_effect_ops_in_host_program(host_program, BuildTarget::C)?;
                 reject_unsupported_windowed_reductions_in_host_program(
                     host_program,
@@ -2097,6 +2143,7 @@ fn execution_artifact_from_compiled_observed(
                 artifact.entry_lane_decline = entry_lane_decline;
                 return Ok(artifact);
             }
+            validate_compiled_resource_target(&compiled, build_target, None)?;
             reject_unsupported_effect_ops(&compiled.dag, BuildTarget::C)?;
             reject_symbolic_windowed_reduce(&compiled.dag, BuildTarget::C)?;
             reject_unsupported_reduce_window_precision(&compiled.dag, BuildTarget::C)?;
@@ -2173,6 +2220,7 @@ fn execution_artifact_from_compiled_observed(
             if compiled.library_runtime.is_some() {
                 return Err(reef_context_hip_unsupported_error());
             }
+            validate_compiled_resource_target(&compiled, build_target, None)?;
             let host_requires_host_backend = host_compiled
                 .host
                 .as_ref()

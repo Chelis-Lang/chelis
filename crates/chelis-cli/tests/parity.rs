@@ -603,6 +603,13 @@ fn parity_rank_poly_borrow_library_only() {
     drive_parity(&examples_root().join("rank_poly_borrow.ch"), false);
 }
 
+// A callable tensor entry: check/evaluate the declaration and compile its C
+// object. This is target admission coverage, not a claim of GPU execution.
+#[test]
+fn parity_resource_target_cpu_library_only() {
+    drive_parity(&examples_root().join("resource_target_cpu.ch"), false);
+}
+
 // -----------------------------------------------------------------------------
 // Corpus completeness guard
 // -----------------------------------------------------------------------------
@@ -641,6 +648,7 @@ fn parity_corpus_is_complete() {
         "rank_poly_borrow.ch",
         "recursive_cast_targets.ch",
         "recursive_generic.ch",
+        "resource_target_cpu.ch",
         "scalar_string_foundation.ch",
         "tensor_structural_ops.ch",
         "transformer_block.ch",
