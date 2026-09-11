@@ -199,3 +199,12 @@ name = "hip_entry_obligation_witness"
 [[target]]
 package = "chelis-cli"
 name = "runtime_extent_slice_b"
+
+# chelis#1787: this file's census builds every executable Phase 0 example to C,
+# so a merge that adds an example, or that makes one stop building, breaks it on
+# `main` with no per-pull-request job to catch it. That happened once already,
+# on a hand-written example count this change retires. 16 tests, 2.9 s measured
+# warm, of which the census is 2.6 s.
+[[target]]
+package = "chelis-cli"
+name = "issue_1739_diagonal_runtime_bound"

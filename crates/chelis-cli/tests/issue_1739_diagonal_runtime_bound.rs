@@ -44,6 +44,26 @@ use std::fs;
 use std::process::Command as StdCommand;
 use tempfile::{TempDir, tempdir};
 
+/// Examples the C backend refuses at its early capability gate, with the
+/// diagnostic that refusal must carry. The census asserts the refusal rather
+/// than skipping the file: a bare skip stops measuring quietly, and deleting
+/// the assertion would make the census's claim smaller than its name.
+///
+/// Both entries are here because compiled `dropout` kernels are chelis#1192:
+/// the gate refuses before any C exists, so there is nothing to read guards
+/// out of. When #1192 lands the builds succeed, these rows fail, and the two
+/// examples join the censused set in the same change.
+const REFUSED_BY_A_CAPABILITY_GATE: &[(&str, &str)] = &[
+    (
+        "dropout_fixed_stream.ch",
+        "unimplemented chelis#1192: compiled `dropout` kernels are not implemented",
+    ),
+    (
+        "dropout_staged_claim.ch",
+        "unimplemented chelis#1192: compiled `dropout` kernels are not implemented",
+    ),
+];
+
 /// A two-row operand: `min(2, 4) = 2`.
 const TWO_BY_FOUR: &str = "[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]]";
 /// A three-row operand: `min(3, 4) = 3`.
@@ -452,8 +472,8 @@ fn emitted_guards(c_source: &str) -> Vec<(String, String, String)> {
     found
 }
 
-fn emit_c(path: &str, out_subdir: &std::path::Path) -> String {
-    let build = Command::cargo_bin("chelis")
+fn build_c(path: &str, out_subdir: &std::path::Path) -> std::process::Output {
+    Command::cargo_bin("chelis")
         .expect("chelis binary")
         .args([
             "build",
@@ -464,7 +484,11 @@ fn emit_c(path: &str, out_subdir: &std::path::Path) -> String {
             out_subdir.to_str().expect("UTF-8 path"),
         ])
         .output()
-        .expect("run chelis build");
+        .expect("run chelis build")
+}
+
+fn emit_c(path: &str, out_subdir: &std::path::Path) -> String {
+    let build = build_c(path, out_subdir);
     assert!(
         build.status.success(),
         "chelis build failed for {path}: {}",
@@ -516,6 +540,18 @@ fn the_census_reader_finds_a_guard_that_is_there() {
 /// If a future example gains a guard this test goes red with its name, which is
 /// the point. Add the row here after checking, on both lanes, that the
 /// declaration the guard now enforces is the one the body really produces.
+///
+/// # Coverage
+///
+/// The corpus it must cover is `common::EXECUTABLE_PHASE_0_EXAMPLES`, the
+/// shared roster, and not a count written here. chelis#1787 is what the hand
+/// written count cost: it was pinned at 31, an unrelated merge added a 32nd
+/// example without touching this line, and `main` went red on a number rather
+/// than on a finding. A count derived from this test's own `read_dir` would
+/// have been worse, since it agrees with a reader that has stopped
+/// enumerating. The roster is an independent statement of the corpus, and
+/// `parity.rs`'s `parity_corpus_is_complete` is the one test that compares it
+/// against the directory.
 #[test]
 fn no_shipped_example_gains_a_return_boundary_guard() {
     let dir = tempdir().expect("tempdir");
@@ -525,41 +561,57 @@ fn no_shipped_example_gains_a_return_boundary_guard() {
         .filter(|path| path.extension().is_some_and(|ext| ext == "ch"))
         .collect();
     examples.sort();
-    // The EXACT count, not a floor (round 1 P3). A floor lets the corpus shrink
-    // by a third while the census keeps reporting nothing, which is the same
-    // failure shape as a reader that stops finding guards. There is no example
-    // manifest to read this from, so the number is pinned here: change it in
-    // the same commit that adds or removes an executable example, and read the
-    // census result before you do.
-    // chelis#1787: nothing derives this number, so it drifts, and it drifted
-    // again between this branch's two rebases. It reads 31 on `main` against a
-    // corpus of 36 there; `record_input_broadcast.ch` makes 37. The pin's own
-    // instruction is to change it in the commit that adds an example, so this
-    // one sets the true count. The cause chelis#1787 tracks is unchanged, and
-    // a textual merge cannot see this conflict: the line does not conflict,
-    // so whichever side is replayed last silently wins.
-    const EXECUTABLE_PHASE_0_EXAMPLES: usize = 37;
+    let found: Vec<String> = examples
+        .iter()
+        .filter_map(|path| path.file_name().and_then(|name| name.to_str()))
+        .map(String::from)
+        .collect();
+    let mut expected: Vec<String> = common::EXECUTABLE_PHASE_0_EXAMPLES
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
+    expected.sort();
     assert_eq!(
-        examples.len(),
-        EXECUTABLE_PHASE_0_EXAMPLES,
-        "the census must cover every executable Phase 0 example; found {:?}",
-        examples
-            .iter()
-            .filter_map(|path| path.file_name())
-            .collect::<Vec<_>>()
+        found, expected,
+        "the census must cover every executable Phase 0 example on the shared roster"
     );
 
     let mut census: Vec<String> = Vec::new();
+    let mut refused: Vec<String> = Vec::new();
     for example in &examples {
         let stem = example.file_stem().expect("stem").to_str().expect("UTF-8");
-        let source = emit_c(
-            example.to_str().expect("UTF-8 path"),
-            &dir.path().join(stem),
-        );
+        let name = example.file_name().expect("name").to_str().expect("UTF-8");
+        let path = example.to_str().expect("UTF-8 path");
+        let out = dir.path().join(stem);
+        if let Some((_, diagnostic)) = REFUSED_BY_A_CAPABILITY_GATE
+            .iter()
+            .find(|(refused_name, _)| *refused_name == name)
+        {
+            let build = build_c(path, &out);
+            let stderr = String::from_utf8_lossy(&build.stderr).to_string();
+            assert!(
+                !build.status.success() && stderr.contains(diagnostic),
+                "{name} is recorded as refused by a capability gate, but the build \
+                 succeeded or failed for another reason: {stderr}"
+            );
+            refused.push(name.to_string());
+            continue;
+        }
+        let source = emit_c(path, &out);
         for (function, axis, required) in emitted_guards(&source) {
             census.push(format!("{stem}: {function} axis {axis} claims {required}"));
         }
     }
+
+    assert_eq!(
+        refused,
+        REFUSED_BY_A_CAPABILITY_GATE
+            .iter()
+            .map(|(name, _)| (*name).to_string())
+            .collect::<Vec<_>>(),
+        "every recorded refusal must be reached: a name that no longer matches an \
+         example silently shrinks the census"
+    );
 
     assert_eq!(
         census,
