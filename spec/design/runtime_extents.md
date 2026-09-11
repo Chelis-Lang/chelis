@@ -1,9 +1,14 @@
 # Runtime Extents: values, claims, and their witnesses
 
-**Status:** IN PROGRESS. Slice A and the first Slice B mechanisms have
-landed. The remaining Slice B work is specified below. Slice C is withdrawn:
-`expand` broadcasts a singleton axis and `insert` adds an axis, so neither
-operation produces a deferred shape. Tracking parent: [#1277].
+**Status:** IN PROGRESS. Slice A and Slice B's mechanisms have landed, and
+every row of the oracle's recorded phase-A and phase-B corpus is at an exit
+state: `runtime_extent_oracle.py --phase final` passes on the host lanes, with
+the HIP and Metal hardware receipts still owed separately at the same head and
+corpus digest. Slice C is withdrawn: `expand` broadcasts a singleton axis and
+`insert` adds an axis, so neither operation produces a deferred shape. A green
+class oracle is not a closed class: the recorded rows are a bounded subset, and
+the named residual work in Part II and the open sub-issues of [#1277] remain.
+Tracking parent: [#1277].
 
 **Authority:** `spec/04-type-system.md` §4.7 decides admissibility, identity,
 claims, and guard placement; `spec/05-risc-primitives.md` §2.4.1,
@@ -17,6 +22,9 @@ language rule and does not relax the numbered specs to match a baseline.
 
 The reference implementation state for the merged inventory is `4f3812e2f`.
 The following are merged mechanisms, not a claim of complete class coverage.
+Deliveries after that sha are recorded in [#1277]'s ledger rather than copied
+here; the executable statement of what is landed is the oracle's own row
+report.
 
 | delivery | merged PR | established behavior |
 |---|---|---|
@@ -564,9 +572,9 @@ the C integer helper's existing division-by-zero failure; they do not certify
 that helper's diagnostic parity. The same command retains the earlier literal and helper-order
 receipts and the existing reshape arithmetic gradient/finite-difference controls,
 checks independent static-source proofs, IR rewrites and malformed wire edges, and executes matching
-and mismatching calls from both disk and worker caches. The ignored full-class
-`claimed_extent_contract` is a separate, still-pending #1277 exit, not a receipt
-for these two issues. The named `insert` preparation cases now retain declared
+and mismatching calls from both disk and worker caches. The full-class
+`claimed_extent_contract` is a separate #1277 exit, met in B2b-3, and was
+never a receipt for these two issues. The named `insert` preparation cases now retain declared
 signatures and execute their roots, but their missing caller equality checks
 remain #1374/#1376 work; their measured negative failures remain in the baseline.
 
@@ -724,11 +732,21 @@ The class completion command remains:
 
 Automatic success is exit zero ending `RUNTIME EXTENT ORACLE: PASS`, with
 applicable HIP and Metal hardware receipts at the same head/corpus digest.
+That command now passes. It selects both registered slice phases, runs their
+deduplicated targets once, and prints a digest per phase beside the combined
+one. The nightly `runtime-extent-oracle` job runs exactly it, as one step, so
+this class has one acceptance oracle rather than two phase steps whose
+relationship a reader has to work out. B2b-3 retired the withdrawn phase `c`
+from `SLICE_PHASES`, which is what the command was refusing on; naming `c`
+still reaches the oracle's own
+"corpus is not implemented" refusal. Retiring it added no passing phase and
+erased no row: `--phase a` and `--phase b` keep their names, corpora and
+row-transition checks, and each still has to PASS on its own.
+
 The recorded phase-B corpus has 57 rows and NONE of them is short of exit.
 `--phase b` reads `RUNTIME EXTENT ORACLE: PASS` rather than `RECEIPTS PASS,
-ROWS SHORT OF EXIT`, and `--allow-shortfall` prints no
-`runtime_extent_rows_short` line at all, because there is no shortfall to
-report. That reading, not a hand count, is what to quote. A hand count of the
+ROWS SHORT OF EXIT`, and it now does so without `--allow-shortfall`. That
+reading, not a hand count, is what to quote. A hand count of the
 JSON's `phase_b` column reaches 3 instead, because the column holds 54
 `executes_exactly` and three other values, none of which is a shortfall:
 `expand.positional.replacement.non_unit_source_static` and
@@ -736,25 +754,28 @@ JSON's `phase_b` column reaches 3 instead, because the column holds 54
 programs are SUPPOSED to be rejected and a row that stopped rejecting them would
 be the defect, and `shrink.elementwise_const.build` is a registered
 `typed_unsupported(#1482)`, an owned receipt rather than an unexplained gap.
-Phase b's ROWS being at exit is not the same question as `--phase final`, which
-still refuses because `SLICE_PHASES` requires an unregistered `c`; B2b-3 owns
-that. The op-computed local guards moved seven rows
+The op-computed local guards moved seven rows
 (`expand.shape_derived.declared_result_survives.{c,eval}`,
 `class.load_op_output.eval`, `class.op_output_op_output.{c,eval}` and
 `class.splice_f_of_n_n.{c,eval}`) and the six `shrink.*` preparation cells, and
 #1379's acceptance moved `expand.arith_size.named_claim.{c,eval}`, which were
-the last two. The final
-command currently fails because `SLICE_PHASES` still requires unregistered
-`c`. B2b-3 retires that requirement and its tests; it does not add a fake
-passing phase or erase outstanding B rows. `--phase a` and `--phase b`
-retain their names and row-transition checks.
+the last two.
+
+What a passing `--phase final` claims is exactly this: every row of the two
+recorded corpora is at an exit state, every named receipt executed and passed
+at one clean exact head, and both baselines match their generated corpora. It
+claims nothing about the rows those corpora do not contain, and the class's
+own remaining obligations are the list at the end of this section and the open
+sub-issues of [#1277]. The HIP and Metal hardware halves are separate receipts
+run by hand at the same head and digest; the oracle prints the HIP command it
+expects rather than executing it.
 
 `--phase a` reaches its row report and PASSes. Its `symbolic_window` target runs
 `issue_368_runtime_symbolic_window_grad_is_half_everywhere`, whose `grad`
 lowering failed backward-DAG verification until chelis#1775 landed in #1780.
-The nightly `runtime-extent-oracle` job requires `--phase a` to PASS, which it
-now does; a red there is again the signal that a row is short rather than a
-known outstanding regression.
+`--phase a` has to PASS for `--phase final` to, which it now does; a red
+there is again the signal that a row is short rather than a known outstanding
+regression.
 
 Phase A's `vmap.shared_shape_bound.concrete_c_emit` row left `PHASE_A_DEFERRED`
 with chelis#1397's wildcard-root repair: the guard it was waiting on is that
@@ -777,30 +798,34 @@ reviewed edit to a phase's generated corpus, regenerate that phase's checked
 baseline with
 `.venv/bin/python scripts/runtime_extent_oracle.py --phase <p> --write-baseline`;
 never hand-edit the file or its digest. `--allow-shortfall` reports a
-recorded row shortfall instead of failing on it, so the nightly
-`runtime-extent-oracle` job can enforce phase B's receipts, digests and
-lattice while its remaining rows land; it ends `RUNTIME EXTENT ORACLE:
-RECEIPTS PASS, ROWS SHORT OF EXIT` rather than PASS, `--phase final` refuses
-it, and B2b-3 drops it from the workflow.
+recorded row shortfall instead of failing on it, ending `RUNTIME EXTENT
+ORACLE: RECEIPTS PASS, ROWS SHORT OF EXIT` rather than PASS; `--phase final`
+refuses it outright. No registered phase records a shortfall today, and the
+nightly job cannot be given the flag at all now that it runs `--phase final`.
+The flag stays for the next phase to register a corpus, which starts with rows
+short of exit, and because it is the only thing separating a landing row from a
+drifted receipt; the oracle's self-tests hold its behaviour on synthetic short
+rows.
 
 The preparation suite is `crates/chelis-cli/tests/runtime_extent_claim_preparation.rs`.
-Its baseline and full pending acceptance remain separate:
+Its acceptance runner asserts the decided contract over every cell:
 
 ```sh
 cargo nextest run -p chelis-cli --test runtime_extent_claim_preparation
 cargo test -p chelis-cli --test runtime_extent_claim_preparation \
-  claimed_extent_contract -- --ignored --exact --nocapture
+  claimed_extent_contract -- --exact --nocapture
 ```
 
-The first locks measured current behavior with explicit issue-owned gaps and
-runs the repaired broadcast and literal-call subsets. It must fail on an unexplained behavior
-change. The second is the manual
-acceptance runner over the SAME fixtures and asserts the decided contract.
-It is intentionally red until the owning fixes land, reports every failed
-cell, and must run before any fixture is claimed repaired. An ignored
-acceptance test, a clean checker, object-only output, or equal wrong answers
-on Eval/C is never a passing completion receipt. Missing compiler/toolchain
-prerequisites fail the suite rather than skip a lane.
+`claimed_extent_contract` reports every failed cell rather than stopping at
+one, and must run before any fixture is claimed repaired. B2b-3 took its
+`#[ignore]` off: it was there while the B2b repairs landed, beside a baseline
+test that locked the measured gaps and whose own last assertion said to retire
+it once no cell was unmet. That assertion fired on `main`, so the baseline test
+and `fixtures/runtime_extent_claim_baseline.json` are gone and the contract is
+an ordinary test. A clean checker, object-only output, or equal wrong answers
+on Eval/C is never a passing completion receipt, and an `#[ignore]` back on
+this test would be a claim withdrawn rather than a gate relaxed. Missing
+compiler/toolchain prerequisites fail the suite rather than skip a lane.
 
 The bounded #1619 attribution receipt is the unignored `singleton_broadcast_contract` test:
 
@@ -902,7 +927,8 @@ The preserved named `insert` declarations and executable roots do not prove
 caller equality or attribution. #1374/#1376's caller equality landed with the
 named claim and its inlined-root attribution with #1782; #1397's general
 wildcard-root boundary and #1378's public value witness landed with B2b-root.
-Four cells remain, all #1266's, and the ignored acceptance runner reports them.
+Four cells remained at that delivery, all #1266's; the acceptance runner,
+`#[ignore]`d at the time, reported them, and #1266/#569 met them below.
 
 The suite's rows distinguish:
 
@@ -960,7 +986,7 @@ All are Slice B work under #1277 unless expressly separated.
 | B2b-1: claim transport | C2 contract and red fixtures; integrates B2b-0b | preserve the shipped helper-order and C2.4 checked-reshape/unit receipts (#1686/#1687); finish general scoped checked/lowered identities, explicit caller witnesses, multi-claim axes, rebuild/wire transport and migrated binding consumers; #1397's declaration-erasure half, with #1377's literal call/inlined-root exit established by the witness subset. Named result claims and the unread signature witness (#1374, #1376, #1566) are delivered, and a root's restated literal claim defers to them when a graph-fixed extent entails it, never when an ABI parameter's axis does, decided by `resolve_axis_extent`'s origin rather than by the neighbouring operation (#1782) |
 | B2b-root: root execution | can start independently; acceptance composes B2b-1 | #1397's general wildcard-root boundary is closed: a nullary root whose result type carries a runtime extent is kept in the root manifest, so eval renders it and the C host emits an entry. On eval and C such a root is admitted and sized by the runtime rather than needing a sizing diagnosis, because the manifest print path sizes from the realized extent and never materializes a static buffer; guards and device capability diagnostics still apply, and an empty realized bound renders differently per lane under #1795. #1378's exact public value witness is unlocked and reverified. A root that keeps an unresolved dim variable is still dropped and is residual under #1801 |
 | B2b-2: sources and acceptance | guards and claim transport for every newly admitted row | declaration sources are finished (#665/#1556/#1566); supply #1482's missing shape source. No provenance restriction remains: #1266/#569's field and pipe spellings and #1379's arithmetic sizes are all admitted, so what is left of this row's acceptance half is deleting the walk itself. `shape_deps` removal moves out of this row and is residual under #1372, which must now also migrate B2b-0b's declaring-parameter dependency rather than drop it |
-| B2b-3: phase exit | preceding host repairs and per-row platform dispositions | register actual passing receipts, correct measured stale baselines, retire phase c from final selection; phase b/final remain red until their named obligations pass |
+| B2b-3: phase exit | preceding host repairs and per-row platform dispositions | DELIVERED. Every recorded phase-A and phase-B row has a registered receipt that executes and passes; `--phase b` demands PASS with no `--allow-shortfall`; the withdrawn phase `c` is out of `SLICE_PHASES`, so `--phase final` reaches its row report, passes on the host lanes, and is the nightly `runtime-extent-oracle` job's one step; and `claimed_extent_contract` runs as an ordinary test over all 55 cells with its preparation baseline retired. It moved no row, met no cell, and closes none of the issues listed below |
 | #1512 audit | no dependency on the B2b carrier or withdrawn C | enumerate reachable non-expand unresolved producers and consumer decisions; resolved/unresolved positive and negative pairs; distinguish error cascade suppression; assign each surviving defect a repair under #1512 |
 
 B2b-0b and B2b-1 can be developed as separate changes, but their shared local
@@ -1025,6 +1051,20 @@ claims or witnesses at any checker/lowerer/rebuild/wire boundary loses the
 same obligation. Separable fixture, local-guard, root, and provenance work
 remain separate PRs. At implementation, size is justified by those shared
 invariants and by the cases the oracle proves, not by inherited slice names.
+
+The residual work under [#1277] is its open sub-issues, which a green class
+oracle does not touch. As of 2026-09-11, read with
+
+```sh
+gh api graphql -H "GraphQL-Features: sub_issues" -f query='{ repository(owner:"Chelis-Lang", name:"chelis") { issue(number:1277) { subIssues(first:100) { nodes { number state title } } } } }'
+```
+
+twenty-six are open: #578, #1397, #1482, #1522, #1535, #1559, #1574, #1575,
+#1743, #1771, #1779, #1786, #1788, #1791, #1794, #1795 (with #1481), #1797,
+#1798, #1800, #1801, #1802, #1805, #1814, #1815, #1821 and #1822. Re-read that
+query rather than this sentence: the list is a measurement, and the tracker
+moves. Several of them are rows the recorded corpora do not contain, which is
+the difference between the oracle passing and the class closing.
 
 ### Platform and class interlocks
 

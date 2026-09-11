@@ -1122,11 +1122,30 @@ fn c_run_result_with_source(dir: &TempDir, stem: &str, source: &str) -> (bool, S
     (ok, out, emitted)
 }
 
-/// Supplement the executed output checks with the emitted statement order:
-/// inside `run`'s host body the `print` statement and the call into the
-/// kernel C extracts for `f(seed, x)` (`run__tensor_N`, with `f` inlined and
-/// the same entry guard `f__tensor_0` carries), in the order `effect_first`
-/// names; inside that kernel the entry guard before its first allocation.
+/// The byte index, in `text`, of the `)` that closes the first `(` in it.
+///
+/// Counting depth rather than taking the first `)` is what lets
+/// `host_body_definition` read a parameter list whose spelling nests
+/// parentheses. Parentheses are ASCII, so the returned byte index is always a
+/// char boundary.
+fn closing_paren(text: &str) -> Option<usize> {
+    let open = text.find('(')?;
+    let mut depth = 0usize;
+    for (offset, byte) in text.bytes().enumerate().skip(open) {
+        match byte {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(offset);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// One host body's DEFINITION, located by NAME rather than by its exact
 /// parameter list.
 ///
@@ -1144,20 +1163,35 @@ fn c_run_result_with_source(dir: &TempDir, stem: &str, source: &str) -> (bool, S
 /// rows exist for was intact throughout. A precondition that cannot tell a
 /// changed signature from a changed lane is worse than no precondition, so
 /// this one keys on the structure it actually needs.
+///
+/// Two ways it could still misread the emission, both closed here after the
+/// #1792 round reported them. A match with no left word boundary accepts
+/// `g_run__chelis_owned_body(` as `run__chelis_owned_body`, and the wrong
+/// function's body then satisfies the order assertions for the wrong reason.
+/// And taking the first `)` as the end of the parameter list mistakes a
+/// nested parenthesis for the end of the signature, so the `{` test fails and
+/// this helper reports the body as having left the host lane, which is
+/// #1808's own misdiagnosis in a new spelling. `the_host_body_locator_*`
+/// tests hold both.
 fn host_body_definition<'a>(emitted: &'a str, name: &str) -> &'a str {
     let needle = format!("{name}(");
     let mut at = 0;
     while let Some(found) = emitted[at..].find(&needle) {
         let start = at + found;
+        at = start + needle.len();
+        let preceded_by_identifier = emitted[..start]
+            .chars()
+            .next_back()
+            .is_some_and(|previous| previous.is_alphanumeric() || previous == '_');
+        if preceded_by_identifier {
+            continue;
+        }
         let rest = &emitted[start..];
-        // No parameter of a host body carries a nested parenthesis, so the
-        // first `)` closes the list.
-        if let Some(close) = rest.find(')')
+        if let Some(close) = closing_paren(rest)
             && rest[close + 1..].trim_start().starts_with('{')
         {
             return rest;
         }
-        at = start + needle.len();
     }
     panic!(
         "no definition of `{name}` in the emitted C: the IO body is expected on the host lane, \
@@ -1165,6 +1199,70 @@ fn host_body_definition<'a>(emitted: &'a str, name: &str) -> &'a str {
     );
 }
 
+/// Disposition lock for the locator above, on synthetic C rather than on an
+/// emission: a suffix match and a nested parenthesis are the two ways it can
+/// name the wrong body, and neither is reachable from today's emitter, so an
+/// emitted-code test could not hold them. Measured red on the pre-fold
+/// helper: the first case returned the decoy's body and the second panicked
+/// with "it moved off it".
+#[test]
+fn the_host_body_locator_reads_the_definition_and_not_a_look_alike() {
+    let decoy = concat!(
+        "void g_run__chelis_owned_body(int a) { decoy; }\n",
+        "void run__chelis_owned_body(int a);\n",
+        "void run__chelis_owned_body(int a) { real; }\n",
+    );
+    assert!(
+        host_body_definition(decoy, "run__chelis_owned_body")
+            .starts_with("run__chelis_owned_body(int a) { real;"),
+        "a symbol ENDING in the wanted name is a different function"
+    );
+
+    let nested = "void run__chelis_owned_body(void (*cb)(int), int a) { real; }\n";
+    assert!(
+        host_body_definition(nested, "run__chelis_owned_body").ends_with("{ real; }\n"),
+        "a parameter list that nests parentheses is still a definition"
+    );
+}
+
+/// Negative parity for the locator: a forward declaration with no definition
+/// is the emission actually leaving the host lane, and must still panic.
+///
+/// Caught rather than declared `#[should_panic]`, because the oracle's
+/// `cli_slice_b` row selects this file whole and compares libtest's printed
+/// names against the reviewed manifest. libtest prints a `should_panic` test
+/// as `<name> - should panic`, which the manifest cannot carry without
+/// disagreeing with `runtime_extent_target_manifest.rs`, the reader that
+/// takes the same names out of this source.
+#[test]
+fn the_host_body_locator_refuses_a_forward_declaration_alone() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let outcome = std::panic::catch_unwind(|| {
+        host_body_definition(
+            "void run__chelis_owned_body(int a);\n",
+            "run__chelis_owned_body",
+        )
+    });
+    std::panic::set_hook(previous);
+    let payload = outcome.expect_err("a declaration with no definition must panic");
+    let message = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .expect("panic payload is a string");
+    assert!(
+        message.contains("no definition of `run__chelis_owned_body`")
+            && message.contains("means it moved off it"),
+        "the panic must name the symbol and the lane it left: {message}"
+    );
+}
+
+/// Supplement the executed output checks with the emitted statement order:
+/// inside `run`'s host body the `print` statement and the call into the
+/// kernel C extracts for `f(seed, x)` (`run__tensor_N`, with `f` inlined and
+/// the same entry guard `f__tensor_0` carries), in the order `effect_first`
+/// names; inside that kernel the entry guard before its first allocation.
 fn assert_effect_order_in_emitted_c(emitted: &str, effect_first: bool) {
     // The kernel C extracts for `f(seed, x)` is the `run__tensor_N` whose
     // body carries the entry guard (`seed`'s own sub-expression is another
