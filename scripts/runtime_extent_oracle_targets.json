@@ -325,6 +325,7 @@
         "a_local_unit_extent_claim_is_guarded_on_the_hip_host_lowering",
         "a_local_unit_extent_claim_traps_at_its_operation_on_c",
         "a_local_unit_extent_claim_traps_at_its_operation_on_eval",
+        "a_nested_named_result_claim_is_not_enforced_by_this_slice",
         "a_node_valued_reshape_target_that_agrees_with_its_claim_executes_on_c",
         "a_node_valued_reshape_target_that_agrees_with_its_claim_executes_on_eval",
         "a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_c",

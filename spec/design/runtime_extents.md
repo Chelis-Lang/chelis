@@ -57,9 +57,10 @@ inlining, graph rewrites and cache transport. Their bounded oracle retains
 independent declaration, value and failure assertions. Remaining failure boundaries:
 
 - #1397: the declared result of a runtime-bound movement is retained and
-  guarded. A general wildcard-returning root can still disappear from eval and
-  from entry emission, and #1378's public vmap witness remains masked by that
-  root failure.
+  guarded at the outermost activation. A parameter-bound named result consumed
+  inside another def's body is not (#1800), a general wildcard-returning root
+  can still disappear from eval and from entry emission, and #1378's public
+  vmap witness remains masked by that root failure.
 - #1266/#569: the provenance walk still rejects equivalent field/pipe forms.
 - #1379: local op-computed extents have guard sites, and `shrink` is the
   admitted owner. What remains is acceptance: the lowering still rejects an
@@ -854,7 +855,7 @@ All are Slice B work under #1277 unless expressly separated.
 
 | owner | entry | deliverable and exit |
 |---|---|---|
-| B2b-0b: remaining local guards | merged B2r/S2b and #1658's broadcast preparation repair | guard literal and resolved numeric claims from independent local size sources; op-computed local extents; exact positive/negative C/Eval rows. The op-computed admission and #1397's declaration half are delivered for `shrink`; `pad` and `stride` remain unadmitted owners |
+| B2b-0b: remaining local guards | merged B2r/S2b and #1658's broadcast preparation repair | guard literal and resolved numeric claims from independent local size sources; op-computed local extents; exact positive/negative C/Eval rows. The op-computed admission and #1397's declaration half are delivered for `shrink` at the OUTERMOST activation (exported def, value binding, inlined root); `pad` and `stride` remain unadmitted owners. A helper whose parameter-bound NAMED result is consumed inside another def's body keeps its claim erased by the enclosing signature's own result name and is residual under #1800; the literal half survives that nesting |
 | B2b-1: claim transport | C2 contract and red fixtures; integrates B2b-0b | preserve the shipped helper-order and C2.4 checked-reshape/unit receipts (#1686/#1687); finish general scoped checked/lowered identities, explicit caller witnesses, multi-claim axes, rebuild/wire transport and migrated binding consumers; #1397's declaration-erasure half, with #1377's literal call/inlined-root exit established by the witness subset. Named result claims and the unread signature witness (#1374, #1376, #1566) are delivered |
 | B2b-root: root execution | can start independently; acceptance composes B2b-1 | #1397's general wildcard-root boundary; run or diagnose every accepted root; unlock and reverify #1378's exact public value witness |
 | B2b-2: sources and acceptance | guards and claim transport for every newly admitted row | declaration sources are finished (#665/#1556/#1566); supply #1482's missing shape source, remove provenance restrictions (#1266/#569/#1379). `shape_deps` removal moves out of this row and is residual under #1372, which must now also migrate B2b-0b's declaring-parameter dependency rather than drop it |

@@ -3354,6 +3354,96 @@ fn a_repeated_free_result_name_declares_from_its_first_site() {
     }
 }
 
+/// A helper whose parameter-bound named result is consumed inside ANOTHER
+/// def's body. `len` is the outer actual's extent; the inner `n` is 2.
+fn nested_named_result_source(len: usize, declared: &str) -> String {
+    let values = (1..=len)
+        .map(|v| format!("{v}.0f32"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "def f(w: tensor[n, f32], x: tensor[r, f32]) -> tensor[{declared}, f32] = \
+         shrink(x, [[1i64, shape(x, 0i32)]])\n\
+         def g(y: tensor[s, f32]) -> tensor[k, f32] = f(to_tensor([1.0f32, 2.0f32]), y)\n\
+         out = g(to_tensor([{values}]))\n"
+    )
+}
+
+/// The boundary of this slice's declaration half, stated rather than implied.
+///
+/// A NAMED result claim is enforced at the outermost activation: an exported
+/// def, a top-level value binding, an inlined root. It is NOT enforced when the
+/// declaring def is called from inside another def's body, because the
+/// enclosing signature's own result name is written over the axis the inner
+/// activation stamped, so the class keyed by the inner binder has one member
+/// and C2.4 does not make that a class. Read off the emitted C: `f`'s own
+/// kernel carries `int64_t n = chelis_tensor_shape(inputs[0], 0)` and the
+/// comparison, while `g`'s kernel, with `f` inlined, carries
+/// `int64_t k = chelis_movement_extent(...)` and none.
+///
+/// The LITERAL half survives the same nesting, which is why this row asserts
+/// both: the two halves of the declared-result contract diverge exactly here,
+/// and a lock that pinned only the unguarded side would not show that.
+///
+/// EVIDENTIARY STATUS: disposition lock on both lanes for the named half, not
+/// a regression test: the same program exits zero on `8ae55787f` and this
+/// slice neither introduces nor worsens it. Regression test for the literal
+/// half, which this slice does deliver through the same nesting. Tracked by
+/// chelis#1800, which must update this row when it closes.
+#[test]
+fn a_nested_named_result_claim_is_not_enforced_by_this_slice() {
+    assert!(
+        gcc_available(),
+        "this row compares two executed lanes; neither may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    // The named half: unguarded, and the outer result takes the extent the
+    // operation computed rather than the one `n` declares.
+    let named = nested_named_result_source(4, "n");
+    let (eval_ok, eval_out) = eval_result(&dir, "nested_named.ch", &named);
+    let (c_ok, c_out) = c_run_result(&dir, "nested_named_c", &named);
+    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(
+            ok,
+            "{lane}: the nested named claim is unenforced (chelis#1800): {out}"
+        );
+        assert!(
+            out.contains("shape=[3]") && out.contains("data=[2.0, 3.0, 4.0]"),
+            "{lane}: and the extent the shrink computed is returned: {out}"
+        );
+        assert!(
+            !out.contains("extent `n`"),
+            "{lane}: no guard claims to have checked it: {out}"
+        );
+    }
+
+    // The literal half through the SAME nesting: guarded.
+    let literal = nested_named_result_source(4, "2");
+    let (eval_ok, eval_out) = eval_result(&dir, "nested_lit.ch", &literal);
+    let (c_ok, c_out) = c_run_result(&dir, "nested_lit_c", &literal);
+    assert!(!eval_ok, "a literal claim survives the nesting: {eval_out}");
+    assert!(!c_ok, "a literal claim survives the nesting: {c_out}");
+    let context = "extent `2`: claimed = 2, shrink axis 0 = 3";
+    for (lane, out) in [("eval", &eval_out), ("c", &c_out)] {
+        assert!(
+            out.contains(&domain_trap_line("shrink")),
+            "{lane}: [04-NUM-9]'s line: {out}"
+        );
+        assert!(out.contains(context), "{lane}: expected {context}: {out}");
+    }
+
+    // And the named half's agreeing control still executes exactly, so the
+    // first block above is pinning an unguarded claim and not a broken lane.
+    let agreeing = nested_named_result_source(3, "n");
+    let (eval_ok, eval_out) = eval_result(&dir, "nested_named_ok.ch", &agreeing);
+    assert!(eval_ok, "an agreeing nested claim executes: {eval_out}");
+    assert!(
+        eval_out.contains("shape=[2]") && eval_out.contains("data=[2.0, 3.0]"),
+        "with the declared extent: {eval_out}"
+    );
+}
+
 /// The op-computed guard-order pair: a declared 2 over a shrink that produces
 /// `len - 1`, with the independent effect on one side of the guarded call.
 fn op_computed_effect_order_source(len: usize, effect_first: bool) -> String {
