@@ -69,7 +69,7 @@ fn report_shape(report: &ExecutionReport) -> Result<(), String> {
             .as_array()
             .is_none_or(|items| items.len() != 4)
         || report.native["execution"]["selected"] != 37
-        || report.native["execution"]["captures"] != 49
+        || report.native["execution"]["captures"] != 50
         || report.native["execution"]["binaries"] != 6
         || !digest(&report.native["execution"]["packet_sha256"])
         || !digest(&report.native["execution"]["identity_sha256"])
@@ -286,7 +286,7 @@ mod tests {
                     "packet_sha256":"d".repeat(64),
                     "identity_sha256":"e".repeat(64),
                     "selected":37,
-                    "captures":49,
+                    "captures":50,
                     "binaries":6
                 }
             }),

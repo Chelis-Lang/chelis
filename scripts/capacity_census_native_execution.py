@@ -86,7 +86,7 @@ GROUPS = (
             'device_owner_duplicate_bad_descriptor_cleanup_releases_once',
             'device_owner_distinct_named_outputs_keep_independent_lifetimes',
         ),
-        (4, 7, 1, 1, 1, 1, 1, 1, 1),
+        (5, 7, 1, 1, 1, 1, 1, 1, 1),
         'simulated-device-foreign-abi',
         ('device_owner_duplicate_outputs_reject_without_double_finalization', 'device_owner_returned_input_borrow_rejects_without_double_finalization', 'device_owner_duplicate_bad_descriptor_cleanup_releases_once'),
     ),
@@ -506,7 +506,7 @@ def collect_native_execution(root: Path, target: Path):
             captures.extend(_validate_captures(group_dir, group, runtime_digest, binary))
             _require(_digest(runtime) == _digest(archive) == runtime_digest, "runtime changed during native execution")
         _require(_source_packet(root) == source, "native execution source changed during collection")
-        _require(len(selected) == 37 and len(captures) == 49, "native execution matrix is incomplete")
+        _require(len(selected) == 37 and len(captures) == 50, "native execution matrix is incomplete")
         interpreter = Path(sys.executable).resolve()
         packet = dict(schema=1, source=source, selected=selected, executed=executed, binaries=binaries,
                       interpreter=dict(path=str(interpreter), sha256=_digest(interpreter), prefix=sys.prefix, version=sys.version),

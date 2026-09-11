@@ -121,7 +121,7 @@ class MatrixContractTests(unittest.TestCase):
                        for name, count in zip(group.selected, group.instances, strict=True))
         self.assertEqual(actual, EXPECTED_MATRIX)
         self.assertEqual(len(actual), 37)
-        self.assertEqual(sum(row[3] for row in actual), 49)
+        self.assertEqual(sum(row[3] for row in actual), 50)
 
     def test_public_collection_accepts_no_supplied_selection_or_execution(self):
         import inspect
@@ -366,12 +366,12 @@ class NativeExecutionIntegration(unittest.TestCase):
             raise RuntimeError("native execution integration requires an explicit owned target")
         cls.witness = execution.collect_native_execution(root, Path(requested))
 
-    def test_current_fixed_corpus_binds_37_outcomes_and_all_49_actual_fixture_instances(self):
+    def test_current_fixed_corpus_binds_37_outcomes_and_all_50_actual_fixture_instances(self):
         packet = self.witness.validate()
         self.assertEqual(len(packet["selected"]), 37)
         self.assertEqual(len(packet["executed"]), 37)
         self.assertTrue(all(row["outcome"] == "passed" for row in packet["executed"]))
-        self.assertEqual(len(packet["captures"]), 49)
+        self.assertEqual(len(packet["captures"]), 50)
         self.assertEqual(len(packet["binaries"]), 6)
         self.assertEqual(json.loads((self.witness.directory / "report.json").read_text()), packet)
         generated = [row for row in packet["captures"] if row["fixture_kind"] == "generated-c-current-runtime"]
@@ -426,7 +426,7 @@ EXPECTED_MATRIX = (
     ('native_output_validation', 'test', 'returned_alias_retains_actual_input_owner_for_entire_consumer_lifetime', 1, 'host-foreign-abi'),
     ('native_output_validation', 'test', 'consumed_capsule_can_finalize_on_a_foreign_thread_without_the_python_gil', 1, 'host-foreign-abi'),
     ('native_output_validation', 'test', 'versioned_capsule_preserves_descriptor_flags_and_consumption_lifetime', 1, 'host-foreign-abi'),
-    ('native_device_validation', 'test', 'dynamic_device_owners_preserve_rank_device_and_input_lifetime', 4, 'simulated-device-foreign-abi'),
+    ('native_device_validation', 'test', 'dynamic_device_owners_preserve_rank_device_and_input_lifetime', 5, 'simulated-device-foreign-abi'),
     ('native_device_validation', 'test', 'invalid_storage_offset_capacity_and_context_never_reach_import_or_entry', 7, 'simulated-device-foreign-abi'),
     ('native_device_validation', 'test', 'malformed_dynamic_outputs_release_every_returned_owner', 1, 'simulated-device-foreign-abi'),
     ('native_device_validation', 'test', 'empty_device_view_checks_storage_bounds_without_requiring_a_payload_pointer', 1, 'simulated-device-foreign-abi'),
