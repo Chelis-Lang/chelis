@@ -385,51 +385,68 @@ impl HostExecutionPlan {
         &self.program
     }
 
-    /// Apply one pre-ownership payload rewrite and retain the carrier only if
-    /// every execution schedule still validates against its actual helper.
-    #[doc(hidden)]
-    pub fn try_transform<E>(
+    /// Recover the ordinary public host payload only when no execution
+    /// association would be discarded.
+    pub fn into_ordinary(self) -> Result<ConcreteHostProgram, String> {
+        if self.has_execution_helpers() {
+            Err("cannot discard retained host execution metadata".into())
+        } else {
+            Ok(self.program)
+        }
+    }
+
+    /// Apply a manifest-owned rewrite to global observation metadata. Tensor
+    /// helpers and function bodies are not exposed through this capability.
+    pub fn try_transform_globals<E>(
         mut self,
-        transform: impl FnOnce(&mut ConcreteHostProgram) -> Result<(), E>,
-        invalid: impl FnOnce(String) -> E,
+        transform: impl FnOnce(&mut Vec<ConcreteHostBinding>, &[ConcreteHostFunction]) -> Result<(), E>,
     ) -> Result<Self, E> {
-        transform(&mut self.program)?;
-        self.validate().map_err(invalid)?;
+        transform(&mut self.program.globals, &self.program.functions)?;
         Ok(self)
     }
 
-    /// Rebind a compiler-selected host projection by stable function identity.
-    /// Metadata is moved from the original function; no graph is re-lowered.
-    #[doc(hidden)]
-    pub fn project(self, program: ConcreteHostProgram) -> Result<Self, String> {
-        let mut old = self
-            .program
-            .functions
+    /// Select compiler-proved reachable functions by name, moving the exact
+    /// original bodies, helper graphs, and metadata slots together. Entry
+    /// projection drops globals just like the ordinary compiler projection.
+    pub fn project_functions(self, names: &[String]) -> Result<Self, String> {
+        let mut wanted = names
             .iter()
-            .map(|function| function.name.as_str())
-            .zip(self.functions)
-            .collect::<std::collections::BTreeMap<_, _>>();
-        let functions = program
-            .functions
-            .iter()
-            .map(|function| {
-                old.remove(function.name.as_str()).ok_or_else(|| {
-                    format!(
-                        "projected function `{}` has no execution-plan origin",
-                        function.name
-                    )
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let global = if program.global_tensor_helpers.is_empty() {
-            Vec::new()
-        } else {
-            self.global
-        };
-        let projected = Self {
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        if wanted.len() != names.len() {
+            return Err("host execution projection repeats a function name".into());
+        }
+        let Self {
             program,
-            global,
-            functions,
+            global: _,
+            functions: execution,
+        } = self;
+        let mut functions = Vec::new();
+        let mut selected_execution = Vec::new();
+        for (function, metadata) in program.functions.into_iter().zip(execution) {
+            if wanted.remove(&function.name) {
+                functions.push(function);
+                selected_execution.push(metadata);
+            }
+        }
+        if let Some(missing) = wanted.into_iter().next() {
+            return Err(format!(
+                "projected function `{missing}` has no execution-plan origin"
+            ));
+        }
+        let summary_rejections = functions
+            .iter()
+            .flat_map(|function| function.summary_rejections.iter().cloned())
+            .collect();
+        let projected = Self {
+            program: ConcreteHostProgram {
+                globals: Vec::new(),
+                global_tensor_helpers: Vec::new(),
+                functions,
+                summary_rejections,
+            },
+            global: Vec::new(),
+            functions: selected_execution,
         };
         projected.validate()?;
         Ok(projected)

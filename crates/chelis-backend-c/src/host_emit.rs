@@ -214,8 +214,6 @@ pub(crate) fn emit_host_abi_program(
     body.push(String::new());
     append_uniform_sample_helper(&mut body);
     body.push(String::new());
-    append_fixed_dropout_helpers(&mut body);
-    body.push(String::new());
     append_tensor_math_helpers(&mut body);
     body.push(String::new());
     // Authored functions are published in the generated header with external
@@ -409,6 +407,14 @@ pub(crate) fn emit_host_abi_program(
     }
 
     body.extend(function_bodies);
+
+    if helper_requirements.needs_fixed_dropout_helpers {
+        let mut fixed_helpers = Vec::new();
+        append_fixed_dropout_helpers(&mut fixed_helpers);
+        fixed_helpers.push(String::new());
+        fixed_helpers.extend(body);
+        body = fixed_helpers;
+    }
 
     if !program.globals.is_empty() {
         let hoisted: UnordSet<&str> = captured_globals.iter().map(String::as_str).collect();
@@ -1601,12 +1607,14 @@ fn emit_host_declarations(
 struct HelperRequirements {
     needs_blas_header: bool,
     needs_math_header: bool,
+    needs_fixed_dropout_helpers: bool,
 }
 
 impl HelperRequirements {
     fn merge(&mut self, other: Self) {
         self.needs_blas_header |= other.needs_blas_header;
         self.needs_math_header |= other.needs_math_header;
+        self.needs_fixed_dropout_helpers |= other.needs_fixed_dropout_helpers;
     }
 }
 
@@ -1666,6 +1674,7 @@ fn append_helper(
     // `emit_host_program` to emit exactly one copy at file scope.
     let mut skipping_helper_prelude = false;
     let mut requirements = HelperRequirements::default();
+    requirements.needs_fixed_dropout_helpers = verified.execution().is_some();
     for line in helper_src.lines() {
         if line.starts_with("#include ") {
             if line.contains("\"chelis_blas.h\"") {
