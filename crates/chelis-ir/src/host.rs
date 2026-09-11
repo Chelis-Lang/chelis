@@ -390,16 +390,22 @@ pub struct CompiledProgram {
 #[derive(Debug)]
 pub struct HostExecutionPlan {
     program: ConcreteHostProgram,
-    global: Vec<HelperExecutionMetadata>,
-    functions: Vec<Vec<HelperExecutionMetadata>>,
+    global: Vec<HelperExecutionProduct>,
+    functions: Vec<Vec<HelperExecutionProduct>>,
 }
 
-pub(crate) type HelperExecutionMetadata = Option<crate::evaluation::ExecutionMetadata>;
 pub(crate) type HostExecutionAssociations = (
-    Vec<HelperExecutionMetadata>,
-    Vec<Vec<HelperExecutionMetadata>>,
+    Vec<Option<crate::evaluation::ExecutionMetadata>>,
+    Vec<Vec<Option<crate::evaluation::ExecutionMetadata>>>,
 );
 type HostExecutionParts = (ConcreteHostProgram, HostExecutionAssociations);
+
+#[derive(Debug, Clone)]
+struct HelperExecutionProduct {
+    execution: Option<crate::evaluation::ExecutionMetadata>,
+    #[cfg(feature = "lowering-trace")]
+    trace: Option<crate::lowering_trace::HelperLoweringTrace>,
+}
 
 impl HostExecutionPlan {
     pub fn program(&self) -> &ConcreteHostProgram {
@@ -409,8 +415,18 @@ impl HostExecutionPlan {
     /// Recover the ordinary public host payload only when no execution
     /// association would be discarded.
     pub fn into_ordinary(self) -> Result<ConcreteHostProgram, String> {
-        if self.has_execution_helpers() {
-            Err("cannot discard retained host execution metadata".into())
+        let retains_private_metadata = self.has_execution_helpers() || {
+            #[cfg(feature = "lowering-trace")]
+            {
+                self.has_helper_traces()
+            }
+            #[cfg(not(feature = "lowering-trace"))]
+            {
+                false
+            }
+        };
+        if retains_private_metadata {
+            Err("cannot discard retained host execution or trace metadata".into())
         } else {
             Ok(self.program)
         }
@@ -488,7 +504,7 @@ impl HostExecutionPlan {
             .global_tensor_helpers
             .iter()
             .zip(&self.global)
-            .any(|(helper, execution)| dropout(helper) && execution.is_none())
+            .any(|(helper, product)| dropout(helper) && product.execution.is_none())
             || self
                 .program
                 .functions
@@ -499,7 +515,7 @@ impl HostExecutionPlan {
                         .tensor_helpers
                         .iter()
                         .zip(executions)
-                        .any(|(helper, execution)| dropout(helper) && execution.is_none())
+                        .any(|(helper, product)| dropout(helper) && product.execution.is_none())
                 })
     }
 
@@ -507,8 +523,55 @@ impl HostExecutionPlan {
     /// schedule. Callers use this to distinguish the additive C ingress from
     /// an ordinary host program whose metadata slots are all empty.
     pub fn has_execution_helpers(&self) -> bool {
-        self.global.iter().any(Option::is_some)
-            || self.functions.iter().flatten().any(Option::is_some)
+        self.global
+            .iter()
+            .any(|product| product.execution.is_some())
+            || self
+                .functions
+                .iter()
+                .flatten()
+                .any(|product| product.execution.is_some())
+    }
+
+    #[cfg(feature = "lowering-trace")]
+    pub fn has_helper_traces(&self) -> bool {
+        self.global.iter().any(|product| product.trace.is_some())
+            || self
+                .functions
+                .iter()
+                .flatten()
+                .any(|product| product.trace.is_some())
+    }
+
+    #[cfg(feature = "lowering-trace")]
+    pub fn global_helper_trace(
+        &self,
+        helper: usize,
+    ) -> Result<Option<&crate::lowering_trace::HelperLoweringTrace>, String> {
+        self.global
+            .get(helper)
+            .map(|product| product.trace.as_ref())
+            .ok_or_else(|| format!("global helper {helper} has no execution-plan origin"))
+    }
+
+    #[cfg(feature = "lowering-trace")]
+    pub fn function_helper_trace(
+        &self,
+        function: &str,
+        helper: usize,
+    ) -> Result<Option<&crate::lowering_trace::HelperLoweringTrace>, String> {
+        let index = self
+            .program
+            .functions
+            .iter()
+            .position(|candidate| candidate.name == function)
+            .ok_or_else(|| format!("function `{function}` has no execution-plan origin"))?;
+        self.functions[index]
+            .get(helper)
+            .map(|product| product.trace.as_ref())
+            .ok_or_else(|| {
+                format!("function `{function}` helper {helper} has no execution-plan origin")
+            })
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -517,8 +580,8 @@ impl HostExecutionPlan {
         {
             return Err("host execution metadata does not match helper topology".into());
         }
-        for (helper, execution) in self.program.global_tensor_helpers.iter().zip(&self.global) {
-            if let Some(execution) = execution {
+        for (helper, product) in self.program.global_tensor_helpers.iter().zip(&self.global) {
+            if let Some(execution) = &product.execution {
                 execution.validate_for_dag(&helper.dag)?;
             }
         }
@@ -529,8 +592,8 @@ impl HostExecutionPlan {
                     function.name
                 ));
             }
-            for (helper, execution) in function.tensor_helpers.iter().zip(executions) {
-                if let Some(execution) = execution {
+            for (helper, product) in function.tensor_helpers.iter().zip(executions) {
+                if let Some(execution) = &product.execution {
                     execution.validate_for_dag(&helper.dag)?;
                 }
             }
@@ -539,29 +602,46 @@ impl HostExecutionPlan {
     }
 
     pub(crate) fn into_parts(self) -> HostExecutionParts {
-        (self.program, (self.global, self.functions))
+        let global = self
+            .global
+            .into_iter()
+            .map(|product| product.execution)
+            .collect();
+        let functions = self
+            .functions
+            .into_iter()
+            .map(|products| {
+                products
+                    .into_iter()
+                    .map(|product| product.execution)
+                    .collect()
+            })
+            .collect();
+        (self.program, (global, functions))
     }
 }
 
 #[derive(Debug)]
 struct TensorHelperSink {
     helpers: Vec<HostTensorHelper>,
-    execution: Vec<Option<crate::evaluation::ExecutionMetadata>>,
+    products: Vec<HelperExecutionProduct>,
     collect_execution: bool,
+    collect_trace: bool,
 }
 
 #[derive(Debug, Clone)]
 struct LoweredHostFunction {
     function: HostFunction,
-    execution: Vec<Option<crate::evaluation::ExecutionMetadata>>,
+    products: Vec<HelperExecutionProduct>,
 }
 
 impl TensorHelperSink {
-    fn new(collect_execution: bool) -> Self {
+    fn new(collect_execution: bool, collect_trace: bool) -> Self {
         Self {
             helpers: Vec::new(),
-            execution: Vec::new(),
+            products: Vec::new(),
             collect_execution,
+            collect_trace,
         }
     }
 
@@ -569,18 +649,20 @@ impl TensorHelperSink {
         &mut self,
         helper: HostTensorHelper,
         execution: Option<crate::evaluation::ExecutionMetadata>,
+        #[cfg(feature = "lowering-trace")] trace: Option<
+            crate::lowering_trace::HelperLoweringTrace,
+        >,
     ) {
         self.helpers.push(helper);
-        self.execution.push(execution);
+        self.products.push(HelperExecutionProduct {
+            execution,
+            #[cfg(feature = "lowering-trace")]
+            trace,
+        });
     }
 
-    fn into_parts(
-        self,
-    ) -> (
-        Vec<HostTensorHelper>,
-        Vec<Option<crate::evaluation::ExecutionMetadata>>,
-    ) {
-        (self.helpers, self.execution)
+    fn into_parts(self) -> (Vec<HostTensorHelper>, Vec<HelperExecutionProduct>) {
+        (self.helpers, self.products)
     }
 }
 
@@ -1793,7 +1875,7 @@ fn resolve_host_expr(expr: HostExpr) -> Result<ConcreteHostExpr, crate::HostType
 pub fn try_lower_compiled_program(
     program: &CheckedProgram,
 ) -> Result<CompiledProgram, crate::lower::LowerDiagnostic> {
-    try_lower_compiled_program_with_lane_overrides(program, None, false)
+    try_lower_compiled_program_with_lane_overrides(program, None, false, false)
         .map(|(compiled, _)| compiled)
 }
 
@@ -1808,6 +1890,7 @@ pub fn try_lower_manifested_program(
         program.checked(),
         Some(program.manifest()),
         false,
+        false,
     )
     .map(|(compiled, _)| compiled)
 }
@@ -1819,7 +1902,7 @@ pub fn try_lower_compiled_program_with_manifest(
     program: &CheckedProgram,
     manifest: &chelis_types::manifest::RootManifest,
 ) -> Result<CompiledProgram, crate::lower::LowerDiagnostic> {
-    try_lower_compiled_program_with_lane_overrides(program, Some(manifest), false)
+    try_lower_compiled_program_with_lane_overrides(program, Some(manifest), false, false)
         .map(|(compiled, _)| compiled)
 }
 
@@ -1828,7 +1911,14 @@ pub fn try_lower_compiled_program_with_manifest(
 pub fn try_lower_manifested_execution_program(
     program: &chelis_types::manifest::ManifestedProgram,
 ) -> Result<(Option<crate::Dag>, Option<HostExecutionPlan>), crate::lower::LowerDiagnostic> {
-    lower_execution_program(program.checked(), Some(program.manifest()))
+    lower_execution_program(program.checked(), Some(program.manifest()), false)
+}
+
+#[cfg(feature = "lowering-trace")]
+pub fn try_lower_manifested_execution_program_with_trace(
+    program: &chelis_types::manifest::ManifestedProgram,
+) -> Result<(Option<crate::Dag>, Option<HostExecutionPlan>), crate::lower::LowerDiagnostic> {
+    lower_execution_program(program.checked(), Some(program.manifest()), true)
 }
 
 /// CLI counterpart of [`try_lower_manifested_execution_program`].
@@ -1836,15 +1926,24 @@ pub fn try_lower_execution_program_with_manifest(
     program: &CheckedProgram,
     manifest: &chelis_types::manifest::RootManifest,
 ) -> Result<(Option<crate::Dag>, Option<HostExecutionPlan>), crate::lower::LowerDiagnostic> {
-    lower_execution_program(program, Some(manifest))
+    lower_execution_program(program, Some(manifest), false)
+}
+
+#[cfg(feature = "lowering-trace")]
+pub fn try_lower_execution_program_with_manifest_and_trace(
+    program: &CheckedProgram,
+    manifest: &chelis_types::manifest::RootManifest,
+) -> Result<(Option<crate::Dag>, Option<HostExecutionPlan>), crate::lower::LowerDiagnostic> {
+    lower_execution_program(program, Some(manifest), true)
 }
 
 fn lower_execution_program(
     program: &CheckedProgram,
     manifest: Option<&chelis_types::manifest::RootManifest>,
+    collect_trace: bool,
 ) -> Result<(Option<crate::Dag>, Option<HostExecutionPlan>), crate::lower::LowerDiagnostic> {
     let (compiled, execution) =
-        try_lower_compiled_program_with_lane_overrides(program, manifest, true)?;
+        try_lower_compiled_program_with_lane_overrides(program, manifest, true, collect_trace)?;
     Ok((
         compiled.dag,
         compiled.host.map(|host| HostExecutionPlan {
@@ -1857,14 +1956,15 @@ fn lower_execution_program(
 
 #[derive(Default)]
 struct HostExecutionMetadata {
-    global: Vec<Option<crate::evaluation::ExecutionMetadata>>,
-    functions: Vec<Vec<Option<crate::evaluation::ExecutionMetadata>>>,
+    global: Vec<HelperExecutionProduct>,
+    functions: Vec<Vec<HelperExecutionProduct>>,
 }
 
 fn try_lower_compiled_program_with_lane_overrides(
     program: &CheckedProgram,
     manifest: Option<&chelis_types::manifest::RootManifest>,
     collect_execution: bool,
+    collect_trace: bool,
 ) -> Result<(CompiledProgram, HostExecutionMetadata), crate::lower::LowerDiagnostic> {
     let _cache_guard = HostLoweringCacheGuard::begin();
     let mut lowered_names = top_level_lowering_map(program.exprs(), program.type_env());
@@ -1890,7 +1990,7 @@ fn try_lower_compiled_program_with_lane_overrides(
         Err(_) => None,
     };
     let (host_terms, execution) = crate::lower::catch_lowering_external(|| {
-        lower_host_program_with_execution(program, &lowered_names, collect_execution)
+        lower_host_program_with_execution(program, &lowered_names, collect_execution, collect_trace)
     })??;
     let host = resolve_host_program(host_terms).map_err(|error| {
         crate::lower::LowerDiagnostic::new(
@@ -2132,6 +2232,58 @@ pub fn lower_named_tensor_entry_execution_plan(
     .map(Some)
 }
 
+#[cfg(feature = "lowering-trace")]
+pub fn lower_named_tensor_entry_execution_plan_with_trace(
+    program: &CheckedProgram,
+    name: &str,
+) -> Result<
+    Option<(
+        crate::evaluation::EvaluationPlan,
+        crate::lowering_trace::HelperLoweringTrace,
+    )>,
+    crate::lower::LowerDiagnostic,
+> {
+    let Some((body_expr, scope, result_claim, defs)) =
+        named_tensor_entry_lowering_inputs(program, name)
+    else {
+        return Ok(None);
+    };
+    let context = crate::lower::prepare_subexpr_lowering_context(
+        program.type_env(),
+        defs,
+        Arc::new(crate::lower::collect_top_level_sigs(program.exprs())),
+    );
+    let profile = context.evaluation_profile(&body_expr, &scope);
+    match profile {
+        crate::evaluation::EvaluationProfile::Legacy(
+            crate::evaluation::LegacyEvaluationReason::NoDropout,
+        ) => return Ok(None),
+        crate::evaluation::EvaluationProfile::Legacy(reason) => {
+            return Err(crate::lower::LowerDiagnostic::new(
+                format!(
+                    "tensor entry `{name}` has Dropout execution that is not fixed-control: {reason:?}"
+                ),
+                None,
+                None,
+            )
+            .fatal());
+        }
+        crate::evaluation::EvaluationProfile::FixedControl => {}
+    }
+    let planning = crate::evaluation::RandomExecutionContext::new(RandomLoweringState {
+        seed: None,
+        counter: 0,
+    });
+    crate::lower::try_lower_subexpr_evaluation_with_ordered_inputs_and_trace(
+        &body_expr,
+        scope,
+        &context,
+        result_claim.as_ref(),
+        &planning,
+    )
+    .map(Some)
+}
+
 /// Does the named top-level def have a pure tensor signature — every
 /// parameter a tensor and a tensor result?
 ///
@@ -2208,20 +2360,21 @@ fn lower_host_program(
     program: &CheckedProgram,
     lowered_names: &BTreeMap<String, bool>,
 ) -> Result<HostProgram, crate::lower::LowerDiagnostic> {
-    lower_host_program_with_execution(program, lowered_names, false).map(|(host, _)| host)
+    lower_host_program_with_execution(program, lowered_names, false, false).map(|(host, _)| host)
 }
 
 fn lower_host_program_with_execution(
     program: &CheckedProgram,
     lowered_names: &BTreeMap<String, bool>,
     collect_execution: bool,
+    collect_trace: bool,
 ) -> Result<(HostProgram, HostExecutionMetadata), crate::lower::LowerDiagnostic> {
     // chelis#1158: specialization state is per-invocation; a fresh program
     // lowering must rebuild every specialization (and must not inherit a
     // failed run's partial memo).
     MONO_SPECIALIZATIONS.with(|state| *state.borrow_mut() = MonoSpecializationState::default());
     let mut host = HostProgram::default();
-    let mut global_tensor_helpers = TensorHelperSink::new(collect_execution);
+    let mut global_tensor_helpers = TensorHelperSink::new(collect_execution, collect_trace);
     let mut function_execution = Vec::new();
     let mut global_scope = UnordMap::new();
     // Count pure-tensor `fn`-body top-level defs in the program. When there
@@ -2488,9 +2641,14 @@ fn lower_host_program_with_execution(
         // says so); otherwise we have no good lowering and must drop the
         // def — at least the caller will get `implicit declaration` rather
         // than `call(…)` undefined-symbol.
-        if let Some(lowered) =
-            lower_host_function(name, body, ty_expr.as_ref(), program, collect_execution)?
-        {
+        if let Some(lowered) = lower_host_function(
+            name,
+            body,
+            ty_expr.as_ref(),
+            program,
+            collect_execution,
+            collect_trace,
+        )? {
             let mut function = lowered.function;
             // N→1 lowering collapse per `spec/design/chelis_span_survival.md`
             // §2.3 host-side table, rule "Lowering. Top-level def collapses
@@ -2513,7 +2671,7 @@ fn lower_host_program_with_execution(
                 ),
             );
             host.functions.push(function);
-            function_execution.push(lowered.execution);
+            function_execution.push(lowered.products);
         } else {
             // Inline any local callable bindings in the global binding's
             // body so `let g = grad(f); g(x)` rewrites to `(grad(f))(x)`
@@ -2599,7 +2757,7 @@ fn lower_host_program_with_execution(
         MONO_SPECIALIZATIONS.with(|state| std::mem::take(&mut state.borrow_mut().functions));
     for lowered in monomorphized {
         host.functions.push(lowered.function);
-        function_execution.push(lowered.execution);
+        function_execution.push(lowered.products);
     }
     loop {
         let mut changed = false;
@@ -4348,6 +4506,30 @@ fn lower_def_body_kernel(
                 seed: None,
                 counter: 0,
             });
+            #[cfg(feature = "lowering-trace")]
+            let (plan, trace) = if tensor_helpers.collect_trace {
+                let (plan, trace) =
+                    crate::lower::try_lower_subexpr_evaluation_with_ordered_inputs_and_trace(
+                        &signature.body_expr,
+                        scoped,
+                        &context,
+                        Some(&expected),
+                        &planning,
+                    )?;
+                (plan, Some(trace))
+            } else {
+                (
+                    crate::lower::try_lower_subexpr_evaluation_with_ordered_inputs(
+                        &signature.body_expr,
+                        scoped,
+                        &context,
+                        Some(&expected),
+                        &planning,
+                    )?,
+                    None,
+                )
+            };
+            #[cfg(not(feature = "lowering-trace"))]
             let plan = crate::lower::try_lower_subexpr_evaluation_with_ordered_inputs(
                 &signature.body_expr,
                 scoped,
@@ -4363,25 +4545,65 @@ fn lower_def_body_kernel(
             let plan = plan.rebind_dimensions(rebound).map_err(|message| {
                 crate::lower::LowerDiagnostic::new(message, None, None).fatal()
             })?;
+            #[cfg(feature = "lowering-trace")]
+            let trace =
+                trace.map(|trace| rebind_helper_lowering_trace(trace, &signature.scope, &expected));
             let (dag, execution) = plan.into_parts();
             return Ok(Some(finish_tensor_helper_product(
                 dag,
                 Some(execution),
+                #[cfg(feature = "lowering-trace")]
+                trace,
                 &signature.scope,
                 tensor_helpers,
                 expected,
             )));
         }
     }
-    let dag = match lower_kernel_dag(
+    #[cfg(feature = "lowering-trace")]
+    let lowered = if tensor_helpers.collect_trace {
+        let context = cached_subexpr_lowering_context(program);
+        let scoped = kernel_scope_types(&signature.scope, Some(&signature.params));
+        crate::lower::try_lower_subexpr_program_with_ordered_inputs_and_trace(
+            &signature.body_expr,
+            scoped,
+            &context,
+            Some(&expected),
+            None,
+            0,
+            true,
+        )
+        .map(|(dag, counter, trace)| ((dag, counter), Some(trace)))
+    } else {
+        lower_kernel_dag(
+            &signature.body_expr,
+            program,
+            &signature.scope,
+            Some(&signature.params),
+            &expected,
+            None,
+        )
+        .map(|lowered| (lowered, None))
+    };
+    #[cfg(not(feature = "lowering-trace"))]
+    let lowered = lower_kernel_dag(
         &signature.body_expr,
         program,
         &signature.scope,
         Some(&signature.params),
         &expected,
         None,
-    ) {
-        Ok((dag, _)) => dag,
+    );
+    let (dag, trace) = match lowered {
+        #[cfg(feature = "lowering-trace")]
+        Ok(((dag, _), trace)) => {
+            let dag = remap_tensor_helper_dim_symbols(&dag, &signature.scope, &expected);
+            let trace =
+                trace.map(|trace| rebind_helper_lowering_trace(trace, &signature.scope, &expected));
+            (dag, trace)
+        }
+        #[cfg(not(feature = "lowering-trace"))]
+        Ok((dag, _)) => (dag, ()),
         Err(diagnostic) if diagnostic.fatal => {
             crate::lower::raise_fatal_lowering_diagnostic(diagnostic)
         }
@@ -4401,8 +4623,11 @@ fn lower_def_body_kernel(
         return Ok(None);
     }
     record_host_work(|profile| profile.tensor_helper_successes += 1);
-    Ok(Some(finish_tensor_helper_call(
+    Ok(Some(finish_tensor_helper_product(
         dag,
+        None,
+        #[cfg(feature = "lowering-trace")]
+        trace,
         &signature.scope,
         tensor_helpers,
         expected,
@@ -4590,11 +4815,12 @@ fn lower_host_function(
     ty_expr: Option<&Expr>,
     program: &CheckedProgram,
     collect_execution: bool,
+    collect_trace: bool,
 ) -> Result<Option<LoweredHostFunction>, crate::lower::LowerDiagnostic> {
     let Some(signature) = host_def_signature(name, body, ty_expr, program) else {
         return Ok(None);
     };
-    let mut tensor_helpers = TensorHelperSink::new(collect_execution);
+    let mut tensor_helpers = TensorHelperSink::new(collect_execution, collect_trace);
     // The preflight facts are keyed by the body expression's address, so the
     // guard opens on the signature's own copy, which is not moved until the
     // body has been lowered.
@@ -4655,7 +4881,7 @@ fn lower_host_function(
     } else {
         ret_ty
     };
-    let (tensor_helpers, execution) = tensor_helpers.into_parts();
+    let (tensor_helpers, products) = tensor_helpers.into_parts();
     Ok(Some(LoweredHostFunction {
         function: HostFunction {
             name: name.to_string(),
@@ -4667,7 +4893,7 @@ fn lower_host_function(
             specialization: None,
             summary_rejections: Vec::new(),
         },
-        execution,
+        products,
     }))
 }
 
@@ -4742,12 +4968,13 @@ fn try_lower_tensor_helper_call(
         profile.tensor_helper_attempts += 1;
         profile.tensor_helper_input_nodes += deep_expr_nodes(expr);
     });
-    let Some((dag, execution)) = lower_tensor_helper_product(
+    let Some(product) = lower_tensor_helper_product(
         expr,
         program,
         scope,
         &expected,
         tensor_helpers.collect_execution,
+        tensor_helpers.collect_trace,
     ) else {
         record_host_work(|profile| profile.tensor_helper_fallbacks += 1);
         return None;
@@ -4757,7 +4984,7 @@ fn try_lower_tensor_helper_call(
     // host-lane builtin as a free variable. Emitting this DAG would generate
     // C with a `__tensor_scalar0_0 = fold;` line — `fold` is not a C symbol.
     // Fall back to `lower_host_expr` which handles HOFs directly.
-    if kernel_dag_loads_builtin(&dag).is_some() {
+    if kernel_dag_loads_builtin(&product.dag).is_some() {
         record_host_work(|profile| {
             profile.tensor_helper_fallbacks += 1;
             profile.tensor_helper_builtin_load_rejections += 1;
@@ -4766,8 +4993,10 @@ fn try_lower_tensor_helper_call(
     }
     record_host_work(|profile| profile.tensor_helper_successes += 1);
     Some(finish_tensor_helper_product(
-        dag,
-        execution,
+        product.dag,
+        product.execution,
+        #[cfg(feature = "lowering-trace")]
+        product.trace,
         scope,
         tensor_helpers,
         expected,
@@ -4814,13 +5043,21 @@ fn lower_tensor_helper_dag(
     }
 }
 
+struct LoweredTensorHelper {
+    dag: crate::Dag,
+    execution: Option<crate::evaluation::ExecutionMetadata>,
+    #[cfg(feature = "lowering-trace")]
+    trace: Option<crate::lowering_trace::HelperLoweringTrace>,
+}
+
 fn lower_tensor_helper_product(
     expr: &Expr,
     program: &CheckedProgram,
     scope: &UnordMap<String, HostTypeTerm>,
     expected: &TensorType,
     collect_execution: bool,
-) -> Option<(crate::Dag, Option<crate::evaluation::ExecutionMetadata>)> {
+    collect_trace: bool,
+) -> Option<LoweredTensorHelper> {
     if collect_execution {
         let context = cached_subexpr_lowering_context(program);
         let scoped = collect_tensor_scope(scope).into_sorted();
@@ -4831,14 +5068,37 @@ fn lower_tensor_helper_product(
                 seed: None,
                 counter: 0,
             });
-            let plan = match crate::lower::try_lower_subexpr_evaluation_with_ordered_inputs(
+            #[cfg(feature = "lowering-trace")]
+            let lowered = if collect_trace {
+                crate::lower::try_lower_subexpr_evaluation_with_ordered_inputs_and_trace(
+                    expr,
+                    scoped,
+                    &context,
+                    Some(expected),
+                    &planning,
+                )
+                .map(|(plan, trace)| (plan, Some(trace)))
+            } else {
+                crate::lower::try_lower_subexpr_evaluation_with_ordered_inputs(
+                    expr,
+                    scoped,
+                    &context,
+                    Some(expected),
+                    &planning,
+                )
+                .map(|plan| (plan, None))
+            };
+            #[cfg(not(feature = "lowering-trace"))]
+            let lowered = crate::lower::try_lower_subexpr_evaluation_with_ordered_inputs(
                 expr,
                 scoped,
                 &context,
                 Some(expected),
                 &planning,
-            ) {
-                Ok(plan) => plan,
+            )
+            .map(|plan| (plan, ()));
+            let (plan, trace) = match lowered {
+                Ok(lowered) => lowered,
                 Err(diagnostic) if diagnostic.fatal => {
                     crate::lower::raise_fatal_lowering_diagnostic(diagnostic)
                 }
@@ -4851,11 +5111,51 @@ fn lower_tensor_helper_product(
                     crate::lower::LowerDiagnostic::new(message, None, None).fatal(),
                 )
             });
+            #[cfg(feature = "lowering-trace")]
+            let trace = trace.map(|trace| rebind_helper_lowering_trace(trace, scope, expected));
             let (dag, metadata) = plan.into_parts();
-            return Some((dag, Some(metadata)));
+            return Some(LoweredTensorHelper {
+                dag,
+                execution: Some(metadata),
+                #[cfg(feature = "lowering-trace")]
+                trace,
+            });
         }
     }
-    lower_tensor_helper_dag(expr, program, scope, expected).map(|dag| (dag, None))
+    #[cfg(feature = "lowering-trace")]
+    if collect_trace {
+        let context = cached_subexpr_lowering_context(program);
+        let scoped = collect_tensor_scope(scope).into_sorted();
+        let (dag, _, trace) =
+            match crate::lower::try_lower_subexpr_program_with_ordered_inputs_and_trace(
+                expr,
+                scoped,
+                &context,
+                Some(expected),
+                None,
+                0,
+                false,
+            ) {
+                Ok(lowered) => lowered,
+                Err(diagnostic) if diagnostic.fatal => {
+                    crate::lower::raise_fatal_lowering_diagnostic(diagnostic)
+                }
+                Err(_) => return None,
+            };
+        let dag = remap_tensor_helper_dim_symbols(&dag, scope, expected);
+        let trace = rebind_helper_lowering_trace(trace, scope, expected);
+        return Some(LoweredTensorHelper {
+            dag,
+            execution: None,
+            trace: Some(trace),
+        });
+    }
+    lower_tensor_helper_dag(expr, program, scope, expected).map(|dag| LoweredTensorHelper {
+        dag,
+        execution: None,
+        #[cfg(feature = "lowering-trace")]
+        trace: None,
+    })
 }
 
 fn lower_tensor_helper_dag_with_controls(
@@ -4894,12 +5194,21 @@ fn finish_tensor_helper_call(
     tensor_helpers: &mut TensorHelperSink,
     expected: TensorType,
 ) -> HostExpr {
-    finish_tensor_helper_product(dag, None, scope, tensor_helpers, expected)
+    finish_tensor_helper_product(
+        dag,
+        None,
+        #[cfg(feature = "lowering-trace")]
+        None,
+        scope,
+        tensor_helpers,
+        expected,
+    )
 }
 
 fn finish_tensor_helper_product(
     dag: crate::Dag,
     execution: Option<crate::evaluation::ExecutionMetadata>,
+    #[cfg(feature = "lowering-trace")] trace: Option<crate::lowering_trace::HelperLoweringTrace>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
     expected: TensorType,
@@ -4984,6 +5293,8 @@ fn finish_tensor_helper_product(
             summary_rejection,
         },
         execution,
+        #[cfg(feature = "lowering-trace")]
+        trace,
     );
     HostExpr::new(HostExprKind::TensorCall {
         helper: helper_index,
@@ -10381,6 +10692,7 @@ fn lower_recursive_generic_call(
             &ret_ty,
             program,
             tensor_helpers.collect_execution,
+            tensor_helpers.collect_trace,
         )?;
         let lowered_args = args
             .iter()
@@ -10664,6 +10976,7 @@ fn ensure_mono_specialization(
     ret_ty: &HostTypeTerm,
     program: &CheckedProgram,
     collect_execution: bool,
+    collect_trace: bool,
 ) -> Result<String, crate::lower::LowerDiagnostic> {
     let canonical_key = mono_specialization_key(name, param_tys, ret_ty);
     if let Some(symbol) =
@@ -10753,6 +11066,7 @@ fn ensure_mono_specialization(
         program,
         spec_scope: &spec_scope,
         collect_execution,
+        collect_trace,
     });
     MONO_SPECIALIZATIONS.with(|state| {
         state.borrow_mut().in_progress.pop();
@@ -10771,6 +11085,7 @@ struct MonoSpecializedFunctionInput<'a> {
     program: &'a CheckedProgram,
     spec_scope: &'a UnordMap<String, HostTypeTerm>,
     collect_execution: bool,
+    collect_trace: bool,
 }
 
 fn lower_mono_specialized_function(
@@ -10785,9 +11100,10 @@ fn lower_mono_specialized_function(
         program,
         spec_scope,
         collect_execution,
+        collect_trace,
     } = input;
     let body_expr = inline_local_callable_lets(body_expr);
-    let mut fn_tensor_helpers = TensorHelperSink::new(collect_execution);
+    let mut fn_tensor_helpers = TensorHelperSink::new(collect_execution, collect_trace);
     // chelis#1201: pin this specialization's type variables for the body.
     // The body's checked types are the generic ones the checker recorded, so
     // without this a generic ADT constructed inside the body (coral#26's
@@ -10824,7 +11140,7 @@ fn lower_mono_specialized_function(
     } else {
         ret_ty.clone()
     };
-    let (tensor_helpers, execution) = fn_tensor_helpers.into_parts();
+    let (tensor_helpers, products) = fn_tensor_helpers.into_parts();
     Ok(LoweredHostFunction {
         function: HostFunction {
             name: symbol.to_string(),
@@ -10836,7 +11152,7 @@ fn lower_mono_specialized_function(
             specialization: None,
             summary_rejections: Vec::new(),
         },
-        execution,
+        products,
     })
 }
 
@@ -11206,7 +11522,7 @@ fn top_level_fn_helper_summary_rejects(
     // it must leave no trace on specialization state
     // (harden-bounded-monomorphization D1).
     let probe_guard = MonoProbeGuard::begin();
-    let lowered = lower_host_function(name, body, None, program, false);
+    let lowered = lower_host_function(name, body, None, program, false, false);
     drop(probe_guard);
     if pushed {
         pop_inlining(name);
@@ -11927,6 +12243,21 @@ fn remap_tensor_helper_dim_symbols(
         }
     }
     actualize_tensor_helper_types(&remapped, scope)
+}
+
+#[cfg(feature = "lowering-trace")]
+fn rebind_helper_lowering_trace(
+    trace: crate::lowering_trace::HelperLoweringTrace,
+    scope: &UnordMap<String, HostTypeTerm>,
+    expected_output: &TensorType,
+) -> crate::lowering_trace::HelperLoweringTrace {
+    trace
+        .rebind_dimensions(|dag| remap_tensor_helper_dim_symbols(dag, scope, expected_output))
+        .unwrap_or_else(|message| {
+            crate::lower::raise_fatal_lowering_diagnostic(
+                crate::lower::LowerDiagnostic::new(message, None, None).fatal(),
+            )
+        })
 }
 
 fn actualize_tensor_helper_types(
@@ -16550,7 +16881,7 @@ def bad[b](box: Box[b]) -> bool =
                     specialization: None,
                     summary_rejections: Vec::new(),
                 },
-                execution: Vec::new(),
+                products: Vec::new(),
             }],
             in_progress: vec![InProgressMonoSpecialization {
                 def_name: "seeded".to_string(),
@@ -16584,7 +16915,7 @@ def bad[b](box: Box[b]) -> bool =
 
         let body = find_top_level_def_expr(checked.exprs(), "bad_wrap")
             .expect("the checked program contains bad_wrap");
-        let error = lower_host_function("bad_wrap", body, None, &checked, false)
+        let error = lower_host_function("bad_wrap", body, None, &checked, false, false)
             .expect_err("real lowering must report the genuine bad call");
         assert_eq!(
             error.message,
@@ -19363,7 +19694,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     }
 
     fn lower_against(program: &CheckedProgram, source: &str) -> Result<HostExpr, String> {
-        let mut helpers = TensorHelperSink::new(false);
+        let mut helpers = TensorHelperSink::new(false, false);
         lower_host_expr(&deep_expr(source), program, &UnordMap::new(), &mut helpers)
             .map_err(|diagnostic| diagnostic.message)
     }

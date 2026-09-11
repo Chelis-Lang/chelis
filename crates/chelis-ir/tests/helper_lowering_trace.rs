@@ -46,8 +46,10 @@ fn same_dag(left: &chelis_ir::Dag, right: &chelis_ir::Dag) {
 fn traced_helper_is_the_ordinary_retained_helper_and_projects_with_its_function() {
     let program = manifested(
         r#"
-def selected(x: tensor[3, f32]) -> tensor[3, f32] = add(x, x)
-def discarded(x: tensor[3, f32]) -> tensor[3, f32] = mul(x, x)
+def selected(x: tensor[3, f32], flag: bool) -> (tensor[3, f32], bool) =
+  (add(x, x), flag)
+def discarded(x: tensor[3, f32], flag: bool) -> (tensor[3, f32], bool) =
+  (mul(x, x), flag)
 "#,
     );
     let (_, ordinary) = try_lower_manifested_execution_program(&program).unwrap();
@@ -84,17 +86,21 @@ def discarded(x: tensor[3, f32]) -> tensor[3, f32] = mul(x, x)
         );
     }
     assert!(!ordinary.has_helper_traces());
-    assert!(ordinary
-        .function_helper_trace("selected", 0)
-        .unwrap()
-        .is_none());
+    assert!(
+        ordinary
+            .function_helper_trace("selected", 0)
+            .unwrap()
+            .is_none()
+    );
     assert!(traced.has_helper_traces());
 
     let projected = traced.project_functions(&["selected".into()]).unwrap();
-    assert!(projected
-        .function_helper_trace("selected", 0)
-        .unwrap()
-        .is_some());
+    assert!(
+        projected
+            .function_helper_trace("selected", 0)
+            .unwrap()
+            .is_some()
+    );
     assert!(projected.function_helper_trace("discarded", 0).is_err());
 }
 
@@ -136,7 +142,12 @@ def derivative(x: tensor[3, f32], y: tensor[3, f32])
     };
     assert!(application.after_splice.get(disconnected).is_none());
     assert_eq!(
-        application.after_packing.get(disconnected).unwrap().output_type.dims,
+        application
+            .after_packing
+            .get(disconnected)
+            .unwrap()
+            .output_type
+            .dims,
         vec![chelis_ir::DimInfo::Lit(3)]
     );
     assert_eq!(helper.dag.roots().len(), 2);
@@ -190,4 +201,3 @@ def derivative(x: tensor[32, f32]) -> tensor[32, f32] = grad(loss)(x)
     assert!(!trace.normalization.before_dce.steps.is_empty());
     assert!(!trace.normalization.after_drops.steps.is_empty());
 }
-
