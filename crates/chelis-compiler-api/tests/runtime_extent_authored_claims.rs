@@ -75,20 +75,22 @@ fn an_authored_repeated_binder_mints_its_claim() {
     );
 }
 
-/// The same spelling, arrived at by coincidence.
+/// The same spelling, arrived at by coincidence, at the one level this entry
+/// reaches.
 ///
 /// `reduce_seq` and `total` are unrelated definitions that each named an axis
-/// `seq`. Their results become top-level roots, and the multi-root kernel the
-/// compiler synthesizes takes those roots as its parameters, carrying the
-/// spelling with them. Reading that as a signature assertion relates a
-/// 3-extent axis to a 2-extent one and traps a correct program.
+/// `seq`. This row pins that the tensor-lane lowering relates nothing across
+/// them. It does NOT reach the synthesized multi-root host kernel, which is
+/// where chelis#1374's collision actually bit; that lane is measured on the
+/// emitted host source by
+/// `chelis-cli::runtime_extent_slice_b::a_synthesized_kernel_parameter_collision_emits_no_guard`.
 ///
-/// EVIDENTIARY STATUS: regression test. Measured red at `01c6e33a1`, where the
-/// synthesized kernel minted `seq` and `batch` claims across its root
-/// parameters and the compiled program aborted with
-/// "extent `seq`: __host_tensor_arg_1 axis 0 = 3, y axis 1 = 2".
+/// EVIDENTIARY STATUS: disposition lock, NOT a regression test. Measured GREEN
+/// at `01c6e33a1`, before the authored-signature restriction, so it would not
+/// have caught the defect. It is here to keep this lane from acquiring the
+/// behaviour later.
 #[test]
-fn a_synthesized_parameter_name_collision_mints_nothing() {
+fn unrelated_definitions_sharing_a_spelling_relate_nothing_on_the_tensor_lane() {
     let dag = lowered(
         "def id2(x: &tensor[batch, seq, f32]) -> tensor[batch, seq, f32] = relu(x)\n\
          def total(x: &tensor[seq, f32]) -> f32 = tensor_to_scalar(sum(x, seq))\n\

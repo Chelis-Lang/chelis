@@ -515,6 +515,71 @@ fn c_independent_trap_after_a_mismatch_loses() {
 // HIP prologue.
 // ---------------------------------------------------------------------------
 
+/// A synthesized multi-root kernel takes its parameters from captured root
+/// bindings, and two of them spelling the same binder is a coincidence, not a
+/// claim.
+///
+/// `id2` and `total` are unrelated definitions that each named an axis `seq`.
+/// Their results become top-level roots, the compiler synthesizes one kernel
+/// over those roots, and the roots' types carry the spelling in. Reading that
+/// as a signature assertion compares `y`'s axis 1 (extent 2) with `total`'s
+/// argument axis 0 (extent 3) and aborts a correct program.
+///
+/// Every line earns its place: the `grad` root is what routes these roots
+/// through the staged host partition, and without it the synthesized kernel
+/// never forms. `out_tl` gives the collision a second `batch` occurrence, so a
+/// repair that only suppressed the disagreeing pair would still fail here.
+///
+/// EVIDENTIARY STATUS: regression test. Measured red at `01c6e33a1`, where the
+/// emitted host source carried one `extent `batch`` and one `extent `seq``
+/// guard and the linked binary exited on
+/// "extent `seq`: __host_tensor_arg_1 axis 0 = 3, y axis 1 = 2".
+#[test]
+fn a_synthesized_kernel_parameter_collision_emits_no_guard() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = fixture(
+        &dir,
+        "collision.ch",
+        "def id2(x: &tensor[batch, seq, f32]) -> tensor[batch, seq, f32] = relu(x)\n\
+         def total(x: &tensor[seq, f32]) -> f32 = tensor_to_scalar(sum(x, seq))\n\
+         y = id2(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]))\n\
+         out_tl = sum(y, seq)\n\
+         outt = total(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n\
+         gr = grad(total)(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n",
+    );
+    let out_dir = dir.path().join("collision-out");
+    let build = build_c(&path, &out_dir);
+    assert!(
+        build.status.success(),
+        "the fixture builds: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let emitted = fs::read_to_string(out_dir.join("collision.c")).expect("C source is written");
+    assert!(
+        !emitted.contains("extent `seq`"),
+        "no author related the two `seq` axes:\n{emitted}"
+    );
+    assert!(
+        !emitted.contains("extent `batch`"),
+        "nor the `batch` ones, which happen to agree and would hide the defect:\n{emitted}"
+    );
+    let status = link_generated(&out_dir, "collision.c", "collision");
+    assert!(status.success(), "link failed: {status}");
+    let run = StdCommand::new(out_dir.join("collision"))
+        .output()
+        .expect("run compiled binary");
+    let mut output = String::from_utf8_lossy(&run.stdout).to_string();
+    output.push_str(&String::from_utf8_lossy(&run.stderr));
+    assert!(
+        run.status.success(),
+        "and the program runs to completion: {output}"
+    );
+    assert!(
+        output.contains("outt = 6"),
+        "with its own result intact: {output}"
+    );
+}
+
 /// An `ExtentWitness` retained ONLY as a section 4.7 entry obligation reaches
 /// the HIP device lane and the program emits.
 ///
