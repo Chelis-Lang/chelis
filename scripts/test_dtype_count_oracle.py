@@ -22,7 +22,7 @@ class CommandManifestTests(unittest.TestCase):
                 "dedicated Count IR and evaluator",
                 "exact current WireDag and registered wire capacity",
                 "compiled C exact multi-axis and empty execution",
-                "loud HIP and Metal issue receipts",
+                "device Count structural child oracle",
                 "semantic registration and executable example parity",
                 "generated rejection registry agreement",
             ],
@@ -39,8 +39,7 @@ class CommandManifestTests(unittest.TestCase):
             "wire_dag_v6_count",
             "capacity_census_wire",
             "exec_count_",
-            "count_with_issue_1291_receipt",
-            "issue_1287_count_device_reject",
+            "dtype_count_device_oracle.py",
             "count_is_registered_against_its_exact_authority_atom",
             "parity_count_bool_axes",
             "parity_corpus_is_complete",
@@ -48,10 +47,13 @@ class CommandManifestTests(unittest.TestCase):
         ):
             self.assertIn(required, joined)
 
-    def test_device_work_is_rejection_only_in_this_oracle(self) -> None:
+    def test_device_leg_is_the_structural_child_not_a_hardware_claim(self) -> None:
+        device = oracle.oracle_legs(sys.executable)[4]
+        self.assertEqual(
+            device.argv,
+            (sys.executable, "scripts/dtype_count_device_oracle.py"),
+        )
         for leg in oracle.oracle_legs(sys.executable):
-            self.assertNotIn("chelis-backend-hip", leg.argv, leg.name)
-            self.assertNotIn("chelis-backend-metal", leg.argv, leg.name)
             self.assertNotIn("--ignored", leg.argv, leg.name)
 
 

@@ -419,8 +419,7 @@ denotes the input dimensions with the complete selected axis set `K` removed.
 > `AdRejectionReason::IntegerReductionOutput`; it never receives a silent zero
 > cotangent.
 
-*(Not fully implemented; chelis#1287 owns the evaluator and C delivery,
-chelis#1291 the HIP and Metal kernels.)*
+*(Not fully implemented on the HIP target; chelis#1291 owns it.)*
 
 > **[05-OP-30]** `sum(x, axes..., accumulator = default(p)) -> result` admits
 > exactly a tensor operand whose dtype `p` is an active signed integer or
