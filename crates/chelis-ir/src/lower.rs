@@ -13893,12 +13893,12 @@ impl<'program> LowerCtx<'program> {
     /// witness claim `entry_extent_guards` derives.
     ///
     /// The extent has to be one the GRAPH fixes rather than one an external
-    /// input promises. A `Load` axis spelled `tensor[2, f32]` is an interface
-    /// obligation the entry guard checks, not a fact of this graph, so a
-    /// witness reading one is never an entailing partner. An inlined root's
-    /// arguments are constructed in the graph, which is the form chelis#1782
-    /// reports; the exported-kernel and value-binding forms read `Load`s and
-    /// keep every literal claim they had.
+    /// input promises. An ABI parameter's axis is an interface obligation the
+    /// entry guard checks, not a fact of this graph, so a witness observing
+    /// one is never an entailing partner. An inlined root's arguments are
+    /// constructed in the graph, which is the form chelis#1782 reports; the
+    /// exported-kernel and value-binding forms read parameters and keep every
+    /// literal claim they had.
     fn literal_result_claim_is_entailed(&self, witness: NodeId, required: usize) -> bool {
         self.named_claim_partners(witness)
             .into_iter()
@@ -13910,30 +13910,64 @@ impl<'program> LowerCtx<'program> {
     /// The obligation is attached to the LATER of the two witnesses with a
     /// backward requirement edge to the earlier, so `witness` can be either
     /// end; [`Self::add_named_extent_claim`] pushes one claim and one edge
-    /// together, which is the pairing read back here.
+    /// together, which is the pairing read back here. `witness`'s own claim
+    /// list answers the common case, so the scan for the other direction runs
+    /// only when that list does not.
     fn named_claim_partners(&self, witness: NodeId) -> Vec<NodeId> {
-        let mut partners = Vec::new();
-        for node in self.dag.nodes() {
-            let RiscOp::ExtentWitness { claims, .. } = &node.op else {
-                continue;
-            };
-            for (_, requirement) in claims.iter().zip(node.inputs.iter().skip(1)) {
-                if node.id == witness {
-                    partners.push(*requirement);
-                } else if *requirement == witness {
-                    partners.push(node.id);
-                }
-            }
+        let own: Vec<NodeId> = self
+            .dag
+            .get(witness)
+            .into_iter()
+            .filter_map(|node| match &node.op {
+                RiscOp::ExtentWitness { claims, .. } => Some(
+                    claims
+                        .iter()
+                        .zip(node.inputs.iter().skip(1))
+                        .map(|(_, requirement)| *requirement)
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        if !own.is_empty() {
+            return own;
         }
-        partners
+        self.dag
+            .nodes()
+            .iter()
+            .filter_map(|node| {
+                let RiscOp::ExtentWitness { claims, .. } = &node.op else {
+                    return None;
+                };
+                claims
+                    .iter()
+                    .zip(node.inputs.iter().skip(1))
+                    .any(|(_, requirement)| *requirement == witness)
+                    .then_some(node.id)
+            })
+            .collect()
     }
 
     /// The extent this witness observes, when the lowered graph fixes it.
     ///
-    /// `None` for an axis whose extent is symbolic, and for one an external
-    /// input merely declares: see [`Self::literal_result_claim_is_entailed`]
-    /// for why a `Load` is excluded.
+    /// The question is one of PROVENANCE, not of the neighbouring operation.
+    /// An earlier form of this decided it by matching the observed node's op
+    /// against `RiscOp::Load`, which a single pass-through hop defeated: red
+    /// team round 1 measured `g(mul(a, a), b)` and `g(cast(a, f32), b)` losing
+    /// their literal guard where `g(a, b)` kept it, so the rule the design doc
+    /// states was not the rule the build had.
+    ///
+    /// [`crate::axis_sources::resolve_axis_extent`] is the existing answer and
+    /// is total over the four origins, so "not fixed" is a decision rather
+    /// than a fallthrough. `Literal` is an extent the graph itself states;
+    /// `ExternalAxis` is an ABI promise, recognised through any number of
+    /// pass-through hops; `ScalarInput` and `OpComputed` are extents no
+    /// compile-time constant states at all. It resolves the same premise
+    /// `entry_covered_witness_claims` resolves for its own question, so the
+    /// two readers cannot disagree about where an extent comes from.
     fn graph_fixed_witness_extent(&self, witness: NodeId) -> Option<usize> {
+        use crate::axis_sources::ExtentOrigin;
         let node = self.dag.get(witness)?;
         let RiscOp::ExtentWitness {
             axis: RtAxis::Lit(axis),
@@ -13942,17 +13976,13 @@ impl<'program> LowerCtx<'program> {
         else {
             return None;
         };
-        let observed = self.dag.get(*node.inputs.first()?)?;
-        if matches!(observed.op, RiscOp::Load { .. }) {
-            return None;
-        }
-        match observed
-            .output_type
-            .dims
-            .get(usize::try_from(*axis).ok()?)?
-        {
-            DimInfo::Lit(extent) => Some(*extent),
-            DimInfo::Named(..) => None,
+        let observed = node.inputs.first().copied()?;
+        let axis = usize::try_from(*axis).ok()?;
+        match crate::axis_sources::resolve_axis_extent(&self.dag, observed, axis)? {
+            ExtentOrigin::Literal(extent) => usize::try_from(extent).ok(),
+            ExtentOrigin::ExternalAxis { .. }
+            | ExtentOrigin::ScalarInput { .. }
+            | ExtentOrigin::OpComputed { .. } => None,
         }
     }
 

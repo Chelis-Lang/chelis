@@ -3926,23 +3926,27 @@ fn independent_literal_root_source(x_extent: usize) -> String {
     )
 }
 
-/// A root whose entailing extent arrives through the ABI: `g`'s binder `n` is
-/// declared by `f`'s parameter `a`, and `a`'s extent is an input promise the
-/// entry guard checks rather than one the lowered graph fixes.
-fn abi_promised_entailment_source(b_extent: usize) -> String {
-    let list = |n: usize| {
+/// A binding whose entailing extent arrives through the ABI: `g`'s binder `n`
+/// is declared by `f`'s parameter `a`, and `a`'s extent is an input promise
+/// the entry guard checks rather than one the lowered graph fixes.
+///
+/// `a_prim` types `f`'s first parameter and `a_arg` spells what `f` hands
+/// `g`, so one helper produces the direct spelling and the two that put a
+/// node between the parameter and the witness.
+fn abi_promised_entailment_source(a_prim: &str, a_arg: &str, b_extent: usize) -> String {
+    let list = |n: usize, prim: &str| {
         (1..=n)
-            .map(|v| format!("{v}.0f32"))
+            .map(|v| format!("{v}.0{prim}"))
             .collect::<Vec<_>>()
             .join(", ")
     };
     format!(
         "module Repro.AbiPromisedEntailment\n\
          def g(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = insert(scalar_to_tensor(7.0f32), 0i32, shape(y, 0i32))\n\
-         def f(a: tensor[4, f32], b: tensor[rows, f32]) -> tensor[4, f32] = g(a, b)\n\
+         def f(a: tensor[4, {a_prim}], b: tensor[rows, f32]) -> tensor[4, f32] = g({a_arg}, b)\n\
          out = f(to_tensor([{}]), to_tensor([{}]))\n",
-        list(4),
-        list(b_extent)
+        list(4, a_prim),
+        list(b_extent, "f32")
     )
 }
 
@@ -4157,16 +4161,26 @@ fn an_independent_root_literal_claim_still_names_its_claimed_extent() {
     }
 }
 
-/// The rule's FIRST bound, and the negative that fixes it: an entailing
-/// extent that arrives through the ABI keeps its literal guard.
+/// The rule's FIRST bound, and the negatives that fix it: an entailing extent
+/// that arrives through the ABI keeps its literal guard, however many
+/// pass-through hops separate the parameter from the witness.
 ///
-/// The suppression above requires the other witness of the named claim to
-/// observe an axis whose extent the lowered GRAPH fixes. Here `g`'s binder
-/// `n` is declared by `f`'s parameter `a`, whose extent reaches the program
-/// as an ABI input spelled `tensor[4, f32]`: a promise the entry guard
-/// checks, not a fact of this graph. `graph_fixed_witness_extent` therefore
-/// declines the partner and `f`'s own literal claim is recorded, so this
-/// program still renders `claimed = 4`.
+/// The suppression requires the other witness of the named claim to observe an
+/// axis whose extent the lowered GRAPH fixes. Here `g`'s binder `n` is
+/// declared by `f`'s parameter `a`, whose extent reaches the program as an ABI
+/// input spelled `tensor[4, ...]`: a promise the entry guard checks, not a
+/// fact of this graph. `f`'s own literal claim is therefore recorded, and all
+/// three spellings still render `claimed = 4`.
+///
+/// The three spellings are the finding. An earlier version of this row tested
+/// only `g(a, b)` and the code decided "graph-fixed" by matching the observed
+/// node's op against `RiscOp::Load`, so ONE node between the parameter and the
+/// witness defeated the bound: red team round 1 measured `g(mul(a, a), b)` and
+/// `g(cast(a, f32), b)` rendering ``extent `n`: x axis 0 = 4, y axis 0 = 5``
+/// at `a1b54dbc1`, against ``extent `4`: claimed = 4, y axis 0 = 5`` at
+/// `d861a6c6f`. The repair resolves the observed axis to its ORIGIN with
+/// `axis_sources::resolve_axis_extent`, so an `ExternalAxis` origin is
+/// recognised through any number of pass-through hops.
 ///
 /// That bound is deliberate rather than a statement that the obligation is
 /// independent here. The entry guard does pin `a axis 0` to 4, so the named
@@ -4174,10 +4188,11 @@ fn an_independent_root_literal_claim_still_names_its_claimed_extent() {
 /// root; declining only on a graph-fixed extent keeps this change inside the
 /// form chelis#1782 reports and leaves the ABI-promised form untouched.
 ///
-/// EVIDENTIARY STATUS: disposition lock with a measured mutation behind it,
-/// not a regression test. Deleting the `RiscOp::Load` exclusion from
-/// `graph_fixed_witness_extent` and rebuilding turns this row's output into
-/// ``extent `n`: x axis 0 = 4, y axis 0 = 5``, so the assertion has teeth.
+/// EVIDENTIARY STATUS: mixed, per row. The `mul` and `cast` spellings are
+/// REGRESSION tests, recorded red at `a1b54dbc1` with the named rendering. The
+/// direct spelling is a DISPOSITION LOCK that passes at `d861a6c6f` and at
+/// `a1b54dbc1`. The entry-guard assertion is a lock on why this is a
+/// rendering finding and not a lost check.
 #[test]
 fn an_abi_promised_entailing_extent_keeps_its_literal_guard() {
     assert!(
@@ -4185,22 +4200,34 @@ fn an_abi_promised_entailing_extent_keeps_its_literal_guard() {
         "this row compares two executed lanes; neither may skip"
     );
     let dir = tempfile::tempdir().expect("tempdir");
-    let source = abi_promised_entailment_source(5);
-    let (eval_ok, eval_out) = eval_result(&dir, "abi_entailment.ch", &source);
-    let (c_ok, c_out) = c_run_result(&dir, "abi_entailment_c", &source);
-    assert!(
-        !eval_ok,
-        "a literal claim of 4 over a read of 5 traps: {eval_out}"
-    );
-    assert!(
-        !c_ok,
-        "a literal claim of 4 over a read of 5 traps: {c_out}"
-    );
-    for out in [&eval_out, &c_out] {
-        assert!(out.contains(&domain_trap_line("load")), "{out}");
+    for (label, a_prim, a_arg) in [
+        ("direct", "f32", "a"),
+        ("through_mul", "f32", "mul(a, a)"),
+        ("through_cast", "f64", "cast(a, f32)"),
+    ] {
+        let source = abi_promised_entailment_source(a_prim, a_arg, 5);
+        let (eval_ok, eval_out) = eval_result(&dir, &format!("abi_{label}.ch"), &source);
+        let (c_ok, c_out, emitted) =
+            c_run_result_with_source(&dir, &format!("abi_{label}_c"), &source);
         assert!(
-            out.contains("extent `4`: claimed = 4, y axis 0 = 5"),
-            "an ABI-promised entailing extent keeps the literal guard: {out}"
+            !eval_ok,
+            "{label}: a literal claim of 4 over a read of 5 traps: {eval_out}"
+        );
+        assert!(
+            !c_ok,
+            "{label}: a literal claim of 4 over a read of 5 traps: {c_out}"
+        );
+        for out in [&eval_out, &c_out] {
+            assert!(out.contains(&domain_trap_line("load")), "{label}: {out}");
+            assert!(
+                out.contains("extent `4`: claimed = 4, y axis 0 = 5"),
+                "{label}: an ABI-promised entailing extent keeps the literal guard: {out}"
+            );
+        }
+        assert!(
+            emitted.contains("chelis_tensor_shape(inputs[0], 0) != 4"),
+            "{label}: the kernel still checks `a`'s promised extent at entry, which is \
+             why the declined suppression would cost no check: {emitted}"
         );
     }
 }
