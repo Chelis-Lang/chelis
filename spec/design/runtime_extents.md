@@ -671,7 +671,19 @@ the decision shared, a tensor-typed projection of a runtime record inside a
 host def body binds to a local before the tensor helper is attempted, and the
 helper takes that local as its own tensor input. That IS materializing the
 field's tensor as the actual shape input, and it is the prologue-local rewrite
-#1266 reports downstream applying by hand. The necessity is the one #1266
+#1266 reports downstream applying by hand.
+
+The binding is not unconditional, and both exits are loud rather than wrong. A
+base name an inner binder also rebinds keeps ALL of its projections where they
+are, because the walk asks whether the name is bound anywhere under the body
+rather than reconstructing lexical scope; such a program needs the
+prologue-local rewrite it needed before, and the C lane names the construct
+under [04-TOT-2] instead of substituting the wrong tensor. A binder position
+the walk cannot read a name from abandons the hoist for that def entirely, on
+the same reasoning. The enumerable part of the claim is the oracle beside the
+reader: every binder spelling Surf can write is built through the parser and
+asserted to yield its name, because a reader checked against a shape the
+parser never emits proves nothing about the shape it always emits. The necessity is the one #1266
 names: both spelling variants must execute, and the direct spelling otherwise
 leaves `expand` to a C host vocabulary that deliberately has no emission for
 it ([04-TOT-2]). A record whose constructor is a compile-time fact keeps its

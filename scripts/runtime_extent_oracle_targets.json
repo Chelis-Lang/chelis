@@ -354,6 +354,8 @@
         "a_shape_derived_bound_keeps_its_declared_result_dimension_on_eval",
         "a_static_non_unit_source_under_a_same_rank_claim_is_a_type_error",
         "a_synthesized_kernel_parameter_collision_emits_no_guard",
+        "a_typed_binder_beside_a_projection_does_not_stop_the_hoist",
+        "a_typed_binder_suppresses_only_the_base_it_rebinds",
         "a_zero_positional_replacement_declares_an_empty_axis_on_c",
         "a_zero_positional_replacement_declares_an_empty_axis_on_eval",
         "an_abi_promised_entailing_extent_keeps_its_literal_guard",

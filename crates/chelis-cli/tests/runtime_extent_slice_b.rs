@@ -4929,3 +4929,90 @@ fn a_binder_that_shadows_the_record_base_suppresses_the_hoist() {
         "shape=[2], data=[108.0, 110.0]",
     );
 }
+
+/// Round 2, P1-1. A TYPED lambda parameter that does NOT shadow the record
+/// base. Deep writes it `(t {type: ..})`, an unstamped form whose head is the
+/// name, and the hoist must read it rather than refuse.
+const TYPED_LAMBDA_BESIDE_A_PROJECTION: &str = "module Repro.TypedLambdaBeside\n\
+     type Inputs = | Inputs { q: tensor[batch, f32], b: tensor[1, f32] }\n\
+     def scale(t: tensor[1, f32]) -> tensor[1, f32] = mul(t, t)\n\
+     sig f: Inputs -> tensor[batch, f32]\n\
+     def f(inp: Inputs) = expand((fn (t: tensor[1, f32]) -> scale(t))(inp.b), 0i32, \
+     shape(inp.q, cast(0, int32)))\n\
+     out = f(Inputs { q: to_tensor([1.0f32, 2.0f32, 3.0f32]), b: to_tensor([0.25f32]) })\n";
+
+/// The untyped twin, whose binder the earlier readers did handle.
+const UNTYPED_LAMBDA_BESIDE_A_PROJECTION: &str = "module Repro.UntypedLambdaBeside\n\
+     type Inputs = | Inputs { q: tensor[batch, f32], b: tensor[1, f32] }\n\
+     def scale(t: tensor[1, f32]) -> tensor[1, f32] = mul(t, t)\n\
+     sig f: Inputs -> tensor[batch, f32]\n\
+     def f(inp: Inputs) = expand((fn (t) -> scale(t))(inp.b), 0i32, \
+     shape(inp.q, cast(0, int32)))\n\
+     out = f(Inputs { q: to_tensor([1.0f32, 2.0f32, 3.0f32]), b: to_tensor([0.25f32]) })\n";
+
+/// Round 2, P1-1. A typed binder that does not shadow the record base no
+/// longer stops the hoist.
+///
+/// EVIDENTIARY STATUS: regression test. Measured RED at `2570da8d1`: check
+/// clean, eval `[0.0625, 0.0625, 0.0625]`, and the C lane refusing with
+/// `unsupported: builtin expand on chelis build host emission ... [04-TOT-2]`,
+/// because the reader could not decode `(t {type: ..})` and the hoist was
+/// abandoned for the whole definition. The untyped twin built there, which is
+/// what identified the binder spelling as the cause. On `33cc78e84` the typed
+/// program was rejected at check, so neither lane had it working.
+#[test]
+fn a_typed_binder_beside_a_projection_does_not_stop_the_hoist() {
+    assert_both_lanes_render(
+        "typed_lambda_beside",
+        TYPED_LAMBDA_BESIDE_A_PROJECTION,
+        "shape=[3], data=[0.0625, 0.0625, 0.0625]",
+    );
+    assert_both_lanes_render(
+        "untyped_lambda_beside",
+        UNTYPED_LAMBDA_BESIDE_A_PROJECTION,
+        "shape=[3], data=[0.0625, 0.0625, 0.0625]",
+    );
+}
+
+/// Round 2, P1-1. The two outcomes are told apart in the emitted C, not
+/// inferred from the values.
+///
+/// A definition whose typed binder is merely NEARBY hoists: its C carries the
+/// hoisted local. A definition whose typed binder REBINDS the record base
+/// suppresses that base's projections: its C carries none, and the host lane
+/// emits the read itself. Without this pair a suppressed shadow and an
+/// abandoned hoist look identical from the values alone, which is exactly how
+/// round 1's shadow receipt passed while the reader was broken.
+///
+/// EVIDENTIARY STATUS: regression test on the first assertion, disposition
+/// lock on the second. At `2570da8d1` BOTH emitted zero hoisted locals,
+/// because the reader refused on either program.
+#[test]
+fn a_typed_binder_suppresses_only_the_base_it_rebinds() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let emitted = |stem: &str, source: &str| -> String {
+        let out_dir = dir.path().join(format!("{stem}-out"));
+        let build = build_c(&fixture(&dir, &format!("{stem}.ch"), source), &out_dir);
+        assert!(
+            build.status.success(),
+            "{stem} must build: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        fs::read_to_string(out_dir.join(format!("{stem}.c"))).expect("generated C")
+    };
+    let beside = emitted("typed_beside_c", TYPED_LAMBDA_BESIDE_A_PROJECTION);
+    assert!(
+        beside.contains("__host_record_field_"),
+        "a typed binder beside the projection leaves the hoist alone: {beside}"
+    );
+    let shadowing = emitted("typed_shadow_c", TYPED_LAMBDA_SHADOWS_THE_RECORD_BASE);
+    assert!(
+        !shadowing.contains("__host_record_field_"),
+        "a typed binder that rebinds the base suppresses that base's \
+         projections: {shadowing}"
+    );
+    assert!(
+        shadowing.contains("chelis_adt_get_field"),
+        "and the host lane reads the field itself instead: {shadowing}"
+    );
+}

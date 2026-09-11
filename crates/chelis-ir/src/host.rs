@@ -4499,6 +4499,19 @@ fn hoist_record_projections(
                 .collect(),
             *span,
         ),
+        // Round 2, P3: an unstamped form carries children like any other, and
+        // a typed parameter is one, so the rewriter descends it rather than
+        // relying on the reader having refused first.
+        Expr::UnknownForm(data) => Expr::UnknownForm(Box::new(chelis_deep::ast::UnknownFormData {
+            head: data.head.clone(),
+            meta: data.meta.clone(),
+            children: data
+                .children
+                .iter()
+                .map(|child| hoist_record_projections(child, program, scope, bound, hoists))
+                .collect(),
+            span: data.span,
+        })),
         Expr::MetaExpr(meta, span) => Expr::MetaExpr(
             chelis_deep::ast::MetaExpr {
                 metadata: meta.metadata.clone(),
@@ -4656,55 +4669,61 @@ fn names_bound_in(expr: &Expr, out: &mut UnordSet<String>) -> Result<(), String>
     }
 }
 
-/// Decode the name (or names, for a pattern) a binder-position child carries.
+/// Decode the name a binder-position child carries, or account for why it
+/// carries none.
+///
+/// Three shapes reach a binder position and only one of them is a name:
+///
+///   * a STAMPED vocabulary node is a container, not a binder. `fn`'s binder
+///     position holds `params`, and `params`'s own children are the names; the
+///     whole-tree walk visits them, so there is nothing to decode here.
+///   * an UNSTAMPED form whose head is the name is the binder itself. A typed
+///     parameter is written `(t {type: (t-tensor ..)})`, which no closed tag
+///     matches, so `stamped_parts` reads it as nothing and only its head says
+///     what it binds. Two earlier readers missed exactly this, which is why
+///     the oracle beside it builds every fixture through the parser.
+///   * a metadata map or a non-name atom binds nothing.
+///
+/// Anything else FAILS CLOSED, naming the construct. The caller then abandons
+/// the hoist for that definition, which lowers as it did before the mechanism
+/// existed. A spelling we cannot read is one we cannot prove safe.
 fn collect_binder_position_names(
     node_tag: DeepTag,
     index: usize,
     child: &Expr,
     sink: &mut UnordSet<String>,
 ) -> Result<(), String> {
-    // Decode into a fresh set, never by watching `sink` grow: two pipe stages
-    // share the synthesized parameter name, so the second one adds nothing to
-    // `out` and a growth test would call a perfectly readable binder
-    // unreadable.
-    let mut decoded: UnordSet<String> = UnordSet::new();
-    let out = &mut decoded;
-    match child {
-        // The bare spelling, and the typed spelling: `(inp {type: ..})` is an
-        // `UnknownForm` whose head IS the parameter name.
-        Expr::Atom(Atom::Name(name), _) => {
-            out.insert(name.clone());
-        }
-        Expr::UnknownForm(data) => {
-            out.insert(data.head.clone());
-        }
-        Expr::MetaExpr(meta, _) => {
-            let mut nested = UnordSet::new();
-            collect_binder_position_names(node_tag, index, &meta.expr, &mut nested)?;
-            decoded.extend(nested.into_sorted());
-            let result = decoded.clone();
-            sink.extend(result.into_sorted());
-            return Ok(());
-        }
-        // A pattern binds by the names inside it.
-        Expr::Node(_, _) | Expr::List(_, _) | Expr::BareList(_, _) => {
-            collect_binder_names(child, out);
-        }
-        // A binder position holding a literal or a metadata map binds nothing;
-        // an empty `params` reaches here as no child at all, not as this arm.
-        Expr::Atom(_, _) | Expr::Map(_, _) => return Ok(()),
+    if stamped_parts(child).is_some() {
+        return Ok(());
     }
-    if decoded.is_empty() {
-        return Err(format!(
-            "a binder position of `{}` at index {index} carries a spelling this \
-             walk cannot read a name from",
-            node_tag.as_str()
-        ));
+    if let Some(name) = binder_child_name(child) {
+        sink.insert(name);
+        return Ok(());
     }
-    sink.extend(decoded.into_sorted());
-    Ok(())
+    if matches!(child, Expr::Map(_, _) | Expr::Atom(_, _)) {
+        return Ok(());
+    }
+    Err(format!(
+        "a binder position of `{}` at index {index} carries a spelling this \
+         walk cannot read a name from",
+        node_tag.as_str()
+    ))
 }
 
+/// The name an UNSTAMPED binder-position child spells.
+fn binder_child_name(child: &Expr) -> Option<String> {
+    match child {
+        Expr::Atom(Atom::Name(name), _) => Some(name.clone()),
+        Expr::MetaExpr(meta, _) => binder_child_name(&meta.expr),
+        Expr::List(list, _) => list
+            .elements
+            .first()
+            .and_then(symbol_name)
+            .map(str::to_string),
+        Expr::BareList(items, _) => items.first().and_then(symbol_name).map(str::to_string),
+        _ => None,
+    }
+}
 /// A `(var {} name)` reference, the node a hoisted projection leaves behind.
 fn var_expr_node(name: &str, span: chelis_deep::span::Span) -> Expr {
     Expr::Node(
@@ -19468,137 +19487,161 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
 #[cfg(test)]
 mod record_hoist_binder_vocabulary_tests {
     use super::*;
-    use chelis_deep::ast::{Atom, Expr, UnknownFormData};
     use chelis_deep::role::{ChildStampRole, child_stamp_role};
     use chelis_deep::tag::DeepTag;
 
-    fn name(text: &str) -> Expr {
-        Expr::Atom(
-            Atom::Name(text.to_string()),
-            chelis_deep::span::Span::new(0, 0),
-        )
+    /// Parse Surf and hand back the canonical Deep the lowerer receives.
+    ///
+    /// The oracle builds every fixture this way and never constructs an `Expr`
+    /// by hand. Round 2 is why: the previous version built its typed-parameter
+    /// fixture as an `UnknownForm`, a shape the parser does not produce at a
+    /// binder position, so its typed leg was green against a spelling that
+    /// never occurs while the real one -- an unstamped list whose head is the
+    /// name -- fell through undecoded. An oracle over a representation nobody
+    /// emits proves nothing about the representation everybody emits.
+    fn deep_program(source: &str) -> Vec<Expr> {
+        let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
+        chelis_surf::desugar::desugar_program(&decls)
     }
 
-    /// A TYPED binder: Deep renders `fn (inp: Inputs)` as an `UnknownForm`
-    /// whose head is the parameter name. This is the spelling that made the
-    /// hand-written reader miss a shadowing parameter (chelis#1266 round 1,
-    /// P1-3).
-    fn typed_name(text: &str) -> Expr {
-        Expr::UnknownForm(Box::new(UnknownFormData {
-            head: text.to_string(),
-            meta: chelis_deep::Metadata::default(),
-            children: Vec::new(),
-            span: chelis_deep::span::Span::new(0, 0),
-        }))
+    /// The body of the named `def`, which is the subtree the hoist walks.
+    fn def_body(program: &[Expr], name: &str) -> Expr {
+        let (_, body) = find_top_level_def_named(program, name).expect("the def");
+        let Some((DeepTag::Fn, _, kids)) = stamped_parts(body) else {
+            panic!("a def body is a `fn` node");
+        };
+        kids.get(1).expect("the fn body").clone()
     }
 
-    fn node(tag: DeepTag, children: Vec<Expr>) -> Expr {
-        Expr::Node(
-            Box::new(chelis_deep::node::Node::new(
-                tag,
-                chelis_deep::Metadata::default(),
-                children,
-            )),
-            chelis_deep::span::Span::new(0, 0),
-        )
+    fn bound_names(source: &str, def: &str) -> Result<Vec<String>, String> {
+        let program = deep_program(source);
+        let mut out = UnordSet::new();
+        names_bound_in(&def_body(&program, def), &mut out)?;
+        Ok(out.into_sorted())
     }
 
-    /// Which tags declare a binder child position, taken from the closed
-    /// vocabulary's own role table rather than from a list anyone typed here.
-    /// A tag that gains a binder position later joins this set on its own and
-    /// the assertions below then apply to it.
-    fn tags_with_binder_positions() -> Vec<(DeepTag, usize)> {
-        let mut found = Vec::new();
+    /// One Surf spelling that binds `shadowed` inside `f`'s body, named by the
+    /// binder form it exercises. Every entry is real source the parser accepts.
+    fn binder_spellings() -> Vec<(&'static str, String)> {
+        vec![
+            (
+                "typed fn parameter",
+                "def f(x: tensor[1, f32]) -> tensor[1, f32] = \
+                 (fn (shadowed: tensor[1, f32]) -> mul(shadowed, shadowed))(x)\n"
+                    .to_string(),
+            ),
+            (
+                "untyped fn parameter",
+                "def f(x: tensor[1, f32]) -> tensor[1, f32] = \
+                 (fn (shadowed) -> mul(shadowed, shadowed))(x)\n"
+                    .to_string(),
+            ),
+            (
+                "two typed fn parameters",
+                "def f(x: tensor[1, f32]) -> tensor[1, f32] = \
+                 (fn (shadowed: tensor[1, f32], other: tensor[1, f32]) -> mul(shadowed, other))(x, x)\n"
+                    .to_string(),
+            ),
+            (
+                "let binding",
+                "def f(x: tensor[1, f32]) -> tensor[1, f32] = {\n  shadowed = mul(x, x)\n  shadowed\n}\n"
+                    .to_string(),
+            ),
+            (
+                "match pattern binder",
+                "type Holder =\n  | Holder { v: tensor[1, f32] }\n\n\
+                 def f(x: tensor[1, f32]) -> tensor[1, f32] = \
+                 match Holder { v: x } with { | Holder { v: shadowed } => mul(shadowed, shadowed) }\n"
+                    .to_string(),
+            ),
+            (
+                "pipe stage over a let binder",
+                "def f(x: tensor[1, f32]) -> tensor[1, f32] = {\n  \
+                 shadowed = x |> mul(x)\n  shadowed\n}\n"
+                    .to_string(),
+            ),
+        ]
+    }
+
+    /// The vocabulary oracle for chelis#1266's hoist, built through the parser.
+    ///
+    /// Every binder spelling Surf can write must yield its name, because the
+    /// hoist substitutes a local for a projection and must never do so under a
+    /// binder it could not see. A spelling that yields nothing is either a
+    /// silent wrong answer or, with the fail-closed exit, a definition whose
+    /// hoist is abandoned and whose C lane then refuses.
+    ///
+    /// EVIDENTIARY STATUS: regression test. Measured RED at `2570da8d1` on the
+    /// "typed fn parameter" and "two typed fn parameters" rows, where the
+    /// reader refused with "a binder position of `fn` at index 0 carries a
+    /// spelling this walk cannot read a name from" and bound nothing.
+    #[test]
+    fn every_surf_binder_spelling_yields_its_name() {
+        for (form, source) in binder_spellings() {
+            let read = bound_names(&source, "f");
+            let names = read.unwrap_or_else(|error| panic!("{form}: the reader refused: {error}"));
+            assert!(
+                names.iter().any(|name| name == "shadowed"),
+                "{form}: bound {names:?}, which does not include the binder"
+            );
+        }
+    }
+
+    /// The role table is the authority for WHICH positions bind, and it must
+    /// keep naming the forms above. A tag that gains a binder position joins
+    /// this set on its own.
+    ///
+    /// EVIDENTIARY STATUS: disposition lock on the representation choice.
+    #[test]
+    fn the_role_table_declares_the_binder_positions_the_reader_uses() {
+        let mut tags = Vec::new();
         for tag in DeepTag::ALL {
-            // Two children is enough to separate `Bind`'s alternating roles
-            // from `Params`'s uniform one.
-            for arity in [1usize, 2] {
+            for arity in [1usize, 2, 3] {
                 for index in 0..arity {
                     if child_stamp_role(tag, index, arity) == ChildStampRole::Binder
-                        && !found.iter().any(|(seen, _)| *seen == tag)
+                        && !tags.contains(&tag)
                     {
-                        found.push((tag, index));
+                        tags.push(tag);
                     }
                 }
             }
         }
-        found
-    }
-
-    /// The vocabulary oracle for chelis#1266's hoist. Every binder position
-    /// the closed vocabulary declares must yield a name, in BOTH the bare and
-    /// the typed spelling.
-    ///
-    /// EVIDENTIARY STATUS: regression test. The typed spelling is measured RED
-    /// against the hand-written reader this replaced: `collect_binder_names`
-    /// had no `UnknownForm` arm, so a typed `(params {} (inp {type: ..}))`
-    /// contributed no name and a lambda shadowing a record base had its inner
-    /// projection rewritten to the outer record's local.
-    #[test]
-    fn every_binder_position_in_the_closed_vocabulary_yields_a_name() {
-        let binder_tags = tags_with_binder_positions();
-        // Measured on this vocabulary: module, def, defsig, deftype,
-        // typealias, variant, field, defdim, fn, pat-var, pat-as, params,
-        // bind. The scan is the authority; these three are spot checks that
-        // it did not silently come back near-empty.
-        for required in [DeepTag::Params, DeepTag::Bind, DeepTag::PatVar] {
+        for required in [DeepTag::Params, DeepTag::Bind, DeepTag::PatVar, DeepTag::Fn] {
             assert!(
-                binder_tags.iter().any(|(tag, _)| *tag == required),
-                "the vocabulary scan must find `{}`: {binder_tags:?}",
-                required.as_str()
+                tags.contains(&required),
+                "`{}` must declare a binder position: {:?}",
+                required.as_str(),
+                tags.iter().map(|t| t.as_str()).collect::<Vec<_>>()
             );
-        }
-        for (tag, index) in binder_tags {
-            for (spelling, binder) in [
-                ("bare", name("shadowed")),
-                ("typed", typed_name("shadowed")),
-            ] {
-                let mut children = vec![name("filler"); index + 1];
-                children[index] = binder;
-                let Ok(built) =
-                    std::panic::catch_unwind(|| node(tag, children.clone())).map_err(|_| ())
-                else {
-                    // A tag whose arity contract refuses this shape is not a
-                    // counterexample: the reader is only claimed for nodes the
-                    // vocabulary admits.
-                    continue;
-                };
-                let mut out = UnordSet::new();
-                let read = names_bound_in(&built, &mut out);
-                assert!(
-                    read.is_ok(),
-                    "`{}` refused its own {spelling} binder position {index}: {read:?}",
-                    tag.as_str()
-                );
-                assert!(
-                    out.contains("shadowed"),
-                    "`{}` binder position {index} ({spelling}) contributed no name",
-                    tag.as_str()
-                );
-            }
         }
     }
 
     /// The fail-closed half: a binder position carrying a spelling the reader
-    /// cannot decode refuses, and the caller then hoists nothing rather than
+    /// cannot decode refuses, so the caller abandons the hoist rather than
     /// treating the name as unbound.
     ///
-    /// EVIDENTIARY STATUS: disposition lock on the refusal path. Without it a
-    /// future binder spelling would silently rejoin the class this replaced.
+    /// This one is built by hand deliberately, because its whole subject is a
+    /// shape the parser does NOT produce. It is the only hand-built fixture
+    /// here, and it asserts the refusal path rather than a decode.
+    ///
+    /// EVIDENTIARY STATUS: disposition lock.
     #[test]
     fn an_undecodable_binder_position_refuses_instead_of_reading_no_name() {
-        let opaque = Expr::Map(
-            chelis_deep::Metadata::default(),
-            chelis_deep::span::Span::new(0, 0),
+        let span = chelis_deep::span::Span::new(0, 0);
+        // An UNSTAMPED form whose head is not a name: no closed tag matches
+        // it, so it is not a container the walk descends, and nothing in it
+        // spells a binder.
+        let unreadable = Expr::Node(
+            Box::new(chelis_deep::node::Node::new(
+                DeepTag::Params,
+                chelis_deep::Metadata::default(),
+                vec![Expr::BareList(
+                    vec![Expr::Atom(Atom::Int(1.into()), span)],
+                    span,
+                )],
+            )),
+            span,
         );
-        let params = node(DeepTag::Params, vec![opaque]);
-        let mut out = UnordSet::new();
-        // A metadata map at a binder position binds nothing and says so; the
-        // reader must not silently return an empty set for a NAME-shaped slot.
-        assert!(names_bound_in(&params, &mut out).is_ok());
-        assert!(out.is_empty());
-
-        let unreadable = node(DeepTag::Params, vec![node(DeepTag::TUnit, Vec::new())]);
         let mut out = UnordSet::new();
         let read = names_bound_in(&unreadable, &mut out);
         assert!(
