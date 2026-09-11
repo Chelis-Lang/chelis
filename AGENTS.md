@@ -992,10 +992,11 @@ skill assets, and the opaque-invariants corpus) and `cargo fmt --all`, then
 changed crate, one `cargo nextest run` over the drift tripwires (atom partition,
 generated dtype header, compiler pins, opaque corpus, loud-unsupported, payload census,
 bundled std loader, conformance manifest, asset drift, skill-set uniformity, phase-3
-gate inventory, stack-guard coverage), and, when a `packages/chelis-std/` or
-`crates/chelis-std-bundle/` path changed, `regen_all.py --tier 1` right after tier 0
-(so every check sees the regenerated bundle) and `cargo nextest run -p
-chelis-std-bundle --lib` after the tripwires. Every writer runs before every check. It
+gate inventory, stack-guard coverage, runtime-extent target manifest), and, when
+a `packages/chelis-std/` or `crates/chelis-std-bundle/` path changed,
+`regen_all.py --tier 1` right after tier 0 (so every check sees the regenerated
+bundle) and `cargo nextest run -p chelis-std-bundle --lib` after the tripwires.
+Every writer runs before every check. It
 exits non-zero for any failing stage (fmt, regeneration, lint, per-crate clippy, the
 tripwire run, or the std-bundle self-test) and never for a file it fixed; a regenerated
 `dist/` or `reef.lock` is reported as a changed file to commit, never as a failure.

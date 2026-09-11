@@ -195,7 +195,7 @@ class FastCommandListTests(unittest.TestCase):
             elif token == "--test":
                 self.assertIsNotNone(package)
                 pairs.append((package, command[index + 1]))
-        self.assertEqual(len(pairs), 12)
+        self.assertEqual(len(pairs), 13)
         for package, target in pairs:
             path = REPO_ROOT / "crates" / package / "tests" / f"{target}.rs"
             self.assertTrue(path.is_file(), f"missing tripwire target {path}")

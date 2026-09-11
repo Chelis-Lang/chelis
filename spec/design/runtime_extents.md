@@ -599,6 +599,38 @@ command currently fails because `SLICE_PHASES` still requires unregistered
 passing phase or erase outstanding B rows. `--phase a` and `--phase b`
 retain their names and row-transition checks.
 
+`--phase a` does not reach its row report on current `main`. Its
+`symbolic_window` target runs
+`issue_368_runtime_symbolic_window_grad_is_half_everywhere`, whose `grad`
+lowering fails backward-DAG verification; chelis#1775 owns that regression and
+names chelis#1693 as its first failing commit. Every other phase-A and phase-B
+target passes with no receipt drift, so that one cell is what stands between
+the oracle and a phase-A row report. The nightly `runtime-extent-oracle` job
+requires `--phase a` to PASS and is therefore red until chelis#1775 lands,
+deliberately: the red is the signal that the row is still short.
+
+Phase A's wire capacity leg executes the Python binding facade through the
+interpreter `PYO3_PYTHON` names, falling back to the checkout's `.venv`, and
+not through the interpreter running the oracle. Install that facade's
+dependencies into it with
+`uv pip install --python <that interpreter> -r bindings/python/pyproject.toml`;
+without them the leg reports a `ModuleNotFoundError` that reads like a census
+defect.
+
+Each phase's expected per-test receipts live in the reviewed manifest
+`scripts/runtime_extent_oracle_targets.json`, which the oracle reads to build
+its commands and which `crates/chelis-types/tests/runtime_extent_target_manifest.rs`
+checks against the named sources inside `scripts/gate.py --fast`. After a
+reviewed edit to a phase's generated corpus, regenerate that phase's checked
+baseline with
+`.venv/bin/python scripts/runtime_extent_oracle.py --phase <p> --write-baseline`;
+never hand-edit the file or its digest. `--allow-shortfall` reports a
+recorded row shortfall instead of failing on it, so the nightly
+`runtime-extent-oracle` job can enforce phase B's receipts, digests and
+lattice while its remaining rows land; it ends `RUNTIME EXTENT ORACLE:
+RECEIPTS PASS, ROWS SHORT OF EXIT` rather than PASS, `--phase final` refuses
+it, and B2b-3 drops it from the workflow.
+
 The preparation suite is `crates/chelis-cli/tests/runtime_extent_claim_preparation.rs`.
 Its baseline and full pending acceptance remain separate:
 
