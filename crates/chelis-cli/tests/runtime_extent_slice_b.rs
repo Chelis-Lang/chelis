@@ -1972,3 +1972,305 @@ fn a_fresh_binder_over_a_node_valued_reshape_target_executes_on_both_lanes() {
         "the compiled binary produces the same real shape: {c_out}"
     );
 }
+
+// ===========================================================================
+// B2b-1: a declared result claim survives the call boundary (chelis#1374,
+// chelis#1376).
+//
+// Section 4.7.2 makes a declared result that names an extent not statically
+// proven equal to the produced one an execution-time check that traps Domain.
+// Section 4.7.3 adds that a signature may name a fresh extent only by imposing
+// an execution-time equality guard. The three rows below are the three shapes
+// that claim reaches the boundary in:
+//
+//   * the LITERAL control, `-> tensor[4, f32]` over a read of a second
+//     tensor's axis. Its requirement is a constant, so it is the row that says
+//     the cross-tensor READ is not what the repair adds;
+//   * chelis#1374, the same read under a NAMED result claim `-> tensor[rows,
+//     f32]` whose binder is declared by a THIRD tensor. Nothing statically
+//     relates `rows` to `cols`, so §4.7.2's execution-time check is the only
+//     thing that can reject the disagreement;
+//   * chelis#1376, a FOREIGN claim over a SAME-tensor read: the set axis of
+//     `insert(x, 1i32, shape(x, 0i32))` is declared `cols`, a binder `x` does
+//     not carry. §4.7.3's fresh-extent rule is exactly this case.
+//
+// All three are VALUE BINDINGS (`out = f(...)`), for the reason this file's
+// header gives: a `def main() = f(...)` root inlines `f` into a kernel that
+// carries no entry guard, while `out = f(...)` applies `f` and its entry
+// obligations run at the call on both lanes.
+//
+// The dimension names are deliberately multi-letter. A single-letter name
+// desugars to `d-var`, a polymorphic dimension variable that inference
+// instantiates against each literal argument extent, so the disagreement
+// becomes a check-time `dimension mismatch` and never reaches a guard.
+// `rows`/`cols` desugar to `d-name`, the concrete symbolic axis that survives
+// into `DimInfo::Named` and is what a signature witness carries.
+//
+// Rendering: §4.7 makes this a typed operation-precondition guard under
+// [04-NUM-9], so the complete line is `numeric trap: domain in load at int64`
+// and the accompanying context names each disagreeing source, its axis and its
+// observed value. The assertions below check the trap line byte-exactly and
+// the context by content, never by an invented cross-lane format.
+// ===========================================================================
+
+/// The literal control's fixture: `-> tensor[4, f32]` over `shape(y, 0i32)`,
+/// with a third parameter `x` present so the program is the same shape as
+/// chelis#1374's and differs from it only in the result claim.
+fn literal_claim_cross_tensor_source(y_extent: usize) -> String {
+    let values = (1..=y_extent)
+        .map(|v| format!("{v}.0f32"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "module Repro.LiteralCrossTensor\n\
+         def f(b: tensor[f32], x: tensor[rows, f32], y: tensor[cols, f32]) -> tensor[4, f32] = insert(b, 0i32, shape(y, 0i32))\n\
+         out = f(scalar_to_tensor(7.0f32), to_tensor([1.0f32, 2.0f32]), to_tensor([{values}]))\n"
+    )
+}
+
+/// chelis#1374's fixture: the same cross-tensor read under a NAMED result
+/// claim. `rows` is declared by `x`; the produced extent is `y`'s axis 0.
+fn named_claim_cross_tensor_source(x_extent: usize, y_extent: usize) -> String {
+    let list = |n: usize| {
+        (1..=n)
+            .map(|v| format!("{v}.0f32"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "module Repro.NamedCrossTensor\n\
+         def f(b: tensor[f32], x: tensor[rows, f32], y: tensor[cols, f32]) -> tensor[rows, f32] = insert(b, 0i32, shape(y, 0i32))\n\
+         out = f(scalar_to_tensor(7.0f32), to_tensor([{}]), to_tensor([{}]))\n",
+        list(x_extent),
+        list(y_extent)
+    )
+}
+
+/// chelis#1376's fixture: a FOREIGN claim over a SAME-tensor read. The set
+/// axis of `insert(x, 1i32, shape(x, 0i32))` is declared `cols`, which only
+/// `y` carries, so the signature names a fresh extent for that axis.
+fn foreign_claim_same_tensor_source(y_extent: usize) -> String {
+    let values = (1..=y_extent)
+        .map(|v| format!("{v}.0f32"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "module Repro.ForeignSameTensor\n\
+         def f(x: tensor[rows, f32], y: tensor[cols, f32]) -> tensor[rows, cols, f32] = insert(x, 1i32, shape(x, 0i32))\n\
+         out = f(to_tensor([1.0f32, 2.0f32]), to_tensor([{values}]))\n"
+    )
+}
+
+/// expand.literal_claim.cross_tensor_read.eval
+///
+/// EVIDENTIARY STATUS of the mismatch assertions: regression test. Recorded
+/// red at `e813415d0` with the measured output in the pull request.
+/// EVIDENTIARY STATUS of the agreeing twin: disposition lock; it is the row
+/// that says the guard fires on the disagreement and not on the cross-tensor
+/// spelling.
+#[test]
+fn a_literal_claim_over_a_cross_tensor_read_traps_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = eval_result(&dir, "lit_cross.ch", &literal_claim_cross_tensor_source(3));
+    assert!(
+        !ok,
+        "a declared tensor[4, f32] over a read of 3 must not execute: {out}"
+    );
+    assert!(out.contains(&domain_trap_line("load")), "{out}");
+    assert!(
+        out.contains("extent `4`: claimed = 4, y axis 0 = 3"),
+        "the context names the constant requirement and the read it refutes: {out}"
+    );
+
+    let (ok, out) = eval_result(
+        &dir,
+        "lit_cross_ok.ch",
+        &literal_claim_cross_tensor_source(4),
+    );
+    assert!(ok, "the agreeing extent must execute: {out}");
+    assert!(
+        out.contains("out = tensor(shape=[4], data=[7.0, 7.0, 7.0, 7.0])"),
+        "and produce the declared shape: {out}"
+    );
+}
+
+/// expand.literal_claim.cross_tensor_read.c
+///
+/// EVIDENTIARY STATUS: as its eval twin. The two lanes assert the same literal
+/// context string, so their agreement is measured here rather than assumed
+/// from a shared call.
+#[test]
+fn a_literal_claim_over_a_cross_tensor_read_traps_on_c() {
+    assert!(
+        gcc_available(),
+        "this row executes a linked program; no lane may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(&dir, "lit_cross_c", &literal_claim_cross_tensor_source(3));
+    assert!(
+        !ok,
+        "the linked binary must trap rather than print a shape: {out}"
+    );
+    assert!(out.contains(&domain_trap_line("load")), "{out}");
+    assert!(
+        out.contains("extent `4`: claimed = 4, y axis 0 = 3"),
+        "the C lane renders the same context as eval: {out}"
+    );
+
+    let (ok, out) = c_run_result(
+        &dir,
+        "lit_cross_c_ok",
+        &literal_claim_cross_tensor_source(4),
+    );
+    assert!(ok, "the agreeing extent must execute: {out}");
+    assert!(
+        out.contains("shape=[4]"),
+        "and produce the declared shape: {out}"
+    );
+}
+
+/// expand.named_claim.cross_tensor_read.eval (chelis#1374)
+///
+/// EVIDENTIARY STATUS of the mismatch assertions: regression test. Recorded
+/// red at `e813415d0`, where eval printed `out = tensor(shape=[3], data=[7.0,
+/// 7.0, 7.0])` and exited 0 under a declared `tensor[rows, f32]` whose binder
+/// was witnessed at extent 2.
+/// EVIDENTIARY STATUS of the agreeing twin: disposition lock.
+#[test]
+fn a_cross_tensor_read_under_a_named_claim_is_guarded_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = eval_result(
+        &dir,
+        "named_cross.ch",
+        &named_claim_cross_tensor_source(2, 3),
+    );
+    assert!(
+        !ok,
+        "`rows` is witnessed at 2 and the result is produced at 3: {out}"
+    );
+    assert!(out.contains(&domain_trap_line("load")), "{out}");
+    assert!(
+        out.contains("extent `rows`: x axis 0 = 2, y axis 0 = 3"),
+        "the context names the declaring witness and the produced extent: {out}"
+    );
+
+    let (ok, out) = eval_result(
+        &dir,
+        "named_cross_ok.ch",
+        &named_claim_cross_tensor_source(3, 3),
+    );
+    assert!(ok, "an agreeing pair of witnesses must execute: {out}");
+    assert!(
+        out.contains("out = tensor(shape=[3], data=[7.0, 7.0, 7.0])"),
+        "and produce the claimed shape: {out}"
+    );
+}
+
+/// expand.named_claim.cross_tensor_read.c (chelis#1374)
+///
+/// EVIDENTIARY STATUS: as its eval twin; recorded red at `e813415d0` with the
+/// linked binary printing `out = tensor(shape=[3], data=[7, 7, 7])`.
+#[test]
+fn issue_1374_cross_tensor_read_under_a_named_claim_is_guarded_on_c() {
+    assert!(
+        gcc_available(),
+        "this row executes a linked program; no lane may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(
+        &dir,
+        "named_cross_c",
+        &named_claim_cross_tensor_source(2, 3),
+    );
+    assert!(
+        !ok,
+        "the linked binary must trap rather than print a shape: {out}"
+    );
+    assert!(out.contains(&domain_trap_line("load")), "{out}");
+    assert!(
+        out.contains("extent `rows`: x axis 0 = 2, y axis 0 = 3"),
+        "the C lane renders the same context as eval: {out}"
+    );
+
+    let (ok, out) = c_run_result(
+        &dir,
+        "named_cross_c_ok",
+        &named_claim_cross_tensor_source(3, 3),
+    );
+    assert!(ok, "an agreeing pair of witnesses must execute: {out}");
+    assert!(
+        out.contains("shape=[3]"),
+        "and produce the claimed shape: {out}"
+    );
+}
+
+/// expand.foreign_claim.same_tensor_set_axis.eval (chelis#1376)
+///
+/// EVIDENTIARY STATUS of the mismatch assertions: regression test. Recorded
+/// red at `e813415d0`, where eval printed `out = tensor(shape=[2, 2], data=
+/// [1.0, 1.0, 2.0, 2.0])` and exited 0 under a declared `tensor[rows, cols,
+/// f32]` whose `cols` was witnessed at extent 3.
+/// EVIDENTIARY STATUS of the agreeing twin: disposition lock.
+#[test]
+fn a_same_tensor_read_under_a_foreign_claim_is_guarded_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = eval_result(
+        &dir,
+        "foreign_same.ch",
+        &foreign_claim_same_tensor_source(3),
+    );
+    assert!(
+        !ok,
+        "`cols` is witnessed at 3 and the set axis is produced at 2: {out}"
+    );
+    assert!(out.contains(&domain_trap_line("load")), "{out}");
+    assert!(
+        out.contains("extent `cols`: y axis 0 = 3, x axis 0 = 2"),
+        "the context names the declaring witness and the produced extent: {out}"
+    );
+
+    let (ok, out) = eval_result(
+        &dir,
+        "foreign_same_ok.ch",
+        &foreign_claim_same_tensor_source(2),
+    );
+    assert!(ok, "an agreeing pair of witnesses must execute: {out}");
+    assert!(
+        out.contains("out = tensor(shape=[2, 2], data=[1.0, 1.0, 2.0, 2.0])"),
+        "and produce the claimed shape: {out}"
+    );
+}
+
+/// expand.foreign_claim.same_tensor_set_axis.c (chelis#1376)
+///
+/// EVIDENTIARY STATUS: as its eval twin; recorded red at `e813415d0` with the
+/// linked binary printing `out = tensor(shape=[2, 2], data=[1, 1, 2, 2])`.
+#[test]
+fn issue_1376_same_tensor_read_under_a_foreign_claim_is_guarded_on_c() {
+    assert!(
+        gcc_available(),
+        "this row executes a linked program; no lane may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(&dir, "foreign_same_c", &foreign_claim_same_tensor_source(3));
+    assert!(
+        !ok,
+        "the linked binary must trap rather than print a shape: {out}"
+    );
+    assert!(out.contains(&domain_trap_line("load")), "{out}");
+    assert!(
+        out.contains("extent `cols`: y axis 0 = 3, x axis 0 = 2"),
+        "the C lane renders the same context as eval: {out}"
+    );
+
+    let (ok, out) = c_run_result(
+        &dir,
+        "foreign_same_c_ok",
+        &foreign_claim_same_tensor_source(2),
+    );
+    assert!(ok, "an agreeing pair of witnesses must execute: {out}");
+    assert!(
+        out.contains("shape=[2, 2]"),
+        "and produce the claimed shape: {out}"
+    );
+}
