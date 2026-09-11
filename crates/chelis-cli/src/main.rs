@@ -1561,28 +1561,29 @@ fn lower_build_program_for_cli(
         // This mode asks the shared pipeline to select the CLI's ordinary
         // host/strict policy from the actual collected host. Planned helpers
         // instead use its explicit host binding, with no standalone root zip.
-        let (lowered, plan) = chelis_compiler_api::pipeline::lower_checked_for_c_execution(
-            checked.clone(),
-            manifest,
-            chelis_compiler_api::pipeline::LoweringMode::AllowHostBackend,
-        )
-        .map_err(|rejection| boxed_string_error(rejection.to_string()))?;
+        let (lowered, mut ordinary_host, plan) =
+            chelis_compiler_api::pipeline::lower_checked_for_c_execution(
+                checked.clone(),
+                manifest,
+                chelis_compiler_api::pipeline::LoweringMode::AllowHostBackend,
+            )
+            .map_err(|rejection| boxed_string_error(rejection.to_string()))?;
         let host = plan
             .as_ref()
-            .map(chelis_ir::host::HostExecutionPlan::program);
+            .map(chelis_ir::host::HostExecutionPlan::program)
+            .or(ordinary_host.as_ref());
         emit_summary_rejections(host);
+        if let Some(host) = ordinary_host.as_mut() {
+            apply_manifest_display_roots(host, manifest, target)?;
+        }
         let plan = plan
             .map(|plan| {
-                plan.try_transform(
-                    |host| {
-                        apply_manifest_display_roots(host, manifest, target)?;
-                        Ok::<_, Box<dyn std::error::Error>>(())
-                    },
-                    boxed_string_error,
-                )
+                plan.try_transform_globals(|globals, functions| {
+                    apply_manifest_display_roots_to_globals(globals, functions, manifest, target)
+                })
             })
             .transpose()?;
-        Ok((lowered.into_dag(), None, plan))
+        Ok((lowered.into_dag(), ordinary_host, plan))
     } else {
         let mut compiled =
             chelis_ir::host::try_lower_compiled_program_with_manifest(checked.program(), manifest)
@@ -3593,13 +3594,15 @@ fn cmd_build(
         BuildTarget::C => {
             let c_name = c_source_name::CSourceName::from_path(file);
             let func_name = c_name.symbol();
-            if let Some(plan) = execution_host.take()
+            if let Some(host_program) = execution_host
+                .as_ref()
+                .map(chelis_ir::host::HostExecutionPlan::program)
+                .or(compiled_host.as_ref())
                 && (requires_main
-                    || chelis_ir::host::host_program_requires_host_backend(plan.program())
+                    || chelis_ir::host::host_program_requires_host_backend(host_program)
                     || dag.roots().is_empty()
-                    || !plan.program().functions.is_empty())
+                    || !host_program.functions.is_empty())
             {
-                let host_program = plan.program();
                 // AD-transform UX only: the lowerer marks an AD transform
                 // it could not resolve with the dedicated transform
                 // marker, so the workaround text names exactly those
@@ -3630,20 +3633,32 @@ fn cmd_build(
                     .into());
                 }
                 apply_shared_host_builtin_gates(host_program, BuildTarget::C)?;
-                shared_compiler_gate(
-                    chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_execution_plan(
-                        &plan,
+                shared_compiler_gate(match execution_host.as_ref() {
+                    Some(plan) => chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_execution_plan(
+                        plan,
                         BuildTarget::C,
                     ),
-                )?;
+                    None => chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_program(
+                        host_program,
+                        BuildTarget::C,
+                    ),
+                })?;
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_windowed_reductions_in_host_program(
                         host_program,
                         BuildTarget::C,
                     ),
                 )?;
-                let verified =
-                    verified_host_execution_codegen_program(checked, &root_manifest, plan)?;
+                let verified = if let Some(plan) = execution_host.take() {
+                    verified_host_execution_codegen_program(checked, &root_manifest, plan)?
+                } else {
+                    verified_host_codegen_program(
+                        checked,
+                        &root_manifest,
+                        BuildTarget::C,
+                        compiled_host.take().expect("ordinary C host selected"),
+                    )?
+                };
                 let result = chelis_backend_c::codegen_host_program(&verified, func_name)?;
                 cmd_build_c_result(result, &c_name, output, &symbolic_dims, requires_main)
             } else {
@@ -3934,13 +3949,15 @@ fn cmd_build_deep(
         BuildTarget::C => {
             let c_name = c_source_name::CSourceName::from_path(file);
             let func_name = c_name.symbol();
-            if let Some(plan) = execution_host.take()
+            if let Some(host_program) = execution_host
+                .as_ref()
+                .map(chelis_ir::host::HostExecutionPlan::program)
+                .or(compiled_host.as_ref())
                 && (requires_main
-                    || chelis_ir::host::host_program_requires_host_backend(plan.program())
+                    || chelis_ir::host::host_program_requires_host_backend(host_program)
                     || dag.roots().is_empty()
-                    || !plan.program().functions.is_empty())
+                    || !host_program.functions.is_empty())
             {
-                let host_program = plan.program();
                 // Same split as the Surf lane: the transform marker earns
                 // the grad/vmap workaround text; plain callable markers
                 // reach ABI projection's frozen diagnostic instead
@@ -3957,20 +3974,32 @@ fn cmd_build_deep(
                     .into());
                 }
                 apply_shared_host_builtin_gates(host_program, BuildTarget::C)?;
-                shared_compiler_gate(
-                    chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_execution_plan(
-                        &plan,
+                shared_compiler_gate(match execution_host.as_ref() {
+                    Some(plan) => chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_execution_plan(
+                        plan,
                         BuildTarget::C,
                     ),
-                )?;
+                    None => chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_program(
+                        host_program,
+                        BuildTarget::C,
+                    ),
+                })?;
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_windowed_reductions_in_host_program(
                         host_program,
                         BuildTarget::C,
                     ),
                 )?;
-                let verified =
-                    verified_host_execution_codegen_program(checked, &root_manifest, plan)?;
+                let verified = if let Some(plan) = execution_host.take() {
+                    verified_host_execution_codegen_program(checked, &root_manifest, plan)?
+                } else {
+                    verified_host_codegen_program(
+                        checked,
+                        &root_manifest,
+                        BuildTarget::C,
+                        compiled_host.take().expect("ordinary C host selected"),
+                    )?
+                };
                 let result = chelis_backend_c::codegen_host_program(&verified, func_name)?;
                 cmd_build_c_result(result, &c_name, output, &symbolic_dims, requires_main)
             } else {
@@ -11141,11 +11170,25 @@ fn apply_manifest_display_roots(
     manifest: &chelis_types::manifest::RootManifest,
     target: BuildTarget,
 ) -> Result<(), chelis_types::unsupported::Unsupported> {
+    apply_manifest_display_roots_to_globals(
+        &mut program.globals,
+        &program.functions,
+        manifest,
+        target,
+    )
+}
+
+fn apply_manifest_display_roots_to_globals(
+    globals: &mut Vec<chelis_ir::host::ConcreteHostBinding>,
+    functions: &[chelis_ir::host::ConcreteHostFunction],
+    manifest: &chelis_types::manifest::RootManifest,
+    target: BuildTarget,
+) -> Result<(), chelis_types::unsupported::Unsupported> {
     use chelis_ir::host::{HostBinding, HostExpr, HostExprKind};
     use chelis_types::types::Lane;
 
     let mut represented_defs = std::collections::BTreeSet::new();
-    for binding in &mut program.globals {
+    for binding in globals.iter_mut() {
         binding.display_name = None;
         binding.display_roots = manifest
             .entries
@@ -11188,11 +11231,7 @@ fn apply_manifest_display_roots(
             .first()
             .copied()
             .expect("host def came from one manifest entry");
-        let Some(function) = program
-            .functions
-            .iter()
-            .find(|function| function.name == def_name)
-        else {
+        let Some(function) = functions.iter().find(|function| function.name == def_name) else {
             return Err(build_unavailable_root_error(
                 first,
                 target,
@@ -11224,12 +11263,8 @@ fn apply_manifest_display_roots(
             .map(manifest_host_display_root)
             .collect();
         let mut binding_name = format!("__chelis_manifest_observation_{observation_index}");
-        while program
-            .globals
-            .iter()
-            .any(|binding| binding.name == binding_name)
-            || program
-                .functions
+        while globals.iter().any(|binding| binding.name == binding_name)
+            || functions
                 .iter()
                 .any(|function| function.name == binding_name)
         {
@@ -11261,8 +11296,7 @@ fn apply_manifest_display_roots(
             .iter()
             .position(|entry| entry.def_name == def_name)
             .expect("host def came from the manifest");
-        let insertion_index = program
-            .globals
+        let insertion_index = globals
             .iter()
             .position(|existing| {
                 let existing_def = observation_defs
@@ -11275,8 +11309,8 @@ fn apply_manifest_display_roots(
                     .position(|entry| entry.def_name == existing_def)
                     .is_some_and(|index| index > manifest_index)
             })
-            .unwrap_or(program.globals.len());
-        program.globals.insert(insertion_index, binding);
+            .unwrap_or(globals.len());
+        globals.insert(insertion_index, binding);
     }
 
     Ok(())
