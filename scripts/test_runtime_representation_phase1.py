@@ -52,6 +52,16 @@ class ReceiptTests(unittest.TestCase):
                     if defect == 'ambiguous': text += '\n' + text
                     with self.subTest(defect=defect), self.assertRaises(oracle.OracleFailure):
                         oracle.runtime_artifact(text)
+                evidence = root / 'evidence'
+                evidence.mkdir()
+                with mock.patch.object(oracle, 'command', return_value=json.dumps(packet)):
+                    with oracle.runtime_pin(evidence) as receipt:
+                        pinned = evidence / 'runtime/libchelis_runtime.a'
+                        self.assertEqual(oracle.os.environ['CHELIS_RUNTIME_DIR'], str(pinned.parent))
+                        self.assertEqual(oracle.os.environ['CHELIS_RUNTIME_LIB'], str(pinned))
+                        self.assertEqual(list(receipt['pinned_artifact']), [str(pinned)])
+                    self.assertNotIn('CHELIS_RUNTIME_DIR', oracle.os.environ)
+                    self.assertNotIn('CHELIS_RUNTIME_LIB', oracle.os.environ)
 
     def test_expected_mutation_failure_requires_the_exact_assertion_case(self):
         selected = ['p::contract::negative']

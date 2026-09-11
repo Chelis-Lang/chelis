@@ -127,17 +127,23 @@ def runtime_pin(directory):
     hashes = artifact_hashes([copied])
     if next(iter(original.values())) != next(iter(hashes.values())):
         raise OracleFailure('runtime artifact changed during pinning')
-    old = os.environ.get('CHELIS_RUNTIME_DIR')
+    old_directory = os.environ.get('CHELIS_RUNTIME_DIR')
+    old_library = os.environ.get('CHELIS_RUNTIME_LIB')
     os.environ['CHELIS_RUNTIME_DIR'] = str(pinned)
+    os.environ['CHELIS_RUNTIME_LIB'] = str(copied)
     try:
         yield {'cargo_artifact': original, 'pinned_artifact': hashes,
                'features': ['ownership-ledger']}
         verify_artifacts(hashes)
     finally:
-        if old is None:
+        if old_directory is None:
             os.environ.pop('CHELIS_RUNTIME_DIR', None)
         else:
-            os.environ['CHELIS_RUNTIME_DIR'] = old
+            os.environ['CHELIS_RUNTIME_DIR'] = old_directory
+        if old_library is None:
+            os.environ.pop('CHELIS_RUNTIME_LIB', None)
+        else:
+            os.environ['CHELIS_RUNTIME_LIB'] = old_library
 
 
 def selection(packet, root: Path, expected=None):

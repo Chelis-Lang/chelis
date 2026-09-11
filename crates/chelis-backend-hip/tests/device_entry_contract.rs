@@ -86,15 +86,17 @@ fn kernel_marshaling_uses_checked_program_rank_and_int64_geometry() {
             let generated = support::codegen_hip(&dag, "rank_entry").unwrap();
             let source = &generated.c_source;
             let last_axis = rank.max(1) - 1;
-            assert!(source.contains(&format!("int64_t a_s{last_axis}")));
+            assert!(source.contains(&format!("chelis_device_metadata a_s{last_axis}")));
             assert!(source.contains(&format!("_a_s{last_axis} =")));
-            assert!(!source.contains(&format!("int64_t a_s{}", rank.max(1))));
-            assert!(source.contains("int64_t out_size"));
-            assert!(source.contains("(int64_t)blockIdx.x * blockDim.x"));
+            assert!(!source.contains(&format!("chelis_device_metadata a_s{}", rank.max(1))));
+            assert!(source.contains("chelis_device_metadata out_size"));
+            assert!(source.contains("(chelis_device_metadata)blockIdx.x * blockDim.x"));
             for legacy in [
                 "int indices[",
                 "int out_size",
                 "int t1_size",
+                "int64_t a_s",
+                "int64_t out_size",
                 "->storage_size",
             ] {
                 assert!(!source.contains(legacy), "rank {rank}: retained {legacy}");

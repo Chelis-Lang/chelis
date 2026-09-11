@@ -201,18 +201,19 @@ def run() -> Path:
     python_cases = phase1.python_execution(python_suite(), packet["python_selected"])
     phase1_receipt = phase1.run()
     executions = []
-    for index, (row, (name, args)) in enumerate(
-        zip(packet["legs"], phase2_legs(), strict=True)
-    ):
-        executions.append(
-            execute_leg(
-                name,
-                args,
-                row["selected_count"],
-                row["selected_sha256"],
-                directory / str(index),
+    with phase1.runtime_pin(directory / "runtime-build") as runtime_receipt:
+        for index, (row, (name, args)) in enumerate(
+            zip(packet["legs"], phase2_legs(), strict=True)
+        ):
+            executions.append(
+                execute_leg(
+                    name,
+                    args,
+                    row["selected_count"],
+                    row["selected_sha256"],
+                    directory / str(index),
+                )
             )
-        )
     if source_identity(ROOT) != identity:
         raise OracleFailure("source changed during Phase 2 execution")
     receipt = {
@@ -222,6 +223,7 @@ def run() -> Path:
         "run_id": run_id,
         "manifest_sha256": hashlib.sha256(MANIFEST.read_bytes()).hexdigest(),
         "phase1_receipt": str(phase1_receipt),
+        "runtime": runtime_receipt,
         "python_executed": [
             {"id": name, "outcome": "passed"} for name in python_cases
         ],

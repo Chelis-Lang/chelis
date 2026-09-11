@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from pathlib import Path
 import tempfile
 import unittest
@@ -73,6 +74,9 @@ class ReceiptTests(unittest.TestCase):
                 ],
                 "manual_exclusions": list(oracle.manual_exclusions()),
             }
+            runtime_receipt = {
+                "pinned_artifact": {str(root / "runtime/libchelis_runtime.a"): "sha256"}
+            }
             events: list[str] = []
 
             def phase_one():
@@ -102,14 +106,21 @@ class ReceiptTests(unittest.TestCase):
                     oracle.phase1, "python_execution", return_value=["phase2.contract"]
                 ),
                 mock.patch.object(oracle.phase1, "run", side_effect=phase_one),
+                mock.patch.object(
+                    oracle.phase1,
+                    "runtime_pin",
+                    return_value=nullcontext(runtime_receipt),
+                ) as runtime_pin,
                 mock.patch.object(oracle, "execute_leg", side_effect=execute),
                 mock.patch.object(oracle.uuid, "uuid4", return_value="run-id"),
             ):
                 receipt = oracle.run()
 
+            runtime_pin.assert_called_once_with(root / "target/runtime-representation-phase2/run-id/runtime-build")
             self.assertEqual(events, ["phase1", *[name for name, _ in legs]])
             payload = json.loads(receipt.read_text())
             self.assertEqual(payload["phase1_receipt"], str(root / "phase1.json"))
+            self.assertEqual(payload["runtime"], runtime_receipt)
             self.assertEqual(payload["head"], "head")
             self.assertEqual(payload["source_digest"], "source")
             self.assertEqual(payload["manual_exclusions"], list(oracle.manual_exclusions()))
