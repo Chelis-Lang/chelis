@@ -3174,14 +3174,16 @@ fn host_def_kernel_product(
         return Ok(None);
     };
     let _preflight_guard = TensorHelperPreflightGuard::begin(&signature.body_expr, program);
+    // Classify lexical controls before host signature preparation substitutes
+    // local callable aliases: that rewrite does not carry closure captures.
+    let profile_body = as_list(body)
+        .filter(|list| tag(list) == Some(DeepTag::Fn))
+        .and_then(|list| children(list).get(1))
+        .unwrap_or(&signature.body_expr);
     let profile = match execution {
         Some(_) => cached_subexpr_lowering_context(program).evaluation_profile(
-            &signature.body_expr,
-            &signature
-                .params
-                .iter()
-                .map(|param| param.name.clone())
-                .collect::<Vec<_>>(),
+            profile_body,
+            &kernel_scope_types(&signature.scope, Some(&signature.params)),
         ),
         None => crate::evaluation::EvaluationProfile::Legacy(
             crate::evaluation::LegacyEvaluationReason::LegacyApi,

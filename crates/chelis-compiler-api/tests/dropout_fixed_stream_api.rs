@@ -10,6 +10,82 @@ use chelis_compiler_api::schema::{
 use std::collections::BTreeMap;
 
 #[test]
+fn unrelated_scalar_capture_preserves_public_acceptance_and_next_draw() {
+    // PR1807 R1: an unrelated rebound scalar is not a closure dependency.
+    let ones = "to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32])";
+    for function_body in [
+        "dropout(v, 0.5f32)",
+        "{ ignored = unrelated\n dropout(v, 0.5f32) }",
+    ] {
+        for shadow in [false, true] {
+            for next_draw in [false, true] {
+                let source = format!(
+                    "def sample(x: tensor[8, f32]) -> tensor[8, f32] = {{\n\
+                 unrelated = 0.5f32\n\
+                 f = fn (v: tensor[8, f32]) -> {function_body}\n\
+                 {}\n f(x)\n}}\n\
+                 def main() = with seed(42i64) {{\n first = sample({ones})\n {}\n}}",
+                    if shadow { "unrelated = 0.25f32" } else { "" },
+                    if next_draw {
+                        format!("add(first, dropout({ones}, 0.5f32))")
+                    } else {
+                        "first".into()
+                    },
+                );
+                let result = eval_selected(
+                    EvalRequest {
+                        source_kind: SourceKind::Surf,
+                        source,
+                        bindings: BTreeMap::new(),
+                    },
+                    &["main".into()],
+                )
+                .unwrap_or_else(|error| panic!("shadow={shadow}, next={next_draw}: {error:?}"));
+                let expected = if next_draw {
+                    mask(0)
+                        .iter()
+                        .zip(mask(1))
+                        .take(8)
+                        .map(|(a, b)| a + b)
+                        .collect::<Vec<_>>()
+                } else {
+                    mask(0)[..8].to_vec()
+                };
+                assert_eq!(tensor(&result, "main"), expected);
+                assert!(result.transcript.is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn generic_static_rate_cast_keeps_precise_public_rejection_until_host_transport() {
+    for dtype in ["f32", "f64"] {
+        let source = format!(
+            "def keep[p: Float](x: tensor[4, p]) -> tensor[4, p] = dropout(x, cast(0.5, p))\n\
+             def main() = with seed(42i64) {{ keep(to_tensor([1.0{dtype}, 1.0{dtype}, 1.0{dtype}, 1.0{dtype}])) }}"
+        );
+        let error = eval_selected(
+            EvalRequest {
+                source_kind: SourceKind::Surf,
+                source,
+                bindings: BTreeMap::new(),
+            },
+            &["main".into()],
+        )
+        .unwrap_err();
+        assert_eq!(error.stage, "lower", "{error:?}");
+        assert!(error.transcript.is_empty());
+        assert!(
+            error.errors.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("requires a statically-resolvable rate")),
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
 fn fixed_dropout_composes_with_host_produced_checked_reshape_targets() {
     use chelis_compiler_api::compiler::{eval_in_context, prepare_eval_in_context};
     use chelis_compiler_api::{COMPILER_VERSION, compile_reef_context};

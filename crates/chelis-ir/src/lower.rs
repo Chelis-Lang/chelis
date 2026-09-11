@@ -9,6 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::{Arc, OnceLock};
 
+mod static_controls;
+
 /// Path-sensitive helpers emitted outside the dynamic handler cannot bake its
 /// seed. The active helper path obtains the real seed from the host handler;
 /// the inactive path's value is discarded by the enclosing blend.
@@ -1686,12 +1688,8 @@ pub(crate) fn try_lower_subexpr_evaluation_with_ordered_inputs(
     result_claim: Option<&TensorType>,
     execution: &crate::evaluation::RandomExecutionContext,
 ) -> Result<crate::evaluation::EvaluationPlan, LowerDiagnostic> {
-    let names = scoped_types
-        .iter()
-        .map(|(name, _)| name.clone())
-        .collect::<Vec<_>>();
     if let crate::evaluation::EvaluationProfile::Legacy(reason) =
-        context.evaluation_profile(expr, &names)
+        context.evaluation_profile(expr, &scoped_types)
         && reason != crate::evaluation::LegacyEvaluationReason::NoDropout
     {
         return Err(LowerDiagnostic::new(
@@ -1741,15 +1739,15 @@ impl SubexprLoweringContext {
     pub(crate) fn evaluation_profile(
         &self,
         expr: &Expr,
-        bound: &[String],
+        bound: &[(String, TensorType)],
     ) -> crate::evaluation::EvaluationProfile {
         let defs = self
             .program_defs
             .iter()
-            .filter(|(name, _)| !bound.contains(name))
+            .filter(|(name, _)| !bound.iter().any(|(bound, _)| bound == *name))
             .map(|(name, body)| (name.clone(), body.clone()))
             .collect();
-        evaluation_profile_from_defs(expr, &defs)
+        static_controls::profile(expr, &defs, bound)
     }
 }
 
@@ -4499,140 +4497,7 @@ fn evaluation_profile_from_defs(
     expr: &Expr,
     program_defs: &BTreeMap<String, Expr>,
 ) -> crate::evaluation::EvaluationProfile {
-    use crate::evaluation::{EvaluationProfile, LegacyEvaluationReason as Reason};
-    struct Profile<'a> {
-        defs: &'a BTreeMap<String, Expr>,
-        active: BTreeSet<String>,
-        dropout: bool,
-        reason: Option<Reason>,
-    }
-    impl Profile<'_> {
-        fn visit(&mut self, expr: &Expr, grad_depth: usize, bound: &UnordSet<String>) {
-            if let Some(name) = bare_var_name(expr)
-                && !bound.contains(&name)
-                && let Some(body) = self.defs.get(&name)
-            {
-                if bare_var_name(body).as_ref() == Some(&name) {
-                    return;
-                }
-                if !self.active.insert(name.clone()) {
-                    self.reason.get_or_insert(Reason::RecursiveControl);
-                    return;
-                }
-                self.visit(body, grad_depth, &UnordSet::new());
-                self.active.remove(&name);
-                return;
-            }
-            if let Some(("dropout", args)) = app_var_name_and_args(expr)
-                && !bound.contains("dropout")
-                && !self.defs.contains_key("dropout")
-            {
-                self.dropout = true;
-                if args.get(1).and_then(extract_numeric_leaf).is_none() {
-                    self.reason.get_or_insert(Reason::RuntimeRate);
-                }
-            }
-            let Some((tag, metadata, kids)) = stamped_parts(expr) else {
-                return;
-            };
-            if tag == DeepTag::Fn {
-                let mut scoped = bound.clone();
-                if let Some(params) = kids.first()
-                    && let Some((DeepTag::Params, _, params)) = stamped_parts(params)
-                {
-                    for param in params {
-                        collect_param_bound_names(param, &mut scoped);
-                    }
-                }
-                if let Some(body) = kids.get(1) {
-                    self.visit(body, grad_depth, &scoped);
-                }
-                return;
-            }
-            if tag == DeepTag::Let {
-                let mut scoped = bound.clone();
-                if let Some(bindings) = kids.first()
-                    && let Some((DeepTag::Bind, _, bindings)) = stamped_parts(bindings)
-                {
-                    for pair in bindings.as_chunks::<2>().0 {
-                        self.visit(&pair[1], grad_depth, &scoped);
-                        if let Some(name) = symbol_name(&pair[0]) {
-                            scoped.insert(name.to_owned());
-                        }
-                    }
-                }
-                if let Some(body) = kids.get(1) {
-                    self.visit(body, grad_depth, &scoped);
-                }
-                return;
-            }
-            let next_depth = match tag {
-                DeepTag::Grad => {
-                    if grad_depth != 0 {
-                        self.reason.get_or_insert(Reason::HigherOrderAd);
-                    }
-                    grad_depth + 1
-                }
-                DeepTag::Vmap => {
-                    self.reason.get_or_insert(Reason::RandomVmap);
-                    grad_depth
-                }
-                DeepTag::HandleEffect => {
-                    if metadata
-                        .effect()
-                        .is_some_and(|effect| *effect.value() == EffectKind::Resource)
-                    {
-                        self.reason.get_or_insert(Reason::ResourceScope);
-                    } else if kids.first().and_then(extract_numeric_leaf).is_none() {
-                        self.reason.get_or_insert(Reason::RuntimeSeed);
-                    }
-                    grad_depth
-                }
-                DeepTag::If => {
-                    let condition = kids.first().and_then(extract_numeric_leaf);
-                    let branch = match condition {
-                        Some(StagedScalar::Raw(chelis_types::RawScalar::Int(value))) => {
-                            Some(value != 0)
-                        }
-                        Some(StagedScalar::Typed(value)) if value.prim() == Prim::Bool => {
-                            value.as_i64_exact().map(|value| value != 0)
-                        }
-                        _ => None,
-                    };
-                    if let Some(branch) = branch {
-                        if let Some(selected) = kids.get(if branch { 1 } else { 2 }) {
-                            self.visit(selected, grad_depth, bound);
-                        }
-                        return;
-                    }
-                    self.reason.get_or_insert(Reason::DynamicControl);
-                    grad_depth
-                }
-                DeepTag::Match => {
-                    self.reason.get_or_insert(Reason::DynamicControl);
-                    grad_depth
-                }
-                _ => grad_depth,
-            };
-            for child in kids {
-                self.visit(child, next_depth, bound);
-            }
-        }
-    }
-    let mut profile = Profile {
-        defs: program_defs,
-        active: BTreeSet::new(),
-        dropout: false,
-        reason: None,
-    };
-    profile.visit(expr, 0, &UnordSet::new());
-    if let Some(reason) = profile.reason {
-        EvaluationProfile::Legacy(reason)
-    } else if !profile.dropout {
-        EvaluationProfile::Legacy(Reason::NoDropout)
-    } else {
-        EvaluationProfile::FixedControl
-    }
+    static_controls::profile(expr, program_defs, &[])
 }
 
 fn to_list_source_expr(expr: &Expr) -> Option<&Expr> {
@@ -6028,6 +5893,7 @@ struct LowerCtx<'program> {
     reshape_targets: BTreeMap<NodeId, usize>,
     invocation_witnesses: Vec<NodeId>,
     local_callables: UnordMap<String, CallableExpr>,
+    static_rate_bindings: UnordMap<String, StagedScalar>,
     program_types: Arc<BTreeMap<String, TensorType>>,
     program_defs: Arc<BTreeMap<String, Expr>>,
     program_signatures: Arc<BTreeMap<String, Expr>>,
@@ -6176,6 +6042,7 @@ impl<'program> LowerCtx<'program> {
             local_unit_refinements: BTreeMap::new(),
             invocation_witnesses: Vec::new(),
             local_callables: UnordMap::new(),
+            static_rate_bindings: UnordMap::new(),
             program_types: program_types.into(),
             program_defs: program_defs.into(),
             program_signatures: program_signatures.into(),
@@ -6396,6 +6263,13 @@ impl<'program> LowerCtx<'program> {
                 .into_iter()
                 .filter(|(name, _)| !shadowed.contains(*name))
                 .map(|(name, value)| (name.clone(), value.clone())),
+        );
+        subctx.static_rate_bindings.extend(
+            self.static_rate_bindings
+                .to_sorted()
+                .into_iter()
+                .filter(|(name, _)| !shadowed.contains(*name))
+                .map(|(name, value)| (name.clone(), *value)),
         );
         subctx.fn_typed_params.extend(
             self.fn_typed_params
@@ -7685,6 +7559,7 @@ impl<'program> LowerCtx<'program> {
 
     /// `(let {} (bind {} name1 expr1 name2 expr2 ...) body)`
     fn lower_let(&mut self, elems: &[Expr]) -> LoweredValue {
+        let saved_static_rates = self.static_rate_bindings.clone();
         let witness_start = self.invocation_witnesses.len();
         if elems.len() < 4 {
             raise_malformed_deep(
@@ -7710,6 +7585,7 @@ impl<'program> LowerCtx<'program> {
             let mut i = 0;
             while i + 1 < bind_kids.len() {
                 if let Expr::Atom(Atom::Name(name), _) = &bind_kids[i] {
+                    let static_rate = self.static_rate(&bind_kids[i + 1]);
                     // Same shadowing rationale as
                     // `lower_plain_callable_app`: drop any outer-scope
                     // `fn_typed_params[name]` so a let-shadowed name
@@ -7785,6 +7661,10 @@ impl<'program> LowerCtx<'program> {
                         }
                         self.bindings.insert(name.clone(), val_id);
                     }
+                    self.static_rate_bindings.remove(name);
+                    if let Some(value) = static_rate {
+                        self.static_rate_bindings.insert(name.clone(), value);
+                    }
                 }
                 i += 2;
             }
@@ -7793,6 +7673,7 @@ impl<'program> LowerCtx<'program> {
         let result = self.lower_expr(&elems[3]);
         let result = self.retain_invocation_witnesses(result, witness_start);
         self.bindings = saved; // Restore scope
+        self.static_rate_bindings = saved_static_rates;
         self.binding_witnesses = saved_witnesses;
         self.local_unit_refinements = saved_unit_refinements;
         self.signature_witnesses = saved_signature_witnesses;
@@ -9088,6 +8969,13 @@ impl<'program> LowerCtx<'program> {
         _app_span: Span,
         inlining_name: Option<String>,
     ) -> LoweredValue {
+        let saved_static_rates = self.static_rate_bindings.clone();
+        // Resolve all controls in the caller, before any callee formal shadows
+        // an actual name. This inspects source and never evaluates an argument.
+        let static_rates = args
+            .iter()
+            .map(|arg| self.static_rate(arg))
+            .collect::<Vec<_>>();
         let Some((param_names, body)) = self.extract_fn_parts(fn_expr) else {
             return self
                 .lower_unrepresentable("function application", std::slice::from_ref(fn_expr));
@@ -9206,6 +9094,12 @@ impl<'program> LowerCtx<'program> {
         }
         self.dim_substitutions
             .merge(tensor_dim_substitutions(&formal_types, &actual_types));
+        for (name, value) in param_names.iter().zip(static_rates) {
+            self.static_rate_bindings.remove(name);
+            if let Some(value) = value {
+                self.static_rate_bindings.insert(name.clone(), value);
+            }
+        }
         // Issue #388: record the positional index of each named axis in the
         // formal parameter shapes so a named reduction/expand-anchor lookup
         // can recover the axis even after monomorphization erases the named
@@ -9352,6 +9246,7 @@ impl<'program> LowerCtx<'program> {
         self.prec_substitutions = saved_prec_substitutions;
         self.rank_substitutions = saved_rank_substitutions;
         self.dim_axis_positions = saved_dim_axis_positions;
+        self.static_rate_bindings = saved_static_rates;
         result
     }
 
@@ -10303,6 +10198,9 @@ impl<'program> LowerCtx<'program> {
                         self.random_seed.unwrap_or(COMPILED_HANDLER_OWNED_SEED),
                     )
                 } else {
+                    // Legacy host dispatch does not transport specialized
+                    // rate provenance. Keep its precise pre-execution
+                    // rejection until that separate boundary supports plans.
                     let rate = self.resolve_static_f64_arg(&args[1], "dropout", "rate");
                     let seed = self.random_seed.unwrap_or(0)
                         ^ self.random_counter.wrapping_mul(0x9E37_79B9_7F4A_7C15);
@@ -14514,6 +14412,18 @@ impl<'program> LowerCtx<'program> {
     /// Resolve a statically-known scalar and finalize it once at `target`.
     /// Unlike the legacy f64 extractor, an integer leaf remains exact through
     /// int64 and a typed leaf retains its source dtype until the checked cast.
+    fn static_rate(&self, expr: &Expr) -> Option<StagedScalar> {
+        self.execution.as_ref()?;
+        static_controls::scalar(
+            expr,
+            &self.static_rate_bindings,
+            &self.prec_substitutions,
+            !self.bindings.contains_key("neg")
+                && !self.local_callables.contains_key("neg")
+                && !self.program_defs.contains_key("neg"),
+        )
+    }
+
     fn resolve_static_scalar_arg(
         &self,
         expr: &Expr,
@@ -14521,7 +14431,11 @@ impl<'program> LowerCtx<'program> {
         builtin: &'static str,
         arg_desc: &str,
     ) -> chelis_types::ScalarValue {
-        let value = match extract_numeric_leaf(expr) {
+        let value = match if builtin == "dropout" {
+            self.static_rate(expr)
+        } else {
+            extract_numeric_leaf(expr)
+        } {
             Some(StagedScalar::Raw(raw)) => chelis_types::cast_raw(builtin, raw, target),
             Some(StagedScalar::Typed(value)) => chelis_types::cast_scalar(builtin, value, target),
             None => raise_fatal_lowering_error(
