@@ -176,7 +176,7 @@ impl MemoryPlan {
     }
 }
 
-fn bytes_expr(expr: &DimExpr, dtype: Prim) -> DimExpr {
+pub(crate) fn bytes_expr(expr: &DimExpr, dtype: Prim) -> DimExpr {
     let bytes = dtype
         .runtime_dtype()
         .unwrap_or_else(|error| {
