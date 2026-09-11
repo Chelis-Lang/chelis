@@ -399,10 +399,10 @@ impl<'a> EvalContext<'a> {
     /// chelis#1277 B2h: the kernel the C lane emits for def `name`, or `None`
     /// for the host lane. The decision is `chelis_ir::host::host_def_kernel`,
     /// the function `lower_host_function` itself uses, so the two lanes cannot
-    /// disagree about which defs are kernels. A kernel whose DAG draws no
-    /// Random is cached per def; one that draws is re-lowered on every
-    /// application so its ordinals start at the current stream position, as
-    /// the transforms re-lower per application. A kernel decision whose
+    /// disagree about which defs are kernels. A context-bound evaluation plan
+    /// or a kernel whose DAG draws Random is re-lowered on every application
+    /// so its inherited seed and ordinals start at the current stream position,
+    /// as the transforms re-lower per application. A kernel decision whose
     /// lowering fails is the evaluation's error, never a fall-through to the
     /// interpreter (the C lane's fall-through is chelis#1515 and is not
     /// inherited here).
@@ -444,9 +444,13 @@ impl<'a> EvalContext<'a> {
         let kernel = host_def_evaluation_plan(program, name, &RandomExecutionContext::new(random))
             .map_err(|diagnostic| diagnostic.to_string())?
             .map(|plan| Arc::new(DefEvaluationKernel::Planned(plan)));
-        if !kernel
+        let context_bound = kernel
             .as_ref()
-            .is_some_and(|kernel| kernel_draws_random(kernel.kernel_for_inspection()))
+            .is_some_and(|kernel| kernel.plan().is_some() || kernel.staged_plan().is_some());
+        if !context_bound
+            && !kernel
+                .as_ref()
+                .is_some_and(|kernel| kernel_draws_random(kernel.kernel_for_inspection()))
         {
             self.def_kernels.insert(name.to_string(), kernel.clone());
         }
