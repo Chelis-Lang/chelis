@@ -499,6 +499,7 @@ pub(super) fn finish_unified_app(
     }
 
     if let Some(ref fname) = func_name {
+        let site = UnresolvedOperandSite::new(list, kids, fname.as_str(), env);
         match fname.as_str() {
             "print" => {
                 return Type::Unit;
@@ -506,8 +507,16 @@ pub(super) fn finish_unified_app(
             "fail" => {
                 if let Some(first_arg) = arg_tys.first() {
                     match subst.apply(first_arg) {
-                        Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {
+                        Type::Prim(Prim::String) | Type::Error(_) => {
                             return Type::Var(vg.fresh_tvar());
+                        }
+                        Type::Var(_) => {
+                            return site.defer(
+                                &arg_tys,
+                                &result_ty,
+                                product,
+                                Type::Var(vg.fresh_tvar()),
+                            );
                         }
                         other => {
                             return report(
@@ -533,8 +542,16 @@ pub(super) fn finish_unified_app(
             "string_len" => {
                 if let Some(first_arg) = arg_tys.first() {
                     match subst.apply(first_arg) {
-                        Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {
+                        Type::Prim(Prim::String) | Type::Error(_) => {
                             return Type::Prim(Prim::Int64);
+                        }
+                        Type::Var(_) => {
+                            return site.defer(
+                                &arg_tys,
+                                &result_ty,
+                                product,
+                                Type::Prim(Prim::Int64),
+                            );
                         }
                         other => {
                             return report(
@@ -555,7 +572,8 @@ pub(super) fn finish_unified_app(
             "string_concat" => {
                 for arg_ty in &arg_tys {
                     match subst.apply(arg_ty) {
-                        Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {}
+                        Type::Prim(Prim::String) | Type::Error(_) => {}
+                        Type::Var(_) => site.register(&arg_tys, &result_ty, product),
                         other => {
                             return report(
                                 errors,
@@ -578,7 +596,8 @@ pub(super) fn finish_unified_app(
             "string_slice" => {
                 if let Some(first_arg) = arg_tys.first() {
                     match subst.apply(first_arg) {
-                        Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {}
+                        Type::Prim(Prim::String) | Type::Error(_) => {}
+                        Type::Var(_) => site.register(&arg_tys, &result_ty, product),
                         other => {
                             return report(
                                 errors,
@@ -597,7 +616,8 @@ pub(super) fn finish_unified_app(
                 for (index, arg_ty) in arg_tys.iter().enumerate().skip(1) {
                     match subst.apply(arg_ty) {
                         Type::Prim(precision) if precision.is_integer() => {}
-                        Type::Var(_) | Type::Error(_) => {}
+                        Type::Error(_) => {}
+                        Type::Var(_) => site.register(&arg_tys, &result_ty, product),
                         other => {
                             return report(
                                 errors,
@@ -642,8 +662,16 @@ pub(super) fn finish_unified_app(
             "string_trim" => {
                 if let Some(first_arg) = arg_tys.first() {
                     match subst.apply(first_arg) {
-                        Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {
+                        Type::Prim(Prim::String) | Type::Error(_) => {
                             return Type::Prim(Prim::String);
+                        }
+                        Type::Var(_) => {
+                            return site.defer(
+                                &arg_tys,
+                                &result_ty,
+                                product,
+                                Type::Prim(Prim::String),
+                            );
                         }
                         other => {
                             return report(
@@ -667,8 +695,16 @@ pub(super) fn finish_unified_app(
             "to_int" => {
                 if let Some(first_arg) = arg_tys.first() {
                     match subst.apply(first_arg) {
-                        Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {
+                        Type::Prim(Prim::String) | Type::Error(_) => {
                             return Type::Adt("Option".to_string(), vec![Type::Prim(Prim::Int64)]);
+                        }
+                        Type::Var(_) => {
+                            return site.defer(
+                                &arg_tys,
+                                &result_ty,
+                                product,
+                                Type::Adt("Option".to_string(), vec![Type::Prim(Prim::Int64)]),
+                            );
                         }
                         other => {
                             return report(
@@ -689,8 +725,16 @@ pub(super) fn finish_unified_app(
             "to_float" => {
                 if let Some(first_arg) = arg_tys.first() {
                     match subst.apply(first_arg) {
-                        Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {
+                        Type::Prim(Prim::String) | Type::Error(_) => {
                             return Type::Adt("Option".to_string(), vec![Type::Prim(Prim::F64)]);
+                        }
+                        Type::Var(_) => {
+                            return site.defer(
+                                &arg_tys,
+                                &result_ty,
+                                product,
+                                Type::Adt("Option".to_string(), vec![Type::Prim(Prim::F64)]),
+                            );
                         }
                         other => {
                             return report(
@@ -711,8 +755,16 @@ pub(super) fn finish_unified_app(
             "rank" => {
                 if let Some(first_arg) = arg_tys.first() {
                     match type_for_readonly_check(first_arg, subst) {
-                        Type::Tensor(_, _) | Type::Var(_) | Type::Error(_) => {
+                        Type::Tensor(_, _) | Type::Error(_) => {
                             return Type::Prim(Prim::Int32);
+                        }
+                        Type::Var(_) => {
+                            return site.defer(
+                                &arg_tys,
+                                &result_ty,
+                                product,
+                                Type::Prim(Prim::Int32),
+                            );
                         }
                         other => {
                             return report(
@@ -738,7 +790,10 @@ pub(super) fn finish_unified_app(
                     // validation.
                     match type_for_readonly_check(first_arg, subst) {
                         Type::Tensor(dims, _) => Some(dims),
-                        Type::Var(_) | Type::Error(_) => None,
+                        Type::Error(_) => None,
+                        Type::Var(_) => {
+                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                        }
                         other => {
                             return report(
                                 errors,
@@ -800,8 +855,16 @@ pub(super) fn finish_unified_app(
                     match subst.apply(axis_arg) {
                         // [05-DIM-2]: extent-domain out (int64), axis-domain
                         // in (int32).
-                        Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_) => {
+                        Type::Prim(Prim::Int32) | Type::Error(_) => {
                             return Type::Prim(Prim::Int64);
+                        }
+                        Type::Var(_) => {
+                            return site.defer(
+                                &arg_tys,
+                                &result_ty,
+                                product,
+                                Type::Prim(Prim::Int64),
+                            );
                         }
                         other => {
                             return report(
@@ -822,8 +885,16 @@ pub(super) fn finish_unified_app(
             "numel" => {
                 if let Some(first_arg) = arg_tys.first() {
                     match type_for_readonly_check(first_arg, subst) {
-                        Type::Tensor(_, _) | Type::Var(_) | Type::Error(_) => {
+                        Type::Tensor(_, _) | Type::Error(_) => {
                             return Type::Prim(Prim::Int64);
+                        }
+                        Type::Var(_) => {
+                            return site.defer(
+                                &arg_tys,
+                                &result_ty,
+                                product,
+                                Type::Prim(Prim::Int64),
+                            );
                         }
                         other => {
                             return report(
@@ -865,7 +936,10 @@ pub(super) fn finish_unified_app(
                                 TensorPrec::Var(p) => Type::Var(p),
                             };
                         }
-                        Type::Var(_) | Type::Error(_) => return result_ty,
+                        Type::Error(_) => return result_ty,
+                        Type::Var(_) => {
+                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                        }
                         other => {
                             return report(
                                 errors,
@@ -893,7 +967,10 @@ pub(super) fn finish_unified_app(
                         Type::Var(p) if subst.tvar_restriction(p).is_some() => {
                             return Type::Tensor(vec![], TensorPrec::Var(p));
                         }
-                        Type::Var(_) | Type::Error(_) => return result_ty,
+                        Type::Error(_) => return result_ty,
+                        Type::Var(_) => {
+                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                        }
                         other => {
                             return report(
                                 errors,
@@ -1055,7 +1132,10 @@ pub(super) fn finish_unified_app(
                     Type::Tensor(dims, precision) => {
                         return Type::Tensor(dims, precision);
                     }
-                    Type::Var(_) | Type::Error(_) => return result_ty,
+                    Type::Error(_) => return result_ty,
+                    Type::Var(_) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                    }
                     other => {
                         return report(
                             errors,
@@ -1265,7 +1345,10 @@ pub(super) fn finish_unified_app(
                             Type::Tensor(dims, TensorPrec::Concrete(Prim::Int64)),
                         ]);
                     }
-                    Type::Var(_) | Type::Error(_) => return result_ty,
+                    Type::Error(_) => return result_ty,
+                    Type::Var(_) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                    }
                     other => {
                         return report(
                             errors,
@@ -1392,7 +1475,15 @@ pub(super) fn finish_unified_app(
                         Type::Adt(name, _) if name == "List" || name == "Dict" => {
                             return Type::Prim(Prim::Int64);
                         }
-                        Type::Var(_) | Type::Error(_) => return Type::Prim(Prim::Int64),
+                        Type::Error(_) => return Type::Prim(Prim::Int64),
+                        Type::Var(_) => {
+                            return site.defer(
+                                &arg_tys,
+                                &result_ty,
+                                product,
+                                Type::Prim(Prim::Int64),
+                            );
+                        }
                         Type::Ref(inner) if matches!(&*inner, Type::Adt(name, _) if name == "List" || name == "Dict") =>
                         {
                             return report(
@@ -1451,7 +1542,10 @@ pub(super) fn finish_unified_app(
                     Type::Adt(name, mut args) if name == "List" && args.len() == 1 => {
                         return args.remove(0);
                     }
-                    Type::Var(_) | Type::Error(_) => return result_ty,
+                    Type::Error(_) => return result_ty,
+                    Type::Var(_) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                    }
                     Type::Ref(inner) if matches!(&*inner, Type::Adt(name, _) if name == "List") => {
                         return report(
                             errors,
@@ -1496,7 +1590,10 @@ pub(super) fn finish_unified_app(
                         }
                         return Type::Adt("List".to_string(), vec![subst.apply(&args[0])]);
                     }
-                    Type::Var(_) | Type::Error(_) => return result_ty,
+                    Type::Error(_) => return result_ty,
+                    Type::Var(_) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                    }
                     other => {
                         return report(
                             errors,
@@ -1722,7 +1819,10 @@ pub(super) fn finish_unified_app(
                     Type::Adt(name, args) if name == "List" && args.len() == 1 => {
                         return Type::Adt("List".to_string(), vec![args[0].clone()]);
                     }
-                    Type::Var(_) | Type::Error(_) => return result_ty,
+                    Type::Error(_) => return result_ty,
+                    Type::Var(_) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                    }
                     other => {
                         return report(
                             errors,
@@ -1766,7 +1866,10 @@ pub(super) fn finish_unified_app(
                             vec![Type::Adt("List".to_string(), vec![args[0].clone()])],
                         );
                     }
-                    Type::Var(_) | Type::Error(_) => return result_ty,
+                    Type::Error(_) => return result_ty,
+                    Type::Var(_) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                    }
                     other => {
                         return report(
                             errors,
@@ -1789,7 +1892,8 @@ pub(super) fn finish_unified_app(
                 for arg_ty in &arg_tys {
                     match subst.apply(arg_ty) {
                         Type::Prim(prec) if prec.is_integer() => {}
-                        Type::Var(_) | Type::Error(_) => {}
+                        Type::Error(_) => {}
+                        Type::Var(_) => site.register(&arg_tys, &result_ty, product),
                         other => {
                             return report(
                                 errors,
@@ -2114,7 +2218,15 @@ pub(super) fn finish_unified_app(
                                         vec![inner_args[0].clone()],
                                     );
                                 }
-                                Type::Var(_) | Type::Error(_) => return result_ty,
+                                Type::Error(_) => return result_ty,
+                                Type::Var(_) => {
+                                    return site.defer(
+                                        &arg_tys,
+                                        &result_ty,
+                                        product,
+                                        result_ty.clone(),
+                                    );
+                                }
                                 other => {
                                     return report(
                                         errors,
@@ -2132,7 +2244,10 @@ pub(super) fn finish_unified_app(
                                 }
                             }
                         }
-                        Type::Var(_) | Type::Error(_) => return result_ty,
+                        Type::Error(_) => return result_ty,
+                        Type::Var(_) => {
+                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                        }
                         other => {
                             return report(
                                 errors,
@@ -2197,7 +2312,10 @@ pub(super) fn finish_unified_app(
                                 vec![Type::Tuple(vec![Type::Prim(Prim::Int64), args[0].clone()])],
                             );
                         }
-                        Type::Var(_) | Type::Error(_) => return result_ty,
+                        Type::Error(_) => return result_ty,
+                        Type::Var(_) => {
+                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                        }
                         other => {
                             return report(
                                 errors,
@@ -2222,7 +2340,15 @@ pub(super) fn finish_unified_app(
                                 Type::Tuple(items) if items.len() == 2 => {
                                     match &items[0] {
                                         Type::Prim(Prim::Int64) | Type::Prim(Prim::String) => {}
-                                        Type::Var(_) | Type::Error(_) => return result_ty,
+                                        Type::Error(_) => return result_ty,
+                                        Type::Var(_) => {
+                                            return site.defer(
+                                                &arg_tys,
+                                                &result_ty,
+                                                product,
+                                                result_ty.clone(),
+                                            );
+                                        }
                                         other => {
                                             return report(
                                                 errors,
@@ -2247,7 +2373,15 @@ pub(super) fn finish_unified_app(
                                         vec![items[0].clone(), items[1].clone()],
                                     );
                                 }
-                                Type::Var(_) | Type::Error(_) => return result_ty,
+                                Type::Error(_) => return result_ty,
+                                Type::Var(_) => {
+                                    return site.defer(
+                                        &arg_tys,
+                                        &result_ty,
+                                        product,
+                                        result_ty.clone(),
+                                    );
+                                }
                                 other => {
                                     return report(
                                         errors,
@@ -2265,7 +2399,10 @@ pub(super) fn finish_unified_app(
                                 }
                             }
                         }
-                        Type::Var(_) | Type::Error(_) => return result_ty,
+                        Type::Error(_) => return result_ty,
+                        Type::Var(_) => {
+                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                        }
                         other => {
                             return report(
                                 errors,
@@ -2486,7 +2623,10 @@ pub(super) fn finish_unified_app(
                         Type::Adt(name, args) if name == "Dict" && args.len() == 2 => {
                             return Type::Adt("List".to_string(), vec![args[0].clone()]);
                         }
-                        Type::Var(_) | Type::Error(_) => return result_ty,
+                        Type::Error(_) => return result_ty,
+                        Type::Var(_) => {
+                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                        }
                         other => {
                             return report(
                                 errors,
@@ -2509,7 +2649,10 @@ pub(super) fn finish_unified_app(
                         Type::Adt(name, args) if name == "Dict" && args.len() == 2 => {
                             return Type::Adt("List".to_string(), vec![args[1].clone()]);
                         }
-                        Type::Var(_) | Type::Error(_) => return result_ty,
+                        Type::Error(_) => return result_ty,
+                        Type::Var(_) => {
+                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                        }
                         other => {
                             return report(
                                 errors,
@@ -2535,7 +2678,10 @@ pub(super) fn finish_unified_app(
                                 vec![Type::Tuple(vec![args[0].clone(), args[1].clone()])],
                             );
                         }
-                        Type::Var(_) | Type::Error(_) => return result_ty,
+                        Type::Error(_) => return result_ty,
+                        Type::Var(_) => {
+                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                        }
                         other => {
                             return report(
                                 errors,
@@ -2573,8 +2719,11 @@ pub(super) fn finish_unified_app(
                     // the to_tensor app's `type:` metadata) sees a
                     // sound shape instead of `Dim::Wildcard`.
                     let resolved = subst.apply(first_arg);
-                    if matches!(resolved, Type::Var(_) | Type::Error(_)) {
+                    if matches!(resolved, Type::Error(_)) {
                         return result_ty;
+                    }
+                    if matches!(resolved, Type::Var(_)) {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
                     }
                     match peel_to_tensor_argument(&resolved) {
                         ToTensorPeel::Ok { rank, precision } => {
@@ -2687,7 +2836,10 @@ pub(super) fn finish_unified_app(
                             }
                             return Type::Adt("List".to_string(), vec![Type::Prim(precision)]);
                         }
-                        Type::Var(_) | Type::Error(_) => return result_ty,
+                        Type::Error(_) => return result_ty,
+                        Type::Var(_) => {
+                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                        }
                         other => {
                             return report(
                                 errors,
@@ -2728,7 +2880,15 @@ pub(super) fn finish_unified_app(
                                             TensorPrec::Concrete(precision),
                                         );
                                     }
-                                    Type::Var(_) | Type::Error(_) => return result_ty,
+                                    Type::Error(_) => return result_ty,
+                                    Type::Var(_) => {
+                                        return site.defer(
+                                            &arg_tys,
+                                            &result_ty,
+                                            product,
+                                            result_ty.clone(),
+                                        );
+                                    }
                                     other => {
                                         return report(
                                             errors,
@@ -2763,7 +2923,10 @@ pub(super) fn finish_unified_app(
                             }
                         }
                     }
-                    Type::Var(_) | Type::Error(_) => return result_ty,
+                    Type::Error(_) => return result_ty,
+                    Type::Var(_) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                    }
                     other => {
                         return report(
                             errors,
@@ -2823,7 +2986,15 @@ pub(super) fn finish_unified_app(
                                             TensorPrec::Concrete(precision),
                                         );
                                     }
-                                    Type::Var(_) | Type::Error(_) => return result_ty,
+                                    Type::Error(_) => return result_ty,
+                                    Type::Var(_) => {
+                                        return site.defer(
+                                            &arg_tys,
+                                            &result_ty,
+                                            product,
+                                            result_ty.clone(),
+                                        );
+                                    }
                                     other => {
                                         return report(
                                             errors,
@@ -2858,7 +3029,10 @@ pub(super) fn finish_unified_app(
                             }
                         }
                     }
-                    Type::Var(_) | Type::Error(_) => return result_ty,
+                    Type::Error(_) => return result_ty,
+                    Type::Var(_) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                    }
                     other => {
                         return report(
                             errors,
