@@ -65,6 +65,7 @@ mod app_route;
 mod app_scatter;
 mod app_shape;
 mod app_shape_helpers;
+mod app_string;
 mod app_tensor;
 mod binder_literal;
 mod checked;
@@ -79,6 +80,7 @@ mod expr_function;
 mod expr_pattern;
 pub(crate) mod expr_record;
 mod expr_transform;
+mod operand_deferral;
 mod program;
 pub(crate) mod recursion;
 mod rigid;
@@ -101,6 +103,7 @@ use app_route::*;
 use app_scatter::*;
 use app_shape::*;
 use app_shape_helpers::*;
+use app_string::*;
 use app_tensor::*;
 use binder_literal::*;
 use checked::*;
@@ -112,6 +115,7 @@ use expr_function::*;
 use expr_pattern::*;
 use expr_record::*;
 use expr_transform::*;
+use operand_deferral::*;
 use program::*;
 use rigid::*;
 use slot::*;
@@ -133,9 +137,11 @@ pub use validate::type_to_deep_expr;
 
 pub(crate) use checked::checked_program_with_effect_annotations_in_session;
 #[cfg(test)]
+pub(crate) use checked::take_post_app_key_log;
+#[cfg(test)]
 pub(crate) use checked::{
-    FinalizationMutationCase, TypeStampMutationCase, run_finalization_mutation_case,
-    run_type_stamp_mutation_case,
+    FinalizationMutationCase, ReconcileMutationCase, TypeStampMutationCase,
+    run_finalization_mutation_case, run_reconcile_mutation_case, run_type_stamp_mutation_case,
 };
 pub(crate) use declarations::{param_has_consuming_use, param_has_consuming_use_in_session};
 pub(crate) use program::{

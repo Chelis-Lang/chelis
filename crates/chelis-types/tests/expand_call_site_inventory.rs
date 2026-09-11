@@ -215,6 +215,11 @@ const ALLOWED: &[(&str, usize, &str)] = &[
         14,
         "unit-extent operands at a legal axis, plus one axis-out-of-range negative row",
     ),
+    (
+        "crates/chelis-types/tests/unresolved_operand_matrix.rs",
+        3,
+        "chelis#1512's `expand` row: a valid broadcast of axis 0 from the unit extent of tensor[1, 3, f32], the axis-out-of-range twin beside it, and the name once more in the route label; all same-rank",
+    ),
     // chelis#668 PR A. The `expand` sites here are POSITIVE CONTROLS: the
     // reproducer PP5's retired validator used to reject is rank 1 beside rank
     // 1 under the one-shape rule, so it is well typed and must stay spelled
