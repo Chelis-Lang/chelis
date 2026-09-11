@@ -81,6 +81,44 @@ pub fn lower_checked_for_c_execution(
     let (_, host) =
         chelis_ir::host::try_lower_execution_program_with_manifest(checked.program(), manifest)
             .map_err(CoreLowerError::Lower)?;
+    finish_c_execution_lowering(checked, host, mode)
+}
+
+/// Opt-in pass capture follows the same C lane and ordinary root guards.
+/// Captures never make an ordinary helper into a planned execution helper.
+#[cfg(feature = "lowering-trace")]
+pub fn lower_checked_for_c_execution_with_trace(
+    checked: CheckedCompilation,
+    manifest: &chelis_types::manifest::RootManifest,
+    mode: LoweringMode,
+) -> Result<
+    (
+        LoweredCompilation,
+        Option<chelis_ir::host::ConcreteHostProgram>,
+        Option<chelis_ir::host::HostExecutionPlan>,
+    ),
+    CoreLowerError,
+> {
+    let (_, host) = chelis_ir::host::try_lower_execution_program_with_manifest_and_trace(
+        checked.program(),
+        manifest,
+    )
+    .map_err(CoreLowerError::Lower)?;
+    finish_c_execution_lowering(checked, host, mode)
+}
+
+fn finish_c_execution_lowering(
+    checked: CheckedCompilation,
+    host: Option<chelis_ir::host::HostExecutionPlan>,
+    mode: LoweringMode,
+) -> Result<
+    (
+        LoweredCompilation,
+        Option<chelis_ir::host::ConcreteHostProgram>,
+        Option<chelis_ir::host::HostExecutionPlan>,
+    ),
+    CoreLowerError,
+> {
     if host
         .as_ref()
         .is_some_and(|plan| plan.has_execution_helpers())
@@ -104,7 +142,13 @@ pub fn lower_checked_for_c_execution(
         };
         let lowered = lower_checked(checked, mode)?;
         let ordinary = host
-            .map(|plan| plan.into_ordinary())
+            .map(|plan| {
+                // This lane remains ordinary compilation; helper snapshots
+                // cannot justify changing its selection or optimization.
+                #[cfg(feature = "lowering-trace")]
+                let plan = plan.discard_helper_traces();
+                plan.into_ordinary()
+            })
             .transpose()
             .map_err(|message| {
                 CoreLowerError::Lower(LowerDiagnostic {

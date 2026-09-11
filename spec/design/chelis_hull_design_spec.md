@@ -1109,8 +1109,8 @@ The application snapshots and maps are observations, not proofs of call-site
 splicing/result-packing correspondence. Remaining obligations include checking them,
 pre-erasure Random protocol and Resource metadata, the selected emission's
 `VerifiedDagProgram.emission()` ownership actions, external decoding and checking,
-and independent Hull numerical tests. This trace does not cover contextual/host
-subexpression entry points or certify floating-point AD. In particular, observing
+and independent Hull numerical tests. The library entry point alone does not
+cover contextual/host subexpression entry points or certify floating-point AD. In particular, observing
 a Dropout node does not discharge the required Dropout conformance lane. Existing
 compiler/spec discrepancies require separately approved compatibility work; this
 tool must not repair or conceal them.
@@ -1160,6 +1160,44 @@ infrastructure, not a compiled-C capability, host-emission snapshot, new wire
 profile or mixed certificate. Joining actual selected emission and independently
 checking both graph correspondences remains required.
 
+The feature also provides explicit helper-observing counterparts for manifested
+host execution lowering and fixed-control named-entry lowering. Each successful
+host tensor helper retains one private lowering product containing its existing
+execution metadata and, only for the observing ingress, an owned helper trace.
+The trace reuses the production collector at the helper's actual AD, splice,
+result-packing and normalization boundaries. The pre-normalization helper result
+retains its tuple/ADT structure and exact ordered, duplicate-split root IDs. It
+adds execution-splice mappings
+for occurrence, draw and scope identities, because the existing
+`Application.remap` intentionally carries node identities only. Execution
+normalization observations are present only for helpers already lowered through
+the fixed-control execution path; observing an ordinary helper neither creates
+execution metadata nor changes its AD or normalization route. Historical pass
+snapshots remain immutable. When host lowering later rebinds helper dimensions,
+the trace records that actual boundary output separately instead of rewriting
+the earlier snapshots retroactively.
+
+Helper products are appended only after the helper succeeds. A rejected or
+speculative lowering therefore contributes no observation. Function projection
+moves the exact function, helper graphs, execution metadata and optional traces
+together; discarded siblings do not become evidence for the selected function.
+The host execution plan exposes only borrowed, function/helper-indexed or
+global-helper-indexed trace access. Its consuming ownership boundary still
+extracts the original graph/metadata association, after an observer has had a
+chance to copy the selected trace. Ordinary lowering and ordinary execution
+lowering do not collect helper snapshots, including in a feature-enabled build.
+An explicit consuming trace-discard operation removes only these optional
+observations; it cannot remove execution metadata or substitute helper graphs.
+The retained helper trace is owned and `Send + Sync`; the collector's local
+`Rc<RefCell<_>>` never enters the returned carrier.
+
+The focused IR oracle for this companion is `cargo nextest run -p chelis-ir
+--features lowering-trace --test helper_lowering_trace --test lowering_trace`.
+It compares traced/untraced helper graphs, raw versus shaped-zero gradients,
+tuple root order, actual fixed-control pre/post-AD execution and function
+projection. This IR evidence alone does not bind a trace to final emitted bytes;
+the opt-in compilation API below supplies the final-success pairing.
+
 ### Opt-in observation of selected compiler emission
 
 The `chelis-compiler-api/emission-observer` feature supplies
@@ -1202,6 +1240,46 @@ distinguish the full initial host lowering from the selected emitted functions,
 including partial and complete primal disconnection. Feature-disabled compilation
 is checked separately. This does not yet join the library AD trace to selected
 emission, check fusion or effect erasure, or implement an external certificate.
+
+### Same-compilation helper observation and final-success pairing
+
+`chelis-compiler-api/compilation-trace` enables the existing emission observer
+and IR/core lowering-trace features. Its additive
+`compile_for_execution_with_trace(request, project)` follows the same strict
+compilation as `compile_for_execution`. The callback borrows the actual selected
+ownership-verified emission and helper-local pass captures carried through that
+compilation's lowering, specialization and selection. It does not rerun AD or
+attach a separately lowered library graph to the result.
+
+`SelectedLowering` distinguishes a fixed-control named-entry trace, selected
+host helper traces, and `Unavailable`. Helper slots and function order come
+from the actual selected host product; a missing slot is not an empty proof.
+This first API slice retains passes for the already planned fixed-control C
+lane. Ordinary fallback and other targets explicitly report `Unavailable`;
+collecting observations must not select a different lowering or optimization
+lane. IR's separate observing ingress also tests ordinary helpers without
+manufacturing execution metadata. Duplicate tuple packing and nonidentity
+dimension rebinding have direct production-boundary tests, not a claim that
+every structured source expression is a retained native host helper.
+
+The callback still precedes fallible code generation. Only final successful
+artifact construction and exactly one selected emission return a
+`TracedCompilation<T>` pairing the actual artifact with the caller's projection.
+A later compiler error wins over an earlier observation; duplicate callbacks
+cannot execute the projection twice. The pairing is private and consuming
+access separates its products. Caller projections remain untrusted data.
+
+The gate's opt-in commands run IR helper/library traces and API compilation/
+emission tests, including capture-unit missing/duplicate/failure controls.
+They pin complete observed/unobserved artifacts and diagnostics, nested-call
+isolation, actual helper AD, and the distinction between historical snapshots
+and the later real dimension-rebinding output. Feature closure and both platform
+Clippy owners include the new feature; normal builds remain opt-out.
+
+No existing public Rust layout, serialized schema, shell interface or default
+output changes. This is not a checked source/AD correspondence, Resource
+occurrence census, ordered host-cut collector, native invocation/state receipt,
+numerical proof or external certificate. Those remain separate obligations.
 
 ## 7. Spec-Driven Test Generation - `Hull.Generate`
 

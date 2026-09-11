@@ -1690,6 +1690,55 @@ pub(crate) fn try_lower_subexpr_evaluation_with_ordered_inputs(
     authored_signature: bool,
     execution: &crate::evaluation::RandomExecutionContext,
 ) -> Result<crate::evaluation::EvaluationPlan, LowerDiagnostic> {
+    try_lower_subexpr_evaluation_with_ordered_inputs_impl(
+        expr,
+        scoped_types,
+        context,
+        result_claim,
+        authored_signature,
+        execution,
+        #[cfg(feature = "lowering-trace")]
+        None,
+    )
+}
+
+#[cfg(feature = "lowering-trace")]
+pub(crate) fn try_lower_subexpr_evaluation_with_ordered_inputs_and_trace(
+    expr: &Expr,
+    scoped_types: Vec<(String, TensorType)>,
+    context: &SubexprLoweringContext,
+    result_claim: Option<&TensorType>,
+    authored_signature: bool,
+    execution: &crate::evaluation::RandomExecutionContext,
+) -> Result<
+    (
+        crate::evaluation::EvaluationPlan,
+        crate::lowering_trace::HelperLoweringTrace,
+    ),
+    LowerDiagnostic,
+> {
+    let collector = crate::lowering_trace::Collector::new_execution_helper();
+    let plan = try_lower_subexpr_evaluation_with_ordered_inputs_impl(
+        expr,
+        scoped_types,
+        context,
+        result_claim,
+        authored_signature,
+        execution,
+        Some(collector.clone()),
+    )?;
+    Ok((plan, collector.finish_helper()))
+}
+
+fn try_lower_subexpr_evaluation_with_ordered_inputs_impl(
+    expr: &Expr,
+    scoped_types: Vec<(String, TensorType)>,
+    context: &SubexprLoweringContext,
+    result_claim: Option<&TensorType>,
+    authored_signature: bool,
+    execution: &crate::evaluation::RandomExecutionContext,
+    #[cfg(feature = "lowering-trace")] trace: Option<crate::lowering_trace::Collector>,
+) -> Result<crate::evaluation::EvaluationPlan, LowerDiagnostic> {
     if let crate::evaluation::EvaluationProfile::Legacy(reason) =
         context.evaluation_profile(expr, &scoped_types)
         && reason != crate::evaluation::LegacyEvaluationReason::NoDropout
@@ -1702,7 +1751,11 @@ pub(crate) fn try_lower_subexpr_evaluation_with_ordered_inputs(
         .fatal());
     }
     let state = execution.state();
-    catch_lowering(|| {
+    // The explicit collector is invocation-local and is discarded with this
+    // whole attempt on unwind. It contains `RefCell` only to compose nested
+    // lowering contexts, so assert safety at this narrow catch boundary
+    // rather than weakening `catch_lowering` for unrelated callers.
+    catch_lowering(std::panic::AssertUnwindSafe(|| {
         let mut metadata = None;
         let (dag, _, _, _) = lower_subexpr_program_inner_impl(
             expr,
@@ -1713,6 +1766,8 @@ pub(crate) fn try_lower_subexpr_evaluation_with_ordered_inputs(
             SubexprLoweringOptions {
                 include_list_controls: false,
                 authored_signature,
+                #[cfg(feature = "lowering-trace")]
+                trace,
             },
             Some(&mut metadata),
         );
@@ -1727,7 +1782,7 @@ pub(crate) fn try_lower_subexpr_evaluation_with_ordered_inputs(
                 expr.span_id().map(ToOwned::to_owned),
             )
         })
-    })
+    }))
 }
 
 #[derive(Clone)]
@@ -1791,6 +1846,8 @@ pub(crate) fn try_lower_subexpr_program_with_context_and_controls(
                 include_list_controls: true,
                 // The scope is the ambient bindings this subexpression captured.
                 authored_signature: false,
+                #[cfg(feature = "lowering-trace")]
+                trace: None,
             },
             None,
         );
@@ -1834,25 +1891,75 @@ pub(crate) fn try_lower_subexpr_program_with_ordered_inputs(
     random_counter: u64,
     authored_signature: bool,
 ) -> Result<(Dag, u64), LowerDiagnostic> {
+    try_lower_subexpr_program_with_ordered_inputs_impl(
+        expr,
+        scoped_bindings,
+        context,
+        result_claim,
+        crate::host::RandomLoweringState {
+            seed: random_seed,
+            counter: random_counter,
+        },
+        authored_signature,
+        #[cfg(feature = "lowering-trace")]
+        None,
+    )
+}
+
+#[cfg(feature = "lowering-trace")]
+pub(crate) fn try_lower_subexpr_program_with_ordered_inputs_and_trace(
+    expr: &Expr,
+    scoped_bindings: Vec<(String, TensorType)>,
+    context: &SubexprLoweringContext,
+    result_claim: Option<&TensorType>,
+    random_seed: Option<u64>,
+    random_counter: u64,
+    authored_signature: bool,
+) -> Result<(Dag, u64, crate::lowering_trace::HelperLoweringTrace), LowerDiagnostic> {
+    let collector = crate::lowering_trace::Collector::new_helper();
+    let (dag, random_counter) = try_lower_subexpr_program_with_ordered_inputs_impl(
+        expr,
+        scoped_bindings,
+        context,
+        result_claim,
+        crate::host::RandomLoweringState {
+            seed: random_seed,
+            counter: random_counter,
+        },
+        authored_signature,
+        Some(collector.clone()),
+    )?;
+    Ok((dag, random_counter, collector.finish_helper()))
+}
+
+fn try_lower_subexpr_program_with_ordered_inputs_impl(
+    expr: &Expr,
+    scoped_bindings: Vec<(String, TensorType)>,
+    context: &SubexprLoweringContext,
+    result_claim: Option<&TensorType>,
+    random: crate::host::RandomLoweringState,
+    authored_signature: bool,
+    #[cfg(feature = "lowering-trace")] trace: Option<crate::lowering_trace::Collector>,
+) -> Result<(Dag, u64), LowerDiagnostic> {
     assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
-    catch_lowering(|| {
+    // As above, a failed attempt owns and discards its complete collector.
+    catch_lowering(std::panic::AssertUnwindSafe(|| {
         let (dag, random_counter, _, _) = lower_subexpr_program_inner_impl(
             expr,
             scoped_bindings,
             context,
             result_claim,
-            crate::host::RandomLoweringState {
-                seed: random_seed,
-                counter: random_counter,
-            },
+            random,
             SubexprLoweringOptions {
                 include_list_controls: false,
                 authored_signature,
+                #[cfg(feature = "lowering-trace")]
+                trace,
             },
             None,
         );
         (dag, random_counter)
-    })
+    }))
 }
 
 pub(crate) fn try_lower_staged_host_region(
@@ -1974,15 +2081,16 @@ pub(crate) fn try_lower_staged_host_region(
 
 /// What one subexpression lowering is, beyond its expression and its scope.
 ///
-/// Both fields are facts about the CALLER, not about the body: whether the
+/// These fields are facts about the CALLER, not about the body: whether the
 /// runtime list controls belong in this DAG, and whether the scope came from a
 /// signature someone wrote. Neither is recoverable from the expression, and
 /// passing them as bare positional booleans made the call sites unreadable.
-#[derive(Clone, Copy)]
 struct SubexprLoweringOptions {
     include_list_controls: bool,
     /// See [`LowerCtx::signature_is_authored`].
     authored_signature: bool,
+    #[cfg(feature = "lowering-trace")]
+    trace: Option<crate::lowering_trace::Collector>,
 }
 
 fn lower_subexpr_program_inner_impl(
@@ -1997,6 +2105,8 @@ fn lower_subexpr_program_inner_impl(
     let SubexprLoweringOptions {
         include_list_controls,
         authored_signature,
+        #[cfg(feature = "lowering-trace")]
+        trace,
     } = options;
     let mut ctx = LowerCtx::new(
         context.program_types.clone(),
@@ -2004,6 +2114,10 @@ fn lower_subexpr_program_inner_impl(
         context.program_signatures.clone(),
         LinearityInfo::default(),
     );
+    #[cfg(feature = "lowering-trace")]
+    {
+        ctx.trace = trace.clone();
+    }
     ctx.random_seed = random.seed;
     ctx.random_counter = random.counter;
     if execution_out.is_some() {
@@ -2048,6 +2162,8 @@ fn lower_subexpr_program_inner_impl(
     // unchanged (eval and the copy/drop linearity passes treat `Copy` as a
     // pass-through) but the root count now matches the pytree arity.
     let mut seen_roots: UnordSet<NodeId> = UnordSet::new();
+    #[cfg(feature = "lowering-trace")]
+    let mut packed_value_roots = Vec::new();
     for id in value.flatten_nodes() {
         let root_id = if seen_roots.insert(id) {
             id
@@ -2065,6 +2181,15 @@ fn lower_subexpr_program_inner_impl(
             )
         };
         ctx.dag.add_root(root_id);
+        #[cfg(feature = "lowering-trace")]
+        packed_value_roots.push(root_id);
+    }
+    #[cfg(feature = "lowering-trace")]
+    if let Some(trace) = &trace {
+        let mut roots = packed_value_roots.into_iter();
+        let packed_result = value.trace_value_from_roots(&mut roots);
+        assert!(roots.next().is_none());
+        trace.helper_result(ctx.dag.roots(), packed_result);
     }
     let value_root_count = ctx.dag.roots().len();
     let mut list_checks = Vec::new();
@@ -2105,16 +2230,40 @@ fn lower_subexpr_program_inner_impl(
         }
     }
     let next_random_counter = ctx.random_counter;
-    if let Some(output) = execution_out {
-        let (dag, metadata) =
-            normalize_evaluation_dag(ctx.dag, ctx.execution.expect("plan lowering metadata"));
-        *output = Some(metadata);
+    if execution_out.is_some() {
+        let (dag, metadata) = normalize_evaluation_dag_with_trace(
+            ctx.dag,
+            ctx.execution.expect("plan lowering metadata"),
+            #[cfg(feature = "lowering-trace")]
+            trace.as_ref(),
+        );
+        if let Some(output) = execution_out {
+            *output = Some(metadata);
+        }
         return (dag, next_random_counter, value_root_count, list_checks);
     }
-    let dce_dag = crate::optimize::dead_code_eliminate(&ctx.dag);
-    let (copy_dag, _) = insert_copy_nodes_for_consuming_fanout(&dce_dag);
+    #[cfg(feature = "lowering-trace")]
+    let before_dce = trace.as_ref().map(|_| ctx.dag.clone());
+    let (dce_dag, dce_remap) = crate::optimize::dead_code_eliminate_with_remap(&ctx.dag);
+    let (copy_dag, copy_remap) = insert_copy_nodes_for_consuming_fanout(&dce_dag);
+    #[cfg(not(feature = "lowering-trace"))]
+    let _ = (&dce_remap, &copy_remap);
+    #[cfg(feature = "lowering-trace")]
+    let after_copies = trace.as_ref().map(|_| copy_dag.clone());
+    let after_drops = insert_drop_nodes_for_unconsumed_values(copy_dag);
+    #[cfg(feature = "lowering-trace")]
+    if let Some(trace) = &trace {
+        trace.normalization(
+            &before_dce.expect("helper trace before DCE"),
+            &dce_dag,
+            after_copies.expect("helper trace after copies"),
+            &after_drops,
+            &dce_remap,
+            &copy_remap,
+        );
+    }
     (
-        insert_drop_nodes_for_unconsumed_values(copy_dag),
+        after_drops,
         next_random_counter,
         value_root_count,
         list_checks,
@@ -2123,7 +2272,20 @@ fn lower_subexpr_program_inner_impl(
 
 fn normalize_evaluation_dag(
     dag: Dag,
+    execution: crate::evaluation::ExecutionMetadata,
+) -> (Dag, crate::evaluation::ExecutionMetadata) {
+    normalize_evaluation_dag_with_trace(
+        dag,
+        execution,
+        #[cfg(feature = "lowering-trace")]
+        None,
+    )
+}
+
+fn normalize_evaluation_dag_with_trace(
+    dag: Dag,
     mut execution: crate::evaluation::ExecutionMetadata,
+    #[cfg(feature = "lowering-trace")] trace: Option<&crate::lowering_trace::Collector>,
 ) -> (Dag, crate::evaluation::ExecutionMetadata) {
     execution.spine.record_nodes(&dag);
     execution
@@ -2143,22 +2305,55 @@ fn normalize_evaluation_dag(
             }) if requirements.is_empty() && claims.is_empty() => false,
             _ => true,
         });
-    let (dag, remap) =
+    #[cfg(feature = "lowering-trace")]
+    let before_dce_execution =
+        trace.map(|_| crate::lowering_trace::Collector::execution_observation(&dag, &execution));
+    #[cfg(feature = "lowering-trace")]
+    let before_dce = trace.map(|_| dag.clone());
+    let (after_dce, dce_remap) =
         crate::optimize::dead_code_eliminate_with_retained(&dag, &execution.spine.nodes());
     execution
-        .remap(&remap)
+        .remap(&dce_remap)
         .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None));
-    let (dag, remap) = insert_copy_nodes_for_consuming_fanout(&dag);
+    #[cfg(feature = "lowering-trace")]
+    let after_dce_execution = trace
+        .map(|_| crate::lowering_trace::Collector::execution_observation(&after_dce, &execution));
+    let (after_copies, copy_remap) = insert_copy_nodes_for_consuming_fanout(&after_dce);
     execution
-        .remap(&remap)
+        .remap(&copy_remap)
         .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None));
-    let dag = insert_drop_nodes_for_unconsumed_values(dag);
+    #[cfg(feature = "lowering-trace")]
+    let after_copies_execution = trace.map(|_| {
+        crate::lowering_trace::Collector::execution_observation(&after_copies, &execution)
+    });
+    #[cfg(feature = "lowering-trace")]
+    let after_copies_trace = trace.map(|_| after_copies.clone());
+    let after_drops = insert_drop_nodes_for_unconsumed_values(after_copies);
     // The normalization passes preserve source node order; inserted Copies
     // precede their consumer and terminal Drops follow the source spine.
     execution
-        .complete(&dag)
+        .complete(&after_drops)
         .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None));
-    (dag, execution)
+    #[cfg(feature = "lowering-trace")]
+    if let Some(trace) = trace {
+        let after_drops_execution =
+            crate::lowering_trace::Collector::execution_observation(&after_drops, &execution);
+        trace.normalization(
+            &before_dce.expect("helper trace before DCE"),
+            &after_dce,
+            after_copies_trace.expect("helper trace after copies"),
+            &after_drops,
+            &dce_remap,
+            &copy_remap,
+        );
+        trace.execution_normalization(
+            before_dce_execution.expect("helper execution before DCE"),
+            after_dce_execution.expect("helper execution after DCE"),
+            after_copies_execution.expect("helper execution after copies"),
+            after_drops_execution,
+        );
+    }
+    (after_drops, execution)
 }
 
 pub fn remap_tensor_dim_symbols(
@@ -5529,6 +5724,39 @@ impl LoweredValue {
         }
     }
 
+    #[cfg(feature = "lowering-trace")]
+    fn trace_value_from_roots(
+        &self,
+        roots: &mut impl Iterator<Item = NodeId>,
+    ) -> crate::lowering_trace::Value {
+        use crate::lowering_trace::Value;
+        match self {
+            Self::Host { .. } => {
+                raise_lowering_error("a host value is not a tensor helper result", None, None)
+            }
+            Self::Node(_) => Value::Node(roots.next().expect("packed tensor result root")),
+            Self::Tuple(items) => Value::Tuple(
+                items
+                    .iter()
+                    .map(|item| item.trace_value_from_roots(roots))
+                    .collect(),
+            ),
+            Self::Adt {
+                ctor,
+                field_names,
+                fields,
+                ..
+            } => Value::Adt {
+                ctor: ctor.clone(),
+                field_names: field_names.clone(),
+                fields: fields
+                    .iter()
+                    .map(|field| field.trace_value_from_roots(roots))
+                    .collect(),
+            },
+        }
+    }
+
     /// Whether `add_named_roots` would contribute zero roots for this
     /// value, i.e. whether it holds no tensor node anywhere (chelis#1095).
     ///
@@ -8686,24 +8914,58 @@ impl<'program> LowerCtx<'program> {
         if let Some(execution) = &mut self.execution {
             execution.spine.record_nodes(&self.dag);
         }
+        #[cfg(feature = "lowering-trace")]
+        let execution_before_splice = subctx.trace.as_ref().and_then(|_| {
+            self.execution.as_ref().map(|execution| {
+                crate::lowering_trace::Collector::execution_observation(&self.dag, execution)
+            })
+        });
         let remap = self.splice_dag(&specialized_grad_dag, &arg_map);
+        #[cfg(feature = "lowering-trace")]
+        let mut effect_remap = None;
         if let Some(child) = subctx.execution.take() {
-            self.execution
-                .as_mut()
-                .expect("evaluation parent owns its child plan")
-                .merge_child(child, self.execution_scope, &remap, &self.dag)
-                .unwrap_or_else(|message| {
-                    raise_fatal_lowering_error(
-                        message,
-                        Some(body.span()),
-                        body.span_id().map(ToOwned::to_owned),
-                    )
-                });
+            let merged = {
+                #[cfg(feature = "lowering-trace")]
+                {
+                    if subctx.trace.is_some() {
+                        self.execution
+                            .as_mut()
+                            .expect("evaluation parent owns its child plan")
+                            .merge_child_observed(child, self.execution_scope, &remap, &self.dag)
+                            .map(|observed| effect_remap = Some(observed))
+                    } else {
+                        self.execution
+                            .as_mut()
+                            .expect("evaluation parent owns its child plan")
+                            .merge_child(child, self.execution_scope, &remap, &self.dag)
+                    }
+                }
+                #[cfg(not(feature = "lowering-trace"))]
+                {
+                    self.execution
+                        .as_mut()
+                        .expect("evaluation parent owns its child plan")
+                        .merge_child(child, self.execution_scope, &remap, &self.dag)
+                }
+            };
+            merged.unwrap_or_else(|message| {
+                raise_fatal_lowering_error(
+                    message,
+                    Some(body.span()),
+                    body.span_id().map(ToOwned::to_owned),
+                )
+            });
         }
         self.execution_dependencies
             .extend(subctx.execution_dependencies.iter().copied());
         #[cfg(feature = "lowering-trace")]
         let after_splice = subctx.trace.as_ref().map(|_| self.dag.clone());
+        #[cfg(feature = "lowering-trace")]
+        let execution_after_splice = subctx.trace.as_ref().and_then(|_| {
+            self.execution.as_ref().map(|execution| {
+                crate::lowering_trace::Collector::execution_observation(&self.dag, execution)
+            })
+        });
         let mut control_roots = grad_result.dag.roots().iter().copied();
         for check in retained_checks {
             self.runtime_list_checks.push(match check {
@@ -8823,6 +9085,27 @@ impl<'program> LowerCtx<'program> {
         };
         #[cfg(feature = "lowering-trace")]
         if let Some(trace) = &subctx.trace {
+            if let (
+                Some(remap),
+                Some(before_splice_execution),
+                Some(after_splice_execution),
+                Some(execution),
+            ) = (
+                effect_remap,
+                execution_before_splice,
+                execution_after_splice,
+                self.execution.as_ref(),
+            ) {
+                trace.execution_application(crate::lowering_trace::ExecutionApplication {
+                    gradient: trace_gradient.expect("gradient execution observation"),
+                    remap,
+                    before_splice: before_splice_execution,
+                    after_splice: after_splice_execution,
+                    after_packing: crate::lowering_trace::Collector::execution_observation(
+                        &self.dag, execution,
+                    ),
+                });
+            }
             trace.application(
                 trace_gradient.expect("gradient observation"),
                 crate::lowering_trace::Application {
@@ -16463,6 +16746,66 @@ mod tests {
             error.contains("claimed = 5, required axis 0 = 4"),
             "{error}"
         );
+    }
+
+    #[cfg(feature = "lowering-trace")]
+    #[test]
+    fn helper_ingress_splits_duplicate_result_roots_in_order() {
+        use crate::lowering_trace::Value;
+
+        let tensor = TensorType {
+            dims: vec![DimInfo::Lit(3)],
+            precision: Prim::F32,
+        };
+        let expr = chelis_deep::parser::parse_str(
+            "(tuple {type: (t-tuple {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)) (t-tensor {} (d-lit {} 3) (t-prim {} f32)))} (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x) (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x))",
+        )
+        .expect("parse typed duplicate tuple")
+        .remove(0);
+        let context = SubexprLoweringContext {
+            program_types: Arc::new(BTreeMap::new()),
+            program_defs: Arc::new(BTreeMap::new()),
+            program_signatures: Arc::new(BTreeMap::new()),
+        };
+        let (dag, _, trace) = try_lower_subexpr_program_with_ordered_inputs_and_trace(
+            &expr,
+            vec![("x".into(), tensor)],
+            &context,
+            None,
+            None,
+            0,
+            false,
+        )
+        .expect("duplicate tuple lowers through the actual helper ingress");
+
+        assert_eq!(trace.packed_roots.len(), 2);
+        assert_ne!(trace.packed_roots[0], trace.packed_roots[1]);
+        assert_eq!(
+            trace.packed_roots,
+            trace.lowering.normalization.before_dce.roots()
+        );
+        assert!(matches!(
+            trace
+                .lowering
+                .normalization
+                .before_dce
+                .get(trace.packed_roots[1])
+                .unwrap()
+                .op,
+            RiscOp::Copy
+        ));
+        assert_eq!(
+            trace.packed_result,
+            Value::Tuple(
+                trace
+                    .packed_roots
+                    .iter()
+                    .copied()
+                    .map(Value::Node)
+                    .collect()
+            )
+        );
+        assert_eq!(dag.roots().len(), 2);
     }
 
     #[cfg(feature = "lowering-trace")]

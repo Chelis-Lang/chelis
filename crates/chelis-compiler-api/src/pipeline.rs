@@ -396,6 +396,27 @@ pub fn lower_checked_for_c_execution(
     result.map_err(PipelineRejection::from)
 }
 
+/// Optional captures use the same C selection and ordinary root guards.
+#[cfg(feature = "compilation-trace")]
+pub(crate) fn lower_checked_for_c_execution_with_trace(
+    checked: CheckedCompilation,
+    manifest: &chelis_types::manifest::RootManifest,
+    mode: LoweringMode,
+) -> Result<
+    (
+        LoweredCompilation,
+        Option<chelis_ir::host::ConcreteHostProgram>,
+        Option<chelis_ir::host::HostExecutionPlan>,
+    ),
+    PipelineRejection,
+> {
+    pipeline_bail_if_cancelled("lower")?;
+    let result =
+        chelis_pipeline_core::lower_checked_for_c_execution_with_trace(checked, manifest, mode);
+    pipeline_bail_if_cancelled("lower")?;
+    result.map_err(PipelineRejection::from)
+}
+
 /// Lower a context-checked compilation against its library DAG.
 pub fn lower_checked_with_context(
     checked: ContextCheckedCompilation<'_>,
