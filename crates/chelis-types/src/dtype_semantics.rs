@@ -3123,29 +3123,17 @@ pub fn integer_is_exactly_representable(value: i64, prim: Prim) -> bool {
         || magnitude.trailing_zeros() >= significant_bits.saturating_sub(precision)
 }
 
-/// Validated, borrowed input to the pure `[05-OP-37]` dropout value kernel.
-///
-/// Preparation performs every dtype/rate guard without drawing or allocating.
-/// The caller enters its source-owned forward/replay site only after `new`
-/// succeeds, then supplies that site's raw seed and ordinal to `apply`.
-/// This kernel owns no ambient random state and grants no replay provenance.
-///
-/// ```compile_fail
-/// use chelis_types::dtype_semantics::PreparedDropout;
-/// fn bypass<'a>(input: &'a chelis_types::TensorStorage, rate: chelis_types::ScalarValue)
-///     -> PreparedDropout<'a> {
-///     PreparedDropout { input, rate }
-/// }
-/// ```
-#[derive(Debug)]
-pub struct PreparedDropout<'a> {
-    input: &'a TensorStorage,
+/// Validated fixed parameters shared by the borrowed evaluator kernel and
+/// native emission. Construction checks the input dtype and stored rate;
+/// neither construction nor inspection draws, allocates a tensor or grants
+/// permission to replay a source site.
+#[derive(Debug, Clone, Copy)]
+pub struct DropoutParameters {
     rate: ScalarValue,
 }
 
-impl<'a> PreparedDropout<'a> {
-    pub fn new(input: &'a TensorStorage, rate: ScalarValue) -> Result<Self, NumericKernelError> {
-        let prim = input.prim();
+impl DropoutParameters {
+    pub fn new(prim: Prim, rate: ScalarValue) -> Result<Self, NumericKernelError> {
         if !prim.is_float() {
             return Err(NumericKernelError::WrongFamily {
                 op: "dropout",
@@ -3168,7 +3156,56 @@ impl<'a> PreparedDropout<'a> {
             }
             .into());
         }
-        Ok(Self { input, rate })
+        Ok(Self { rate })
+    }
+
+    pub fn rate(self) -> ScalarValue {
+        self.rate
+    }
+
+    /// The denominator is finalized at the storage dtype, before division.
+    /// Keeping this operation here prevents native preparation from silently
+    /// using a wide subtraction or reciprocal multiplication instead.
+    pub fn denominator(self) -> Result<ScalarValue, NumericKernelError> {
+        let one = cast_raw("dropout", RawScalar::Int(1), self.rate.prim())?;
+        float_binop(FloatBinOp::Sub, one, self.rate)
+    }
+}
+
+/// Validated, borrowed input to the pure `[05-OP-37]` dropout value kernel.
+///
+/// Preparation performs every dtype/rate guard without drawing or allocating.
+/// The caller enters its source-owned forward/replay site only after `new`
+/// succeeds, then supplies that site's raw seed and ordinal to `apply`.
+/// This kernel owns no ambient random state and grants no replay provenance.
+///
+/// ```compile_fail
+/// use chelis_types::dtype_semantics::{DropoutParameters, PreparedDropout};
+/// fn bypass<'a>(input: &'a chelis_types::TensorStorage, rate: chelis_types::ScalarValue)
+///     -> PreparedDropout<'a> {
+///     let parameters = DropoutParameters::new(input.prim(), rate).unwrap();
+///     PreparedDropout { input, parameters }
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use chelis_types::dtype_semantics::DropoutParameters;
+/// fn bypass(rate: chelis_types::ScalarValue) -> DropoutParameters {
+///     DropoutParameters { rate }
+/// }
+/// ```
+#[derive(Debug)]
+pub struct PreparedDropout<'a> {
+    input: &'a TensorStorage,
+    parameters: DropoutParameters,
+}
+
+impl<'a> PreparedDropout<'a> {
+    pub fn new(input: &'a TensorStorage, rate: ScalarValue) -> Result<Self, NumericKernelError> {
+        Ok(Self {
+            input,
+            parameters: DropoutParameters::new(input.prim(), rate)?,
+        })
     }
 
     /// Evaluate the finalized sub/div graph with a pure keyed mask. A second
@@ -3176,10 +3213,9 @@ impl<'a> PreparedDropout<'a> {
     /// the source execution plan, not this numerical function, authorizes it.
     pub fn apply(&self, seed: u64, ordinal: u64) -> Result<TensorStorage, NumericKernelError> {
         let prim = self.input.prim();
-        let wide_rate = self.rate.as_f64_lossy();
-        let one = cast_raw("dropout", RawScalar::Int(1), prim)?;
+        let wide_rate = self.parameters.rate().as_f64_lossy();
         let zero = cast_raw("dropout", RawScalar::Int(0), prim)?;
-        let denominator = float_binop(FloatBinOp::Sub, one, self.rate)?;
+        let denominator = self.parameters.denominator()?;
         let mut output = Vec::with_capacity(self.input.len());
         for index in 0..self.input.len() {
             let exact_unit = dropout_random_unit(seed, ordinal, index as u64);
@@ -3720,6 +3756,52 @@ mod tests {
         assert!(!integer_is_exactly_representable(1, Prim::Bool));
         assert!(!integer_is_exactly_representable(1, Prim::String));
         assert!(!integer_is_exactly_representable(1, Prim::F8e4m3));
+    }
+
+    #[test]
+    fn dropout_parameters_preserve_the_finalized_subtraction() {
+        for (prim, expected) in [
+            (Prim::F16, 0.89990234375),
+            (Prim::Bf16, 0.8984375),
+            (Prim::F32, f64::from(f32::from_bits(0x3f66_6666))),
+            (Prim::F64, f64::from_bits(0x3fec_cccc_cccc_cccd)),
+        ] {
+            let rate = scalar_from_f64("test", prim, 0.1).unwrap();
+            let parameters = DropoutParameters::new(prim, rate).unwrap();
+            assert_eq!(parameters.rate(), rate);
+            let denominator = parameters.denominator().unwrap();
+            assert_eq!(denominator.prim(), prim);
+            assert_eq!(denominator.as_f64_lossy(), expected, "{}", prim.name());
+            if matches!(prim, Prim::F16 | Prim::Bf16) {
+                assert_ne!(denominator.as_f64_lossy(), 1.0 - rate.as_f64_lossy());
+            }
+        }
+    }
+
+    #[test]
+    fn dropout_parameters_do_not_need_a_dummy_tensor_to_check_ingress() {
+        let rate = scalar_from_f64("test", Prim::F32, 0.5).unwrap();
+        assert!(matches!(
+            DropoutParameters::new(Prim::Int32, rate),
+            Err(NumericKernelError::WrongFamily { .. })
+        ));
+        assert!(matches!(
+            DropoutParameters::new(Prim::F64, rate),
+            Err(NumericKernelError::DtypeMismatch { .. })
+        ));
+        for prim in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+            for value in [-0.5, 1.0, f64::NAN, f64::INFINITY] {
+                let rate = scalar_from_f64("test", prim, value).unwrap();
+                assert!(matches!(
+                    DropoutParameters::new(prim, rate),
+                    Err(NumericKernelError::Trap(NumericTrap::Domain { .. }))
+                ));
+            }
+            let zero = scalar_from_f64("test", prim, -0.0).unwrap();
+            let parameters = DropoutParameters::new(prim, zero).unwrap();
+            assert!(parameters.rate().as_f64_lossy().is_sign_negative());
+            assert_eq!(parameters.denominator().unwrap().as_f64_lossy(), 1.0);
+        }
     }
 
     #[test]
