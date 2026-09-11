@@ -1,0 +1,1 @@
+A `def main() = f(...)` root whose inferred result dimension restates the callee's own dimension binder no longer emits a second `claimed = N` extent guard ahead of the named one. The guard that runs names both disagreeing parameter axes, which is what `spec/04-type-system.md` section 4.7 asks a runtime extent diagnostic to convey.
