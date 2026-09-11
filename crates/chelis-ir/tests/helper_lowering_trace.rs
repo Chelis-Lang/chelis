@@ -46,10 +46,11 @@ fn same_dag(left: &chelis_ir::Dag, right: &chelis_ir::Dag) {
 fn traced_helper_is_the_ordinary_retained_helper_and_projects_with_its_function() {
     let program = manifested(
         r#"
+def twice[p: Float](x: tensor[3, p]) -> tensor[3, p] = add(x, x)
 def selected(x: tensor[3, f32], flag: bool) -> (tensor[3, f32], bool) =
-  (add(x, x), flag)
-def discarded(x: tensor[3, f32], flag: bool) -> (tensor[3, f32], bool) =
-  (mul(x, x), flag)
+  (twice(x), flag)
+def discarded(x: tensor[3, f16], flag: bool) -> (tensor[3, f16], bool) =
+  (twice(x), flag)
 "#,
     );
     let (_, ordinary) = try_lower_manifested_execution_program(&program).unwrap();
