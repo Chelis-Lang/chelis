@@ -14390,7 +14390,12 @@ impl<'program> LowerCtx<'program> {
     /// (the #703 silent-substitution class). Callers that bake this into
     /// codegen now go through [`Self::resolve_static_f64_arg`], which turns an
     /// unresolvable value into a loud lowering error.
-    fn extract_f64_value(expr: &Expr) -> Option<f64> {
+    /// Legacy numeric-control folding at an inlined call site. A checked
+    /// float cast can name the callee's precision binder even though the
+    /// caller has already monomorphized it; consult that exact substitution
+    /// instead of treating the source spelling as unresolved. No value is
+    /// evaluated here, and integer casts remain deliberately unsupported.
+    fn extract_f64_value(expr: &Expr, substitutions: &UnordMap<String, Prim>) -> Option<f64> {
         match expr {
             Expr::Atom(Atom::Float(f), _) => Some(*f),
             Expr::Atom(Atom::Int(n), _) => Some(*n as f64),
@@ -14403,8 +14408,12 @@ impl<'program> LowerCtx<'program> {
                     DeepTag::Cast => {
                         let inner = kids.first()?;
                         let target = kids.get(1)?;
-                        match Self::try_extract_prim(target) {
-                            Some(prim) if prim.is_float() => Self::extract_f64_value(inner),
+                        let target = Self::try_extract_prim(target)
+                            .or_else(|| static_controls::type_prim(target, substitutions));
+                        match target {
+                            Some(prim) if prim.is_float() => {
+                                Self::extract_f64_value(inner, substitutions)
+                            }
                             _ => None,
                         }
                     }
@@ -14416,7 +14425,7 @@ impl<'program> LowerCtx<'program> {
                             .is_some_and(|callee| expr_is_var_named(callee, "neg")) =>
                     {
                         let inner = kids.get(1)?;
-                        Self::extract_f64_value(inner).map(|v| -v)
+                        Self::extract_f64_value(inner, substitutions).map(|v| -v)
                     }
                     // Only `(lit {} <atom>)` owns this value slot. Reading the
                     // first child of an arbitrary composite silently folded
@@ -14454,7 +14463,7 @@ impl<'program> LowerCtx<'program> {
     /// own evaluator and does not require this DAG lowering to succeed, so a
     /// runtime bound that fails the build still evaluates to the right range.
     fn resolve_static_f64_arg(&self, expr: &Expr, builtin: &str, arg_desc: &str) -> f64 {
-        Self::extract_f64_value(expr).unwrap_or_else(|| {
+        Self::extract_f64_value(expr, &self.prec_substitutions).unwrap_or_else(|| {
             let found = match expr {
                 Expr::List(list, _) => get_tag(list).map(DeepTag::as_str).unwrap_or("expression"),
                 _ => "expression",
@@ -18856,7 +18865,7 @@ mod tests {
         let mut exprs = chelis_deep::parser::parse_str("(par {} 2.0 3.0)").expect("parse par");
         let par = exprs.pop().expect("one par expression");
         assert_eq!(
-            LowerCtx::extract_f64_value(&par),
+            LowerCtx::extract_f64_value(&par, &UnordMap::new()),
             None,
             "a composite `par` is not a static literal: reading its first child \
              would substitute 2.0 for its specified last-child value 3.0"
@@ -18867,9 +18876,36 @@ mod tests {
             .pop()
             .expect("one literal");
         assert_eq!(
-            LowerCtx::extract_f64_value(&literal),
+            LowerCtx::extract_f64_value(&literal, &UnordMap::new()),
             Some(3.0),
             "narrowing the extractor must preserve the admitted literal path"
+        );
+    }
+
+    #[test]
+    fn static_float_extraction_requires_an_explicit_float_target_substitution() {
+        let cast = chelis_deep::parser::parse_str(
+            "(cast {type: (t-prim {} f32)} (lit {} 0.5) (t-var {} p))",
+        )
+        .expect("parse cast")
+        .pop()
+        .expect("one cast expression");
+
+        let mut float = UnordMap::new();
+        float.insert("p".to_string(), Prim::F32);
+        assert_eq!(LowerCtx::extract_f64_value(&cast, &float), Some(0.5));
+
+        let mut integer = UnordMap::new();
+        integer.insert("p".to_string(), Prim::Int32);
+        assert_eq!(
+            LowerCtx::extract_f64_value(&cast, &integer),
+            None,
+            "a surrounding float result claim must not turn an integer cast into an identity"
+        );
+        assert_eq!(
+            LowerCtx::extract_f64_value(&cast, &UnordMap::new()),
+            None,
+            "checked metadata is not a substitute for a missing call-site binding"
         );
     }
 

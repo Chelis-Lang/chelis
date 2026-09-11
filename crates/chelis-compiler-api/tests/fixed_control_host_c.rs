@@ -2,6 +2,9 @@
 #[allow(dead_code)]
 mod ownership_support;
 
+use chelis_compiler_api::compiler::compile_for_execution;
+use chelis_compiler_api::schema::{CompileRequest, CompileTarget, SourceKind};
+
 #[test]
 fn generic_static_rate_reaches_native_host_helper() {
     for dtype in ["f16", "bf16", "f32", "f64"] {
@@ -19,6 +22,105 @@ result = with seed(42i64) {{
         assert_eq!(
             stdout, "result = tensor(shape=[4], data=[0.0, 2.0, 0.0, 0.0])\n",
             "generic helper specialization must preserve {dtype} values"
+        );
+    }
+}
+
+#[test]
+fn concrete_wrapper_reaches_generic_static_rate_host_helper() {
+    let c = ownership_support::emit_selected(
+        r#"
+def keep[p: Float](x: tensor[4, p]) -> tensor[4, p] = dropout(x, cast(0.5, p))
+def run(x: tensor[4, f32]) -> tensor[4, f32] = keep(x)
+result = with seed(42i64) {
+  run(to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32]))
+}
+"#,
+        "generic-wrapper",
+    );
+    let (summary, stdout) = ownership_support::run_program(&c);
+    ownership_support::balanced(&summary);
+    assert_eq!(
+        stdout,
+        "result = tensor(shape=[4], data=[0.0, 2.0, 0.0, 0.0])\n"
+    );
+}
+
+#[test]
+fn computed_and_record_wrappers_preserve_generic_fixed_control_composition() {
+    let computed = ownership_support::emit(
+        r#"
+def keep[p: Float](x: tensor[4, p]) -> tensor[4, p] = dropout(x, cast(0.5, p))
+result = with seed(42i64) {
+  x = to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32])
+  keep(add(x, x))
+}
+"#,
+        "generic-computed",
+    );
+    let (summary, stdout) = ownership_support::run_program(&computed);
+    ownership_support::balanced(&summary);
+    assert_eq!(
+        stdout,
+        "result = tensor(shape=[4], data=[0.0, 4.0, 0.0, 0.0])\n"
+    );
+
+    let record = ownership_support::emit(
+        r#"
+type Inputs = | Inputs { q: tensor[4, f32] }
+def keep[p: Float](x: tensor[4, p]) -> tensor[4, p] = dropout(x, cast(0.5, p))
+def run(inp: Inputs) -> tensor[4, f32] = keep(add(inp.q, inp.q))
+result = with seed(42i64) {
+  inp = Inputs { q: to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32]) }
+  a = run(inp)
+  b = run(inp)
+  [a, b]
+}
+"#,
+        "generic-record-wrapper",
+    );
+    let (summary, stdout) = ownership_support::run_program(&record);
+    ownership_support::balanced(&summary);
+    assert_eq!(
+        stdout,
+        "result = [tensor(shape=[4], data=[0.0, 4.0, 0.0, 0.0]), tensor(shape=[4], data=[4.0, 0.0, 0.0, 0.0])]\n"
+    );
+}
+
+#[test]
+fn concrete_wrappers_do_not_admit_runtime_controls_or_gpu_dropout() {
+    let cases = [
+        (
+            CompileTarget::C,
+            "def keep[p: Float](x: tensor[4,p], rate: p) -> tensor[4,p] = dropout(x, rate)\n\
+             def run(x: tensor[4,f32], rate: f32) -> tensor[4,f32] = with seed(42i64) { keep(x, rate) }",
+        ),
+        (
+            CompileTarget::C,
+            "def keep(x: tensor[4,f32], seed: int64) -> tensor[4,f32] = with seed(seed) { dropout(x, 0.5f32) }\n\
+             def run(x: tensor[4,f32], seed: int64) -> tensor[4,f32] = keep(x, seed)",
+        ),
+        (
+            CompileTarget::Hip,
+            "def keep[p: Float](x: tensor[4,p]) -> tensor[4,p] = with seed(42i64) { dropout(x, cast(0.5, p)) }\n\
+             def run(x: tensor[4,f32]) -> tensor[4,f32] = keep(x)",
+        ),
+    ];
+    for (target, source) in cases {
+        let error = compile_for_execution(CompileRequest {
+            source_kind: SourceKind::Surf,
+            source: source.into(),
+            target,
+            entry_name: Some("run".into()),
+        })
+        .expect_err("unsupported wrapper control must remain loud");
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("dropout")
+                || message.contains("Dropout")
+                || message.contains("fixed-control")
+                || message.contains("requires a signed int64 literal seed"),
+            "{message}"
         );
     }
 }
