@@ -238,10 +238,11 @@ fn assert_activation_width_matrix(op: &str) {
             !emitted.contains(STUB_MARKER),
             "{name}: emitted the historical unsupported-builtin stub"
         );
-        let run_body = emitted
-            .rfind(" run__chelis_owned_body() {")
-            .and_then(|start| emitted.get(start..))
-            .unwrap_or_else(|| panic!("{name}: emitted C has no consuming `run` body:\n{emitted}"));
+        // chelis#1820: located by NAME, not by the full signature. chelis#1799
+        // added a `chelis_rng_state` parameter to every host body, and the old
+        // `run__chelis_owned_body() {` needle then missed the definition and
+        // failed before this row inspected any call site.
+        let run_body = common::host_body_definition(&emitted, "run__chelis_owned_body");
         let reduced_relu = op == "relu" && matches!(dtype, "f16" | "bf16");
         if reduced_relu {
             assert_reduced_relu_raw_selection(run_body, dtype, &name);

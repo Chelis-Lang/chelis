@@ -6,6 +6,7 @@ use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
+use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -51,6 +52,16 @@ thread_local! {
     static TENSOR_HELPER_PREFLIGHT_STACK:
         RefCell<Vec<UnordMap<usize, TensorHelperPreflightFacts>>> = const { RefCell::new(Vec::new()) };
     static HOST_LOWERING_CACHE_ACTIVE: Cell<bool> = const { Cell::new(false) };
+    // chelis#1829: how many `HostLoweringCacheGuard`s are live on this thread.
+    // The caches are armed while this is non-zero, so an inner scope cannot
+    // disarm an outer one when it drops.
+    static HOST_LOWERING_CACHE_DEPTH: Cell<usize> = const { Cell::new(0) };
+    // chelis#1829: kernel-decision summary probes that missed the memo and ran
+    // a full callee lowering. `HostWorkProfile` beside it is `cfg(test)`-only
+    // and therefore invisible to downstream crates, so this one is always
+    // compiled: it lets a counted receipt in `chelis-compiler-api` bound the
+    // interpreter's probe work without a wall clock.
+    static HOST_SUMMARY_PROBE_BUILDS: Cell<u64> = const { Cell::new(0) };
     // chelis#1158: bounded memoized monomorphization of recursive generic
     // host calls. Keyed by the callee's canonical checked type application;
     // one specialized definition per key, with in-progress entries visible
@@ -246,35 +257,165 @@ fn pop_inlining(name: &str) {
     });
 }
 
-struct HostLoweringCacheGuard;
+fn clear_host_lowering_caches() {
+    TYPE_POLYMORPHIC_FN_CACHE.with(|cache| cache.borrow_mut().clear());
+    TOP_LEVEL_FN_CALL_GRAPH_CACHE.with(|cache| cache.borrow_mut().clear());
+    PROGRAM_DEFS_CACHE.with(|cache| cache.borrow_mut().clear());
+    DEF_EFFECT_ROWS_CACHE.with(|cache| cache.borrow_mut().clear());
+    SUBEXPR_LOWERING_CONTEXT_CACHE.with(|cache| cache.borrow_mut().clear());
+    HELPER_SUMMARY_REJECTS_CACHE.with(|cache| cache.borrow_mut().clear());
+    DYNAMIC_TO_TENSOR_DEF_SUMMARIES_CACHE.with(|cache| cache.borrow_mut().clear());
+    TENSOR_HELPER_PREFLIGHT_STACK.with(|stack| stack.borrow_mut().clear());
+}
+
+/// Drop every entry keyed on one program address.
+///
+/// Every cache above is keyed on `program as *const CheckedProgram as usize`,
+/// which is sound only while that program is alive: a freed program's address
+/// can be reused by a later one. Inside a single scope the scope's own program
+/// is borrowed for the whole scope and cannot be freed, and `chelis-ir` never
+/// constructs a `CheckedProgram`, so the outermost program is safe by
+/// construction. A nested scope brings a second program in, and that one can
+/// be dropped while the outer scope stays armed, so a scope evicts its own
+/// program's address when it begins and again when it drops.
+///
+/// Stated as narrowly as the code earns it: rows for a program that owns a
+/// scope are evicted on that scope's begin and on its drop, so they never
+/// outlive it. That is not a universal sentence about every row. A program
+/// probed while some OTHER program's scope is armed writes rows under no
+/// scope of its own, and those live until the outermost scope drops. No
+/// production caller does that: the interpreter threads exactly one program
+/// per scope, and the only other `begin` is the C-lane whole-program
+/// lowering. Keying these caches on something that cannot be recycled,
+/// rather than on an address, is the representation change chelis#1835 owns.
+/// chelis#1829.
+fn evict_host_lowering_cache_entries(program_key: usize) {
+    fn drop_program_rows<V>(cache: &mut UnordMap<(usize, String), V>, program_key: usize) {
+        let stale = cache
+            .to_sorted()
+            .into_iter()
+            .map(|(key, _)| key)
+            .filter(|(program, _)| *program == program_key)
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in stale {
+            cache.remove(&key);
+        }
+    }
+    TYPE_POLYMORPHIC_FN_CACHE.with(|cache| drop_program_rows(&mut cache.borrow_mut(), program_key));
+    HELPER_SUMMARY_REJECTS_CACHE
+        .with(|cache| drop_program_rows(&mut cache.borrow_mut(), program_key));
+    TOP_LEVEL_FN_CALL_GRAPH_CACHE.with(|cache| {
+        cache.borrow_mut().remove(&program_key);
+    });
+    PROGRAM_DEFS_CACHE.with(|cache| {
+        cache.borrow_mut().remove(&program_key);
+    });
+    DEF_EFFECT_ROWS_CACHE.with(|cache| {
+        cache.borrow_mut().remove(&program_key);
+    });
+    SUBEXPR_LOWERING_CONTEXT_CACHE.with(|cache| {
+        cache.borrow_mut().remove(&program_key);
+    });
+    DYNAMIC_TO_TENSOR_DEF_SUMMARIES_CACHE.with(|cache| {
+        cache.borrow_mut().remove(&program_key);
+    });
+}
+
+/// Arms the host-lowering memo for one program, for as long as it is held.
+///
+/// Scopes nest. The outermost `begin` clears every cache and arms the flag;
+/// an inner `begin` evicts only the entering program's rows, so an inner
+/// lowering can neither read a recycled address nor discard the rows the outer
+/// scope is still using. `Drop` disarms and clears only when the last scope
+/// ends, which is what lets the interpreter hold one across a whole evaluation
+/// while a nested whole-program lowering comes and goes. chelis#1829.
+struct HostLoweringCacheGuard {
+    program_key: usize,
+}
 
 impl HostLoweringCacheGuard {
-    fn begin() -> Self {
-        TYPE_POLYMORPHIC_FN_CACHE.with(|cache| cache.borrow_mut().clear());
-        TOP_LEVEL_FN_CALL_GRAPH_CACHE.with(|cache| cache.borrow_mut().clear());
-        PROGRAM_DEFS_CACHE.with(|cache| cache.borrow_mut().clear());
-        DEF_EFFECT_ROWS_CACHE.with(|cache| cache.borrow_mut().clear());
-        SUBEXPR_LOWERING_CONTEXT_CACHE.with(|cache| cache.borrow_mut().clear());
-        HELPER_SUMMARY_REJECTS_CACHE.with(|cache| cache.borrow_mut().clear());
-        DYNAMIC_TO_TENSOR_DEF_SUMMARIES_CACHE.with(|cache| cache.borrow_mut().clear());
-        TENSOR_HELPER_PREFLIGHT_STACK.with(|stack| stack.borrow_mut().clear());
+    fn begin(program: &CheckedProgram) -> Self {
+        let program_key = program as *const CheckedProgram as usize;
+        let depth = HOST_LOWERING_CACHE_DEPTH.with(Cell::get);
+        if depth == 0 {
+            clear_host_lowering_caches();
+        } else {
+            evict_host_lowering_cache_entries(program_key);
+        }
+        HOST_LOWERING_CACHE_DEPTH.with(|active| active.set(depth + 1));
         HOST_LOWERING_CACHE_ACTIVE.with(|active| active.set(true));
-        Self
+        Self { program_key }
     }
 }
 
 impl Drop for HostLoweringCacheGuard {
     fn drop(&mut self) {
-        HOST_LOWERING_CACHE_ACTIVE.with(|active| active.set(false));
-        TYPE_POLYMORPHIC_FN_CACHE.with(|cache| cache.borrow_mut().clear());
-        TOP_LEVEL_FN_CALL_GRAPH_CACHE.with(|cache| cache.borrow_mut().clear());
-        PROGRAM_DEFS_CACHE.with(|cache| cache.borrow_mut().clear());
-        DEF_EFFECT_ROWS_CACHE.with(|cache| cache.borrow_mut().clear());
-        SUBEXPR_LOWERING_CONTEXT_CACHE.with(|cache| cache.borrow_mut().clear());
-        HELPER_SUMMARY_REJECTS_CACHE.with(|cache| cache.borrow_mut().clear());
-        DYNAMIC_TO_TENSOR_DEF_SUMMARIES_CACHE.with(|cache| cache.borrow_mut().clear());
-        TENSOR_HELPER_PREFLIGHT_STACK.with(|stack| stack.borrow_mut().clear());
+        let remaining = HOST_LOWERING_CACHE_DEPTH.with(|depth| {
+            // This is a scope depth, never a capacity key. The chelis#893
+            // runtime-representation inventory's `CAPACITY_FOLDS` rule keys on
+            // the `saturating_*` and `checked_mul` method names wherever they
+            // appear in IR-class code, so the floor is spelled out here rather
+            // than classified as capacity arithmetic it is not; chelis#1851
+            // tracks the inventory's name-keyed rule. chelis#1835's
+            // structural repair deletes this guard and this counter with it.
+            let current = depth.get();
+            let remaining = if current > 0 { current - 1 } else { 0 };
+            depth.set(remaining);
+            remaining
+        });
+        if remaining == 0 {
+            HOST_LOWERING_CACHE_ACTIVE.with(|active| active.set(false));
+            clear_host_lowering_caches();
+        } else {
+            // A scope's rows must not outlive the scope. Evicting only on
+            // `begin` left an inner scope's rows in the caches after its
+            // program was gone, so a later program allocated at the same
+            // address could read them; evicting here as well is what makes
+            // the sentence on `evict_host_lowering_cache_entries` true on
+            // both edges rather than only on entry.
+            evict_host_lowering_cache_entries(self.program_key);
+        }
     }
+}
+
+/// A live host-lowering memo scope. See [`begin_host_lowering_cache_scope`].
+///
+/// The `PhantomData` is the contract, not decoration. The `&'program
+/// CheckedProgram` ties the scope to the program it arms for, so the borrow
+/// checker refuses to drop that program while rows keyed on its address are
+/// still readable. The `*const ()` makes the scope neither `Send` nor `Sync`,
+/// because the caches it arms are thread-locals: dropping the scope on another
+/// thread would leave the arming thread armed forever with rows retained.
+pub struct HostLoweringCacheScope<'program> {
+    /// Held for its `Drop`, never read.
+    _guard: HostLoweringCacheGuard,
+    program: PhantomData<(&'program CheckedProgram, *const ())>,
+}
+
+/// Arm the host-lowering memo for `program` until the returned scope drops.
+///
+/// The kernel-decision probe behind `host_def_kernel` expands the call graph
+/// as a tree, so an interpreter that applies imported definitions must hold
+/// one of these for the whole evaluation or pay that expansion per definition
+/// (chelis#1829). The probe's own algorithm is chelis#1835 and is unchanged.
+pub fn begin_host_lowering_cache_scope(program: &CheckedProgram) -> HostLoweringCacheScope<'_> {
+    HostLoweringCacheScope {
+        _guard: HostLoweringCacheGuard::begin(program),
+        program: PhantomData,
+    }
+}
+
+/// Kernel-decision summary probes on this thread that missed the memo and ran
+/// a full callee lowering. A counted receipt bounds this instead of timing the
+/// evaluation, so it cannot flake under load. chelis#1829.
+pub fn host_summary_probe_builds() -> u64 {
+    HOST_SUMMARY_PROBE_BUILDS.with(Cell::get)
+}
+
+/// Reset [`host_summary_probe_builds`] for this thread.
+pub fn reset_host_summary_probe_builds() {
+    HOST_SUMMARY_PROBE_BUILDS.with(|builds| builds.set(0));
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1981,7 +2122,7 @@ fn try_lower_compiled_program_with_lane_overrides(
     collect_execution: bool,
     collect_trace: bool,
 ) -> Result<(CompiledProgram, HostExecutionMetadata), crate::lower::LowerDiagnostic> {
-    let _cache_guard = HostLoweringCacheGuard::begin();
+    let _cache_guard = HostLoweringCacheGuard::begin(program);
     let mut lowered_names = top_level_lowering_map(program.exprs(), program.type_env());
     if let Some(manifest) = manifest {
         for entry in &manifest.entries {
@@ -11998,6 +12139,19 @@ fn top_level_fn_helper_summary_rejects(
         return Ok(false);
     }
     record_host_work(|profile| profile.helper_summary_builds += 1);
+    // This is a diagnostic count, never a capacity key. The chelis#893
+    // runtime-representation inventory's `CAPACITY_FOLDS` rule keys on the
+    // `saturating_*` and `checked_mul` method names wherever they appear in
+    // IR-class code, so the ceiling is spelled out here rather than classified
+    // as capacity arithmetic it is not; chelis#1851 tracks that name-keyed rule.
+    HOST_SUMMARY_PROBE_BUILDS.with(|builds| {
+        let counted = builds.get();
+        builds.set(if counted == u64::MAX {
+            counted
+        } else {
+            counted + 1
+        });
+    });
     let pushed = push_inlining(name);
     // This lowering is a probe: its result is inspected and discarded, so
     // it must leave no trace on specialization state
@@ -17543,6 +17697,279 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
         let deep = chelis_surf::desugar::desugar_program(&decls);
         chelis_types::check_ir_program(&deep)
             .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors))
+    }
+
+    /// A chain of mutually recursive defs, each calling the next from two
+    /// argument positions. The kernel-decision probe expands that call graph
+    /// as a tree, so an unmemoized run costs 2^depth summary builds while a
+    /// memoized one costs one per definition.
+    fn issue_1829_fanout_source(depth: usize) -> String {
+        let mut lines = vec!["module Demo.Fanout".to_string(), String::new()];
+        for level in 0..depth {
+            lines.push(format!(
+                "def f{level}(x: int64) -> int64 = add(f{next}(x), f{next}(x))",
+                next = level + 1
+            ));
+        }
+        lines.push(format!("def f{depth}(x: int64) -> int64 = x"));
+        lines.push(String::new());
+        lines.join("\n")
+    }
+
+    /// chelis#1829 class receipt. The interpreter reaches `host_def_kernel`
+    /// once per applied definition; with a host-lowering scope armed for the
+    /// program, the summary probes behind those calls are bounded by the
+    /// definition count instead of expanding the call graph as a tree.
+    ///
+    /// Evidentiary status: DISPOSITION LOCK on the scope introduced by
+    /// chelis#1829. It cannot be a regression test against the base, because
+    /// `begin_host_lowering_cache_scope` does not exist there. Its red was
+    /// established by mutation: with the scope's body neutered, the same
+    /// assertion reads 2^depth. The underlying tree expansion is chelis#1835
+    /// and is unchanged by this repair; this locks only that an armed scope
+    /// bounds it.
+    #[test]
+    fn issue_1829_interpreter_scope_bounds_kernel_decision_probes() {
+        let depth = 12;
+        std::thread::Builder::new()
+            .name("issue-1829-fanout".to_string())
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                let checked = surf_check(&issue_1829_fanout_source(depth));
+                let names = (0..=depth)
+                    .map(|level| format!("f{level}"))
+                    .collect::<Vec<_>>();
+                reset_host_work_profile();
+                reset_host_summary_probe_builds();
+                {
+                    let _scope = begin_host_lowering_cache_scope(&checked);
+                    for name in &names {
+                        host_def_kernel(&checked, name, None)
+                            .expect("#1829 fixture reaches a kernel decision");
+                    }
+                }
+                let profile = take_host_work_profile();
+                let probes = host_summary_probe_builds();
+                eprintln!(
+                    "#1829 depth={depth} defs={} helper_summary_builds={} probe_builds={probes}",
+                    names.len(),
+                    profile.helper_summary_builds
+                );
+                assert!(
+                    profile.helper_summary_builds <= names.len(),
+                    "#1829: an armed scope must build at most one summary per definition; \
+                     {} definitions produced {} builds",
+                    names.len(),
+                    profile.helper_summary_builds
+                );
+                assert_eq!(
+                    probes,
+                    u64::try_from(profile.helper_summary_builds).expect("probe count fits"),
+                    "#1829: the always-compiled probe counter and the test-only profile \
+                     must count the same misses, or a downstream receipt reads the wrong number"
+                );
+            })
+            .expect("#1829 probe thread starts")
+            .join()
+            .expect("#1829 probe thread completes");
+    }
+
+    /// chelis#1829 hazard (1). A nested scope must not disarm or empty the
+    /// scope that encloses it: the interpreter holds one across a whole
+    /// evaluation, and a whole-program lowering reached from inside it would
+    /// otherwise drop the memo mid-flight.
+    ///
+    /// Evidentiary status: DISPOSITION LOCK on the refcounted guard. Against
+    /// the base the inner drop disarmed the flag and cleared every cache,
+    /// which is the behaviour this pins as gone.
+    #[test]
+    fn issue_1829_nested_scope_keeps_the_outer_memo_armed_and_populated() {
+        let outer = surf_check("module Demo.Outer\n\ndef outer_fn(x: int64) -> int64 = x\n");
+        let inner = surf_check("module Demo.Inner\n\ndef inner_fn(x: int64) -> int64 = x\n");
+        let outer_key = &outer as *const CheckedProgram as usize;
+
+        let outer_scope = begin_host_lowering_cache_scope(&outer);
+        let defs = cached_program_defs(&outer);
+        assert!(defs.contains_key("outer_fn"), "the outer program memoizes");
+        assert!(
+            PROGRAM_DEFS_CACHE.with(|cache| cache.borrow().contains_key(&outer_key)),
+            "#1829: the outer scope must populate the memo"
+        );
+
+        {
+            let _inner_scope = begin_host_lowering_cache_scope(&inner);
+            assert!(
+                HOST_LOWERING_CACHE_ACTIVE.with(Cell::get),
+                "#1829: an inner scope stays armed"
+            );
+        }
+
+        assert!(
+            HOST_LOWERING_CACHE_ACTIVE.with(Cell::get),
+            "#1829: an inner scope's drop must not disarm the outer scope"
+        );
+        assert!(
+            PROGRAM_DEFS_CACHE.with(|cache| cache.borrow().contains_key(&outer_key)),
+            "#1829: an inner scope's drop must not empty the outer scope's memo"
+        );
+
+        drop(outer_scope);
+        assert!(
+            !HOST_LOWERING_CACHE_ACTIVE.with(Cell::get),
+            "#1829: the last scope to drop disarms the memo"
+        );
+        assert!(
+            PROGRAM_DEFS_CACHE.with(|cache| cache.borrow().is_empty()),
+            "#1829: the last scope to drop clears the memo"
+        );
+    }
+
+    /// chelis#1829 P2-1 (round 1). A scope's rows must not outlive the scope.
+    /// Eviction used to run only on `begin`, so an inner scope's rows stayed in
+    /// the caches after its program was dropped, and a later program allocated
+    /// at that address could read them. The reviewer reproduced exactly that.
+    ///
+    /// This lock establishes the invariant directly rather than by hoping an
+    /// allocator recycles an address: it asserts the inner program's rows are
+    /// present while its scope is live and gone the moment that scope drops,
+    /// which is what makes a recycled address harmless. The presence assertion
+    /// is what stops this passing without measuring anything.
+    ///
+    /// Evidentiary status: DISPOSITION LOCK on the drop-edge eviction added in
+    /// round 1. Against the pre-round head the post-drop assertion fails.
+    #[test]
+    fn issue_1829_dropping_an_inner_scope_evicts_its_own_rows() {
+        let outer = surf_check("module Demo.Outer2\n\ndef outer_fn(x: int64) -> int64 = x\n");
+        let inner = surf_check("module Demo.Inner2\n\ndef inner_fn(x: int64) -> int64 = x\n");
+        let outer_key = &outer as *const CheckedProgram as usize;
+        let inner_key = &inner as *const CheckedProgram as usize;
+        assert_ne!(outer_key, inner_key, "two live programs have two addresses");
+
+        let outer_scope = begin_host_lowering_cache_scope(&outer);
+        cached_program_defs(&outer);
+        {
+            let _inner_scope = begin_host_lowering_cache_scope(&inner);
+            cached_program_defs(&inner);
+            HELPER_SUMMARY_REJECTS_CACHE.with(|cache| {
+                cache
+                    .borrow_mut()
+                    .insert((inner_key, "inner_fn".to_string()), true);
+            });
+            assert!(
+                PROGRAM_DEFS_CACHE.with(|cache| cache.borrow().contains_key(&inner_key)),
+                "#1829: the inner scope must actually populate rows, or this lock \
+                 would pass without measuring anything"
+            );
+        }
+
+        assert!(
+            !PROGRAM_DEFS_CACHE.with(|cache| cache.borrow().contains_key(&inner_key)),
+            "#1829: an inner scope's definition rows must not outlive its drop"
+        );
+        assert_eq!(
+            HELPER_SUMMARY_REJECTS_CACHE.with(|cache| cache
+                .borrow()
+                .get(&(inner_key, "inner_fn".to_string()))
+                .copied()),
+            None,
+            "#1829: an inner scope's program-keyed summary rows must not outlive its drop"
+        );
+        assert!(
+            PROGRAM_DEFS_CACHE.with(|cache| cache.borrow().contains_key(&outer_key)),
+            "#1829: the drop must evict only the dropping scope's program"
+        );
+
+        drop(outer_scope);
+    }
+
+    /// chelis#1829 P2-2 (round 1). `HostLoweringCacheScope` arms thread-local
+    /// caches, so sending one to another thread and dropping it there leaves
+    /// the arming thread armed forever with rows retained. The reviewer proved
+    /// the type satisfied `thread::spawn`'s bound and did exactly that.
+    ///
+    /// This is a COMPILE-TIME lock, not a runtime one: the two blanket impls
+    /// below are ambiguous for any `Send` type, so if the `*const ()` marker is
+    /// ever removed this call stops compiling and the crate's test target fails
+    /// to build. A runtime test cannot assert a negative trait bound.
+    ///
+    /// The companion invariant, that the scope cannot outlive the program it
+    /// arms for, needs no test: the `&'program CheckedProgram` in the scope's
+    /// `PhantomData` makes the borrow checker enforce it.
+    ///
+    /// Evidentiary status: DISPOSITION LOCK on the marker added in round 1.
+    #[test]
+    fn issue_1829_cache_scope_cannot_cross_a_thread() {
+        trait AmbiguousIfSend<Witness> {
+            fn assert_not_send() {}
+        }
+        impl<T: ?Sized> AmbiguousIfSend<()> for T {}
+        impl<T: ?Sized + Send> AmbiguousIfSend<u8> for T {}
+        // Resolves only while `HostLoweringCacheScope` is NOT `Send`.
+        <HostLoweringCacheScope<'_> as AmbiguousIfSend<_>>::assert_not_send();
+    }
+
+    /// chelis#1829 hazard (2). Cache keys are program addresses, so a scope
+    /// entering on an address that a freed program once occupied must not read
+    /// that program's rows. `begin` evicts the entering program's address, and
+    /// only that address.
+    ///
+    /// Evidentiary status: DISPOSITION LOCK on the eviction. A real address
+    /// reuse cannot be forced deterministically, so the row that a recycled
+    /// address would present is planted directly.
+    #[test]
+    fn issue_1829_entering_scope_evicts_only_its_own_program_address() {
+        let outer = surf_check("module Demo.Held\n\ndef held_fn(x: int64) -> int64 = x\n");
+        let entering =
+            surf_check("module Demo.Entering\n\ndef entering_fn(x: int64) -> int64 = x\n");
+        let outer_key = &outer as *const CheckedProgram as usize;
+        let entering_key = &entering as *const CheckedProgram as usize;
+        assert_ne!(
+            outer_key, entering_key,
+            "two live programs have two addresses"
+        );
+
+        let outer_scope = begin_host_lowering_cache_scope(&outer);
+        cached_program_defs(&outer);
+        // The rows a freed predecessor at `entering`'s address would leave.
+        PROGRAM_DEFS_CACHE.with(|cache| {
+            cache
+                .borrow_mut()
+                .insert(entering_key, Arc::new(BTreeMap::new()));
+        });
+        HELPER_SUMMARY_REJECTS_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            cache.insert((entering_key, "stale_fn".to_string()), true);
+            cache.insert((outer_key, "held_fn".to_string()), true);
+        });
+
+        {
+            let _inner_scope = begin_host_lowering_cache_scope(&entering);
+            assert!(
+                !PROGRAM_DEFS_CACHE.with(|cache| cache.borrow().contains_key(&entering_key)),
+                "#1829: entering a scope must evict the entering address's rows"
+            );
+            assert!(
+                HELPER_SUMMARY_REJECTS_CACHE.with(|cache| cache
+                    .borrow()
+                    .get(&(entering_key, "stale_fn".to_string()))
+                    .is_none()),
+                "#1829: eviction covers the program-keyed summary rows too"
+            );
+            assert!(
+                PROGRAM_DEFS_CACHE.with(|cache| cache.borrow().contains_key(&outer_key)),
+                "#1829: eviction must not reach another program's rows"
+            );
+            assert_eq!(
+                HELPER_SUMMARY_REJECTS_CACHE.with(|cache| cache
+                    .borrow()
+                    .get(&(outer_key, "held_fn".to_string()))
+                    .copied()),
+                Some(true),
+                "#1829: the held program's summary rows survive an inner scope"
+            );
+        }
+
+        drop(outer_scope);
     }
 
     fn issue_1205_source(operations: usize, flat: bool) -> String {

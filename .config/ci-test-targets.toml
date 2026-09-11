@@ -212,3 +212,40 @@ name = "runtime_extent_slice_b"
 [[target]]
 package = "chelis-cli"
 name = "issue_1739_diagonal_runtime_bound"
+
+# chelis#1818/#1817/#1789/#1777/#1820: every guard those issues repair merged
+# green and surfaced only in a nightly, because no per-pull-request job ran any
+# of them. Two of the repaired files are cheap enough to close that gap here.
+# Neither compiles or links C.
+#
+# PROVISIONAL pending chelis#1824, which is the open decision about what this
+# selection is FOR. The defect that issue names is not that targets get added;
+# it is that nobody has decided what the set covers, so it grows one escape at a
+# time with no rule. These two carry a measured cost and this status so the
+# evidence is concrete rather than another silent accretion. Re-decide them with
+# the rest of the file when #1824 settles.
+#
+# Deliberately NOT registered, so the gap is recorded rather than silent:
+#   - issue_1222_root_alias_ownership: two rows are red on chelis#1776, so
+#     registering it would make Fast Tests red on every pull request.
+#   - issue_1271_cross_package_ctor_collision, issue_1344_block_alias_ownership:
+#     green, but both publish packages and link C per case, which is the cost
+#     shape that took the Fast Tests job past its budget above.
+#   - scalar_stub_matrix: already delegated to the parallel dtype oracle through
+#     the `ci` profile's default-filter, so it has a hosted owner already.
+#
+# issue_1739_diagonal_runtime_bound was on that list until chelis#1834, for
+# being red on chelis#1192. It is registered directly above because #1834 made
+# it green: its census now ASSERTS the two dropout refusals with their exact
+# diagnostic instead of failing on them, so the row measures the gap rather
+# than tripping over it.
+
+# 3 tests, 0.246 s measured warm. Pure source scan, no compiler invocation.
+[[target]]
+package = "chelis-types"
+name = "expand_insert_source_literal_inventory"
+
+# 18 tests, 1.595 s measured warm. Host-runtime evaluation only.
+[[target]]
+package = "chelis-compiler-api"
+name = "issue_257_tensor_scan_host_runtime"

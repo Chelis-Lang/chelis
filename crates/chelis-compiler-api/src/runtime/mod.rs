@@ -470,6 +470,16 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
             message,
             transcript: Vec::new(),
         })?;
+    // chelis#1829: the kernel-decision probe behind `def_kernel` expands the
+    // call graph as a tree and is memoized only while a host-lowering scope is
+    // armed. Before #1693 this program held new code only, so an imported name
+    // was not found and never probed; it now composes the library in, so every
+    // imported definition takes that path. Hold one scope for the whole
+    // evaluation, declared after `kernel_program` so it drops first, while the
+    // program it keys on is still alive.
+    let eval_program = kernel_program.as_ref().unwrap_or(program);
+    let _host_lowering_scope = chelis_ir::host::begin_host_lowering_cache_scope(eval_program);
+
     // Lowered classification. A new-code value binding that references a
     // library function (e.g. `imported_val = lib_add(20, 22)`) must
     // inherit that function's host-lane-vs-tensor-lane classification —
@@ -567,7 +577,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         type_env,
         adt_fields,
         tensor_bindings,
-        program: Some(kernel_program.as_ref().unwrap_or(program)),
+        program: Some(eval_program),
         def_kernels: UnordMap::new(),
         transcript: Vec::new(),
         transcript_capture: crate::transcript_capture::current_transcript_capture(),

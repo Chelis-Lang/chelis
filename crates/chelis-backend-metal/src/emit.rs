@@ -324,7 +324,7 @@ fn invalid_count(node: &DagNode, detail: String) -> Unsupported {
 /// A legal Count the Metal device carrier cannot describe. The launch
 /// geometry and the kernel's `ChelisCountDims` index in `uint` and the rank
 /// cap mirrors HIP's fixed-rank device metadata, so this is a target
-/// capability cell under [05-UNS-5], owned by chelis#1345, not a language
+/// capability cell under [05-UNS-5], owned by chelis#1844, not a language
 /// rejection.
 fn count_device_limit(node: &DagNode, detail: String) -> Unsupported {
     Unsupported::new(
@@ -332,9 +332,9 @@ fn count_device_limit(node: &DagNode, detail: String) -> Unsupported {
         format!("Count at Metal DAG node {}: {detail}", node.id.0),
         Stage::Codegen("metal"),
         chelis_types::unimplemented_rejection!(
-            1345,
+            1844,
             "the Metal Count kernel indexes its device tensors in uint under a fixed rank \
-             cap; chelis#1345 moves device tensors onto the dynamic-rank int64 carrier"
+             cap; chelis#1844 moves Metal device tensors onto the dynamic-rank int64 carrier"
         ),
     )
 }

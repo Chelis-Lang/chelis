@@ -66,8 +66,59 @@ default-filter = '''
 filter = '''(binary_id(/^chelis-compiler-api::capacity_census_wire$/) & test(/^wire_schema_numeric_fields_match_the_reviewed_baseline$/)) + (binary_id(/^chelis-python::capacity_census_bindings$/) & test(/^registered_pyfunctions_match_the_reviewed_rustdoc_signatures$/))'''
 test-group = "capacity-rustdoc-verifiers"
 
+# chelis#1831 per-test backstop for the profiles unattended jobs run.
+#
+# Without a `terminate-after`, nextest prints `SLOW [> Ns]` every 60 seconds
+# forever and never kills the test. One pathological row then consumes the
+# whole hosted budget and the job dies by `timeout-minutes` with no JUnit, no
+# summary and no attribution: in dispatch 34615787779, three of four
+# `Full Workspace (Linux, shard N/4)` jobs were cancelled at 60 minutes, two of
+# them on their LAST test, and reported nothing.
+#
+# The period comes from measured rows, not a round number. The 10,362 test
+# durations in nightly 34558777344's JUnit split cleanly in two:
+#
+#   p50 0.0 s, p90 0.6 s, p99 13.1 s, p99.9 105.6 s
+#   slowest healthy row  223.8 s  runtime_extent_claim_preparation::
+#                                 omitted_extent_claim_contract
+#   ------------------------------ 2.7x gap ------------------------------
+#   the tracked chelis#1829/#1830 JSON+CSV interpreter family, 7 rows,
+#   607.5 s .. 2340.7 s, all PASSING; slowest is
+#   csv_io::csv_io_end_to_end_is_exact_and_byte_stable at 2340.7 s.
+#
+# 3000 s (50 x 60 s) sits above the slowest measured PASSING row with 28%
+# headroom and below the 60-minute job budget. That is deliberate: choosing a
+# period inside the second group would convert chelis#1830 from a slow row
+# into a failing row, which is a disposition decision that issue owns (either
+# `#[ignore]` plus a manual gate, or fix the interpreter), not one a CI
+# backstop should make on its behalf. What this setting buys today is the
+# unbounded case: a row that never returns is killed and the rest of the run
+# still reports. It does not, on its own, rescue a 60-minute shard that spends
+# 2900 s inside that family.
+#
+# The 60-second period is nextest's own warning cadence, kept so the `SLOW`
+# lines in existing logs do not change shape.
+#
+# REVISIT THIS PERIOD when chelis#1829 resolves. The second cluster is a
+# tracked regression, not inherent cost. chelis#1830 measured the same rows on
+# the `ci` profile in run 34485518418 (2026-09-10 13:54 UTC, head f5c2a1ea8):
+# csv_io_end_to_end 13.889 s, json_io_end_to_end 8.093 s, json_io_missing_path
+# 6.210 s, which is where they regressed 168x to 207x from. So 3000 s is sized
+# around a defect that is expected to disappear, and it must not calcify as if
+# it described this suite's real shape. When those rows return to seconds, drop
+# this to roughly 600 s (10 periods, 2.7x the slowest healthy row) and delete
+# this paragraph. chelis#1830 is closed as not-planned and is kept here as the
+# measurement record; chelis#1829 owns the disposition.
+#
+# The `default` profile deliberately carries NO backstop: a developer
+# workstation running several agents is exactly the contention case
+# chelis#1607 recorded, where a load-sensitive cap fires as a phantom failure.
+# `scripts/test_ci_cadence.py::terminate_after` locks that every profile a
+# hosted job names carries this setting.
+
 [profile.ci]
 fail-fast = false
+slow-timeout = { period = "60s", terminate-after = 50 }
 # Keep the local fast-suite scope, then delegate every complete test binary
 # named by a required Phase 0-3 oracle `--test` argument. Selector-based `-E`
 # legs remain in both jobs, including expressions with whole-binary arms. The
@@ -125,6 +176,8 @@ path = "junit.xml"
 [profile.ci-fast]
 inherits = "default"
 fail-fast = false
+# chelis#1831: see the backstop note above `[profile.ci]`.
+slow-timeout = { period = "60s", terminate-after = 50 }
 
 [profile.ci-fast.junit]
 path = "junit.xml"
@@ -132,6 +185,8 @@ path = "junit.xml"
 [profile.ci-full]
 inherits = "default"
 fail-fast = false
+# chelis#1831: see the backstop note above `[profile.ci]`.
+slow-timeout = { period = "60s", terminate-after = 50 }
 
 [profile.ci-full.junit]
 # Explicit-filter and macOS lanes write one report per hosted runner without
@@ -164,6 +219,8 @@ default-filter = '''
     + (binary_id(/^chelis-cli::reef_install_from_monorepo$/) & test(/^reef_install_from_monorepo_populates_registry_and_unblocks_check$/))
     + (binary_id(/^chelis-cli::issue_1293_redteam_round4$/) & test(/^recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c$/))
 '''
+# chelis#1831: see the backstop note above `[profile.ci]`.
+slow-timeout = { period = "60s", terminate-after = 50 }
 # A transient gcc/CPU-contention hiccup should not fail a nightly job; retry
 # the heavy tests rather than capping their concurrency (which would slow the
 # per-PR gate, the exact regression this change reverses).
