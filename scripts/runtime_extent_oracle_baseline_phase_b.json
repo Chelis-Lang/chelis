@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "1f4930c7cddf79e657ff4f3eccf9169695a3bb6960043fdea59982427b7dc50e",
+  "corpus_sha256": "335d4b6a119ae25e3428e3e0f9b0ccec40dd4be1c1a0119594dcbbdca321f14f",
   "rows": [
     {
       "id": "claim.literal.nested_and_unused.eval_c",
@@ -29,7 +29,7 @@
     {
       "id": "class.load_op_output.eval",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.load_and_op_output_members_share_one_guarded_class_on_eval"
     },
     {
@@ -53,13 +53,13 @@
     {
       "id": "class.op_output_op_output.c",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.two_op_output_members_guard_against_the_canonical_member_on_c"
     },
     {
       "id": "class.op_output_op_output.eval",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.two_op_output_members_guard_against_the_canonical_member_on_eval"
     },
     {
@@ -77,13 +77,13 @@
     {
       "id": "class.splice_f_of_n_n.c",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.splicing_f_of_n_n_yields_one_member_per_output_axis_on_c"
     },
     {
       "id": "class.splice_f_of_n_n.eval",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.splicing_f_of_n_n_yields_one_member_per_output_axis_on_eval"
     },
     {
@@ -239,13 +239,13 @@
     {
       "id": "expand.shape_derived.declared_result_survives.c",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_shape_derived_bound_keeps_its_declared_result_dimension_on_c"
     },
     {
       "id": "expand.shape_derived.declared_result_survives.eval",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_shape_derived_bound_keeps_its_declared_result_dimension_on_eval"
     },
     {

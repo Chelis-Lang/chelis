@@ -56,13 +56,15 @@ obligations: computed reshape claims and broadcast unit preconditions survive
 inlining, graph rewrites and cache transport. Their bounded oracle retains
 independent declaration, value and failure assertions. Remaining failure boundaries:
 
-- #1397: checked function stamps now retain the declared result; movement
-  execution still owes its guard and general wildcard-returning roots can
-  disappear from eval and entry emission. #1378's public vmap witness remains
-  masked by that root failure.
+- #1397: the declared result of a runtime-bound movement is retained and
+  guarded at the outermost activation. A parameter-bound named result consumed
+  inside another def's body is not (#1800), a general wildcard-returning root
+  can still disappear from eval and from entry emission, and #1378's public
+  vmap witness remains masked by that root failure.
 - #1266/#569: the provenance walk still rejects equivalent field/pipe forms.
-- #1379: local op-computed extents need guard sites beyond the folded-axis
-  and scalar-target forms B2r serves.
+- #1379: local op-computed extents have guard sites, and `shrink` is the
+  admitted owner. What remains is acceptance: the lowering still rejects an
+  arithmetic expand size, so the admitted guard has nothing to check there.
 - #1482 needs an actual shape source for a synthesized constant. The
   declaration consumers no longer use legacy name recovery: every name a lane
   renders resolves through `ExtentOrigin`, and a name that resolves to none is
@@ -268,6 +270,22 @@ using the unvalidated claim. Merely checking after a wrong allocation is not
 a conforming implementation of C1.3. C and Eval consume the same observation
 instruction and placement; the C emitter's current five movement callers are
 not a proof that every derived site has a consumer.
+
+An op-computed site therefore states a THIRD read instruction beside the
+carrier and the realized extent: the extent the operation is about to compute,
+expressed from that operation's own bounds and evaluated before it runs. The
+derivation owns which owners supply one, and that one answer also gates
+lowering's declared-result stamp, so a claim cannot be written onto an axis
+with no site to check it. `shrink` supplies one; `pad` with non-zero padding
+and `stride` with a non-unit step do not, and are unguarded rather than
+newly silent.
+
+When such a class's canonical value is a binder no interface witness declares,
+the FIRST site in derivation order declares it from its observed extent and
+every later site guards against that value. This is C2.4's canonical-member
+rule reaching the local sites, and it is the rule the C emitter already applied
+through its declare-then-guard split; stating it here removes the asymmetry in
+which the evaluator skipped such a site while C emitted its comparison.
 
 The unit precondition on `expand` is a separate obligation from its result
 extent. Its observed value is the OPERAND axis before replacement. Its result
@@ -629,7 +647,11 @@ remove `SizeClass`, `classify_expand_size`, `classify_arith_app`,
 provenance rejection sites. `shape_deps` stays: `root_reach` traverses it, so
 removing it would silently merge scopes and reintroduce #1566, and it is a
 declared WireDag v9 transport whose removal is a schema change with its own
-numeric census obligations. That removal is residual under #1372. Guards may land earlier;
+numeric census obligations. It carries a third obligation since B2b-0b: a named
+claim over an op-computed result axis records its declaring parameter there, so
+an unread declaring parameter survives elimination and reaches the kernel. That
+dependency is what makes the claim comparable at all, and #1372's removal must
+migrate it rather than drop it. That removal is residual under #1372. Guards may land earlier;
 acceptance may not widen earlier. A best-effort identity recognizer may
 remain as a refinement whose miss yields a fresh guarded extent.
 
@@ -644,7 +666,11 @@ The class completion command remains:
 Automatic success is exit zero ending `RUNTIME EXTENT ORACLE: PASS`, with
 applicable HIP and Metal hardware receipts at the same head/corpus digest.
 The recorded phase-B corpus has 57 rows: 38 at exit,
-19 short. This is baseline metadata, not a fresh execution receipt. The final
+19 short. This is baseline metadata, not a fresh execution receipt. The
+op-computed local guards move seven of those short rows
+(`expand.shape_derived.declared_result_survives.{c,eval}`,
+`class.load_op_output.eval`, `class.op_output_op_output.{c,eval}` and
+`class.splice_f_of_n_n.{c,eval}`) and the six `shrink.*` preparation cells. The final
 command currently fails because `SLICE_PHASES` still requires unregistered
 `c`. B2b-3 retires that requirement and its tests; it does not add a fake
 passing phase or erase outstanding B rows. `--phase a` and `--phase b`
@@ -829,10 +855,10 @@ All are Slice B work under #1277 unless expressly separated.
 
 | owner | entry | deliverable and exit |
 |---|---|---|
-| B2b-0b: remaining local guards | merged B2r/S2b and #1658's broadcast preparation repair | guard literal and resolved numeric claims from independent local size sources; op-computed local extents; exact positive/negative C/Eval rows |
+| B2b-0b: remaining local guards | merged B2r/S2b and #1658's broadcast preparation repair | guard literal and resolved numeric claims from independent local size sources; op-computed local extents; exact positive/negative C/Eval rows. The op-computed admission and #1397's declaration half are delivered for `shrink` at the OUTERMOST activation (exported def, value binding, inlined root); `pad` and `stride` remain unadmitted owners. A helper whose parameter-bound NAMED result is consumed inside another def's body keeps its claim erased by the enclosing signature's own result name and is residual under #1800; the literal half survives that nesting |
 | B2b-1: claim transport | C2 contract and red fixtures; integrates B2b-0b | preserve the shipped helper-order and C2.4 checked-reshape/unit receipts (#1686/#1687); finish general scoped checked/lowered identities, explicit caller witnesses, multi-claim axes, rebuild/wire transport and migrated binding consumers; #1397's declaration-erasure half, with #1377's literal call/inlined-root exit established by the witness subset. Named result claims and the unread signature witness (#1374, #1376, #1566) are delivered |
 | B2b-root: root execution | can start independently; acceptance composes B2b-1 | #1397's general wildcard-root boundary; run or diagnose every accepted root; unlock and reverify #1378's exact public value witness |
-| B2b-2: sources and acceptance | guards and claim transport for every newly admitted row | declaration sources are finished (#665/#1556/#1566); supply #1482's missing shape source, remove provenance restrictions (#1266/#569/#1379). `shape_deps` removal moves out of this row and is residual under #1372 |
+| B2b-2: sources and acceptance | guards and claim transport for every newly admitted row | declaration sources are finished (#665/#1556/#1566); supply #1482's missing shape source, remove provenance restrictions (#1266/#569/#1379). `shape_deps` removal moves out of this row and is residual under #1372, which must now also migrate B2b-0b's declaring-parameter dependency rather than drop it |
 | B2b-3: phase exit | preceding host repairs and per-row platform dispositions | register actual passing receipts, correct measured stale baselines, retire phase c from final selection; phase b/final remain red until their named obligations pass |
 | #1512 audit | no dependency on the B2b carrier or withdrawn C | enumerate reachable non-expand unresolved producers and consumer decisions; resolved/unresolved positive and negative pairs; distinguish error cascade suppression; assign each surviving defect a repair under #1512 |
 

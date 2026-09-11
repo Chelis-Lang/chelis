@@ -6277,6 +6277,16 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         // an extent under [05-DIM-1]. Section 4.7's required context - the
         // disagreeing names, the axis and each observed value - is its own
         // `fprintf`, so the trap line stays exactly one line.
+        //
+        // That context names the OPERATION rather than the node id. Section
+        // 4.7 asks for "the names of the disagreeing sources", binding "the
+        // information conveyed and not the bytes rendered", and a node id is
+        // not a source name: `spec/06` section 5.2-5.4's dead-code and
+        // common-subexpression passes renumber nodes, so the same defect
+        // printed a different number depending on what else the program
+        // contained. Every other extent diagnostic on both lanes already
+        // spells it `<source> axis <axis> = <value>`; this was the last pair
+        // that did not.
         // The comparison operand is the class's CANONICAL VALUE, supplied by
         // the derivation: the binder name where a lane declares one, the
         // literal the checker resolved the claim to otherwise. The emitter
@@ -6307,7 +6317,7 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             self.line(&format!("if (({extent_expr}) != {operand}) {{"));
             self.indent += 1;
             self.line(&format!(
-                "fprintf(stderr, \"extent `{name_fmt}`: claimed = %lld, node {id} axis {axis} = %lld\\n\", (long long)({operand}), (long long)({extent_expr}));"
+                "fprintf(stderr, \"extent `{name_fmt}`: claimed = %lld, {op} axis {axis} = %lld\\n\", (long long)({operand}), (long long)({extent_expr}));"
             ));
             self.line(&format!(
                 "chelis_numeric_trap(\"numeric trap: domain in {op} at int64\");"
@@ -6479,6 +6489,20 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         // Preserve the existing runtime-bound empty-range rejection shared
         // with Eval. The metadata API also serves statically empty tensors;
         // this operation-level admission rule is separate from shape safety.
+        //
+        // It stays AFTER the plan, and therefore after any extent guard the
+        // plan's site emits, because `spec/05-risc-primitives.md` section
+        // 2.4.1 does NOT make an empty span a runtime-bound error: its closed
+        // list is a negative bound, a shrink range overshoot, a non-positive
+        // stride step and the two reshape errors. `spec/04-type-system.md`
+        // section 4.7.2 makes only a NEGATIVE size an error. So an extent-0
+        // result under a declared `tensor[2, f32]` is a CLAIM mismatch and the
+        // guard reporting it is the conforming diagnostic; this rejection is
+        // an operation-level admission rule the numbered spec does not require,
+        // and the evaluator's matching rejection is what diverges from it
+        // (chelis#1795). Round 1 of chelis#1397 read the order the other way
+        // round and this comment records why that reading was wrong, so the
+        // next reader does not re-derive it.
         for (axis, (start, end)) in bounds.iter().enumerate() {
             if start.node_input().is_some() || end.node_input().is_some() {
                 self.line(&format!("if (t{id}_start[{axis}].bits == t{id}_end[{axis}].bits) {{ chelis_numeric_trap(\"numeric trap: domain in shrink at int64\"); }}"));

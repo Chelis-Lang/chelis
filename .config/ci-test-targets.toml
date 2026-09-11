@@ -173,3 +173,21 @@ name = "runtime_extent_authored_claims"
 [[target]]
 package = "chelis-compiler-api"
 name = "hip_entry_obligation_witness"
+
+# chelis#1808: the phase-b oracle's receipt leg reads this file, so a sibling
+# merge that changes the C emission turns `runtime_extent_oracle.py --phase b`
+# red on `main` itself. It went unnoticed once because no per-pull-request job
+# ran it. 70 tests, 13.4 s measured warm.
+#
+# The oracle's other receipt leg, `runtime_extent_claim_preparation`, is
+# deliberately NOT here. It is 28 tests and 177 s measured warm on an M-series
+# workstation, and it compiles and links a C fixture per cell, which is slower
+# on the hosted Linux runner. Registered once, it took the Fast Tests job past
+# its 20-minute budget: the ci-fast run of 4193 tests was cancelled at 15m47s
+# with no junit, and the integration aggregator failed on the cancellation. The
+# nightly `runtime-extent-oracle` job runs `--phase b`, which reads that leg, so
+# the matrix stays covered; it is the per-pull-request budget it does not fit,
+# not the coverage that is missing.
+[[target]]
+package = "chelis-cli"
+name = "runtime_extent_slice_b"

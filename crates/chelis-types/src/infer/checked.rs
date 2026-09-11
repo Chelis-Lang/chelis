@@ -293,6 +293,20 @@ pub(super) struct InferenceProduct {
     /// instance so the two policies cannot drift or repeat the lexical walk.
     pub(super) top_level_references: TopLevelReferenceGraph,
     shape_lambda_tvars: UnordSet<TypeVar>,
+    /// chelis#1512: true while `replay_ready_shape_checks` is running. The
+    /// `PostApp` replay re-enters `finish_unified_app`, whose own tail calls
+    /// this function again; without the flag that recursion is unbounded.
+    /// The outer pass runs to a fixpoint, so a nested call has nothing to add.
+    replaying_shape_checks: bool,
+    /// chelis#1512: while a `PostApp` entry is being replayed, the ledger's
+    /// own CLONE of the call stands in for the live Deep node, and that clone
+    /// is dropped at the end of the replay iteration. A route that
+    /// re-registers during the replay would otherwise key its new entry by an
+    /// address that is freed moments later. This pair carries the translation
+    /// `(clone address, original site)`, and it is what makes
+    /// [`Self::post_app_key`]'s documented lifetime invariant true rather
+    /// than merely asserted.
+    replaying_post_app: Option<(usize, usize)>,
     deferred_type_derivations: Vec<DeferredTypeDerivation>,
     next_deferred_shape_id: u64,
     deferred_shape_checks: Vec<DeferredShapeCheck>,
@@ -318,6 +332,29 @@ pub(super) enum DeferredShapeRule {
     Conv,
     ScatterElements {
         list: deep::List,
+    },
+    /// chelis#1512: any other checked route that returned early on an
+    /// unresolved operand. The replay re-enters `finish_unified_app` itself
+    /// rather than a per-route decision function, so the deferred path is the
+    /// eager path: there is no second implementation of any route's
+    /// validation to disagree with the first.
+    /// chelis#1512: an `app_shape` route suspended on an unresolved operand.
+    /// The rule, not the inference entry point, is what replays.
+    ShapeRoute {
+        route: ShapeRouteKind,
+        list: deep::List,
+        kids: Vec<deep::Expr>,
+    },
+    PostApp {
+        /// Address of the `deep::List` this call was registered from, the
+        /// same identity `expr_key` uses for owner stamps. The rule owns a
+        /// CLONE of that node, so the address has to be recorded rather than
+        /// read back off the copy.
+        site: usize,
+        list: deep::List,
+        kids: Vec<deep::Expr>,
+        func_name: String,
+        env: Box<Env>,
     },
 }
 
@@ -503,6 +540,52 @@ impl InferenceProduct {
             .any(|check| check.id >= checkpoint)
     }
 
+    /// chelis#1512: the ledger identity of one call.
+    ///
+    /// Identity is the address of the `deep::List` node in the tree the
+    /// traversal is walking, the same identity `expr_key` uses for owner
+    /// stamps. One case is not that tree: during a `PostApp` replay the
+    /// caller holds the ledger's own clone, which is dropped when the replay
+    /// iteration ends, so this translates that clone back to the original
+    /// site. Every key this returns therefore names a node that outlives the
+    /// entry, which is the invariant the old spelling documented without
+    /// holding: a route that re-registered during a replay stored a freed
+    /// address, and a later allocation reusing it would make
+    /// [`Self::has_post_app_check_for`] answer for an unrelated live call
+    /// (round 2 P2-1, latent: 0 collisions in 2,000 runs, never observed).
+    pub(super) fn post_app_key(&self, list: &deep::List) -> usize {
+        let addr = std::ptr::from_ref(list).addr();
+        match self.replaying_post_app {
+            Some((clone_addr, original_site)) if clone_addr == addr => original_site,
+            _ => addr,
+        }
+    }
+
+    /// Is this call already suspended?
+    pub(super) fn has_post_app_check_for(&self, list: &deep::List) -> bool {
+        let key = self.post_app_key(list);
+        self.deferred_shape_checks.iter().any(
+            |check| matches!(&check.rule, DeferredShapeRule::PostApp { site, .. } if *site == key),
+        )
+    }
+
+    /// chelis#1512: drop a suspended `PostApp` decision for this call.
+    ///
+    /// A call that FAILS on the eager pass has nothing left to decide. It may
+    /// still have registered a suspension a moment earlier, for a different
+    /// operand that was not the one it rejected on, and replaying it would
+    /// re-enter the whole route and re-report the rejection the eager pass
+    /// already made. Cancelling the deferral is what fixes that, rather than
+    /// filtering the duplicate out afterwards: a filter keyed on the message
+    /// cannot tell a re-report from a second call that legitimately fails the
+    /// same way, and these diagnostics carry no span to tell them apart.
+    pub(super) fn cancel_post_app_check_for(&mut self, list: &deep::List) {
+        let key = self.post_app_key(list);
+        self.deferred_shape_checks.retain(
+            |check| !matches!(&check.rule, DeferredShapeRule::PostApp { site, .. } if *site == key),
+        );
+    }
+
     pub(super) fn defer_shape_check(
         &mut self,
         rule: DeferredShapeRule,
@@ -510,6 +593,10 @@ impl InferenceProduct {
         arg_tys: Vec<Type>,
         result_ty: Type,
     ) {
+        #[cfg(test)]
+        if let DeferredShapeRule::PostApp { site, .. } = &rule {
+            record_post_app_key(*site, self.replaying_post_app.is_some());
+        }
         let id = self.next_deferred_shape_id;
         self.next_deferred_shape_id += 1;
         self.deferred_shape_checks.push(DeferredShapeCheck {
@@ -528,6 +615,32 @@ impl InferenceProduct {
         &mut self,
         vg: &mut VarGen,
         subst: &mut Subst,
+        adt_reg: &AdtRegistry,
+        errors: &mut DiagnosticSink<'_>,
+    ) {
+        if self.replaying_shape_checks {
+            return;
+        }
+        self.replaying_shape_checks = true;
+        // A `PostApp` replay can bind the operand another suspended check was
+        // waiting on, and the pass has an order. Repeat until a pass settles
+        // nothing new, so a check that became ready mid-pass is not carried
+        // to `finish_deferred_shape_checks` and reported as never bound.
+        loop {
+            let before = self.deferred_shape_checks.len();
+            self.replay_ready_shape_checks_once(vg, subst, adt_reg, errors);
+            if self.deferred_shape_checks.len() >= before {
+                break;
+            }
+        }
+        self.replaying_shape_checks = false;
+    }
+
+    fn replay_ready_shape_checks_once(
+        &mut self,
+        vg: &mut VarGen,
+        subst: &mut Subst,
+        adt_reg: &AdtRegistry,
         errors: &mut DiagnosticSink<'_>,
     ) {
         self.resolve_deferred_type_derivations(subst, errors);
@@ -592,6 +705,51 @@ impl InferenceProduct {
                         errors,
                     )
                 }
+                DeferredShapeRule::ShapeRoute { route, list, kids } => {
+                    let settled: Vec<Type> =
+                        check.arg_tys.iter().map(|ty| subst.apply(ty)).collect();
+                    let produced =
+                        check_shape_route_signature(route, list, kids, &settled, vg, subst, errors);
+                    reconcile_replayed_result(
+                        &route.builtin(),
+                        &check.result_ty,
+                        produced,
+                        subst,
+                        errors,
+                    )
+                }
+                DeferredShapeRule::PostApp {
+                    site,
+                    list,
+                    kids,
+                    func_name,
+                    env,
+                } => {
+                    let settled: Vec<Type> =
+                        check.arg_tys.iter().map(|ty| subst.apply(ty)).collect();
+                    let mut replay_env = (**env).clone();
+                    // chelis#1512 round 2 P2-1: `list` is the ledger's own
+                    // clone and dies with this iteration. Carry the original
+                    // site so a route that re-registers inside the replay
+                    // keys its entry by the live node, not by this clone.
+                    self.replaying_post_app = Some((std::ptr::from_ref(list).addr(), *site));
+                    let replayed = finish_unified_app(
+                        list,
+                        kids,
+                        Some(func_name.clone()),
+                        settled,
+                        check.result_ty.clone(),
+                        &mut replay_env,
+                        vg,
+                        subst,
+                        adt_reg,
+                        errors,
+                        self,
+                        None,
+                    );
+                    self.replaying_post_app = None;
+                    reconcile_replayed_result(func_name, &check.result_ty, replayed, subst, errors)
+                }
             };
             let _ = resolved;
         }
@@ -604,9 +762,10 @@ impl InferenceProduct {
         &mut self,
         vg: &mut VarGen,
         subst: &mut Subst,
+        adt_reg: &AdtRegistry,
         errors: &mut DiagnosticSink<'_>,
     ) {
-        self.replay_ready_shape_checks(vg, subst, errors);
+        self.replay_ready_shape_checks(vg, subst, adt_reg, errors);
         for check in self.deferred_shape_checks.drain(..) {
             let operation = match check.rule {
                 DeferredShapeRule::Matmul => "matmul".to_string(),
@@ -615,6 +774,23 @@ impl InferenceProduct {
                 DeferredShapeRule::LayerNorm => "layer_norm".to_string(),
                 DeferredShapeRule::Conv => "conv".to_string(),
                 DeferredShapeRule::ScatterElements { .. } => "scatter_elements".to_string(),
+                DeferredShapeRule::ShapeRoute { route, .. } => route.builtin(),
+                // chelis#1512: a collection, host or string route's operand is
+                // NOT required to be a tensor carrying a shape, so an operand
+                // that never binds is not an error here. A polymorphic
+                // definition legitimately calls `dict_of`, `len` or `where`
+                // over a value that acquires its constructor per call site,
+                // and the replay discharges the route's own validation at each
+                // of those bindings. The eager pass already published the
+                // unconstrained result this arm published before the repair,
+                // so discharging the obligation silently leaves the program
+                // exactly as it was.
+                //
+                // The rules above keep the rejection because their operand
+                // must be a tensor with a shape: without one, no result type
+                // can be derived at all, which is the acceptance boundary the
+                // shape-computed builtins have carried since chelis#1489.
+                DeferredShapeRule::PostApp { .. } => continue,
             };
             errors.push(CheckError::new(
                 CheckErrorKind::TypeMismatch,
@@ -879,6 +1055,70 @@ impl InferenceProduct {
     }
 }
 
+// chelis#1512 round 2 P2-1: every `PostApp` ledger key, with whether it was
+// minted during a replay.
+//
+// A test cannot read the ledger, and the property at issue is about the KEY
+// rather than about any diagnostic, so it has to be observed where it is
+// minted. Thread-local because the checker runs single-threaded per program
+// and nextest gives each test its own thread. A `///` here would attach to the
+// macro invocation and go nowhere, which `unused_doc_comments` rejects.
+#[cfg(test)]
+thread_local! {
+    static POST_APP_KEY_LOG: std::cell::RefCell<Vec<(usize, bool)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn record_post_app_key(site: usize, during_replay: bool) {
+    POST_APP_KEY_LOG.with(|log| log.borrow_mut().push((site, during_replay)));
+}
+
+/// Drain the log. Returns `(key, minted during a replay)` in mint order.
+#[cfg(test)]
+pub(crate) fn take_post_app_key_log() -> Vec<(usize, bool)> {
+    POST_APP_KEY_LOG.with(|log| std::mem::take(&mut *log.borrow_mut()))
+}
+
+/// chelis#1512: unify a replayed route's answer with the type the suspended
+/// call already published to its consumer, and report loudly when the two
+/// disagree.
+///
+/// A route that builds its result out of band rather than through unification
+/// (chelis#1265's class) hands its answer back without ever meeting the
+/// declaration the call was accepted against. That is the wrong-answer
+/// witness this issue was filed on, so the reconciliation is here, once, for
+/// every replayed route rather than per route.
+///
+/// A replay that REJECTED returns `Type::Error`, which unifies with anything,
+/// so a rejected call reports once and not twice.
+///
+/// `pub(super)` so `ReconcileMutationCase` can drive it directly from
+/// `session.rs`: the disagreement branch is the one place where a relocated
+/// decision could quietly overwrite a published type, and a test that can only
+/// reach it through a whole program cannot show that the returned value is the
+/// PRODUCED one.
+pub(super) fn reconcile_replayed_result(
+    operation: &str,
+    published: &Type,
+    produced: Type,
+    subst: &mut Subst,
+    errors: &mut DiagnosticSink<'_>,
+) -> Type {
+    if unify(published, &produced, subst).is_err() {
+        let expected = subst.apply(published);
+        errors.push(CheckError::new(
+            CheckErrorKind::TypeMismatch,
+            format!(
+                "`{operation}` result does not match the type this call produces once its \
+                 operand is known: expected {expected}, got {produced}"
+            ),
+            vec![],
+        ));
+    }
+    produced
+}
+
 /// A semantic shape rule can decide symbolic tensor dimensions and precision
 /// variables. It must wait only while an operand's *type constructor* is still
 /// unknown; treating every free variable as pending would reject legitimate
@@ -1003,6 +1243,39 @@ pub(crate) enum TypeStampMutationCase {
     IncompatibleRepeat,
     UnregisteredSynthesized,
     RuntimeNonStampOwnerLookup,
+}
+
+/// chelis#1512: the two branches of [`reconcile_replayed_result`], driven
+/// from `session.rs` where a `DiagnosticSink` can be constructed.
+#[cfg(test)]
+pub(crate) enum ReconcileMutationCase {
+    /// The replayed rule produces a type the suspended call did not publish.
+    Disagrees,
+    /// The rule produces the type a fresh published variable can take.
+    Agrees,
+}
+
+/// Returns the rendered produced type and whether the published type ended up
+/// bound to it.
+#[cfg(test)]
+pub(crate) fn run_reconcile_mutation_case(
+    case: ReconcileMutationCase,
+    errors: &mut DiagnosticSink<'_>,
+) -> (String, bool) {
+    let tensor = |dim: i64| Type::Tensor(vec![Dim::Lit(dim)], TensorPrec::Concrete(Prim::F32));
+    let mut subst = Subst::new();
+    let mut vg = VarGen::default();
+    let published = match case {
+        ReconcileMutationCase::Disagrees => tensor(3),
+        ReconcileMutationCase::Agrees => Type::Var(vg.fresh_tvar()),
+    };
+    let produce = match case {
+        ReconcileMutationCase::Disagrees => tensor(4),
+        ReconcileMutationCase::Agrees => tensor(3),
+    };
+    let produced = reconcile_replayed_result("permute", &published, produce, &mut subst, errors);
+    let bound = subst.apply(&published) == produced;
+    (produced.to_string(), bound)
 }
 
 #[cfg(test)]

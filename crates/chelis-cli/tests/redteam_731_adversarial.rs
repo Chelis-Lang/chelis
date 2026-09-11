@@ -275,19 +275,12 @@ fn redteam_boundary_seed_cross_function_parity() {
 /// lanes ran the DEFAULT stream: seed -1 and seed 0 produced identical output
 /// ("distinct seeds yield distinct streams" [05-RNG-1] fails). chelis#794
 /// replaced that fold with `extract_u64_value`, which honors [05-RNG-1]'s
-/// two's-complement reinterpretation. The checker still narrows the front-end
-/// surface (Phase 1 F2, pending chelis#735), so this oracle still returns early
-/// and gives that lowering fix NO end-to-end cross-lane coverage: only the
-/// in-memory `RiscOp::UniformLike { seed }` unit assertions in
-/// `chelis-ir` cover it. If a future change accepts a negative seed at check,
-/// the assertions below become live.
+/// two's-complement reinterpretation. chelis#1803 admits that signed literal
+/// through the checker; rejection must no longer silently skip this oracle.
 #[test]
 fn redteam_negative_dp_seed_not_silently_dropped() {
     let score = check_score(NEGATIVE_SEED_DP, ".dp");
-    if score < 1.0 {
-        // The front-end rejected the negative seed: loud, no finding.
-        return;
-    }
+    assert_eq!(score, 1.0, "signed int64 literal must be admitted");
     let dir = tempdir().expect("tempdir");
     let out_dir = dir.path().join("negseed-out");
     let c_src = build_c(NEGATIVE_SEED_DP, ".dp", "negseed", &out_dir);
@@ -326,8 +319,7 @@ fn redteam_handle_effect_extra_child_is_rejected() {
     );
 }
 
-/// The PR's baked-seed expectation: the direct suffixed form bakes
-/// `CHELIS_EFFECTIVE_UNIFORM_SEED(7ULL)`; the generated C must be identical
+/// The direct suffixed seed must produce identical generated C
 /// across two builds and the runtime output bit-identical across two runs and
 /// against eval.
 #[test]
@@ -341,10 +333,8 @@ fn redteam_baked_seed_deterministic_and_cross_lane() {
     let src_a = build_c(BAKED_SEED_CH, ".ch", "seeded", &out_a);
     let src_b = build_c(BAKED_SEED_CH, ".ch", "seeded", &out_b);
     assert_eq!(src_a, src_b, "generated C must be build-to-build identical");
-    assert!(
-        src_a.contains("CHELIS_EFFECTIVE_UNIFORM_SEED(7ULL"),
-        "expected the baked effective-seed wrapper argument 7ULL; got:\n{src_a}"
-    );
+    // The handler transports seed 7 through the invocation-local RNG state
+    // (chelis#1799); a former macro spelling is not the execution contract.
     let eval = parse_tensor_data(&eval_stdout(BAKED_SEED_CH, ".ch"), "sampled");
     let c1 = c_sampled(BAKED_SEED_CH, ".ch", "seeded1");
     let c2 = c_sampled(BAKED_SEED_CH, ".ch", "seeded2");

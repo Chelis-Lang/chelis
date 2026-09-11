@@ -3174,14 +3174,16 @@ fn host_def_kernel_product(
         return Ok(None);
     };
     let _preflight_guard = TensorHelperPreflightGuard::begin(&signature.body_expr, program);
+    // Classify lexical controls before host signature preparation substitutes
+    // local callable aliases: that rewrite does not carry closure captures.
+    let profile_body = as_list(body)
+        .filter(|list| tag(list) == Some(DeepTag::Fn))
+        .and_then(|list| children(list).get(1))
+        .unwrap_or(&signature.body_expr);
     let profile = match execution {
         Some(_) => cached_subexpr_lowering_context(program).evaluation_profile(
-            &signature.body_expr,
-            &signature
-                .params
-                .iter()
-                .map(|param| param.name.clone())
-                .collect::<Vec<_>>(),
+            profile_body,
+            &kernel_scope_types(&signature.scope, Some(&signature.params)),
         ),
         None => crate::evaluation::EvaluationProfile::Legacy(
             crate::evaluation::LegacyEvaluationReason::LegacyApi,
@@ -11660,15 +11662,44 @@ fn actualize_tensor_helper_types(
                         (crate::dag::RtDim::Node(_), crate::dag::RtDim::Node(_))
                         | (crate::dag::RtDim::Node(_), crate::dag::RtDim::Lit(_))
                         | (crate::dag::RtDim::Lit(_), crate::dag::RtDim::Node(_)) => {
-                            Some(crate::dag::DimInfo::Named(
-                                reserve_runtime_dim_name(
-                                    occupied_dim_names,
+                            // chelis#1397: a DECLARED extent on this axis is
+                            // a claim, and minting a fresh symbol over it
+                            // discards the claim rather than discharging it.
+                            // `unresolved_axis` mints only when the node
+                            // carries no usable dimension of its own, which
+                            // is the same rule the `pad` arm above already
+                            // applies.
+                            //
+                            // Keeping the claim is only safe when something
+                            // checks it, so the admission is ASKED rather than
+                            // assumed: `op_computed_axis_extent` is the one
+                            // answer `local_dim_guard_sites` uses to decide
+                            // whether this axis gets a guard site. Until this
+                            // call existed the coupling was structural - only
+                            // `shrink` reaches this arm, and `shrink` is the
+                            // one admitted owner - so removing `shrink` from
+                            // admission would have kept the claim with nothing
+                            // to enforce it, silently.
+                            if crate::axis_sources::op_computed_axis_extent(op, axis).is_some() {
+                                Some(unresolved_axis(
                                     "shrink",
                                     node_id,
                                     axis,
-                                ),
-                                None,
-                            ))
+                                    input.dims.len(),
+                                    fallback,
+                                    occupied_dim_names,
+                                ))
+                            } else {
+                                Some(crate::dag::DimInfo::Named(
+                                    reserve_runtime_dim_name(
+                                        occupied_dim_names,
+                                        "shrink",
+                                        node_id,
+                                        axis,
+                                    ),
+                                    None,
+                                ))
+                            }
                         }
                         // `ToEnd` is an `end`-only marker; `Sym` is a
                         // `Reshape` target only; and `InputAxis` belongs only

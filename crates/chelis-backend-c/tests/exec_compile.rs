@@ -7096,6 +7096,7 @@ int main() {{
 ///
 /// EVIDENTIARY STATUS: regression test for the RENDERING - `main` emits
 /// `chelis: runtime dim `n` mismatch at node 3 axis 0` followed by `abort()`
+/// (the legacy rendering; the shipped context names the operation)
 /// at this site, which [04-NUM-9] does not permit - and a disposition lock
 /// for the position, which `main` already gets right through chelis#616's
 /// `runtime_dim_sites`.
@@ -7346,7 +7347,12 @@ fn numeric_local_extent_claims_execute_exactly() {
                         format!("numeric_local_{resolved_name}_{reshape}_{tensor_size}_{good}");
                     let op = if reshape { "reshape" } else { "insert" };
                     let trap = format!("numeric trap: domain in {op} at int64");
-                    let context = format!("node {} axis 0 = {observed}", root.0);
+                    // Section 4.7's context names the OPERATION that
+                    // introduces the extent, not the node id: a node id is not
+                    // a source name and does not survive `spec/06` section
+                    // 5.2-5.4's renumbering passes.
+                    let _ = root;
+                    let context = format!("{op} axis 0 = {observed}");
                     let expected = if reshape {
                         vec![1.0, 2.0, 3.0, 4.0]
                     } else {
@@ -7642,7 +7648,7 @@ int main() {{
         out.lines()
             .any(|line| line == "numeric trap: domain in insert at int64")
             && out.contains("claimed = 4")
-            && out.contains("node 2 axis 0 = 5")
+            && out.contains("insert axis 0 = 5")
             && !out.contains("NO TRAP"),
         "the failure must identify the literal claim and observed carrier: {out}"
     );
@@ -7733,7 +7739,7 @@ fn an_interface_member_with_a_resolved_dim_keeps_its_site_in_a_local_class() {
         result.c_source
     );
     assert!(
-        result.c_source.contains("node 3 axis 0 = %lld"),
+        result.c_source.contains("insert axis 0 = %lld"),
         "the interface member of a Local class keeps its site: {}",
         result.c_source
     );
@@ -7835,10 +7841,9 @@ puts("EXACT"); return 0; }}"#
             } else {
                 ("m", 2, 0, 3)
             };
-            let context = format!(
-                "extent {claim}: claimed = {required}, node {} axis {axis} = {observed}",
-                root.0
-            );
+            let _ = root;
+            let context =
+                format!("extent {claim}: claimed = {required}, reshape axis {axis} = {observed}");
             for (lane, diagnostic) in [("eval", e), ("c", c)] {
                 let diagnostic = diagnostic.replace('`', "");
                 assert!(

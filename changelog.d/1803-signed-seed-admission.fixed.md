@@ -1,0 +1,1 @@
+Accept explicit negative `i64` seed literals in Surf and Deep, preserving their signed 64-bit seed bits through evaluation and compiled C. Runtime, cast, and other computed seed expressions remain rejected.

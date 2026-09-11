@@ -233,6 +233,35 @@ pub(super) fn infer_permute_app(
         return err;
     }
 
+    let mut route_arg_tys = vec![input_ty];
+    route_arg_tys.extend(axis_tys);
+    defer_or_check_shape_route(
+        ShapeRouteKind::Permute,
+        list,
+        kids,
+        route_arg_tys,
+        vg,
+        subst,
+        errors,
+        product,
+    )
+}
+
+/// chelis#1512: the route's own rule, over already-inferred argument
+/// types. Split out of the inference entry point so the deferred replay
+/// and the eager pass call ONE function: a suspended decision that ran a
+/// copy of the rule could drop what the original path did on the way to it.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn check_permute_signature(
+    list: &deep::List,
+    kids: &[deep::Expr],
+    arg_tys: &[Type],
+    subst: &mut Subst,
+    errors: &mut DiagnosticSink<'_>,
+) -> Type {
+    let input_ty = arg_tys[0].clone();
+    let axis_tys: Vec<Type> = arg_tys[1..].to_vec();
+
     for axis_ty in &axis_tys {
         let resolved = subst.apply(axis_ty);
         match resolved {
@@ -390,7 +419,7 @@ pub(super) fn infer_reshape_app(
 
             Type::Tensor(vec![Dim::Wildcard], TensorPrec::Concrete(precision))
         }
-        Type::Tensor(input_dims, precision) => {
+        Type::Tensor(_, ref precision) => {
             if let Some(shape_expr) = kids.get(2) {
                 let shape_ty = infer_expr(shape_expr, env, vg, subst, adt_reg, errors, product);
                 let expected_shape_ty =
@@ -415,33 +444,17 @@ pub(super) fn infer_reshape_app(
                         ),
                     );
                 }
-                let dims =
-                    reshape_output_dims(shape_expr, input_var_name.as_deref(), &input_dims, subst);
-                if let Err(error) = validate_reshape_target_dims(&dims, subst) {
-                    return report(errors, error.into());
-                }
-                if subst.static_dim_products_match(&input_dims, &dims) == Some(false) {
-                    let input_numel = subst.static_dim_product(&input_dims);
-                    let target_numel = subst.static_dim_product(&dims);
-                    return report(
-                        errors,
-                        CheckError::new(
-                            CheckErrorKind::DimensionMismatch,
-                            match (target_numel, input_numel) {
-                                (Some(target), Some(input)) => format!(
-                                    "reshape target has {target} elements but input tensor has {input}"
-                                ),
-                                _ => "reshape target element count does not match input tensor"
-                                    .to_string(),
-                            },
-                            vec![],
-                        ),
-                    );
-                }
-                return Type::Tensor(dims, precision);
+                return check_reshape_signature(
+                    list,
+                    kids,
+                    input_var_name.as_deref(),
+                    &[input_ty.clone(), shape_ty],
+                    subst,
+                    errors,
+                );
             }
 
-            Type::Tensor(vec![Dim::Wildcard], precision)
+            Type::Tensor(vec![Dim::Wildcard], precision.clone())
         }
         Type::Var(_) => {
             if let Some(shape_expr) = kids.get(2) {
@@ -471,41 +484,43 @@ pub(super) fn infer_reshape_app(
                 // Inferring the shape list may have bound the input's own
                 // type through a `shape(input, axis)` element. Re-read the
                 // input before deriving the output.
-                if let Type::Tensor(input_dims, precision) = subst.apply(&input_ty) {
-                    let dims = reshape_output_dims(
-                        shape_expr,
+                if !matches!(type_for_readonly_check(&input_ty, subst), Type::Var(_)) {
+                    return check_reshape_signature(
+                        list,
+                        kids,
                         input_var_name.as_deref(),
-                        &input_dims,
+                        &[input_ty.clone(), shape_ty],
                         subst,
+                        errors,
                     );
-                    if let Err(error) = validate_reshape_target_dims(&dims, subst) {
-                        return report(errors, error.into());
-                    }
-                    if subst.static_dim_products_match(&input_dims, &dims) == Some(false) {
-                        let input_numel = subst.static_dim_product(&input_dims);
-                        let target_numel = subst.static_dim_product(&dims);
-                        return report(
-                            errors,
-                            CheckError::new(
-                                CheckErrorKind::DimensionMismatch,
-                                match (target_numel, input_numel) {
-                                    (Some(target), Some(input)) => format!(
-                                        "reshape target has {target} elements but input tensor has {input}"
-                                    ),
-                                    _ => "reshape target element count does not match input tensor"
-                                        .to_string(),
-                                },
-                                vec![],
-                            ),
-                        );
-                    }
-                    return Type::Tensor(dims, precision);
                 }
 
+                // chelis#1512: the target list stands on its own, so validate
+                // it here rather than only on the replay. Relocating a
+                // decision is how a check silently stops happening.
                 let dims = reshape_output_dims(shape_expr, input_var_name.as_deref(), &[], subst);
                 if let Err(error) = validate_reshape_target_dims(&dims, subst) {
                     return report(errors, error.into());
                 }
+
+                // The input is still a variable, so neither the output dims
+                // nor the element-count rule can be decided yet. Suspend the
+                // route and let the ledger run this same rule once the
+                // operand binds; publishing `input_ty` here is what made a
+                // correct `reshape` fail its declared signature and an
+                // incorrect one pass.
+                return defer_or_check_shape_route(
+                    ShapeRouteKind::Reshape {
+                        input_var_name: input_var_name.clone(),
+                    },
+                    list,
+                    kids,
+                    vec![input_ty, shape_ty],
+                    vg,
+                    subst,
+                    errors,
+                    product,
+                );
             }
             input_ty
         }
@@ -519,6 +534,81 @@ pub(super) fn infer_reshape_app(
             ),
         ),
     }
+}
+
+/// `reshape`'s own rule, the single entry the eager pass and the deferred
+/// shape ledger both call.
+///
+/// `arg_tys` is `[input, shape_list]` with the input already settled: the
+/// caller decides whether it can be, and suspends the call when it cannot.
+/// Deriving the output dims and checking the element count are one decision,
+/// so they live together here rather than being copied onto a deferred path.
+pub(super) fn check_reshape_signature(
+    list: &deep::List,
+    kids: &[deep::Expr],
+    input_var_name: Option<&str>,
+    arg_tys: &[Type],
+    subst: &mut Subst,
+    errors: &mut DiagnosticSink<'_>,
+) -> Type {
+    let Some(shape_expr) = kids.get(2) else {
+        // The two-argument form has no target to check against.
+        return match type_for_readonly_check(&arg_tys[0], subst) {
+            Type::Tensor(_, precision) => Type::Tensor(vec![Dim::Wildcard], precision),
+            Type::Prim(precision) => {
+                Type::Tensor(vec![Dim::Wildcard], TensorPrec::Concrete(precision))
+            }
+            other => other,
+        };
+    };
+    let input_dims = match type_for_readonly_check(&arg_tys[0], subst) {
+        Type::Tensor(dims, precision) => {
+            let dims = dims.clone();
+            let target = reshape_output_dims(shape_expr, input_var_name, &dims, subst);
+            if let Err(error) = validate_reshape_target_dims(&target, subst) {
+                return report(errors, error.into());
+            }
+            if subst.static_dim_products_match(&dims, &target) == Some(false) {
+                let input_numel = subst.static_dim_product(&dims);
+                let target_numel = subst.static_dim_product(&target);
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        match (target_numel, input_numel) {
+                            (Some(target), Some(input)) => format!(
+                                "reshape target has {target} elements but input tensor has {input}"
+                            ),
+                            _ => "reshape target element count does not match input tensor"
+                                .to_string(),
+                        },
+                        vec![],
+                    ),
+                );
+            }
+            return Type::Tensor(target, precision);
+        }
+        Type::Prim(precision) => {
+            let target = reshape_output_dims(shape_expr, input_var_name, &[], subst);
+            if let Err(error) = validate_reshape_target_dims(&target, subst) {
+                return report(errors, error.into());
+            }
+            return Type::Tensor(target, TensorPrec::Concrete(precision));
+        }
+        Type::Error(witness) => return propagate(&witness),
+        other => other,
+    };
+    report(
+        errors,
+        CheckError::new(
+            CheckErrorKind::TypeMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!("reshape expects tensor input, got {input_dims}"),
+            ),
+            vec![],
+        ),
+    )
 }
 
 /// `shrink(&x, [[s0, e0], [s1, e1], ...]) -> tensor[e0-s0, e1-s1, ..., p]`
@@ -560,6 +650,34 @@ pub(super) fn infer_shrink_app(
     if let Some(err) = propagate_if_error([&input_ty, &bounds_ty]) {
         return err;
     }
+
+    let route_arg_tys = vec![input_ty, bounds_ty];
+    defer_or_check_shape_route(
+        ShapeRouteKind::Shrink,
+        list,
+        kids,
+        route_arg_tys,
+        vg,
+        subst,
+        errors,
+        product,
+    )
+}
+
+/// chelis#1512: the route's own rule, over already-inferred argument
+/// types. Split out of the inference entry point so the deferred replay
+/// and the eager pass call ONE function: a suspended decision that ran a
+/// copy of the rule could drop what the original path did on the way to it.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn check_shrink_signature(
+    list: &deep::List,
+    kids: &[deep::Expr],
+    arg_tys: &[Type],
+    subst: &mut Subst,
+    errors: &mut DiagnosticSink<'_>,
+) -> Type {
+    let input_ty = arg_tys[0].clone();
+    let bounds_ty = arg_tys[1].clone();
 
     // The bounds argument must be a `List[List[Int64]]` (extent-domain
     // under [05-DIM-1]).
@@ -763,6 +881,35 @@ pub(super) fn infer_stride_app(
         return err;
     }
 
+    let mut route_arg_tys = vec![input_ty];
+    route_arg_tys.extend(stride_tys);
+    defer_or_check_shape_route(
+        ShapeRouteKind::Stride,
+        list,
+        kids,
+        route_arg_tys,
+        vg,
+        subst,
+        errors,
+        product,
+    )
+}
+
+/// chelis#1512: the route's own rule, over already-inferred argument
+/// types. Split out of the inference entry point so the deferred replay
+/// and the eager pass call ONE function: a suspended decision that ran a
+/// copy of the rule could drop what the original path did on the way to it.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn check_stride_signature(
+    list: &deep::List,
+    kids: &[deep::Expr],
+    arg_tys: &[Type],
+    subst: &mut Subst,
+    errors: &mut DiagnosticSink<'_>,
+) -> Type {
+    let input_ty = arg_tys[0].clone();
+    let stride_tys: Vec<Type> = arg_tys[1..].to_vec();
+
     for stride_ty in &stride_tys {
         let resolved = subst.apply(stride_ty);
         match resolved {
@@ -915,6 +1062,36 @@ pub(super) fn infer_pad_app(
     if let Some(err) = propagate_if_error([&input_ty, &padding_ty]) {
         return err;
     }
+
+    let route_arg_tys = vec![input_ty, padding_ty, fill_ty];
+    defer_or_check_shape_route(
+        ShapeRouteKind::Pad,
+        list,
+        kids,
+        route_arg_tys,
+        vg,
+        subst,
+        errors,
+        product,
+    )
+}
+
+/// chelis#1512: the route's own rule, over already-inferred argument
+/// types. Split out of the inference entry point so the deferred replay
+/// and the eager pass call ONE function: a suspended decision that ran a
+/// copy of the rule could drop what the original path did on the way to it.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn check_pad_signature(
+    list: &deep::List,
+    kids: &[deep::Expr],
+    arg_tys: &[Type],
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    errors: &mut DiagnosticSink<'_>,
+) -> Type {
+    let input_ty = arg_tys[0].clone();
+    let padding_ty = arg_tys[1].clone();
+    let fill_ty = arg_tys[2].clone();
 
     // Padding pairs are extent-domain ([05-DIM-1]): List[List[Int64]].
     let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
@@ -1120,6 +1297,38 @@ pub(super) fn infer_reduce_window_app(
     if let Some(err) = propagate_if_error([&input_ty, &window_ty, &stride_ty]) {
         return err;
     }
+
+    let route_arg_tys = vec![input_ty, window_ty, stride_ty];
+    defer_or_check_shape_route(
+        ShapeRouteKind::ReduceWindow {
+            name: name.to_string(),
+        },
+        list,
+        kids,
+        route_arg_tys,
+        vg,
+        subst,
+        errors,
+        product,
+    )
+}
+
+/// chelis#1512: the route's own rule, over already-inferred argument
+/// types. Split out of the inference entry point so the deferred replay
+/// and the eager pass call ONE function: a suspended decision that ran a
+/// copy of the rule could drop what the original path did on the way to it.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn check_reduce_window_signature(
+    list: &deep::List,
+    kids: &[deep::Expr],
+    name: &str,
+    arg_tys: &[Type],
+    subst: &mut Subst,
+    errors: &mut DiagnosticSink<'_>,
+) -> Type {
+    let input_ty = arg_tys[0].clone();
+    let window_ty = arg_tys[1].clone();
+    let stride_ty = arg_tys[2].clone();
 
     let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
     if let Err(_te) = unify(&window_ty, &int_list, subst) {

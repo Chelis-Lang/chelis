@@ -10,7 +10,7 @@
 //! (`chelis-effects` `validate_handler_expr`): a `random` handler whose seed
 //! is not an int LITERAL (`int_literal`: a bare `Atom::Int` or a single
 //! `(lit … Atom::Int)`) is REJECTED with
-//! `with seed(...) currently requires an int literal seed` in BOTH lanes
+//! `with seed(...) requires a signed int64 literal seed` in BOTH lanes
 //! (check/eval AND build all run the gate). So every "computed" seed
 //! (negation `-1`, `cast(..)`, `add(..)`, a float) fails LOUDLY and
 //! IDENTICALLY across lanes — never a silent divergence. The eval
@@ -114,7 +114,7 @@ fn assert_both_reject(tag: &str, seed_expr: &str) {
     let (e, c) = outcome(tag, seed_expr);
     match (e, c) {
         (Lane::Err(em), Lane::Err(_)) => assert!(
-            em.contains("requires an int literal seed"),
+            em.contains("requires a signed int64 literal seed"),
             "{seed_expr}: eval rejected but not via the seed-literal gate: {em}"
         ),
         (e, c) => panic!("{seed_expr}: expected BOTH-ERR, got eval={e:?} c={c:?}"),
@@ -135,7 +135,7 @@ fn assert_both_agree(tag: &str, seed_expr: &str) {
 
 #[test]
 fn rt_2a_negative_seed_rejected_both_lanes() {
-    // `-1` and `-2147483649` are `neg(...)` apps, not int literals: rejected.
+    // Unsuffixed negative seeds remain rejected: their dtype is not int64.
     assert_both_reject("2a", "-1");
     assert_both_reject("2a", "-2147483649");
 }

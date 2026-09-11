@@ -15,7 +15,7 @@ kernel behavior. It proves three things and nothing more:
 
 The inventory's completeness claim is over `INVENTORY_SOURCES`: an explicit,
 reviewed list of the repository files that can carry a representation seam.
-Sixty-nine are Rust and seven are C or Objective-C headers. A completeness
+Seventy are Rust and seven are C or Objective-C headers. A completeness
 claim stated over a *language* instead cannot be discharged, because a reviewer
 can always name one more construct; stated over a file list it is decidable,
 and `_assert_source_list_current` proves the list still equals the tracked
@@ -63,7 +63,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "8a71918274cd18212341a966a58bae6a3c78121feb03ab6a8e3bec3cfa0edb6a"
+FREEZE_SHA256 = "641149d8c43aa488d964ed9a79188b03dc1bb35689cf2fd6537674e839d777be"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -129,6 +129,7 @@ INVENTORY_SOURCES: tuple[str, ...] = (
     "crates/chelis-ir/src/lib.rs",
     "crates/chelis-ir/src/load_store_name.rs",
     "crates/chelis-ir/src/lower.rs",
+    "crates/chelis-ir/src/lower/static_controls.rs",
     "crates/chelis-ir/src/lowering_trace.rs",
     "crates/chelis-ir/src/optimize.rs",
     "crates/chelis-ir/src/ownership/classify.rs",

@@ -1,0 +1,1 @@
+Specialize fixed dropout rates through typed helper parameters, generic dtype casts, and gradient captures in source-owned IR evaluation plans. Ordinary host evaluation keeps its existing precise rejection until it can transport these plans; compiled dropout support is unchanged.

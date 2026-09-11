@@ -9,9 +9,11 @@
 //! distinguish 'no diagnostics' from 'the diagnostics were not
 //! transported'". These tests are the executable form of the atom.
 //!
-//! **The exit status moves 1 -> 2 on these paths, deliberately.** Exit is
-//! derived from `cmd_check_one`'s `Ok`/`Err` discriminant, so routing a path
-//! through the report converts it. `spec/04-type-system.md` § Gating pins
+//! **The exit status moves 1 -> 2 on these paths, deliberately.** Exit is a
+//! function of the report's errors array, and once a path emits a report it
+//! takes that array's exit status. (When this suite was written the status
+//! came from `cmd_check_one`'s `Ok`/`Err` discriminant; `cmd_check_one` has
+//! since become total and has no `Err` to derive it from.) `spec/04-type-system.md` § Gating pins
 //! only "`0` iff empty, non-zero otherwise", so both values conform and the
 //! choice was a maintainer call. It converges the Surf arm onto the Deep
 //! arm, which already emitted a report and exit 2 for the identical failure:
@@ -338,4 +340,163 @@ fn a_non_zero_exit_always_carries_at_least_one_diagnostic() {
              as success to any consumer keying on the array; stdout={stdout}"
         );
     }
+}
+
+#[test]
+fn every_directory_entry_carries_a_report_never_a_display_string() {
+    // chelis#886 [04-FIT-12], the structural half.
+    //
+    // `cmd_check <dir>` used to match on `cmd_check_one`'s `Result` and, in
+    // the `Err` arm, push `{"file":...,"error":"<display string>"}` -- a
+    // message occupying the slot its sibling fills with a full report. A
+    // consumer walking `files[]` got a report for one entry and a sentence
+    // for the next, with no `kind`, no `severity`, and nothing from the
+    // closed diagnostic vocabulary.
+    //
+    // That arm is gone, and not because someone remembered to delete it:
+    // `cmd_check_one` is total, so the value it matched on cannot be
+    // constructed. The signature pins in `main.rs` enforce the cause.
+    //
+    // This is a REGRESSION GUARD, not a test of that change. It passes
+    // against the parent commit as well, because chelis#1679 had already
+    // made every one of THESE fixtures produce a report. The `Err` arm was
+    // still reachable on the parent -- a `.dp` with a negative extent,
+    // checked with `--show-inferred`, produced a display-string entry and
+    // exit 1 -- but that input depends on chelis#1768 and is deliberately
+    // kept out of this fixture set. The test that distinguishes the change
+    // is `a_failure_building_inferred_signatures_is_reported_not_propagated`.
+    let dir = tempdir().expect("tempdir");
+    fs::write(
+        dir.path().join("ok.ch"),
+        b"def f(x: f32) -> f32 = add(x, x)\n",
+    )
+    .expect("write");
+    fs::write(dir.path().join("ugly.ch"), b"def  h(x:f32)->f32=add(x,x)\n").expect("write");
+    let unreadable = dir.path().join("locked.ch");
+    fs::write(&unreadable, b"def g(x: f32) -> f32 = add(x, x)\n").expect("write");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).expect("chmod");
+    }
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["check"])
+        .arg(dir.path())
+        .output()
+        .expect("run chelis check");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644));
+    }
+
+    let envelope: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("directory mode must emit an envelope: {e}\n{stdout}"));
+    let files = envelope["files"].as_array().expect("files array");
+    assert_eq!(files.len(), 3, "one entry per file: {stdout}");
+
+    for entry in files {
+        let name = entry["file"].as_str().unwrap_or("<unnamed>");
+        assert!(
+            entry.get("error").is_none(),
+            "{name}: carries a display string where a report belongs; {entry}"
+        );
+        let report = entry
+            .get("report")
+            .unwrap_or_else(|| panic!("{name}: no report; {entry}"));
+        assert!(
+            report.get("errors").is_some(),
+            "{name}: the report must be a check report; {entry}"
+        );
+    }
+
+    // Two of the three fail, so the envelope's exit status reflects them.
+    assert_eq!(output.status.code(), Some(2), "stdout={stdout}");
+}
+
+#[test]
+fn a_failure_building_inferred_signatures_is_reported_not_propagated() {
+    // The one input this change alters, found by a red-team pass after the
+    // directory test above turned out NOT to discriminate: it passes against
+    // the parent commit too, because chelis#1679 had already made those
+    // fixtures report.
+    //
+    // A Deep program with a negative extent type-checks clean, but the
+    // extent cannot be carried by the typed inferred-signature row, so
+    // building the rows fails. Before this change that failure propagated
+    // through `?`: `chelis check --show-inferred` exited 1 with EMPTY stdout,
+    // a live [04-FIT-12] bypass. It is now a diagnostic on the report.
+    //
+    // The negative extent being accepted at all is a separate checker
+    // defect, chelis#1768, and this fixture DEPENDS on it. When #1768 is
+    // fixed the program will be rejected during type analysis, the rows will
+    // never be built, and this whole test will fail -- not as a regression,
+    // but because the fixture stopped reaching the path. Replace the fixture
+    // with another way of making inferred-signature construction fail; do
+    // not restore the checker's acceptance to make this pass.
+    let dir = tempdir().expect("tempdir");
+    let path = write(
+        &dir,
+        "negative_extent.dp",
+        b"(def {} f (fn {} (params {} (x {type: (t-tensor {} (d-lit {} -1) (t-prim {} f32))})) (var {} x)))\n",
+    );
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["check", "--show-inferred"])
+        .arg(&path)
+        .output()
+        .expect("run chelis check");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    let report: WireCheckResult = serde_json::from_str(&stdout).unwrap_or_else(|e| {
+        panic!("the failure must reach a report, not propagate ({e}); stderr={stderr}")
+    });
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|d| d.message.contains("inferred signatures unavailable")),
+        "the reason must be carried as a diagnostic; got {stdout}"
+    );
+    assert!(
+        report.inferred_signatures.is_none(),
+        "the rows could not be built, so the member is omitted; got {stdout}"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a non-empty errors array exits 2"
+    );
+
+    // Negative control, scoped to what "the failure is confined to the
+    // request" actually means: without the flag the rows are never built,
+    // so no inferred-signature diagnostic is produced.
+    //
+    // It deliberately does NOT assert that this program checks clean
+    // without the flag. It does today, but only because of chelis#1768;
+    // asserting exit 0 would pin that defect as correct behaviour and make
+    // its fix look like a regression here.
+    let plain = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["check"])
+        .arg(&path)
+        .output()
+        .expect("run chelis check");
+    let plain_stdout = String::from_utf8_lossy(&plain.stdout).to_string();
+    let plain_report: WireCheckResult = serde_json::from_str(&plain_stdout)
+        .unwrap_or_else(|e| panic!("without the flag a report is still emitted ({e})"));
+    assert!(
+        !plain_report
+            .errors
+            .iter()
+            .any(|d| d.message.contains("inferred signatures unavailable")),
+        "the rows were not requested, so their failure cannot be reported; got {plain_stdout}"
+    );
 }

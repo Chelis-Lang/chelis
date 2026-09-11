@@ -1495,7 +1495,15 @@ fn split_by_scope(
             let mut buckets: Vec<(u128, Vec<OrderedMember>)> = Vec::new();
             for entry in members {
                 let mask = reach.get(entry.node).copied().unwrap_or(u128::MAX);
-                let mut merged: Vec<OrderedMember> = vec![entry];
+                // Absorb every intersecting bucket, then append the new entry,
+                // so a merged bucket stays in derivation order. Pushing the
+                // entry first and appending the buckets after it REVERSED the
+                // group, which the sort below could not undo through a tie:
+                // three axes of one node came out [2, 1, 0]. The sort key now
+                // carries the axis, so this no longer decides anything on its
+                // own, and it is kept order-preserving because the next tie to
+                // be introduced would silently inherit the reversal.
+                let mut merged: Vec<OrderedMember> = Vec::new();
                 let mut merged_mask = mask;
                 buckets.retain_mut(|(bucket_mask, bucket)| {
                     if *bucket_mask & merged_mask != 0 {
@@ -1506,6 +1514,7 @@ fn split_by_scope(
                         true
                     }
                 });
+                merged.push(entry);
                 buckets.push((merged_mask, merged));
             }
             buckets
@@ -1589,16 +1598,28 @@ pub fn derive_dim_witnesses(dag: &Dag) -> Vec<RuntimeDimClass> {
 /// axis claiming a literal already owes a guard.
 /// The sort key C2.4 rule 1 defines: interface members before local ones,
 /// interface members by assigned ABI input slot, every remaining tie by node
-/// position.
-type OrderKey = (bool, Option<(usize, usize)>, usize);
+/// position and then by the member's own axis.
+///
+/// The axis component is not decoration. `slot` is `Some` only for an
+/// [`AxisSource::ExternalAxis`] member, and it already carries that member's
+/// axis; every OTHER kind sorts with `slot = None`, so two axes of ONE node
+/// tied on `(true, None, node)`. Measured before it was added: a `shrink`
+/// whose two axes both claim `n` produced members `[(node, 1), (node, 0)]`,
+/// and a `reshape` with three such axes produced `[2, 1, 0]` - the canonical
+/// member of the class was the LAST axis, and the guards ran in reverse
+/// declaration order, which `spec/04-type-system.md` section 4.7 fixes:
+/// "Guards ready at the same source position are evaluated in declaration
+/// order."
+type OrderKey = (bool, Option<(usize, usize)>, usize, usize);
 
 /// A member together with the key that orders it.
 ///
 /// `slot` is the declaring `Load`'s assigned ABI input slot and axis for an interface
 /// member and `None` for a local one, so sorting on `(slot.is_none(), slot,
-/// node)` puts every interface member ahead of every local one, orders the
-/// interface group by assigned slot, and breaks every remaining tie by node
-/// position. That is C2.4 rule 1 in one key.
+/// node, axis)` puts every interface member ahead of every local one, orders
+/// the interface group by assigned slot, and breaks every remaining tie by
+/// node position and then by declaration order within that node. That is C2.4
+/// rule 1 in one key.
 struct OrderedMember {
     slot: Option<(usize, usize)>,
     node: usize,
@@ -1635,11 +1656,11 @@ impl OrderedMember {
         });
         let slot =
             input_axis.and_then(|(load, axis)| abi_input_slot(dag, load).map(|slot| (slot, axis)));
-        (slot.is_none(), slot, self.node)
+        (slot.is_none(), slot, self.node, self.member.axis)
     }
 
     fn key(&self) -> OrderKey {
-        (self.slot.is_none(), self.slot, self.node)
+        (self.slot.is_none(), self.slot, self.node, self.member.axis)
     }
 }
 
@@ -2190,6 +2211,81 @@ pub enum LocalGuardObservation {
     /// Read the site node's realized output extent at the site's axis, after
     /// that node runs.
     RealizedExtent,
+    /// Compute the extent the site's node is ABOUT to produce, from that
+    /// node's own bounds, before it runs.
+    ///
+    /// This is the third quantity, and it is neither of the first two. An
+    /// [`AxisSource::OpComputed`] axis has no carrier: no `RtDim` on the
+    /// operation states the extent, because the operation derives it from its
+    /// own output-shape rule. [`Self::RealizedExtent`] does state it, but only
+    /// after the node has run, and for an op-computed axis the node IS the
+    /// allocation - C2.5 rejects that read in terms: "An extent computed by
+    /// the operation must be computed/validated before its first
+    /// shape-dependent allocation/access, not recovered from a tensor
+    /// allocated using the unvalidated claim. Merely checking after a wrong
+    /// allocation is not a conforming implementation of C1.3."
+    ///
+    /// So the derivation states HOW to compute it, once, and both lanes read
+    /// that one answer rather than each asking the operation again.
+    ComputedExtent(ComputedAxisExtent),
+}
+
+/// The extent an admitted [`AxisSource::OpComputed`] axis will produce,
+/// expressed from the operation's own carriers.
+///
+/// One variant per admitted owner, because the arithmetic is the owner's own
+/// output-shape rule and there is no rule shared across owners to factor out.
+/// `spec/04-type-system.md` section 4.7's movement paragraph makes `shrink`
+/// the owner whose symbolic axes "always mint fresh extents"; a `pad` with
+/// non-zero padding and a `stride` with a non-unit step mint fresh extents
+/// under the same sentence and are NOT admitted here (chelis#1379 owns the
+/// arithmetic-sized forms). They keep the behaviour they have rather than
+/// becoming newly silent: no site existed for them before this variant and
+/// none exists after it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComputedAxisExtent {
+    /// `shrink`'s half-open span on one axis: the extent is `end - start`
+    /// (`spec/05-risc-primitives.md` section 2.4).
+    ///
+    /// `RtDim::ToEnd` resolves to the OPERAND's realized extent at
+    /// `operand_axis`, which is readable before the shrink runs because the
+    /// operand is one of the shrink's producers. `operand_axis` is carried
+    /// rather than re-derived from the site key, so a consumer reading this
+    /// variant needs nothing but the variant.
+    ///
+    /// A span whose `start` is not below its `end` computes no extent. The
+    /// operation's own domain rejection owns that failure on both lanes and
+    /// runs first (the C runtime's movement plan rejects it before the guard
+    /// site is reached), so the guard yields nothing rather than comparing a
+    /// fabricated number.
+    ShrinkSpan {
+        start: RtDim,
+        end: RtDim,
+        operand_axis: usize,
+    },
+}
+
+/// The computed extent of `axis`, when `op` is an admitted op-computed owner.
+///
+/// ONE admission answer for two callers: [`local_dim_guard_sites`], which
+/// turns it into a guard site, and lowering's declared-result stamp, which
+/// may write a claim onto an op-computed result axis only where this function
+/// produces the guard that enforces it. Splitting the two would let a claim
+/// be stamped with no site to check it, which is a silently wrong shape on
+/// the evaluator and the legacy movement failure on C.
+pub fn op_computed_axis_extent(op: &RiscOp, axis: usize) -> Option<ComputedAxisExtent> {
+    match op {
+        RiscOp::Shrink { bounds } => {
+            bounds
+                .get(axis)
+                .map(|(start, end)| ComputedAxisExtent::ShrinkSpan {
+                    start: start.clone(),
+                    end: end.clone(),
+                    operand_axis: axis,
+                })
+        }
+        _ => None,
+    }
 }
 
 /// What a local guard reports, what it compares against, and how it reads the
@@ -2247,6 +2343,39 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
             // contains a number. Literal-source proofs were handled by
             // is_member; unsupported observation kinds remain outside this
             // carrier consumer.
+            // An op-computed axis is the third observation kind, and it is
+            // admitted HERE rather than by widening the carrier filter below,
+            // because it has no carrier: the operation derives the extent from
+            // its own output-shape rule. [`op_computed_axis_extent`] is the one
+            // admission answer, shared with lowering's declared-result stamp so
+            // a claim cannot be stamped onto an axis with no site to check it.
+            if let AxisSource::OpComputed { axis: computed, .. } = &member.source {
+                let Some(node) = dag.get(member.node) else {
+                    continue;
+                };
+                // `OpComputed` names this node and this axis (C4.1 rejects any
+                // other pairing), so the member's axis IS the axis to compute.
+                let Some(observed) = op_computed_axis_extent(&node.op, *computed) else {
+                    // An unadmitted owner - `pad` with non-zero padding,
+                    // `stride` with a non-unit step, a `reshape` binding a
+                    // symbol it does not compute - keeps the disposition it
+                    // had: no site before this arm existed and none after.
+                    continue;
+                };
+                sites.push((
+                    (member.node.0, member.axis),
+                    LocalGuardClaim {
+                        claim: name.clone(),
+                        canonical: match resolved {
+                            Some(value) => CanonicalExtent::Resolved(value),
+                            None => CanonicalExtent::Binder(name.clone()),
+                        },
+                        op: crate::grad::risc_op_name(&node.op),
+                        observed: LocalGuardObservation::ComputedExtent(observed),
+                    },
+                ));
+                continue;
+            }
             if !matches!(
                 member.source,
                 AxisSource::InputAxis { .. } | AxisSource::ScalarInput { .. }
@@ -2268,8 +2397,8 @@ pub fn local_dim_guard_sites(dag: &Dag) -> Vec<(LocalGuardSite, LocalGuardClaim)
                 // claim executed unguarded on every lane.
                 //
                 // External declarations retain their existing entry checks.
-                // OpComputed sources need independent observations beyond
-                // these carriers; B2b-0b still owns that separate extension.
+                // OpComputed sources are admitted by the arm above, which
+                // supplies the independent observation these carriers cannot.
                 continue;
             }
             let Some(node) = dag.get(member.node) else {

@@ -9,6 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::{Arc, OnceLock};
 
+mod static_controls;
+
 /// Path-sensitive helpers emitted outside the dynamic handler cannot bake its
 /// seed. The active helper path obtains the real seed from the host handler;
 /// the inactive path's value is discarded by the enclosing blend.
@@ -1686,12 +1688,8 @@ pub(crate) fn try_lower_subexpr_evaluation_with_ordered_inputs(
     result_claim: Option<&TensorType>,
     execution: &crate::evaluation::RandomExecutionContext,
 ) -> Result<crate::evaluation::EvaluationPlan, LowerDiagnostic> {
-    let names = scoped_types
-        .iter()
-        .map(|(name, _)| name.clone())
-        .collect::<Vec<_>>();
     if let crate::evaluation::EvaluationProfile::Legacy(reason) =
-        context.evaluation_profile(expr, &names)
+        context.evaluation_profile(expr, &scoped_types)
         && reason != crate::evaluation::LegacyEvaluationReason::NoDropout
     {
         return Err(LowerDiagnostic::new(
@@ -1741,15 +1739,15 @@ impl SubexprLoweringContext {
     pub(crate) fn evaluation_profile(
         &self,
         expr: &Expr,
-        bound: &[String],
+        bound: &[(String, TensorType)],
     ) -> crate::evaluation::EvaluationProfile {
         let defs = self
             .program_defs
             .iter()
-            .filter(|(name, _)| !bound.contains(name))
+            .filter(|(name, _)| !bound.iter().any(|(bound, _)| bound == *name))
             .map(|(name, body)| (name.clone(), body.clone()))
             .collect();
-        evaluation_profile_from_defs(expr, &defs)
+        static_controls::profile(expr, &defs, bound)
     }
 }
 
@@ -4499,140 +4497,7 @@ fn evaluation_profile_from_defs(
     expr: &Expr,
     program_defs: &BTreeMap<String, Expr>,
 ) -> crate::evaluation::EvaluationProfile {
-    use crate::evaluation::{EvaluationProfile, LegacyEvaluationReason as Reason};
-    struct Profile<'a> {
-        defs: &'a BTreeMap<String, Expr>,
-        active: BTreeSet<String>,
-        dropout: bool,
-        reason: Option<Reason>,
-    }
-    impl Profile<'_> {
-        fn visit(&mut self, expr: &Expr, grad_depth: usize, bound: &UnordSet<String>) {
-            if let Some(name) = bare_var_name(expr)
-                && !bound.contains(&name)
-                && let Some(body) = self.defs.get(&name)
-            {
-                if bare_var_name(body).as_ref() == Some(&name) {
-                    return;
-                }
-                if !self.active.insert(name.clone()) {
-                    self.reason.get_or_insert(Reason::RecursiveControl);
-                    return;
-                }
-                self.visit(body, grad_depth, &UnordSet::new());
-                self.active.remove(&name);
-                return;
-            }
-            if let Some(("dropout", args)) = app_var_name_and_args(expr)
-                && !bound.contains("dropout")
-                && !self.defs.contains_key("dropout")
-            {
-                self.dropout = true;
-                if args.get(1).and_then(extract_numeric_leaf).is_none() {
-                    self.reason.get_or_insert(Reason::RuntimeRate);
-                }
-            }
-            let Some((tag, metadata, kids)) = stamped_parts(expr) else {
-                return;
-            };
-            if tag == DeepTag::Fn {
-                let mut scoped = bound.clone();
-                if let Some(params) = kids.first()
-                    && let Some((DeepTag::Params, _, params)) = stamped_parts(params)
-                {
-                    for param in params {
-                        collect_param_bound_names(param, &mut scoped);
-                    }
-                }
-                if let Some(body) = kids.get(1) {
-                    self.visit(body, grad_depth, &scoped);
-                }
-                return;
-            }
-            if tag == DeepTag::Let {
-                let mut scoped = bound.clone();
-                if let Some(bindings) = kids.first()
-                    && let Some((DeepTag::Bind, _, bindings)) = stamped_parts(bindings)
-                {
-                    for pair in bindings.as_chunks::<2>().0 {
-                        self.visit(&pair[1], grad_depth, &scoped);
-                        if let Some(name) = symbol_name(&pair[0]) {
-                            scoped.insert(name.to_owned());
-                        }
-                    }
-                }
-                if let Some(body) = kids.get(1) {
-                    self.visit(body, grad_depth, &scoped);
-                }
-                return;
-            }
-            let next_depth = match tag {
-                DeepTag::Grad => {
-                    if grad_depth != 0 {
-                        self.reason.get_or_insert(Reason::HigherOrderAd);
-                    }
-                    grad_depth + 1
-                }
-                DeepTag::Vmap => {
-                    self.reason.get_or_insert(Reason::RandomVmap);
-                    grad_depth
-                }
-                DeepTag::HandleEffect => {
-                    if metadata
-                        .effect()
-                        .is_some_and(|effect| *effect.value() == EffectKind::Resource)
-                    {
-                        self.reason.get_or_insert(Reason::ResourceScope);
-                    } else if kids.first().and_then(extract_numeric_leaf).is_none() {
-                        self.reason.get_or_insert(Reason::RuntimeSeed);
-                    }
-                    grad_depth
-                }
-                DeepTag::If => {
-                    let condition = kids.first().and_then(extract_numeric_leaf);
-                    let branch = match condition {
-                        Some(StagedScalar::Raw(chelis_types::RawScalar::Int(value))) => {
-                            Some(value != 0)
-                        }
-                        Some(StagedScalar::Typed(value)) if value.prim() == Prim::Bool => {
-                            value.as_i64_exact().map(|value| value != 0)
-                        }
-                        _ => None,
-                    };
-                    if let Some(branch) = branch {
-                        if let Some(selected) = kids.get(if branch { 1 } else { 2 }) {
-                            self.visit(selected, grad_depth, bound);
-                        }
-                        return;
-                    }
-                    self.reason.get_or_insert(Reason::DynamicControl);
-                    grad_depth
-                }
-                DeepTag::Match => {
-                    self.reason.get_or_insert(Reason::DynamicControl);
-                    grad_depth
-                }
-                _ => grad_depth,
-            };
-            for child in kids {
-                self.visit(child, next_depth, bound);
-            }
-        }
-    }
-    let mut profile = Profile {
-        defs: program_defs,
-        active: BTreeSet::new(),
-        dropout: false,
-        reason: None,
-    };
-    profile.visit(expr, 0, &UnordSet::new());
-    if let Some(reason) = profile.reason {
-        EvaluationProfile::Legacy(reason)
-    } else if !profile.dropout {
-        EvaluationProfile::Legacy(Reason::NoDropout)
-    } else {
-        EvaluationProfile::FixedControl
-    }
+    static_controls::profile(expr, program_defs, &[])
 }
 
 fn to_list_source_expr(expr: &Expr) -> Option<&Expr> {
@@ -5348,20 +5213,6 @@ fn extract_numeric_leaf(expr: &Expr) -> Option<StagedScalar> {
     }
 }
 
-/// Read an optional scalar type stamp without treating malformed type
-/// metadata as absence. The outer `Option` is recognition success; the inner
-/// one distinguishes an unstamped expression from a stamped scalar.
-fn optional_scalar_prim(expr: &Expr) -> Option<Option<Prim>> {
-    let metadata = match expr {
-        Expr::Node(_, _) | Expr::List(_, _) => Some(stamped_parts(expr)?.1),
-        _ => None,
-    };
-    match metadata.and_then(|meta| meta.ty()) {
-        Some(ty) => Some(Some(LowerCtx::try_extract_prim(ty.expression())?)),
-        None => Some(None),
-    }
-}
-
 /// A binder-adopted decimal specialized to an integer keeps its f32 source
 /// default; all other polarities finalize at the substituted target.
 fn binder_float_literal_source_default(
@@ -5380,120 +5231,6 @@ fn binder_float_literal_source_default(
         .flatten()
         .filter(Prim::is_integer)
         .map(|_| Prim::F32)
-}
-
-/// Decode one canonical numeric `lit` under [04-LIT-1].
-///
-/// This is the fold's only literal ingress. It jointly validates the value
-/// atom, declared primitive, and the optional provenance marker. The sole
-/// cross-family form is an exact integer atom with one
-/// `literal_source: integer` marker at a float dtype; `scalar_from_i64`
-/// performs its one required target-width finalization without an f64 hop.
-fn extract_type_checked_literal(expr: &Expr) -> Option<chelis_types::ScalarValue> {
-    use chelis_types::{scalar_from_f64, scalar_from_i64};
-
-    let (DeepTag::Lit, metadata, kids) = stamped_parts(expr)? else {
-        return None;
-    };
-    let [Expr::Atom(atom, _)] = kids else {
-        return None;
-    };
-    let declared = optional_scalar_prim(expr)??;
-    let literal_source = metadata.literal_source();
-    let integer_source = literal_source.is_some();
-
-    match (atom, declared, literal_source) {
-        (Atom::Int(value), prim, None) if prim.is_integer() => {
-            scalar_from_i64("lit", prim, *value).ok()
-        }
-        (Atom::Int(value), prim, Some(_)) if prim.is_float() && integer_source => {
-            scalar_from_i64("lit", prim, *value).ok()
-        }
-        (Atom::Float(value), prim, None) if prim.is_float() => {
-            scalar_from_f64("lit", prim, *value).ok()
-        }
-        (Atom::Bool(value), Prim::Bool, None) => {
-            scalar_from_i64("lit", Prim::Bool, i64::from(*value)).ok()
-        }
-        (Atom::Str(_) | Atom::Name(_) | Atom::Tag(_), _, _)
-        | (Atom::Int(_) | Atom::Float(_) | Atom::Bool(_), _, _) => None,
-    }
-}
-
-/// Evaluate the closed static scalar grammar while preserving a checked dtype
-/// at every edge.
-///
-/// This is stricter than `extract_numeric_leaf`, whose `RawScalar` form is
-/// intentionally useful for general literal folding but cannot distinguish
-/// `true` from integer `1`. A seed needs that distinction: literal payload and
-/// type metadata must agree before a wrapper can consume the value, while a
-/// successful explicit cast establishes its target dtype per [04-NUM-14].
-fn extract_type_checked_scalar(expr: &Expr) -> Option<chelis_types::ScalarValue> {
-    match expr {
-        // A BARE atom carries no type metadata, so there is nothing for the
-        // payload to agree with and this fold declines it. Stamping one here
-        // would invent a dtype the source never wrote, in two ways that both
-        // matter. It would widen the fold's accept set past the checker's,
-        // which classifies a bare integer atom as an UNSUFFIXED seed literal
-        // and rejects it (`chelis_types::infer::expr::seed_literal_form`); and
-        // any stamp it picked would contradict spec/04-type-system.md §5.3,
-        // where an integer literal defaults to `int32` and a float literal to
-        // `f32` rather than to the int64/f64 a seed wants. So
-        // `extract_type_checked_literal` stays the fold's ONLY literal
-        // ingress, as its doc says, and a bare atom reaches the caller's loud
-        // rejection instead of a guessed value (chelis#794).
-        Expr::Atom(_, _) => None,
-        Expr::List(_, _) | Expr::Node(_, _) => {
-            let (tag, _, kids) = stamped_parts(expr)?;
-            match tag {
-                DeepTag::Lit => extract_type_checked_literal(expr),
-                DeepTag::Cast => {
-                    let inner = extract_type_checked_scalar(kids.first()?)?;
-                    let target = LowerCtx::try_extract_prim(kids.get(1)?)?;
-                    if optional_scalar_prim(expr)?.is_some_and(|declared| declared != target) {
-                        return None;
-                    }
-                    match chelis_deep::cast_mode_of(kids).ok()? {
-                        chelis_deep::CastMode::Checked => {
-                            chelis_types::CheckedCastPlan::new(inner.prim(), target)
-                                .ok()?
-                                .cast_scalar("cast", inner)
-                                .ok()
-                        }
-                        chelis_deep::CastMode::Trunc => {
-                            if !inner.prim().is_float() || !target.is_integer() {
-                                return None;
-                            }
-                            chelis_types::cast_trunc_scalar("cast_trunc", inner, target).ok()
-                        }
-                    }
-                }
-                DeepTag::App => {
-                    if kids.len() != 2 || !expr_is_var_named(&kids[0], "neg") {
-                        return None;
-                    }
-                    let inner = extract_type_checked_scalar(&kids[1])?;
-                    let negated = if inner.prim().is_float() {
-                        chelis_types::float_unop(chelis_types::FloatUnOp::Neg, inner).ok()?
-                    } else if inner.prim().is_integer() {
-                        chelis_types::int_unop(chelis_types::IntUnOp::Neg, inner).ok()?
-                    } else {
-                        return None;
-                    };
-                    if optional_scalar_prim(expr)?
-                        .is_some_and(|declared| declared != negated.prim())
-                    {
-                        return None;
-                    }
-                    Some(negated)
-                }
-                _ => None,
-            }
-        }
-        Expr::Map(_, _) | Expr::MetaExpr(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => {
-            None
-        }
-    }
 }
 
 /// Return true iff any element of `dims` is a wildcard placeholder
@@ -6028,6 +5765,7 @@ struct LowerCtx<'program> {
     reshape_targets: BTreeMap<NodeId, usize>,
     invocation_witnesses: Vec<NodeId>,
     local_callables: UnordMap<String, CallableExpr>,
+    static_rate_bindings: UnordMap<String, StagedScalar>,
     program_types: Arc<BTreeMap<String, TensorType>>,
     program_defs: Arc<BTreeMap<String, Expr>>,
     program_signatures: Arc<BTreeMap<String, Expr>>,
@@ -6176,6 +5914,7 @@ impl<'program> LowerCtx<'program> {
             local_unit_refinements: BTreeMap::new(),
             invocation_witnesses: Vec::new(),
             local_callables: UnordMap::new(),
+            static_rate_bindings: UnordMap::new(),
             program_types: program_types.into(),
             program_defs: program_defs.into(),
             program_signatures: program_signatures.into(),
@@ -6396,6 +6135,13 @@ impl<'program> LowerCtx<'program> {
                 .into_iter()
                 .filter(|(name, _)| !shadowed.contains(*name))
                 .map(|(name, value)| (name.clone(), value.clone())),
+        );
+        subctx.static_rate_bindings.extend(
+            self.static_rate_bindings
+                .to_sorted()
+                .into_iter()
+                .filter(|(name, _)| !shadowed.contains(*name))
+                .map(|(name, value)| (name.clone(), *value)),
         );
         subctx.fn_typed_params.extend(
             self.fn_typed_params
@@ -7685,6 +7431,7 @@ impl<'program> LowerCtx<'program> {
 
     /// `(let {} (bind {} name1 expr1 name2 expr2 ...) body)`
     fn lower_let(&mut self, elems: &[Expr]) -> LoweredValue {
+        let saved_static_rates = self.static_rate_bindings.clone();
         let witness_start = self.invocation_witnesses.len();
         if elems.len() < 4 {
             raise_malformed_deep(
@@ -7710,6 +7457,7 @@ impl<'program> LowerCtx<'program> {
             let mut i = 0;
             while i + 1 < bind_kids.len() {
                 if let Expr::Atom(Atom::Name(name), _) = &bind_kids[i] {
+                    let static_rate = self.static_rate(&bind_kids[i + 1]);
                     // Same shadowing rationale as
                     // `lower_plain_callable_app`: drop any outer-scope
                     // `fn_typed_params[name]` so a let-shadowed name
@@ -7785,6 +7533,10 @@ impl<'program> LowerCtx<'program> {
                         }
                         self.bindings.insert(name.clone(), val_id);
                     }
+                    self.static_rate_bindings.remove(name);
+                    if let Some(value) = static_rate {
+                        self.static_rate_bindings.insert(name.clone(), value);
+                    }
                 }
                 i += 2;
             }
@@ -7793,6 +7545,7 @@ impl<'program> LowerCtx<'program> {
         let result = self.lower_expr(&elems[3]);
         let result = self.retain_invocation_witnesses(result, witness_start);
         self.bindings = saved; // Restore scope
+        self.static_rate_bindings = saved_static_rates;
         self.binding_witnesses = saved_witnesses;
         self.local_unit_refinements = saved_unit_refinements;
         self.signature_witnesses = saved_signature_witnesses;
@@ -9088,6 +8841,13 @@ impl<'program> LowerCtx<'program> {
         _app_span: Span,
         inlining_name: Option<String>,
     ) -> LoweredValue {
+        let saved_static_rates = self.static_rate_bindings.clone();
+        // Resolve all controls in the caller, before any callee formal shadows
+        // an actual name. This inspects source and never evaluates an argument.
+        let static_rates = args
+            .iter()
+            .map(|arg| self.static_rate(arg))
+            .collect::<Vec<_>>();
         let Some((param_names, body)) = self.extract_fn_parts(fn_expr) else {
             return self
                 .lower_unrepresentable("function application", std::slice::from_ref(fn_expr));
@@ -9206,6 +8966,12 @@ impl<'program> LowerCtx<'program> {
         }
         self.dim_substitutions
             .merge(tensor_dim_substitutions(&formal_types, &actual_types));
+        for (name, value) in param_names.iter().zip(static_rates) {
+            self.static_rate_bindings.remove(name);
+            if let Some(value) = value {
+                self.static_rate_bindings.insert(name.clone(), value);
+            }
+        }
         // Issue #388: record the positional index of each named axis in the
         // formal parameter shapes so a named reduction/expand-anchor lookup
         // can recover the axis even after monomorphization erases the named
@@ -9352,6 +9118,7 @@ impl<'program> LowerCtx<'program> {
         self.prec_substitutions = saved_prec_substitutions;
         self.rank_substitutions = saved_rank_substitutions;
         self.dim_axis_positions = saved_dim_axis_positions;
+        self.static_rate_bindings = saved_static_rates;
         result
     }
 
@@ -10303,6 +10070,9 @@ impl<'program> LowerCtx<'program> {
                         self.random_seed.unwrap_or(COMPILED_HANDLER_OWNED_SEED),
                     )
                 } else {
+                    // Legacy host dispatch does not transport specialized
+                    // rate provenance. Keep its precise pre-execution
+                    // rejection until that separate boundary supports plans.
                     let rate = self.resolve_static_f64_arg(&args[1], "dropout", "rate");
                     let seed = self.random_seed.unwrap_or(0)
                         ^ self.random_counter.wrapping_mul(0x9E37_79B9_7F4A_7C15);
@@ -13948,9 +13718,13 @@ impl<'program> LowerCtx<'program> {
         };
         for (axis, dim) in declared.dims.iter().enumerate() {
             let resolved = match dim {
-                DimInfo::Lit(required) => self.preserve_literal_result_axis(id, axis, *required),
+                DimInfo::Lit(required) => {
+                    self.preserve_literal_result_axis(id, axis, *required)
+                        || self.preserve_op_computed_result_axis(id, axis, None)
+                }
                 DimInfo::Named(binder, _) if !binder.is_empty() && binder != "*" => {
                     self.preserve_named_result_axis(id, axis, binder)
+                        || self.preserve_op_computed_result_axis(id, axis, Some(binder))
                 }
                 _ => false,
             };
@@ -13958,6 +13732,107 @@ impl<'program> LowerCtx<'program> {
                 self.dag.node_mut(id).expect("result").output_type.dims[axis] = dim.clone();
             }
         }
+    }
+
+    /// chelis#1397's declaration half: keep a declared result dimension over an
+    /// extent the OPERATION computes.
+    ///
+    /// The witness arms above both need a witness that OBSERVED the produced
+    /// extent, and an [`AxisSource::OpComputed`] axis has none: no input
+    /// carries the extent, so `axis_literal_witness` and
+    /// `axis_interface_witness` both decline and the declared dimension was
+    /// dropped, leaving the lowered result carrying the synthesized
+    /// `_rt_shrink_dim_N_A` instead of the `tensor[2, f32]` the user wrote.
+    /// Measured before this arm: `def f(x: tensor[rows, f32]) -> tensor[2, f32]
+    /// = shrink(x, [[1i64, shape(x, 0i32)]])` printed `shape=[3]` and exited
+    /// zero on both lanes.
+    ///
+    /// So this arm records NO requirement edge. Section 4.7 places the check at
+    /// "the source position of the operation that introduces the guarded
+    /// extent", and `local_dim_guard_sites`' op-computed arm is that site; a
+    /// witness comparison would be a second, differently placed check of the
+    /// same claim.
+    ///
+    /// Two conditions, and both are about not stamping a claim nothing checks:
+    ///
+    /// - `axis_sources::op_computed_axis_extent` must admit the owner. It is
+    ///   the SAME call the guard site makes, so an unadmitted owner keeps its
+    ///   existing disposition rather than gaining a claim with no guard, which
+    ///   on the evaluator would be a silently wrong shape.
+    /// - A NAMED claim must be declared by a parameter of this AUTHORED
+    ///   signature. `signature_is_authored` is PR #1773's gate, so a
+    ///   synthesized multi-root kernel stamps nothing, and `signature_witness`
+    ///   requires the binder to be a parameter axis of the same activation.
+    ///
+    ///   The claim then makes that parameter a DEPENDENCY of the result, and
+    ///   this arm records it. Without that the declaring parameter can be
+    ///   eliminated as dead before the kernel is formed: PR #1773 mints one
+    ///   witness per declared parameter axis but
+    ///   `retain_invocation_witnesses` keeps only the ones carrying a
+    ///   requirement or a claim, which a binder declared by a SINGLE parameter
+    ///   has neither of. For `f(w: tensor[n, f32], x: tensor[r, f32]) ->
+    ///   tensor[n, f32]` with `w` unread, the kernel was then not even given
+    ///   `w`, the class had one member, and the program returned the extent the
+    ///   operation computed at exit zero on both lanes. Recording the
+    ///   dependency makes `w` a kernel input exactly as `scope.unread`'s
+    ///   repeated binder already made its unread parameter one, and the
+    ///   canonical value is then the caller's, not the operation's own.
+    ///
+    ///   This records a data dependency, not a second check. The comparison
+    ///   stays where section 4.7 puts it, at the operation that introduces the
+    ///   extent, so the trap names `shrink` rather than `load`.
+    ///
+    ///   A result name declared NOWHERE else needs no such gate: it is the
+    ///   checker's fresh-extent representation under section 4.7.2 and is still
+    ///   published as `*`, which reaches neither this arm nor a class.
+    fn preserve_op_computed_result_axis(
+        &mut self,
+        id: NodeId,
+        axis: usize,
+        binder: Option<&str>,
+    ) -> bool {
+        use crate::axis_sources::AxisSource;
+        if let Some(binder) = binder
+            && (!self.signature_is_authored || self.signature_witness(binder).is_none())
+        {
+            return false;
+        }
+        let Some(AxisSource::OpComputed { axis: computed, .. }) =
+            crate::axis_sources::output_axis_sources(&self.dag, id)
+                .get(axis)
+                .cloned()
+        else {
+            return false;
+        };
+        let Some(node) = self.dag.get(id) else {
+            return false;
+        };
+        if crate::axis_sources::op_computed_axis_extent(&node.op, computed).is_none() {
+            return false;
+        }
+        // A NAMED claim's canonical value is the declaring parameter's axis, so
+        // the kernel needs that parameter even when the body never reads it.
+        // Record the dependency; without it the declaring `Load` is eliminated
+        // as dead, the kernel is not given the parameter, the class has one
+        // member and the claim executes unchecked.
+        //
+        // This is the same retention `scope.unread` relies on, reached a
+        // different way. `retain_invocation_witnesses` keeps a witness that
+        // carries a requirement or a claim, and PR #1773 gives one to a binder
+        // REPEATED across parameters; a binder declared once has neither, so
+        // the claim this arm stamps is what makes its witness live. The
+        // comparison itself stays where section 4.7 puts it, at the operation
+        // that introduces the extent, so the trap names `shrink` rather than
+        // `load`: this records a data dependency, not a second check.
+        if let Some(binder) = binder
+            && let Some(witness) = self.signature_witness(binder)
+        {
+            let result = self.dag.node_mut(id).expect("result");
+            if !result.shape_deps.contains(&witness) {
+                result.shape_deps.push(witness);
+            }
+        }
+        true
     }
 
     /// chelis#1377's half: a literal claim becomes a tagged requirement on the
@@ -14287,21 +14162,12 @@ impl<'program> LowerCtx<'program> {
         // `extract_int_for_dim` would also accept a float-typed `(lit ... 7)`
         // by looking only at its payload. Reinterpret the accepted signed
         // value as two's-complement bits; negative seeds are conforming.
-        let declared = expr_type_metadata(expr)
-            .and_then(Self::try_extract_prim)
-            .or_else(|| {
-                let (DeepTag::Cast, _, kids) = stamped_parts(expr)? else {
-                    return None;
-                };
-                Self::try_extract_prim(kids.get(1)?)
-            });
-        if declared != Some(Prim::Int64) {
-            return None;
-        }
-        let value = extract_type_checked_scalar(expr)?;
-        if value.prim() != Prim::Int64 {
-            return None;
-        }
+        let value = chelis_types::static_seed::constant_seed(
+            expr,
+            !self.bindings.contains_key("neg")
+                && !self.local_callables.contains_key("neg")
+                && !self.program_defs.contains_key("neg"),
+        )?;
         let signed = value.as_i64_exact()?;
         Some(signed as u64)
     }
@@ -14409,6 +14275,18 @@ impl<'program> LowerCtx<'program> {
     /// Resolve a statically-known scalar and finalize it once at `target`.
     /// Unlike the legacy f64 extractor, an integer leaf remains exact through
     /// int64 and a typed leaf retains its source dtype until the checked cast.
+    fn static_rate(&self, expr: &Expr) -> Option<StagedScalar> {
+        self.execution.as_ref()?;
+        static_controls::scalar(
+            expr,
+            &self.static_rate_bindings,
+            &self.prec_substitutions,
+            !self.bindings.contains_key("neg")
+                && !self.local_callables.contains_key("neg")
+                && !self.program_defs.contains_key("neg"),
+        )
+    }
+
     fn resolve_static_scalar_arg(
         &self,
         expr: &Expr,
@@ -14416,7 +14294,11 @@ impl<'program> LowerCtx<'program> {
         builtin: &'static str,
         arg_desc: &str,
     ) -> chelis_types::ScalarValue {
-        let value = match extract_numeric_leaf(expr) {
+        let value = match if builtin == "dropout" {
+            self.static_rate(expr)
+        } else {
+            extract_numeric_leaf(expr)
+        } {
             Some(StagedScalar::Raw(raw)) => chelis_types::cast_raw(builtin, raw, target),
             Some(StagedScalar::Typed(value)) => chelis_types::cast_scalar(builtin, value, target),
             None => raise_fatal_lowering_error(

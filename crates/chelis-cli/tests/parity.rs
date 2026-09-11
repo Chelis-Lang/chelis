@@ -590,6 +590,11 @@ fn parity_scalar_string_foundation() {
 }
 
 #[test]
+fn parity_signed_seed() {
+    drive_parity(&examples_root().join("signed_seed.ch"), true);
+}
+
+#[test]
 fn parity_tensor_structural_ops() {
     drive_parity(&examples_root().join("tensor_structural_ops.ch"), true);
 }
@@ -720,6 +725,7 @@ fn parity_corpus_is_complete() {
         "recursive_generic.ch",
         "resource_target_cpu.ch",
         "scalar_string_foundation.ch",
+        "signed_seed.ch",
         "tensor_structural_ops.ch",
         "transformer_block.ch",
         "vmap_relu.ch",
