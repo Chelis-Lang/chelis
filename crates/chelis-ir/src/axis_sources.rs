@@ -749,6 +749,168 @@ pub(crate) fn check_node_axis_sources(
     Ok(())
 }
 
+// ===========================================================================
+// C4.4's remaining half: where a named extent's value is PRODUCED.
+//
+// `output_axis_sources` answers "what determines this axis", one hop, in the
+// operation's own terms. A declaration consumer needs the terminal answer
+// instead: the emitted C allocates by NAME (`chelis_alloc(1, (int64_t[]){
+// _anon_dim_2_1 })`), so every name it renders needs one place that assigns
+// it. Resolving the one-hop chain to its terminal origin is what lets a
+// declaration come from the axis SOURCE rather than from a search for a
+// `Load` carrying the same string, which is what chelis#665 and chelis#1556
+// both fail.
+// ===========================================================================
+
+/// Where the value of one output axis's extent is PRODUCED, after resolving
+/// every pass-through hop.
+///
+/// This is the terminal form of [`AxisSource`]: `InputAxis` is a hop rather
+/// than an origin (the extent belongs to the operand's axis, which has a
+/// source of its own), and `ClassSupplied` states that the claim supplies the
+/// extent without saying which member produces it. Both resolve here;
+/// everything else is already terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExtentOrigin {
+    /// A compile-time-constant extent.
+    Literal(i64),
+    /// An axis of an external `Load`, named by the exact declaring node. The
+    /// C and HIP prologues can declare this one from input shape metadata
+    /// before any operation runs.
+    ExternalAxis { load: NodeId, axis: usize },
+    /// A rank-0 exact-`int64` extent value produced by `node`.
+    ScalarInput { node: NodeId },
+    /// An extent the operation computes by its own output-shape rule, so it
+    /// exists only once that operation has run and must be declared there.
+    OpComputed { op: NodeId, axis: usize },
+}
+
+/// The origin of `node`'s output axis `axis`, resolving pass-through hops.
+///
+/// `InputAxis { input, Lit(a) }` recurses into the operand in that absolute
+/// input slot at axis `a`: a kept axis's extent IS the operand's, which is
+/// why it is not a witness of its own claim (`derive_dim_witnesses` skips it
+/// for exactly that reason) and why a declaration for it has to come from
+/// wherever the operand's axis is produced.
+///
+/// `ClassSupplied` resolves through the claim's class: the axis is sized by
+/// whatever the class resolves to, so its origin is the origin of the class's
+/// canonical member. A class with no member that resolves anywhere has no
+/// origin, which is a typed receipt rather than a guess.
+///
+/// The walk is bounded by the node count, so a malformed graph cannot spin.
+/// `None` means the axis has no resolvable origin.
+pub fn resolve_axis_extent(dag: &Dag, node: NodeId, axis: usize) -> Option<ExtentOrigin> {
+    resolve_axis_extent_bounded(dag, node, axis, dag.nodes().len())
+}
+
+fn resolve_axis_extent_bounded(
+    dag: &Dag,
+    node: NodeId,
+    axis: usize,
+    fuel: usize,
+) -> Option<ExtentOrigin> {
+    if fuel == 0 {
+        return None;
+    }
+    let source = output_axis_sources(dag, node).into_iter().nth(axis)?;
+    match source {
+        AxisSource::Literal { value } => Some(ExtentOrigin::Literal(value)),
+        AxisSource::ExternalAxis { load, axis } => Some(ExtentOrigin::ExternalAxis { load, axis }),
+        AxisSource::OpComputed { op, axis } => Some(ExtentOrigin::OpComputed { op, axis }),
+        AxisSource::ScalarInput { input } => {
+            let producer = *dag.get(node)?.inputs.get(input)?;
+            Some(ExtentOrigin::ScalarInput { node: producer })
+        }
+        AxisSource::InputAxis { input, axis } => {
+            let RtAxis::Lit(read_axis) = axis;
+            let operand = *dag.get(node)?.inputs.get(input)?;
+            let read_axis = usize::try_from(read_axis).ok()?;
+            resolve_axis_extent_bounded(dag, operand, read_axis, fuel - 1)
+        }
+        AxisSource::ClassSupplied { op, axis } => {
+            resolve_class_supplied_extent(dag, op, axis, fuel - 1)
+        }
+    }
+}
+
+/// The origin a `ClassSupplied` axis takes from its class.
+///
+/// The axis consumes its claim rather than witnessing it, so its extent is
+/// the extent the class resolves to. Take the first member of that class
+/// whose own origin resolves, in the class's canonical order, skipping the
+/// axis itself so a one-member class cannot recurse into itself.
+fn resolve_class_supplied_extent(
+    dag: &Dag,
+    op: NodeId,
+    axis: usize,
+    fuel: usize,
+) -> Option<ExtentOrigin> {
+    if fuel == 0 {
+        return None;
+    }
+    let claim = axis_claim(dag.get(op)?.output_type.dims.get(axis)?)?;
+    derive_runtime_dim_classes(dag)
+        .into_iter()
+        .filter(|class| class.claim == claim)
+        .flat_map(|class| class.members)
+        .filter(|member| member.node != op || member.axis != axis)
+        .find_map(|member| resolve_axis_extent_bounded(dag, member.node, member.axis, fuel - 1))
+}
+
+/// Every non-anonymous named dimension the graph renders, with the origin
+/// that produces its value, in the order a declaration consumer emits them.
+///
+/// A name is resolved from the FIRST output axis carrying it in node-id
+/// order, which is emission order for the C lane, so a declaration lands at
+/// or before every reference to it. A name whose only occurrence is
+/// op-internal (`BlasMatmul`'s contraction dim `k` appears in no output type
+/// at all) has no output axis to resolve from and is absent here; a consumer
+/// that renders such a name owes its own receipt.
+pub fn dim_extent_origins(dag: &Dag) -> Vec<(String, ExtentOrigin)> {
+    let mut seen: Vec<String> = Vec::new();
+    let mut out = Vec::new();
+    for node in dag.nodes() {
+        for (axis, dim) in node.output_type.dims.iter().enumerate() {
+            let DimInfo::Named(name, _) = dim else {
+                continue;
+            };
+            if is_anonymous(name) || seen.iter().any(|other| other == name) {
+                continue;
+            }
+            let Some(origin) = resolve_axis_extent(dag, node.id, axis) else {
+                continue;
+            };
+            seen.push(name.clone());
+            out.push((name.clone(), origin));
+        }
+    }
+    out
+}
+
+/// Every non-anonymous named dimension the graph renders that `dim_extent_origins`
+/// could NOT resolve. A consumer turns each into a typed receipt rather than
+/// a panic or a guessed extent.
+pub fn unresolved_dim_names(dag: &Dag) -> Vec<String> {
+    let resolved = dim_extent_origins(dag);
+    let mut out: Vec<String> = Vec::new();
+    for node in dag.nodes() {
+        for dim in &node.output_type.dims {
+            let DimInfo::Named(name, _) = dim else {
+                continue;
+            };
+            if is_anonymous(name)
+                || resolved.iter().any(|(other, _)| other == name)
+                || out.iter().any(|other| other == name)
+            {
+                continue;
+            }
+            out.push(name.clone());
+        }
+    }
+    out
+}
+
 /// The stamped extent claim a class groups by.
 ///
 /// Grouping is by the CLAIM, "which is the output of the typed identity proof

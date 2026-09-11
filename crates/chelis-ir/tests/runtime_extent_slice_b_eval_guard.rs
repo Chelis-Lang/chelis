@@ -416,3 +416,101 @@ fn a_locally_placed_unit_claim_that_holds_broadcasts() {
     assert_eq!(out.shape, vec![3]);
     assert_eq!(out.to_f64_lossy_vec(), vec![7.0, 7.0, 7.0]);
 }
+
+// ===========================================================================
+// chelis#1566: the binding inference identifies extents by SPELLING.
+//
+// `infer_symbolic_bindings_from_inputs` groups occurrences with the legacy
+// name-keyed `dag::symbolic_bindings`, a plain `BTreeMap<String, _>`, so two
+// independent signatures that merely spell a binder `seq` land in one group
+// and the equality loop rejects a correct merged kernel. The C and HIP
+// prologues do not, because `derive_dim_witnesses` runs `split_by_scope`.
+//
+// The `.ch` shape is `rank_poly_tier3::named_axis_eval_parity_corners`, whose
+// `total(x: &tensor[seq, f32])` and `use2(x: &tensor[batch, seq, f32])` merge
+// into one kernel. The CLI cannot host this row: `runtime_extent_claim_
+// preparation.rs`'s `scope.independent` cell passes there because both roots
+// are value bindings the host interpreter applies, so it never reaches this
+// evaluator's inputs map. The witness therefore binds the inputs at the API
+// boundary, which is the same reason this file's header gives for every other
+// row in it.
+// ===========================================================================
+
+/// Two independent roots, each from its own signature, both spelling `seq`,
+/// at DIFFERENT extents. Both must evaluate: `seq` in one signature and `seq`
+/// in the other are two claims sharing a spelling, not one extent.
+///
+/// EVIDENTIARY STATUS: regression test. Measured RED on `3dc3f54f6`, where
+/// the evaluator returns `symbolic dimension `seq` mismatch: canonical x[0] =
+/// 3, but y[1] = 2`.
+#[test]
+fn two_signatures_spelling_one_binder_bind_independently_on_eval() {
+    let mut dag = Dag::new();
+    let x = load(&mut dag, "x", vec![named("seq")]);
+    let y = load(&mut dag, "y", vec![named("batch"), named("seq")]);
+    let from_x = dag.add_node(
+        RiscOp::Neg,
+        vec![x],
+        ty(vec![named("seq")], Prim::F32),
+        None,
+    );
+    let from_y = dag.add_node(
+        RiscOp::Neg,
+        vec![y],
+        ty(vec![named("batch"), named("seq")], Prim::F32),
+        None,
+    );
+    dag.add_root(from_x);
+    dag.add_root(from_y);
+
+    let values = eval_tensor_roots_with_strict(&dag, &[from_x, from_y], |name| match name {
+        "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
+        "y" => Some(TensorValue::from_vec(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0])),
+        _ => None,
+    })
+    .expect("two scopes spelling `seq` are two claims, not one extent");
+    assert_eq!(
+        values.get(&from_x).map(|value| value.shape.clone()),
+        Some(vec![3]),
+        "`total`'s root keeps its own extent",
+    );
+    assert_eq!(
+        values.get(&from_y).map(|value| value.shape.clone()),
+        Some(vec![2, 2]),
+        "`use2`'s root keeps its own extent",
+    );
+}
+
+/// The negative twin. One scope, two `Load` axes spelling `seq` at
+/// disagreeing extents, both reachable from the SAME root: that is one claim
+/// with two witnesses and it must still refuse. Scoping a claim by the
+/// results it reaches must not be mistaken for dropping the equality check.
+///
+/// EVIDENTIARY STATUS: disposition lock. Measured GREEN on `3dc3f54f6` for
+/// the same reason it must stay green afterwards, through a different
+/// mechanism: today the legacy name grouping refuses it, and after the switch
+/// the scoped derivation must.
+#[test]
+fn one_scope_with_two_disagreeing_witnesses_of_a_binder_still_refuses_on_eval() {
+    let mut dag = Dag::new();
+    let x = load(&mut dag, "x", vec![named("seq")]);
+    let y = load(&mut dag, "y", vec![named("seq")]);
+    let sum = dag.add_node(
+        RiscOp::Add,
+        vec![x, y],
+        ty(vec![named("seq")], Prim::F32),
+        None,
+    );
+    dag.add_root(sum);
+
+    let err = eval_tensor_roots_with_strict(&dag, &[sum], |name| match name {
+        "x" => Some(TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0])),
+        "y" => Some(TensorValue::from_vec(vec![2], vec![1.0, 2.0])),
+        _ => None,
+    })
+    .expect_err("one claim with two disagreeing witnesses must refuse");
+    assert!(
+        err.contains("seq"),
+        "the refusal names the claim whose witnesses disagree: {err}"
+    );
+}
