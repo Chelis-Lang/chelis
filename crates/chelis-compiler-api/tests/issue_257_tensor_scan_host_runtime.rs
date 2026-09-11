@@ -425,10 +425,15 @@ out = grad(target)(cast(1.0, f32))
         .iter()
         .find(|r| r.name.as_deref() == Some("out"))
         .expect("missing out root");
-    // d/dx (2x) = 2.
+    // d/dx (2x) = 2. chelis#1741 made the scalar cotangent a scalar by spec
+    // (`spec/06-transformations.md` section 2.1), and
+    // `issue_1741_scalar_gradient_api` pins that rule. This row's subject is
+    // that an unrelated `tensor_scan` def must not trip the host-only AD
+    // guard, not which carrier a scalar cotangent arrives in, so it follows
+    // the spec's carrier instead of pinning the pre-#1741 one.
     match &root.value {
-        ExecutionValue::Tensor { value } => assert_eq!(value.data.to_f64_lossy_vec(), vec![2.0]),
-        other => panic!("expected scalar gradient tensor, got {other:?}"),
+        ExecutionValue::Scalar { value } => assert_eq!(value.get().as_f64_lossy(), 2.0),
+        other => panic!("expected a scalar gradient, got {other:?}"),
     }
 }
 
