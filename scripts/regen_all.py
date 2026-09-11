@@ -27,7 +27,7 @@ Tiers, in dependency order
     runtime-representation Phase 0 inventory
     (`runtime_representation_oracle.py --phase 0 --regenerate`, which needs
     clang); and check-only legs for two artifacts that have no writer, the
-    generated dtype C header and the two sibling census JSON files. Under
+    generated dtype C header and the wire census JSON. Under
     `--full` the script also prints that the tree-sitter parsers have neither
     a regenerator nor a drift test in this repository.
 
@@ -36,10 +36,10 @@ because later tiers consume earlier outputs. `--check` runs every selected leg
 and reports all stale ones. A program that cannot be launched (no `cargo` on
 PATH, say) is a failed leg in write mode and a stale leg with the launch error
 as its reason in check mode; it never escapes as a traceback. Every leg's
-writer environment variable (today only `CHELIS_CAPACITY_CENSUS_WRITE`) is
-removed from the child environment before any leg runs and set again only on
-the one write command that declares it, so an ambient leftover cannot turn a
-checker into a writer. The final line is exactly one of:
+writer environment variable (`CHELIS_CAPACITY_CENSUS_WRITE`) is removed from
+the child environment before any leg runs and set again only on the write
+command that declares it, so an ambient leftover cannot turn a checker into a
+writer. The final line is exactly one of:
 
     REGEN ALL: PASS                              exit 0
     REGEN ALL: STALE (<leg names>)               exit 1  (--check only)
@@ -69,8 +69,9 @@ What this script never writes
   `scripts/runtime_extent_oracle_baseline_phase_b.json`;
 * `docs/copy_drop_fixture_fitness_baseline.json`;
 * `scripts/test_timing_baseline.json` (regenerated from CI telemetry only);
-* `spec/design/capacity_census_wire.json` and
-  `spec/design/capacity_census_bindings.json` (no writer exists);
+* `spec/design/capacity_census_bindings.json` (stable reviewed authority rows,
+  not execution-derived graph hashes);
+* `spec/design/capacity_census_wire.json` (no writer exists);
 * `crates/chelis-runtime/include/chelis_runtime_dtype.h` (no writer exists);
 * the tree-sitter parsers under `grammars/`.
 
@@ -124,10 +125,10 @@ DTYPE_HEADER_MANUAL = (
     "(crates/chelis-runtime/src/dtype_header.rs) into that header, then rerun "
     "this leg."
 )
-CENSUS_SIBLINGS_MANUAL = (
-    "no --write seam exists for spec/design/capacity_census_wire.json or "
-    "spec/design/capacity_census_bindings.json; edit them by hand from "
-    "scripts/capacity_census_typed.py output, then rerun this leg."
+CENSUS_WIRE_MANUAL = (
+    "no --write seam exists for spec/design/capacity_census_wire.json; "
+    "edit it by hand from scripts/capacity_census_typed.py output, then "
+    "rerun this leg."
 )
 CENSUS_TODO_INSTRUCTION = (
     "classify each row through exactly one final authority (rules 1-3 of the "
@@ -276,7 +277,7 @@ def regen_legs(python: str) -> tuple[RegenLeg, ...]:
             manual_after=DTYPE_HEADER_MANUAL,
         ),
         RegenLeg(
-            name="census-siblings",
+            name="capacity-census-wire",
             tier=2,
             write_argv=None,
             check_argv=(
@@ -287,17 +288,10 @@ def regen_legs(python: str) -> tuple[RegenLeg, ...]:
                 "chelis-compiler-api",
                 "--test",
                 "capacity_census_wire",
-                "-p",
-                "chelis-python",
-                "--test",
-                "capacity_census_bindings",
             ),
-            writes=(
-                "spec/design/capacity_census_wire.json",
-                "spec/design/capacity_census_bindings.json",
-            ),
+            writes=("spec/design/capacity_census_wire.json",),
             needs="cargo",
-            manual_after=CENSUS_SIBLINGS_MANUAL,
+            manual_after=CENSUS_WIRE_MANUAL,
         ),
         RegenLeg(
             name="tree-sitter",
@@ -601,7 +595,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--full",
         action="store_true",
-        help="also run tier 2 (the census, the runtime-representation inventory, and the check-only legs)",
+        help=(
+            "also run tier 2 (the censuses, the runtime-representation inventory, "
+            "the binding graph writer, and the check-only legs)"
+        ),
     )
     args = parser.parse_args(argv)
     if args.tier is None:

@@ -14,6 +14,7 @@ crate-type = ["staticlib", "rlib"]
 ownership-ledger = ["dep:chelis-unord"]
 
 [dependencies]
+chelis-abi.workspace = true
 chelis-unord = { workspace = true, optional = true }
 chelis-vocab.workspace = true
 # chelis#732 Phase 2: exact f16/bf16 widening and correctly rounded

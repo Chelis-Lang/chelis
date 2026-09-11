@@ -451,6 +451,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "chelis-abi"
+version = "0.18.6"
+dependencies = [
+ "chelis-vocab",
+]
+
+[[package]]
 name = "chelis-backend-c"
 version = "0.18.6"
 dependencies = [
@@ -779,6 +786,7 @@ name = "chelis-python"
 version = "0.18.6"
 dependencies = [
  "assert_cmd",
+ "chelis-abi",
  "chelis-backend-c",
  "chelis-compiler-api",
  "chelis-vocab",
@@ -786,6 +794,7 @@ dependencies = [
  "libloading",
  "proc-macro2",
  "pyo3",
+ "pyo3-build-config",
  "quote",
  "serde",
  "serde_json",
@@ -840,6 +849,7 @@ dependencies = [
 name = "chelis-runtime"
 version = "0.18.6"
 dependencies = [
+ "chelis-abi",
  "chelis-types",
  "chelis-unord",
  "chelis-vocab",

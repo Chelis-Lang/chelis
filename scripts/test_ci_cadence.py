@@ -47,7 +47,7 @@ def assert_extended(test, pr, nightly):
         test.assertFalse(job.get("continue-on-error", False))
         test.assertEqual(job["timeout-minutes"], 60 if name.startswith(("generalize", "dtype")) else 45)
         if name == "runtime-representation-phase0-oracle":
-            test.assertEqual(job["name"], "Runtime Representation Phase 1 Oracle")
+            test.assertEqual(job["name"], "Runtime Representation Phase 2 Oracle")
             artifacts = [
                 step
                 for step in job["steps"]
@@ -57,7 +57,10 @@ def assert_extended(test, pr, nightly):
             test.assertEqual(len(artifacts), 1)
             test.assertEqual(
                 artifacts[0]["with"]["path"],
-                "target/runtime-representation-phase1/",
+                (
+                    "target/runtime-representation-phase1/\n"
+                    "target/runtime-representation-phase2/\n"
+                ),
             )
         steps = [s for s in job["steps"] if s.get("run", "").startswith(command)]
         test.assertEqual(len(steps), 1, command)
@@ -103,6 +106,19 @@ def assert_extended(test, pr, nightly):
     test.assertIn(workspace_suite, commands)
     assert_complete_hash_partition(test, full, workspace_suite)
     test.assertIn(".venv/bin/python scripts/ci_script_tests.py nightly", [s.get("run") for s in jobs["script-nightly"]["steps"]])
+    script_cache_steps = [
+        step
+        for step in jobs["script-nightly"]["steps"]
+        if step.get("name") in {
+            "Restore script compiler builds",
+            "Save script compiler builds",
+        }
+    ]
+    test.assertEqual(len(script_cache_steps), 2)
+    for step in script_cache_steps:
+        cached_paths = step["with"]["path"].splitlines()
+        test.assertIn("target/agents/native-execution-integration", cached_paths)
+        test.assertIn("target/agents/native-owner-integration", cached_paths)
     test.assertIn("cargo test -p chelis-cli --test chelis_std_self_test_corpus -- --ignored --nocapture", commands)
     test.assertIn("cargo test -p chelis-backend-c", [s.get("run") for s in jobs["backend-sanitizers-full"]["steps"]])
     support = jobs["integration-support"]

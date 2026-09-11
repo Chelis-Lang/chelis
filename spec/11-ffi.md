@@ -39,6 +39,18 @@ Empty and rank-zero descriptors obey the same rules; no fixed-rank carrier,
 host-width extent, implicit f64 conversion, or default tensor repairs invalid
 input. Unsupported valid device/dtype combinations are rejected explicitly.
 
+A native invocation preserves the admitted manifest's dimension constraints
+across every supplied and returned tensor. A concrete extent equals the observed
+int64 extent. Repeated named dimension identities obey spec/04 §4.1's equality
+rule across input and output axes. An unresolved named result extent requires a
+binding from an admitted input or an explicit concrete constraint in that
+manifest. Wildcard `*` dimensions remain independently unknown: they create no
+shared equality binding, and each concrete wildcard extent constrains only its
+own axis. A dimension with neither a name nor a concrete extent is malformed.
+Names are identities, never expressions for the native adapter to evaluate;
+computed relations retain their owning checker's admitted transport and runtime
+checks.
+
 The `NativeTensor.shape` getter is exactly the non-differentiable metadata
 operation [05-OP-45]. Its Rust result is `Vec<i64>` and its Python result is an
 ordered collection of exact Python integers. `NativeTensor.dtype` reports the
@@ -81,12 +93,13 @@ The callable tensor interface rejects a scalar-signature entry; evaluation
 admits scalar results under its own execution-value contract.
 
 The callable artifact metadata uses the exact uint32 discriminant
-`abi_version: 1`. A consumer requires this field and validates the supported
+`abi_version: 2`. A consumer requires this field and validates the supported
 ABI version before decoding the remaining metadata, inspecting its source,
 or opening the compiled library. Missing, duplicate, non-integer, and
 unsupported version fields are errors; no missing-version default or
-versionless fallback is permitted. This discriminant selects the callable
-ABI and is distinct from execution-value and DAG schema versions. Tensor
+versionless fallback is permitted. Version 1 is rejected before the remaining
+metadata is decoded or the library is opened. This discriminant selects the
+callable ABI and is distinct from execution-value and DAG schema versions. Tensor
 metadata retains the exact extent and dtype contracts above.
 
 `project_root` supplies Reef dependency context. `compile_and_load` discovers
@@ -116,6 +129,20 @@ ones governed by [05-OP-31..33], and the heap-kind, strong-owner, tagged-value
 conversion, option-node, entry-borrow, and guarded-access identities are the ones
 governed by [05-OP-44]. (The compiled ownership requirement is not
 fully implemented; see chelis#1286.)
+
+A callable device entry has the exact C signature
+`void entry(const chelis_device_tensor_owner *const *inputs, int32_t input_count, chelis_device_tensor_owner **outputs, int32_t output_count)`.
+Both counts equal the selected manifest's arities before arrays are read or
+written; positive arity requires a complete non-null array. Inputs are live
+borrowed handles for the entire invocation. The caller retains their storage and
+the loaded artifact library. Temporary views own checked metadata and borrow a
+provably live input or storage slot; the callee releases those views before their
+slots. Every input owner agrees with the actual current HIP device before
+allocation or launch; returned device identity is observed from each output owner. Each escaping output is an independent owned contiguous clone in logical
+strided order, including an output equal to an input or another output. Output
+adoption validates every actual descriptor before exposing a language result.
+The caller finalizes each output through `chelis_device_tensor_release` from the
+same retained library. Raw packet addresses are observations, never owner handles.
 
 The compiler-api pipeline behind this surface serves two products with different
 entry contracts:

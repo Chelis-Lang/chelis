@@ -1,4 +1,4 @@
-//! The C and Objective-C leg: clang's front end reads the headers.
+//! The C, C++, and Objective-C leg: clang's front end reads native sources.
 //!
 //! A seam row is `kind|path|owner`, and the owner is the enclosing
 //! *declaration*. Producing it therefore means parsing declarations, and C
@@ -137,12 +137,32 @@ pub const PUBLIC_C_LANE: HeaderLane = HeaderLane {
 };
 
 /// The HIP support header: a host-side driver-API file with no device
-/// syntax, read with and without `NDEBUG` and with the hipBLAS header
-/// present and absent.
+/// syntax, read with and without `NDEBUG` against the required matching
+/// hipBLAS header.
 pub const HIP_LANE: HeaderLane = HeaderLane {
-    language: "c",
+    language: "c++",
     target: "x86_64-unknown-linux-gnu",
-    extra: &[],
+    extra: &["-std=c++17"],
+    configurations: &[
+        Configuration {
+            name: "debug",
+            flags: &[],
+            extra_include: Some("hipblas-present"),
+        },
+        Configuration {
+            name: "release",
+            flags: &["-DNDEBUG"],
+            extra_include: Some("hipblas-present"),
+        },
+    ],
+};
+
+/// The private HIP ownership companion: host C++17, parsed against committed
+/// standard-library and HIP stubs rather than a workstation SDK.
+pub const DEVICE_CXX_LANE: HeaderLane = HeaderLane {
+    language: "c++",
+    target: "x86_64-unknown-linux-gnu",
+    extra: &["-std=c++17"],
     configurations: &[
         Configuration {
             name: "debug",
@@ -153,11 +173,6 @@ pub const HIP_LANE: HeaderLane = HeaderLane {
             name: "release",
             flags: &["-DNDEBUG"],
             extra_include: None,
-        },
-        Configuration {
-            name: "hipblas",
-            flags: &[],
-            extra_include: Some("hipblas-present"),
         },
     ],
 };
@@ -186,7 +201,9 @@ pub const OBJECTIVE_C_LANE: HeaderLane = HeaderLane {
 pub fn lane_for(path: &str) -> HeaderLane {
     if path.ends_with("chelis_metal_runtime.h") {
         OBJECTIVE_C_LANE
-    } else if path.ends_with("chelis_hip_runtime.h") {
+    } else if path.ends_with("chelis_device_owner.cpp") {
+        DEVICE_CXX_LANE
+    } else if path.starts_with("crates/chelis-backend-hip/runtime/") {
         HIP_LANE
     } else {
         PUBLIC_C_LANE
@@ -222,6 +239,7 @@ const OBJECTIVE_C_TYPE_WORDS: &[&str] = &["BOOL", "Class", "SEL", "id", "instanc
 /// type and name no arithmetic type of their own.
 const TYPE_OPERATOR_WORDS: &[&str] = &[
     "__builtin_va_list",
+    "decltype",
     "__typeof",
     "__typeof__",
     "__typeof_unqual",
@@ -246,20 +264,25 @@ const ARM_MARKER: &str = "chelis_inventory_arm";
 /// Where the stub SDK and the published include directory live. The binary is
 /// built by the oracle inside the checkout it scans, so the crate's own
 /// manifest directory is the right anchor for both.
-fn support_dirs() -> Result<(PathBuf, PathBuf), ScanError> {
+fn support_dirs() -> Result<(PathBuf, PathBuf, PathBuf), ScanError> {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let stubs = manifest.join("sdk-stubs");
     let include = manifest.join("../chelis-runtime/include");
-    for (label, dir) in [("stub SDK", &stubs), ("published include", &include)] {
+    let device_runtime = manifest.join("../chelis-backend-hip/runtime");
+    for (label, dir) in [
+        ("stub SDK", &stubs),
+        ("published include", &include),
+        ("device runtime", &device_runtime),
+    ] {
         if !dir.is_dir() {
             return Err(ScanError::new(format!(
-                "the {label} directory `{}` is missing; the inventory cannot parse a C \
-                 header without it",
+                "the {label} directory `{}` is missing; the inventory cannot parse a \
+                 native source without it",
                 dir.display()
             )));
         }
     }
-    Ok((stubs, include))
+    Ok((stubs, include, device_runtime))
 }
 
 /// A clang invocation with the lane's language, target, stub SDK, published
@@ -269,6 +292,7 @@ fn clang_command(
     configuration: Configuration,
     stubs: &Path,
     include: &Path,
+    device_runtime: &Path,
 ) -> Command {
     let path = std::env::var_os("PATH").unwrap_or_default();
     let mut command = Command::new("clang");
@@ -288,6 +312,9 @@ fn clang_command(
         .arg(include)
         .args(lane.extra)
         .args(configuration.flags);
+    if lane == HIP_LANE || lane == DEVICE_CXX_LANE {
+        command.arg("-I").arg(device_runtime);
+    }
     command
 }
 
@@ -346,9 +373,10 @@ fn dump_ast(
     configuration: Configuration,
     stubs: &Path,
     include: &Path,
+    device_runtime: &Path,
     file: &Path,
 ) -> Result<Value, ScanError> {
-    let mut command = clang_command(lane, configuration, stubs, include);
+    let mut command = clang_command(lane, configuration, stubs, include, device_runtime);
     command
         .args(["-fsyntax-only", "-Xclang", "-ast-dump=json"])
         .arg(file);
@@ -376,9 +404,10 @@ fn live_arms(
     configuration: Configuration,
     stubs: &Path,
     include: &Path,
+    device_runtime: &Path,
     marked_file: &Path,
 ) -> Result<BTreeSet<usize>, ScanError> {
-    let mut command = clang_command(lane, configuration, stubs, include);
+    let mut command = clang_command(lane, configuration, stubs, include, device_runtime);
     command.args(["-E", "-P"]).arg(marked_file);
     let stdout = run_clang(
         command,
@@ -420,7 +449,7 @@ pub fn scan_c_source(
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| ScanError::new(format!("`{path}` has no file name")))?;
-    let (stubs, include) = support_dirs()?;
+    let (stubs, include, device_runtime) = support_dirs()?;
     let resource = resource_dir()?;
     let scratch = tempfile::Builder::new()
         .prefix("chelis-repr-inventory-")
@@ -435,12 +464,15 @@ pub fn scan_c_source(
     let marked_file = scratch.path().join(format!("staged-arms-{file_name}"));
     std::fs::write(&marked_file, &arms.marked_source)
         .map_err(|error| ScanError::new(format!("cannot stage `{path}`: {error}")))?;
-    let universe = vec![
+    let mut universe = vec![
         canonical(&file)?,
         canonical(&stubs)?,
         canonical(&include)?,
         canonical(&resource)?,
     ];
+    if lane == HIP_LANE || lane == DEVICE_CXX_LANE {
+        universe.push(canonical(&device_runtime)?);
+    }
 
     let mut rows = Vec::new();
     let mut seen = BTreeSet::new();
@@ -451,9 +483,17 @@ pub fn scan_c_source(
             *configuration,
             &stubs,
             &include,
+            &device_runtime,
             &marked_file,
         )?);
-        let tree = dump_ast(lane, *configuration, &stubs, &include, &file)?;
+        let tree = dump_ast(
+            lane,
+            *configuration,
+            &stubs,
+            &include,
+            &device_runtime,
+            &file,
+        )?;
         let mut names = DeclaredNames::default();
         names.collect(&tree);
         let mut reader = Reader {
@@ -711,19 +751,23 @@ impl DeclaredNames {
                 "RecordDecl"
                     | "EnumDecl"
                     | "TypedefDecl"
+                    | "TypeAliasDecl"
                     | "ObjCInterfaceDecl"
                     | "ObjCProtocolDecl"
                     | "ObjCTypeParamDecl"
+                    | "TemplateTypeParmDecl"
                     | "CXXRecordDecl"
             )
         {
             self.words.insert(name.to_string());
         }
-        if kind == "TypedefDecl" && !name.is_empty() {
-            for owned in owned_tag_ids(node) {
-                self.typedef_of_record
-                    .entry(owned)
-                    .or_insert_with(|| name.to_string());
+        if matches!(kind, "TypedefDecl" | "TypeAliasDecl") && !name.is_empty() {
+            if kind == "TypedefDecl" {
+                for owned in owned_tag_ids(node) {
+                    self.typedef_of_record
+                        .entry(owned)
+                        .or_insert_with(|| name.to_string());
+                }
             }
             // The written target keeps the census's names (`uint8_t`) for one
             // more step; the desugared one is what a typedef of a builtin
@@ -958,10 +1002,47 @@ impl<'a> Reader<'a> {
     /// A type spelling's words with every typedef alias resolved through the
     /// translation unit's own typedefs.
     fn resolved_words(&self, spelling: &str) -> Vec<String> {
-        c_lexical::resolve_words(
-            c_lexical::lex_c_tokens(&strip_annotations(spelling)),
-            &self.names.aliases,
-        )
+        c_lexical::resolve_words(self.lex_type_words(spelling), &self.names.aliases)
+    }
+
+    /// C++ `decltype(expression)` embeds value identifiers in a type spelling.
+    /// They are not type words, but explicit type tokens inside the expression
+    /// still matter (`decltype((float *)0)` governs an element pointer).
+    fn lex_type_words(&self, spelling: &str) -> Vec<String> {
+        let tokens = c_lexical::lex_c_tokens(&strip_annotations(spelling));
+        let mut output = Vec::with_capacity(tokens.len());
+        let mut pending_decltype = false;
+        let mut decltype_depth = 0usize;
+        for token in tokens {
+            if token == "decltype" {
+                pending_decltype = true;
+                output.push(token);
+                continue;
+            }
+            if pending_decltype && token == "(" {
+                pending_decltype = false;
+                decltype_depth = 1;
+                output.push(token);
+                continue;
+            }
+            if decltype_depth > 0 {
+                if token == "(" {
+                    decltype_depth += 1;
+                } else if token == ")" {
+                    decltype_depth -= 1;
+                }
+                let is_identifier = token
+                    .chars()
+                    .next()
+                    .is_some_and(|character| character.is_ascii_alphabetic() || character == '_');
+                if !is_identifier || self.is_known_type_word(&token) {
+                    output.push(token);
+                }
+                continue;
+            }
+            output.push(token);
+        }
+        output
     }
 
     /// Reject a type spelt with a word no vocabulary classifies, wherever the
@@ -1010,7 +1091,7 @@ impl<'a> Reader<'a> {
             .into_iter()
             .flatten()
             .any(|spelling| {
-                let mut words = c_lexical::lex_c_tokens(&strip_annotations(spelling));
+                let mut words = self.lex_type_words(spelling);
                 for _ in 0..8 {
                     if governs_a_pointer(&words) {
                         return true;
@@ -1165,7 +1246,8 @@ impl<'a> Reader<'a> {
                     }
                 });
             }
-            "FunctionDecl" | "ObjCMethodDecl" => self.visit_function(node, kind, begin),
+            "FunctionDecl" | "CXXMethodDecl" | "CXXConstructorDecl" | "CXXDestructorDecl"
+            | "ObjCMethodDecl" => self.visit_function(node, kind, begin),
             "VarDecl" => {
                 let name = field_str(node, "name").unwrap_or_default().to_string();
                 self.check_type_words(node.get("type"), &format!("`{name}`"));
@@ -1181,7 +1263,7 @@ impl<'a> Reader<'a> {
                     }
                 });
             }
-            "TypedefDecl" => {
+            "TypedefDecl" | "TypeAliasDecl" => {
                 let name = field_str(node, "name").unwrap_or_default().to_string();
                 self.check_type_words(node.get("type"), &format!("typedef `{name}`"));
                 let sample = self.declaration_sample(begin);
@@ -1210,6 +1292,15 @@ impl<'a> Reader<'a> {
                 });
             }
             "ObjCIvarDecl" | "ObjCPropertyDecl" => self.visit_field(node, begin, end),
+            "NamespaceDecl"
+            | "FunctionTemplateDecl"
+            | "ClassTemplateDecl"
+            | "ClassTemplateSpecializationDecl"
+            | "LinkageSpecDecl" => {
+                for child in children(node) {
+                    self.visit_nested(child);
+                }
+            }
             "BlockDecl" => {
                 // A block literal's parameters are carriers exactly as a
                 // function's are, and the enclosing declaration's type does
@@ -1224,8 +1315,18 @@ impl<'a> Reader<'a> {
                     }
                 }
             }
-            "ObjCTypeParamDecl" | "EmptyDecl" | "IndirectFieldDecl" | "ImplicitParamDecl"
-            | "LabelDecl" | "ParmVarDecl" => {
+            "ObjCTypeParamDecl"
+            | "TemplateTypeParmDecl"
+            | "NonTypeTemplateParmDecl"
+            | "TemplateTemplateParmDecl"
+            | "AccessSpecDecl"
+            | "UsingDecl"
+            | "UsingShadowDecl"
+            | "EmptyDecl"
+            | "IndirectFieldDecl"
+            | "ImplicitParamDecl"
+            | "LabelDecl"
+            | "ParmVarDecl" => {
                 // `IndirectFieldDecl` mirrors an anonymous member's fields the
                 // reader already visited inside the anonymous aggregate;
                 // parameters are read with their function or block.
@@ -1464,11 +1565,19 @@ impl<'a> Reader<'a> {
                 self.check_type_words(node.get("type"), "a cast");
                 if self.governs_element_pointer(node.get("type")) {
                     let sample = self.expression_sample(begin, end);
-                    self.push(
-                        "raw-element-pointer",
-                        sample,
-                        qual_type(node.get("type")).unwrap_or("element pointer cast"),
-                    );
+                    if contains_data_member(node) {
+                        // A cast of a descriptor's opaque data field is one
+                        // transition seam, not a newly created second class.
+                        // Keep the frozen direct-access identity while making
+                        // its sample include the governing element spelling.
+                        self.push("direct-data-access", sample, "typed ->data cast");
+                    } else {
+                        self.push(
+                            "raw-element-pointer",
+                            sample,
+                            qual_type(node.get("type")).unwrap_or("element pointer cast"),
+                        );
+                    }
                 }
             }
             _ => {}
@@ -1477,6 +1586,11 @@ impl<'a> Reader<'a> {
             self.visit_nested(child);
         }
     }
+}
+
+fn contains_data_member(node: &Value) -> bool {
+    (field_str(node, "kind") == Some("MemberExpr") && field_str(node, "name") == Some("data"))
+        || children(node).any(contains_data_member)
 }
 
 /// One typedef-resolution step: every word that names an alias is replaced

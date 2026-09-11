@@ -37,6 +37,10 @@ const RUNTIME_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../chelis-runtime/include/chelis_runtime.h"
 ));
+const RUNTIME_VIEWS_H: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-runtime/include/chelis_runtime_views.h"
+));
 const RUNTIME_DTYPE_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../chelis-runtime/include/chelis_runtime_dtype.h"
@@ -56,6 +60,18 @@ const MATH_H: &str = include_str!(concat!(
 const HIP_RUNTIME_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../chelis-backend-hip/runtime/chelis_hip_runtime.h"
+));
+const DEVICE_OWNER_CPP: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-backend-hip/runtime/chelis_device_owner.cpp"
+));
+const DEVICE_OWNER_H: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-backend-hip/runtime/chelis_device_owner.h"
+));
+const DEVICE_DESCRIPTOR_H: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-backend-hip/runtime/chelis_device_descriptor.h"
 ));
 const METAL_RUNTIME_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -154,12 +170,22 @@ fn copy_runtime_artifacts(
     extras: ExtraRuntimeArtifacts,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     fs::write(runtime_dir.join("chelis_runtime.h"), RUNTIME_H)?;
+    fs::write(runtime_dir.join("chelis_runtime_views.h"), RUNTIME_VIEWS_H)?;
     fs::write(runtime_dir.join("chelis_runtime_dtype.h"), RUNTIME_DTYPE_H)?;
     fs::write(runtime_dir.join("chelis_blas.h"), BLAS_H)?;
     fs::write(runtime_dir.join("chelis_simd.h"), SIMD_H)?;
     fs::write(runtime_dir.join("chelis_math.h"), MATH_H)?;
     if extras.hip {
         fs::write(runtime_dir.join("chelis_hip_runtime.h"), HIP_RUNTIME_H)?;
+        fs::write(
+            runtime_dir.join("chelis_device_owner.cpp"),
+            DEVICE_OWNER_CPP,
+        )?;
+        fs::write(runtime_dir.join("chelis_device_owner.h"), DEVICE_OWNER_H)?;
+        fs::write(
+            runtime_dir.join("chelis_device_descriptor.h"),
+            DEVICE_DESCRIPTOR_H,
+        )?;
     }
     if extras.metal {
         fs::write(runtime_dir.join("chelis_metal_runtime.h"), METAL_RUNTIME_H)?;
@@ -9904,17 +9930,23 @@ fn cmd_build_hip_host(
             }
         }
     }
-    let helper_sources = helper_paths
+    let mut support_sources = helper_paths
         .iter()
         .map(|path| path.display().to_string())
-        .collect::<Vec<_>>()
-        .join(" ");
+        .collect::<Vec<_>>();
+    support_sources.push(
+        runtime_dir
+            .join("chelis_device_owner.cpp")
+            .display()
+            .to_string(),
+    );
+    let support_sources = support_sources.join(" ");
     if requires_main {
         println!(
             "Compile: hipcc {} {} {} -L{} -lchelis_runtime -lpthread -ldl {} -o {}",
             compile_flags.join(" "),
             c_path.display(),
-            helper_sources,
+            support_sources,
             runtime_dir.display(),
             link_flags.join(" "),
             c_path.with_extension("").display()
@@ -9924,7 +9956,7 @@ fn cmd_build_hip_host(
             "Compile objects: hipcc {} -c {} {}",
             compile_flags.join(" "),
             c_path.display(),
-            helper_sources
+            support_sources
         );
     }
     Ok(())
@@ -10259,17 +10291,19 @@ fn cmd_build_hip(
     flags.dedup();
     if requires_main {
         println!(
-            "Compile: hipcc {} {} -L{} -lchelis_runtime -lpthread -ldl -o {}",
+            "Compile: hipcc {} {} {} -L{} -lchelis_runtime -lpthread -ldl -o {}",
             flags.join(" "),
             c_path.display(),
+            runtime_dir.join("chelis_device_owner.cpp").display(),
             runtime_dir.display(),
             c_path.with_extension("").display()
         );
     } else {
         println!(
-            "Compile object: hipcc {} -c {}",
+            "Compile object: hipcc {} -c {} {}",
             flags.join(" "),
-            c_path.display()
+            c_path.display(),
+            runtime_dir.join("chelis_device_owner.cpp").display()
         );
     }
     Ok(())

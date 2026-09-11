@@ -483,6 +483,7 @@ fn compile_and_run_dag(dag: &Dag, func_name: &str) -> String {
     };
     for header in &[
         "chelis_runtime.h",
+        "chelis_runtime_views.h",
         "chelis_runtime_dtype.h",
         "chelis_blas.h",
         "chelis_simd.h",

@@ -30,6 +30,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chelis_deep::tag::DeepTag;
 use chelis_deep::{Atom, Expr, List};
@@ -41,6 +42,15 @@ mod stdlib_closure_tests;
 
 #[path = "../../../tests/support/c_lexical.rs"]
 mod c_lexical;
+
+#[path = "../../../tests/support/c_preprocessor.rs"]
+mod c_preprocessor;
+
+#[path = "../../../tests/support/c_include.rs"]
+mod c_include;
+
+#[path = "../../../tests/support/capacity_census_backend_headers.rs"]
+mod backend_headers;
 
 #[path = "../../../tests/support/capacity_census_authority.rs"]
 mod capacity_census_authority;
@@ -58,6 +68,7 @@ const INCLUDE_DIR_REL: &str = "crates/chelis-runtime/include";
 const HEADER_ROOTS: &[&str] = &["chelis_runtime.h", "chelis_blas.h", "chelis_math.h"];
 const STD_SRC_REL: &str = "packages/chelis-std/src";
 const CONTROLLING_SPEC_REL: &str = "spec/05-risc-primitives.md";
+static PLANTED_INCLUDE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const NUMERIC_PRIMS: &[&str] = &[
     "f64", "f32", "f16", "bf16", "f8e4m3", "int8", "int16", "int32", "int64",
 ];
@@ -669,13 +680,13 @@ const FINAL_TAGGED_TRANSPORT_ROWS: &[StaticSurfaceDescriptor] = &[
     StaticSurfaceDescriptor::new(
         PRIMARY_CENSUS_FAMILY,
         "header-struct",
-        "chelis_runtime.h: typedef struct { const void * data ; int64_t count ; chelis_dtype dtype ; uint8_t reserved [ 7 ] ; } chelis_read_view",
+        "chelis_runtime_views.h: typedef struct { const void * data ; int64_t count ; chelis_dtype dtype ; uint8_t reserved [ 7 ] ; } chelis_read_view",
         &["numeric-op"],
     ),
     StaticSurfaceDescriptor::new(
         PRIMARY_CENSUS_FAMILY,
         "header-struct",
-        "chelis_runtime.h: typedef struct { void * data ; int64_t count ; chelis_dtype dtype ; uint8_t reserved [ 7 ] ; } chelis_write_view",
+        "chelis_runtime_views.h: typedef struct { void * data ; int64_t count ; chelis_dtype dtype ; uint8_t reserved [ 7 ] ; } chelis_write_view",
         &["numeric-op"],
     ),
     StaticSurfaceDescriptor::new(
@@ -707,6 +718,83 @@ macro_rules! final_numeric_row {
 }
 
 const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: int64_t chelis_metadata_plan_byte_offset ( const chelis_metadata_plan * plan , chelis_scalar linear_index ) ;",
+        &["numeric-op"],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_byte_offset` takes a canonical tagged int64 logical"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_metadata_plan * chelis_metadata_plan_new ( chelis_scalar rank , const chelis_scalar * shape , chelis_scalar exemplar ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_new` constructs an independently owned, opaque"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_metadata_plan * chelis_metadata_plan_view ( chelis_scalar rank , const chelis_scalar * shape , const chelis_scalar * strides , chelis_scalar exemplar , chelis_scalar byte_capacity ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_view` instead retains rank-many exact tagged int64"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: int32_t chelis_metadata_plan_rank ( const chelis_metadata_plan * plan ) ;",
+        &["numeric-op"],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_new` constructs an independently owned, opaque"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: const int64_t * chelis_metadata_plan_shape ( const chelis_metadata_plan * plan ) ;",
+        &["numeric-op"],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_new` constructs an independently owned, opaque"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: const int64_t * chelis_metadata_plan_strides ( const chelis_metadata_plan * plan ) ;",
+        &["numeric-op"],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_new` constructs an independently owned, opaque"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: int64_t chelis_metadata_plan_count ( const chelis_metadata_plan * plan ) ;",
+        &["numeric-op"],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_new` constructs an independently owned, opaque"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: int64_t chelis_metadata_plan_byte_count ( const chelis_metadata_plan * plan ) ;",
+        &["numeric-op"],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_new` constructs an independently owned, opaque"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: chelis_dtype chelis_metadata_plan_dtype ( const chelis_metadata_plan * plan ) ;",
+        &["numeric-op"],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_new` constructs an independently owned, opaque"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: void chelis_metadata_plan_check_capacity ( const chelis_metadata_plan * plan , chelis_scalar byte_capacity ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_check_capacity` validates a canonical nonnegative int64"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_runtime.h: void chelis_metadata_plan_release ( chelis_metadata_plan * plan ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_metadata_plan_release` consumes the live plan exactly once; all"
+    ),
     // Final [05-OP-32] registrations from the retired primary cohort.
     final_numeric_row!(
         "header-export",
@@ -2479,11 +2567,92 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
     },
 ];
 
+const BACKEND_TAGGED_TRANSPORT_ROWS: &[StaticSurfaceDescriptor] = &[StaticSurfaceDescriptor::new(
+    PRIMARY_CENSUS_FAMILY,
+    "header-struct",
+    "chelis_device_descriptor.h: typedef struct { void * data ; const int64_t * shape ; const int64_t * strides ; int64_t count ; int64_t byte_capacity ; int32_t rank ; chelis_dtype dtype ; uint8_t ownership ; uint8_t reserved [ 2 ] ; } chelis_gpu_tensor",
+    &["numeric-op"],
+)];
+
+const BACKEND_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: chelis_device_tensor_owner * chelis_device_tensor_alloc ( chelis_metadata_plan * plan ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_gpu_tensor` observation. `chelis_device_tensor_alloc` consumes one"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: chelis_device_tensor_owner * chelis_device_tensor_borrow ( chelis_metadata_plan * plan , void * data , chelis_scalar byte_capacity ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_device_tensor_borrow` consumes one live metadata plan, validates its"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: chelis_device_tensor_owner * chelis_device_tensor_import ( const chelis_gpu_tensor * packet ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_device_tensor_import` validates every field of a generated raw packet"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: const chelis_gpu_tensor * chelis_device_tensor_view ( const chelis_device_tensor_owner * owner ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_device_tensor_view` returns a const generated packet observation tied"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: int32_t chelis_device_tensor_device ( const chelis_device_tensor_owner * owner ) ;",
+        &["numeric-op"],
+        "[05-OP-33]",
+        "`chelis_device_tensor_device` returns the owner's exact nonnegative int32"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: chelis_device_tensor_owner * chelis_device_tensor_clone ( const chelis_device_tensor_owner * source ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_device_tensor_clone` returns a distinct owner with a new contiguous"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: void chelis_device_tensor_release ( chelis_device_tensor_owner * owner ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_device_tensor_release` consumes one live opaque owner exactly once,"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: void chelis_device_tensor_copy_from_host ( chelis_device_tensor_owner * destination , const chelis_tensor * source ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_device_tensor_copy_from_host` and `chelis_device_tensor_copy_to_host`"
+    ),
+    final_numeric_row!(
+        "header-export",
+        "chelis_device_owner.h: void chelis_device_tensor_copy_to_host ( chelis_tensor_write * destination , const chelis_device_tensor_owner * source ) ;",
+        &[],
+        "[05-OP-33]",
+        "`chelis_device_tensor_copy_from_host` and `chelis_device_tensor_copy_to_host`"
+    ),
+];
+
 fn final_authority_registries() -> AuthorityRegistries<'static> {
     AuthorityRegistries {
         nonnumeric: FINAL_NONNUMERIC_ROWS,
         tagged_transports: FINAL_TAGGED_TRANSPORT_ROWS,
         numeric_operations: FINAL_NUMERIC_OPERATION_ROWS,
+    }
+}
+
+fn backend_authority_registries() -> AuthorityRegistries<'static> {
+    AuthorityRegistries {
+        nonnumeric: &[],
+        tagged_transports: BACKEND_TAGGED_TRANSPORT_ROWS,
+        numeric_operations: BACKEND_NUMERIC_OPERATION_ROWS,
     }
 }
 
@@ -2588,6 +2757,19 @@ fn coverage_manifest() -> CoverageManifest {
                 ],
             },
             CoveredLeg {
+                leg: "backend-runtime-headers".to_string(),
+                artifact: "complete chelis_hip_runtime.h and chelis_metal_runtime.h published closures with committed SDK fixtures".to_string(),
+                enumerator: "backend_headers::scan -> shared attributed preprocess_root -> header_rows".to_string(),
+                command: "cargo nextest run -p chelis-cli --test capacity_census_tripwire -E 'test(backend_headers::)'".to_string(),
+                expected_success: "backend_runtime_headers_match_the_reviewed_final_authority passes".to_string(),
+                mutations: vec![
+                    "backend_roots_cannot_omit_an_unreached_generated_header".to_string(),
+                    "backend_environments_cannot_change_a_public_numeric_signature".to_string(),
+                    "generated_device_descriptor_requires_exact_tagged_transport_authority".to_string(),
+                    "device_owner_callables_require_exact_op33_authority".to_string(),
+                ],
+            },
+            CoveredLeg {
                 leg: "wire-schema-numeric-fields".to_string(),
                 artifact: "compiler/Python serialization publication roots and their reachable \
                            rustdoc JSON type graph"
@@ -2612,7 +2794,7 @@ fn coverage_manifest() -> CoverageManifest {
                 leg: "binding-raw-dtype-params".to_string(),
                 artifact: "crates/chelis-python/src/lib.rs registered PyO3 callables".to_string(),
                 enumerator:
-                    "live PyO3 signatures; nine final rows require input/return exposure, eight unchanged legacy rows defer it"
+                    "live PyO3 signatures and reachable payloads; all 17 rows require current authority as nine nonnumeric registrations, seven exact tagged transports, or one exact numeric operation"
                         .to_string(),
                 command: "cargo nextest run -p chelis-python --test capacity_census_bindings"
                     .to_string(),
@@ -2621,7 +2803,7 @@ fn coverage_manifest() -> CoverageManifest {
                         .to_string(),
                 mutations: vec![
                     "a_registered_pyfunction_with_a_raw_dtype_parameter_is_rejected".to_string(),
-                    "retired_binding_rows_cannot_regain_legacy_admission".to_string(),
+                    "final_binding_rows_cannot_regain_legacy_admission".to_string(),
                     "copied_missing_and_duplicate_binding_registrations_fail".to_string(),
                 ],
             },
@@ -2724,12 +2906,28 @@ fn repo_root() -> PathBuf {
 /// closure is followed by the real preprocessor, so an export added to a
 /// transitively-included header - or hidden behind a macro - is visible.
 fn preprocessed_headers(include_dir: &Path, roots: &[&str]) -> BTreeMap<String, String> {
+    preprocessed_headers_with_environment(
+        include_dir,
+        roots,
+        &c_preprocessor::Environment::native_c(),
+    )
+}
+
+/// Backend headers use explicit C++/Objective-C++ SDK lanes while retaining
+/// the primary census's attribution, type-word and context-invariance rules.
+fn preprocessed_headers_with_environment(
+    include_dir: &Path,
+    roots: &[&str],
+    environment: &c_preprocessor::Environment<'_>,
+) -> BTreeMap<String, String> {
     let sources = header_source_closure(include_dir, roots);
     assert_no_line_directives(&sources);
     assert_context_invariant_headers(include_dir, roots);
     let mut per_file: BTreeMap<String, String> = BTreeMap::new();
     for root in roots {
-        for (name, text) in preprocess_root(include_dir, root) {
+        let preprocessed = c_preprocessor::preprocess_root(include_dir, root, environment)
+            .unwrap_or_else(|error| panic!("{}{}{}", teaching_header(), error, teaching_footer()));
+        for (name, text) in preprocessed {
             if let Some(previous) = per_file.get(&name) {
                 let previous_rows = header_rows_local(&name, previous);
                 let current_rows = header_rows_local(&name, &text);
@@ -2911,20 +3109,12 @@ fn published_headers_on_disk(include_dir: &Path) -> BTreeSet<String> {
     out
 }
 
-/// A `#include` of a local header by EITHER spelling. `cc -E -I <dir>`
-/// resolves `<x>` against the include path exactly as it resolves `"x"`, so
-/// a raw-source guard that follows only quoted includes leaves a local
-/// header reachable solely through `#include <x>` outside every raw-source
-/// scan (round-3 red team P2). Callers filter by resolution inside the
-/// include directory, which keeps system includes out.
+/// Recognize both literal include spellings. Resolution separately preserves
+/// the compiler's search order: a quoted include first tries the including
+/// header's directory, while an angle include uses the published include root.
+/// Both spellings participate in attribution and conditional-macro guards.
 fn local_include(line: &str) -> Option<&str> {
-    let rest = line.trim_start().strip_prefix("#include")?.trim_start();
-    let close = match rest.chars().next()? {
-        '"' => '"',
-        '<' => '>',
-        _ => return None,
-    };
-    rest[1..].split(close).next()
+    c_include::include_name(line)
 }
 
 fn header_source_closure(include_dir: &Path, roots: &[&str]) -> BTreeMap<String, String> {
@@ -2937,11 +3127,11 @@ fn header_source_closure(include_dir: &Path, roots: &[&str]) -> BTreeMap<String,
         let path = include_dir.join(&name);
         let source =
             fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        for line in source.lines() {
-            if let Some(included) = local_include(line)
-                && include_dir.join(included).is_file()
-            {
-                pending.push(included.to_string());
+        for (_, line) in logical_lines(&strip_c_comments(&source)) {
+            if let Some(included) = c_include::resolve(&name, &line, |candidate| {
+                include_dir.join(candidate).is_file()
+            }) {
+                pending.push(included);
             }
         }
         sources.insert(name, source);
@@ -3142,11 +3332,13 @@ fn closure_conditional_macro_taint(
     let edges: Vec<(String, String)> = sources
         .iter()
         .flat_map(|(name, source)| {
-            source
-                .lines()
-                .filter_map(local_include)
-                .filter(|included| sources.contains_key(*included))
-                .map(|included| (name.clone(), included.to_string()))
+            logical_lines(&strip_c_comments(source))
+                .into_iter()
+                .filter_map(|(_, line)| {
+                    c_include::resolve(name, &line, |candidate| sources.contains_key(candidate))
+                })
+                .map(|included| (name.clone(), included))
+                .collect::<Vec<_>>()
         })
         .collect();
     loop {
@@ -3204,8 +3396,11 @@ fn assert_context_invariant_headers(include_dir: &Path, roots: &[&str]) {
             }
 
             let varying = conditional_stack.iter().any(|frame| *frame);
-            if varying && let Some(included) = local_include(trimmed) {
-                conditional_includes.insert(included.to_string());
+            if varying
+                && let Some(included) =
+                    c_include::resolve(name, trimmed, |candidate| sources.contains_key(candidate))
+            {
+                conditional_includes.insert(included);
             }
             let extern_wrapper = trimmed == "extern \"C\" {" || trimmed == "}";
             if varying && brace_depth == 0 && !trimmed.starts_with('#') {
@@ -3248,6 +3443,20 @@ fn assert_context_invariant_headers(include_dir: &Path, roots: &[&str]) {
                 dependent
             })
             .collect();
+        // A conditional include can expose ABI through an otherwise empty
+        // intermediate header. Follow its complete local closure before
+        // deciding that the conditional branch declares no public surface.
+        let mut pending: Vec<_> = conditional_includes.iter().cloned().collect();
+        while let Some(included) = pending.pop() {
+            for (_, line) in logical_lines(&strip_c_comments(&sources[&included])) {
+                if let Some(child) = c_include::resolve(&included, &line, |candidate| {
+                    sources.contains_key(candidate)
+                }) && conditional_includes.insert(child.clone())
+                {
+                    pending.push(child);
+                }
+            }
+        }
         let conditional_include_rows: Vec<Row> = conditional_includes
             .iter()
             .filter_map(|included| sources.get(included).map(|source| (included, source)))
@@ -3511,61 +3720,6 @@ fn comment_stripping_respects_string_and_character_literals() {
     );
 }
 
-/// Run the REAL C preprocessor over a root header and return its output
-/// attributed per header file via linemarkers, restricted to files under
-/// `include_dir` (system-header content is dropped). This is the
-/// compiled-artifact requirement made literal: `#define`-hidden spellings
-/// arrive expanded, so the re-red-team's macro evasion is visible. A
-/// missing C compiler fails LOUDLY - a skip here would be an evasion
-/// channel.
-fn preprocess_root(include_dir: &Path, root: &str) -> BTreeMap<String, String> {
-    let out = std::process::Command::new("cc")
-        .arg("-E")
-        .arg("-x")
-        .arg("c")
-        .arg("-I")
-        .arg(include_dir)
-        .arg(include_dir.join(root))
-        .output()
-        .unwrap_or_else(|e| {
-            panic!(
-                "{}the capacity census requires a C compiler (`cc`) on PATH to \
-                 preprocess the published headers; none ran: {e}{}",
-                teaching_header(),
-                teaching_footer()
-            )
-        });
-    assert!(
-        out.status.success(),
-        "cc -E failed for {root}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let text = String::from_utf8_lossy(&out.stdout).to_string();
-    let dir_str = include_dir.to_string_lossy().to_string();
-    let mut per_file: BTreeMap<String, String> = BTreeMap::new();
-    let mut current: Option<String> = None;
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("# ") {
-            // Linemarker: `# <num> "<file>" <flags...>`.
-            if let Some(file) = rest.split('"').nth(1) {
-                current = if file.contains(&dir_str) || file.ends_with(root) {
-                    Path::new(file)
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                } else {
-                    None
-                };
-            }
-            continue;
-        }
-        if let Some(name) = &current {
-            per_file.entry(name.clone()).or_default().push_str(line);
-            per_file.entry(name.clone()).or_default().push('\n');
-        }
-    }
-    per_file
-}
-
 /// Extract exported declarations and struct layouts from one preprocessed
 /// header body. `static` definitions carry no ABI and are skipped; the
 /// `extern "C" {` wrapper is neutralized; preprocessor lines are dropped.
@@ -3603,9 +3757,10 @@ fn push_callable_row(
 
 fn header_rows(header_name: &str, raw: &str, typedefs: &BTreeMap<String, Vec<String>>) -> Vec<Row> {
     let text = strip_c_comments(raw);
-    let text: String = text
-        .lines()
-        .filter(|l| !l.trim_start().starts_with('#'))
+    let text: String = logical_lines(&text)
+        .into_iter()
+        .filter(|(_, line)| !line.trim_start().starts_with('#'))
+        .map(|(_, line)| line)
         .collect::<Vec<_>>()
         .join("\n")
         .replace("extern \"C\" {", "");
@@ -3700,6 +3855,21 @@ fn header_rows(header_name: &str, raw: &str, typedefs: &BTreeMap<String, Vec<Str
         }
     }
     rows
+}
+
+#[test]
+fn multiline_preprocessor_macros_do_not_create_phantom_exports() {
+    let rows = header_rows_local(
+        "fixture.h",
+        concat!(
+            "#define CHECK(call) do { \\\n",
+            "    if ((call) != 0) abort(); \\\n",
+            "} while (0)\n",
+            "int real_export(void);\n",
+        ),
+    );
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(rows[0].id.contains("real_export"));
 }
 
 // ---------------------------------------------------------------------------
@@ -5094,8 +5264,9 @@ fn exported_public_numeric_stdlib_def_is_enumerated() {
 /// walk. A name may carry a subdirectory (`sub/x.h`), which is how the
 /// recursive-walk controls plant a header one level down.
 fn planted_include_dir(label: &str, files: &[(&str, &str)]) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("census-{label}-{}", std::process::id()));
-    fs::remove_dir_all(&dir).ok();
+    let sequence = PLANTED_INCLUDE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let dir =
+        std::env::temp_dir().join(format!("census-{label}-{}-{sequence}", std::process::id()));
     fs::create_dir_all(&dir).expect("temp include dir");
     for (name, body) in files {
         let path = dir.join(name);
@@ -6484,6 +6655,69 @@ fn relu_identities_are_registered_against_their_exact_authority_atom() {
         assert!(
             registration_problem(*registration, &spec).is_none(),
             "`{callable}` must name the existing [05-OP-43] normative atom"
+        );
+    }
+}
+
+#[test]
+fn metadata_plan_callables_require_exact_op33_authority() {
+    let root = repo_root();
+    let files = preprocessed_headers(&root.join(INCLUDE_DIR_REL), HEADER_ROOTS);
+    let mut typedefs = BTreeMap::new();
+    for text in files.values() {
+        typedefs.append(&mut collect_typedefs(text));
+    }
+    let rows: Vec<_> = files
+        .iter()
+        .flat_map(|(name, text)| header_rows(name, text, &typedefs))
+        .filter(|row| row.kind == "header-export" && row.id.contains("chelis_metadata_plan_"))
+        .collect();
+    assert_eq!(
+        rows.len(),
+        11,
+        "complete checked metadata plan API: {rows:?}"
+    );
+    let spec = fs::read_to_string(root.join(CONTROLLING_SPEC_REL)).unwrap();
+    let registry = fs::read_to_string(root.join("spec/registry/c_tensor_runtime.md")).unwrap();
+    let normative: BTreeSet<_> = registry
+        .lines()
+        .filter(|line| line.contains("chelis_metadata_plan_"))
+        .map(|line| {
+            let signature = line.split('`').nth(1).expect("exact normative C signature");
+            format!(
+                "chelis_runtime.h: {}",
+                canonical_c_tokens(&format!("{signature};"))
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.id.clone())
+            .collect::<BTreeSet<_>>(),
+        normative
+    );
+    for row in rows {
+        let surface = authority_surface(&row);
+        assert_eq!(
+            capacity_census_authority::classify_final_authority(
+                &surface,
+                final_authority_registries(),
+                &spec,
+            ),
+            Ok(capacity_census_authority::FinalAuthority::NumericOperation { atom: "[05-OP-33]" }),
+        );
+        let mut successor = surface;
+        successor.id = successor
+            .id
+            .replace("chelis_metadata_plan_", "chelis_unchecked_metadata_");
+        assert!(
+            capacity_census_authority::classify_final_authority(
+                &successor,
+                final_authority_registries(),
+                &spec,
+            )
+            .is_err(),
+            "a renamed successor must acquire independent exact authority"
         );
     }
 }

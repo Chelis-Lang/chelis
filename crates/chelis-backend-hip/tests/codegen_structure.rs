@@ -127,9 +127,11 @@ fn cpu_runtime_library_path() -> PathBuf {
 }
 
 fn copy_runtime_artifacts(dst: &Path) {
+    support::stage_device_runtime(dst);
     let include_dir = cpu_runtime_include_dir();
     for header in &[
         "chelis_runtime.h",
+        "chelis_runtime_views.h",
         "chelis_runtime_dtype.h",
         "chelis_blas.h",
         "chelis_simd.h",
@@ -159,33 +161,22 @@ fn hip_runtime_header() -> String {
 }
 
 #[test]
-fn hip_runtime_header_owns_its_rank_cap_and_dtype_sizing_dependencies() {
+fn hip_runtime_header_uses_only_the_checked_device_owner_and_official_sdk() {
     let header = hip_runtime_header();
-    assert!(header.contains("#include \"chelis_runtime_dtype.h\""));
-    assert!(header.contains("CHELIS_GPU_MAX_DIM"));
-    for removed in ["CHELIS_MAX_DIM", "chelis_runtime_dtype_size_checked"] {
+    assert!(header.contains("#include \"chelis_device_owner.h\""));
+    assert!(header.contains("#include <hipblas/hipblas.h>"));
+    for forbidden in [
+        "CHELIS_GPU_MAX_DIM",
+        "chelis_gpu_dtype_size",
+        "chelis_gpu_alloc",
+        "hipblasDatatype_t",
+        "__has_include",
+        "case CHELIS_DTYPE_F64:",
+        "case CHELIS_DTYPE_BOOL:",
+    ] {
         assert!(
-            !header.contains(removed),
-            "HIP runtime header still depends on removed host symbol `{removed}`"
-        );
-    }
-
-    // chelis#1360: this used to assert the header CONTAINED
-    // `case CHELIS_DTYPE_F64:` / `case CHELIS_DTYPE_BOOL:`, which pinned a
-    // second copy of the width table in place. The copy is how the defect
-    // happened - chelis#1308 narrowed bool to one byte here while the
-    // emitter went on dispatching four-byte kernels - so the assertion is
-    // inverted: the header must delegate to the runtime's one authority and
-    // must not restate the per-dtype widths at all.
-    assert!(
-        header.contains("return (size_t)chelis_dtype_size((chelis_dtype)dtype);"),
-        "chelis_gpu_dtype_size must delegate to the runtime width authority"
-    );
-    for restated in ["case CHELIS_DTYPE_F64:", "case CHELIS_DTYPE_BOOL:"] {
-        assert!(
-            !header.contains(restated),
-            "HIP runtime header restates the dtype width table (`{restated}`); \
-             delegate to chelis_dtype_size instead (chelis#1360)"
+            !header.contains(forbidden),
+            "retained legacy metadata/SDK path {forbidden}"
         );
     }
 }
@@ -424,20 +415,20 @@ fn dedicated_relu_and_adjoint_emit_strict_bit_preserving_kernels() {
     );
     assert!(!source.contains("fmax"), "{source}");
     assert!(
-        source.contains("int64_t chelis_output_shape_0[1] = { 4 };")
-            && source.contains("int64_t chelis_output_shape_1[1] = { 4 };")
+        source.contains("chelis_device_metadata chelis_output_shape_0[1] = { 4 };")
+            && source.contains("chelis_device_metadata chelis_output_shape_1[1] = { 4 };")
             && source
                 .contains("outputs[0] = chelis_alloc(1, chelis_output_shape_0, CHELIS_DTYPE_F32);")
             && source
                 .contains("outputs[1] = chelis_alloc(1, chelis_output_shape_1, CHELIS_DTYPE_F32);"),
-        "host output shapes must match chelis_alloc's int64_t ABI: {source}"
+        "host output shapes must use the generated int64 metadata alias: {source}"
     );
     assert!(
         !source.contains("(int64_t[])"),
         "host shape ownership must stay in the classified input/output preamble: {source}"
     );
     assert!(
-        source.contains("chelis_gpu_alloc(1, (int[]){ 4 }, CHELIS_DTYPE_F32)"),
+        source.contains("chelis_device_tensor_alloc(slot_plan0)"),
         "device shape arrays must retain the GPU runtime's int ABI: {source}"
     );
 
@@ -641,7 +632,7 @@ fn s4_max_reduce_emits_kernel() {
 // ===========================================================================
 
 #[test]
-fn s5_reshape_no_kernel_launch() {
+fn s5_reshape_materializes_logical_order() {
     let mut dag = Dag::new();
     let x = dag.add_node(
         RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
@@ -659,10 +650,11 @@ fn s5_reshape_no_kernel_launch() {
     );
     dag.add_root(r);
     let result = codegen_hip(&dag, "test_reshape").unwrap();
-    // Reshape itself must not add a kernel launch
+    assert!(result.c_source.contains("kernel_reshape_CHELIS_DTYPE_F32"));
     assert!(
-        result.c_source.contains("chelis_gpu_alloc_view"),
-        "Reshape must use alloc_view (metadata-only), not a kernel"
+        result
+            .c_source
+            .contains("chelis_device_tensor_alloc(slot_plan1)")
     );
 }
 
@@ -684,7 +676,7 @@ fn s5_permute_no_kernel_launch() {
     dag.add_root(p);
     let result = codegen_hip(&dag, "test_permute").unwrap();
     assert!(
-        result.c_source.contains("chelis_gpu_alloc_view"),
+        result.c_source.contains("chelis_device_tensor_borrow"),
         "Permute must use alloc_view (metadata-only)"
     );
 }
@@ -710,7 +702,7 @@ fn s5_expand_no_kernel_launch() {
     dag.add_root(e);
     let result = codegen_hip(&dag, "test_expand").unwrap();
     assert!(
-        result.c_source.contains("chelis_gpu_alloc_view"),
+        result.c_source.contains("chelis_device_tensor_borrow"),
         "Expand must use alloc_view (metadata-only)"
     );
 }
@@ -754,12 +746,12 @@ fn s5_input_axis_expand_reads_witness_metadata() {
 
     let result = codegen_hip(&dag, "test_input_axis_expand").unwrap();
     assert!(
-        result.c_source.contains("inputs[1]->shape[0]"),
+        result.c_source.contains("input_view_1->shape[0]"),
         "InputAxis extent must be sourced from the witness metadata: {}",
         result.c_source
     );
     assert!(
-        result.c_source.contains("chelis_gpu_alloc_view"),
+        result.c_source.contains("chelis_device_tensor_borrow"),
         "InputAxis expand remains a metadata-only view"
     );
 }
@@ -781,13 +773,13 @@ fn s5_realize_materializes_with_kernel_not_view() {
 
     let result = codegen_hip(&dag, "test_realize").unwrap();
     assert!(
-        result.c_source.contains("kernel_cast"),
+        result.c_source.contains("kernel_realize_"),
         "Realize must materialize through a copy-style kernel launch"
     );
     assert!(
-        !result.c_source.contains(
-            "chelis_gpu_alloc_view(1, (int[]){ 3 }, CHELIS_DTYPE_F32, d_t1->data, d_t1->storage_size)"
-        ),
+        !result
+            .c_source
+            .contains("chelis_device_tensor_borrow(plan_t2, d_t1->data"),
         "Realize must not lower to a metadata-only view"
     );
 }
@@ -984,16 +976,29 @@ fn s10_device_helpers_present() {
 }
 
 // ===========================================================================
-// S11: Kernel JIT uses static caching
+// S11: Kernel modules belong to the invocation's device context
 // ===========================================================================
 
 #[test]
-fn s11_static_module_caching() {
+fn s11_modules_are_created_and_released_in_the_invocation_context() {
     let dag = dag_add_consts();
     let result = codegen_hip(&dag, "test_cache").unwrap();
     assert!(
-        result.c_source.contains("static hipModule_t"),
-        "Kernel modules must be cached with 'static hipModule_t'"
+        !result.c_source.contains("static hipModule_t"),
+        "An unqualified static module cannot be reused across device contexts"
+    );
+    assert_eq!(
+        result.c_source.matches(" = chelis_compile_kernel(").count(),
+        result.c_source.matches("hipModuleUnload(").count(),
+        "Every invocation-owned module must be released"
+    );
+    let source = &result.c_source;
+    assert!(
+        source
+            .find("CHELIS_HIP_CHECK(hipDeviceSynchronize());")
+            .unwrap()
+            < source.find("hipModuleUnload(").unwrap(),
+        "empty escapes also need kernel completion before module/slot teardown"
     );
 }
 
@@ -1040,11 +1045,15 @@ fn s12_transfers_present() {
     let dag = dag_with_load();
     let result = codegen_hip(&dag, "test_transfer").unwrap();
     assert!(
-        result.c_source.contains("chelis_host_to_device"),
+        result
+            .c_source
+            .contains("chelis_device_tensor_copy_from_host"),
         "Input transfer (host→device) must be present"
     );
     assert!(
-        result.c_source.contains("chelis_device_to_host"),
+        result
+            .c_source
+            .contains("chelis_device_tensor_copy_to_host"),
         "Output transfer (device→host) must be present"
     );
 }
@@ -1054,11 +1063,15 @@ fn s12_transfer_order() {
     let dag = dag_with_load();
     let result = codegen_hip(&dag, "test_transfer_order").unwrap();
     let src = &result.c_source;
-    let h2d_pos = src.find("chelis_host_to_device").expect("h2d present");
-    let d2h_pos = src.find("chelis_device_to_host").expect("d2h present");
+    let h2d_pos = src
+        .find("chelis_device_tensor_copy_from_host")
+        .expect("h2d present");
+    let d2h_pos = src
+        .find("chelis_device_tensor_copy_to_host")
+        .expect("d2h present");
     assert!(
         h2d_pos < d2h_pos,
-        "host_to_device must come before device_to_host"
+        "Input transfer must precede output transfer"
     );
 }
 
@@ -1072,7 +1085,10 @@ fn s12_duplicate_load_transfers_once() {
 
     let result = codegen_hip(&dag, "test_dup_transfer_once").unwrap();
     assert_eq!(
-        result.c_source.matches("chelis_host_to_device").count(),
+        result
+            .c_source
+            .matches("chelis_device_tensor_copy_from_host")
+            .count(),
         1,
         "Repeated loads of the same input should share one host→device transfer"
     );
@@ -1151,13 +1167,17 @@ fn s12_symbolic_repeated_occurrences_check_every_non_canonical_input() {
     dag.add_root(xyz);
 
     let result = codegen_hip(&dag, "test_symbolic_repeats").unwrap();
-    assert!(result.c_source.contains("int batch = inputs[0]->shape[0];"));
     assert!(
-        result.c_source.contains("inputs[1]->shape[0] != batch"),
+        result
+            .c_source
+            .contains("chelis_device_metadata batch = input_view_0->shape[0];")
+    );
+    assert!(
+        result.c_source.contains("input_view_1->shape[0] != batch"),
         "second occurrence must be checked against the canonical binding"
     );
     assert!(
-        result.c_source.contains("inputs[2]->shape[0] != batch"),
+        result.c_source.contains("input_view_2->shape[0] != batch"),
         "third occurrence must also be checked against the canonical binding"
     );
 }
@@ -1191,18 +1211,19 @@ fn s12_slot_backed_kernels_iterate_over_logical_size_after_dce() {
     let src = &result.c_source;
 
     assert!(
-        src.contains("int fill_size = d_t"),
+        src.contains("chelis_device_metadata fill_size = d_t"),
         "Slot-backed fill kernels must iterate over logical size"
     );
     assert!(
         !src.lines().any(|line| {
             let trimmed = line.trim_start();
-            trimmed.starts_with("int fill_size =") && trimmed.contains("->storage_size;")
+            trimmed.starts_with("chelis_device_metadata fill_size =")
+                && trimmed.contains("->byte_capacity")
         }),
         "Fill kernels must not iterate over slot capacity"
     );
     assert!(
-        src.contains("_size = d_t") && src.contains("->size;"),
+        src.contains("_size = d_t") && src.contains("->count;"),
         "Elementwise outputs must use logical size even when backed by a reused slot"
     );
 }
@@ -1231,19 +1252,27 @@ fn s13_cleanup_frees_intermediates() {
     let result = codegen_hip(&dag, "test_cleanup").unwrap();
     // a (t0) and b (t1) are intermediates, so both their wrappers and slot owners are freed.
     assert!(
-        result.c_source.contains("chelis_gpu_free_view(d_t0)"),
+        result
+            .c_source
+            .contains("chelis_device_tensor_release(o_t0)"),
         "Intermediate wrapper t0 must be freed"
     );
     assert!(
-        result.c_source.contains("chelis_gpu_free_view(d_t1)"),
+        result
+            .c_source
+            .contains("chelis_device_tensor_release(o_t1)"),
         "Intermediate wrapper t1 must be freed"
     );
     assert!(
-        result.c_source.contains("chelis_gpu_free(chelis_slot0)"),
+        result
+            .c_source
+            .contains("chelis_device_tensor_release(chelis_slot0)"),
         "Intermediate slot 0 must be freed"
     );
     assert!(
-        result.c_source.contains("chelis_gpu_free(chelis_slot1)"),
+        result
+            .c_source
+            .contains("chelis_device_tensor_release(chelis_slot1)"),
         "Intermediate slot 1 must be freed"
     );
 }
@@ -1254,13 +1283,21 @@ fn s13_outputs_not_freed() {
     let result = codegen_hip(&dag, "test_no_free_output").unwrap();
     // The output wrapper is freed after the host copy, and the backing slot is freed once at the end.
     assert!(
-        result.c_source.contains("chelis_gpu_free_view(d_t2)"),
+        result
+            .c_source
+            .contains("chelis_device_tensor_release(o_t2)"),
         "Output wrapper must be freed after the output transfer"
     );
     assert!(
-        result.c_source.contains("chelis_gpu_free(chelis_slot0)")
-            || result.c_source.contains("chelis_gpu_free(chelis_slot1)")
-            || result.c_source.contains("chelis_gpu_free(chelis_slot2)"),
+        result
+            .c_source
+            .contains("chelis_device_tensor_release(chelis_slot0)")
+            || result
+                .c_source
+                .contains("chelis_device_tensor_release(chelis_slot1)")
+            || result
+                .c_source
+                .contains("chelis_device_tensor_release(chelis_slot2)"),
         "At least one backing slot must be freed during cleanup"
     );
 }
@@ -1270,11 +1307,15 @@ fn s13_input_copies_are_freed() {
     let dag = dag_with_load();
     let result = codegen_hip(&dag, "test_free_input_copy").unwrap();
     assert!(
-        result.c_source.contains("chelis_gpu_free_view(d_t0)"),
+        result
+            .c_source
+            .contains("chelis_device_tensor_release(o_t0)"),
         "The per-node load wrapper must be freed"
     );
     assert!(
-        result.c_source.contains("chelis_gpu_free(chelis_slot0)"),
+        result
+            .c_source
+            .contains("chelis_device_tensor_release(chelis_slot0)"),
         "The unique input device slot must be freed"
     );
 }
@@ -1305,11 +1346,15 @@ fn s13_views_use_view_free() {
     let result = codegen_hip(&dag, "test_view_free").unwrap();
     // Permute (t1) is a view — must use chelis_gpu_free_view, NOT chelis_gpu_free
     assert!(
-        result.c_source.contains("chelis_gpu_free_view(d_t1)"),
+        result
+            .c_source
+            .contains("chelis_device_tensor_release(o_t1)"),
         "View (permute) must use chelis_gpu_free_view, not chelis_gpu_free"
     );
     assert!(
-        !result.c_source.contains("chelis_gpu_free(d_t1)"),
+        !result
+            .c_source
+            .contains("chelis_device_tensor_release(d_t1)"),
         "View (permute) must NOT use chelis_gpu_free (would double-free device memory)"
     );
 }
@@ -1350,6 +1395,7 @@ int main(void) {
         .arg("-O2")
         .arg(tmp.path().join("main.cpp"))
         .arg(tmp.path().join("model.cpp"))
+        .arg(tmp.path().join("chelis_device_owner.cpp"))
         .arg(format!("-L{}", tmp.path().display()))
         .arg("-lchelis_runtime")
         .arg("-lpthread")
@@ -1571,8 +1617,7 @@ fn sparse_gather_i64_emits_typed_hip_kernel_and_runtime_allocation() {
     assert!(
         result
             .c_source
-            .contains("chelis_gpu_dtype_size(dst->dtype)")
-            || hip_runtime_header().contains("chelis_gpu_dtype_size")
+            .contains("chelis_device_tensor_copy_from_host(")
     );
     assert!(
         !result
@@ -1622,9 +1667,19 @@ fn sparse_scatter_add_i32_emits_atomic_add_kernel() {
     assert!(
         result
             .c_source
-            .contains("atomicAdd(&out[dst], updates[i]);")
+            .contains("atomicAdd(&out[dst], updates[chelis_logical_offset(i, updates_sh, updates_s, updates_ndim)]);")
     );
-    assert!(result.c_source.contains("hipMemcpyDeviceToDevice"));
+    assert!(result.c_source.contains("kernel_materialize_"));
+    assert!(!result.c_source.contains("hipMemcpyDeviceToDevice"));
+    assert!(
+        result
+            .c_source
+            .contains("chelis_metadata_plan_strides(sparse_geometry")
+    );
+    assert!(
+        !result.c_source.contains("_after = ("),
+        "sparse suffixes must project checked geometry"
+    );
 }
 
 #[test]
@@ -1655,8 +1710,8 @@ fn s15_batched_matmul_emits_hipblas_strided_batched_helper_and_link_flag() {
         "eligible rank-4 batched matmul should lower to the hipBLAS strided-batched helper"
     );
     assert!(
-        result.c_source.contains(", 20LL, 30LL, 24LL);"),
-        "strided-batched helper call should pass concrete row-major per-batch strides"
+        result.c_source.contains("->strides[1]"),
+        "strided-batched helper must project canonical per-matrix strides"
     );
     assert!(
         !result
@@ -1725,8 +1780,8 @@ fn s15_batched_matmul_symbolic_batch_emits_strided_batched_helper() {
         "symbolic batch with concrete matrix dimensions should use strided-batched hipBLAS"
     );
     assert!(
-        result.c_source.contains(", batch, 20LL, 30LL, 24LL);"),
-        "runtime symbolic batch count should be passed with concrete matrix strides"
+        result.c_source.contains("_batch_count = d_t") && result.c_source.contains("->strides[0]"),
+        "runtime batch count and matrix strides must project admitted metadata"
     );
 }
 
@@ -1793,7 +1848,7 @@ fn s15_batched_matmul_symbolic_matrix_dim_uses_helper_loop_fallback() {
 }
 
 #[test]
-fn s15_batched_matmul_noncontiguous_batch_layout_uses_helper_loop_fallback() {
+fn s15_batched_matmul_materializes_noncontiguous_batch_layout_before_blas() {
     let mut dag = Dag::new();
     let base_a = dag.add_node(
         RiscOp::synth_const(mat_f32(4, 5).precision, 1.0),
@@ -1832,16 +1887,14 @@ fn s15_batched_matmul_noncontiguous_batch_layout_uses_helper_loop_fallback() {
     let result = codegen_hip(&dag, "test_hipblas_noncontiguous_batch_loop_fallback").unwrap();
 
     assert!(
-        result
-            .c_source
-            .contains("chelis_hipblas_sgemm_batched_row_major"),
-        "non-contiguous leading batch layout should preserve the helper-loop fallback"
+        result.c_source.contains("kernel_realize_"),
+        "non-contiguous leading batch layout must be materialized into planned storage"
     );
     assert!(
-        !result
+        result
             .c_source
             .contains("chelis_hipblas_sgemm_strided_batched_row_major"),
-        "non-contiguous leading batch layout must not call strided-batched hipBLAS"
+        "the materialized canonical batch layout may call strided-batched hipBLAS"
     );
 }
 
@@ -1915,13 +1968,13 @@ fn s15_device_entrypoint_is_emitted_for_direct_gpu_execution() {
     assert!(
         result
             .c_source
-            .contains("extern \"C\" void test_device_entry_device(chelis_gpu_tensor **inputs, int n_in, chelis_gpu_tensor **outputs, int n_out)"),
+            .contains("extern \"C\" void test_device_entry_device(const chelis_device_tensor_owner *const *inputs, chelis_device_rank n_in, chelis_device_tensor_owner **outputs, chelis_device_rank n_out)"),
         "HIP codegen must emit the device-native ABI entrypoint for Python direct execution"
     );
     assert!(
         result
             .c_source
-            .contains("outputs[0] = chelis_gpu_clone(d_t"),
+            .contains("outputs[0] = chelis_device_tensor_clone(o_t"),
         "device-native outputs must be surfaced as owned GPU tensors"
     );
 }
@@ -2037,7 +2090,7 @@ fn sf3_no_intermediate_alloc_in_fused_chain() {
 
     // Without fusion: 2 const allocs + add alloc + neg alloc = 4 allocs.
     // With fusion: 2 const allocs + 1 fused output alloc = 3 allocs.
-    let alloc_count = host_src.matches("chelis_gpu_alloc(").count();
+    let alloc_count = host_src.matches("chelis_device_tensor_alloc(").count();
     assert_eq!(
         alloc_count, 3,
         "Fused chain should have 3 GPU allocs (2 const + 1 fused output), got {alloc_count}"

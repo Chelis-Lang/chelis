@@ -76,13 +76,14 @@ class LoadCensusRows(unittest.TestCase):
     def test_binding_final_shape_keeps_execution_evidence_out_of_baseline(self) -> None:
         transport = {"kind": "binding-pyfunction", "id": "chelis_python::eval_json(typed)",
                      "flags": ["float-carrier", "numeric-param", "numeric-return"],
-                     "authority": "TaggedTransport", "contract": "compiler-json/chelis_python::eval_json",
-                     "graph_identity": "a" * 64}
+                     "authority": "TaggedTransport",
+                     "contract": "compiler-json/chelis_python::eval_json"}
         nonnumeric = {"kind": "binding-pymethod", "id": "chelis_python::CompiledModel::path(typed)",
-                      "flags": [], "authority": "nonnumeric", "graph_identity": "b" * 64}
+                      "flags": [], "authority": "nonnumeric"}
         valid = {"version": 2, "rows": [nonnumeric, transport]}
         capacity_census_liveness.validate_binding_baseline(valid)
-        for key in ("citation", "source_sha256", "evidence", "successor_overrides"):
+        for key in ("citation", "graph_identity", "source_sha256", "evidence",
+                    "successor_overrides"):
             with self.subTest(key=key), self.assertRaises(ValueError):
                 capacity_census_liveness.validate_binding_baseline({**valid, key: "supplied"})
             with self.assertRaises(ValueError):
@@ -101,9 +102,9 @@ class LoadCensusRows(unittest.TestCase):
     def test_binding_shape_rejects_missing_contract_erased_capacity_and_duplicates(self) -> None:
         row = {"kind": "binding-pyfunction", "id": "chelis_python::check_json(typed)",
                "flags": ["float-carrier", "numeric-return"], "authority": "TaggedTransport",
-               "contract": "compiler-json/chelis_python::check_json", "graph_identity": "a" * 64}
+               "contract": "compiler-json/chelis_python::check_json"}
         for change in ({"flags": []}, {"contract": "other"}, {"authority": "permanent-disposition"},
-                       {"graph_identity": "stale"}):
+                       {"graph_identity": "a" * 64}):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 capacity_census_liveness.validate_binding_baseline({"version": 2, "rows": [{**row, **change}]})
         with self.assertRaises(ValueError):

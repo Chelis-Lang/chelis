@@ -170,6 +170,34 @@ undeclared identifier '__AMDGCN_WAVEFRONT_SIZE'
    time and runtime. Mixed stacks, such as compiling against one ROCm install's headers
    while linking another install's hipBLAS, are unsupported.
 
+   The descriptor/owner cutover selects hipBLAS major 3 or newer, with the
+   official `hipblas/hipblas.h` and its matching hipBLAS library. The version
+   header exposes `hipblasVersionMajor`; generated helpers use `hipDataType`
+   (`HIP_R_16F`, `HIP_R_16BF`) and `hipblasComputeType_t`
+   (`HIPBLAS_COMPUTE_32F`) for the corresponding GEMM calls. The official
+   [version-header template](https://raw.githubusercontent.com/ROCm/hipBLAS/develop/library/include/hipblas-version.h.in)
+   defines that version macro. A later major must retain the required signatures
+   or fail compilation; a major number alone supplies no execution evidence. Missing SDK headers are a prerequisite failure; handwritten
+   declarations inside Chelis are not a supported substitute. The shared descriptor
+   adoption under #893/#1345 removes the existing support header's legacy declaration
+   fallback and compiles helpers against the selected official API.
+
+   Do not infer that API from an exported symbol name. AMD documents that hipBLAS
+   3.0 replaced `hipblasDatatype_t` with `hipDataType`, using
+   `hipblasComputeType_t` for GEMM's computation type
+   ([hipBLAS deprecations](https://rocm.docs.amd.com/projects/hipBLAS/en/latest/reference/deprecation.html#removed-in-hipblas-3-0)).
+   A missing `hipblasGemmEx_v2` symbol does not prove that the unsuffixed symbol
+   accepts the older signature. This SDK choice does not change Chelis's dtype
+   or accumulator semantics.
+
+   The wheel paths below are historical environment evidence, not an exact-head
+   header/library compatibility receipt. Before accepting the descriptor adoption,
+   record the installed header path and version, the preprocessed declarations
+   used by the actual generated translation unit, the linked library path/version,
+   and executed f32/f64/f16/bf16 matmul results. A fixture-only header census cannot
+   replace this hardware evidence. No matching HIP runner or current installed
+   header/library receipt has yet been established for that adoption.
+
    This workstation's wheel library package is `_rocm_sdk_libraries_gfx1151`; its
    rocBLAS Tensile data lives under:
 

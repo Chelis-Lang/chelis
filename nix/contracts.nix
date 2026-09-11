@@ -19,6 +19,7 @@
 
   publicRuntimeHeaders = [
     "chelis_runtime.h"
+    "chelis_runtime_views.h"
     "chelis_runtime_dtype.h"
     "chelis_blas.h"
     "chelis_simd.h"
@@ -31,6 +32,7 @@
         "bin/chelis"
         "lib/libchelis_runtime.a"
         "include/chelis_runtime.h"
+        "include/chelis_runtime_views.h"
         "include/chelis_runtime_dtype.h"
         "include/chelis_blas.h"
         "include/chelis_simd.h"
@@ -45,6 +47,7 @@
         "bin/chelis"
         "lib/libchelis_runtime.a"
         "include/chelis_runtime.h"
+        "include/chelis_runtime_views.h"
         "include/chelis_runtime_dtype.h"
         "include/chelis_blas.h"
         "include/chelis_simd.h"
@@ -56,6 +59,7 @@
       required = [
         "lib/libchelis_runtime.a"
         "include/chelis_runtime.h"
+        "include/chelis_runtime_views.h"
         "include/chelis_runtime_dtype.h"
         "include/chelis_blas.h"
         "include/chelis_simd.h"
@@ -71,6 +75,7 @@
         "lib"
         "lib/libchelis_runtime.a"
         "include/chelis_runtime.h"
+        "include/chelis_runtime_views.h"
         "include/chelis_runtime_dtype.h"
         "include/chelis_blas.h"
         "include/chelis_simd.h"

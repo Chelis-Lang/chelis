@@ -172,8 +172,7 @@ class LegManifestTests(unittest.TestCase):
                 "cargo nextest run -p chelis-cli --test capacity_census_tripwire",
                 f"{PYTHON} scripts/runtime_representation_oracle.py --phase 0 --regenerate",
                 "cargo nextest run -p chelis-runtime --test runtime_dtype_generated_header",
-                "cargo nextest run -p chelis-compiler-api --test capacity_census_wire "
-                "-p chelis-python --test capacity_census_bindings",
+                "cargo nextest run -p chelis-compiler-api --test capacity_census_wire",
             ],
         )
         self.assertIn("(no writer)", output)
@@ -300,7 +299,11 @@ class CensusEnvTests(unittest.TestCase):
         # An ambient leftover from a manual census write must not turn the
         # check-mode tripwire into a writer that then compares against what
         # it just wrote.
-        ambient = {"PATH": "/usr/bin", regen_all.CENSUS_WRITE_ENV: "1", "KEEP": "yes"}
+        ambient = {
+            "PATH": "/usr/bin",
+            regen_all.CENSUS_WRITE_ENV: "1",
+            "KEEP": "yes",
+        }
         with tempfile.TemporaryDirectory() as td:
             root = _fake_repo(Path(td))
             checker = _Recorder(corpus=root / regen_all.OPAQUE_CORPUS_DIR)
@@ -312,23 +315,34 @@ class CensusEnvTests(unittest.TestCase):
             self.assertEqual(env.get("KEEP"), "yes")
 
     def test_write_mode_scrubs_the_seam_from_every_leg_but_its_owner(self):
-        ambient = {"PATH": "/usr/bin", regen_all.CENSUS_WRITE_ENV: "1"}
+        ambient = {
+            "PATH": "/usr/bin",
+            regen_all.CENSUS_WRITE_ENV: "1",
+        }
         with tempfile.TemporaryDirectory() as td:
             root = _fake_repo(Path(td))
             writer = _Recorder()
             code, _out = _run(["--full"], repo_root=root, recorder=writer, environ=ambient)
         self.assertEqual(code, 0)
-        carriers = [
+        census_carriers = [
             argv for argv, env in writer.calls if regen_all.CENSUS_WRITE_ENV in env
         ]
-        self.assertEqual(len(carriers), 1)
-        self.assertIn("capacity_census_tripwire", carriers[0])
-        self.assertNotIn("--check", carriers[0])
+        self.assertEqual(len(census_carriers), 1)
+        self.assertIn("capacity_census_tripwire", census_carriers[0])
 
     def test_scrub_environment_is_keyed_on_every_leg_declaration(self):
         keys = regen_all.leg_env_keys(regen_all.regen_legs(PYTHON))
-        self.assertEqual(keys, frozenset({regen_all.CENSUS_WRITE_ENV}))
-        scrubbed = regen_all.scrub_environment({"A": "1", regen_all.CENSUS_WRITE_ENV: "1"}, keys)
+        self.assertEqual(
+            keys,
+            frozenset({regen_all.CENSUS_WRITE_ENV}),
+        )
+        scrubbed = regen_all.scrub_environment(
+            {
+                "A": "1",
+                regen_all.CENSUS_WRITE_ENV: "1",
+            },
+            keys,
+        )
         self.assertEqual(scrubbed, {"A": "1"})
 
     def test_write_env_is_printed_on_the_leg_line(self):
@@ -340,6 +354,7 @@ class CensusEnvTests(unittest.TestCase):
             "capacity-census (cargo): CHELIS_CAPACITY_CENSUS_WRITE=1 cargo nextest run",
             output,
         )
+        self.assertNotIn("capacity-census-bindings", output)
 
 
 class ManualActionTests(unittest.TestCase):
@@ -402,15 +417,17 @@ class ManualActionTests(unittest.TestCase):
         self.assertIsNotNone(message)
         self.assertIn("FREEZE_SHA256", message)
 
-    def test_check_only_legs_report_the_manual_action_in_write_mode(self):
+    def test_wire_check_only_leg_reports_the_manual_action_in_write_mode(self):
         with tempfile.TemporaryDirectory() as td:
             root = _fake_repo(Path(td))
             recorder = _Recorder(returncodes={"capacity_census_wire": 101})
             code, output = _run(["--full", "--tier", "2"], repo_root=root, recorder=recorder)
         self.assertEqual(code, 2)
-        self.assertIn(regen_all.CENSUS_SIBLINGS_MANUAL, output)
+        self.assertIn(regen_all.CENSUS_WIRE_MANUAL, output)
         self.assertTrue(
-            output.rstrip().endswith("REGEN ALL: MANUAL ACTION REQUIRED (census-siblings)"),
+            output.rstrip().endswith(
+                "REGEN ALL: MANUAL ACTION REQUIRED (capacity-census-wire)"
+            ),
             output,
         )
 
@@ -448,7 +465,8 @@ class LaunchFailureTests(unittest.TestCase):
         # cargo legs are stale for the launch reason.
         self.assertTrue(
             output.rstrip().endswith(
-                "REGEN ALL: STALE (capacity-census, dtype-c-header, census-siblings)"
+                "REGEN ALL: STALE (capacity-census, dtype-c-header, "
+                "capacity-census-wire)"
             ),
             output,
         )
@@ -575,8 +593,8 @@ class NeverWritesFrozenArtifactsTests(unittest.TestCase):
         "runtime_extent_oracle_baseline",
         "copy_drop_fixture_fitness_baseline",
         "test_timing_baseline",
-        "capacity_census_wire.json",
         "capacity_census_bindings.json",
+        "capacity_census_wire.json",
         "chelis_runtime_dtype.h",
         "tree-sitter generate",
     )
@@ -597,7 +615,9 @@ class NeverWritesFrozenArtifactsTests(unittest.TestCase):
             self.assertNotIn("--regenerate", leg.check_argv or ())
         # The artifacts with no writer are check-only legs, never write legs.
         no_writer = {leg.name for leg in legs if leg.write_argv is None}
-        self.assertEqual(no_writer, {"dtype-c-header", "census-siblings", "tree-sitter"})
+        self.assertEqual(
+            no_writer, {"dtype-c-header", "capacity-census-wire", "tree-sitter"}
+        )
 
     def test_docstring_names_every_hand_maintained_artifact(self):
         doc = regen_all.__doc__ or ""
@@ -609,8 +629,8 @@ class NeverWritesFrozenArtifactsTests(unittest.TestCase):
             "runtime_extent_oracle_baseline.json",
             "copy_drop_fixture_fitness_baseline.json",
             "test_timing_baseline.json",
-            "capacity_census_wire.json",
             "capacity_census_bindings.json",
+            "capacity_census_wire.json",
             "chelis_runtime_dtype.h",
             "grammars/",
         ):

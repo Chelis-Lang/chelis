@@ -446,21 +446,19 @@ UNREPRESENTABLE_DOMAIN_ORACLE: list[str] = [
     "scripts/unrepresentable_domain_oracle.py",
 ]
 
-# chelis#893 Phase 1, retaining the Phase 0 inventory and mutations. It runs release-profile
-# Rust reproducers and re-scans the seam inventory once per controlled
-# mutation, so on a hosted runner the oracle costs about eleven minutes: the
-# release builds of chelis-ir, chelis-backend-c, chelis-backend-hip, and
-# chelis-runtime never come from the shared cache (the workspace-cache writer
-# builds only the test profile), and the mutation re-scans run serially. It is
-# therefore its own gate stage, run by its own CI job, so the workspace test
-# shards keep their partition wall and the oracle keeps its own failure
-# boundary, like the other phase oracles. The stage still needs
-# `cargo nextest`, and `--local` keeps the obligation on developer machines.
+# chelis#893 Phase 2, retaining the complete Phase 1 host/C receipt and Phase 0
+# inventory/mutations before the generated ABI, device-owner, Python/DLPack,
+# and backend-header census legs. The inherited release builds and serial
+# mutation scans dominate the hosted cost, so the oracle remains its own gate
+# stage and CI job. This preserves the workspace shards' partition wall and
+# gives the cross-language receipt one failure boundary. The stage needs
+# `cargo nextest`, clang, and the managed Python; `--local` keeps the same
+# obligation on developer machines.
 RUNTIME_REPRESENTATION_ORACLE: list[str] = [
     MANAGED_PYTHON,
     "scripts/runtime_representation_oracle.py",
     "--phase",
-    "1",
+    "2",
 ]
 
 # chelis#1205's authoritative front-end complexity and parity oracle. It

@@ -54,6 +54,10 @@ const RUNTIME_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../chelis-runtime/include/chelis_runtime.h"
 ));
+const RUNTIME_VIEWS_H: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-runtime/include/chelis_runtime_views.h"
+));
 const RUNTIME_DTYPE_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../chelis-runtime/include/chelis_runtime_dtype.h"
@@ -65,6 +69,18 @@ const BLAS_H: &str = include_str!(concat!(
 const HIP_RUNTIME_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../chelis-backend-hip/runtime/chelis_hip_runtime.h"
+));
+const DEVICE_OWNER_CPP: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-backend-hip/runtime/chelis_device_owner.cpp"
+));
+const DEVICE_OWNER_H: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-backend-hip/runtime/chelis_device_owner.h"
+));
+const DEVICE_DESCRIPTOR_H: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-backend-hip/runtime/chelis_device_descriptor.h"
 ));
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -3882,6 +3898,10 @@ fn compile_result_c(
                 contents: RUNTIME_H.to_string(),
             },
             GeneratedFile {
+                path: "chelis_runtime_views.h".to_string(),
+                contents: RUNTIME_VIEWS_H.to_string(),
+            },
+            GeneratedFile {
                 path: "chelis_runtime_dtype.h".to_string(),
                 contents: RUNTIME_DTYPE_H.to_string(),
             },
@@ -3919,12 +3939,28 @@ fn compile_result_hip(
                 contents: RUNTIME_H.to_string(),
             },
             GeneratedFile {
+                path: "chelis_runtime_views.h".to_string(),
+                contents: RUNTIME_VIEWS_H.to_string(),
+            },
+            GeneratedFile {
                 path: "chelis_runtime_dtype.h".to_string(),
                 contents: RUNTIME_DTYPE_H.to_string(),
             },
             GeneratedFile {
                 path: "chelis_hip_runtime.h".to_string(),
                 contents: HIP_RUNTIME_H.to_string(),
+            },
+            GeneratedFile {
+                path: "chelis_device_owner.cpp".to_string(),
+                contents: DEVICE_OWNER_CPP.to_string(),
+            },
+            GeneratedFile {
+                path: "chelis_device_owner.h".to_string(),
+                contents: DEVICE_OWNER_H.to_string(),
+            },
+            GeneratedFile {
+                path: "chelis_device_descriptor.h".to_string(),
+                contents: DEVICE_DESCRIPTOR_H.to_string(),
             },
         ],
         compile_flags: result.compile_flags.clone(),
@@ -3978,12 +4014,28 @@ fn compile_result_hip_host(
             contents: RUNTIME_H.to_string(),
         },
         GeneratedFile {
+            path: "chelis_runtime_views.h".to_string(),
+            contents: RUNTIME_VIEWS_H.to_string(),
+        },
+        GeneratedFile {
             path: "chelis_runtime_dtype.h".to_string(),
             contents: RUNTIME_DTYPE_H.to_string(),
         },
         GeneratedFile {
             path: "chelis_hip_runtime.h".to_string(),
             contents: HIP_RUNTIME_H.to_string(),
+        },
+        GeneratedFile {
+            path: "chelis_device_owner.cpp".to_string(),
+            contents: DEVICE_OWNER_CPP.to_string(),
+        },
+        GeneratedFile {
+            path: "chelis_device_owner.h".to_string(),
+            contents: DEVICE_OWNER_H.to_string(),
+        },
+        GeneratedFile {
+            path: "chelis_device_descriptor.h".to_string(),
+            contents: DEVICE_DESCRIPTOR_H.to_string(),
         },
     ]);
     // Device helpers run one at a time from the host wrapper, so the peak
@@ -5382,8 +5434,8 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
 
     // The shared gate follows the backend's exact dtype surface. f64 and
     // the integer family have typed kernel templates. bf16/f16 are narrower:
-    // storage and hipBLAS matmul are implemented, and [05-OP-43]'s dedicated
-    // ReLU identities have exact raw-bit kernels. Other compute nodes would
+    // storage, planned Realize copies and hipBLAS matmul are implemented, and
+    // [05-OP-43]'s dedicated ReLU identities have exact raw-bit kernels. Other compute nodes would
     // still reach an unsupported narrow-float path.
     let narrow_float_admissible: UnordSet<NodeId> = dag
         .nodes()
@@ -5398,6 +5450,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
             RiscOp::Load { .. }
             | RiscOp::Store { .. }
             | RiscOp::BlasMatmul { .. }
+            | RiscOp::Realize
             | RiscOp::Relu
             | RiscOp::ReluAdjoint => Some(node.id),
             _ => None,
@@ -5419,12 +5472,12 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                     {
                         chelis_types::unimplemented_rejection!(
                             729,
-                            "`f16` is implemented only for HIP tensor load/store, `BlasMatmul`, and the dedicated [05-OP-43] ReLU identities; this operation needs a typed bf16/f16 kernel (spec/04-type-system.md §5.7.1)"
+                            "`f16` is implemented only for HIP tensor load/store, planned `Realize`, `BlasMatmul`, and the dedicated [05-OP-43] ReLU identities; this operation needs a typed bf16/f16 kernel (spec/04-type-system.md §5.7.1)"
                         )
                     } else {
                         chelis_types::unimplemented_rejection!(
                             729,
-                            "`bf16` is implemented only for HIP tensor load/store, `BlasMatmul`, and the dedicated [05-OP-43] ReLU identities; this operation needs a typed bf16/f16 kernel (spec/04-type-system.md §5.7.1)"
+                            "`bf16` is implemented only for HIP tensor load/store, planned `Realize`, `BlasMatmul`, and the dedicated [05-OP-43] ReLU identities; this operation needs a typed bf16/f16 kernel (spec/04-type-system.md §5.7.1)"
                         )
                     };
                     return Err(unsupported_gate_error(
@@ -5445,7 +5498,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                         "`chelis build --target hip` DAG path does not support tensor precision \
                          `{}` (node {}). Supported: f32/f64/bool plus the integer family \
                          (int8/int16/int32/int64), with bf16/f16 admitted on matmul, \
-                         load/store, and dedicated ReLU nodes. See \
+                         load/store, planned Realize, and dedicated ReLU nodes. See \
                          spec/04-type-system.md §5.7.1.",
                         other.name(),
                         node.id.0,

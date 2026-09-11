@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "freeze_sha256": "641149d8c43aa488d964ed9a79188b03dc1bb35689cf2fd6537674e839d777be",
+  "freeze_sha256": "59db154426c58985dbd25703fca66d07ca46f4b6100d0e7ef54701fdbb297d33",
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -1845,62 +1845,6 @@
       "sample": "(half)0.0h"
     },
     {
-      "identity": "kind=descriptor-field|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor::data",
-      "sample": "float *data"
-    },
-    {
-      "identity": "kind=descriptor-field|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor::dtype",
-      "sample": "int dtype"
-    },
-    {
-      "identity": "kind=descriptor-field|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor::ndim",
-      "sample": "int ndim"
-    },
-    {
-      "identity": "kind=descriptor-field|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor::shape",
-      "sample": "int shape[CHELIS_GPU_MAX_DIM]"
-    },
-    {
-      "identity": "kind=descriptor-field|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor::size",
-      "sample": "int size"
-    },
-    {
-      "identity": "kind=descriptor-field|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor::storage_size",
-      "sample": "int storage_size"
-    },
-    {
-      "identity": "kind=descriptor-field|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor::strides",
-      "sample": "int strides[CHELIS_GPU_MAX_DIM]"
-    },
-    {
-      "identity": "kind=descriptor-field|path=crates/chelis-python/src/lib.rs|owner=ChelisGpuTensor::data",
-      "sample": "data: * mut f32"
-    },
-    {
-      "identity": "kind=descriptor-field|path=crates/chelis-python/src/lib.rs|owner=ChelisGpuTensor::dtype",
-      "sample": "dtype: i32"
-    },
-    {
-      "identity": "kind=descriptor-field|path=crates/chelis-python/src/lib.rs|owner=ChelisGpuTensor::ndim",
-      "sample": "ndim: i32"
-    },
-    {
-      "identity": "kind=descriptor-field|path=crates/chelis-python/src/lib.rs|owner=ChelisGpuTensor::shape",
-      "sample": "shape: [i32 ; CHELIS_MAX_DIM]"
-    },
-    {
-      "identity": "kind=descriptor-field|path=crates/chelis-python/src/lib.rs|owner=ChelisGpuTensor::size",
-      "sample": "size: i32"
-    },
-    {
-      "identity": "kind=descriptor-field|path=crates/chelis-python/src/lib.rs|owner=ChelisGpuTensor::storage_size",
-      "sample": "storage_size: i32"
-    },
-    {
-      "identity": "kind=descriptor-field|path=crates/chelis-python/src/lib.rs|owner=ChelisGpuTensor::strides",
-      "sample": "strides: [i32 ; CHELIS_MAX_DIM]"
-    },
-    {
       "identity": "kind=descriptor-field|path=crates/chelis-python/src/lib.rs|owner=DLTensor::byte_offset",
       "sample": "byte_offset: u64"
     },
@@ -1929,60 +1873,36 @@
       "sample": "strides: * mut i64"
     },
     {
-      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_device_to_host",
-      "sample": "CHELIS_HIP_CHECK(hipMemcpy(view.data, src->data, view.count * chelis_gpu_dtype_size(src->dtype), ..."
-    },
-    {
-      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_alloc",
-      "sample": "CHELIS_HIP_CHECK(hipMalloc(&t->data, t->size * chelis_gpu_dtype_size(dtype)))"
-    },
-    {
-      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_alloc_view",
-      "sample": "t->data"
-    },
-    {
-      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_clone",
-      "sample": "CHELIS_HIP_CHECK(hipMemcpy( dst->data, src->data, src->size * chelis_gpu_dtype_size(src->dtype), ..."
-    },
-    {
-      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_free",
-      "sample": "t->data"
-    },
-    {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_bf16_gemm_f32_acc_row_major",
-      "sample": "CHELIS_HIPBLAS_CHECK(hipblasGemmEx( handle, HIPBLAS_OP_N, HIPBLAS_OP_N, n, m, k, &alpha, b->data,..."
+      "sample": "CHELIS_HIPBLAS_CHECK(hipblasGemmEx_64( handle, HIPBLAS_OP_N, HIPBLAS_OP_N, n, m, k, &alpha, b->da..."
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_dgemm_batched_row_major",
-      "sample": "a->data"
+      "sample": "(const double *)(const void *)a->data"
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_dgemm_row_major",
-      "sample": "CHELIS_HIPBLAS_CHECK(hipblasDgemm( handle, HIPBLAS_OP_N, HIPBLAS_OP_N, n, m, k, &alpha, (const do..."
+      "sample": "CHELIS_HIPBLAS_CHECK(hipblasDgemm_64( handle, HIPBLAS_OP_N, HIPBLAS_OP_N, n, m, k, &alpha, (const..."
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_dgemm_strided_batched_row_major",
-      "sample": "CHELIS_HIPBLAS_CHECK(hipblasDgemmStridedBatched( handle, HIPBLAS_OP_N, HIPBLAS_OP_N, n, m, k, &al..."
+      "sample": "CHELIS_HIPBLAS_CHECK(hipblasDgemmStridedBatched_64( handle, HIPBLAS_OP_N, HIPBLAS_OP_N, n, m, k, ..."
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_f16_gemm_f32_acc_row_major",
-      "sample": "CHELIS_HIPBLAS_CHECK(hipblasGemmEx( handle, HIPBLAS_OP_N, HIPBLAS_OP_N, n, m, k, &alpha, b->data,..."
+      "sample": "CHELIS_HIPBLAS_CHECK(hipblasGemmEx_64( handle, HIPBLAS_OP_N, HIPBLAS_OP_N, n, m, k, &alpha, b->da..."
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_sgemm_batched_row_major",
-      "sample": "CHELIS_HIPBLAS_CHECK(hipblasSgemm( handle, HIPBLAS_OP_N, HIPBLAS_OP_N, n, m, k, &alpha, b->data +..."
+      "sample": "CHELIS_HIPBLAS_CHECK(hipblasSgemm_64( handle, HIPBLAS_OP_N, HIPBLAS_OP_N, n, m, k, &alpha, (const..."
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_sgemm_row_major",
-      "sample": "CHELIS_HIPBLAS_CHECK(hipblasSgemm( handle, HIPBLAS_OP_N, HIPBLAS_OP_N, n, m, k, &alpha, b->data, ..."
+      "sample": "CHELIS_HIPBLAS_CHECK(hipblasSgemm_64( handle, HIPBLAS_OP_N, HIPBLAS_OP_N, n, m, k, &alpha, (const..."
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_sgemm_strided_batched_row_major",
-      "sample": "CHELIS_HIPBLAS_CHECK(hipblasSgemmStridedBatched( handle, HIPBLAS_OP_N, HIPBLAS_OP_N, n, m, k, &al..."
-    },
-    {
-      "identity": "kind=direct-data-access|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_host_to_device",
-      "sample": "CHELIS_HIP_CHECK(hipMemcpy(dst->data, view.data, dst->size * chelis_gpu_dtype_size(dst->dtype), h..."
+      "sample": "CHELIS_HIPBLAS_CHECK(hipblasSgemmStridedBatched_64( handle, HIPBLAS_OP_N, HIPBLAS_OP_N, n, m, k, ..."
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-ir/src/lower.rs|owner=LowerCtx < 'program >::emit_literal_tensor",
@@ -1991,14 +1911,6 @@
     {
       "identity": "kind=direct-data-access|path=crates/chelis-ir/src/lower.rs|owner=extract_cons_chain_tensor",
       "sample": "t . data"
-    },
-    {
-      "identity": "kind=direct-data-access|path=crates/chelis-python/src/lib.rs|owner=GpuTensorHandle::drop",
-      "sample": "(* tensor) . data"
-    },
-    {
-      "identity": "kind=direct-data-access|path=crates/chelis-python/src/lib.rs|owner=TensorOwner::data_ptr",
-      "sample": "(handle . api . read_view) (handle . ptr . as_ptr ()) . data"
     },
     {
       "identity": "kind=direct-data-access|path=crates/chelis-runtime/src/lib.rs|owner=tensor_storage_data",
@@ -2075,22 +1987,6 @@
     {
       "identity": "kind=dtype-contract|path=crates/chelis-vocab/src/lib.rs|owner=RuntimeDType::I8",
       "sample": "I8 = 7"
-    },
-    {
-      "identity": "kind=fixed-rank-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor::shape",
-      "sample": "int shape[CHELIS_GPU_MAX_DIM] (extent CHELIS_GPU_MAX_DIM)"
-    },
-    {
-      "identity": "kind=fixed-rank-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor::strides",
-      "sample": "int strides[CHELIS_GPU_MAX_DIM] (extent CHELIS_GPU_MAX_DIM)"
-    },
-    {
-      "identity": "kind=fixed-rank-metadata|path=crates/chelis-python/src/lib.rs|owner=ChelisGpuTensor::shape",
-      "sample": "shape: [i32 ; CHELIS_MAX_DIM] (extent CHELIS_MAX_DIM)"
-    },
-    {
-      "identity": "kind=fixed-rank-metadata|path=crates/chelis-python/src/lib.rs|owner=ChelisGpuTensor::strides",
-      "sample": "strides: [i32 ; CHELIS_MAX_DIM] (extent CHELIS_MAX_DIM)"
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::bound_c_expr",
@@ -2193,12 +2089,8 @@
       "sample": "hipMemcpy(d_t{id}->data, __host_data, {}u * sizeof(float), hipMemcpyHostToDevice);"
     },
     {
-      "identity": "kind=load-store-template|path=crates/chelis-backend-hip/src/emit.rs|owner=HipEmitter::emit_input_shape_preamble",
-      "sample": "int64_t {} = chelis_tensor_shape(inputs[{canonical_slot}], {canonical_axis});"
-    },
-    {
       "identity": "kind=load-store-template|path=crates/chelis-backend-hip/src/kernels.rs|owner=DEVICE_HELPERS",
-      "sample": "#if CHELIS_DEBUG_BOUNDS __device__ int chelis_gpu_failure = 0; __device__ void chelis_record_fail..."
+      "sample": "#include <stdint.h> typedef int64_t chelis_device_metadata; #if CHELIS_DEBUG_BOUNDS __device__ in..."
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-hip/src/kernels.rs|owner=scatter_elements",
@@ -2231,30 +2123,6 @@
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-metal/src/emit.rs|owner=Emitter < 'plan >::emit_unary",
       "sample": "{{ __unsafe_unretained id<MTLBuffer> bufs[2] = {{ {}, {out_buf} }}; chelis_metal_launch({pso_var}..."
-    },
-    {
-      "identity": "kind=narrow-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor::ndim",
-      "sample": "int ndim"
-    },
-    {
-      "identity": "kind=narrow-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor::size",
-      "sample": "int size"
-    },
-    {
-      "identity": "kind=narrow-metadata|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor::storage_size",
-      "sample": "int storage_size"
-    },
-    {
-      "identity": "kind=narrow-metadata|path=crates/chelis-python/src/lib.rs|owner=ChelisGpuTensor::ndim",
-      "sample": "ndim: i32"
-    },
-    {
-      "identity": "kind=narrow-metadata|path=crates/chelis-python/src/lib.rs|owner=ChelisGpuTensor::size",
-      "sample": "size: i32"
-    },
-    {
-      "identity": "kind=narrow-metadata|path=crates/chelis-python/src/lib.rs|owner=ChelisGpuTensor::storage_size",
-      "sample": "storage_size: i32"
     },
     {
       "identity": "kind=narrow-metadata|path=crates/chelis-python/src/lib.rs|owner=DLTensor::ndim",
@@ -2353,48 +2221,8 @@
       "sample": "input . output_type . dims . len () . saturating_sub (1)"
     },
     {
-      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_alloc",
-      "sample": "static inline chelis_gpu_tensor* chelis_gpu_alloc(int ndim, const int *shape, int dtype)"
-    },
-    {
-      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_alloc_view",
-      "sample": "static inline chelis_gpu_tensor* chelis_gpu_alloc_view( int ndim, const int *shape, int dtype, fl..."
-    },
-    {
-      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_tensor::data",
-      "sample": "float *data"
-    },
-    {
       "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_dgemm_batched_row_major",
       "sample": "const double *a_base = (const double *)(const void *)a->data"
-    },
-    {
-      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_dgemm_row_major",
-      "sample": "CHELIS_HIPBLAS_CHECK(hipblasDgemm( handle, HIPBLAS_OP_N, HIPBLAS_OP_N, n, m, k, &alpha, (const do..."
-    },
-    {
-      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_hipblas_dgemm_strided_batched_row_major",
-      "sample": "CHELIS_HIPBLAS_CHECK(hipblasDgemmStridedBatched( handle, HIPBLAS_OP_N, HIPBLAS_OP_N, n, m, k, &al..."
-    },
-    {
-      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=hipblasDgemm",
-      "sample": "extern hipblasStatus_t hipblasDgemm( hipblasHandle_t handle, hipblasOperation_t transa, hipblasOp..."
-    },
-    {
-      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=hipblasDgemmStridedBatched",
-      "sample": "extern hipblasStatus_t hipblasDgemmStridedBatched( hipblasHandle_t handle, hipblasOperation_t tra..."
-    },
-    {
-      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=hipblasSgemm",
-      "sample": "extern hipblasStatus_t hipblasSgemm( hipblasHandle_t handle, hipblasOperation_t transa, hipblasOp..."
-    },
-    {
-      "identity": "kind=raw-element-pointer|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=hipblasSgemmStridedBatched",
-      "sample": "extern hipblasStatus_t hipblasSgemmStridedBatched( hipblasHandle_t handle, hipblasOperation_t tra..."
-    },
-    {
-      "identity": "kind=raw-element-pointer|path=crates/chelis-python/src/lib.rs|owner=ChelisGpuTensor::data",
-      "sample": "* mut f32"
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-python/src/lib.rs|owner=DLTensor::shape",
@@ -2407,10 +2235,6 @@
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-python/src/lib.rs|owner=HostEntryBorrowFn",
       "sample": "* const i64"
-    },
-    {
-      "identity": "kind=raw-element-pointer|path=crates/chelis-python/src/lib.rs|owner=gpu_input_tensor",
-      "sample": "tensor . call_method0 (\"data_ptr\") ? . extract :: < usize > () ? as * mut f32"
     },
     {
       "identity": "kind=raw-element-pointer|path=crates/chelis-python/src/lib.rs|owner=host_dims_ptr",
@@ -2513,14 +2337,6 @@
       "sample": "CHELIS_HIP_CHECK(hipMemcpyDtoH(&failure, symbol, sizeof(failure)))"
     },
     {
-      "identity": "kind=width-arithmetic|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_alloc",
-      "sample": "chelis_gpu_tensor *t = (chelis_gpu_tensor*)calloc(1, sizeof(chelis_gpu_tensor))"
-    },
-    {
-      "identity": "kind=width-arithmetic|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_alloc_view",
-      "sample": "chelis_gpu_tensor *t = (chelis_gpu_tensor*)calloc(1, sizeof(chelis_gpu_tensor))"
-    },
-    {
       "identity": "kind=width-arithmetic|path=crates/chelis-backend-hip/runtime/chelis_hip_runtime.h|owner=chelis_gpu_failure_symbol",
       "sample": "sizeof(int)"
     },
@@ -2602,7 +2418,7 @@
       "artifact": "the frozen INVENTORY_SOURCES file list",
       "enumerator": "chelis-repr-inventory: syn for Rust; clang's front end under fixed target lanes, a committed stub SDK, and a scrubbed environment for C and Objective-C headers, classified with the capacity census's closed type-word lists",
       "universe": {
-        "registered_sources": 77,
+        "registered_sources": 83,
         "roots": [
           "crates/chelis-runtime/src/**/*.rs",
           "crates/chelis-runtime/include/**/*.h",
@@ -2615,6 +2431,7 @@
           "crates/chelis-python/build.rs",
           "crates/chelis-backend-*/src/**/*.rs",
           "crates/chelis-backend-*/runtime/**/*.h",
+          "crates/chelis-backend-*/runtime/**/*.cpp",
           "crates/chelis-backend-*/build.rs"
         ],
         "closure_rule": "the registered list must equal its roots' tracked contents; a new file fails until it is registered"
@@ -2622,6 +2439,160 @@
       "identity": "kind|path|owner, where owner is the seam's enclosing declaration",
       "expected_success": "every hit is exact active debt from the frozen foundation",
       "owner_module_final_forms": {
+        "crates/chelis-backend-hip/runtime/chelis_device_descriptor.h": [
+          {
+            "kind": "descriptor-field",
+            "owner": "chelis_gpu_tensor::byte_capacity"
+          },
+          {
+            "kind": "descriptor-field",
+            "owner": "chelis_gpu_tensor::count"
+          },
+          {
+            "kind": "descriptor-field",
+            "owner": "chelis_gpu_tensor::data"
+          },
+          {
+            "kind": "descriptor-field",
+            "owner": "chelis_gpu_tensor::dtype"
+          },
+          {
+            "kind": "descriptor-field",
+            "owner": "chelis_gpu_tensor::ownership"
+          },
+          {
+            "kind": "descriptor-field",
+            "owner": "chelis_gpu_tensor::rank"
+          },
+          {
+            "kind": "descriptor-field",
+            "owner": "chelis_gpu_tensor::reserved"
+          },
+          {
+            "kind": "descriptor-field",
+            "owner": "chelis_gpu_tensor::shape"
+          },
+          {
+            "kind": "descriptor-field",
+            "owner": "chelis_gpu_tensor::strides"
+          },
+          {
+            "kind": "fixed-rank-metadata",
+            "owner": "chelis_gpu_tensor::reserved"
+          },
+          {
+            "kind": "narrow-metadata",
+            "owner": "chelis_gpu_tensor::rank"
+          },
+          {
+            "kind": "raw-element-pointer",
+            "owner": "chelis_gpu_tensor::shape"
+          },
+          {
+            "kind": "raw-element-pointer",
+            "owner": "chelis_gpu_tensor::strides"
+          }
+        ],
+        "crates/chelis-backend-hip/runtime/chelis_device_owner.cpp": [
+          {
+            "kind": "direct-data-access",
+            "owner": "canonical_plan"
+          },
+          {
+            "kind": "direct-data-access",
+            "owner": "chelis_device_tensor_clone"
+          },
+          {
+            "kind": "direct-data-access",
+            "owner": "chelis_device_tensor_copy_from_host"
+          },
+          {
+            "kind": "direct-data-access",
+            "owner": "chelis_device_tensor_copy_to_host"
+          },
+          {
+            "kind": "direct-data-access",
+            "owner": "chelis_device_tensor_import"
+          },
+          {
+            "kind": "raw-element-pointer",
+            "owner": "array_preflight"
+          },
+          {
+            "kind": "raw-element-pointer",
+            "owner": "canonical_strides"
+          },
+          {
+            "kind": "raw-element-pointer",
+            "owner": "tagged_array"
+          },
+          {
+            "kind": "width-arithmetic",
+            "owner": "array_preflight"
+          }
+        ],
+        "crates/chelis-backend-hip/src/emit.rs": [
+          {
+            "kind": "backend-element-spelling",
+            "owner": "HipEmitter::tagged_i64"
+          },
+          {
+            "kind": "width-arithmetic",
+            "owner": "HipEmitter::collect_kernels"
+          },
+          {
+            "kind": "width-arithmetic",
+            "owner": "HipEmitter::kernel_source_for_op"
+          }
+        ],
+        "crates/chelis-python/src/lib.rs": [
+          {
+            "kind": "raw-element-pointer",
+            "owner": "HipGetDeviceFn"
+          },
+          {
+            "kind": "width-arithmetic",
+            "owner": "cpu_input_tensor"
+          },
+          {
+            "kind": "width-arithmetic",
+            "owner": "gpu_input_tensor"
+          }
+        ],
+        "crates/chelis-python/src/native_tensor.rs": [
+          {
+            "kind": "direct-data-access",
+            "owner": "ValidatedTensor::adopt"
+          },
+          {
+            "kind": "direct-data-access",
+            "owner": "ValidatedTensor::data"
+          },
+          {
+            "kind": "width-arithmetic",
+            "owner": "ValidatedTensor::adopt"
+          }
+        ],
+        "crates/chelis-runtime/include/chelis_runtime.h": [
+          {
+            "kind": "raw-element-pointer",
+            "owner": "chelis_metadata_plan_shape"
+          },
+          {
+            "kind": "raw-element-pointer",
+            "owner": "chelis_metadata_plan_strides"
+          }
+        ],
+        "crates/chelis-runtime/src/lib.rs": [
+          {
+            "kind": "raw-element-pointer",
+            "owner": "chelis_metadata_plan_shape"
+          },
+          {
+            "kind": "raw-element-pointer",
+            "owner": "chelis_metadata_plan_strides"
+          }
+        ],
         "crates/chelis-backend-c/src/emit.rs": [
           {
             "kind": "backend-element-spelling",
@@ -2809,7 +2780,7 @@
           "witness_id": "phase0.mutate_descriptor_field",
           "expected_kind": "descriptor-field",
           "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h",
-          "implementation_sha256": "3efd37ce58610fe600fcb16f586d289f208f14ac0ac226a19df73a83e509add2",
+          "implementation_sha256": "43837a17e04d9aa9ef67d16e5e9ddf85c1c83450c581da84776f20825258e13e",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
@@ -3018,7 +2989,7 @@
           "witness_id": "phase0.mutate_unknown_c_arithmetic_spelling",
           "expected_kind": "unknown-arithmetic-spelling",
           "path": "crates/chelis-runtime/include/chelis_simd.h",
-          "implementation_sha256": "5a275ebb9ea4a02584f6327ff34173febe3ccd31fbf7158b6a7243c7545c4aa6",
+          "implementation_sha256": "528209e5d31902f9e024054fa79c799f9efa04abf4fc684666d73527a6fd74d3",
           "expected_failure": {
             "code": "source.rejected",
             "reason_prefix": "fail-closed inventory scanner rejected"
@@ -3042,7 +3013,7 @@
           "witness_id": "phase0.mutate_c_body_direct_data_access",
           "expected_kind": "direct-data-access",
           "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h",
-          "implementation_sha256": "33eb44a5790618abb588514cfca4f66489d7aed313d6f1b1decd4aae9f233681",
+          "implementation_sha256": "3f92b83033c0ebdb91ba20c8b0f3e4b0266799ee39fa05c0ea30af57032077e7",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
@@ -3054,7 +3025,7 @@
           "witness_id": "phase0.mutate_c_extern_element_data",
           "expected_kind": "raw-element-pointer",
           "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "652af6905a6e0dbef8d69724e2f2ecc91728c0b4e80384db39ddc9d576d2b4c8",
+          "implementation_sha256": "0e691349cdfb6ef2fe1e4b8e8b04cb002cdbc7ca78c1d8fbfbe03a99ac797dc8",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
@@ -3066,7 +3037,7 @@
           "witness_id": "phase0.mutate_c_non_descriptor_struct_field",
           "expected_kind": "raw-element-pointer",
           "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "c8f3218d0584cb05027065aa074f4ac351c98dc4c93c24cde7dc019514595ad7",
+          "implementation_sha256": "89d7943fda9ab8af0d6d866ec2daed29931999695129b7baa51a5b5f1650c929",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
@@ -3078,7 +3049,7 @@
           "witness_id": "phase0.mutate_c_tagged_struct_field",
           "expected_kind": "raw-element-pointer",
           "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "c95e7a83af05f5d73227a87ba1d19090b6dee0c5d4b1fd4ff5b2622e773285ec",
+          "implementation_sha256": "66baae0e709c09a4ec03e9479725377473a14a9a50a22a9bb4f24ea7f50b0193",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
@@ -3092,7 +3063,7 @@
           "witness_id": "phase0.mutate_c_union_field",
           "expected_kind": "raw-element-pointer",
           "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "9c84593bd48bb3f3c407517d79b11f8029fef749b594054dc9e5ce70eb44d62c",
+          "implementation_sha256": "b6d58b8b6d47fc238d02b874bb0114528ba943b582f0b4aefe64b2424eeb1045",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
@@ -3106,7 +3077,7 @@
           "witness_id": "phase0.mutate_c_macro_typed_carrier",
           "expected_kind": "raw-element-pointer",
           "path": "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h",
-          "implementation_sha256": "9b97563372d76a47b08262899d9bb90234e25a91b3dabe53916c1c7718bc582d",
+          "implementation_sha256": "8f0d0eb57078e4652fa6ad694f4ad1e488c5057b995f8a39a02350aa5a19a7b7",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
@@ -3120,7 +3091,7 @@
           "witness_id": "phase0.mutate_c_multi_declarator_data",
           "expected_kind": "raw-element-pointer",
           "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "ecdd5bcd40d1ff0f8df7f6867222895a714cb5c3ab9037f6eeb5c9df56f56be9",
+          "implementation_sha256": "a0c78b453578eb6c58692ccc1a1ce6bcb24a4526ffdeaf23ee83716a10f2bfbe",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
@@ -3149,7 +3120,7 @@
           "witness_id": "phase0.mutate_objc_element_pointer_parameter",
           "expected_kind": "raw-element-pointer",
           "path": "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h",
-          "implementation_sha256": "b81cd9a85fc1d491177f2bd0facbfa6d5d94096f4378ca74e7ee0ecc82aabd22",
+          "implementation_sha256": "4202ed69a1291bcf4a105a4101ba1496ec028792ace76c3dc90b2f4c25ccf0a2",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
@@ -3189,7 +3160,7 @@
           "witness_id": "phase0.mutate_objc_method_carrier",
           "expected_kind": "raw-element-pointer",
           "path": "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h",
-          "implementation_sha256": "56bdca1c019b3b0ec4771372617b231c695bcad5038312d3427e6bc879b1a32d",
+          "implementation_sha256": "e7a5958edfecef3fa0698863da5a7ded9cc19d05ba713c8600903bfc2505a98b",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
@@ -3203,7 +3174,7 @@
           "witness_id": "phase0.mutate_c_unclassified_cast_spelling",
           "expected_kind": "unknown-arithmetic-spelling",
           "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "a52f7f228aa161f0c440ccb28bc37a6e8cc775fa6482f053074720d320af4fbe",
+          "implementation_sha256": "1b207ca7ea965d3a5d807e8e57d314384b5721fb1c036c685bb589fb746d4236",
           "expected_failure": {
             "code": "source.rejected",
             "reason_prefix": "fail-closed inventory scanner rejected"
@@ -3215,7 +3186,7 @@
           "witness_id": "phase0.mutate_c_pointer_to_element_array",
           "expected_kind": "raw-element-pointer",
           "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "b29d9ac289d3f98a3920d1ef03b69c8ababa67229d9c4870539bfe188c8bfea0",
+          "implementation_sha256": "92711242d52e99b8e85951af0cadbaf9351da7a3ac5aece490d58d207edeb654",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
@@ -3253,7 +3224,7 @@
           "witness_id": "phase0.mutate_objc_block_parameter",
           "expected_kind": "raw-element-pointer",
           "path": "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h",
-          "implementation_sha256": "918a13029005cd66a2c7bdd93a01610279532203ffb52e0c0622e0f7576c9868",
+          "implementation_sha256": "bfed9fb46724b06a6b4c66a35c22d6b60752905a5b6aced8a0df7f3d8125ff1b",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
@@ -3267,7 +3238,7 @@
           "witness_id": "phase0.mutate_c_sizeof_in_array_bound",
           "expected_kind": "width-arithmetic",
           "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "4ca847b36f57af09c8dc3fcbb1fe59a7c5453b9d8f701fd13f2377a130352fc7",
+          "implementation_sha256": "3d8b4530f2844f61872f1ffb47e4bdc842eee9a3a1213e7702b791bcc927718d",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
@@ -3295,7 +3266,7 @@
           "witness_id": "phase0.mutate_c_int8_element_pointer",
           "expected_kind": "raw-element-pointer",
           "path": "crates/chelis-runtime/include/chelis_runtime.h",
-          "implementation_sha256": "893963a2127df0a77b879dcb1805aa321c0953bf56da1bbc9a9218c7226b4bac",
+          "implementation_sha256": "ff68ddf828b03077df95b128d5b1fb85ab984fae444d4805fe841af685626062",
           "expected_failure": {
             "code": "inventory.unclassified",
             "reason_prefix": "unclassified inventory hit"
