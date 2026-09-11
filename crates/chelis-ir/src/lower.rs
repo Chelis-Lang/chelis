@@ -2170,6 +2170,8 @@ fn lower_subexpr_program_inner_impl(
     // unchanged (eval and the copy/drop linearity passes treat `Copy` as a
     // pass-through) but the root count now matches the pytree arity.
     let mut seen_roots: UnordSet<NodeId> = UnordSet::new();
+    #[cfg(feature = "lowering-trace")]
+    let mut packed_value_roots = Vec::new();
     for id in value.flatten_nodes() {
         let root_id = if seen_roots.insert(id) {
             id
@@ -2187,6 +2189,15 @@ fn lower_subexpr_program_inner_impl(
             )
         };
         ctx.dag.add_root(root_id);
+        #[cfg(feature = "lowering-trace")]
+        packed_value_roots.push(root_id);
+    }
+    #[cfg(feature = "lowering-trace")]
+    if let Some(trace) = &trace {
+        let mut roots = packed_value_roots.into_iter();
+        let packed_result = value.trace_value_from_roots(&mut roots);
+        assert!(roots.next().is_none());
+        trace.helper_result(ctx.dag.roots(), packed_result);
     }
     let value_root_count = ctx.dag.roots().len();
     let mut list_checks = Vec::new();
@@ -5629,6 +5640,39 @@ impl LoweredValue {
                 ctor: ctor.clone(),
                 field_names: field_names.clone(),
                 fields: fields.iter().map(Self::trace_value).collect(),
+            },
+        }
+    }
+
+    #[cfg(feature = "lowering-trace")]
+    fn trace_value_from_roots(
+        &self,
+        roots: &mut impl Iterator<Item = NodeId>,
+    ) -> crate::lowering_trace::Value {
+        use crate::lowering_trace::Value;
+        match self {
+            Self::Host { .. } => {
+                raise_lowering_error("a host value is not a tensor helper result", None, None)
+            }
+            Self::Node(_) => Value::Node(roots.next().expect("packed tensor result root")),
+            Self::Tuple(items) => Value::Tuple(
+                items
+                    .iter()
+                    .map(|item| item.trace_value_from_roots(roots))
+                    .collect(),
+            ),
+            Self::Adt {
+                ctor,
+                field_names,
+                fields,
+                ..
+            } => Value::Adt {
+                ctor: ctor.clone(),
+                field_names: field_names.clone(),
+                fields: fields
+                    .iter()
+                    .map(|field| field.trace_value_from_roots(roots))
+                    .collect(),
             },
         }
     }

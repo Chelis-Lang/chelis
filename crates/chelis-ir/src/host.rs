@@ -5152,13 +5152,7 @@ fn lower_tensor_helper_product(
         let scoped = collect_tensor_scope(scope).into_sorted();
         let (dag, _, trace) =
             match crate::lower::try_lower_subexpr_program_with_ordered_inputs_and_trace(
-                expr,
-                scoped,
-                &context,
-                Some(expected),
-                None,
-                0,
-                false,
+                expr, scoped, &context, None, None, 0, false,
             ) {
                 Ok(lowered) => lowered,
                 Err(diagnostic) if diagnostic.fatal => {

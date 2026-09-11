@@ -191,6 +191,11 @@ pub struct HelperLoweringTrace {
     pub executions: Vec<ExecutionGradient>,
     pub applications: Vec<ExecutionApplication>,
     pub normalization: ExecutionNormalization,
+    /// Every root after helper-local result packing and before normalization,
+    /// in ABI order.
+    pub packed_roots: Vec<NodeId>,
+    /// The helper result structure whose leaves are `packed_roots` entries.
+    pub packed_result: Value,
 }
 
 impl HelperLoweringTrace {
@@ -254,6 +259,7 @@ struct State {
     executions: Vec<ExecutionGradient>,
     execution_applications: Vec<ExecutionApplication>,
     execution_normalization: Option<ExecutionNormalization>,
+    helper_result: Option<(Vec<NodeId>, Value)>,
 }
 
 /// Explicitly inherited by child contexts; never global or thread-local.
@@ -357,12 +363,26 @@ impl Collector {
             .execution_normalization
             .take()
             .expect("successful helper lowering records execution normalization");
+        let (packed_roots, packed_result) = self
+            .state
+            .borrow_mut()
+            .helper_result
+            .take()
+            .expect("successful helper lowering records its packed result");
         HelperLoweringTrace {
             lowering: self.finish(),
             executions,
             applications,
             normalization,
+            packed_roots,
+            packed_result,
         }
+    }
+
+    pub(crate) fn helper_result(&self, roots: &[NodeId], result: Value) {
+        let mut state = self.state.borrow_mut();
+        assert!(state.helper_result.is_none());
+        state.helper_result = Some((roots.to_vec(), result));
     }
 
     pub(crate) fn child(&self, kind: ContextKind) -> Self {

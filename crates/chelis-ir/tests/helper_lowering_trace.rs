@@ -166,7 +166,80 @@ def derivative(x: tensor[3, f32], y: tensor[3, f32])
     );
     assert_eq!(helper.dag.roots().len(), 2);
     assert_ne!(helper.dag.roots()[0], helper.dag.roots()[1]);
+    assert_eq!(
+        trace.packed_roots,
+        trace.lowering.normalization.before_dce.roots()
+    );
+    assert_eq!(
+        trace.packed_result,
+        Value::Tuple(
+            trace
+                .packed_roots
+                .iter()
+                .copied()
+                .map(Value::Node)
+                .collect()
+        )
+    );
     same_dag(&trace.lowering.normalization.after_drops, &helper.dag);
+}
+
+#[test]
+fn helper_packing_keeps_duplicate_cotangent_slots_as_distinct_ordered_roots() {
+    let program = manifested(
+        r#"
+def loss(x: tensor[3, f32], y: tensor[3, f32]) -> f32 =
+  tensor_to_scalar(sum(add(x, y), 0))
+def derivative(x: tensor[3, f32], y: tensor[3, f32])
+  -> (tensor[3, f32], tensor[3, f32]) = grad(loss)(x, y)
+"#,
+    );
+    let (_, plan) = try_lower_manifested_execution_program_with_trace(&program).unwrap();
+    let plan = plan.expect("host execution plan");
+    let function = plan
+        .program()
+        .functions
+        .iter()
+        .find(|function| function.name == "derivative")
+        .expect("derivative function");
+    let helper = &function.tensor_helpers[0];
+    let trace = plan
+        .function_helper_trace("derivative", 0)
+        .unwrap()
+        .expect("derivative helper trace");
+    let gradient = &trace.lowering.gradients[0];
+    assert_eq!(gradient.gradients.len(), 2);
+    assert_eq!(
+        gradient.gradients[&gradient.wrt[0]], gradient.gradients[&gradient.wrt[1]],
+        "the actual AD pass shares the equal cotangents before helper packing"
+    );
+    assert_eq!(
+        trace.packed_roots,
+        trace.lowering.normalization.before_dce.roots()
+    );
+    assert_eq!(trace.packed_roots.len(), 2);
+    assert_ne!(trace.packed_roots[0], trace.packed_roots[1]);
+    assert!(matches!(
+        trace
+            .lowering
+            .normalization
+            .before_dce
+            .get(trace.packed_roots[1])
+            .unwrap()
+            .op,
+        RiscOp::Copy
+    ));
+    assert_eq!(
+        trace.packed_result,
+        Value::Tuple(
+            trace
+                .packed_roots
+                .iter()
+                .copied()
+                .map(Value::Node)
+                .collect()
+        )
+    );
 }
 
 #[test]
@@ -235,4 +308,32 @@ def derivative(x: tensor[32, f32]) -> tensor[32, f32] = grad(loss)(x)
     }
     assert!(!trace.normalization.before_dce.steps.is_empty());
     assert!(!trace.normalization.after_drops.steps.is_empty());
+}
+
+#[test]
+fn failed_helper_attempt_returns_no_trace_and_cannot_pollute_the_next_compilation() {
+    let rejected = manifested(
+        r#"
+def loss(x: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(floor(x), 0))
+def derivative(x: tensor[3, f32]) -> tensor[3, f32] = grad(loss)(x)
+"#,
+    );
+    let error = try_lower_manifested_execution_program_with_trace(&rejected)
+        .expect_err("the actual AD pass rejects floor");
+    assert!(error.to_string().contains("floor"));
+
+    let accepted = manifested(
+        r#"
+def loss(x: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(mul(x, x), 0))
+def derivative(x: tensor[3, f32]) -> tensor[3, f32] = grad(loss)(x)
+"#,
+    );
+    let (_, plan) = try_lower_manifested_execution_program_with_trace(&accepted).unwrap();
+    let plan = plan.expect("successful host plan");
+    let trace = plan
+        .function_helper_trace("derivative", 0)
+        .unwrap()
+        .expect("successful helper trace");
+    assert_eq!(trace.lowering.gradients.len(), 1);
+    assert_eq!(trace.executions.len(), 1);
 }

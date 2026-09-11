@@ -1165,7 +1165,9 @@ host execution lowering and fixed-control named-entry lowering. Each successful
 host tensor helper retains one private lowering product containing its existing
 execution metadata and, only for the observing ingress, an owned helper trace.
 The trace reuses the production collector at the helper's actual AD, splice,
-result-packing and normalization boundaries. It adds execution-splice mappings
+result-packing and normalization boundaries. The pre-normalization helper result
+retains its tuple/ADT structure and exact ordered, duplicate-split root IDs. It
+adds execution-splice mappings
 for occurrence, draw and scope identities, because the existing
 `Application.remap` intentionally carries node identities only. Normalization
 execution observations refer to the graphs already held by the ordinary trace
