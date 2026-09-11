@@ -21,6 +21,70 @@ def helper(x: tensor[1, f32]) -> tensor[1, f32] = mul(x, x)
 def solve(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[1, f32] = add(helper(a), helper(b))
 ";
 
+const FIXED_CONTROL_ENTRIES: &str = "\
+def sample(x: tensor[4, f32]) -> tensor[4, f32] = with seed(42i64) { dropout(x, 0.5f32) }
+def other(y: tensor[8, f32]) -> tensor[8, f32] = with seed(7i64) { dropout(y, 0.5f32) }
+";
+
+#[test]
+fn fixed_control_hostless_entry_keeps_exact_callable_selection() {
+    let artifact = compile_c(FIXED_CONTROL_ENTRIES, Some("sample"));
+    assert_eq!(input_names(&artifact), ["x"]);
+    assert_eq!(artifact.outputs.len(), 1);
+    assert!(
+        artifact
+            .compile_result
+            .files
+            .iter()
+            .any(|file| file.path == "chelis_main.c")
+    );
+    for (entry, reason) in [
+        (None, "ambiguous entry"),
+        (Some("ample"), "unknown entry_name `ample`"),
+    ] {
+        let error = compile_for_execution(CompileRequest {
+            source_kind: SourceKind::Surf,
+            source: FIXED_CONTROL_ENTRIES.into(),
+            target: CompileTarget::C,
+            entry_name: entry.map(str::to_owned),
+        })
+        .unwrap_err();
+        assert!(format!("{error:?}").contains(reason), "{error:?}");
+    }
+}
+
+#[test]
+fn fixed_control_source_sibling_does_not_replace_an_ordinary_selected_entry() {
+    let source =
+        format!("{FIXED_CONTROL_ENTRIES}\ndef identity(z: tensor[2, f32]) -> tensor[2, f32] = z\n");
+    let artifact = compile_c(&source, Some("identity"));
+    assert_eq!(input_names(&artifact), ["z"]);
+    let c = &artifact
+        .compile_result
+        .files
+        .iter()
+        .find(|file| file.path == "chelis_main.c")
+        .unwrap()
+        .contents;
+    assert!(!c.contains("chelis_dropout_unit"));
+}
+
+#[test]
+fn fixed_control_hostless_entry_does_not_admit_an_unhandled_draw() {
+    let error = compile_for_execution(CompileRequest {
+        source_kind: SourceKind::Surf,
+        source: "def main(x: tensor[4, f32]) -> tensor[4, f32] = dropout(x, 0.5f32)\n".into(),
+        target: CompileTarget::C,
+        entry_name: Some("main".into()),
+    })
+    .unwrap_err();
+    let message = format!("{error:?}");
+    assert!(
+        message.contains("inherited") || message.contains("Random"),
+        "{error:?}"
+    );
+}
+
 // #818 repro verbatim: single def, multi-statement block, a parameter reused
 // across statements, `concat` in the body.
 const CONCAT_ENTRY: &str = "\

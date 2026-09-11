@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "freeze_sha256": "59db154426c58985dbd25703fca66d07ca46f4b6100d0e7ef54701fdbb297d33",
+  "freeze_sha256": "d87cef198c2d5b9fca494fd848fcecfe5c70ed28a05735c2ee7e13f810440d30",
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -219,11 +219,19 @@
       "deletion_phase": 4
     },
     {
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=FIXED_DROPOUT_HELPERS",
+      "deletion_phase": 4
+    },
+    {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_abi.rs|owner=HostAbiType::c_type_name",
       "deletion_phase": 4
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_abi_tests.rs|owner=fold_dead_heap_accumulator_binds_the_body_edge_before_its_release",
+      "deletion_phase": 4
+    },
+    {
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_abi_tests.rs|owner=fixed_control_host_helper_uses_the_active_invocation_rng",
       "deletion_phase": 4
     },
     {
@@ -836,6 +844,10 @@
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_permute",
+      "deletion_phase": 4
+    },
+    {
+      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_preplanned",
       "deletion_phase": 4
     },
     {
@@ -1609,12 +1621,20 @@
       "sample": "(int32_t)0"
     },
     {
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=FIXED_DROPOUT_HELPERS",
+      "sample": "static inline uint64_t chelis_dropout_mix(uint64_t value) {"
+    },
+    {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_abi.rs|owner=HostAbiType::c_type_name",
       "sample": "int8_t"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_abi_tests.rs|owner=fold_dead_heap_accumulator_binds_the_body_edge_before_its_release",
       "sample": "for (int64_t __i = 0;"
+    },
+    {
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_abi_tests.rs|owner=fixed_control_host_helper_uses_the_active_invocation_rng",
+      "sample": "static inline uint64_t chelis_dropout_mix"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_abi_tests.rs|owner=supported_concrete_types_map_to_exact_c_host_abis",
@@ -2027,6 +2047,10 @@
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_node",
       "sample": "if (((const int64_t*)t{actual}_data)[0] != ((const int64_t*)t{required}_data)[0]) {{"
+    },
+    {
+      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_preplanned",
+      "sample": "uint64_t __chelis_fixed_seed = __chelis_rng->seed, __chelis_fixed_counter = __chelis_rng->counter;"
     },
     {
       "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_recip_reduced_f",

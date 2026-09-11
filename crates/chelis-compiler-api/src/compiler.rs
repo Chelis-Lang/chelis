@@ -1448,7 +1448,11 @@ fn strict_entry_decline_error(reason: EntryLaneDecline) -> CompilerError {
 /// The entry lane's claim/decline decision for one compilation.
 enum EntryLaneOutcome<'a> {
     /// The lane claims the compilation: emit `dag` scoped to `entry`.
-    Claim { entry: &'a str, dag: Dag },
+    Claim {
+        entry: &'a str,
+        dag: Dag,
+        execution: Option<chelis_ir::evaluation::EvaluationPlan>,
+    },
     /// The lane declines; the host lane owns the compilation.
     Decline(EntryLaneDecline),
 }
@@ -1492,6 +1496,7 @@ fn entry_lane_decision<'a>(
     host_program: &'a chelis_ir::host::ConcreteHostProgram,
     host_only: bool,
     strictness: EntryStrictness,
+    allow_execution: bool,
 ) -> Result<EntryLaneOutcome<'a>> {
     use EntryLaneOutcome::Decline;
 
@@ -1509,7 +1514,12 @@ fn entry_lane_decision<'a>(
     {
         return Ok(Decline(EntryLaneDecline::HasGlobals));
     }
-    let Some(entry) = resolve_execution_entry(entry_name, host_program, host_only, strictness)?
+    // A newly admitted fixed-control callable must not inherit the legacy
+    // host default of silently choosing the last tensor def.
+    let legacy_host_selection =
+        host_only && !(allow_execution && strictness == EntryStrictness::Strict);
+    let Some(entry) =
+        resolve_execution_entry(entry_name, host_program, legacy_host_selection, strictness)?
     else {
         return Ok(Decline(EntryLaneDecline::NoEntryResolved));
     };
@@ -1523,12 +1533,32 @@ fn entry_lane_decision<'a>(
             entry: entry.to_string(),
         }));
     }
-    let Some(dag) = chelis_ir::host::lower_named_tensor_entry_dag(checked, entry) else {
-        return Ok(Decline(EntryLaneDecline::LoweringFailed {
-            entry: entry.to_string(),
-        }));
+    let execution = if allow_execution {
+        chelis_ir::host::lower_named_tensor_entry_execution_plan(checked, entry).map_err(
+            |diagnostic| {
+                stage_error_with_span(
+                    "lower",
+                    diagnostic.to_string(),
+                    GeneralKind::LowerError,
+                    deep_span_to_diagnostic(diagnostic.span),
+                )
+            },
+        )?
+    } else {
+        None
     };
-    let dag = chelis_ir::optimize::dead_code_eliminate(&dag);
+    let dag = if let Some(plan) = &execution {
+        // Inspection for ABI metadata after the sealed plan is consumed. This
+        // clone is never emitted or paired with substitute execution metadata.
+        plan.dag_for_inspection().clone()
+    } else {
+        let Some(dag) = chelis_ir::host::lower_named_tensor_entry_dag(checked, entry) else {
+            return Ok(Decline(EntryLaneDecline::LoweringFailed {
+                entry: entry.to_string(),
+            }));
+        };
+        chelis_ir::optimize::dead_code_eliminate(&dag)
+    };
     if dag.roots().is_empty() {
         return Ok(Decline(EntryLaneDecline::EmptyAfterDce {
             entry: entry.to_string(),
@@ -1555,7 +1585,11 @@ fn entry_lane_decision<'a>(
             extra,
         }));
     }
-    Ok(EntryLaneOutcome::Claim { entry, dag })
+    Ok(EntryLaneOutcome::Claim {
+        entry,
+        dag,
+        execution,
+    })
 }
 
 /// Compile to a callable execution artifact: the CALLABLE surface
@@ -1581,7 +1615,7 @@ pub fn compile_for_execution_with_observer(
     request: CompileRequest,
     observer: &mut dyn FnMut(crate::emission_observer::EmissionObservation<'_>),
 ) -> Result<CompiledExecutionArtifact> {
-    let compiled = compile_source_for_target(
+    let compiled = compile_source_for_codegen(
         request.source_kind,
         &request.source,
         manifest_target(request.target),
@@ -1599,7 +1633,7 @@ fn compile_for_execution_impl(
     request: CompileRequest,
     strictness: EntryStrictness,
 ) -> Result<CompiledExecutionArtifact> {
-    let compiled = compile_source_for_target(
+    let compiled = compile_source_for_codegen(
         request.source_kind,
         &request.source,
         manifest_target(request.target),
@@ -1855,7 +1889,7 @@ fn validate_compiled_resource_target(
 }
 
 fn execution_artifact_from_compiled_observed(
-    compiled: CompiledSource,
+    mut compiled: CompiledSource,
     target: CompileTarget,
     entry_name: Option<&str>,
     strictness: EntryStrictness,
@@ -1865,19 +1899,34 @@ fn execution_artifact_from_compiled_observed(
 ) -> Result<CompiledExecutionArtifact> {
     let build_target = BuildTarget::from(target);
     reject_host_only_builtins_before_host_lowering(compiled.checked(), build_target)?;
-    let mut host_compiled = chelis_ir::host::try_lower_manifested_program(&compiled.program)
-        .map_err(|diagnostic| {
-            stage_error_with_span(
-                "lower",
-                diagnostic.to_string(),
-                GeneralKind::LowerError,
-                deep_span_to_diagnostic(diagnostic.span),
-            )
-        })?;
+    let lower_error = |diagnostic: chelis_ir::lower::LowerDiagnostic| {
+        stage_error_with_span(
+            "lower",
+            diagnostic.to_string(),
+            GeneralKind::LowerError,
+            deep_span_to_diagnostic(diagnostic.span),
+        )
+    };
+    let (mut legacy_host, mut execution_host) = if target == CompileTarget::C
+        && (compiled.host_execution.is_some() || compiled.host_ordinary.is_some())
+    {
+        (
+            compiled.host_ordinary.take(),
+            compiled.host_execution.take(),
+        )
+    } else {
+        let lowered = chelis_ir::host::try_lower_manifested_program(&compiled.program)
+            .map_err(lower_error)?;
+        (lowered.host, None)
+    };
+    let host_program = execution_host
+        .as_ref()
+        .map(|plan| plan.program())
+        .or(legacy_host.as_ref());
     // Preserve the actual lowering, not a second independently lowered program.
     // Ordinary compilation does not clone it, even with the feature enabled.
     #[cfg(feature = "emission-observer")]
-    let observed_host = observer.as_ref().and_then(|_| host_compiled.host.clone());
+    let observed_host = observer.as_ref().and_then(|_| host_program.cloned());
     let func_name = execution_c_symbol(entry_name);
 
     // Reject host-runtime-only builtins early for any compiled-backend
@@ -1886,16 +1935,14 @@ fn execution_artifact_from_compiled_observed(
     // unknown compiled-lane builtin; this gate improves ordering and context,
     // and is not the correctness boundary. See spec/05-risc-primitives.md
     // §3.6 and spec/design/loud_unsupported.md §C6.3.
-    if let Some(host_program) = host_compiled.host.as_ref() {
+    if let Some(host_program) = host_program {
         reject_host_only_builtins(host_program, build_target)?;
         reject_eval_only_builtins(host_program, build_target)?;
     }
 
     match target {
         CompileTarget::C => {
-            let host_only = host_compiled
-                .host
-                .as_ref()
+            let host_only = host_program
                 .map(chelis_ir::host::host_program_requires_host_backend)
                 .unwrap_or(false);
 
@@ -1969,35 +2016,110 @@ fn execution_artifact_from_compiled_observed(
                             GeneralKind::CompileError,
                         ));
                     }
-                    resolved => resolved,
+                    resolved => resolved.map(|(entry, dag)| (entry, dag, None)),
                 }
-            } else if let Some(host_program) = host_compiled.host.as_ref() {
+            } else if let Some(host_program) = host_program {
                 match entry_lane_decision(
                     entry_name,
                     compiled.checked(),
                     host_program,
                     host_only,
                     strictness,
+                    execution_host.is_some(),
                 )? {
-                    EntryLaneOutcome::Claim { entry, dag } => Some((entry, dag)),
+                    EntryLaneOutcome::Claim {
+                        entry,
+                        dag,
+                        execution,
+                    } => Some((entry, dag, execution)),
                     EntryLaneOutcome::Decline(reason) => {
                         entry_lane_decline = Some(reason);
                         None
                     }
                 }
+            } else if !chelis_ir::host::program_has_top_level_value_bindings(compiled.checked())
+                && compiled
+                    .dag
+                    .nodes()
+                    .iter()
+                    .any(|node| matches!(node.op, RiscOp::Dropout { .. }))
+                && !(strictness == EntryStrictness::Legacy
+                    && (entry_name.is_some_and(|name| {
+                        !compiled
+                            .tensor_root_names
+                            .iter()
+                            .any(|root| root.as_str() == name)
+                    }) || (entry_name.is_none()
+                        && compiled.tensor_root_names.as_slice().len() > 1
+                        && !compiled
+                            .tensor_root_names
+                            .iter()
+                            .any(|root| root.as_str() == "main"))))
+            {
+                // A tensor-only def can be absent from the host program. Its
+                // raw value DAG cannot carry the execution seal: resolve the
+                // exact source entry, then lower its source-owned plan. Keep
+                // legacy file-stem/whole-program selection out of this lane.
+                match resolve_in_context_entry(&compiled, entry_name)? {
+                    Some((entry, ordinary)) => {
+                        let execution = chelis_ir::host::lower_named_tensor_entry_execution_plan(
+                            compiled.checked(),
+                            entry,
+                        )
+                        .map_err(lower_error)?;
+                        let dag = execution
+                            .as_ref()
+                            .map(|plan| plan.dag_for_inspection().clone())
+                            .unwrap_or(ordinary);
+                        Some((entry, dag, execution))
+                    }
+                    None => None,
+                }
             } else {
                 None
             };
 
-            if let Some((entry, entry_dag)) = scoped_entry {
+            if let Some((entry, entry_dag, execution)) = scoped_entry {
                 validate_compiled_resource_target(&compiled, build_target, Some(entry))?;
                 // Fix 2: the entry-scoped symbol is the fixed, collision-free
                 // `chelis_main` so a def named `main`/`free`/`chelis_*` links.
                 let entry_symbol = EXECUTION_ENTRY_C_SYMBOL;
-                reject_unsupported_effect_ops(&entry_dag, BuildTarget::C)?;
+                if execution.is_none() {
+                    reject_unsupported_effect_ops(&entry_dag, BuildTarget::C)?;
+                }
                 reject_symbolic_windowed_reduce(&entry_dag, BuildTarget::C)?;
                 reject_unsupported_reduce_window_precision(&entry_dag, BuildTarget::C)?;
                 reject_unsized_named_dims(&entry_dag, "c")?;
+                if let Some(plan) = execution {
+                    let verified = plan.verify_ownership().map_err(|error| {
+                        stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+                    })?;
+                    #[cfg(feature = "emission-observer")]
+                    crate::emission_observer::observe(
+                        &mut observer,
+                        &compiled.program,
+                        observed_host.as_ref(),
+                        crate::emission_observer::SelectedEmission::Dag {
+                            unfused: &entry_dag,
+                            selected: verified.emission(),
+                        },
+                    );
+                    let result = chelis_backend_c::codegen_evaluation_with_options(
+                        verified,
+                        entry_symbol,
+                        chelis_backend_c::CodegenOptions::default(),
+                    )
+                    .map_err(unsupported_stage_error)?;
+                    return Ok(compiled_execution_artifact(
+                        entry_symbol,
+                        None,
+                        compile_result_c(target, entry_symbol, &result),
+                        manifest_result(&compiled.program),
+                        execution_input_specs(&entry_dag, &result.input_labels)?,
+                        execution_output_specs(&entry_dag, &result.output_labels)?,
+                        result.symbolic_dims,
+                    ));
+                }
                 let specialized =
                     chelis_ir::specialize::specialize_for_exact_arithmetic(&entry_dag);
                 let fused = chelis_ir::fuse::fuse(&specialized);
@@ -2073,7 +2195,7 @@ fn execution_artifact_from_compiled_observed(
                 ));
             }
 
-            if let Some(host_program) = host_compiled.host.as_ref()
+            if let Some(host_program) = host_program
                 && (host_only || compiled.dag.roots().is_empty())
             {
                 let projected_host_program = match (&entry_lane_decline, strictness) {
@@ -2103,7 +2225,6 @@ fn execution_artifact_from_compiled_observed(
                     _ => None,
                 };
                 validate_compiled_resource_target(&compiled, build_target, resource_entry)?;
-                reject_unsupported_effect_ops_in_host_program(host_program, BuildTarget::C)?;
                 reject_unsupported_windowed_reductions_in_host_program(
                     host_program,
                     BuildTarget::C,
@@ -2112,19 +2233,47 @@ fn execution_artifact_from_compiled_observed(
                     .globals
                     .iter()
                     .all(|global| matches!(&global.ty, chelis_ir::ConcreteHostType::Scalar(_)));
-                let selected = projected_host_program
-                    .unwrap_or_else(|| host_compiled.host.take().expect("host branch selected"));
-                let selected = chelis_backend_c::prepare_host_program_for_codegen(selected)
-                    .map_err(unsupported_stage_error)?;
-                let verified = chelis_ir::ownership::verify_ownership(
+                let ownership = if let Some(plan) = execution_host.take() {
+                    let selected = match projected_host_program {
+                        Some(projected) => plan
+                            .project_functions(
+                                &projected
+                                    .functions
+                                    .iter()
+                                    .map(|function| function.name.clone())
+                                    .collect::<Vec<_>>(),
+                            )
+                            .map_err(|message| {
+                                stage_error("ownership", message, GeneralKind::CompileError)
+                            })?,
+                        None => plan,
+                    };
+                    reject_unsupported_effect_ops_in_host_execution_plan(
+                        &selected,
+                        BuildTarget::C,
+                    )?;
+                    let selected =
+                        chelis_backend_c::prepare_host_execution_plan_for_codegen(selected)
+                            .map_err(unsupported_stage_error)?;
+                    chelis_ir::ownership::lower_host_execution_ownership(
+                        &compiled.program,
+                        selected,
+                    )
+                } else {
+                    let selected = projected_host_program
+                        .unwrap_or_else(|| legacy_host.take().expect("ordinary C host selected"));
+                    reject_unsupported_effect_ops_in_host_program(&selected, BuildTarget::C)?;
+                    let selected = chelis_backend_c::prepare_host_program_for_codegen(selected)
+                        .map_err(unsupported_stage_error)?;
                     chelis_ir::ownership::lower_host_ownership(&compiled.program, selected)
-                        .map_err(|error| {
-                            stage_error("ownership", error.to_string(), GeneralKind::CompileError)
-                        })?,
-                )
+                }
                 .map_err(|error| {
                     stage_error("ownership", error.to_string(), GeneralKind::CompileError)
                 })?;
+                let verified =
+                    chelis_ir::ownership::verify_ownership(ownership).map_err(|error| {
+                        stage_error("ownership", error.to_string(), GeneralKind::CompileError)
+                    })?;
                 #[cfg(feature = "emission-observer")]
                 crate::emission_observer::observe(
                     &mut observer,
@@ -2237,15 +2386,11 @@ fn execution_artifact_from_compiled_observed(
                 return Err(reef_context_hip_unsupported_error());
             }
             validate_compiled_resource_target(&compiled, build_target, None)?;
-            let host_requires_host_backend = host_compiled
-                .host
-                .as_ref()
+            let host_requires_host_backend = host_program
                 .map(chelis_ir::host::host_program_requires_host_backend)
                 .unwrap_or(false);
-            let preferred_entry = host_compiled
-                .host
-                .as_ref()
-                .and_then(chelis_ir::host::preferred_tensor_entry_name);
+            let preferred_entry =
+                host_program.and_then(chelis_ir::host::preferred_tensor_entry_name);
             let preferred_entry_is_host = match preferred_entry {
                 Some(name) => {
                     crate::target_capability::hip_entry_lane(compiled.checked(), name)
@@ -2267,11 +2412,11 @@ fn execution_artifact_from_compiled_observed(
                 || (compiled.dag.roots().is_empty()
                     && preferred_entry_dag.is_none()
                     && host_requires_host_backend))
-                && let Some(host_program) = host_compiled.host.as_ref()
+                && let Some(host_program) = host_program
             {
                 reject_unsupported_effect_ops_in_host_program(host_program, BuildTarget::Hip)?;
                 reject_unsupported_hip_ops_in_host_program(host_program)?;
-                let selected = host_compiled.host.take().expect("host branch selected");
+                let selected = legacy_host.take().expect("host branch selected");
                 // The helper manifest is read before C payload selection so a
                 // Count-bearing helper reaches the HIP backend as its source
                 // DAG and is lowered exactly like a HIP tensor entry.
@@ -2605,6 +2750,8 @@ fn compile_rewritten_decls_in_context(
 
     Ok(CompiledSource {
         program: ManifestedProgram::new(new_checked, manifest, target),
+        host_execution: None,
+        host_ordinary: None,
         dag: lowered_parts.dag,
         evaluation_program,
         tensor_root_names: new_tensor_root_names,
@@ -3258,6 +3405,10 @@ pub fn result_envelope<T>(result: Result<T>) -> crate::schema::ApiEnvelope<T> {
 
 struct CompiledSource {
     program: ManifestedProgram,
+    // Private C carrier: no second host lowering may replace its execution
+    // metadata between source ingress and selected artifact emission.
+    host_execution: Option<chelis_ir::host::HostExecutionPlan>,
+    host_ordinary: Option<chelis_ir::host::ConcreteHostProgram>,
     dag: Dag,
     evaluation_program: Option<chelis_ir::lower::EvaluationProgram>,
     // Callable function-entry selection is a separate surface from value-root
@@ -3670,6 +3821,14 @@ fn compile_source_for_target(
     compile_source_scoped(source_kind, source, None, target)
 }
 
+fn compile_source_for_codegen(
+    source_kind: SourceKind,
+    source: &str,
+    target: Target,
+) -> Result<CompiledSource> {
+    compile_source_scoped_mode(source_kind, source, None, target, true)
+}
+
 /// Like [`compile_source`], but when `entry` is `Some`, prune the expanded
 /// program to the defs reachable from that named entry BEFORE the type
 /// checker runs. This is the WI-3 entrypoint-isolation path: it lets a caller
@@ -3684,17 +3843,54 @@ fn compile_source_scoped(
     entry: Option<&str>,
     target: Target,
 ) -> Result<CompiledSource> {
+    compile_source_scoped_mode(source_kind, source, entry, target, false)
+}
+
+fn compile_source_scoped_mode(
+    source_kind: SourceKind,
+    source: &str,
+    entry: Option<&str>,
+    target: Target,
+    codegen: bool,
+) -> Result<CompiledSource> {
+    // eval_for_target(C) still evaluates a value graph using a C manifest;
+    // requesting that manifest must not silently select native host emission.
+    let planned_c = codegen && target == Target::C;
     bail_if_cancelled("parse")?;
     let outcome = crate::pipeline::run_source(crate::pipeline::PipelineRequest {
         source_kind,
         source,
         entry,
-        goal: crate::pipeline::PipelineGoal::Lower(crate::pipeline::LoweringMode::AllowHostOnly),
+        goal: if planned_c {
+            crate::pipeline::PipelineGoal::FullCheck
+        } else {
+            crate::pipeline::PipelineGoal::Lower(crate::pipeline::LoweringMode::AllowHostOnly)
+        },
     })
     .map_err(pipeline_rejection_to_compiler_error)
     .map_err(|error| cancelled_or("check", error))?;
-    let crate::pipeline::PipelineOutcome::Lowered(lowered) = outcome else {
-        unreachable!("the lower goal returns only a lowered outcome")
+    let (lowered, host_ordinary, host_execution) = match outcome {
+        crate::pipeline::PipelineOutcome::Lowered(lowered) => (lowered, None, None),
+        crate::pipeline::PipelineOutcome::Checked(checked) if planned_c => {
+            // C execution selects host lowering here, before artifact emission.
+            // Preserve the host-only builtin diagnostic before lowering callbacks.
+            reject_host_only_builtins_before_host_lowering(checked.program(), BuildTarget::C)?;
+            let realizability = chelis_effects::realizability::infer_realizability(
+                checked.program(),
+                crate::target_capability::tensor_capable_prims(target),
+            );
+            let manifest = chelis_effects::realizability::compute_root_manifest(
+                checked.program(),
+                &realizability,
+            );
+            crate::pipeline::lower_checked_for_c_execution(
+                checked,
+                &manifest,
+                crate::pipeline::LoweringMode::AllowHostOnly,
+            )
+            .map_err(pipeline_rejection_to_compiler_error)?
+        }
+        _ => unreachable!("requested source goal returns checked C or lowered source"),
     };
     bail_if_cancelled("lower")?;
     // chelis#1079: realizability is a production phase boundary. The target
@@ -3727,6 +3923,8 @@ fn compile_source_scoped(
 
     Ok(CompiledSource {
         program: ManifestedProgram::new(checked, manifest, target),
+        host_execution,
+        host_ordinary,
         dag: lowered_parts.dag,
         evaluation_program,
         tensor_root_names: root_metadata.tensor_names().clone(),
@@ -4636,6 +4834,19 @@ pub fn reject_unsupported_effect_ops_in_host_program(
     target: BuildTarget,
 ) -> std::result::Result<(), CompilerError> {
     for_each_host_helper_dag(program, |dag| reject_unsupported_effect_ops(dag, target))
+}
+
+/// Only the C execution carrier may admit fixed-control helpers. Raw host/DAG
+/// entry points and device targets retain their independent rejection policy.
+pub fn reject_unsupported_effect_ops_in_host_execution_plan(
+    plan: &chelis_ir::host::HostExecutionPlan,
+    target: BuildTarget,
+) -> std::result::Result<(), CompilerError> {
+    if target == BuildTarget::C && !plan.has_unplanned_dropout_helper() {
+        Ok(())
+    } else {
+        reject_unsupported_effect_ops_in_host_program(plan.program(), target)
+    }
 }
 
 /// Apply both C windowed-reduction gates to every tensor-helper DAG emitted
@@ -8961,6 +9172,20 @@ b: tensor[2, f32] = b
         };
         assert_eq!(inputs_for("a"), ["a".to_string()].into_iter().collect());
         assert_eq!(inputs_for("b"), ["b".to_string()].into_iter().collect());
+    }
+
+    #[test]
+    fn c_manifest_evaluation_retains_its_value_root_ingress() {
+        let source = "input: tensor[2, f32] = input\n";
+        let compiled = compile_source_for_target(SourceKind::Surf, source, Target::C).unwrap();
+        assert!(compiled.host_execution.is_none());
+        assert!(!compiled.dag.roots().is_empty());
+        assert!(
+            compiled
+                .named_roots
+                .get(&crate::pipeline::IrName::new("input"))
+                .is_some()
+        );
     }
 
     #[test]

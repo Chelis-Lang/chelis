@@ -321,8 +321,37 @@ pub fn prepare_dag_for_codegen(
 pub fn prepare_host_program_for_codegen(
     mut program: chelis_ir::host::ConcreteHostProgram,
 ) -> Result<chelis_ir::host::ConcreteHostProgram, chelis_types::unsupported::Unsupported> {
+    prepare_concrete_host_program_for_codegen(&mut program, true)?;
+    Ok(program)
+}
+
+/// Select the exact nested C helper DAGs while retaining their lowering-owned
+/// fixed-control schedules. Rewrites are admitted only when every schedule
+/// still validates against the rewritten helper graph.
+pub fn prepare_host_execution_plan_for_codegen(
+    plan: chelis_ir::host::HostExecutionPlan,
+) -> Result<chelis_ir::host::HostExecutionPlan, chelis_types::unsupported::Unsupported> {
+    for helper in &plan.program().global_tensor_helpers {
+        chelis_ir::check_axis_sources(&helper.dag, chelis_types::unsupported::Stage::Codegen("c"))?;
+    }
+    for function in &plan.program().functions {
+        for helper in &function.tensor_helpers {
+            chelis_ir::check_axis_sources(
+                &helper.dag,
+                chelis_types::unsupported::Stage::Codegen("c"),
+            )?;
+        }
+    }
+    Ok(plan)
+}
+
+fn prepare_concrete_host_program_for_codegen(
+    program: &mut chelis_ir::host::ConcreteHostProgram,
+    specialize_exact_arithmetic: bool,
+) -> Result<(), chelis_types::unsupported::Unsupported> {
     fn prepare(
         helper: &mut chelis_ir::host::HostTensorHelper,
+        specialize_exact_arithmetic: bool,
     ) -> Result<(), chelis_types::unsupported::Unsupported> {
         // A shape-derived BLAS summary is not proof of the primitive
         // contraction's arithmetic. Keep the source graph as the payload.
@@ -332,7 +361,11 @@ pub fn prepare_host_program_for_codegen(
         ) {
             helper.specialization = None;
         }
-        let specialized = chelis_ir::specialize::specialize_for_exact_arithmetic(&helper.dag);
+        let specialized = if specialize_exact_arithmetic {
+            chelis_ir::specialize::specialize_for_exact_arithmetic(&helper.dag)
+        } else {
+            helper.dag.clone()
+        };
         chelis_ir::check_axis_sources(
             &specialized,
             chelis_types::unsupported::Stage::Codegen("c"),
@@ -341,7 +374,7 @@ pub fn prepare_host_program_for_codegen(
         Ok(())
     }
     for helper in &mut program.global_tensor_helpers {
-        prepare(helper)?;
+        prepare(helper, specialize_exact_arithmetic)?;
     }
     for function in &mut program.functions {
         // Wrapper propagation can lift a helper's shortcut into a function
@@ -353,10 +386,10 @@ pub fn prepare_host_program_for_codegen(
             function.specialization = None;
         }
         for helper in &mut function.tensor_helpers {
-            prepare(helper)?;
+            prepare(helper, specialize_exact_arithmetic)?;
         }
     }
-    Ok(program)
+    Ok(())
 }
 
 #[cfg(test)]

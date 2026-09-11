@@ -49,20 +49,14 @@ use tempfile::{TempDir, tempdir};
 /// than skipping the file: a bare skip stops measuring quietly, and deleting
 /// the assertion would make the census's claim smaller than its name.
 ///
-/// Both entries are here because compiled `dropout` kernels are chelis#1192:
-/// the gate refuses before any C exists, so there is nothing to read guards
-/// out of. When #1192 lands the builds succeed, these rows fail, and the two
-/// examples join the censused set in the same change.
-const REFUSED_BY_A_CAPABILITY_GATE: &[(&str, &str)] = &[
-    (
-        "dropout_fixed_stream.ch",
-        "unimplemented chelis#1192: compiled `dropout` kernels are not implemented",
-    ),
-    (
-        "dropout_staged_claim.ch",
-        "unimplemented chelis#1192: compiled `dropout` kernels are not implemented",
-    ),
-];
+/// The staged Dropout example still reaches chelis#1192 before any C exists.
+/// Fixed-control Dropout is compiled and joins the ordinary guard census.
+/// When the staged build succeeds, this row fails and that example must join
+/// the censused set too.
+const REFUSED_BY_A_CAPABILITY_GATE: &[(&str, &str)] = &[(
+    "dropout_staged_claim.ch",
+    "unimplemented chelis#1192: compiled `dropout` kernels are not implemented",
+)];
 
 /// A two-row operand: `min(2, 4) = 2`.
 const TWO_BY_FOUR: &str = "[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]]";

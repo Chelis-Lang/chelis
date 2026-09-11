@@ -271,6 +271,66 @@ fn verified_host_from_source(source: &str) -> chelis_ir::ownership::VerifiedHost
     .expect("verify host ownership")
 }
 
+fn verified_execution_host_from_source(source: &str) -> chelis_ir::ownership::VerifiedHostProgram {
+    let declarations = chelis_surf::parser::parse_str(source).expect("parse host source");
+    let deep = chelis_surf::desugar::desugar_program(&declarations);
+    let checked = chelis_types::check_typed_program(&deep)
+        .unwrap_or_else(|errors| panic!("check host source: {:?}", errors.errors));
+    let checked = chelis_effects::check_program(&checked).expect("effects host source");
+    let checked = chelis_types::check_linearity(&checked).expect("linearity host source");
+    let realizability =
+        chelis_effects::realizability::infer_realizability(&checked, crate::TENSOR_CAPABLE_PRIMS);
+    let manifest = chelis_effects::realizability::compute_root_manifest(&checked, &realizability);
+    let (_dag, plan) =
+        chelis_ir::host::try_lower_execution_program_with_manifest(&checked, &manifest)
+            .expect("lower planned host source");
+    let plan = crate::prepare_host_execution_plan_for_codegen(
+        plan.expect("source uses the planned host lane"),
+    )
+    .expect("select planned C host payload");
+    assert!(!plan.has_unplanned_dropout_helper());
+    let manifested = chelis_types::manifest::ManifestedProgram::new(
+        checked,
+        manifest,
+        chelis_types::types::Target::C,
+    );
+    chelis_ir::ownership::verify_ownership(
+        chelis_ir::ownership::lower_host_execution_ownership(&manifested, plan)
+            .expect("lower planned host ownership"),
+    )
+    .expect("verify planned host ownership")
+}
+
+#[test]
+fn fixed_control_host_helper_uses_the_active_invocation_rng() {
+    let verified = verified_execution_host_from_source(
+        r#"
+def keep[p: Float](x: tensor[4, p]) -> tensor[4, p] = dropout(x, cast(0.5, p))
+result = with seed(42i64) {
+  keep(to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32]))
+}
+"#,
+    );
+    let c = crate::codegen_host_program(&verified, "fixed_host")
+        .expect("emit planned host helper")
+        .c_source;
+    assert!(
+        c.contains("if (__chelis_rng == NULL || !__chelis_rng->active)"),
+        "scope-0 execution must distinguish inactive state from active seed zero:\n{c}"
+    );
+    assert!(
+        c.contains("__chelis_fixed_seed = __chelis_rng->seed")
+            && c.contains("__chelis_rng->counter = __chelis_fixed_counter"),
+        "the private helper must consume and commit its caller-owned stream:\n{c}"
+    );
+    assert_eq!(
+        c.matches("static inline uint64_t chelis_dropout_mix")
+            .count(),
+        1,
+        "fixed-control sampler support is emitted once per translation unit"
+    );
+}
+
 fn emitted_function_body<'a>(source: &'a str, name: &str) -> &'a str {
     for (offset, _) in source.match_indices(&format!("{name}(")) {
         let tail = &source[offset..];

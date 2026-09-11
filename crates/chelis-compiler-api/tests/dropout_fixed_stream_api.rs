@@ -59,7 +59,10 @@ fn unrelated_scalar_capture_preserves_public_acceptance_and_next_draw() {
 }
 
 #[test]
-fn generic_static_rate_cast_keeps_precise_public_rejection_until_host_transport() {
+fn generic_static_rate_cast_keeps_the_remaining_evaluator_gap_explicit() {
+    // chelis#1764 remains open: compiled C now specializes this rate, but the
+    // evaluator's generic host call still cannot dispatch the Dropout builtin.
+    // Keep the exact residual rejection visible; C success is not eval parity.
     for dtype in ["f32", "f64"] {
         let source = format!(
             "def keep[p: Float](x: tensor[4, p]) -> tensor[4, p] = dropout(x, cast(0.5, p))\n\
@@ -74,12 +77,12 @@ fn generic_static_rate_cast_keeps_precise_public_rejection_until_host_transport(
             &["main".into()],
         )
         .unwrap_err();
-        assert_eq!(error.stage, "lower", "{error:?}");
+        assert_eq!(error.stage, "eval", "{error:?}");
         assert!(error.transcript.is_empty());
         assert!(
             error.errors.iter().any(|diagnostic| diagnostic
                 .message
-                .contains("requires a statically-resolvable rate")),
+                .contains("unknown runtime name `dropout`")),
             "{error:?}"
         );
     }

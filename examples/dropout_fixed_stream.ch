@@ -1,4 +1,4 @@
--- Evaluator-only fixed stream: backward reuses the forward mask.
+-- Fixed stream in the evaluator and C: backward reuses the forward mask.
 def loss(x: tensor[4, f32]) -> tensor[f32] = x |> dropout(0.5f32) |> sum(0)
 def main() =
   with seed(42i64) {

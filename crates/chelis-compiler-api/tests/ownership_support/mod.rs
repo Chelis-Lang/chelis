@@ -93,11 +93,12 @@ pub fn emit_selected(source: &str, entry: &str) -> String {
         entry_name: Some(entry.into()),
     })
     .unwrap_or_else(|e| panic!("{entry}: {e:?}"));
+    let generated_path = format!("{}.c", artifact.compile_result.entry_name);
     artifact
         .compile_result
         .files
         .into_iter()
-        .find(|f| f.path == format!("{entry}.c"))
+        .find(|f| f.path == generated_path)
         .expect("selected C file")
         .contents
 }
@@ -106,10 +107,19 @@ pub fn run(source: &str, driver: &str) -> Value {
     run_with_peers(source, &[], driver)
 }
 
+#[allow(dead_code)]
+pub fn run_program(source: &str) -> (Value, String) {
+    execute_program(source, &[])
+}
+
 pub fn run_with_peers(source: &str, peers: &[String], driver: &str) -> Value {
+    execute_program(&format!("{source}\n{PRELUDE}\n{driver}"), peers).0
+}
+
+fn execute_program(source: &str, peers: &[String]) -> (Value, String) {
     let dir = tempfile::tempdir().unwrap();
     let c = dir.path().join("probe.c");
-    fs::write(&c, format!("{source}\n{PRELUDE}\n{driver}")).unwrap();
+    fs::write(&c, source).unwrap();
     let binary = dir.path().join("probe");
     let mut cc = Command::new("cc");
     cc.args(["-std=c11", "-O0"])
@@ -159,10 +169,13 @@ pub fn run_with_peers(source: &str, peers: &[String], driver: &str) -> Value {
         .collect();
     assert_eq!(rows[0]["schema"], "compiled-value-ownership-ledger-v1");
     assert_eq!(rows.iter().filter(|r| r["event"] == "summary").count(), 1);
-    let summary = rows.last().unwrap().clone();
+    let summary = rows.last().expect("summary row").clone();
     assert_eq!(summary["event"], "summary");
     assert_eq!(summary["invalid_operations"], 0, "{summary}");
-    summary
+    (
+        summary,
+        String::from_utf8(output.stdout).expect("utf-8 stdout"),
+    )
 }
 
 pub fn balanced(summary: &Value) {

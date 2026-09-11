@@ -408,6 +408,14 @@ pub(crate) fn emit_host_abi_program(
 
     body.extend(function_bodies);
 
+    if helper_requirements.needs_fixed_dropout_helpers {
+        let mut fixed_helpers = Vec::new();
+        append_fixed_dropout_helpers(&mut fixed_helpers);
+        fixed_helpers.push(String::new());
+        fixed_helpers.extend(body);
+        body = fixed_helpers;
+    }
+
     if !program.globals.is_empty() {
         let hoisted: UnordSet<&str> = captured_globals.iter().map(String::as_str).collect();
         let helper_output_counts = (0..program.global_tensor_helpers.len())
@@ -711,6 +719,14 @@ fn append_uniform_sample_helper(out: &mut Vec<String>) {
     out.push(
         "#define CHELIS_EFFECTIVE_UNIFORM_SEED(seed) chelis_effective_uniform_seed(__chelis_rng, seed)"
             .to_string(),
+    );
+}
+
+fn append_fixed_dropout_helpers(out: &mut Vec<String>) {
+    out.extend(
+        crate::emit::FIXED_DROPOUT_HELPERS
+            .iter()
+            .map(|line| line.to_string()),
     );
 }
 
@@ -1581,12 +1597,14 @@ fn emit_host_declarations(
 struct HelperRequirements {
     needs_blas_header: bool,
     needs_math_header: bool,
+    needs_fixed_dropout_helpers: bool,
 }
 
 impl HelperRequirements {
     fn merge(&mut self, other: Self) {
         self.needs_blas_header |= other.needs_blas_header;
         self.needs_math_header |= other.needs_math_header;
+        self.needs_fixed_dropout_helpers |= other.needs_fixed_dropout_helpers;
     }
 }
 
@@ -1600,11 +1618,14 @@ fn append_helper(
     helper_name: &str,
 ) -> Result<HelperRequirements, Unsupported> {
     let helper_name = random_helper_name(helper_name);
-    if let Some((_input_name, _input_ty)) = verified_identity_helper_input(helper, verified.dag()) {
+    if verified.execution().is_none()
+        && let Some((_input_name, _input_ty)) =
+            verified_identity_helper_input(helper, verified.dag())
+    {
         out.push(format!(
-            "static void {}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out, chelis_rng_state *__chelis_rng) {{",
-            helper_name,
-        ));
+                "static void {}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out, chelis_rng_state *__chelis_rng) {{",
+                helper_name,
+            ));
         out.push("    (void)n_in;".to_string());
         out.push("    (void)n_out;".to_string());
         out.push("    (void)__chelis_rng;".to_string());
@@ -1619,27 +1640,32 @@ fn append_helper(
     // ensures the kernel function itself gets `static` linkage so that when
     // compiled with `-shared -fPIC` the symbol is not exported via PLT.
     let dag = verified.dag();
-    let uses_blas = dag
-        .nodes()
-        .iter()
-        .any(|node| matches!(node.op, RiscOp::BlasMatmul { .. }));
-    let helper_src = CEmitter::emit_verified_dag_with_options(
-        dag,
-        &helper_name,
-        crate::CodegenOptions {
-            use_blas: uses_blas,
-            static_entry: true,
-            ..crate::CodegenOptions::default()
-        },
-    )?;
+    let uses_blas = verified.execution().is_none()
+        && dag
+            .nodes()
+            .iter()
+            .any(|node| matches!(node.op, RiscOp::BlasMatmul { .. }));
+    let options = crate::CodegenOptions {
+        use_blas: uses_blas,
+        static_entry: true,
+        ..crate::CodegenOptions::default()
+    };
+    let helper_src = if let Some(execution) = verified.execution() {
+        CEmitter::emit_verified_evaluation_with_options(dag, execution, &helper_name, options)?
+    } else {
+        CEmitter::emit_verified_dag_with_options(dag, &helper_name, options)?
+    };
     // The CEmitter prepends dtype-specific uniform sampling helpers to
     // every DAG it emits so that a standalone-emitted kernel
     // stays self-contained. When multiple helpers get concatenated into a
     // single `main.c` that duplicates the definition and gcc rejects the
     // redefinition. We filter the prelude out here and rely on
     // `emit_host_program` to emit exactly one copy at file scope.
-    let mut skipping_uniform_prelude = false;
-    let mut requirements = HelperRequirements::default();
+    let mut skipping_helper_prelude = false;
+    let mut requirements = HelperRequirements {
+        needs_fixed_dropout_helpers: verified.execution().is_some(),
+        ..HelperRequirements::default()
+    };
     for line in helper_src.lines() {
         if line.starts_with("#include ") {
             if line.contains("\"chelis_blas.h\"") {
@@ -1650,13 +1676,19 @@ fn append_helper(
             }
             continue;
         }
-        if line == "/* CHELIS_UNIFORM_HELPERS_BEGIN */" {
-            skipping_uniform_prelude = true;
+        if matches!(
+            line,
+            "/* CHELIS_UNIFORM_HELPERS_BEGIN */" | "/* CHELIS_DROPOUT_HELPERS_BEGIN */"
+        ) {
+            skipping_helper_prelude = true;
             continue;
         }
-        if skipping_uniform_prelude {
-            if line == "/* CHELIS_UNIFORM_HELPERS_END */" {
-                skipping_uniform_prelude = false;
+        if skipping_helper_prelude {
+            if matches!(
+                line,
+                "/* CHELIS_UNIFORM_HELPERS_END */" | "/* CHELIS_DROPOUT_HELPERS_END */"
+            ) {
+                skipping_helper_prelude = false;
             }
             continue;
         }

@@ -1544,6 +1544,84 @@ fn verified_host_codegen_program(
     Ok(chelis_ir::ownership::verify_ownership(lowered)?)
 }
 
+fn verified_host_execution_codegen_program(
+    checked: &chelis_types::CheckedProgram,
+    manifest: &chelis_types::manifest::RootManifest,
+    program: chelis_ir::host::HostExecutionPlan,
+) -> Result<chelis_ir::ownership::VerifiedHostProgram, Box<dyn std::error::Error>> {
+    let manifested = chelis_types::manifest::ManifestedProgram::new(
+        checked.clone(),
+        manifest.clone(),
+        chelis_types::types::Target::C,
+    );
+    let selected = chelis_backend_c::prepare_host_execution_plan_for_codegen(program)?;
+    let lowered = chelis_ir::ownership::lower_host_execution_ownership(&manifested, selected)?;
+    Ok(chelis_ir::ownership::verify_ownership(lowered)?)
+}
+
+fn execution_host_requires_host_backend(
+    checked: &chelis_types::CheckedProgram,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let manifest = build_root_manifest(checked, BuildTarget::C);
+    let (_, host) = chelis_ir::host::try_lower_execution_program_with_manifest(checked, &manifest)
+        .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?;
+    Ok(host
+        .as_ref()
+        .map(|host| chelis_ir::host::host_program_requires_host_backend(host.program()))
+        .unwrap_or(false))
+}
+
+type CliLoweredBuildProgram = (
+    chelis_ir::Dag,
+    Option<chelis_ir::host::ConcreteHostProgram>,
+    Option<chelis_ir::host::HostExecutionPlan>,
+);
+
+fn lower_build_program_for_cli(
+    checked: &chelis_compiler_api::pipeline::CheckedCompilation,
+    manifest: &chelis_types::manifest::RootManifest,
+    target: BuildTarget,
+) -> Result<CliLoweredBuildProgram, Box<dyn std::error::Error>> {
+    if target == BuildTarget::C {
+        // This mode asks the shared pipeline to select the CLI's ordinary
+        // host/strict policy from the actual collected host. Planned helpers
+        // instead use its explicit host binding, with no standalone root zip.
+        let (lowered, mut ordinary_host, plan) =
+            chelis_compiler_api::pipeline::lower_checked_for_c_execution(
+                checked.clone(),
+                manifest,
+                chelis_compiler_api::pipeline::LoweringMode::AllowHostBackend,
+            )
+            .map_err(|rejection| boxed_string_error(rejection.to_string()))?;
+        let host = plan
+            .as_ref()
+            .map(chelis_ir::host::HostExecutionPlan::program)
+            .or(ordinary_host.as_ref());
+        emit_summary_rejections(host);
+        if let Some(host) = ordinary_host.as_mut() {
+            apply_manifest_display_roots(host, manifest, target)?;
+        }
+        let plan = plan
+            .map(|plan| {
+                plan.try_transform_globals(|globals, functions| {
+                    apply_manifest_display_roots_to_globals(globals, functions, manifest, target)
+                })
+            })
+            .transpose()?;
+        Ok((lowered.into_dag(), ordinary_host, plan))
+    } else {
+        let mut compiled =
+            chelis_ir::host::try_lower_compiled_program_with_manifest(checked.program(), manifest)
+                .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?;
+        emit_summary_rejections(compiled.host.as_ref());
+        let dag = lower_checked_for_cli(checked.clone(), compiled.host.as_ref())?;
+        if let Some(host) = compiled.host.as_mut() {
+            apply_manifest_display_roots(host, manifest, target)?;
+        }
+        Ok((dag, compiled.host, None))
+    }
+}
+
 fn verified_dag_codegen_program(
     dag: chelis_ir::dag::Dag,
 ) -> Result<chelis_ir::ownership::VerifiedDagProgram, Box<dyn std::error::Error>> {
@@ -3536,12 +3614,7 @@ fn cmd_build(
                     target,
                 ),
             )?;
-            chelis_ir::host::try_lower_compiled_program(&full_checked)
-                .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?
-                .host
-                .as_ref()
-                .map(chelis_ir::host::host_program_requires_host_backend)
-                .unwrap_or(false)
+            execution_host_requires_host_backend(&full_checked)?
         } else {
             false
         };
@@ -3596,18 +3669,11 @@ fn cmd_build(
             checked, target,
         ),
     )?;
-    let mut compiled_program =
-        chelis_ir::host::try_lower_compiled_program_with_manifest(checked, &root_manifest)
-            .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?;
-    emit_summary_rejections(compiled_program.host.as_ref());
-    let mut dag =
-        lower_checked_for_cli(checked_compilation.clone(), compiled_program.host.as_ref())?;
+    let (mut dag, mut compiled_host, mut execution_host) =
+        lower_build_program_for_cli(&checked_compilation, &root_manifest, target)?;
     let tensor_root_names = checked_compilation.root_metadata().tensor_names().clone();
     let entry_root_names =
         lowered_root_names_from_decls(&entry_decls, &deep_exprs, checked.type_env());
-    if let Some(host_program) = compiled_program.host.as_mut() {
-        apply_manifest_display_roots(host_program, &root_manifest, target)?;
-    }
     let selected = tensor_root_names
         .iter()
         .enumerate()
@@ -3632,7 +3698,10 @@ fn cmd_build(
         BuildTarget::C => {
             let c_name = c_source_name::CSourceName::from_path(file);
             let func_name = c_name.symbol();
-            if let Some(host_program) = compiled_program.host.as_mut()
+            if let Some(host_program) = execution_host
+                .as_ref()
+                .map(chelis_ir::host::HostExecutionPlan::program)
+                .or(compiled_host.as_ref())
                 && (requires_main
                     || chelis_ir::host::host_program_requires_host_backend(host_program)
                     || dag.roots().is_empty()
@@ -3668,25 +3737,32 @@ fn cmd_build(
                     .into());
                 }
                 apply_shared_host_builtin_gates(host_program, BuildTarget::C)?;
-                shared_compiler_gate(
-                    chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_program(
+                shared_compiler_gate(match execution_host.as_ref() {
+                    Some(plan) => chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_execution_plan(
+                        plan,
+                        BuildTarget::C,
+                    ),
+                    None => chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_program(
                         host_program,
                         BuildTarget::C,
                     ),
-                )?;
+                })?;
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_windowed_reductions_in_host_program(
                         host_program,
                         BuildTarget::C,
                     ),
                 )?;
-                let selected = std::mem::take(host_program);
-                let verified = verified_host_codegen_program(
-                    checked,
-                    &root_manifest,
-                    BuildTarget::C,
-                    selected,
-                )?;
+                let verified = if let Some(plan) = execution_host.take() {
+                    verified_host_execution_codegen_program(checked, &root_manifest, plan)?
+                } else {
+                    verified_host_codegen_program(
+                        checked,
+                        &root_manifest,
+                        BuildTarget::C,
+                        compiled_host.take().expect("ordinary C host selected"),
+                    )?
+                };
                 let result = chelis_backend_c::codegen_host_program(&verified, func_name)?;
                 cmd_build_c_result(result, &c_name, output, &symbolic_dims, requires_main)
             } else {
@@ -3703,7 +3779,7 @@ fn cmd_build(
             }
         }
         BuildTarget::Hip => {
-            if let Some(host_program) = compiled_program.host.as_ref() {
+            if let Some(host_program) = compiled_host.as_ref() {
                 apply_shared_host_builtin_gates(host_program, BuildTarget::Hip)?;
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_program(
@@ -3717,8 +3793,7 @@ fn cmd_build(
                     ),
                 )?;
             }
-            let host_requires_host_backend = compiled_program
-                .host
+            let host_requires_host_backend = compiled_host
                 .as_ref()
                 .map(chelis_ir::host::host_program_requires_host_backend)
                 .unwrap_or(false);
@@ -3727,8 +3802,7 @@ fn cmd_build(
             // back to the last fn and silently drops the others. This is a
             // known HIP backend limitation — the backend is single-entry
             // by design. Tracked as a residual issue.
-            let preferred_entry = compiled_program
-                .host
+            let preferred_entry = compiled_host
                 .as_ref()
                 .and_then(chelis_ir::host::preferred_tensor_entry_name);
             let preferred_entry_is_host = match preferred_entry {
@@ -3749,7 +3823,7 @@ fn cmd_build(
                 || (dag.roots().is_empty()
                     && preferred_entry_dag.is_none()
                     && host_requires_host_backend))
-                && let Some(host_program) = compiled_program.host.as_mut()
+                && let Some(host_program) = compiled_host.as_mut()
             {
                 let selected = std::mem::take(host_program);
                 // The helper manifest is read before C payload selection so a
@@ -3772,10 +3846,7 @@ fn cmd_build(
                 } else if !dag.roots().is_empty() {
                     dag.clone()
                 } else {
-                    lower_checked_for_cli(
-                        checked_compilation.clone(),
-                        compiled_program.host.as_ref(),
-                    )?
+                    lower_checked_for_cli(checked_compilation.clone(), compiled_host.as_ref())?
                 };
                 hip_dag = chelis_ir::optimize::dead_code_eliminate(&hip_dag);
                 shared_compiler_gate(
@@ -3800,7 +3871,7 @@ fn cmd_build(
             }
         }
         BuildTarget::Metal => {
-            if let Some(host_program) = compiled_program.host.as_ref() {
+            if let Some(host_program) = compiled_host.as_ref() {
                 apply_shared_host_builtin_gates(host_program, BuildTarget::Metal)?;
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_program(
@@ -3814,8 +3885,7 @@ fn cmd_build(
                     ),
                 )?;
             }
-            let host_requires_host_backend = compiled_program
-                .host
+            let host_requires_host_backend = compiled_host
                 .as_ref()
                 .map(chelis_ir::host::host_program_requires_host_backend)
                 .unwrap_or(false);
@@ -3824,13 +3894,12 @@ fn cmd_build(
             // a Metal DAG entry, so unsupported recursive function values are
             // rejected instead of being silently dropped (#879). A genuinely
             // host-only program keeps the existing fallback artifact path.
-            let preferred_entry_dag = compiled_program
-                .host
+            let preferred_entry_dag = compiled_host
                 .as_ref()
                 .and_then(chelis_ir::host::preferred_tensor_entry_name)
                 .and_then(|name| chelis_ir::host::lower_named_tensor_entry_dag(checked, name));
             let validated_host = if host_requires_host_backend {
-                if let Some(selected) = compiled_program.host.take() {
+                if let Some(selected) = compiled_host.take() {
                     // The helper manifest is read before C payload selection
                     // so a Count-bearing helper reaches the Metal backend as
                     // its source DAG and is lowered exactly like a Metal
@@ -3864,10 +3933,7 @@ fn cmd_build(
                 } else if !dag.roots().is_empty() {
                     dag.clone()
                 } else {
-                    lower_checked_for_cli(
-                        checked_compilation.clone(),
-                        compiled_program.host.as_ref(),
-                    )?
+                    lower_checked_for_cli(checked_compilation.clone(), compiled_host.as_ref())?
                 };
                 metal_dag = chelis_ir::optimize::dead_code_eliminate(&metal_dag);
                 shared_compiler_gate(
@@ -3936,12 +4002,7 @@ fn cmd_build_deep(
                     target,
                 ),
             )?;
-            chelis_ir::host::try_lower_compiled_program(&full_checked)
-                .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?
-                .host
-                .as_ref()
-                .map(chelis_ir::host::host_program_requires_host_backend)
-                .unwrap_or(false)
+            execution_host_requires_host_backend(&full_checked)?
         } else {
             false
         };
@@ -3964,17 +4025,10 @@ fn cmd_build_deep(
             checked, target,
         ),
     )?;
-    let mut compiled_program =
-        chelis_ir::host::try_lower_compiled_program_with_manifest(checked, &root_manifest)
-            .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?;
-    emit_summary_rejections(compiled_program.host.as_ref());
-    let mut dag =
-        lower_checked_for_cli(checked_compilation.clone(), compiled_program.host.as_ref())?;
+    let (mut dag, mut compiled_host, mut execution_host) =
+        lower_build_program_for_cli(&checked_compilation, &root_manifest, target)?;
     let tensor_root_names = checked_compilation.root_metadata().tensor_names().clone();
     let entry_root_names = lowered_root_names_from_exprs(&entry_deep_exprs, checked.type_env());
-    if let Some(host_program) = compiled_program.host.as_mut() {
-        apply_manifest_display_roots(host_program, &root_manifest, target)?;
-    }
     let selected = tensor_root_names
         .iter()
         .enumerate()
@@ -3999,7 +4053,10 @@ fn cmd_build_deep(
         BuildTarget::C => {
             let c_name = c_source_name::CSourceName::from_path(file);
             let func_name = c_name.symbol();
-            if let Some(host_program) = compiled_program.host.as_mut()
+            if let Some(host_program) = execution_host
+                .as_ref()
+                .map(chelis_ir::host::HostExecutionPlan::program)
+                .or(compiled_host.as_ref())
                 && (requires_main
                     || chelis_ir::host::host_program_requires_host_backend(host_program)
                     || dag.roots().is_empty()
@@ -4021,25 +4078,32 @@ fn cmd_build_deep(
                     .into());
                 }
                 apply_shared_host_builtin_gates(host_program, BuildTarget::C)?;
-                shared_compiler_gate(
-                    chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_program(
+                shared_compiler_gate(match execution_host.as_ref() {
+                    Some(plan) => chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_execution_plan(
+                        plan,
+                        BuildTarget::C,
+                    ),
+                    None => chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_program(
                         host_program,
                         BuildTarget::C,
                     ),
-                )?;
+                })?;
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_windowed_reductions_in_host_program(
                         host_program,
                         BuildTarget::C,
                     ),
                 )?;
-                let selected = std::mem::take(host_program);
-                let verified = verified_host_codegen_program(
-                    checked,
-                    &root_manifest,
-                    BuildTarget::C,
-                    selected,
-                )?;
+                let verified = if let Some(plan) = execution_host.take() {
+                    verified_host_execution_codegen_program(checked, &root_manifest, plan)?
+                } else {
+                    verified_host_codegen_program(
+                        checked,
+                        &root_manifest,
+                        BuildTarget::C,
+                        compiled_host.take().expect("ordinary C host selected"),
+                    )?
+                };
                 let result = chelis_backend_c::codegen_host_program(&verified, func_name)?;
                 cmd_build_c_result(result, &c_name, output, &symbolic_dims, requires_main)
             } else {
@@ -4056,7 +4120,7 @@ fn cmd_build_deep(
             }
         }
         BuildTarget::Hip => {
-            if let Some(host_program) = compiled_program.host.as_ref() {
+            if let Some(host_program) = compiled_host.as_ref() {
                 apply_shared_host_builtin_gates(host_program, BuildTarget::Hip)?;
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_program(
@@ -4070,13 +4134,11 @@ fn cmd_build_deep(
                     ),
                 )?;
             }
-            let host_requires_host_backend = compiled_program
-                .host
+            let host_requires_host_backend = compiled_host
                 .as_ref()
                 .map(chelis_ir::host::host_program_requires_host_backend)
                 .unwrap_or(false);
-            let preferred_entry = compiled_program
-                .host
+            let preferred_entry = compiled_host
                 .as_ref()
                 .and_then(chelis_ir::host::preferred_tensor_entry_name);
             let preferred_entry_is_host = match preferred_entry {
@@ -4097,7 +4159,7 @@ fn cmd_build_deep(
                 || (dag.roots().is_empty()
                     && preferred_entry_dag.is_none()
                     && host_requires_host_backend))
-                && let Some(host_program) = compiled_program.host.as_mut()
+                && let Some(host_program) = compiled_host.as_mut()
             {
                 let selected = std::mem::take(host_program);
                 // The helper manifest is read before C payload selection so a
@@ -4120,10 +4182,7 @@ fn cmd_build_deep(
                 } else if !dag.roots().is_empty() {
                     dag.clone()
                 } else {
-                    lower_checked_for_cli(
-                        checked_compilation.clone(),
-                        compiled_program.host.as_ref(),
-                    )?
+                    lower_checked_for_cli(checked_compilation.clone(), compiled_host.as_ref())?
                 };
                 hip_dag = chelis_ir::optimize::dead_code_eliminate(&hip_dag);
                 shared_compiler_gate(
@@ -4148,7 +4207,7 @@ fn cmd_build_deep(
             }
         }
         BuildTarget::Metal => {
-            if let Some(host_program) = compiled_program.host.as_ref() {
+            if let Some(host_program) = compiled_host.as_ref() {
                 apply_shared_host_builtin_gates(host_program, BuildTarget::Metal)?;
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_program(
@@ -4162,18 +4221,16 @@ fn cmd_build_deep(
                     ),
                 )?;
             }
-            let host_requires_host_backend = compiled_program
-                .host
+            let host_requires_host_backend = compiled_host
                 .as_ref()
                 .map(chelis_ir::host::host_program_requires_host_backend)
                 .unwrap_or(false);
-            let preferred_entry_dag = compiled_program
-                .host
+            let preferred_entry_dag = compiled_host
                 .as_ref()
                 .and_then(chelis_ir::host::preferred_tensor_entry_name)
                 .and_then(|name| chelis_ir::host::lower_named_tensor_entry_dag(checked, name));
             let validated_host = if host_requires_host_backend {
-                if let Some(selected) = compiled_program.host.take() {
+                if let Some(selected) = compiled_host.take() {
                     // The helper manifest is read before C payload selection
                     // so a Count-bearing helper reaches the Metal backend as
                     // its source DAG and is lowered exactly like a Metal
@@ -4207,10 +4264,7 @@ fn cmd_build_deep(
                 } else if !dag.roots().is_empty() {
                     dag.clone()
                 } else {
-                    lower_checked_for_cli(
-                        checked_compilation.clone(),
-                        compiled_program.host.as_ref(),
-                    )?
+                    lower_checked_for_cli(checked_compilation.clone(), compiled_host.as_ref())?
                 };
                 metal_dag = chelis_ir::optimize::dead_code_eliminate(&metal_dag);
                 shared_compiler_gate(
@@ -11216,11 +11270,25 @@ fn apply_manifest_display_roots(
     manifest: &chelis_types::manifest::RootManifest,
     target: BuildTarget,
 ) -> Result<(), chelis_types::unsupported::Unsupported> {
+    apply_manifest_display_roots_to_globals(
+        &mut program.globals,
+        &program.functions,
+        manifest,
+        target,
+    )
+}
+
+fn apply_manifest_display_roots_to_globals(
+    globals: &mut Vec<chelis_ir::host::ConcreteHostBinding>,
+    functions: &[chelis_ir::host::ConcreteHostFunction],
+    manifest: &chelis_types::manifest::RootManifest,
+    target: BuildTarget,
+) -> Result<(), chelis_types::unsupported::Unsupported> {
     use chelis_ir::host::{HostBinding, HostExpr, HostExprKind};
     use chelis_types::types::Lane;
 
     let mut represented_defs = std::collections::BTreeSet::new();
-    for binding in &mut program.globals {
+    for binding in globals.iter_mut() {
         binding.display_name = None;
         binding.display_roots = manifest
             .entries
@@ -11263,11 +11331,7 @@ fn apply_manifest_display_roots(
             .first()
             .copied()
             .expect("host def came from one manifest entry");
-        let Some(function) = program
-            .functions
-            .iter()
-            .find(|function| function.name == def_name)
-        else {
+        let Some(function) = functions.iter().find(|function| function.name == def_name) else {
             return Err(build_unavailable_root_error(
                 first,
                 target,
@@ -11299,12 +11363,8 @@ fn apply_manifest_display_roots(
             .map(manifest_host_display_root)
             .collect();
         let mut binding_name = format!("__chelis_manifest_observation_{observation_index}");
-        while program
-            .globals
-            .iter()
-            .any(|binding| binding.name == binding_name)
-            || program
-                .functions
+        while globals.iter().any(|binding| binding.name == binding_name)
+            || functions
                 .iter()
                 .any(|function| function.name == binding_name)
         {
@@ -11336,8 +11396,7 @@ fn apply_manifest_display_roots(
             .iter()
             .position(|entry| entry.def_name == def_name)
             .expect("host def came from the manifest");
-        let insertion_index = program
-            .globals
+        let insertion_index = globals
             .iter()
             .position(|existing| {
                 let existing_def = observation_defs
@@ -11350,8 +11409,8 @@ fn apply_manifest_display_roots(
                     .position(|entry| entry.def_name == existing_def)
                     .is_some_and(|index| index > manifest_index)
             })
-            .unwrap_or(program.globals.len());
-        program.globals.insert(insertion_index, binding);
+            .unwrap_or(globals.len());
+        globals.insert(insertion_index, binding);
     }
 
     Ok(())

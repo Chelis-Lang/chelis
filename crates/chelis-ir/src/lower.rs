@@ -1677,6 +1677,7 @@ pub fn try_lower_subexpr_evaluation_plan(
         scoped_tensor_types.into_sorted(),
         &context,
         None,
+        false,
         execution,
     )
 }
@@ -1686,6 +1687,7 @@ pub(crate) fn try_lower_subexpr_evaluation_with_ordered_inputs(
     scoped_types: Vec<(String, TensorType)>,
     context: &SubexprLoweringContext,
     result_claim: Option<&TensorType>,
+    authored_signature: bool,
     execution: &crate::evaluation::RandomExecutionContext,
 ) -> Result<crate::evaluation::EvaluationPlan, LowerDiagnostic> {
     if let crate::evaluation::EvaluationProfile::Legacy(reason) =
@@ -1710,7 +1712,7 @@ pub(crate) fn try_lower_subexpr_evaluation_with_ordered_inputs(
             state,
             SubexprLoweringOptions {
                 include_list_controls: false,
-                authored_signature: result_claim.is_some(),
+                authored_signature,
             },
             Some(&mut metadata),
         );
@@ -2124,12 +2126,23 @@ fn normalize_evaluation_dag(
     mut execution: crate::evaluation::ExecutionMetadata,
 ) -> (Dag, crate::evaluation::ExecutionMetadata) {
     execution.spine.record_nodes(&dag);
-    execution.spine.retain_nodes(|node| {
-        !matches!(
-            dag.get(node).map(|node| &node.op),
-            Some(RiscOp::Load { .. })
-        )
-    });
+    execution
+        .spine
+        .retain_nodes(|node| match dag.get(node).map(|node| &node.op) {
+            Some(RiscOp::Load { .. }) => false,
+            // A signatureless helper's synthetic scope inputs still mint axis
+            // witnesses so an actually referenced input can carry shape
+            // dependencies. Empty witnesses assert nothing, though, and are not
+            // execution events. Let DCE remove them (and their unused Loads)
+            // instead of turning every enclosing tensor into a false helper ABI
+            // input merely because an execution spine is being collected.
+            Some(RiscOp::ExtentWitness {
+                requirements,
+                claims,
+                ..
+            }) if requirements.is_empty() && claims.is_empty() => false,
+            _ => true,
+        });
     let (dag, remap) =
         crate::optimize::dead_code_eliminate_with_retained(&dag, &execution.spine.nodes());
     execution
@@ -14377,7 +14390,12 @@ impl<'program> LowerCtx<'program> {
     /// (the #703 silent-substitution class). Callers that bake this into
     /// codegen now go through [`Self::resolve_static_f64_arg`], which turns an
     /// unresolvable value into a loud lowering error.
-    fn extract_f64_value(expr: &Expr) -> Option<f64> {
+    /// Legacy numeric-control folding at an inlined call site. A checked
+    /// float cast can name the callee's precision binder even though the
+    /// caller has already monomorphized it; consult that exact substitution
+    /// instead of treating the source spelling as unresolved. No value is
+    /// evaluated here, and integer casts remain deliberately unsupported.
+    fn extract_f64_value(expr: &Expr, substitutions: &UnordMap<String, Prim>) -> Option<f64> {
         match expr {
             Expr::Atom(Atom::Float(f), _) => Some(*f),
             Expr::Atom(Atom::Int(n), _) => Some(*n as f64),
@@ -14390,8 +14408,12 @@ impl<'program> LowerCtx<'program> {
                     DeepTag::Cast => {
                         let inner = kids.first()?;
                         let target = kids.get(1)?;
-                        match Self::try_extract_prim(target) {
-                            Some(prim) if prim.is_float() => Self::extract_f64_value(inner),
+                        let target = Self::try_extract_prim(target)
+                            .or_else(|| static_controls::type_prim(target, substitutions));
+                        match target {
+                            Some(prim) if prim.is_float() => {
+                                Self::extract_f64_value(inner, substitutions)
+                            }
                             _ => None,
                         }
                     }
@@ -14403,7 +14425,7 @@ impl<'program> LowerCtx<'program> {
                             .is_some_and(|callee| expr_is_var_named(callee, "neg")) =>
                     {
                         let inner = kids.get(1)?;
-                        Self::extract_f64_value(inner).map(|v| -v)
+                        Self::extract_f64_value(inner, substitutions).map(|v| -v)
                     }
                     // Only `(lit {} <atom>)` owns this value slot. Reading the
                     // first child of an arbitrary composite silently folded
@@ -14441,7 +14463,7 @@ impl<'program> LowerCtx<'program> {
     /// own evaluator and does not require this DAG lowering to succeed, so a
     /// runtime bound that fails the build still evaluates to the right range.
     fn resolve_static_f64_arg(&self, expr: &Expr, builtin: &str, arg_desc: &str) -> f64 {
-        Self::extract_f64_value(expr).unwrap_or_else(|| {
+        Self::extract_f64_value(expr, &self.prec_substitutions).unwrap_or_else(|| {
             let found = match expr {
                 Expr::List(list, _) => get_tag(list).map(DeepTag::as_str).unwrap_or("expression"),
                 _ => "expression",
@@ -16289,6 +16311,159 @@ impl<'program> LowerCtx<'program> {
 mod tests {
     use super::*;
     use crate::verify;
+
+    #[test]
+    fn evaluation_normalization_drops_only_inert_scope_witnesses() {
+        let tensor = TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision: Prim::F32,
+        };
+        let extent = TensorType {
+            dims: Vec::new(),
+            precision: Prim::Int64,
+        };
+        let mut dag = Dag::new();
+        let used = dag.add_node(
+            RiscOp::Load {
+                name: "used".into(),
+            },
+            Vec::new(),
+            tensor.clone(),
+            None,
+        );
+        let used_witness = dag.add_node(
+            RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::Caller,
+                parameter: "used".into(),
+                axis: RtAxis::Lit(0),
+                requirements: Vec::new(),
+                claims: Vec::new(),
+            },
+            vec![used],
+            extent.clone(),
+            None,
+        );
+        let unused = dag.add_node(
+            RiscOp::Load {
+                name: "unused".into(),
+            },
+            Vec::new(),
+            tensor.clone(),
+            None,
+        );
+        dag.add_node(
+            RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::Caller,
+                parameter: "unused".into(),
+                axis: RtAxis::Lit(0),
+                requirements: Vec::new(),
+                claims: Vec::new(),
+            },
+            vec![unused],
+            extent.clone(),
+            None,
+        );
+        let required = dag.add_node(
+            RiscOp::Load {
+                name: "required".into(),
+            },
+            Vec::new(),
+            tensor.clone(),
+            None,
+        );
+        dag.add_node(
+            RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::Caller,
+                parameter: "required".into(),
+                axis: RtAxis::Lit(0),
+                requirements: vec![
+                    chelis_types::scalar_from_i64("test", Prim::Int64, 5)
+                        .expect("literal requirement"),
+                ],
+                claims: Vec::new(),
+            },
+            vec![required],
+            extent.clone(),
+            None,
+        );
+        let claimed = dag.add_node(
+            RiscOp::Load {
+                name: "claimed".into(),
+            },
+            Vec::new(),
+            tensor.clone(),
+            None,
+        );
+        dag.add_node(
+            RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::Caller,
+                parameter: "claimed".into(),
+                axis: RtAxis::Lit(0),
+                requirements: Vec::new(),
+                claims: vec![crate::dag::ExtentClaim {
+                    claim: "same".into(),
+                    requirement_declares: true,
+                }],
+            },
+            vec![claimed, used_witness],
+            extent,
+            None,
+        );
+        let result = dag.add_node(RiscOp::Copy, vec![used], tensor, None);
+        dag.add_shape_dep(result, used_witness);
+        dag.add_root(result);
+
+        let (normalized, _) =
+            normalize_evaluation_dag(dag, crate::evaluation::ExecutionMetadata::new(None));
+        let loads = normalized
+            .nodes()
+            .iter()
+            .filter_map(|node| match &node.op {
+                RiscOp::Load { name } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(loads, vec!["used", "required", "claimed"]);
+        assert!(normalized.nodes().iter().any(|node| matches!(
+            &node.op,
+            RiscOp::ExtentWitness { parameter, .. } if parameter == "used"
+        )));
+        assert!(!normalized.nodes().iter().any(|node| matches!(
+            &node.op,
+            RiscOp::ExtentWitness { parameter, .. } if parameter == "unused"
+        )));
+        assert!(normalized.nodes().iter().any(|node| matches!(
+            &node.op,
+            RiscOp::ExtentWitness { parameter, requirements, .. }
+                if parameter == "required" && !requirements.is_empty()
+        )));
+        assert!(normalized.nodes().iter().any(|node| matches!(
+            &node.op,
+            RiscOp::ExtentWitness { parameter, claims, .. }
+                if parameter == "claimed" && !claims.is_empty()
+        )));
+
+        let required_witness = normalized
+            .nodes()
+            .iter()
+            .find(|node| {
+                matches!(
+                    &node.op,
+                    RiscOp::ExtentWitness { parameter, .. } if parameter == "required"
+                )
+            })
+            .expect("required witness remains")
+            .id;
+        let error =
+            crate::eval::eval_tensor_roots_with_strict(&normalized, &[required_witness], |_| {
+                Some(crate::eval::TensorValue::from_vec(vec![4], vec![1.0; 4]))
+            })
+            .expect_err("the retained false extent claim must still reject");
+        assert!(
+            error.contains("claimed = 5, required axis 0 = 4"),
+            "{error}"
+        );
+    }
 
     #[cfg(feature = "lowering-trace")]
     #[test]
@@ -18690,7 +18865,7 @@ mod tests {
         let mut exprs = chelis_deep::parser::parse_str("(par {} 2.0 3.0)").expect("parse par");
         let par = exprs.pop().expect("one par expression");
         assert_eq!(
-            LowerCtx::extract_f64_value(&par),
+            LowerCtx::extract_f64_value(&par, &UnordMap::new()),
             None,
             "a composite `par` is not a static literal: reading its first child \
              would substitute 2.0 for its specified last-child value 3.0"
@@ -18701,9 +18876,36 @@ mod tests {
             .pop()
             .expect("one literal");
         assert_eq!(
-            LowerCtx::extract_f64_value(&literal),
+            LowerCtx::extract_f64_value(&literal, &UnordMap::new()),
             Some(3.0),
             "narrowing the extractor must preserve the admitted literal path"
+        );
+    }
+
+    #[test]
+    fn static_float_extraction_requires_an_explicit_float_target_substitution() {
+        let cast = chelis_deep::parser::parse_str(
+            "(cast {type: (t-prim {} f32)} (lit {} 0.5) (t-var {} p))",
+        )
+        .expect("parse cast")
+        .pop()
+        .expect("one cast expression");
+
+        let mut float = UnordMap::new();
+        float.insert("p".to_string(), Prim::F32);
+        assert_eq!(LowerCtx::extract_f64_value(&cast, &float), Some(0.5));
+
+        let mut integer = UnordMap::new();
+        integer.insert("p".to_string(), Prim::Int32);
+        assert_eq!(
+            LowerCtx::extract_f64_value(&cast, &integer),
+            None,
+            "a surrounding float result claim must not turn an integer cast into an identity"
+        );
+        assert_eq!(
+            LowerCtx::extract_f64_value(&cast, &UnordMap::new()),
+            None,
+            "checked metadata is not a substitute for a missing call-site binding"
         );
     }
 
