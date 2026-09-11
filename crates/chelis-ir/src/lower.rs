@@ -646,7 +646,7 @@ struct EvaluationEntry {
     roots: BTreeMap<String, NodeId>,
     nodes: Vec<NodeId>,
     dependencies: BTreeSet<usize>,
-    occurrences: BTreeSet<crate::execution_spine::OccurrenceId>,
+    occurrences: BTreeSet<crate::execution_spine::FullOccurrenceId>,
     profile: crate::evaluation::EvaluationProfile,
 }
 
@@ -1695,15 +1695,43 @@ pub(crate) fn try_lower_subexpr_evaluation_with_ordered_inputs(
         scoped_types,
         context,
         result_claim,
-        authored_signature,
         execution,
-        #[cfg(feature = "lowering-trace")]
-        None,
+        SubexprLoweringOptions {
+            include_list_controls: false,
+            authored_signature,
+            resource_policy: crate::evaluation::ResourcePolicy::Legacy,
+            #[cfg(feature = "lowering-trace")]
+            trace: None,
+        },
+    )
+}
+
+pub(crate) fn try_lower_subexpr_c_execution_with_ordered_inputs(
+    expr: &Expr,
+    scoped_types: Vec<(String, TensorType)>,
+    context: &SubexprLoweringContext,
+    result_claim: Option<&TensorType>,
+    authored_signature: bool,
+    execution: &crate::evaluation::RandomExecutionContext,
+) -> Result<crate::evaluation::EvaluationPlan, LowerDiagnostic> {
+    try_lower_subexpr_evaluation_with_ordered_inputs_impl(
+        expr,
+        scoped_types,
+        context,
+        result_claim,
+        execution,
+        SubexprLoweringOptions {
+            include_list_controls: false,
+            authored_signature,
+            resource_policy: crate::evaluation::ResourcePolicy::RecordRequirements,
+            #[cfg(feature = "lowering-trace")]
+            trace: None,
+        },
     )
 }
 
 #[cfg(feature = "lowering-trace")]
-pub(crate) fn try_lower_subexpr_evaluation_with_ordered_inputs_and_trace(
+pub(crate) fn try_lower_subexpr_c_execution_with_ordered_inputs_and_trace(
     expr: &Expr,
     scoped_types: Vec<(String, TensorType)>,
     context: &SubexprLoweringContext,
@@ -1723,9 +1751,13 @@ pub(crate) fn try_lower_subexpr_evaluation_with_ordered_inputs_and_trace(
         scoped_types,
         context,
         result_claim,
-        authored_signature,
         execution,
-        Some(collector.clone()),
+        SubexprLoweringOptions {
+            include_list_controls: false,
+            authored_signature,
+            resource_policy: crate::evaluation::ResourcePolicy::RecordRequirements,
+            trace: Some(collector.clone()),
+        },
     )?;
     Ok((plan, collector.finish_helper()))
 }
@@ -1735,12 +1767,11 @@ fn try_lower_subexpr_evaluation_with_ordered_inputs_impl(
     scoped_types: Vec<(String, TensorType)>,
     context: &SubexprLoweringContext,
     result_claim: Option<&TensorType>,
-    authored_signature: bool,
     execution: &crate::evaluation::RandomExecutionContext,
-    #[cfg(feature = "lowering-trace")] trace: Option<crate::lowering_trace::Collector>,
+    options: SubexprLoweringOptions,
 ) -> Result<crate::evaluation::EvaluationPlan, LowerDiagnostic> {
-    if let crate::evaluation::EvaluationProfile::Legacy(reason) =
-        context.evaluation_profile(expr, &scoped_types)
+    if let crate::evaluation::EvaluationProfile::Legacy(reason) = context
+        .evaluation_profile_with_resource_policy(expr, &scoped_types, options.resource_policy)
         && reason != crate::evaluation::LegacyEvaluationReason::NoDropout
     {
         return Err(LowerDiagnostic::new(
@@ -1763,12 +1794,7 @@ fn try_lower_subexpr_evaluation_with_ordered_inputs_impl(
             context,
             result_claim,
             state,
-            SubexprLoweringOptions {
-                include_list_controls: false,
-                authored_signature,
-                #[cfg(feature = "lowering-trace")]
-                trace,
-            },
+            options,
             Some(&mut metadata),
         );
         crate::evaluation::EvaluationPlan::new(
@@ -1798,13 +1824,38 @@ impl SubexprLoweringContext {
         expr: &Expr,
         bound: &[(String, TensorType)],
     ) -> crate::evaluation::EvaluationProfile {
+        self.evaluation_profile_with_resource_policy(
+            expr,
+            bound,
+            crate::evaluation::ResourcePolicy::Legacy,
+        )
+    }
+
+    pub(crate) fn c_execution_profile(
+        &self,
+        expr: &Expr,
+        bound: &[(String, TensorType)],
+    ) -> crate::evaluation::EvaluationProfile {
+        self.evaluation_profile_with_resource_policy(
+            expr,
+            bound,
+            crate::evaluation::ResourcePolicy::RecordRequirements,
+        )
+    }
+
+    fn evaluation_profile_with_resource_policy(
+        &self,
+        expr: &Expr,
+        bound: &[(String, TensorType)],
+        resource_policy: crate::evaluation::ResourcePolicy,
+    ) -> crate::evaluation::EvaluationProfile {
         let defs = self
             .program_defs
             .iter()
             .filter(|(name, _)| !bound.iter().any(|(bound, _)| bound == *name))
             .map(|(name, body)| (name.clone(), body.clone()))
             .collect();
-        static_controls::profile(expr, &defs, bound)
+        static_controls::profile(expr, &defs, bound, resource_policy)
     }
 }
 
@@ -1846,6 +1897,7 @@ pub(crate) fn try_lower_subexpr_program_with_context_and_controls(
                 include_list_controls: true,
                 // The scope is the ambient bindings this subexpression captured.
                 authored_signature: false,
+                resource_policy: crate::evaluation::ResourcePolicy::Legacy,
                 #[cfg(feature = "lowering-trace")]
                 trace: None,
             },
@@ -1953,6 +2005,7 @@ fn try_lower_subexpr_program_with_ordered_inputs_impl(
             SubexprLoweringOptions {
                 include_list_controls: false,
                 authored_signature,
+                resource_policy: crate::evaluation::ResourcePolicy::Legacy,
                 #[cfg(feature = "lowering-trace")]
                 trace,
             },
@@ -2089,6 +2142,7 @@ struct SubexprLoweringOptions {
     include_list_controls: bool,
     /// See [`LowerCtx::signature_is_authored`].
     authored_signature: bool,
+    resource_policy: crate::evaluation::ResourcePolicy,
     #[cfg(feature = "lowering-trace")]
     trace: Option<crate::lowering_trace::Collector>,
 }
@@ -2105,6 +2159,7 @@ fn lower_subexpr_program_inner_impl(
     let SubexprLoweringOptions {
         include_list_controls,
         authored_signature,
+        resource_policy,
         #[cfg(feature = "lowering-trace")]
         trace,
     } = options;
@@ -2120,6 +2175,7 @@ fn lower_subexpr_program_inner_impl(
     }
     ctx.random_seed = random.seed;
     ctx.random_counter = random.counter;
+    ctx.resource_policy = resource_policy;
     if execution_out.is_some() {
         ctx.execution = Some(crate::evaluation::ExecutionMetadata::new(random.seed));
     }
@@ -4684,6 +4740,21 @@ fn app_var_name_and_args(expr: &Expr) -> Option<(&str, &[Expr])> {
     Some((name, &kids[1..]))
 }
 
+fn string_literal(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Atom(Atom::Str(value), _) => Some(value),
+        _ => {
+            let (DeepTag::Lit, _, kids) = stamped_parts(expr)? else {
+                return None;
+            };
+            match kids.first()? {
+                Expr::Atom(Atom::Str(value), _) => Some(value),
+                _ => None,
+            }
+        }
+    }
+}
+
 /// Classify the bounded source slice before choosing an evaluator. In
 /// particular, callers must not interpret a plan-construction error as a
 /// request for the compatibility path.
@@ -4705,7 +4776,12 @@ fn evaluation_profile_from_defs(
     expr: &Expr,
     program_defs: &BTreeMap<String, Expr>,
 ) -> crate::evaluation::EvaluationProfile {
-    static_controls::profile(expr, program_defs, &[])
+    static_controls::profile(
+        expr,
+        program_defs,
+        &[],
+        crate::evaluation::ResourcePolicy::Legacy,
+    )
 }
 
 fn to_list_source_expr(expr: &Expr) -> Option<&Expr> {
@@ -6078,6 +6154,7 @@ struct LowerCtx<'program> {
     random_path_condition: Option<NodeId>,
     execution: Option<crate::evaluation::ExecutionMetadata>,
     execution_scope: crate::evaluation::ScopeId,
+    resource_policy: crate::evaluation::ResourcePolicy,
     evaluation_entries: Vec<EvaluationEntry>,
     execution_node_owners: UnordMap<NodeId, usize>,
     execution_dependencies: BTreeSet<usize>,
@@ -6223,6 +6300,7 @@ impl<'program> LowerCtx<'program> {
             random_path_condition: None,
             execution: None,
             execution_scope: crate::evaluation::ScopeId(0),
+            resource_policy: crate::evaluation::ResourcePolicy::Legacy,
             evaluation_entries: Vec::new(),
             execution_node_owners: UnordMap::new(),
             execution_dependencies: BTreeSet::new(),
@@ -6397,6 +6475,7 @@ impl<'program> LowerCtx<'program> {
         subctx: &mut LowerCtx,
         shadowed: &[String],
     ) -> UnordMap<String, NodeId> {
+        subctx.resource_policy = self.resource_policy;
         let shadowed = shadowed.iter().cloned().collect::<UnordSet<_>>();
         let mut captures = UnordMap::new();
         for (name, value) in self
@@ -6831,7 +6910,7 @@ impl<'program> LowerCtx<'program> {
             .as_ref()
             .expect("evaluation lowering owns execution metadata")
             .spine
-            .occurrence_count();
+            .full_occurrence_count();
         let profile = evaluation_profile_from_defs(expr, &self.program_defs);
         let compatibility = !matches!(
             profile,
@@ -6874,8 +6953,8 @@ impl<'program> LowerCtx<'program> {
                     .as_ref()
                     .expect("evaluation lowering restores execution metadata")
                     .spine
-                    .occurrence_count())
-                .map(crate::execution_spine::OccurrenceId)
+                    .full_occurrence_count())
+                .map(crate::execution_spine::FullOccurrenceId)
                 .collect(),
             profile,
         });
@@ -14626,7 +14705,23 @@ impl<'program> LowerCtx<'program> {
                 self.execution_scope = saved_scope;
                 result
             }
-            Ok(EffectKind::Resource) if elems.len() >= 4 => self.lower_expr(&elems[3]),
+            Ok(EffectKind::Resource) if elems.len() >= 4 => {
+                if self.resource_policy == crate::evaluation::ResourcePolicy::RecordRequirements {
+                    let device = string_literal(&elems[2]).unwrap_or_else(|| {
+                        raise_fatal_lowering_error(
+                            "a checked Resource handler must retain its literal device",
+                            Some(elems[2].span()),
+                            elems[2].span_id().map(ToOwned::to_owned),
+                        )
+                    });
+                    self.execution
+                        .as_mut()
+                        .expect("Resource requirements are recorded only in an execution plan")
+                        .spine
+                        .require(&self.dag, device.to_owned());
+                }
+                self.lower_expr(&elems[3])
+            }
             // A decode error, or a KNOWN kind whose form is malformed
             // (fewer than 4 elements). Both raise the same fatal branded
             // diagnostic; the `what` payload names the original symbol so a

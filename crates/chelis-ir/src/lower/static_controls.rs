@@ -141,6 +141,7 @@ struct Profile<'a> {
     active: BTreeSet<String>,
     dropout: bool,
     reason: Option<crate::evaluation::LegacyEvaluationReason>,
+    resource_policy: crate::evaluation::ResourcePolicy,
 }
 
 impl Profile<'_> {
@@ -359,11 +360,13 @@ impl Profile<'_> {
                 depth
             }
             DeepTag::HandleEffect => {
-                if metadata
+                let resource = metadata
                     .effect()
-                    .is_some_and(|effect| *effect.value() == EffectKind::Resource)
-                {
-                    self.reason.get_or_insert(Reason::ResourceScope);
+                    .is_some_and(|effect| *effect.value() == EffectKind::Resource);
+                if resource {
+                    if self.resource_policy == crate::evaluation::ResourcePolicy::Legacy {
+                        self.reason.get_or_insert(Reason::ResourceScope);
+                    }
                 } else if kids.first().and_then(extract_numeric_leaf).is_none() {
                     self.reason.get_or_insert(Reason::RuntimeSeed);
                 }
@@ -404,6 +407,7 @@ pub(super) fn profile(
     expr: &Expr,
     defs: &BTreeMap<String, Expr>,
     inputs: &[(String, TensorType)],
+    resource_policy: crate::evaluation::ResourcePolicy,
 ) -> crate::evaluation::EvaluationProfile {
     use crate::evaluation::{EvaluationProfile, LegacyEvaluationReason};
     let mut profile = Profile {
@@ -411,6 +415,7 @@ pub(super) fn profile(
         active: BTreeSet::new(),
         dropout: false,
         reason: None,
+        resource_policy,
     };
     let mut env = Environment {
         shadowed_neg: defs.contains_key("neg"),
@@ -454,7 +459,12 @@ mod tests {
             .pop()
             .unwrap();
             assert_eq!(
-                profile(&reference, &BTreeMap::from([("draw".into(), body)]), &[]),
+                profile(
+                    &reference,
+                    &BTreeMap::from([("draw".into(), body)]),
+                    &[],
+                    crate::evaluation::ResourcePolicy::Legacy,
+                ),
                 expected
             );
         }
