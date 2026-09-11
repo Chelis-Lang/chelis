@@ -3199,10 +3199,8 @@ fn splicing_f_of_n_n_yields_one_member_per_output_axis_on_c() {
     );
 }
 
-/// A class whose only members are op-computed axes, under a binder no
-/// interface witness of the kernel declares: `n`'s single declaring parameter
-/// is unread, so it carries no entry obligation and its `Load` does not reach
-/// the kernel DAG.
+/// Two op-computed axes of one shrink under a binder declared by an UNREAD
+/// parameter, so the class is guarded per axis in declaration order.
 fn unbound_binder_class_source(rows: usize, cols: usize) -> String {
     let values = (0..rows)
         .map(|r| {
@@ -3221,18 +3219,27 @@ fn unbound_binder_class_source(rows: usize, cols: usize) -> String {
     )
 }
 
-/// The lane-agreement row for the residual `local_guard_verdict`'s doc comment
-/// used to record: this lane SKIPPED a site whose binder it had not bound while
-/// C emitted its comparison unconditionally, and only the C emitter's DECLARE
-/// branch kept the two aligned. Admitting op-computed members makes such a
-/// class reachable from source, so this lane now binds the binder from the
-/// first site and guards the rest against it, which is what C already did.
+/// Two op-computed members of one class are guarded per axis against the
+/// declaring parameter's extent, in declaration order, identically on both
+/// lanes. The mismatch is placed on axis 1 so the row proves the SECOND axis
+/// is guarded and not only the first.
 ///
-/// EVIDENTIARY STATUS: regression test. On the base BOTH lanes printed
-/// `out = tensor(shape=[3, 2], ...)` and exited zero under a declared
-/// `tensor[n, n, f32]`, because the two result axes carried two DIFFERENT
-/// synthesized names and therefore formed no class at all. The byte-identical
-/// comparison between the two lanes is the assertion this row exists for.
+/// This row was written for a different property. Before the claim recorded
+/// its declaring parameter as a dependency, `x` was eliminated, `n` was bound
+/// by nothing, and the class's first site declared the binder from its own
+/// extent while the second guarded against it. That case is no longer
+/// reachable from source: the retention makes `n` the caller's value. The
+/// declare-from-the-first-site rule in `local_guard_verdict` stays, because a
+/// graph built by `grad`, `vmap` or a splice can still present a class whose
+/// binder no input declares, and because it is what keeps this lane matching
+/// the C emitter's declare-then-guard split; it is simply no longer something
+/// a Surf program reaches, and saying so here is more useful than a receipt
+/// that silently stops exercising it.
+///
+/// EVIDENTIARY STATUS: regression test for the mismatch assertions. On
+/// `33cc78e84` both lanes printed `out = tensor(shape=[2, 3], ...)` and exited
+/// zero under a declared `tensor[n, n, f32]`. The satisfied row is the
+/// non-vacuity control.
 #[test]
 fn an_op_computed_class_with_an_unbound_binder_agrees_across_lanes() {
     assert!(
@@ -3240,26 +3247,29 @@ fn an_op_computed_class_with_an_unbound_binder_agrees_across_lanes() {
         "this row compares two executed lanes; neither may skip"
     );
     let dir = tempfile::tempdir().expect("tempdir");
-    let square = unbound_binder_class_source(4, 4);
+    let square = unbound_binder_class_source(3, 3);
     let (eval_ok, eval_out) = eval_result(&dir, "unbound_ok.ch", &square);
     let (c_ok, c_out) = c_run_result(&dir, "unbound_ok_c", &square);
-    assert!(eval_ok, "a 3x3 span agrees with itself: {eval_out}");
-    assert!(c_ok, "a 3x3 span agrees with itself: {c_out}");
+    assert!(
+        eval_ok,
+        "a 2x2 span agrees with `n` on both axes: {eval_out}"
+    );
+    assert!(c_ok, "a 2x2 span agrees with `n` on both axes: {c_out}");
     for (lane, out) in [("eval", &eval_out), ("c", &c_out)] {
         assert!(
-            out.contains("shape=[3, 3]"),
+            out.contains("shape=[2, 2]"),
             "{lane}: the declared square shape: {out}"
         );
     }
 
-    let oblong = unbound_binder_class_source(4, 3);
+    // Axis 0 agrees and axis 1 does not, so the reported failure is the
+    // second axis: both members are guarded, in declaration order.
+    let oblong = unbound_binder_class_source(3, 4);
     let (eval_ok, eval_out) = eval_result(&dir, "unbound_bad.ch", &oblong);
     let (c_ok, c_out) = c_run_result(&dir, "unbound_bad_c", &oblong);
-    assert!(!eval_ok, "a 4x3 actual shrinks to 3x2: {eval_out}");
-    assert!(!c_ok, "a 4x3 actual shrinks to 3x2: {c_out}");
-    // Axis 0 declares the binder, axis 1 is the guard: the same declare/guard
-    // split the C emitter's `runtime_dim_sites` already decided.
-    let context = "extent `n`: claimed = 3, shrink axis 1 = 2";
+    assert!(!eval_ok, "a 3x4 actual shrinks to 2x3: {eval_out}");
+    assert!(!c_ok, "a 3x4 actual shrinks to 2x3: {c_out}");
+    let context = "extent `n`: claimed = 2, shrink axis 1 = 3";
     for (lane, out) in [("eval", &eval_out), ("c", &c_out)] {
         assert!(
             out.contains(&domain_trap_line("shrink")),
@@ -3431,54 +3441,73 @@ fn pad_and_stride_op_computed_extents_remain_unadmitted() {
 
 /// The binder's only declaring parameter is unread, so nothing enforces the
 /// claim the signature makes about the result.
-fn unread_declaring_parameter_source() -> String {
-    "def f(w: tensor[n, f32], x: tensor[r, f32]) -> tensor[n, f32] = \
-     shrink(x, [[1i64, shape(x, 0i32)]])\n\
-     out = f(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]))\n"
-        .to_owned()
+fn unread_declaring_parameter_source(len: usize) -> String {
+    format!(
+        "def f(w: tensor[n, f32], x: tensor[r, f32]) -> tensor[n, f32] = \
+         shrink(x, [[1i64, shape(x, 0i32)]])\n\
+         out = f(to_tensor([1.0f32, 2.0f32]), {})\n",
+        vector_literal(len)
+    )
 }
 
-/// A named result claim is preserved but NOT enforced when the binder's only
-/// declaring parameter is unread. `n` is 2 at the call and the shrink produces
-/// 3, and both lanes return the 3.
+/// A named result claim is enforced even when the binder's only declaring
+/// parameter is UNREAD. `n` is 2 at the call and the shrink produces 3.
 ///
-/// The reason is structural rather than a missing check. `signature_witness`
-/// asks the signature, so the stamp lands; but chelis#1773 mints one witness
-/// per declared parameter axis and relates two only when a binder repeats, so
-/// `w`'s lone witness is dead, elimination takes it and `w`'s `Load` with it,
-/// and the kernel is never given `w` at all. The claim therefore has one
-/// member, which C2.4 does not make a class. Enforcing it needs the unread
-/// parameter's extent to cross the kernel ABI, which is the mechanism
-/// chelis#1773 deliberately did not add and this slice does not add either.
+/// The claim makes the declaring parameter a dependency of the result, so `w`
+/// becomes a kernel input and the canonical value is the caller's rather than
+/// the operation's own. Without that dependency PR #1773's witness for a
+/// binder declared by a SINGLE parameter carries neither a requirement nor a
+/// claim, `retain_invocation_witnesses` drops it, elimination takes `w`'s
+/// `Load`, and the class has one member: C2.4 does not make that a class and
+/// nothing compares anything. `scope.unread` in the preparation corpus is the
+/// same shape for a REPEATED binder, where PR #1773's own comparison already
+/// retains the witness.
 ///
-/// EVIDENTIARY STATUS: disposition lock, not a regression test. This is the
-/// base behaviour, unchanged by this slice: the guard admission, the
-/// declaration stamp and the ordering key all leave it exactly here. The row
-/// exists so the gap is a recorded limit on the claim rather than something a
-/// later reader has to rediscover, and so that closing it has to delete this
-/// test deliberately. Tracked by chelis#1397, which stays open.
+/// EVIDENTIARY STATUS: regression test for the mismatch assertions. Measured
+/// on `cab086ef4`, where the admission, the stamp and the ordering key were
+/// all already in place, this program printed
+/// `out = tensor(shape=[3], data=[2.0, 3.0, 4.0])` and exited ZERO on both
+/// lanes under a declared `tensor[n, f32]` with `n` = 2. The satisfied row is
+/// the non-vacuity control and passed there.
 #[test]
-fn an_unread_declaring_parameter_leaves_its_named_claim_unenforced() {
+fn an_unread_declaring_parameter_still_guards_its_named_result_claim() {
     assert!(
         gcc_available(),
         "this row compares two executed lanes; neither may skip"
     );
     let dir = tempfile::tempdir().expect("tempdir");
-    let source = unread_declaring_parameter_source();
-    let (eval_ok, eval_out) = eval_result(&dir, "unread_declarer.ch", &source);
-    let (c_ok, c_out) = c_run_result(&dir, "unread_declarer_c", &source);
+    let good = unread_declaring_parameter_source(3);
+    let (eval_ok, eval_out) = eval_result(&dir, "unread_declarer_ok.ch", &good);
+    let (c_ok, c_out) = c_run_result(&dir, "unread_declarer_ok_c", &good);
     for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(ok, "{lane}: a shrink that produces `n` = 2 executes: {out}");
         assert!(
-            ok,
-            "{lane}: the claim is unenforced, so the program runs: {out}"
+            out.contains("shape=[2]") && out.contains("data=[2.0, 3.0]"),
+            "{lane}: and produces the declaring parameter's extent: {out}"
         );
+    }
+
+    let bad = unread_declaring_parameter_source(4);
+    let (eval_ok, eval_out) = eval_result(&dir, "unread_declarer_bad.ch", &bad);
+    let (c_ok, c_out) = c_run_result(&dir, "unread_declarer_bad_c", &bad);
+    assert!(
+        !eval_ok,
+        "a shrink that produces 3 under `n` = 2 traps: {eval_out}"
+    );
+    assert!(
+        !c_ok,
+        "a shrink that produces 3 under `n` = 2 traps: {c_out}"
+    );
+    let context = "extent `n`: claimed = 2, shrink axis 0 = 3";
+    for (lane, out) in [("eval", &eval_out), ("c", &c_out)] {
         assert!(
-            out.contains("shape=[3]") && out.contains("data=[2.0, 3.0, 4.0]"),
-            "{lane}: and returns the extent the operation computed: {out}"
+            out.contains(&domain_trap_line("shrink")),
+            "{lane}: [04-NUM-9]'s line names the operation: {out}"
         );
+        assert!(out.contains(context), "{lane}: expected {context}: {out}");
         assert!(
-            !out.contains("extent `n`"),
-            "{lane}: no guard claims to have checked it: {out}"
+            !out.contains("shape=[3]"),
+            "{lane}: and no undeclared extent is returned: {out}"
         );
     }
 }

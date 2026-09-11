@@ -354,7 +354,7 @@
         "an_op_declared_axis_on_an_expand_input_flows_through_the_kept_output_axis_on_eval",
         "an_op_declared_witness_reaches_the_hip_prologue_without_panicking",
         "an_overshooting_shrink_span_is_outside_this_slices_cross_lane_claim",
-        "an_unread_declaring_parameter_leaves_its_named_claim_unenforced",
+        "an_unread_declaring_parameter_still_guards_its_named_result_claim",
         "c_independent_trap_after_a_mismatch_loses",
         "c_independent_trap_before_a_mismatch_wins",
         "every_local_member_of_one_class_is_guarded_at_its_operation_on_c",
