@@ -4787,7 +4787,7 @@ pub fn reject_unsupported_effect_ops_in_host_execution_plan(
     plan: &chelis_ir::host::HostExecutionPlan,
     target: BuildTarget,
 ) -> std::result::Result<(), CompilerError> {
-    if target == BuildTarget::C && !plan.has_unplanned_random_helper() {
+    if target == BuildTarget::C && !plan.has_unplanned_dropout_helper() {
         Ok(())
     } else {
         reject_unsupported_effect_ops_in_host_program(plan.program(), target)

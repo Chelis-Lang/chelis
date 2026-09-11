@@ -24,6 +24,47 @@ result = with seed(42i64) {{
 }
 
 #[test]
+fn ordinary_uniform_helpers_do_not_poison_planned_dropout_admission() {
+    for used in [false, true] {
+        let intervening = if used {
+            "u = sample(x)\n  _ = drop(u)"
+        } else {
+            ""
+        };
+        let source = format!(
+            r#"
+def keep[p: Float](x: tensor[4,p]) -> tensor[4,p] = dropout(x,cast(0.5,p))
+def sample(x: tensor[4,f32]) -> tensor[4,f32] = uniform_like(x,0.0f32,1.0f32)
+result = with seed(42i64) {{
+  x = to_tensor([1.0f32,1.0f32,1.0f32,1.0f32])
+  a = keep(x)
+  {intervening}
+  b = keep(x)
+  [a,b]
+}}
+"#
+        );
+        let c = ownership_support::emit(&source, "uniform-cohabitation");
+        let (summary, stdout) = ownership_support::run_program(&c);
+        ownership_support::balanced(&summary);
+        // [05-RNG-1] seed42: the second Dropout uses ordinal1 without
+        // the intervening draw, ordinal2 with it. No claim about Uniform's
+        // legacy numerical formula is made or encoded in this oracle.
+        let second = if used {
+            "2.0, 2.0, 0.0, 0.0"
+        } else {
+            "2.0, 0.0, 0.0, 0.0"
+        };
+        assert_eq!(
+            stdout,
+            format!(
+                "result = [tensor(shape=[4], data=[0.0, 2.0, 0.0, 0.0]), tensor(shape=[4], data=[{second}])]\n"
+            )
+        );
+    }
+}
+
+#[test]
 fn direct_source_entry_restarts_and_preserves_borrowed_input_ownership() {
     let c = ownership_support::emit_selected(
         r#"

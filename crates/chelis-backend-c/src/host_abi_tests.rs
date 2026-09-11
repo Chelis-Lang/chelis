@@ -288,7 +288,7 @@ fn verified_execution_host_from_source(source: &str) -> chelis_ir::ownership::Ve
         plan.expect("source uses the planned host lane"),
     )
     .expect("select planned C host payload");
-    assert!(!plan.has_unplanned_random_helper());
+    assert!(!plan.has_unplanned_dropout_helper());
     let manifested = chelis_types::manifest::ManifestedProgram::new(
         checked,
         manifest,
