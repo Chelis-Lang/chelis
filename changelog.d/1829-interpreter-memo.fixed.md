@@ -1,0 +1,1 @@
+`chelis eval` no longer re-derives the kernel-lane decision for every imported definition it applies. The interpreter now holds the host-lowering memo for the whole evaluation, so a program that calls into a recursive library such as `Std.Io.Json` runs in seconds again instead of expanding that library's call graph as a tree per definition (chelis#1829).
