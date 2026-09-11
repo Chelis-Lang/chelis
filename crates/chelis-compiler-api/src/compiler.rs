@@ -3872,6 +3872,9 @@ fn compile_source_scoped_mode(
     let (lowered, host_ordinary, host_execution) = match outcome {
         crate::pipeline::PipelineOutcome::Lowered(lowered) => (lowered, None, None),
         crate::pipeline::PipelineOutcome::Checked(checked) if planned_c => {
+            // C execution selects host lowering here, before artifact emission.
+            // Preserve the host-only builtin diagnostic before lowering callbacks.
+            reject_host_only_builtins_before_host_lowering(checked.program(), BuildTarget::C)?;
             let realizability = chelis_effects::realizability::infer_realizability(
                 checked.program(),
                 crate::target_capability::tensor_capable_prims(target),
