@@ -724,12 +724,19 @@ The class completion command remains:
 
 Automatic success is exit zero ending `RUNTIME EXTENT ORACLE: PASS`, with
 applicable HIP and Metal hardware receipts at the same head/corpus digest.
-The recorded phase-B corpus has 57 rows: 38 at exit,
-19 short. This is baseline metadata, not a fresh execution receipt. The
-op-computed local guards move seven of those short rows
+The recorded phase-B corpus has 57 rows, 2 of them short of exit:
+`expand.piped_shape_read.lint_fix` and `expand.record_projection.size`, both
+#1266/#569's and both owned by B2b-2. This is baseline metadata, not a fresh
+execution receipt; `--phase b --allow-shortfall` prints the same pair as
+`runtime_extent_rows_short` and `runtime_extent_rows_short_list`, which is the
+count to quote, because it is the oracle's own accounting and a hand count of
+the JSON's `phase_b` column reaches a different number by treating
+`shrink.elementwise_const.build`'s registered `typed_unsupported(#1482)` as a
+shortfall. The op-computed local guards moved seven rows
 (`expand.shape_derived.declared_result_survives.{c,eval}`,
 `class.load_op_output.eval`, `class.op_output_op_output.{c,eval}` and
-`class.splice_f_of_n_n.{c,eval}`) and the six `shrink.*` preparation cells. The final
+`class.splice_f_of_n_n.{c,eval}`) and the six `shrink.*` preparation cells, and
+#1379's acceptance moved `expand.arith_size.named_claim.{c,eval}`. The final
 command currently fails because `SLICE_PHASES` still requires unregistered
 `c`. B2b-3 retires that requirement and its tests; it does not add a fake
 passing phase or erase outstanding B rows. `--phase a` and `--phase b`
