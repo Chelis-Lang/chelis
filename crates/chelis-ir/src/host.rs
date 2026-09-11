@@ -275,9 +275,18 @@ fn clear_host_lowering_caches() {
 /// is borrowed for the whole scope and cannot be freed, and `chelis-ir` never
 /// constructs a `CheckedProgram`, so the outermost program is safe by
 /// construction. A nested scope brings a second program in, and that one can
-/// be dropped while the outer scope stays armed, so every `begin` evicts the
-/// entering program's address first: an entry is then only ever read for a
-/// program that has been borrowed continuously since it was written.
+/// be dropped while the outer scope stays armed, so a scope evicts its own
+/// program's address when it begins and again when it drops.
+///
+/// Stated as narrowly as the code earns it: rows for a program that owns a
+/// scope are evicted on that scope's begin and on its drop, so they never
+/// outlive it. That is not a universal sentence about every row. A program
+/// probed while some OTHER program's scope is armed writes rows under no
+/// scope of its own, and those live until the outermost scope drops. No
+/// production caller does that: the interpreter threads exactly one program
+/// per scope, and the only other `begin` is the C-lane whole-program
+/// lowering. Keying these caches on something that cannot be recycled,
+/// rather than on an address, is the representation change chelis#1835 owns.
 /// chelis#1829.
 fn evict_host_lowering_cache_entries(program_key: usize) {
     fn drop_program_rows<V>(cache: &mut UnordMap<(usize, String), V>, program_key: usize) {
@@ -346,7 +355,8 @@ impl Drop for HostLoweringCacheGuard {
             // runtime-representation inventory's `CAPACITY_FOLDS` rule keys on
             // the `saturating_*` and `checked_mul` method names wherever they
             // appear in IR-class code, so the floor is spelled out here rather
-            // than classified as capacity arithmetic it is not. chelis#1835's
+            // than classified as capacity arithmetic it is not; chelis#1851
+            // tracks the inventory's name-keyed rule. chelis#1835's
             // structural repair deletes this guard and this counter with it.
             let current = depth.get();
             let remaining = if current > 0 { current - 1 } else { 0 };
@@ -11298,7 +11308,7 @@ fn top_level_fn_helper_summary_rejects(
     // runtime-representation inventory's `CAPACITY_FOLDS` rule keys on the
     // `saturating_*` and `checked_mul` method names wherever they appear in
     // IR-class code, so the ceiling is spelled out here rather than classified
-    // as capacity arithmetic it is not.
+    // as capacity arithmetic it is not; chelis#1851 tracks that name-keyed rule.
     HOST_SUMMARY_PROBE_BUILDS.with(|builds| {
         let counted = builds.get();
         builds.set(if counted == u64::MAX {
