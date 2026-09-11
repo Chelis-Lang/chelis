@@ -6,8 +6,28 @@ typedef enum { hipMemcpyHostToHost = 0, hipMemcpyHostToDevice = 1, hipMemcpyDevi
 typedef struct chelis_stub_hipModule *hipModule_t;
 typedef struct chelis_stub_hipFunction *hipFunction_t;
 typedef void *hipDeviceptr_t;
+#ifdef __cplusplus
+struct dim3 {
+    unsigned int x;
+    unsigned int y;
+    unsigned int z;
+    constexpr dim3(unsigned int x_value = 1, unsigned int y_value = 1,
+                   unsigned int z_value = 1)
+        : x(x_value), y(y_value), z(z_value) {}
+};
+#else
 typedef struct { unsigned int x, y, z; } dim3;
-typedef struct { int warpSize; } hipDeviceProp_t;
+#endif
+typedef struct {
+    int warpSize;
+    int maxGridSize[3];
+    int maxThreadsDim[3];
+    int maxThreadsPerBlock;
+} hipDeviceProp_t;
+typedef enum {
+    HIP_R_16F = 2,
+    HIP_R_16BF = 14
+} hipDataType;
 const char *hipGetErrorString(hipError_t error);
 hipError_t hipMalloc(void **pointer, size_t size);
 hipError_t hipFree(void *pointer);

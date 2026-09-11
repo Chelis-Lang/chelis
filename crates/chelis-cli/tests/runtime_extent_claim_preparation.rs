@@ -1,9 +1,12 @@
-//! #1277 preparation: one fixture set, current observations and pending contract.
+//! #1277 acceptance: one fixture set, and the decided contract over all of it.
 //!
-//! The normal test locks measured gaps; it is NOT a claim that they are fixed.
-//! Run the ignored `claimed_extent_contract` test explicitly before moving a
-//! row to acceptance. It reports all failed cells rather than stopping at one.
-//! The manual command and remaining owners live in runtime_extents.md C5.
+//! `claimed_extent_contract` asserts every cell of the matrix, reporting all
+//! failed cells rather than stopping at one. It was `#[ignore]`d while the
+//! B2b repairs landed, beside a baseline test that locked the measured gaps
+//! and whose own tripwire said to retire it once nothing was unmet. Both
+//! happened in B2b-3: the contract runs normally and the baseline is gone,
+//! so a cell that regresses is a failure rather than a changed observation.
+//! The oracle command and remaining owners live in runtime_extents.md C5.
 mod common;
 
 use common::{gcc_available, link_generated};
@@ -816,39 +819,31 @@ fn collect() -> (Value, Vec<String>) {
     (Value::Object(observed), failures)
 }
 
+/// THE ACCEPTANCE RUNNER for chelis#1277's preparation matrix: every cell of
+/// it, against the decided contract rather than against a recorded
+/// observation. It reports every failed cell instead of stopping at the first.
+///
+/// # Evidentiary status
+///
+/// Per assertion, and both kinds are present in the one `failures` list.
+/// The rows the B2b slices repaired (#1374/#1376/#1377's claim transport,
+/// #1397's wildcard root and #1378's public vmap witness, #1266/#569's record
+/// and pipe spellings, #1619's broadcast attribution, #1782's restated literal
+/// claim) are REGRESSION assertions: each was measured red before its owning
+/// change and green after, on the shas those pull requests record. The
+/// satisfied controls beside them are DISPOSITION LOCKS: green throughout,
+/// there so a repair that starts refusing correct programs fails here too.
+///
+/// Until B2b-3 this test carried `#[ignore]` and a sibling,
+/// `current_observations_are_explicit_and_do_not_claim_acceptance`, compared
+/// the same observations against a checked-in baseline of the measured gaps.
+/// That sibling's own last assertion said to retire it once no cell was unmet,
+/// and its tripwire fired on `main` when #1379's acceptance emptied the list.
+/// It and `fixtures/runtime_extent_claim_baseline.json` are therefore gone: a
+/// baseline of gaps that has no gaps left records nothing, and keeping it
+/// would ask a future reader to update a file instead of reading this
+/// contract.
 #[test]
-fn current_observations_are_explicit_and_do_not_claim_acceptance() {
-    let (observed, failures) = collect();
-    let expected: Value =
-        serde_json::from_str(include_str!("fixtures/runtime_extent_claim_baseline.json"))
-            .expect("baseline JSON");
-    let changed: Vec<_> = observed
-        .as_object()
-        .unwrap()
-        .iter()
-        .filter(|(id, value)| expected.get(*id) != Some(*value))
-        .map(|(id, _)| id)
-        .collect();
-    assert!(
-        changed.is_empty()
-            && observed.as_object().unwrap().len() == expected.as_object().unwrap().len(),
-        "behavior changed in {changed:?}: compare each cell with its contract before updating the issue-owned baseline. Observations: {}",
-        serde_json::to_string_pretty(
-            &changed
-                .iter()
-                .map(|id| ((*id).clone(), observed[*id].clone()))
-                .collect::<serde_json::Map<_, _>>()
-        )
-        .unwrap()
-    );
-    assert!(
-        !failures.is_empty(),
-        "all contracts now pass: retire the preparation baseline and attach acceptance receipts"
-    );
-}
-
-#[test]
-#[ignore = "manual pending acceptance: runtime_extents.md C5; expected red until B2b repairs"]
 fn claimed_extent_contract() {
     let (_, failures) = collect();
     assert!(

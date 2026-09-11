@@ -1,0 +1,7 @@
+#ifndef CHELIS_STUB_CSTDLIB
+#define CHELIS_STUB_CSTDLIB
+#include <stdlib.h>
+namespace std {
+using ::abort;
+}
+#endif

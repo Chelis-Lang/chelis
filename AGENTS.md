@@ -343,9 +343,9 @@ numeric data, whether or not you have read that document:
   grandfather rows, three successor overrides, and 155 permanent plain rows; the
   executable primary census and guard retain none of those disposition lists or
   admission paths. The active primary baseline has completed
-  that migration: all 251 rows have final authority as 66 exact structurally
+  that migration: all 313 rows have final authority as 74 exact structurally
   nonnumeric rows, 16 structurally recognized tagged carriers/transports, and
-  169 registered numeric operations (the [05-OP-35] stdlib registrations among
+  223 registered numeric operations (the [05-OP-35] stdlib registrations among
   them). It retains no grandfather, successor-override, permanent-disposition,
   integer-plumbing, or other transition rows. The wire baseline has 96 final
   numeric leaves: 79 verified transports and 17 exact numeric operations.
@@ -354,11 +354,14 @@ numeric data, whether or not you have read that document:
   private verifier requires current graph, codec/admission, cache, publication
   and mutation execution; neither a static descriptor nor a baseline grants
   wire authority. Nine source/name/path/vocabulary and opaque-handle bindings have final
-  nonnumeric authority, and four compiler-JSON functions have final tagged-transport
-  authority. Four native registered-PyO3 baseline rows remain a sealed legacy cohort.
-  That cohort confers no authorization
-  for a new, renamed, reclassified, or otherwise changed row, and a change touching one
-  must move it to a final authority class rather than copy its disposition. A bare
+  nonnumeric authority. Seven bindings have final tagged-transport authority: four
+  compiler-JSON functions, the compiled-model tensor call, and the two DLPack methods.
+  `NativeTensor.shape` has exact numeric-operation authority under [05-OP-45].
+  The binding census retains no legacy cohort; every discovered row requires current
+  graph and execution authority. The backend-header baseline has ten final rows:
+  the exact generated `chelis_gpu_tensor` tagged transport and nine [05-OP-33]
+  device-owner operations, discovered through the complete HIP and Metal support
+  roots with committed SDK fixtures. A bare
   numeric carrier has no citation or maintainer-override path:
   redesign it onto the tagged carrier or remove it. Opening a fresh issue does not
   authorize capacity debt. No grandfather, permanent-disposition,
@@ -1009,11 +1012,14 @@ lease.
 `scripts/regen_all.py` is the regeneration entry point on its own as well. Default
 tiers 0 and 1 write (tier 1 is the std bundle and needs cargo); `--check` reports every
 stale artifact; `--full` adds tier 2, the capacity census and the
-runtime-representation inventory, and exits 2 naming the manual action when a census
-row lands with citation `TODO` or the regenerated inventory's digest differs from the
+runtime-representation inventory. The Python-binding baseline stores only stable
+reviewed rows, flags, authorities, and contracts; current graph identities are
+execution evidence from the dedicated binding acceptance test and are never persisted
+or regenerated. Full regeneration exits 2 naming the manual action when a census row
+lands with citation `TODO` or the regenerated inventory's digest differs from the
 reviewed `FREEZE_SHA256`. It never writes a frozen digest, the loud-unsupported
-`BASELINE`, a hand-maintained baseline, the sibling census JSON files, the dtype C
-header, or the tree-sitter parsers.
+`BASELINE`, the binding or wire census JSON, the dtype C header, or the tree-sitter
+parsers.
 
 `--fast`, `--local`, and the bare full gate run a preflight before the first command:
 the environment checks (`PYO3_PYTHON`, `CARGO_TARGET_DIR` containment, an explicit

@@ -305,6 +305,20 @@
     },
     {
       "phase": "b",
+      "id": "cli_claim_contract",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/runtime_extent_claim_preparation.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "claimed_extent_contract"
+      ],
+      "note": "The acceptance runner over all 55 preparation cells, registered when B2b-3 took its `#[ignore]` off. The file's other two rows select `literal_` and `singleton_broadcast_contract` exactly, so neither reaches this test: without this row the contract would run only in the nightly full-workspace job, which does not finish inside its timeout (chelis#1819), and on a schedule it would run nowhere. Named with `--exact` rather than run whole for the reason `exec_c` gives: the receipt check requires the observed test set to EQUAL the expected one, and this file holds twenty-eight tests this phase does not own."
+    },
+    {
+      "phase": "b",
       "id": "cli_slice_b",
       "package": "chelis-cli",
       "kind": "test",
@@ -413,6 +427,8 @@
         "splicing_f_of_n_n_yields_one_member_per_output_axis_on_eval",
         "the_canonical_piped_shape_read_checks_evaluates_and_builds",
         "the_guard_order_fixture_reaches_its_later_trap_when_the_claim_agrees_on_eval",
+        "the_host_body_locator_reads_the_definition_and_not_a_look_alike",
+        "the_host_body_locator_refuses_a_forward_declaration_alone",
         "the_local_alias_spelling_emits_the_same_c_it_always_did",
         "the_value_binding_form_of_a_polymorphic_binder_is_unchanged",
         "two_classes_sharing_one_node_keep_separate_guards_on_c",

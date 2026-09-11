@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -75,28 +76,68 @@ class LibtestReceipts(unittest.TestCase):
     def test_library_artifact_requires_exact_library_kind_and_test_profile(self):
         from capacity_census_wire_runner import select_test_binary
 
-        target = Path("/workspace/target/census")
-        source = Path("/workspace/crates/api/src/lib.rs")
-        artifact = {
-            "reason": "compiler-artifact",
-            "target": {"name": "api", "kind": ["lib"], "src_path": str(source)},
-            "profile": {"test": True},
-            "executable": str(target / "debug/deps/api-abc"),
-        }
-        self.assertEqual(select_test_binary(target, source, "api", [artifact], kind="lib"), Path(artifact["executable"]))
-        for records in ([], [artifact, artifact],
-            [{**artifact, "profile": {"test": False}}],
-            [{**artifact, "target": {**artifact["target"], "kind": ["test"]}}],
-            [{**artifact, "target": {**artifact["target"], "kind": ["bin"]}}],
-            [{**artifact, "target": {**artifact["target"], "src_path": "/foreign/lib.rs"}}],
-            [{**artifact, "executable": "/foreign/api-abc"}],
-        ):
-            with self.subTest(records=records), self.assertRaises(GraphError):
-                select_test_binary(target, source, "api", records, kind="lib")
-        with self.assertRaises(GraphError):
-            select_test_binary(target, source, "api", [artifact])
-        with self.assertRaises(GraphError):
-            select_test_binary(target, source, "api", [artifact], kind="bin")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            target = root / "target/census"
+            source = root / "crates/api/src/lib.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text("// library")
+            (source.parent.parent / "Cargo.toml").write_text('[package]\nname = "api"\n')
+            artifact = {
+                "reason": "compiler-artifact",
+                "target": {"name": "api", "kind": ["lib"], "src_path": str(source)},
+                "profile": {"test": True},
+                "executable": str(target / "debug/deps/api-abc"),
+            }
+            self.assertEqual(select_test_binary(target, source, "api", [artifact], kind="lib"), Path(artifact["executable"]))
+            for records in ([], [artifact, artifact],
+                [{**artifact, "profile": {"test": False}}],
+                [{**artifact, "target": {**artifact["target"], "kind": ["test"]}}],
+                [{**artifact, "target": {**artifact["target"], "kind": ["bin"]}}],
+                [{**artifact, "target": {**artifact["target"], "kind": ["cdylib", "rlib"]}}],
+                [{**artifact, "target": {**artifact["target"], "src_path": "/foreign/lib.rs"}}],
+                [{**artifact, "executable": "/foreign/api-abc"}],
+            ):
+                with self.subTest(records=records), self.assertRaises(GraphError):
+                    select_test_binary(target, source, "api", records, kind="lib")
+            with self.assertRaises(GraphError):
+                select_test_binary(target, source, "api", [artifact])
+            with self.assertRaises(GraphError):
+                select_test_binary(target, source, "api", [artifact], kind="bin")
+
+    def test_library_artifact_kinds_match_the_actual_concrete_crate_declaration(self):
+        from capacity_census_wire_runner import select_test_binary
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source = root / "crates/api/src/lib.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text("// library")
+            manifest = source.parent.parent / "Cargo.toml"
+            target = root / "target/census"
+            artifact = {
+                "reason": "compiler-artifact",
+                "target": {"name": "api", "kind": ["cdylib", "rlib"], "src_path": str(source)},
+                "profile": {"test": True}, "executable": str(target / "debug/deps/api-abc"),
+            }
+            manifest.write_text('[lib]\ncrate-type = ["cdylib", "rlib"]\n')
+            self.assertEqual(select_test_binary(target, source, "api", [artifact], kind="lib"), Path(artifact["executable"]))
+            for kinds in (["lib"], ["cdylib"], ["rlib", "cdylib"], ["cdylib", "rlib", "bin"]):
+                changed = {**artifact, "target": {**artifact["target"], "kind": kinds}}
+                with self.subTest(kinds=kinds), self.assertRaises(GraphError):
+                    select_test_binary(target, source, "api", [changed], kind="lib")
+            for declaration in ('[lib]\ncrate-type = ["rlib"]\n',
+                                '[lib]\ncrate-type = []\n', '[lib]\ncrate-type = ["bin"]\n',
+                                '[lib]\ncrate-type = ["cdylib", "cdylib"]\n',
+                                '[lib]\ncrate-type = [1]\n', '[lib]\ncrate-type = "rlib"\n',
+                                '[lib]\ncrate-type = {workspace = true}\n',
+                                'lib = "not a table"\n', '[lib\n'):
+                manifest.write_text(declaration)
+                with self.subTest(declaration=declaration), self.assertRaises(GraphError):
+                    select_test_binary(target, source, "api", [artifact], kind="lib")
+            manifest.unlink()
+            with self.assertRaises(GraphError):
+                select_test_binary(target, source, "api", [artifact], kind="lib")
 
     def test_actual_rust_framework_does_not_accept_ignored_or_zero_match(self):
         from capacity_census_wire_runner import run_libtest
@@ -113,6 +154,11 @@ class LibtestReceipts(unittest.TestCase):
                 "#[test] fn managed_python() {\n"
                 ' assert_eq!(std::env::var("PYO3_PYTHON"), std::env::var("EXPECTED_PYTHON"));\n'
                 ' assert_eq!(std::env::var("VIRTUAL_ENV"), std::env::var("EXPECTED_VENV"));\n'
+                ' assert_eq!(std::env::var("PYTHONPATH"), std::env::var("EXPECTED_SITE"));\n'
+                ' assert!(std::env::var_os("PYTHONHOME").is_none());\n'
+                ' assert!(std::env::var_os("PYTHONUSERBASE").is_none());\n'
+                ' assert_eq!(std::env::var("PYTHONNOUSERSITE").unwrap(), "1");\n'
+                ' assert_eq!(std::env::var("PYTHONSAFEPATH").unwrap(), "1");\n'
                 "}\n"
             )
             subprocess.run(
@@ -127,8 +173,14 @@ class LibtestReceipts(unittest.TestCase):
                 {
                     "PYO3_PYTHON": "/unrelated/python",
                     "VIRTUAL_ENV": "/unrelated/venv",
+                    "PYTHONPATH": "/unrelated/site-packages",
+                    "PYTHONHOME": "/unrelated/home",
+                    "PYTHONUSERBASE": "/unrelated/user",
                     "EXPECTED_PYTHON": sys.executable,
                     "EXPECTED_VENV": sys.prefix,
+                    "EXPECTED_SITE": os.pathsep.join(dict.fromkeys(
+                        sysconfig.get_path(key) for key in ("purelib", "platlib")
+                    )),
                 },
             ):
                 run_libtest(root, binary, ("managed_python",))

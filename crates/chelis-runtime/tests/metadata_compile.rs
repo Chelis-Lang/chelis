@@ -29,16 +29,56 @@ impl Probe {
         command.args(["--edition=2024", "--crate-type=rlib", "--crate-name", name]);
         command.arg(input).arg("--out-dir").arg(&self.0);
         if external {
+            command
+                .arg("-L")
+                .arg(format!("dependency={}", self.0.display()));
             command.arg("--extern").arg(format!(
                 "chelis_vocab={}",
                 self.0.join("libchelis_vocab.rlib").display()
+            ));
+            command.arg("--extern").arg(format!(
+                "chelis_abi={}",
+                self.0.join("libchelis_abi.rlib").display()
             ));
         }
         command.output().expect("execute metadata compile control")
     }
 
-    fn execute_contract(&self, owner: &str, tests: &str, name: &str) -> Output {
-        fs::write(self.0.join("metadata.rs"), owner).unwrap();
+    fn compile_abi(&self, metadata: &str) {
+        let source_dir = self.0.join("chelis_abi");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(source_dir.join("lib.rs"), "pub mod metadata;\n").unwrap();
+        fs::write(source_dir.join("metadata.rs"), metadata).unwrap();
+        compiled(
+            Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
+                .args([
+                    "--edition=2024",
+                    "--crate-type=rlib",
+                    "--crate-name",
+                    "chelis_abi",
+                ])
+                .arg(source_dir.join("lib.rs"))
+                .arg("--out-dir")
+                .arg(&self.0)
+                .arg("--extern")
+                .arg(format!(
+                    "chelis_vocab={}",
+                    self.0.join("libchelis_vocab.rlib").display()
+                ))
+                .output()
+                .expect("compile shared metadata owner"),
+        );
+    }
+
+    fn execute_contract(
+        &self,
+        runtime_owner: &str,
+        abi_owner: &str,
+        tests: &str,
+        name: &str,
+    ) -> Output {
+        fs::write(self.0.join("metadata.rs"), runtime_owner).unwrap();
+        self.compile_abi(abi_owner);
         let input = self.0.join("contract.rs");
         fs::write(&input, tests).unwrap();
         let binary = self.0.join("contract");
@@ -59,10 +99,17 @@ impl Probe {
                 .arg(&input)
                 .arg("-o")
                 .arg(&binary)
+                .arg("-L")
+                .arg(format!("dependency={}", self.0.display()))
                 .arg("--extern")
                 .arg(format!(
                     "chelis_vocab={}",
                     self.0.join("libchelis_vocab.rlib").display()
+                ))
+                .arg("--extern")
+                .arg(format!(
+                    "chelis_abi={}",
+                    self.0.join("libchelis_abi.rlib").display()
                 ))
                 .output()
                 .expect("compile real metadata contract"),
@@ -82,7 +129,8 @@ impl Probe {
 #[test]
 fn weakened_metadata_construction_fails_the_executable_contract() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let owner = fs::read_to_string(root.join("src/metadata.rs")).unwrap();
+    let runtime_owner = fs::read_to_string(root.join("src/metadata.rs")).unwrap();
+    let abi_owner = fs::read_to_string(root.join("../chelis-abi/src/metadata.rs")).unwrap();
     let tests = fs::read_to_string(root.join("tests/checked_metadata.rs")).unwrap();
     let path = "#[path = \"../src/metadata.rs\"]";
     assert_eq!(tests.matches(path).count(), 1);
@@ -115,7 +163,7 @@ fn weakened_metadata_construction_fails_the_executable_contract() {
             "window_metadata_binds_valid_padding_and_row_major_source_indices",
         ),
         (
-            "w > input.shape[axis]",
+            "w > input.shape()[axis]",
             "false",
             "window_metadata_binds_valid_padding_and_row_major_source_indices",
         ),
@@ -165,18 +213,18 @@ fn weakened_metadata_construction_fails_the_executable_contract() {
             "affine_metadata_checks_exact_extents_and_offsets_without_storage",
         ),
         (
-            "self.shape.as_ref() == domain",
+            "self.domain.shape.as_ref() == domain",
             "true",
             "checked_iteration_steps_preserve_exact_large_domains_without_storage",
         ),
         (
-            "if self.rank == 0 {\n            Ok(0)",
-            "if self.rank == 0 {\n            Ok(1)",
+            "if self.domain.rank == 0 {\n            Ok(0)",
+            "if self.domain.rank == 0 {\n            Ok(1)",
             "checked_iteration_steps_preserve_exact_large_domains_without_storage",
         ),
         (
-            "self.shape.as_ref() == domain {\n            Ok(1)",
-            "self.shape.as_ref() == domain {\n            Ok(0)",
+            "self.domain.shape.as_ref() == domain {\n            Ok(1)",
+            "self.domain.shape.as_ref() == domain {\n            Ok(0)",
             "checked_iteration_steps_preserve_exact_large_domains_without_storage",
         ),
         (
@@ -185,17 +233,17 @@ fn weakened_metadata_construction_fails_the_executable_contract() {
             "checked_movement_relations_reject_invalid_bijections_and_bystanders",
         ),
         (
-            "target.shape[out_axis] != self.shape[axis]",
+            "target.domain.shape[out_axis] != self.domain.shape[axis]",
             "false",
             "checked_movement_relations_reject_invalid_bijections_and_bystanders",
         ),
         (
-            "!inserted && self.shape[axis] != 1",
+            "!inserted && self.domain.shape[axis] != 1",
             "false",
             "checked_movement_relations_reject_invalid_bijections_and_bystanders",
         ),
         (
-            "extent != self.shape[input_axis]",
+            "extent != self.domain.shape[input_axis]",
             "false",
             "checked_movement_relations_reject_invalid_bijections_and_bystanders",
         ),
@@ -230,7 +278,7 @@ fn weakened_metadata_construction_fails_the_executable_contract() {
             "target_projection_is_checked_without_requesting_a_large_allocation",
         ),
         (
-            "self.bytes.0 > capacity.0",
+            "required.get() > capacity.get()",
             "false",
             "checked_indexing_and_byte_ranges_reject_out_of_bounds_before_access",
         ),
@@ -240,13 +288,29 @@ fn weakened_metadata_construction_fails_the_executable_contract() {
             "scratch_lengths_and_rank_projections_are_checked_before_allocation",
         ),
     ] {
+        let runtime_matches = runtime_owner.matches(from).count();
+        let abi_matches = abi_owner.matches(from).count();
         assert_eq!(
-            owner.matches(from).count(),
+            runtime_matches + abi_matches,
             1,
             "unique mutation anchor: {from}"
         );
-        compiled(probe.execute_contract(&owner, &tests, witness));
-        let output = probe.execute_contract(&owner.replacen(from, to, 1), &tests, witness);
+        compiled(probe.execute_contract(&runtime_owner, &abi_owner, &tests, witness));
+        let output = if runtime_matches == 1 {
+            probe.execute_contract(
+                &runtime_owner.replacen(from, to, 1),
+                &abi_owner,
+                &tests,
+                witness,
+            )
+        } else {
+            probe.execute_contract(
+                &runtime_owner,
+                &abi_owner.replacen(from, to, 1),
+                &tests,
+                witness,
+            )
+        };
         assert_eq!(
             output.status.code(),
             Some(101),
@@ -306,9 +370,11 @@ fn internal_callers_cannot_forge_counts_or_restore_independent_tensor_fields() {
         &fs::read_to_string(root.join("../chelis-vocab/src/lib.rs")).unwrap(),
         false,
     ));
-    let owner = fs::read_to_string(root.join("src/metadata.rs")).unwrap();
+    let runtime_owner = fs::read_to_string(root.join("src/metadata.rs")).unwrap();
+    let abi_owner = fs::read_to_string(root.join("../chelis-abi/src/metadata.rs")).unwrap();
+    probe.compile_abi(&abi_owner);
     let library = fs::read_to_string(root.join("src/lib.rs")).unwrap();
-    fs::write(probe.0.join("metadata.rs"), &owner).unwrap();
+    fs::write(probe.0.join("metadata.rs"), &runtime_owner).unwrap();
     let declarations = format!(
         "{}\n{}",
         declaration(&library, "chelis_tensor"),
@@ -410,11 +476,24 @@ fn internal_callers_cannot_forge_counts_or_restore_independent_tensor_fields() {
             "E0624",
             "index_step_for_checked_shape",
         ),
+        (
+            "fn bad(m: &mut ShapeMetadata) { m.domain.elements = ElementCount::from_extents(&[99]).unwrap(); }"
+                .to_owned(),
+            "E0616",
+            "domain",
+        ),
     ];
-    for field in ["shape", "strides", "rank", "elements", "bytes", "dtype"] {
+    for (field, code) in [
+        ("shape", "E0615"),
+        ("strides", "E0616"),
+        ("rank", "E0615"),
+        ("elements", "E0615"),
+        ("bytes", "E0615"),
+        ("dtype", "E0615"),
+    ] {
         negatives.push((
             format!("fn bad(m: &mut ShapeMetadata) {{ let _ = &mut m.{field}; }}"),
-            "E0616",
+            code,
             field,
         ));
     }
@@ -436,27 +515,36 @@ fn internal_callers_cannot_forge_counts_or_restore_independent_tensor_fields() {
         );
     }
 
-    // Positive mutation control: exposing a field must make the forbidden
-    // caller compile, proving the negative above detects this weakened owner.
-    let anchor = "    elements: ElementCount,";
-    let carrier = declaration(&owner, "ShapeMetadata");
+    // Positive mutation control: exposing the checked owner and its count must
+    // make the forbidden caller compile, proving the negative above detects
+    // the current nested representation rather than an obsolete direct field.
+    let domain_anchor = "    domain: CheckedDomain,";
+    let shape_carrier = declaration(&abi_owner, "ShapeMetadata");
     assert_eq!(
-        carrier.matches(anchor).count(),
+        shape_carrier.matches(domain_anchor).count(),
         1,
-        "exact ShapeMetadata count field"
+        "exact ShapeMetadata domain field"
     );
-    fs::write(
-        probe.0.join("metadata.rs"),
-        owner.replacen(
-            &carrier,
-            &carrier.replacen(anchor, "    pub(crate) elements: ElementCount,", 1),
-            1,
-        ),
-    )
-    .unwrap();
+    let checked_carrier = declaration(&abi_owner, "CheckedDomain");
+    let count_anchor = "    elements: ElementCount,";
+    assert_eq!(
+        checked_carrier.matches(count_anchor).count(),
+        1,
+        "exact CheckedDomain count field"
+    );
+    let exposed_shape = shape_carrier.replacen(domain_anchor, "    pub domain: CheckedDomain,", 1);
+    let exposed_checked = checked_carrier
+        .replacen("struct CheckedDomain {", "pub struct CheckedDomain {", 1)
+        .replacen(count_anchor, "    pub elements: ElementCount,", 1);
+    let weakened_owner = abi_owner
+        .replacen(&shape_carrier, &exposed_shape, 1)
+        .replacen(&checked_carrier, &exposed_checked, 1);
+    probe.compile_abi(&weakened_owner);
     compiled(probe.compile(
         "exposed",
-        &format!("{context}\nfn bad(m: &mut ShapeMetadata) {{ let _ = &mut m.elements; }}"),
+        &format!(
+            "{context}\nfn bad(m: &mut ShapeMetadata) {{ m.domain.elements = ElementCount::from_extents(&[99]).unwrap(); }}"
+        ),
         true,
     ));
 }

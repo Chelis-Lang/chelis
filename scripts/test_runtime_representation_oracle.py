@@ -79,12 +79,18 @@ class SourceUniverseTests(unittest.TestCase):
         self.assertIn("root.glob(pattern)", candidates)
         self.assertNotIn("ls-files", candidates)
 
-    def test_the_universe_holds_the_handwritten_device_headers(self) -> None:
-        for header in (
+    def test_the_universe_holds_the_phase2_owned_sources(self) -> None:
+        for source in (
+            "crates/chelis-backend-hip/runtime/chelis_device_descriptor.h",
+            "crates/chelis-backend-hip/runtime/chelis_device_owner.cpp",
+            "crates/chelis-backend-hip/runtime/chelis_device_owner.h",
             "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h",
             "crates/chelis-backend-metal/runtime/chelis_metal_runtime.h",
+            "crates/chelis-python/src/dlpack.rs",
+            "crates/chelis-python/src/native_tensor.rs",
+            "crates/chelis-runtime/include/chelis_runtime_views.h",
         ):
-            self.assertIn(header, oracle.INVENTORY_SOURCES)
+            self.assertIn(source, oracle.INVENTORY_SOURCES)
 
 
 class BaselineTests(unittest.TestCase):
@@ -233,6 +239,22 @@ class BaselineTests(unittest.TestCase):
 
 
 class MutationContractTests(unittest.TestCase):
+    def test_header_mutations_remain_inside_their_include_guards(self) -> None:
+        for probe in oracle.phase0_mutation_probes():
+            if probe.path.suffix != ".h":
+                continue
+            source = (REPO_ROOT / probe.path).read_text()
+            mutated = probe.mutate(source)
+            original_guard_end = source.rstrip().rfind("#endif")
+            mutated_guard_end = mutated.rstrip().rfind("#endif")
+            self.assertGreaterEqual(original_guard_end, 0, probe.witness_id)
+            self.assertGreaterEqual(mutated_guard_end, 0, probe.witness_id)
+            self.assertEqual(
+                mutated[mutated_guard_end + len("#endif") :],
+                source[original_guard_end + len("#endif") :],
+                f"{probe.witness_id} planted a repeated declaration after the guard",
+            )
+
     def test_element_final_forms_are_exact_and_never_admit_raw_access(self) -> None:
         for owner in oracle.ELEMENT_FINAL_CONTRACT_OWNERS:
             self.assertTrue(oracle.owner_module_final_form(
@@ -377,6 +399,26 @@ class MutationContractTests(unittest.TestCase):
 
 
 class ManifestTests(unittest.TestCase):
+    def test_phase_two_final_forms_are_exact_closed_and_manifested(self) -> None:
+        forms = set(oracle.PHASE2_FINAL_FORMS)
+        self.assertEqual(len(forms), 35)
+        for path, kind, owner in forms:
+            self.assertTrue(oracle.owner_module_final_form(kind, path, owner))
+            self.assertFalse(oracle.owner_module_final_form(kind, path, owner + "_unchecked"))
+            self.assertFalse(oracle.owner_module_final_form(kind, path + ".other", owner))
+        self.assertFalse(oracle.owner_module_final_form(
+            "raw-element-pointer",
+            "crates/chelis-backend-hip/runtime/chelis_hip_runtime.h",
+            "chelis_hipblas_sgemm_row_major",
+        ))
+        manifest = oracle.coverage_manifest()["source_inventory"]["owner_module_final_forms"]
+        manifested = {
+            (path, row["kind"], row["owner"])
+            for path, rows in manifest.items()
+            for row in rows
+        }
+        self.assertTrue(forms <= manifested)
+
     def test_checked_host_metadata_has_paired_profiles_and_exact_width_owners(self) -> None:
         path = "crates/chelis-runtime/src/metadata.rs"
         self.assertIn(path, oracle.INVENTORY_SOURCES)
@@ -624,7 +666,10 @@ class RedTeamRegressionTests(unittest.TestCase):
 
     def test_the_docstring_source_counts_match_the_frozen_list(self) -> None:
         rust = sum(1 for path in oracle.INVENTORY_SOURCES if path.endswith(".rs"))
-        headers = len(oracle.INVENTORY_SOURCES) - rust
+        native = len(oracle.INVENTORY_SOURCES) - rust
         source = Path(oracle.__file__).read_text(encoding="utf-8")
-        self.assertIn("Seventy are Rust and seven are C or Objective-C headers", source)
-        self.assertEqual((rust, headers), (70, 7))
+        self.assertIn(
+            "Seventy-two are Rust and eleven are C, C++, or Objective-C sources",
+            source,
+        )
+        self.assertEqual((rust, native), (72, 11))

@@ -218,6 +218,17 @@ EXPECTED_OP_MANIFESTS = {
 | rank | `int32_t chelis_tensor_rank(const chelis_tensor *tensor)` |
 | extent | `int64_t chelis_tensor_shape(const chelis_tensor *tensor, int32_t axis)` |
 | element count | `int64_t chelis_tensor_numel(const chelis_tensor *tensor)` |
+| contiguous metadata plan | `chelis_metadata_plan *chelis_metadata_plan_new(chelis_scalar rank, const chelis_scalar *shape, chelis_scalar exemplar)` |
+| strided metadata plan | `chelis_metadata_plan *chelis_metadata_plan_view(chelis_scalar rank, const chelis_scalar *shape, const chelis_scalar *strides, chelis_scalar exemplar, chelis_scalar byte_capacity)` |
+| metadata plan rank | `int32_t chelis_metadata_plan_rank(const chelis_metadata_plan *plan)` |
+| metadata plan shape | `const int64_t *chelis_metadata_plan_shape(const chelis_metadata_plan *plan)` |
+| metadata plan strides | `const int64_t *chelis_metadata_plan_strides(const chelis_metadata_plan *plan)` |
+| metadata plan count | `int64_t chelis_metadata_plan_count(const chelis_metadata_plan *plan)` |
+| metadata plan logical bytes | `int64_t chelis_metadata_plan_byte_count(const chelis_metadata_plan *plan)` |
+| metadata plan dtype | `chelis_dtype chelis_metadata_plan_dtype(const chelis_metadata_plan *plan)` |
+| metadata plan capacity check | `void chelis_metadata_plan_check_capacity(const chelis_metadata_plan *plan, chelis_scalar byte_capacity)` |
+| metadata plan logical byte offset | `int64_t chelis_metadata_plan_byte_offset(const chelis_metadata_plan *plan, chelis_scalar linear_index)` |
+| metadata plan release | `void chelis_metadata_plan_release(chelis_metadata_plan *plan)` |
 | contiguous stride | `int64_t chelis_tensor_stride(const chelis_tensor *tensor, int32_t axis)` |
 | logical byte count | `int64_t chelis_tensor_byte_count(const chelis_tensor *tensor)` |
 | tensor iteration index step | `int64_t chelis_tensor_elementwise_index_step(const chelis_tensor *input, const chelis_tensor *domain)` |
@@ -291,7 +302,16 @@ EXPECTED_OP_MANIFESTS = {
 | checked window window_check_target | `void chelis_window_check_target(const chelis_window_plan *plan, chelis_window_side side, chelis_scalar rank, const chelis_scalar *shape)` |
 | checked window window_plan_release | `void chelis_window_plan_release(chelis_window_plan *plan)` |
 | checked literal tensor_check_literal | `void chelis_tensor_check_literal(chelis_scalar rank, const chelis_scalar *shape, chelis_scalar exemplar, chelis_scalar count)` |
-| checked literal tensor_write_literal | `void chelis_tensor_write_literal(chelis_tensor_write *guard, chelis_scalar count, const chelis_scalar *values)` |""".splitlines()
+| checked literal tensor_write_literal | `void chelis_tensor_write_literal(chelis_tensor_write *guard, chelis_scalar count, const chelis_scalar *values)` |
+| device allocation | `chelis_device_tensor_owner *chelis_device_tensor_alloc(chelis_metadata_plan *plan)` |
+| device storage borrow | `chelis_device_tensor_owner *chelis_device_tensor_borrow(chelis_metadata_plan *plan, void *data, chelis_scalar byte_capacity)` |
+| device packet import | `chelis_device_tensor_owner *chelis_device_tensor_import(const chelis_gpu_tensor *packet)` |
+| device packet observation | `const chelis_gpu_tensor *chelis_device_tensor_view(const chelis_device_tensor_owner *owner)` |
+| independent device clone | `chelis_device_tensor_owner *chelis_device_tensor_clone(const chelis_device_tensor_owner *source)` |
+| device owner finalization | `void chelis_device_tensor_release(chelis_device_tensor_owner *owner)` |
+| host to device transfer | `void chelis_device_tensor_copy_from_host(chelis_device_tensor_owner *destination, const chelis_tensor *source)` |
+| device to host transfer | `void chelis_device_tensor_copy_to_host(chelis_tensor_write *destination, const chelis_device_tensor_owner *source)` |
+| device owner device | `int32_t chelis_device_tensor_device(const chelis_device_tensor_owner *owner)` |""".splitlines()
     ),
     "05-OP-34": tuple(
         """\
@@ -501,7 +521,7 @@ FROZEN_ATOM_DIGESTS = {
     "05-OP-30": "30c8c04f547161b7c40cbe5659a0c5fee34102f34a6fc605bcde8740221b461b",
     "05-OP-31": "20100b3524f8381469ea2a24d035da89be346f7809b70bfd6698aa94b6df9031",
     "05-OP-32": "fc45b2ef829aeebdb0d524059c63452cd2d9c733a5c2cdf85b5bfdd845bda8a1",
-    "05-OP-33": "5e1d0617106428fb3336f50f8d043eca7d37ab97bfd15ed6e77232f0dbd2db32",
+    "05-OP-33": "04fdb17037f755f45826d8bcdbcfc76bb1bd5b955d60e57006669932da442cd0",
     "05-OP-34": "0d2c7d4a051a43dc6b0c93b241434ff1d66bbd7a3e6d47e5c74b669d2fd687bf",
     "05-OP-35": "6eb9a0e1023aeed6dcf43abe8623a9b94dcb38db15224f38915320108c276ef7",
     "05-OP-36": "aeaaf9888f922b31159b8b7536444603897d649c8fb477e77bda659346177ab4",
@@ -524,7 +544,7 @@ FROZEN_REGION_DIGESTS = {
         'spec/11-ffi.md',
         '## 1. Python Interop',
         '## 2. C Interop',
-        '837dbd997cbe338382f349f51629a61cf326df75070ee86028cb542c2dfffdae',
+        '5dab69dbeb509abc8994fc77c0d67c13da09bc1c41802609382fffc6b3d4e692',
     ),
     'numeric wire codecs and roles': (
         'spec/10-serialization.md',
@@ -536,7 +556,7 @@ FROZEN_REGION_DIGESTS = {
         "AGENTS.md",
         "### Numeric Surface Discipline",
         "### Public-Surface Change Rule",
-        "6ae916889e4265dfb27f9ae1c605b2abd478f5675c7826c04e5da5faa9d0d11e",
+        "6c73e65eb03112dd1b8e661cbd987c70a11402722c2ac762d9c14d3ca6132f19",
     ),
     "numeric value semantics": (
         "spec/04-type-system.md",
@@ -2349,15 +2369,15 @@ def validate_normative_contract(
             "takes rank and every target extent as exact tagged int64 scalars",
             "changes no metadata, ownership, or payload",
             "preserves every stored element bit",
-            "exactly the thirty-two final public C callable identities",
+            "exactly the public C callable identities enumerated in",
             "unboxed axes and rank are `int32_t`",
-            "tensor arguments and results are [05-OP-44]'s opaque `chelis_tensor` "
-            "handles, and every tensor result is a new owner",
+            "host tensor arguments and results are [05-OP-44]'s opaque "
+            "`chelis_tensor` handles, and every host tensor result is a new owner",
             "alignment, live-owner state, and write-guard state, before reading "
             "data",
-            "Foreign storage enters only through [05-OP-44]'s entry borrow; no "
-            "callable in this family constructs a non-owning view, adopts caller "
-            "bytes, or frees storage",
+            "Foreign host tensor storage enters only through [05-OP-44]'s entry "
+            "borrow; host tensor callables in this family do not construct a "
+            "non-owning host tensor view, adopt caller bytes, or free storage",
             "extents, sizes, offsets, counts, and element counts are `int64_t`",
             "rank is nonnegative",
             "before allocation or element access",

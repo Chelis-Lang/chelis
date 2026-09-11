@@ -238,7 +238,7 @@ class LocalCommandListTests(unittest.TestCase):
                 "<managed-python> scripts/pipeline_core_documentation_guard.py",
                 "<managed-python> scripts/unrepresentable_domain_oracle.py",
                 "<managed-python> scripts/runtime_representation_oracle.py "
-                "--phase 1",
+                "--phase 2",
                 "cargo nextest run -p chelis-ir --features lowering-trace "
                 "--lib --test lowering_trace",
                 "cargo nextest run -p chelis-compiler-api --features emission-observer "

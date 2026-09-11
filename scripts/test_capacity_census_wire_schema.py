@@ -618,7 +618,7 @@ class ActualSchemaCodec(unittest.TestCase):
                     else:
                         api["index"][str(version["inner"]["enum"]["variants"][0])][
                             "name"
-                        ] = "V2"
+                        ] = "V1"
                 elif mutation in {
                     "missing-artifact-version-header",
                     "wrong-artifact-metadata-mirror",

@@ -410,6 +410,7 @@ fn hipcc_link_generated(out_dir: &Path, source: &str, binary: &str) -> std::proc
         .current_dir(out_dir)
         .args([
             source,
+            "chelis_device_owner.cpp",
             "-L.",
             "-lchelis_runtime",
             "-lm",

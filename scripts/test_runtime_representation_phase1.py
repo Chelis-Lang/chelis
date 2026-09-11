@@ -52,6 +52,16 @@ class ReceiptTests(unittest.TestCase):
                     if defect == 'ambiguous': text += '\n' + text
                     with self.subTest(defect=defect), self.assertRaises(oracle.OracleFailure):
                         oracle.runtime_artifact(text)
+                evidence = root / 'evidence'
+                evidence.mkdir()
+                with mock.patch.object(oracle, 'command', return_value=json.dumps(packet)):
+                    with oracle.runtime_pin(evidence) as receipt:
+                        pinned = evidence / 'runtime/libchelis_runtime.a'
+                        self.assertEqual(oracle.os.environ['CHELIS_RUNTIME_DIR'], str(pinned.parent))
+                        self.assertEqual(oracle.os.environ['CHELIS_RUNTIME_LIB'], str(pinned))
+                        self.assertEqual(list(receipt['pinned_artifact']), [str(pinned)])
+                    self.assertNotIn('CHELIS_RUNTIME_DIR', oracle.os.environ)
+                    self.assertNotIn('CHELIS_RUNTIME_LIB', oracle.os.environ)
 
     def test_expected_mutation_failure_requires_the_exact_assertion_case(self):
         selected = ['p::contract::negative']
@@ -74,9 +84,55 @@ class ReceiptTests(unittest.TestCase):
 
     def test_failed_process_cannot_publish_a_passing_transcript(self):
         with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaises(oracle.OracleFailure):
-                oracle.command([oracle.sys.executable, '-c', 'print("PASS"); raise SystemExit(1)'], Path(directory), Path(directory), 'failing')
-            self.assertEqual(json.loads((Path(directory) / 'failing.process.json').read_text())['returncode'], 1)
+            root = Path(directory)
+            fallback = root / '.venv/bin/python'
+            fallback.parent.mkdir(parents=True)
+            fallback.symlink_to(Path(oracle.sys.executable))
+            prefix = oracle.subprocess.check_output(
+                [str(fallback), '-I', '-c', 'import sys; print(sys.prefix)'],
+                text=True,
+            ).strip()
+            probe = (
+                'import json, os; '
+                'print(json.dumps({name: os.environ[name] '
+                'for name in ("PYO3_PYTHON", "VIRTUAL_ENV")}))'
+            )
+            with mock.patch.dict(oracle.os.environ, {}, clear=True):
+                output = oracle.command(
+                    [oracle.sys.executable, '-c', probe],
+                    root,
+                    root / 'managed',
+                    'environment',
+                )
+                self.assertEqual(json.loads(output), {
+                    'PYO3_PYTHON': str(fallback),
+                    'VIRTUAL_ENV': prefix,
+                })
+                with mock.patch.dict(
+                    oracle.os.environ,
+                    {'PYO3_PYTHON': str(root / 'missing-python')},
+                ):
+                    with self.assertRaisesRegex(
+                        oracle.OracleFailure,
+                        'PYO3_PYTHON.*missing-python',
+                    ):
+                        oracle.command(
+                            [oracle.sys.executable, '-c', 'pass'],
+                            root,
+                            root / 'invalid',
+                            'environment',
+                        )
+                with self.assertRaises(oracle.OracleFailure):
+                    oracle.command(
+                        [oracle.sys.executable, '-c', 'print("PASS"); raise SystemExit(1)'],
+                        root,
+                        root / 'failing',
+                        'failing',
+                    )
+            self.assertEqual(
+                json.loads((root / 'failing/failing.process.json').read_text())['returncode'],
+                1,
+            )
 
     def test_python_skip_missing_and_duplicate_success_fail_receipts(self):
         class Fixture(unittest.TestCase):

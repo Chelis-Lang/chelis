@@ -1035,9 +1035,9 @@ class ListOutputTests(unittest.TestCase):
         )
         self.assertIn(command, [gate.render(entry) for entry in gate.full_command_list()])
 
-    def test_runtime_representation_phase1_oracle_is_continuous_and_local(self):
+    def test_runtime_representation_phase2_oracle_is_continuous_and_local(self):
         command = (
-            "<managed-python> scripts/runtime_representation_oracle.py --phase 1"
+            "<managed-python> scripts/runtime_representation_oracle.py --phase 2"
         )
         # The oracle is a stage of its own so hosted CI can give it a runner of
         # its own; it must not also ride on the integration support slice.
@@ -2198,7 +2198,7 @@ class CiParityTests(unittest.TestCase):
         self.assertNotIn("compiled-value-ownership-phase0-oracle", aggregate_block)
         self.assertIn("compiled-value-ownership-phase0-oracle", _workflow_job_block(CI_YML.with_name("heavy-e2e.yml"), "report"))
 
-    def test_runtime_representation_phase1_oracle_is_a_dedicated_gate_job(self):
+    def test_runtime_representation_phase2_oracle_is_a_dedicated_gate_job(self):
         workspace_block = _ci_job_block("ci-fast")
         ownership_block = _ci_job_block("compiled-value-ownership-phase0-oracle")
         oracle_block = _ci_job_block("runtime-representation-phase0-oracle")
@@ -2206,17 +2206,21 @@ class CiParityTests(unittest.TestCase):
         command = "python3 scripts/gate.py runtime-representation"
 
         self.assertIn(
-            "name: Runtime Representation Phase 1 Oracle",
+            "name: Runtime Representation Phase 2 Oracle",
             oracle_block,
         )
         self.assertNotIn("    needs:", oracle_block)
         self.assertIn("contents: read", oracle_block)
         self.assertIn(
-            "name: runtime-representation-phase1-receipts",
+            "name: runtime-representation-phase2-receipts",
             oracle_block,
         )
         self.assertIn(
-            "path: target/runtime-representation-phase1/",
+            "target/runtime-representation-phase1/",
+            oracle_block,
+        )
+        self.assertIn(
+            "target/runtime-representation-phase2/",
             oracle_block,
         )
         self.assertIn("dtolnay/rust-toolchain@stable", oracle_block)
@@ -2341,6 +2345,13 @@ class CiParityTests(unittest.TestCase):
             ),
             "generalize-sweep-oracle-shard": (
                 "junit-linux-generalization-${{ matrix.shard }}",
+                "target/nextest/ci-full/junit.xml",
+            ),
+            # chelis#1819: the nightly workspace suite is a four-way hash
+            # partition, so its report is one artifact per shard. A shared
+            # name would collide on upload and strand the telemetry download.
+            "full-workspace": (
+                "junit-linux-full-${{ matrix.shard }}",
                 "target/nextest/ci-full/junit.xml",
             ),
             "macos-workspace-shard": (
@@ -2837,6 +2848,14 @@ class CiParityTests(unittest.TestCase):
         # shard recompiled the workspace a second time (4.4 hosted minutes).
         self.assertNotIn("GeneralizationPartitionTests", workspace_block)
         self.assertNotIn("ProfilePartitionTests", generalization_block)
+        # Both jobs are partitioned, and neither census is part of its job's
+        # partition: each lists the whole workspace once. One shard owns it,
+        # or four runners repeat the same listing.
+        self.assertIn(
+            "- name: Verify nextest profile coverage\n"
+            "        if: matrix.shard == 1",
+            workspace_block,
+        )
         self.assertIn(
             "- name: Verify generalization lane selection\n"
             "        if: matrix.shard == 1",

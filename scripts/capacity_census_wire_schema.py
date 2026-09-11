@@ -428,10 +428,10 @@ class _SchemaShapeGraph(_CodecShapeGraph):
             )
             variant = self._item(crate, body["variants"][0])
             _require(
-                variant["name"] == "V1"
+                variant["name"] == "V2"
                 and variant["inner"]["variant"]["kind"] == "plain"
                 and not self._serde(variant),
-                "artifact ABI requires the unit V1 variant",
+                "artifact ABI requires the unit V2 variant",
             )
             codec = self._serde_implementations(crate, body, set(), _ARTIFACT_SOURCE)
             self.definitions[identity] = Definition(
@@ -439,7 +439,7 @@ class _SchemaShapeGraph(_CodecShapeGraph):
                 "enum",
                 (),
                 attrs,
-                (("V1", (), ("unit", ())),),
+                (("V2", (), ("unit", ())),),
                 (Edge(identity + ".$version", ("primitive", "u32"), ()),),
                 "artifact-version-codec:" + codec,
             )

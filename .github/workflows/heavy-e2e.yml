@@ -2,7 +2,10 @@ name: Linux Extended Validation
 
 # Daily/manual exhaustive coverage. The full workspace pass deliberately
 # includes PR tests as well as expensive integrations; no default filter
-# can hide a newly added target. The two census targets execute in dtype only.
+# can hide a newly added target. It executes as four disjoint nextest hash
+# partitions of that one unfiltered selection, so every listed test still
+# runs exactly once and each shard reports inside the 60-minute budget.
+# The two census targets execute in dtype only.
 # Feature and phase oracles retain their own
 # acceptance commands. All ignored tests still need explicit/manual owners.
 on:
@@ -22,7 +25,11 @@ env:
 
 jobs:
   full-workspace:
-    name: Full Workspace (Linux)
+    name: Full Workspace (Linux, shard ${{ matrix.shard }}/4)
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -50,7 +57,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: linux-workspace
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' && matrix.shard == 1 }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -64,22 +71,23 @@ jobs:
       - name: Full non-ignored workspace suite
         env:
           CHELIS_TEST_SHARED_REEF_HOME: ${{ runner.temp }}/chelis-test-shared-reef
-        run: cargo nextest run --workspace --profile ci-full --ignore-default-filter --no-fail-fast -E 'not (binary_id(/^chelis-compiler-api::capacity_census_wire$/) | binary_id(/^chelis-python::capacity_census_bindings$/))'
+        run: cargo nextest run --workspace --profile ci-full --ignore-default-filter --no-fail-fast -E 'not (binary_id(/^chelis-compiler-api::capacity_census_wire$/) | binary_id(/^chelis-python::capacity_census_bindings$/))' --partition hash:${{ matrix.shard }}/4
 
       - name: Verify nextest profile coverage
+        if: matrix.shard == 1
         run: .venv/bin/python -m unittest scripts.test_nextest_profile_partition.ProfilePartitionTests
 
       - name: Upload full workspace JUnit
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: junit-linux-full
+          name: junit-linux-full-${{ matrix.shard }}
           path: target/nextest/ci-full/junit.xml
           if-no-files-found: error
           retention-days: 14
 
       - name: chelis-std self-test corpus
-        if: always()
+        if: always() && matrix.shard == 1
         run: cargo test -p chelis-cli --test chelis_std_self_test_corpus -- --ignored --nocapture
 
   script-nightly:
@@ -125,6 +133,8 @@ jobs:
           path: |
             target/agents/wire-codec-rustdoc
             target/agents/native-bindings-driver
+            target/agents/native-execution-integration
+            target/agents/native-owner-integration
             target/graph-fixture-target
           key: ${{ runner.os }}-${{ runner.arch }}-script-execution-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
           restore-keys: ${{ runner.os }}-${{ runner.arch }}-script-execution-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
@@ -139,6 +149,8 @@ jobs:
           path: |
             target/agents/wire-codec-rustdoc
             target/agents/native-bindings-driver
+            target/agents/native-execution-integration
+            target/agents/native-owner-integration
             target/graph-fixture-target
           key: ${{ runner.os }}-${{ runner.arch }}-script-execution-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
 
@@ -337,7 +349,7 @@ jobs:
         run: .venv/bin/python scripts/compiled_value_ownership_oracle.py --phase launch
 
   runtime-representation-phase0-oracle:
-    name: Runtime Representation Phase 1 Oracle
+    name: Runtime Representation Phase 2 Oracle
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -379,8 +391,10 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: runtime-representation-phase1-receipts
-          path: target/runtime-representation-phase1/
+          name: runtime-representation-phase2-receipts
+          path: |
+            target/runtime-representation-phase1/
+            target/runtime-representation-phase2/
           if-no-files-found: error
           retention-days: 14
 
@@ -424,23 +438,12 @@ jobs:
           shared-key: linux-workspace
           save-if: false
 
-      # Phase A must PASS. It does not on current `main`: its `symbolic_window`
-      # target runs `issue_368_runtime_symbolic_window_grad_is_half_everywhere`,
-      # whose `grad` lowering regressed in chelis#1693 and is owned by
-      # chelis#1775. This step is red until that lands, deliberately, because
-      # the row really is short. Do not add `continue-on-error`.
-      - name: Runtime extent oracle (phase A)
-        run: .venv/bin/python scripts/runtime_extent_oracle.py --phase a
-
-      # Phase B's receipts are enforced here; its ROW shortfall is not a
-      # failure yet. chelis#1277's B2b slices are still landing the 19 rows
-      # recorded short, so the run reports them and ends with
-      # `RECEIPTS PASS, ROWS SHORT OF EXIT` rather than PASS. A drifted
-      # receipt, a moved digest or a failing test still fails this step.
-      # The B2b-3 flip pull request drops `--allow-shortfall`, at which point
-      # the step demands PASS.
-      - name: Runtime extent oracle (phase B receipts and row report)
-        run: .venv/bin/python scripts/runtime_extent_oracle.py --phase b --allow-shortfall
+      # One step, because `--phase final` is chelis#1277's completion oracle:
+      # it runs both registered phases' deduplicated targets, refuses
+      # `--allow-shortfall` outright, and prints each phase's corpus digest
+      # beside the combined one.
+      - name: Runtime extent oracle (completion)
+        run: .venv/bin/python scripts/runtime_extent_oracle.py --phase final
 
   generalize-sweep-oracle-shard:
     name: Typecheck Level Generalization Oracle (shard ${{ matrix.shard }}/4)
@@ -610,11 +613,29 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
 
-      - name: Download full Linux workspace JUnit
+      - name: Download full Linux workspace JUnit shard 1
         uses: actions/download-artifact@v7
         with:
-          name: junit-linux-full
-          path: target/test-telemetry/input/linux-full
+          name: junit-linux-full-1
+          path: target/test-telemetry/input/linux-full-1
+
+      - name: Download full Linux workspace JUnit shard 2
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-linux-full-2
+          path: target/test-telemetry/input/linux-full-2
+
+      - name: Download full Linux workspace JUnit shard 3
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-linux-full-3
+          path: target/test-telemetry/input/linux-full-3
+
+      - name: Download full Linux workspace JUnit shard 4
+        uses: actions/download-artifact@v7
+        with:
+          name: junit-linux-full-4
+          path: target/test-telemetry/input/linux-full-4
 
       - name: Download dtype JUnit
         uses: actions/download-artifact@v7
@@ -650,7 +671,10 @@ jobs:
         run: >-
           uv run --managed-python --python 3.11 --no-project python
           scripts/ci_test_telemetry.py
-          --shard linux-full=target/test-telemetry/input/linux-full/junit.xml
+          --shard linux-full-1=target/test-telemetry/input/linux-full-1/junit.xml
+          --shard linux-full-2=target/test-telemetry/input/linux-full-2/junit.xml
+          --shard linux-full-3=target/test-telemetry/input/linux-full-3/junit.xml
+          --shard linux-full-4=target/test-telemetry/input/linux-full-4/junit.xml
           --shard linux-dtype=target/test-telemetry/input/linux-dtype/junit.xml
           --shard linux-generalization-1=target/test-telemetry/input/linux-generalization-1/junit.xml
           --shard linux-generalization-2=target/test-telemetry/input/linux-generalization-2/junit.xml

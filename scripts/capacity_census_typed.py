@@ -336,6 +336,7 @@ def main() -> int:
             print(json.dumps(report, indent=2, sort_keys=True))
             return 0
         compiler_json = None
+        native = None
         if args.mode == "bindings-discovery":
             if args.rustdoc_json:
                 raise CensusError("binding authority requires current compiled and wire execution")
@@ -353,6 +354,9 @@ def main() -> int:
             from capacity_census_compiler_json import verify_compiler_json_bindings
 
             compiler_json = verify_compiler_json_bindings(root, target_dir)
+            from capacity_census_native_authority import verify_native_bindings
+
+            native = verify_native_bindings(root, target_dir)
         if compiler_json is not None:
             document = compiler_json.graph.documents["chelis_python"]
         elif args.rustdoc_json:
@@ -378,6 +382,7 @@ def main() -> int:
                 args.registered_method, classes,
                 provenance=provenance,
                 compiler_json=compiler_json,
+                native=native,
             )
             legacy = {row["id"]: row["flags"] for row in binding_rows(
                 document, args.registered, args.registered_method
@@ -385,7 +390,12 @@ def main() -> int:
             for row in rows:
                 row["legacy_flags"] = legacy.get(row["id"], row["flags"])
             receipt = root / "target/capacity-census-compiler-json-execution.json"
-            report = {"version": 1, "rows": rows, "compiler_json": compiler_json.execution_report()}
+            report = {
+                "version": 2,
+                "rows": rows,
+                "compiler_json": compiler_json.execution_report(),
+                "native": native.execution_report(),
+            }
             receipt.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
             print(json.dumps(report, indent=2, sort_keys=True))
             return 0

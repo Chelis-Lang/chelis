@@ -51,10 +51,18 @@ fn hip_count_emits_one_dedicated_multi_axis_checked_balanced_kernel() {
 
     assert!(source.contains("kernel_count_1"), "{source}");
     assert_eq!(source.matches("const char *kernel_count_1_src").count(), 1);
-    assert!(source.contains("const int __count_selected[8] = { 1, 0, 1"));
+    assert!(source.contains("const int __count_selected[3] = { 1, 0, 1"));
     assert!(
-        source
-            .contains("for (int __count_axis = input_ndim - 1; __count_axis >= 0; --__count_axis)")
+        source.contains("chelis_device_metadata input_ndim")
+            && source.contains("chelis_device_metadata input_size")
+            && source.contains("chelis_device_metadata output_ndim")
+            && source.contains("chelis_device_metadata output_size"),
+        "{source}"
+    );
+    assert!(
+        source.contains("for (chelis_device_metadata __count_axis = input_ndim - 1;")
+            && source.contains("__count_axis >= 0; --__count_axis)"),
+        "{source}"
     );
     // chelis#1308's tagged carrier stores bool as `Repr::Bool8`: the kernel
     // reads exactly one byte per element and rejects any byte outside {0, 1}.
@@ -115,6 +123,23 @@ fn hip_count_named_fixed_dims_and_empty_selected_extent_keep_the_same_kernel() {
     assert!(source.contains("if (__count_len == 0)"), "{source}");
     assert!(source.contains("__count_value = 0"), "{source}");
     assert!(source.contains("kernel_count_1"), "{source}");
+
+    let scalar = count_dag(
+        lit_ty(&[2, 3], Prim::Bool),
+        vec![1, 0],
+        lit_ty(&[], Prim::Int64),
+    );
+    let source = codegen_hip(&scalar, "count_scalar")
+        .expect("all-axis Count emits a scalar")
+        .c_source;
+    assert!(
+        source.contains("chelis_device_metadata __count_output_indices[2]"),
+        "{source}"
+    );
+    assert!(
+        source.contains("chelis_device_metadata output_ndim"),
+        "{source}"
+    );
 }
 
 #[test]
@@ -169,28 +194,25 @@ fn hip_count_grammar_is_rejected_at_the_sealed_ownership_boundary() {
 }
 
 #[test]
-fn hip_count_rejects_its_device_rank_limit_at_the_backend_boundary() {
-    // The rank limit is the device carrier's, not the language's: ownership
-    // lowering admits the DAG, and the backend's typed validator reports the
-    // chelis#1345 capability cell before any kernel is emitted.
+fn hip_count_accepts_rank_above_the_retired_fixed_device_limit() {
+    // Phase 2 removes the fixed-rank carrier. A rank-9 Count therefore emits
+    // exact dynamic-rank metadata instead of reusing chelis#1345 as a target
+    // capability rejection.
     let dag = count_dag(
         lit_ty(&[1; 9], Prim::Bool),
         vec![8],
         lit_ty(&[1; 8], Prim::Int64),
     );
-    let error = match codegen_hip(&dag, "invalid_count") {
-        Ok(_) => panic!("an over-rank Count must not reach HIP kernel emission"),
-        Err(error) => error,
-    };
-    let rendered = error.to_string();
+    let source = codegen_hip(&dag, "rank_nine_count")
+        .expect("dynamic-rank device metadata admits rank 9")
+        .c_source;
     assert!(
-        rendered.contains("unimplemented chelis#1345:"),
-        "{rendered}"
+        source.contains("const int __count_selected[9] = { 0, 0, 0, 0, 0, 0, 0, 0, 1 }"),
+        "{source}"
     );
-    assert!(
-        rendered.contains("exceeds the HIP device rank limit"),
-        "{rendered}"
-    );
+    assert!(source.contains("chelis_device_metadata a_sh8"), "{source}");
+    assert!(!source.contains("CHELIS_GPU_MAX_DIM"), "{source}");
+    assert!(!source.contains("unimplemented chelis#1345"), "{source}");
 }
 
 #[test]

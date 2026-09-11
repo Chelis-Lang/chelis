@@ -1,7 +1,14 @@
 mod compiler_json;
+mod dlpack;
+mod native_tensor;
 mod source_json;
 
 use compiler_json::{CheckJson, CompileJson, DesugarJson, EvalBindingsJson, EvalJson};
+use dlpack::{
+    DLPackCapsule, DLPackDevice, DLPackDeviceRequest, DLPackRequest, DLPackStreamRequest,
+    DLPackVersionRequest,
+};
+use native_tensor::{CompiledInputs, CompiledTensorResults, ValidatedTensor, execute_checked};
 use source_json::SourceJson;
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -10,9 +17,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::ptr::NonNull;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -46,6 +53,10 @@ const RUNTIME_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../chelis-runtime/include/chelis_runtime.h"
 ));
+const RUNTIME_VIEWS_H: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../chelis-runtime/include/chelis_runtime_views.h"
+));
 const RUNTIME_DTYPE_H: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../chelis-runtime/include/chelis_runtime_dtype.h"
@@ -65,7 +76,6 @@ const MATH_H: &str = include_str!(concat!(
 
 const CHELIS_DTYPE_F32: i32 = RuntimeDType::F32.id();
 const CHELIS_DTYPE_F64: i32 = RuntimeDType::F64.id();
-const CHELIS_MAX_DIM: usize = 8;
 const DLPACK_CPU_DEVICE_TYPE: i32 = 1;
 const DLPACK_ROCM_DEVICE_TYPE: i32 = 10;
 
@@ -87,16 +97,11 @@ struct ChelisReadView {
     reserved: [u8; 7],
 }
 
+chelis_abi::define_device_descriptor!(ChelisGpuTensor);
+
 #[repr(C)]
-#[derive(Clone, Copy)]
-struct ChelisGpuTensor {
-    data: *mut f32,
-    shape: [i32; CHELIS_MAX_DIM],
-    strides: [i32; CHELIS_MAX_DIM],
-    ndim: i32,
-    dtype: i32,
-    size: i32,
-    storage_size: i32,
+struct DeviceTensorOwner {
+    _private: [u8; 0],
 }
 
 type HostEntry = unsafe extern "C" fn(*mut *mut ChelisTensor, c_int, *mut *mut ChelisTensor, c_int);
@@ -115,9 +120,36 @@ struct HostRuntimeApi {
     rank: HostRankFn,
     shape: HostShapeFn,
 }
-type DeviceEntry =
-    unsafe extern "C" fn(*mut *mut ChelisGpuTensor, c_int, *mut *mut ChelisGpuTensor, c_int);
-type HipFreeFn = unsafe extern "C" fn(*mut c_void) -> i32;
+type DeviceEntry = unsafe extern "C" fn(
+    *const *const DeviceTensorOwner,
+    c_int,
+    *mut *mut DeviceTensorOwner,
+    c_int,
+);
+type DeviceImportFn = unsafe extern "C" fn(*const ChelisGpuTensor) -> *mut DeviceTensorOwner;
+type DeviceViewFn = unsafe extern "C" fn(*const DeviceTensorOwner) -> *const ChelisGpuTensor;
+type DeviceReleaseFn = unsafe extern "C" fn(*mut DeviceTensorOwner);
+type DeviceIdFn = unsafe extern "C" fn(*const DeviceTensorOwner) -> i32;
+type HipGetDeviceFn = unsafe extern "C" fn(*mut c_int) -> i32;
+type HipSynchronizeFn = unsafe extern "C" fn() -> i32;
+#[derive(Clone, Copy)]
+struct DeviceRuntimeApi {
+    import: DeviceImportFn,
+    view: DeviceViewFn,
+    release: DeviceReleaseFn,
+    device: DeviceIdFn,
+    current_device: HipGetDeviceFn,
+    synchronize: HipSynchronizeFn,
+}
+impl DeviceRuntimeApi {
+    fn current(self) -> PyResult<i32> {
+        let mut device = -1;
+        if unsafe { (self.current_device)(&mut device) } != 0 || device < 0 {
+            return Err(PyRuntimeError::new_err("HIP current device query failed"));
+        }
+        Ok(device)
+    }
+}
 
 #[repr(C)]
 struct DLDevice {
@@ -152,24 +184,36 @@ struct DLManagedTensor {
 
 #[derive(Clone)]
 enum TensorOwner {
-    Cpu(Rc<CpuTensorHandle>),
-    Gpu(Rc<GpuTensorHandle>),
+    Cpu(Arc<CpuTensorHandle>),
+    Gpu(Arc<GpuTensorHandle>),
 }
 
 struct CpuTensorHandle {
     ptr: NonNull<ChelisTensor>,
     api: HostRuntimeApi,
-    _library: Rc<Library>,
+    _library: Arc<Library>,
 }
 
 struct GpuTensorHandle {
-    ptr: NonNull<ChelisGpuTensor>,
-    device_id: i32,
+    ptr: NonNull<DeviceTensorOwner>,
+    api: DeviceRuntimeApi,
+    _library: Arc<Library>,
 }
+
+// These handles expose no Rust references to payload storage. The host ABI's
+// immutable descriptor and atomic owner lifetime permit release from another
+// thread; the matching library remains live until after that release.
+unsafe impl Send for CpuTensorHandle {}
+unsafe impl Sync for CpuTensorHandle {}
+
+// The artifact finalizer releases the opaque owner on its recorded device and
+// restores the calling thread context. Its library stays live through release.
+unsafe impl Send for GpuTensorHandle {}
+unsafe impl Sync for GpuTensorHandle {}
 
 struct LoadedArtifact {
     manifest: ArtifactManifest,
-    library: Rc<Library>,
+    library: Arc<Library>,
     library_path: PathBuf,
     _tempdir: Option<TempDir>,
 }
@@ -220,12 +264,12 @@ struct HostExecution {
 
 struct DeviceExecution {
     entry: DeviceEntry,
-    input_ptrs: Vec<*mut ChelisGpuTensor>,
-    output_ptrs: Vec<*mut ChelisGpuTensor>,
+    input_ptrs: Vec<*const DeviceTensorOwner>,
+    output_ptrs: Vec<*mut DeviceTensorOwner>,
 }
 
 struct HostExecutionOutput(Vec<*mut ChelisTensor>);
-struct DeviceExecutionOutput(Vec<*mut ChelisGpuTensor>);
+struct DeviceExecutionOutput(Vec<*mut DeviceTensorOwner>);
 
 unsafe impl Send for HostExecution {}
 unsafe impl Send for DeviceExecution {}
@@ -260,23 +304,17 @@ impl DeviceExecution {
     }
 }
 
-#[derive(Clone)]
-struct DlpackContext {
-    owner: TensorOwner,
-    shape: Box<[i64]>,
-    strides: Box<[i64]>,
-}
-
 struct CpuInputTensor {
     _owner: Py<PyAny>,
+    _metadata: chelis_abi::metadata::ShapeMetadata,
     ptr: NonNull<ChelisTensor>,
     release: HostReleaseFn,
 }
 
 struct GpuInputTensor {
+    // Release imported metadata before its borrowed Python allocation.
+    handle: Arc<GpuTensorHandle>,
     _owner: Py<PyAny>,
-    tensor: ChelisGpuTensor,
-    device_id: i32,
 }
 
 #[::pyo3::pyclass(name = "CompiledModel", unsendable)]
@@ -286,7 +324,7 @@ struct NativeCompiledModel {
 
 #[::pyo3::pyclass(unsendable)]
 struct NativeTensor {
-    owner: TensorOwner,
+    tensor: ValidatedTensor,
 }
 
 impl Drop for CpuTensorHandle {
@@ -303,49 +341,36 @@ impl Drop for CpuInputTensor {
 
 impl Drop for GpuTensorHandle {
     fn drop(&mut self) {
-        unsafe {
-            let tensor = self.ptr.as_ptr();
-            if !(*tensor).data.is_null() {
-                let _ = hip_free((*tensor).data.cast());
-            }
-            libc::free(tensor.cast());
-        }
+        unsafe { (self.api.release)(self.ptr.as_ptr()) }
     }
 }
 
 #[::pyo3::pymethods]
 impl NativeTensor {
     #[getter]
-    fn shape(&self) -> Vec<usize> {
-        self.owner.shape()
+    fn shape(&self) -> Vec<i64> {
+        self.tensor.shape()
     }
 
-    // chelis#920: report the dtype the runtime tensor actually carries
-    // instead of asserting float32. With the f32-only gate in place the
-    // two were always equal, so the hardcode was invisible; once f64
-    // artifacts load, a stale "float32" here makes consumers
-    // reinterpret a double buffer at a 4-byte stride and read garbage
-    // with no error and an unchanged shape.
     #[getter]
     fn dtype(&self) -> PyResult<&'static str> {
-        numpy_dtype_name(self.owner.runtime_dtype())
+        numpy_dtype_name(self.tensor.dtype().id())
     }
 
-    fn __dlpack_device__(&self) -> (i32, i32) {
-        self.owner.dlpack_device()
+    fn __dlpack_device__(&self) -> DLPackDevice {
+        DLPackDevice::from_validated(&self.tensor)
     }
 
-    #[pyo3(signature = (stream = None, max_version = None, dl_device = None, copy = None))]
+    #[pyo3(signature = (*, stream = None, max_version = None, dl_device = None, copy = None))]
     fn __dlpack__(
         &self,
-        py: Python<'_>,
-        stream: Option<usize>,
-        max_version: Option<&Bound<'_, PyAny>>,
-        dl_device: Option<&Bound<'_, PyAny>>,
+        stream: Option<DLPackStreamRequest>,
+        max_version: Option<DLPackVersionRequest>,
+        dl_device: Option<DLPackDeviceRequest>,
         copy: Option<bool>,
-    ) -> PyResult<PyObject> {
-        let _ = (stream, max_version, dl_device, copy);
-        create_dlpack_capsule(py, self.owner.clone())
+    ) -> PyResult<DLPackCapsule> {
+        let request = DLPackRequest::validate(&self.tensor, stream, max_version, dl_device, copy)?;
+        self.tensor.export(request)
     }
 }
 
@@ -396,144 +421,10 @@ impl NativeCompiledModel {
         py: Python<'_>,
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyObject> {
-        let values = resolve_call_inputs(&self.loaded.manifest.inputs, args, kwargs)?;
-        let device_kinds = values
-            .iter()
-            .map(|value| device_kind(value.bind(py)))
-            .collect::<PyResult<Vec<_>>>()?;
-        let has_gpu = device_kinds
-            .iter()
-            .any(|kind| matches!(kind, DeviceKind::Gpu));
-        let has_cpu = device_kinds
-            .iter()
-            .any(|kind| matches!(kind, DeviceKind::Cpu));
-        if has_gpu && has_cpu {
-            return Err(PyValueError::new_err(
-                "mixed CPU/GPU inputs are not supported in compiled execution",
-            ));
-        }
-
-        if has_gpu {
-            if self.loaded.manifest.target != CompileTarget::Hip {
-                return Err(PyValueError::new_err(
-                    "GPU tensors require a HIP-compiled Chelis artifact",
-                ));
-            }
-            self.call_device(py, &values)
-        } else {
-            self.call_host(py, &values)
-        }
-    }
-}
-
-impl NativeCompiledModel {
-    fn call_host(&self, py: Python<'_>, values: &[Py<PyAny>]) -> PyResult<PyObject> {
-        let api = unsafe { load_host_runtime_api(&self.loaded.library)? };
-        let mut inputs = self
-            .loaded
-            .manifest
-            .inputs
-            .iter()
-            .zip(values)
-            .map(|(spec, value)| cpu_input_tensor(py, value.bind(py), spec, api))
-            .collect::<PyResult<Vec<_>>>()?;
-        let input_ptrs = inputs
-            .iter_mut()
-            .map(|input| input.ptr.as_ptr())
-            .collect::<Vec<_>>();
-        let output_ptrs = vec![std::ptr::null_mut(); self.loaded.manifest.outputs.len()];
-
-        let symbol_name = nul_terminated(&self.loaded.manifest.host_entry_name);
-        let entry = unsafe {
-            self.loaded
-                .library
-                .get::<HostEntry>(symbol_name.as_bytes())
-                .map_err(|err| ChelisError::new_err(format!("load symbol failed: {err}")))?
-        };
-        let execution = HostExecution {
-            entry: *entry,
-            input_ptrs,
-            output_ptrs,
-        };
-        let output_ptrs = py.allow_threads(move || execution.run()).0;
-        drop(inputs);
-
-        let mut owners = Vec::with_capacity(output_ptrs.len());
-        for output in output_ptrs {
-            let ptr = NonNull::new(output).ok_or_else(|| {
-                PyRuntimeError::new_err("compiled execution returned a NULL CPU output tensor")
-            })?;
-            owners.push(TensorOwner::Cpu(Rc::new(CpuTensorHandle {
-                ptr,
-                api,
-                _library: Rc::clone(&self.loaded.library),
-            })));
-        }
-        outputs_to_python(py, &self.loaded.manifest.outputs, owners)
-    }
-
-    fn call_device(&self, py: Python<'_>, values: &[Py<PyAny>]) -> PyResult<PyObject> {
-        let device_entry_name = self
-            .loaded
-            .manifest
-            .device_entry_name
-            .as_ref()
-            .ok_or_else(|| PyValueError::new_err("artifact does not expose a HIP device ABI"))?;
-
-        let mut inputs = self
-            .loaded
-            .manifest
-            .inputs
-            .iter()
-            .zip(values)
-            .map(|(spec, value)| gpu_input_tensor(py, value.bind(py), spec))
-            .collect::<PyResult<Vec<_>>>()?;
-        let first_device_id = inputs
-            .first()
-            .map(|input| input.device_id)
-            .unwrap_or_default();
-        if inputs
-            .iter()
-            .any(|input| input.device_id != first_device_id)
-        {
-            return Err(PyValueError::new_err(
-                "all GPU inputs must live on the same device",
-            ));
-        }
-
-        let input_ptrs = inputs
-            .iter_mut()
-            .map(|input| &mut input.tensor as *mut ChelisGpuTensor)
-            .collect::<Vec<_>>();
-        let output_ptrs = vec![std::ptr::null_mut(); self.loaded.manifest.outputs.len()];
-
-        let symbol_name = nul_terminated(device_entry_name);
-        let entry = unsafe {
-            self.loaded
-                .library
-                .get::<DeviceEntry>(symbol_name.as_bytes())
-                .map_err(|err| ChelisError::new_err(format!("load symbol failed: {err}")))?
-        };
-        let execution = DeviceExecution {
-            entry: *entry,
-            input_ptrs,
-            output_ptrs,
-        };
-        let output_ptrs = py.allow_threads(move || execution.run()).0;
-        drop(inputs);
-
-        let mut owners = Vec::with_capacity(output_ptrs.len());
-        for output in output_ptrs {
-            let ptr = NonNull::new(output).ok_or_else(|| {
-                PyRuntimeError::new_err("compiled execution returned a NULL GPU output tensor")
-            })?;
-            owners.push(TensorOwner::Gpu(Rc::new(GpuTensorHandle {
-                ptr,
-                device_id: first_device_id,
-            })));
-        }
-        outputs_to_python(py, &self.loaded.manifest.outputs, owners)
+    ) -> PyResult<CompiledTensorResults> {
+        let admitted = CompiledInputs::admit(py, &self.loaded, args, kwargs)?;
+        let outputs = execute_checked(py, &admitted);
+        CompiledTensorResults::adopt_outputs(&self.loaded.manifest, outputs)
     }
 }
 
@@ -554,6 +445,24 @@ unsafe fn load_host_runtime_api(library: &Library) -> PyResult<HostRuntimeApi> {
         read_view: load!(HostReadViewFn, b"chelis_tensor_read_view\0"),
         rank: load!(HostRankFn, b"chelis_tensor_rank\0"),
         shape: load!(HostShapeFn, b"chelis_tensor_shape\0"),
+    })
+}
+
+unsafe fn load_device_runtime_api(library: &Library) -> PyResult<DeviceRuntimeApi> {
+    macro_rules! load {
+        ($ty:ty, $symbol:literal) => {
+            *unsafe { library.get::<$ty>($symbol) }.map_err(|error| {
+                ChelisError::new_err(format!("load device runtime symbol failed: {error}"))
+            })?
+        };
+    }
+    Ok(DeviceRuntimeApi {
+        import: load!(DeviceImportFn, b"chelis_device_tensor_import\0"),
+        view: load!(DeviceViewFn, b"chelis_device_tensor_view\0"),
+        release: load!(DeviceReleaseFn, b"chelis_device_tensor_release\0"),
+        device: load!(DeviceIdFn, b"chelis_device_tensor_device\0"),
+        current_device: load!(HipGetDeviceFn, b"hipGetDevice\0"),
+        synchronize: load!(HipSynchronizeFn, b"hipDeviceSynchronize\0"),
     })
 }
 
@@ -856,7 +765,7 @@ fn load_artifact(
     let manifest: ArtifactManifest = serde_json::from_str(&manifest_text)
         .map_err(|err| ChelisError::new_err(format!("parse manifest failed: {err}")))?;
     warn_if_stale_source(py, &manifest)?;
-    let library = Rc::new(
+    let library = Arc::new(
         open_compiled_library(&library_path)
             .map_err(|err| ChelisError::new_err(format!("load shared library failed: {err}")))?,
     );
@@ -1256,13 +1165,6 @@ fn ensure_supported_execution_artifact_inner(
                 spec.dtype
             ));
         }
-        if target == CompileTarget::Hip && spec.dims.len() > CHELIS_MAX_DIM {
-            return Err(format!(
-                "HIP compiled execution currently supports rank <= {CHELIS_MAX_DIM}; `{}` has rank {}",
-                spec.name,
-                spec.dims.len()
-            ));
-        }
         if spec.dims.iter().any(|dim| dim.size.is_none()) {
             return Err(format!(
                 "compiled execution requires fully concrete dimensions; `{}` still has unresolved symbolic axes",
@@ -1282,7 +1184,7 @@ fn artifact_manifest_inner(
         .canonicalize()
         .unwrap_or_else(|_| source_path.to_path_buf());
     ArtifactManifest {
-        abi_version: ArtifactAbiVersion::V1,
+        abi_version: ArtifactAbiVersion::V2,
         target: artifact.compile_result.target,
         host_entry_name: artifact.host_entry_name.clone(),
         device_entry_name: artifact.device_entry_name.clone(),
@@ -1309,6 +1211,7 @@ fn write_generated_files_inner(
 fn write_runtime_headers_inner(root: &Path) -> Result<(), String> {
     for (name, content) in [
         ("chelis_runtime.h", RUNTIME_H),
+        ("chelis_runtime_views.h", RUNTIME_VIEWS_H),
         ("chelis_runtime_dtype.h", RUNTIME_DTYPE_H),
         ("chelis_blas.h", BLAS_H),
         ("chelis_simd.h", SIMD_H),
@@ -1675,13 +1578,15 @@ fn cpu_input_tensor(
     spec: &ExecutionTensorSpec,
     api: HostRuntimeApi,
 ) -> PyResult<CpuInputTensor> {
+    use chelis_abi::metadata::{ByteCount, ElementCount, ShapeMetadata};
+    use native_tensor::{metadata_error, validate_manifest_metadata};
+
     let owner = owner_object(value)?;
     if device_kind(&owner)? == DeviceKind::Gpu {
         return Err(PyValueError::new_err(
-            "GPU tensors require a HIP-compiled artifact and the device execution path",
+            "CPU compiled execution requires CPU inputs",
         ));
     }
-
     let numpy = PyModule::import(py, "numpy")?;
     let array = if owner.hasattr("__dlpack__")? {
         numpy.getattr("from_dlpack")?.call1((owner.clone(),))?
@@ -1692,57 +1597,80 @@ fn cpu_input_tensor(
             "expected a DLPack-capable tensor or NumPy-compatible array",
         ));
     };
-    // [05-OP-31] makes every public host tensor contiguous row-major.
-    // Materialize an internal/noncontiguous Python view before publishing
-    // its descriptor across the compiled host-entry boundary.
-    let array = numpy.getattr("ascontiguousarray")?.call1((array,))?;
-
-    // chelis#920: dispatch the expected NumPy dtype and the runtime
-    // dtype tag off the artifact's `spec.dtype` instead of hard-coding
-    // float32 / CHELIS_DTYPE_F32. A `_ =>` catch-all here would re-create the
-    // silent-default arm this issue is about, so an unmapped dtype is a
-    // loud error even though the gate above already rejected it.
-    let (expected_numpy_dtype, runtime_dtype) = spec_dtype_mapping(&spec.dtype)?;
-    let dtype = array.getattr("dtype")?.str()?.extract::<String>()?;
-    if dtype != expected_numpy_dtype {
+    // Unlike ascontiguousarray, require preserves rank zero. Ensure a base
+    // ndarray so descriptor observations do not dispatch through a subclass.
+    let requirements = PyDict::new(py);
+    requirements.set_item("requirements", ("C", "A", "E"))?;
+    let mut array = numpy
+        .getattr("require")?
+        .call((array,), Some(&requirements))?;
+    let (expected_dtype, runtime_dtype) = spec_dtype_mapping(&spec.dtype)?;
+    let actual_dtype = array.getattr("dtype")?.str()?.extract::<String>()?;
+    if actual_dtype != expected_dtype {
         return Err(PyValueError::new_err(format!(
-            "input `{}` expected dtype {expected_numpy_dtype}, got {dtype}",
+            "input `{}` expected dtype {expected_dtype}, got {actual_dtype}",
             spec.name
         )));
     }
-    let shape = array.getattr("shape")?.extract::<Vec<usize>>()?;
-    validate_shape(spec, &shape)?;
-    let strides = numpy_element_strides(&array)?;
-    validate_canonical_host_strides(&shape, &strides)?;
-    let data_ptr = numpy_data_ptr(&array)?;
-    let size = element_count(&shape)?;
-    let itemsize = array.getattr("itemsize")?.extract::<usize>()?;
-    let byte_capacity = size
-        .checked_mul(itemsize)
-        .and_then(|bytes| i64::try_from(bytes).ok())
-        .ok_or_else(|| PyValueError::new_err("input byte capacity exceeds the host ABI"))?;
-    let host_shape = host_dims(&shape)?;
-    let data = if size == 0 {
+    let dtype = decode_runtime_dtype(runtime_dtype)?;
+    let shape = array.getattr("shape")?.extract::<Vec<i64>>()?;
+    let metadata = ShapeMetadata::contiguous(&shape, dtype).map_err(metadata_error)?;
+    metadata.bytes().allocation().map_err(metadata_error)?;
+    validate_manifest_metadata(spec, &metadata)?;
+    if metadata.elements().get() != 0 {
+        let expected = metadata
+            .strides()
+            .iter()
+            .map(|stride| {
+                ElementCount::from_extents(&[*stride])
+                    .and_then(|n| n.bytes(dtype))
+                    .map(|bytes| bytes.get())
+                    .map_err(metadata_error)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let actual = array.getattr("strides")?.extract::<Vec<i64>>()?;
+        if actual != expected {
+            // Singleton axes may have unobserved noncanonical strides even on
+            // a C-contiguous ndarray. Materialize before publishing OP31.
+            array = array.call_method1("copy", ("C",))?;
+            if array.getattr("strides")?.extract::<Vec<i64>>()? != expected {
+                return Err(PyValueError::new_err(
+                    "cannot publish canonical host input strides",
+                ));
+            }
+        }
+    }
+    let declared_bytes = ByteCount::from_declared(array.getattr("nbytes")?.extract::<i64>()?)
+        .map_err(metadata_error)?;
+    metadata
+        .require_capacity(declared_bytes)
+        .map_err(metadata_error)?;
+    let data = if metadata.elements().get() == 0 {
         std::ptr::null()
     } else {
-        data_ptr.cast_const()
+        let pointer = numpy_data_ptr(&array)?;
+        if pointer.is_null() || pointer.addr() % dtype.byte_width() != 0 {
+            return Err(PyValueError::new_err(
+                "nonempty host input has null or misaligned storage",
+            ));
+        }
+        pointer.cast_const()
     };
-    let tensor = unsafe {
+    let pointer = unsafe {
         (api.entry_borrow)(
-            i32::try_from(shape.len())
-                .map_err(|_| PyValueError::new_err("input rank exceeds the host ABI"))?,
-            host_dims_ptr(&host_shape),
-            u8::try_from(runtime_dtype)
-                .map_err(|_| PyValueError::new_err("runtime dtype tag exceeds the host ABI"))?,
+            metadata.rank(),
+            host_dims_ptr(metadata.shape()),
+            dtype as u8,
             data,
-            byte_capacity,
+            declared_bytes.get(),
         )
     };
-    let ptr = NonNull::new(tensor).ok_or_else(|| {
+    let ptr = NonNull::new(pointer).ok_or_else(|| {
         PyRuntimeError::new_err("chelis_tensor_entry_borrow returned a NULL descriptor")
     })?;
     Ok(CpuInputTensor {
         _owner: array.unbind(),
+        _metadata: metadata,
         ptr,
         release: api.release,
     })
@@ -1752,74 +1680,115 @@ fn gpu_input_tensor(
     py: Python<'_>,
     value: &Bound<'_, PyAny>,
     spec: &ExecutionTensorSpec,
+    api: DeviceRuntimeApi,
+    library: &Arc<Library>,
 ) -> PyResult<GpuInputTensor> {
+    use chelis_abi::metadata::{ByteCount, ElementCount, StridedMetadata};
+    use native_tensor::metadata_error;
     let owner = owner_object(value)?;
     let torch = PyModule::import(py, "torch").map_err(|_| {
         PyValueError::new_err(
             "GPU compiled execution requires torch to bridge Python-managed device tensors",
         )
     })?;
-    let tensor =
-        if owner.hasattr("data_ptr")? && owner.hasattr("stride")? && owner.hasattr("device")? {
-            owner
-        } else if owner.hasattr("__dlpack__")? {
-            torch.getattr("from_dlpack")?.call1((owner.clone(),))?
-        } else {
-            return Err(PyValueError::new_err(
-                "expected a torch tensor or DLPack-capable GPU tensor",
-            ));
-        };
-
-    if device_kind(&tensor)? != DeviceKind::Gpu {
+    let tensor_class = torch.getattr("Tensor")?;
+    let tensor = if owner.is_instance(&tensor_class)? {
+        owner
+    } else if owner.hasattr("__dlpack__")? {
+        torch.getattr("from_dlpack")?.call1((owner,))?
+    } else {
         return Err(PyValueError::new_err(
-            "GPU compiled execution requires GPU tensor inputs",
+            "expected a torch tensor or DLPack-capable GPU tensor",
+        ));
+    };
+    if !tensor.is_instance(&tensor_class)? || device_kind(&tensor)? != DeviceKind::Gpu {
+        return Err(PyValueError::new_err(
+            "GPU bridge did not produce a device torch.Tensor owner",
         ));
     }
-    // chelis#920: the device lane stays f32-only. `supported_execution_dtypes`
-    // admits only f32 for the HIP target, so `spec.dtype` is already f32 here;
-    // re-check it rather than silently tagging whatever arrives as CHELIS_DTYPE_F32,
-    // so widening the HIP gate without widening this marshalling path is a
-    // loud error instead of a reinterpreted buffer.
-    if spec.dtype != "f32" {
-        return Err(PyValueError::new_err(format!(
-            "device compiled execution supports only f32 tensors; `{}` uses `{}`. \
-             The torch/GPU marshalling path is f32-hardcoded (chelis#920)",
-            spec.name, spec.dtype
-        )));
-    }
-    let dtype = tensor.getattr("dtype")?.str()?.extract::<String>()?;
-    if !dtype.ends_with("float32") {
-        return Err(PyValueError::new_err(format!(
-            "input `{}` expected dtype torch.float32, got {dtype}",
-            spec.name
-        )));
+    // The explicit native backend gate remains separate from descriptor dtype support.
+    if spec.dtype != "f32"
+        || tensor.getattr("dtype")?.str()?.extract::<String>()? != "torch.float32"
+    {
+        return Err(PyValueError::new_err(
+            "HIP compiled input requires the declared torch.float32 dtype",
+        ));
     }
     let shape = tensor.getattr("shape")?.extract::<Vec<usize>>()?;
     validate_shape(spec, &shape)?;
-    let strides = tensor.call_method0("stride")?.extract::<Vec<usize>>()?;
-    let data_ptr = tensor.call_method0("data_ptr")?.extract::<usize>()? as *mut f32;
-    let device = tensor.getattr("device")?;
-    let device_id = device
+    let shape = host_dims(&shape)?;
+    let strides = tensor.call_method0("stride")?.extract::<Vec<i64>>()?;
+    let device = tensor
+        .getattr("device")?
         .getattr("index")?
         .extract::<Option<i32>>()?
-        .unwrap_or(0);
-
+        .ok_or_else(|| PyValueError::new_err("GPU input has no concrete device index"))?;
+    if device < 0 || device != api.current()? {
+        return Err(PyValueError::new_err(
+            "GPU input device disagrees with the actual HIP current device",
+        ));
+    }
+    let storage = tensor.call_method0("untyped_storage")?;
+    let base = storage.call_method0("data_ptr")?.extract::<usize>()?;
+    let capacity = ByteCount::from_declared(storage.call_method0("nbytes")?.extract::<i64>()?)
+        .map_err(metadata_error)?;
+    capacity.allocation().map_err(metadata_error)?;
+    let offset = tensor.call_method0("storage_offset")?.extract::<i64>()?;
+    let offset = ElementCount::from_extents(&[offset])
+        .and_then(|count| count.bytes(RuntimeDType::F32))
+        .map_err(metadata_error)?;
+    let remaining = capacity
+        .get()
+        .checked_sub(offset.get())
+        .filter(|n| *n >= 0)
+        .ok_or_else(|| PyValueError::new_err("GPU storage offset exceeds owned byte capacity"))?;
+    let expected = base
+        .checked_add(offset.allocation().map_err(metadata_error)?.get())
+        .ok_or_else(|| PyValueError::new_err("GPU storage pointer offset overflow"))?;
+    let data = tensor.call_method0("data_ptr")?.extract::<usize>()?;
+    let metadata = StridedMetadata::new(
+        &shape,
+        &strides,
+        RuntimeDType::F32,
+        ByteCount::from_declared(remaining).map_err(metadata_error)?,
+    )
+    .map_err(metadata_error)?;
+    if data != expected && !(metadata.elements().get() == 0 && data == 0) {
+        return Err(PyValueError::new_err(
+            "GPU tensor pointer disagrees with its retained storage offset",
+        ));
+    }
+    if metadata.elements().get() != 0 && (data == 0 || data % RuntimeDType::F32.byte_width() != 0) {
+        return Err(PyValueError::new_err(
+            "GPU tensor has null or misaligned nonempty storage",
+        ));
+    }
+    let packet = ChelisGpuTensor {
+        data: data as *mut c_void,
+        shape: metadata.shape().as_ptr(),
+        strides: metadata.strides().as_ptr(),
+        count: metadata.elements().get(),
+        byte_capacity: remaining,
+        rank: metadata.rank(),
+        dtype: RuntimeDType::F32.id() as u8,
+        ownership: 0,
+        reserved: [0; 2],
+    };
+    let ptr = NonNull::new(unsafe { (api.import)(&packet) })
+        .ok_or_else(|| PyRuntimeError::new_err("device import returned a NULL owner"))?;
+    let handle = Arc::new(GpuTensorHandle {
+        ptr,
+        api,
+        _library: Arc::clone(library),
+    });
+    if unsafe { (api.device)(ptr.as_ptr()) } != device {
+        return Err(PyValueError::new_err(
+            "imported owner device disagrees with admitted input",
+        ));
+    }
     Ok(GpuInputTensor {
+        handle,
         _owner: tensor.unbind(),
-        tensor: ChelisGpuTensor {
-            data: data_ptr,
-            shape: dims_array(&shape)?,
-            strides: dims_array(&strides)?,
-            ndim: shape.len() as i32,
-            dtype: CHELIS_DTYPE_F32,
-            // `as i32` truncated silently: a device tensor with more than
-            // `i32::MAX` elements published a wrong (often negative) count to
-            // the GPU carrier. Narrowing to that carrier's declared width is a
-            // decision, so it reports rather than wraps.
-            size: gpu_element_count(&shape)?,
-            storage_size: gpu_element_count(&shape)?,
-        },
-        device_id,
     })
 }
 
@@ -1874,6 +1843,7 @@ fn host_dims_ptr(dims: &[i64]) -> *const i64 {
     }
 }
 
+#[cfg(test)]
 fn validate_canonical_host_strides(shape: &[usize], strides: &[usize]) -> PyResult<()> {
     let expected = contiguous_strides(shape);
     if strides == expected {
@@ -1884,29 +1854,6 @@ fn validate_canonical_host_strides(shape: &[usize], strides: &[usize]) -> PyResu
              element strides {strides:?}, expected {expected:?}"
         )))
     }
-}
-
-/// Element count narrowed to the GPU carrier's declared `int32_t` width.
-///
-/// The GPU tensor still uses the fixed-rank int32 metadata carrier that the
-/// host ABI replaced with dynamic-rank int64 shape and stride carriers; until
-/// it moves, the narrowing is at least loud. Tracked by chelis#1345.
-fn gpu_element_count(shape: &[usize]) -> PyResult<i32> {
-    let count = element_count(shape)?;
-    i32::try_from(count).map_err(|_| {
-        PyValueError::new_err(format!(
-            "device tensor element count {count} exceeds the GPU carrier's int32 width"
-        ))
-    })
-}
-
-fn dims_array(dims: &[usize]) -> PyResult<[i32; CHELIS_MAX_DIM]> {
-    let mut out = [0; CHELIS_MAX_DIM];
-    for (index, dim) in dims.iter().enumerate() {
-        out[index] = i32::try_from(*dim)
-            .map_err(|_| PyValueError::new_err(format!("dimension too large for ABI: {dim}")))?;
-    }
-    Ok(out)
 }
 
 /// Element count for a host input shape, folded in the canonical int64 extent
@@ -1923,40 +1870,15 @@ fn dims_array(dims: &[usize]) -> PyResult<[i32; CHELIS_MAX_DIM]> {
 /// order. Without it a checked fold rejects `[i64::MAX, i64::MAX, 0]` while
 /// accepting `[i64::MAX, 0, i64::MAX]`, though both describe the same empty
 /// array.
+#[cfg(test)]
 fn element_count(shape: &[usize]) -> PyResult<usize> {
-    if shape.contains(&0) {
-        return Ok(0);
-    }
-    let count = shape.iter().copied().try_fold(1_i64, |acc, dim| {
-        let dim = i64::try_from(dim)
-            .map_err(|_| PyValueError::new_err(format!("dimension too large for ABI: {dim}")))?;
-        acc.checked_mul(dim).ok_or_else(|| {
-            PyValueError::new_err("input element count exceeds the int64 extent domain")
-        })
-    })?;
-    usize::try_from(count)
-        .map_err(|_| PyValueError::new_err("input element count exceeds the host index domain"))
+    let shape = host_dims(shape)?;
+    chelis_abi::metadata::ElementCount::from_extents(&shape)
+        .and_then(|count| count.as_usize())
+        .map_err(native_tensor::metadata_error)
 }
 
-fn numpy_element_strides(array: &Bound<'_, PyAny>) -> PyResult<Vec<usize>> {
-    let itemsize = array.getattr("itemsize")?.extract::<usize>()?;
-    if let Ok(strides_any) = array.getattr("strides") {
-        if strides_any.is_none() {
-            return Ok(contiguous_strides(
-                &array.getattr("shape")?.extract::<Vec<usize>>()?,
-            ));
-        }
-        let byte_strides = strides_any.extract::<Vec<usize>>()?;
-        return Ok(byte_strides
-            .into_iter()
-            .map(|stride| stride / itemsize)
-            .collect());
-    }
-    Ok(contiguous_strides(
-        &array.getattr("shape")?.extract::<Vec<usize>>()?,
-    ))
-}
-
+#[cfg(test)]
 fn contiguous_strides(shape: &[usize]) -> Vec<usize> {
     let mut strides = vec![0; shape.len()];
     let mut running = 1usize;
@@ -1978,25 +1900,7 @@ fn numpy_data_ptr(array: &Bound<'_, PyAny>) -> PyResult<*mut c_void> {
     Ok(pointer as *mut c_void)
 }
 
-fn outputs_to_python(
-    py: Python<'_>,
-    specs: &[ExecutionTensorSpec],
-    owners: Vec<TensorOwner>,
-) -> PyResult<PyObject> {
-    if owners.len() == 1 {
-        return tensor_owner_object(py, owners.into_iter().next().expect("single output"));
-    }
-    let dict = PyDict::new(py);
-    for (spec, owner) in specs.iter().zip(owners) {
-        dict.set_item(&spec.name, tensor_owner_object(py, owner)?)?;
-    }
-    Ok(dict.into_any().unbind())
-}
-
-fn tensor_owner_object(py: Python<'_>, owner: TensorOwner) -> PyResult<PyObject> {
-    Ok(Py::new(py, NativeTensor { owner })?.into_any())
-}
-
+#[cfg(test)]
 impl TensorOwner {
     fn shape(&self) -> Vec<usize> {
         match self {
@@ -2007,9 +1911,9 @@ impl TensorOwner {
                     .collect()
             },
             Self::Gpu(handle) => unsafe {
-                let tensor = handle.ptr.as_ref();
-                (0..tensor.ndim as usize)
-                    .map(|axis| tensor.shape[axis] as usize)
+                let tensor = &*(handle.api.view)(handle.ptr.as_ptr());
+                (0..tensor.rank as usize)
+                    .map(|axis| tensor.shape.add(axis).read() as usize)
                     .collect()
             },
         }
@@ -2019,38 +1923,11 @@ impl TensorOwner {
         match self {
             Self::Cpu(_) => contiguous_strides(&self.shape()),
             Self::Gpu(handle) => unsafe {
-                let tensor = handle.ptr.as_ref();
-                (0..tensor.ndim as usize)
-                    .map(|axis| tensor.strides[axis] as usize)
+                let tensor = &*(handle.api.view)(handle.ptr.as_ptr());
+                (0..tensor.rank as usize)
+                    .map(|axis| tensor.strides.add(axis).read() as usize)
                     .collect()
             },
-        }
-    }
-
-    fn data_ptr(&self) -> *mut c_void {
-        match self {
-            Self::Cpu(handle) => unsafe {
-                (handle.api.read_view)(handle.ptr.as_ptr()).data.cast_mut()
-            },
-            Self::Gpu(handle) => unsafe { handle.ptr.as_ref().data.cast() },
-        }
-    }
-
-    fn dlpack_device(&self) -> (i32, i32) {
-        match self {
-            Self::Cpu(_) => (DLPACK_CPU_DEVICE_TYPE, 0),
-            Self::Gpu(handle) => (DLPACK_ROCM_DEVICE_TYPE, handle.device_id),
-        }
-    }
-
-    /// chelis#920: the `CHELIS_*` dtype tag the compiled kernel wrote.
-    /// CPU descriptors expose it only through the read view.
-    fn runtime_dtype(&self) -> i32 {
-        match self {
-            Self::Cpu(handle) => unsafe {
-                i32::from((handle.api.read_view)(handle.ptr.as_ptr()).dtype)
-            },
-            Self::Gpu(handle) => unsafe { handle.ptr.as_ref().dtype },
         }
     }
 }
@@ -2125,94 +2002,6 @@ fn dlpack_bits(dtype: i32) -> PyResult<u8> {
     }
 }
 
-fn create_dlpack_capsule(py: Python<'_>, owner: TensorOwner) -> PyResult<PyObject> {
-    // chelis#920: resolve the width before building the capsule so an
-    // unknown dtype tag surfaces as a Python exception rather than a
-    // capsule that misdescribes its own buffer.
-    let bits = dlpack_bits(owner.runtime_dtype())?;
-    let mut context = Box::new(DlpackContext {
-        shape: owner.shape().into_iter().map(|dim| dim as i64).collect(),
-        strides: owner
-            .strides()
-            .into_iter()
-            .map(|stride| stride as i64)
-            .collect(),
-        owner,
-    });
-    let managed = Box::new(DLManagedTensor {
-        dl_tensor: DLTensor {
-            data: context.owner.data_ptr(),
-            device: {
-                let (device_type, device_id) = context.owner.dlpack_device();
-                DLDevice {
-                    device_type,
-                    device_id,
-                }
-            },
-            ndim: context.shape.len() as i32,
-            // chelis#920: the width follows the runtime tensor's dtype
-            // tag rather than a hardcoded 32. `code: 2` (kDLFloat) is
-            // correct for both f32 and f64, so only `bits` varies.
-            dtype: DLDataType {
-                code: 2,
-                bits,
-                lanes: 1,
-            },
-            shape: context.shape.as_mut_ptr(),
-            strides: context.strides.as_mut_ptr(),
-            byte_offset: 0,
-        },
-        manager_ctx: Box::into_raw(context).cast(),
-        deleter: Some(dlmanaged_tensor_deleter),
-    });
-
-    let capsule = unsafe {
-        Bound::from_owned_ptr_or_err(
-            py,
-            ffi::PyCapsule_New(
-                Box::into_raw(managed).cast(),
-                DLTENSOR_CAPSULE.as_ptr().cast::<c_char>(),
-                Some(dlpack_capsule_destructor),
-            ),
-        )?
-    };
-    Ok(capsule.into_any().unbind())
-}
-
-unsafe extern "C" fn dlmanaged_tensor_deleter(managed: *mut DLManagedTensor) {
-    if managed.is_null() {
-        return;
-    }
-    let managed = unsafe { Box::from_raw(managed) };
-    if !managed.manager_ctx.is_null() {
-        let _ = unsafe { Box::from_raw(managed.manager_ctx.cast::<DlpackContext>()) };
-    }
-}
-
-unsafe extern "C" fn dlpack_capsule_destructor(capsule: *mut ffi::PyObject) {
-    if capsule.is_null() {
-        return;
-    }
-    let is_valid =
-        unsafe { ffi::PyCapsule_IsValid(capsule, DLTENSOR_CAPSULE.as_ptr().cast::<c_char>()) };
-    if is_valid == 0 {
-        return;
-    }
-    let managed =
-        unsafe { ffi::PyCapsule_GetPointer(capsule, DLTENSOR_CAPSULE.as_ptr().cast::<c_char>()) }
-            as *mut DLManagedTensor;
-    if managed.is_null() {
-        return;
-    }
-    unsafe {
-        ffi::PyCapsule_SetName(capsule, std::ptr::null());
-    }
-    let deleter = unsafe { (*managed).deleter };
-    if let Some(deleter) = deleter {
-        unsafe { deleter(managed) };
-    }
-}
-
 fn nul_terminated(name: &str) -> String {
     format!("{name}\0")
 }
@@ -2223,45 +2012,31 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn hip_free(ptr: *mut c_void) -> Result<(), String> {
-    static HIP_FREE: OnceLock<Result<HipFreeFn, String>> = OnceLock::new();
-    if ptr.is_null() {
-        return Ok(());
-    }
-    let hip_free = HIP_FREE.get_or_init(|| {
-        let candidates = ["libamdhip64.so", "libamdhip64.so.6"];
-        for candidate in candidates {
-            let library = unsafe { Library::new(candidate) };
-            let Ok(library) = library else {
-                continue;
-            };
-            let symbol = unsafe { library.get::<HipFreeFn>(b"hipFree\0") };
-            let Ok(symbol) = symbol else {
-                continue;
-            };
-            let func = *symbol;
-            std::mem::forget(library);
-            return Ok(func);
-        }
-        Err("failed to load hipFree from libamdhip64".to_string())
-    });
-    match hip_free {
-        Ok(func) => {
-            unsafe {
-                let _ = func(ptr);
-            }
-            Ok(())
-        }
-        Err(err) => Err(err.clone()),
-    }
-}
-
 /// Exact PyO3 class identities for the registered-surface census.
 /// The census compares this list bijectively with the live module's classes.
 pub fn capacity_census_classes() -> [(&'static str, &'static str, bool); 2] {
     [
         capacity_census_class::<NativeCompiledModel>(),
         capacity_census_class::<NativeTensor>(),
+    ]
+}
+
+/// Compiled class objects for census identity checks on actual module exports.
+/// A matching Python class name or descriptor spelling does not identify a Rust owner.
+pub fn capacity_census_class_types(
+    py: Python<'_>,
+) -> [(&'static str, &'static str, Bound<'_, pyo3::types::PyType>); 2] {
+    [
+        (
+            <NativeCompiledModel as pyo3::PyTypeInfo>::NAME,
+            std::any::type_name::<NativeCompiledModel>(),
+            py.get_type::<NativeCompiledModel>(),
+        ),
+        (
+            <NativeTensor as pyo3::PyTypeInfo>::NAME,
+            std::any::type_name::<NativeTensor>(),
+            py.get_type::<NativeTensor>(),
+        ),
     ]
 }
 
@@ -2297,6 +2072,10 @@ pub fn register_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     register_module(module)
 }
+
+#[cfg(test)]
+#[path = "../tests/support/native_dlpack_owner.rs"]
+mod native_dlpack_owner_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2370,7 +2149,7 @@ loss = (mean(x, 0) : tensor[f32])
     #[test]
     fn compiled_manifest_version_admission_precedes_metadata_and_library_use() {
         let valid = serde_json::json!({
-            "abi_version": 1, "target": "c", "host_entry_name": "chelis_main",
+            "abi_version": 2, "target": "c", "host_entry_name": "chelis_main",
             "inputs": [], "outputs": [], "source_path": "", "source_hash": ""
         });
         let manifest: ArtifactManifest = serde_json::from_value(valid.clone()).unwrap();
@@ -2390,13 +2169,14 @@ loss = (mean(x, 0) : tensor[f32])
             for header in [
                 "",
                 ",\"abi_version\":0",
-                ",\"abi_version\":2",
+                ",\"abi_version\":1",
+                ",\"abi_version\":3",
                 ",\"abi_version\":4294967295",
                 ",\"abi_version\":-1",
-                ",\"abi_version\":1.0",
+                ",\"abi_version\":2.0",
                 ",\"abi_version\":true",
-                ",\"abi_version\":\"1\"",
-                ",\"abi_version\":1,\"abi_version\":1",
+                ",\"abi_version\":\"2\"",
+                ",\"abi_version\":2,\"abi_version\":2",
             ] {
                 // Bad metadata appears first; unsupported/missing versions must
                 // fail at the envelope before visiting it or loading a library.
@@ -2438,18 +2218,6 @@ loss = (mean(x, 0) : tensor[f32])
         // it as a successful count.
         let band = 1_usize << 32;
         assert!(element_count(&[band, band]).is_err());
-    }
-
-    #[test]
-    fn gpu_element_count_reports_instead_of_truncating_to_the_carrier_width() {
-        assert_eq!(gpu_element_count(&[2, 3]).expect("legal count"), 6);
-        assert_eq!(
-            gpu_element_count(&[i32::MAX as usize]).expect("boundary count"),
-            i32::MAX
-        );
-        // One element past the carrier's declared width. `as i32` published
-        // `i32::MIN` here.
-        assert!(gpu_element_count(&[(i32::MAX as usize) + 1]).is_err());
     }
 
     struct HostTensorFixture {
@@ -2565,7 +2333,7 @@ loss = (mean(x, 0) : tensor[f32])
             )
             .expect("parse rank-copy manifest");
             let library =
-                Rc::new(open_compiled_library(&output.lib_path).expect("load rank-copy library"));
+                Arc::new(open_compiled_library(&output.lib_path).expect("load rank-copy library"));
             let symbol = nul_terminated(&manifest.host_entry_name);
             let entry = unsafe {
                 library
@@ -2589,10 +2357,10 @@ loss = (mean(x, 0) : tensor[f32])
                 );
             }
             let output = NonNull::new(output_ptrs[0]).expect("rank-copy output");
-            let owner = TensorOwner::Cpu(Rc::new(CpuTensorHandle {
+            let owner = TensorOwner::Cpu(Arc::new(CpuTensorHandle {
                 ptr: output,
                 api,
-                _library: Rc::clone(&library),
+                _library: Arc::clone(&library),
             }));
             let expected_shape = shape.iter().map(|dim| *dim as i64).collect::<Vec<_>>();
             assert_eq!(unsafe { (api.rank)(output.as_ptr()) }, shape.len() as i32);
@@ -2605,7 +2373,7 @@ loss = (mean(x, 0) : tensor[f32])
             assert_eq!(unsafe { host_values::<f32>(api, output.as_ptr()) }, [7.25]);
 
             // The runtime output is shared by every exported Python/DLPack
-            // view. Dropping a non-final Rc must retain it; the final drop
+            // view. Dropping a non-final Arc must retain it; the final drop
             // owns exactly one call to the runtime destructor.
             let retained_owner = owner.clone();
             drop(owner);

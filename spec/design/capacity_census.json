@@ -59,6 +59,19 @@
         ]
       },
       {
+        "leg": "backend-runtime-headers",
+        "artifact": "complete chelis_hip_runtime.h and chelis_metal_runtime.h published closures with committed SDK fixtures",
+        "enumerator": "backend_headers::scan -> shared attributed preprocess_root -> header_rows",
+        "command": "cargo nextest run -p chelis-cli --test capacity_census_tripwire -E 'test(backend_headers::)'",
+        "expected_success": "backend_runtime_headers_match_the_reviewed_final_authority passes",
+        "mutations": [
+          "backend_roots_cannot_omit_an_unreached_generated_header",
+          "backend_environments_cannot_change_a_public_numeric_signature",
+          "generated_device_descriptor_requires_exact_tagged_transport_authority",
+          "device_owner_callables_require_exact_op33_authority"
+        ]
+      },
+      {
         "leg": "wire-schema-numeric-fields",
         "artifact": "compiler/Python serialization publication roots and their reachable rustdoc JSON type graph",
         "enumerator": "capacity_census_typed.py wire -> private wire verifier: publication graph inventory, final authority, and execution receipts",
@@ -74,12 +87,12 @@
       {
         "leg": "binding-raw-dtype-params",
         "artifact": "crates/chelis-python/src/lib.rs registered PyO3 callables",
-        "enumerator": "live PyO3 signatures; nine final rows require input/return exposure, eight unchanged legacy rows defer it",
+        "enumerator": "live PyO3 signatures and reachable payloads; all 17 rows require current authority as nine nonnumeric registrations, seven exact tagged transports, or one exact numeric operation",
         "command": "cargo nextest run -p chelis-python --test capacity_census_bindings",
         "expected_success": "registered_pyfunctions_match_the_reviewed_rustdoc_signatures passes",
         "mutations": [
           "a_registered_pyfunction_with_a_raw_dtype_parameter_is_rejected",
-          "retired_binding_rows_cannot_regain_legacy_admission",
+          "final_binding_rows_cannot_regain_legacy_admission",
           "copied_missing_and_duplicate_binding_registrations_fail"
         ]
       }
@@ -168,6 +181,13 @@
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_dict * chelis_dict_take_value ( chelis_value value ) ;",
       "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_dtype chelis_metadata_plan_dtype ( const chelis_metadata_plan * plan ) ;",
+      "flags": [
+        "numeric-op"
+      ]
     },
     {
       "kind": "header-export",
@@ -301,6 +321,16 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_matmul_plan * chelis_tensor_matmul_plan ( const chelis_tensor * left , const chelis_tensor * right , chelis_scalar exemplar ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_metadata_plan * chelis_metadata_plan_new ( chelis_scalar rank , const chelis_scalar * shape , chelis_scalar exemplar ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_metadata_plan * chelis_metadata_plan_view ( chelis_scalar rank , const chelis_scalar * shape , const chelis_scalar * strides , chelis_scalar exemplar , chelis_scalar byte_capacity ) ;",
       "flags": []
     },
     {
@@ -717,6 +747,27 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: const int64_t * chelis_metadata_plan_shape ( const chelis_metadata_plan * plan ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: const int64_t * chelis_metadata_plan_strides ( const chelis_metadata_plan * plan ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int32_t chelis_metadata_plan_rank ( const chelis_metadata_plan * plan ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: int32_t chelis_tensor_rank ( const chelis_tensor * tensor ) ;",
       "flags": [
         "numeric-op"
@@ -781,6 +832,27 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: int64_t chelis_matmul_matrix_count ( const chelis_matmul_plan * plan , chelis_matmul_part part ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_metadata_plan_byte_count ( const chelis_metadata_plan * plan ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_metadata_plan_byte_offset ( const chelis_metadata_plan * plan , chelis_scalar linear_index ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_metadata_plan_count ( const chelis_metadata_plan * plan ) ;",
       "flags": [
         "numeric-op"
       ]
@@ -1016,6 +1088,16 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_matmul_plan_release ( chelis_matmul_plan * plan ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_metadata_plan_check_capacity ( const chelis_metadata_plan * plan , chelis_scalar byte_capacity ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_metadata_plan_release ( chelis_metadata_plan * plan ) ;",
       "flags": []
     },
     {
@@ -1261,20 +1343,6 @@
     },
     {
       "kind": "header-struct",
-      "id": "chelis_runtime.h: typedef struct { const void * data ; int64_t count ; chelis_dtype dtype ; uint8_t reserved [ 7 ] ; } chelis_read_view",
-      "flags": [
-        "numeric-op"
-      ]
-    },
-    {
-      "kind": "header-struct",
-      "id": "chelis_runtime.h: typedef struct { void * data ; int64_t count ; chelis_dtype dtype ; uint8_t reserved [ 7 ] ; } chelis_write_view",
-      "flags": [
-        "numeric-op"
-      ]
-    },
-    {
-      "kind": "header-struct",
       "id": "chelis_runtime.h: typedef struct { void * handle ; } chelis_string",
       "flags": []
     },
@@ -1287,6 +1355,20 @@
       "kind": "header-struct",
       "id": "chelis_runtime_dtype.h: enum { CHELIS_DTYPE_F32 = 0 , CHELIS_DTYPE_F64 = 1 , CHELIS_DTYPE_I32 = 2 , CHELIS_DTYPE_BOOL = 3 , CHELIS_DTYPE_I64 = 4 , CHELIS_DTYPE_BF16 = 5 , CHELIS_DTYPE_F16 = 6 , CHELIS_DTYPE_I8 = 7 , CHELIS_DTYPE_I16 = 8 }",
       "flags": []
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime_views.h: typedef struct { const void * data ; int64_t count ; chelis_dtype dtype ; uint8_t reserved [ 7 ] ; } chelis_read_view",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime_views.h: typedef struct { void * data ; int64_t count ; chelis_dtype dtype ; uint8_t reserved [ 7 ] ; } chelis_write_view",
+      "flags": [
+        "numeric-op"
+      ]
     },
     {
       "kind": "std-adt-numeric",

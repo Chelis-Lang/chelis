@@ -1,0 +1,4 @@
+#ifndef CHELIS_STUB_CSTDINT
+#define CHELIS_STUB_CSTDINT
+#include <stdint.h>
+#endif

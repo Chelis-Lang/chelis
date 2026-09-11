@@ -450,13 +450,22 @@ class RuntimeExtentOracleTests(unittest.TestCase):
         self.assertEqual(output.getvalue().splitlines()[-1], ORACLE.PASS_MARKER)
 
     def test_an_unregistered_phase_cannot_report_success(self) -> None:
-        for phase in ("c", "final"):
-            with self.subTest(phase=phase):
-                with self.assertRaisesRegex(
-                    ORACLE.OracleFailure, "not implemented|requires every slice phase"
-                ):
-                    ORACLE.validate(phase)
+        # Disposition lock: naming the withdrawn phase `c` reaches this
+        # oracle's own refusal, which names the phases that do have a corpus.
+        # B2b-3 took `c` out of `SLICE_PHASES` so `final` stops waiting on a
+        # corpus nobody owes; it did not make `c` a phase that can pass.
+        with self.assertRaisesRegex(ORACLE.OracleFailure, "not implemented"):
+            ORACLE.validate("c")
         self.assertNotIn("c", ORACLE.PHASE_REGISTRY)
+        self.assertNotIn("c", ORACLE.SLICE_PHASES)
+        # `final` no longer refuses for a missing `c`, but the refusal itself
+        # is intact: a registry that is missing a registered slice phase
+        # still cannot report completion. Asserted on a synthetic registry
+        # because `final` on the real one now runs every cargo target.
+        with self.assertRaisesRegex(
+            ORACLE.OracleFailure, r"requires every slice phase.*missing \['b'\]"
+        ):
+            ORACLE.selected_specs("final", {"a": ORACLE.PHASE_REGISTRY["a"]})
 
     def test_a_phase_with_a_row_short_of_its_exit_state_cannot_report_success(self) -> None:
         short = ORACLE.CorpusRow("short.row", "ice", "ice", "t.short")
@@ -560,9 +569,82 @@ class RuntimeExtentOracleTests(unittest.TestCase):
         self.assertNotIn("expand.arith_size.named_claim.eval", shortfall)
         self.assertEqual(shortfall, ())
         self.assertEqual(ORACLE.exit_shortfall(ORACLE.PHASE_REGISTRY["a"]), ())
-        # Phase b's ROWS are at exit; `--phase final` is a separate question
-        # and still refuses because `SLICE_PHASES` requires an unregistered
-        # `c`. Retiring that requirement is B2b-3's, not this assertion's.
+        # Both phases' ROWS are at exit, and `--phase final` now selects
+        # exactly those two phases rather than refusing on the withdrawn `c`.
+        # Whether that selection PASSES is a question about receipts, digests
+        # and a clean head, which only a real run answers; what is asserted
+        # here is the selection.
+        self.assertEqual(
+            tuple(spec.phase for spec in ORACLE.selected_specs("final")), ("a", "b")
+        )
+
+    def test_final_selects_every_slice_phase_and_reports_one_combined_digest(
+        self,
+    ) -> None:
+        # Regression test for the B2b-3 flip: before it, `--phase final`
+        # raised "requires every slice phase to be registered; missing ['c']"
+        # and never reached a row report at all. It now runs both phases'
+        # deduplicated targets and prints a per-phase digest beside the
+        # combined one. Run on a synthetic two-phase registry so the
+        # assertion is about the composition rather than about the corpus.
+        done = ORACLE.CorpusRow("done.row", "ice", "executes_exactly", "t.done")
+        short = ORACLE.CorpusRow("short.row", "ice", "ice", "t.short")
+        target = ORACLE.TestTarget("t", ("true",), ("done",))
+
+        def runner(argv, **_kwargs):
+            command = tuple(argv)
+            if command == ("git", "rev-parse", "HEAD"):
+                return subprocess.CompletedProcess(command, 0, "d" * 40 + "\n", "")
+            if command == ("git", "status", "--porcelain"):
+                return subprocess.CompletedProcess(command, 0, "", "")
+            return subprocess.CompletedProcess(command, 0, "test done ... ok\n", "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            paths = {phase: Path(directory) / f"{phase}.json" for phase in ("a", "b")}
+            specs = {
+                phase: _spec(
+                    phase, (done,), baseline_path=paths[phase], targets=(target,)
+                )
+                for phase in ("a", "b")
+            }
+            for phase, spec in specs.items():
+                paths[phase].write_text(ORACLE.render_baseline(spec))
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                head, digest = ORACLE.validate("final", runner=runner, registry=specs)
+            printed = output.getvalue().splitlines()
+            self.assertEqual(head, "d" * 40)
+            self.assertEqual(printed[-1], ORACLE.PASS_MARKER)
+            self.assertIn(
+                f"runtime_extent_corpus_sha256_phase_a={ORACLE.corpus_digest((done,), 'a')}",
+                printed,
+            )
+            self.assertIn(
+                f"runtime_extent_corpus_sha256_phase_b={ORACLE.corpus_digest((done,), 'b')}",
+                printed,
+            )
+            self.assertIn(f"runtime_extent_corpus_sha256={digest}", printed)
+            self.assertNotIn(
+                digest,
+                tuple(ORACLE.corpus_digest((done,), phase) for phase in ("a", "b")),
+            )
+
+            # Negative parity: a short row in EITHER phase fails `final`, and
+            # nothing can excuse it, because the flag that downgrades a
+            # shortfall is the one `final` refuses outright.
+            short_spec = _spec(
+                "b", (done, short), baseline_path=paths["b"], targets=(target,)
+            )
+            paths["b"].write_text(ORACLE.render_baseline(short_spec))
+            with self.assertRaisesRegex(
+                ORACLE.OracleFailure, r"short of an exit state: b:short\.row"
+            ):
+                ORACLE.validate(
+                    "final",
+                    runner=runner,
+                    registry={"a": specs["a"], "b": short_spec},
+                )
 
     def test_authoritative_run_rejects_dirty_worktree(self) -> None:
         def runner(argv: tuple[str, ...], **_kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -735,8 +817,11 @@ class RuntimeExtentOracleTests(unittest.TestCase):
         # Regression test: `--phase final` is chelis#1277's completion
         # command, so the flag that lets the nightly hold a still-landing
         # phase must be refused there rather than silently accepted. The
-        # refusal precedes the unregistered-phase check, so it is the reason
-        # reported rather than the missing phase `c`.
+        # refusal precedes phase selection, the chain validation and every
+        # target, which is why this assertion can name the real `final` and
+        # still run no cargo command. Before B2b-3 that ordering also had to
+        # beat the missing phase `c`; `c` is gone from `SLICE_PHASES` now and
+        # the ordering is what keeps this test cheap.
         with self.assertRaisesRegex(
             ORACLE.OracleFailure, "completion oracle and cannot allow a row shortfall"
         ):

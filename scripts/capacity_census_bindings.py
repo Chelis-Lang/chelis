@@ -256,12 +256,21 @@ def registration_roots(graph, functions, methods, classes, provenance):
     return roots
 
 
-def discover_bindings(documents, functions, methods, classes, *, provenance=None, compiler_json=None):
-    """Analyze exactly registered implementations; retain unresolved legacy types.
+def discover_bindings(
+    documents,
+    functions,
+    methods,
+    classes,
+    *,
+    provenance=None,
+    compiler_json=None,
+    native=None,
+):
+    """Analyze exactly registered implementations.
 
-    The caller must reject a problem on every final/new row. Only the Rust
-    tripwire owns the exact unchanged frozen remainder. This function neither
-    knows that cohort nor grants nonnumeric or transport authority.
+    The caller rejects every unresolved row. This function grants numeric
+    authority only from an exact current execution witness; nonnumeric
+    authority remains in the Rust registry.
     """
     graph = BindingGraph(documents, classes)
     if compiler_json is not None:
@@ -269,6 +278,14 @@ def discover_bindings(documents, functions, methods, classes, *, provenance=None
         if type(compiler_json) is not VerifiedCompilerJsonBindings:
             raise GraphError("compiler JSON requires the actual execution witness")
         compiler_json.validate()
+    if native is not None:
+        from capacity_census_native_authority import (
+            NATIVE_CLASSIFICATIONS,
+            VerifiedNativeBindings,
+        )
+        if type(native) is not VerifiedNativeBindings:
+            raise GraphError("native bindings require the actual execution witness")
+        native.validate()
     roots = registration_roots(graph, functions, methods, classes, provenance)
     results = []
     for kind, name, item, owner, proof in roots:
@@ -294,6 +311,11 @@ def discover_bindings(documents, functions, methods, classes, *, provenance=None
                                        tuple((adapter, direction) for adapter, direction, _ in compiler_json.ownership)))
                     # The scoped wire projection has its own exact text/codec
                     # contracts. It cannot discharge a sibling Python subtree.
+                    obligations = set()
+                elif native is not None and name in NATIVE_CLASSIFICATIONS:
+                    discovered = native.exposure(name, direction, label, proof)
+                    adapted.add((direction, label))
+                    identities.append(("native", discovered.identity))
                     obligations = set()
                 else:
                     discovered = graph.exposure(ty, owner)
@@ -321,13 +343,26 @@ def discover_bindings(documents, functions, methods, classes, *, provenance=None
             result["identity"] = hashlib.sha256(json.dumps(identities, separators=(",", ":")).encode()).hexdigest()
             result["flags"], result["leaves"] = sorted(flags), leaves
             if adapted:
-                expected = {("output", "$return")}
-                if name == "chelis_python::eval_json":
-                    expected.add(("input", "bindings_json"))
-                if adapted != expected:
-                    raise GraphError("compiler JSON binding omitted an exact payload direction")
-                result["authority"] = "TaggedTransport"
-                result["contract"] = "compiler-json/" + name
+                if native is not None and name in NATIVE_CLASSIFICATIONS:
+                    expected = {
+                        *[("input", label) for label, _ in inputs],
+                        ("output", "$return"),
+                    }
+                    if adapted != expected:
+                        raise GraphError("native binding omitted an exact payload direction")
+                    authority, contract, expected_flags = native.classification(name)
+                    if tuple(result["flags"]) != expected_flags:
+                        raise GraphError("native binding capacity differs from its exact contract")
+                    result["authority"] = authority
+                    result["contract"] = contract
+                else:
+                    expected = {("output", "$return")}
+                    if name == "chelis_python::eval_json":
+                        expected.add(("input", "bindings_json"))
+                    if adapted != expected:
+                        raise GraphError("compiler JSON binding omitted an exact payload direction")
+                    result["authority"] = "TaggedTransport"
+                    result["contract"] = "compiler-json/" + name
         except GraphError as error:
             result["problem"] = str(error)
         results.append(result)

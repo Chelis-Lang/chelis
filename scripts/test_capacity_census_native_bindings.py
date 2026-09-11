@@ -1,0 +1,344 @@
+"""Native boundary obligations from spec/11 §§1.1–1.4 and dtype C6.
+
+These fixtures test obligation checking. Only the execution factory can issue
+authority for a registered binding; a fixture is never such a receipt.
+"""
+
+import copy
+import unittest
+
+from capacity_census_graph import GraphError, RustdocGraph
+from capacity_census_native_bindings import (
+    NATIVE_OUTPUTS,
+    require_native_slots,
+    native_output_adapter,
+    require_private_owner,
+    native_input_role,
+    require_native_fields,
+    require_export_abi_choices,
+)
+from test_capacity_census_graph import Artifact, primitive, reference
+
+
+def fixture():
+    artifact = Artifact("chelis_python")
+    artifact.external(10, "pyo3::err::PyResult")
+    artifact.external(11, "alloc::vec::Vec")
+    for item_id, identity in enumerate(NATIVE_OUTPUTS.values(), 20):
+        artifact.external(item_id, identity)
+    return artifact
+
+
+def input_fixture():
+    artifact = fixture()
+    for item_id, identity in {
+        40: "pyo3::marker::Python", 41: "pyo3::instance::Bound",
+        42: "pyo3::types::tuple::PyTuple", 43: "pyo3::types::dict::PyDict",
+        44: "core::option::Option", 45: "chelis_python::dlpack::DLPackStreamRequest",
+        46: "chelis_python::dlpack::DLPackVersionRequest",
+        47: "chelis_python::dlpack::DLPackDeviceRequest",
+        48: "chelis_python::dlpack::DLPackRequest",
+    }.items():
+        artifact.external(item_id, identity)
+    borrow = lambda ty: {"borrowed_ref": {"type": ty, "is_mutable": False, "lifetime": None}}
+    return artifact, {
+        "self": borrow({"generic": "Self"}), "py": reference(40),
+        "args": borrow(reference(41, reference(42))),
+        "kwargs": reference(44, borrow(reference(41, reference(43)))),
+        "stream": reference(44, reference(45)), "max_version": reference(44, reference(46)),
+        "dl_device": reference(44, reference(47)), "copy": reference(44, primitive("bool")),
+    }
+
+
+def private_owner_fixture():
+    artifact = Artifact("chelis_python")
+    artifact.add(2, "native_tensor", {"module": {"items": [20], "is_stripped": False}},
+                 path=["chelis_python", "native_tensor"], visibility="crate")
+    field = artifact.field("metadata", reference(30))
+    artifact.doc["index"][str(field)]["visibility"] = {
+        "restricted": {"parent": 2, "path": "::native_tensor"},
+    }
+    artifact.external(30, "chelis_abi::metadata::ShapeMetadata")
+    artifact.struct(20, "ValidatedTensor", [field], public=False)
+    artifact.doc["paths"]["20"]["path"] = ["chelis_python", "native_tensor", "ValidatedTensor"]
+    artifact.doc["index"]["20"]["span"] = {
+        "filename": "crates/chelis-python/src/native_tensor.rs",
+    }
+    return artifact, field
+
+
+class NativeBoundaryObligations(unittest.TestCase):
+    def test_receivers_and_requests_retain_the_checked_owner_chain(self):
+        for name, module, edges in (
+            ("NativeTensor", "", (("tensor", reference(30)),)),
+            ("ValidatedTensor", "native_tensor", (("inner", reference(31, reference(32))),)),
+            ("DLPackRequest", "dlpack", (("tensor", reference(30)), ("abi", reference(33)))),
+        ):
+            artifact = Artifact("chelis_python")
+            parent = 2 if module else 0
+            if module:
+                artifact.add(2, module, {"module": {"items": [20], "is_stripped": False}},
+                             path=["chelis_python", module], visibility="crate")
+            else:
+                artifact.doc["index"]["0"]["inner"]["module"]["items"].append(20)
+                artifact.doc["index"]["0"]["inner"]["module"]["is_crate"] = True
+            for item_id, identity in {
+                30: "chelis_python::native_tensor::ValidatedTensor", 31: "alloc::sync::Arc",
+                32: "chelis_python::native_tensor::ValidatedTensorInner",
+                33: "chelis_python::dlpack::ExportAbi",
+            }.items():
+                artifact.external(item_id, identity)
+            fields = []
+            for label, ty in edges:
+                field = artifact.field(label, ty)
+                artifact.doc["index"][str(field)]["visibility"] = {
+                    "restricted": {"parent": parent, "path": "::" + module},
+                } if module else "crate"
+                fields.append(field)
+            artifact.struct(20, name, fields, public=False)
+            artifact.doc["paths"]["20"]["path"] = ["chelis_python", *([module] if module else []), name]
+            artifact.doc["index"]["20"]["span"] = {
+                "filename": f"crates/chelis-python/src/{module or 'lib'}.rs",
+            }
+            identity = "::".join(artifact.doc["paths"]["20"]["path"])
+            require_native_fields(RustdocGraph([artifact.doc]), identity)
+            for field in fields:
+                for replacement in (primitive("f64"), reference(31, primitive("i64")), reference(33)):
+                    if artifact.doc["index"][str(field)]["inner"]["struct_field"] == replacement:
+                        continue
+                    changed = copy.deepcopy(artifact.doc)
+                    changed["index"][str(field)]["inner"]["struct_field"] = replacement
+                    with self.subTest(owner=identity, field=field, replacement=replacement), self.assertRaises(GraphError):
+                        require_native_fields(RustdocGraph([changed]), identity)
+
+    def test_export_abi_is_only_the_closed_protocol_choice_without_payloads(self):
+        artifact = Artifact("chelis_python")
+        artifact.add(2, "dlpack", {"module": {"items": [20], "is_stripped": False}},
+                     path=["chelis_python", "dlpack"], visibility="crate")
+        for item_id, name in ((21, "Legacy"), (22, "Versioned")):
+            artifact.add(item_id, name, {"variant": {"kind": "plain", "discriminant": None}})
+        artifact.add(20, "ExportAbi", {"enum": {"generics": {"params": []},
+                     "variants": [21, 22], "has_stripped_variants": False}},
+                     path=["chelis_python", "dlpack", "ExportAbi"], visibility="crate")
+        artifact.doc["index"]["20"]["span"] = {"filename": "crates/chelis-python/src/dlpack.rs"}
+        self.assertEqual(require_export_abi_choices(RustdocGraph([artifact.doc])), ("Legacy", "Versioned"))
+        for mutation in ("payload", "new-choice", "missing", "stripped", "generic", "detached", "moved"):
+            changed = copy.deepcopy(artifact.doc)
+            body = changed["index"]["20"]["inner"]["enum"]
+            if mutation == "payload":
+                changed["index"]["21"]["inner"]["variant"]["kind"] = {"tuple": [200]}
+                changed["index"]["200"] = {"inner": {"struct_field": primitive("f64")}}
+            elif mutation == "new-choice":
+                changed["index"]["22"]["name"] = "TaggedNumber"
+            elif mutation == "missing":
+                body["variants"].pop()
+            elif mutation == "stripped":
+                body["has_stripped_variants"] = True
+            elif mutation == "generic":
+                body["generics"]["params"] = [{"name": "T", "kind": {"type": {}}}]
+            elif mutation == "detached":
+                changed["index"]["2"]["inner"]["module"]["items"] = []
+            else:
+                changed["index"]["20"]["span"]["filename"] = "arbitrary.rs"
+            with self.subTest(mutation=mutation), self.assertRaises(GraphError):
+                require_export_abi_choices(RustdocGraph([changed]))
+
+    def test_adapters_retain_exact_owners_without_numeric_sibling_fields(self):
+        examples = (
+            ("CompiledTensorResults", "native_tensor", "tensors", "result-vector"),
+            ("DLPackDevice", "dlpack", "tensor", "validated-tensor"),
+            ("DLPackCapsule", "dlpack", "request", "validated-request"),
+        )
+        for name, module, label, role in examples:
+            artifact, field = private_owner_fixture()
+            artifact.doc["paths"]["2"]["path"][-1] = module
+            artifact.doc["index"]["2"]["name"] = module
+            artifact.doc["paths"]["20"]["path"] = ["chelis_python", module, name]
+            artifact.doc["index"]["20"]["name"] = name
+            artifact.doc["index"]["20"]["span"]["filename"] = f"crates/chelis-python/src/{module}.rs"
+            artifact.external(30, "chelis_python::native_tensor::ValidatedTensor")
+            artifact.external(31, "alloc::vec::Vec")
+            artifact.external(32, "alloc::string::String")
+            artifact.external(33, "chelis_python::dlpack::DLPackRequest")
+            payload = {"validated-tensor": reference(30), "validated-request": reference(33),
+                       "result-vector": reference(31, {"tuple": [reference(32), reference(30)]})}[role]
+            actual = artifact.doc["index"][str(field)]
+            actual["name"] = label
+            actual["inner"]["struct_field"] = payload
+            actual["visibility"] = {"restricted": {"parent": 2, "path": "::" + module}}
+            identity = f"chelis_python::{module}::{name}"
+            require_native_fields(RustdocGraph([artifact.doc]), identity)
+            for mutation in ("raw-number", "numeric-sibling", "wrong-container", "foreign-owner"):
+                changed = copy.deepcopy(artifact.doc)
+                if mutation == "raw-number":
+                    changed["index"][str(field)]["inner"]["struct_field"] = primitive("f64")
+                elif mutation == "numeric-sibling":
+                    sibling = copy.deepcopy(actual)
+                    sibling.update(id=200, name="extra_number")
+                    sibling["inner"]["struct_field"] = primitive("i64")
+                    changed["index"]["200"] = sibling
+                    changed["index"]["20"]["inner"]["struct"]["kind"]["plain"]["fields"].append(200)
+                elif mutation == "wrong-container":
+                    changed["index"][str(field)]["inner"]["struct_field"] = {"tuple": [payload]}
+                else:
+                    changed["paths"]["33" if role == "validated-request" else "30"]["path"][0] = "impostor"
+                with self.subTest(owner=identity, mutation=mutation), self.assertRaises(GraphError):
+                    require_native_fields(RustdocGraph([changed]), identity)
+            with self.assertRaises(GraphError):
+                require_native_fields(RustdocGraph([artifact.doc]), "chelis_python::ArbitraryTaggedNumber")
+
+    def test_registered_receiver_fields_are_private_to_the_actual_crate_root(self):
+        artifact, field = private_owner_fixture()
+        artifact.doc["paths"]["20"]["path"] = ["chelis_python", "NativeTensor"]
+        artifact.doc["index"]["20"]["name"] = "NativeTensor"
+        artifact.doc["index"]["20"]["span"]["filename"] = "crates/chelis-python/src/lib.rs"
+        artifact.doc["index"]["2"]["inner"]["module"]["items"] = []
+        artifact.doc["index"]["0"]["inner"]["module"]["items"].append(20)
+        artifact.doc["index"]["0"]["inner"]["module"]["is_crate"] = True
+        # Actual rustdoc represents root-private fields as crate visibility.
+        artifact.doc["index"][str(field)]["visibility"] = "crate"
+        identity = "chelis_python::NativeTensor"
+        source = "crates/chelis-python/src/lib.rs"
+        self.assertEqual(require_private_owner(RustdocGraph([artifact.doc]), identity, source),
+                         (("metadata", reference(30)),))
+        for visibility in ("public", {"restricted": {"parent": 0, "path": "::"}},
+                           {"restricted": {"parent": 2, "path": "::"}},
+                           {"restricted": {"parent": 0, "path": "::native_tensor"}}):
+            changed = copy.deepcopy(artifact.doc)
+            changed["index"][str(field)]["visibility"] = visibility
+            with self.subTest(visibility=visibility), self.assertRaises(GraphError):
+                require_private_owner(RustdocGraph([changed]), identity, source)
+        changed = copy.deepcopy(artifact.doc)
+        changed["index"]["0"]["inner"]["module"]["is_crate"] = False
+        with self.assertRaises(GraphError):
+            require_private_owner(RustdocGraph([changed]), identity, source)
+
+    def test_dynamic_input_authority_is_scoped_to_the_registered_payload_slot(self):
+        artifact, types = input_fixture()
+        graph = RustdocGraph([artifact.doc])
+        owners = {
+            "chelis_python::CompiledModel::__call__": ("self", "py", "args", "kwargs"),
+            "chelis_python::NativeTensor::__dlpack__":
+                ("self", "stream", "max_version", "dl_device", "copy"),
+            "chelis_python::NativeTensor::__dlpack_device__": ("self",),
+            "chelis_python::NativeTensor::shape": ("self",),
+        }
+        for owner, labels in owners.items():
+            for label in labels:
+                self.assertIsInstance(native_input_role(graph, owner, label, types[label]), str)
+                for changed in (primitive("f64"), reference(44, primitive("i64")),
+                                {"tuple": [types[label], primitive("f64")]}):
+                    with self.subTest(owner=owner, label=label, changed=changed), self.assertRaises(GraphError):
+                        native_input_role(graph, owner, label, changed)
+            for label in set(types) - set(labels):
+                with self.subTest(owner=owner, label=label), self.assertRaises(GraphError):
+                    native_input_role(graph, owner, label, types[label])
+        # Decoded requests are untrusted. They cannot be replaced by an alleged
+        # already-validated request or by the outgoing device projection.
+        owner = "chelis_python::NativeTensor::__dlpack__"
+        for label in ("stream", "max_version", "dl_device"):
+            for changed in (reference(44, reference(48)), reference(44, reference(22))):
+                with self.subTest(label=label), self.assertRaises(GraphError):
+                    native_input_role(graph, owner, label, changed)
+
+    def test_every_registered_boundary_requires_all_and_only_its_slots(self):
+        slots = {
+            "chelis_python::CompiledModel::__call__": ("self", "py", "args", "kwargs"),
+            "chelis_python::NativeTensor::__dlpack__":
+                ("self", "stream", "max_version", "dl_device", "copy"),
+            "chelis_python::NativeTensor::__dlpack_device__": ("self",),
+            "chelis_python::NativeTensor::shape": ("self",),
+        }
+        for owner, labels in slots.items():
+            inputs = [(label, primitive("bool")) for label in labels]
+            require_native_slots(owner, inputs)
+            for changed in (inputs[:-1], inputs + inputs[:1],
+                            inputs + [("extra_number", primitive("f64"))],
+                            inputs + [("extra_json", primitive("str"))]):
+                with self.subTest(owner=owner, changed=changed), self.assertRaises(GraphError):
+                    require_native_slots(owner, changed)
+        with self.assertRaises(GraphError):
+            require_native_slots("chelis_python::Arbitrary::tagged", [("self", None)])
+
+    def test_transport_returns_require_the_exact_concrete_adapter(self):
+        artifact = fixture()
+        graph = RustdocGraph([artifact.doc])
+        for item_id, (owner, adapter) in enumerate(NATIVE_OUTPUTS.items(), 20):
+            wrapped = owner != "chelis_python::NativeTensor::__dlpack_device__"
+            output = reference(10, reference(item_id)) if wrapped else reference(item_id)
+            self.assertEqual(native_output_adapter(graph, owner, output), adapter)
+            for wrong in (primitive("f64"), reference(11, primitive("i64")),
+                          reference(10, reference(item_id), primitive("f64")),
+                          {"tuple": [output, primitive("f64")]},
+                          reference(item_id, primitive("f64")),
+                          reference(10, reference(999))):
+                with self.subTest(owner=owner, wrong=wrong), self.assertRaises(GraphError):
+                    native_output_adapter(graph, owner, wrong)
+
+    def test_display_names_and_foreign_wrappers_do_not_establish_identity(self):
+        artifact = fixture()
+        owner = "chelis_python::CompiledModel::__call__"
+        expected = reference(10, reference(20))
+        self.assertEqual(native_output_adapter(RustdocGraph([artifact.doc]), owner, expected),
+                         NATIVE_OUTPUTS[owner])
+        for change in ("foreign_crate", "foreign_module", "arbitrary_tagged_enum"):
+            modified = copy.deepcopy(artifact.doc)
+            path = modified["paths"]["20"]["path"]
+            if change == "foreign_crate":
+                path[0] = "impostor"
+            elif change == "foreign_module":
+                path[1] = "unvalidated"
+            else:
+                path[-1] = "TaggedNumber"
+            with self.subTest(change=change), self.assertRaises(GraphError):
+                native_output_adapter(RustdocGraph([modified]), owner, expected)
+
+    def test_shape_is_an_exact_numeric_operation_instead_of_a_transport(self):
+        artifact = fixture()
+        graph = RustdocGraph([artifact.doc])
+        owner = "chelis_python::NativeTensor::shape"
+        self.assertIsNone(native_output_adapter(graph, owner, reference(11, primitive("i64"))))
+        for wrong in (reference(11, primitive("usize")), reference(11, primitive("i32")),
+                      reference(11, primitive("f64")), reference(10, reference(11, primitive("i64"))),
+                      reference(20), primitive("i64")):
+            with self.subTest(wrong=wrong), self.assertRaises(GraphError):
+                native_output_adapter(graph, owner, wrong)
+
+    def test_private_owner_requires_defining_module_and_complete_field_graph(self):
+        artifact, field = private_owner_fixture()
+        identity = "chelis_python::native_tensor::ValidatedTensor"
+        source = "crates/chelis-python/src/native_tensor.rs"
+        self.assertEqual(require_private_owner(RustdocGraph([artifact.doc]), identity, source),
+                         (("metadata", reference(30)),))
+        for mutation in ("public", "crate", "wrong_parent", "wrong_path", "stripped",
+                         "missing_field", "detached", "moved", "generic", "tuple", "alias"):
+            modified = copy.deepcopy(artifact.doc)
+            item = modified["index"]["20"]
+            body = item["inner"]["struct"]
+            private_field = modified["index"][str(field)]
+            if mutation in ("public", "crate"):
+                private_field["visibility"] = mutation
+            elif mutation == "wrong_parent":
+                private_field["visibility"]["restricted"]["parent"] = 0
+            elif mutation == "wrong_path":
+                private_field["visibility"]["restricted"]["path"] = "::another"
+            elif mutation == "stripped":
+                body["kind"]["plain"]["has_stripped_fields"] = True
+            elif mutation == "missing_field":
+                del modified["index"][str(field)]
+            elif mutation == "detached":
+                modified["index"]["2"]["inner"]["module"]["items"] = []
+            elif mutation == "moved":
+                item["span"]["filename"] = "elsewhere.rs"
+            elif mutation == "generic":
+                body["generics"]["params"] = [{"name": "T", "kind": {"type": {}}}]
+            elif mutation == "tuple":
+                body["kind"] = {"tuple": [field]}
+            else:
+                item["inner"] = {"type_alias": {"type": reference(30), "generics": {"params": []}}}
+            with self.subTest(mutation=mutation), self.assertRaises(GraphError):
+                require_private_owner(RustdocGraph([modified]), identity, source)
+
+
+if __name__ == "__main__":
+    unittest.main()
