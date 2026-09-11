@@ -73,6 +73,7 @@ pub fn lower_checked_for_c_execution(
 ) -> Result<
     (
         LoweredCompilation,
+        Option<chelis_ir::host::ConcreteHostProgram>,
         Option<chelis_ir::host::HostExecutionPlan>,
     ),
     CoreLowerError,
@@ -80,17 +81,18 @@ pub fn lower_checked_for_c_execution(
     let (_, host) =
         chelis_ir::host::try_lower_execution_program_with_manifest(checked.program(), manifest)
             .map_err(CoreLowerError::Lower)?;
-    let lowered = if host
+    if host
         .as_ref()
         .is_some_and(|plan| plan.has_execution_helpers())
     {
-        finish_lowering(
+        let lowered = finish_lowering(
             checked,
             Dag::new(),
             &BTreeSet::new(),
             RootCountContext::Program,
             RootBindingMode::SelectedHostBackend,
-        )?
+        )?;
+        Ok((lowered, None, host))
     } else {
         let mode = if mode == LoweringMode::AllowHostBackend
             && !host.as_ref().is_some_and(|plan| {
@@ -100,9 +102,20 @@ pub fn lower_checked_for_c_execution(
         } else {
             mode
         };
-        lower_checked(checked, mode)?
-    };
-    Ok((lowered, host))
+        let lowered = lower_checked(checked, mode)?;
+        let ordinary = host
+            .map(|plan| plan.into_ordinary())
+            .transpose()
+            .map_err(|message| {
+                CoreLowerError::Lower(LowerDiagnostic {
+                    message,
+                    span: None,
+                    span_id: None,
+                    fatal: true,
+                })
+            })?;
+        Ok((lowered, ordinary, None))
+    }
 }
 
 /// Additive evaluator products derived from the same sealed checked source.
@@ -351,8 +364,9 @@ mod tests {
             chelis_effects::realizability::compute_root_manifest(checked.program(), &realizability);
         let ordinary = lower_checked(checked.clone(), LoweringMode::Strict).unwrap();
         for mode in [LoweringMode::AllowHostOnly, LoweringMode::AllowHostBackend] {
-            let (actual, plan) =
+            let (actual, ordinary_host, plan) =
                 lower_checked_for_c_execution(checked.clone(), &manifest, mode).unwrap();
+            assert!(ordinary_host.is_some());
             assert!(
                 !plan
                     .as_ref()

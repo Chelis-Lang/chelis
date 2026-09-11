@@ -385,6 +385,7 @@ pub fn lower_checked_for_c_execution(
 ) -> Result<
     (
         LoweredCompilation,
+        Option<chelis_ir::host::ConcreteHostProgram>,
         Option<chelis_ir::host::HostExecutionPlan>,
     ),
     PipelineRejection,
