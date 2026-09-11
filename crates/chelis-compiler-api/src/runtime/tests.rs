@@ -65,48 +65,60 @@ fn checked_surf(source: &str) -> CheckedProgram {
 #[test]
 fn issue_1829_interpreter_entry_bounds_kernel_decision_probes() {
     const DEPTH: usize = 12;
-    let mut source = String::new();
-    for level in 0..DEPTH {
-        source.push_str(&format!(
-            "def f{level}(x: int64) -> int64 = add(f{next}(x), f{next}(x))\n",
-            next = level + 1
-        ));
-    }
-    source.push_str(&format!("def f{DEPTH}(x: int64) -> int64 = x\n"));
-    source.push_str("result = f0(cast(1, int64))\n");
+    // A large stack so that an unarmed base run reports the probe COUNT rather
+    // than overflowing: the probe recurses once per call-graph level per call
+    // site, and the default test stack aborts the whole process at depth 12.
+    std::thread::Builder::new()
+        .name("issue-1829-entry".to_string())
+        .stack_size(256 * 1024 * 1024)
+        .spawn(|| {
+            let mut source = String::new();
+            for level in 0..DEPTH {
+                source.push_str(&format!(
+                    "def f{level}(x: int64) -> int64 = add(f{next}(x), f{next}(x))\n",
+                    next = level + 1
+                ));
+            }
+            source.push_str(&format!("def f{DEPTH}(x: int64) -> int64 = x\n"));
+            source.push_str("result = f0(cast(1, int64))\n");
 
-    let checked = checked_surf(&source);
-    let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
-    chelis_ir::host::reset_host_summary_probe_builds();
-    let inputs = HostEvaluationInputs {
-        roots: &empty_tensors,
-        bindings: None,
-    };
-    let outcome =
-        evaluate_host_program_with_library_and_types(&checked, None, None, inputs, None, None)
+            let checked = checked_surf(&source);
+            let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
+            let inputs = HostEvaluationInputs {
+                roots: &empty_tensors,
+                bindings: None,
+            };
+            chelis_ir::host::reset_host_summary_probe_builds();
+            let outcome = evaluate_host_program_with_library_and_types(
+                &checked, None, None, inputs, None, None,
+            )
             .expect("#1829 fanout fixture evaluates");
-    let probes = chelis_ir::host::host_summary_probe_builds();
-    let definitions = u64::try_from(DEPTH + 1).expect("definition count fits");
+            let probes = chelis_ir::host::host_summary_probe_builds();
+            let definitions = u64::try_from(DEPTH + 1).expect("definition count fits");
 
-    let result = outcome
-        .host_bindings
-        .get("result")
-        .map(render_value)
-        .expect("#1829 fixture binds `result`");
-    assert_eq!(
-        result, "4096",
-        "#1829 fixture must still compute the right answer"
-    );
-    assert!(
-        probes > 0,
-        "#1829: the fixture must actually reach the kernel-decision probe, or this \
-         receipt would pass without measuring anything"
-    );
-    assert!(
-        probes <= definitions,
-        "#1829: the interpreter entry must build at most one summary per definition; \
-         {definitions} definitions produced {probes} builds"
-    );
+            let result = outcome
+                .host_bindings
+                .get("result")
+                .map(render_value)
+                .expect("#1829 fixture binds `result`");
+            assert_eq!(
+                result, "4096",
+                "#1829 fixture must still compute the right answer"
+            );
+            assert!(
+                probes > 0,
+                "#1829: the fixture must actually reach the kernel-decision probe, or this \
+                 receipt would pass without measuring anything"
+            );
+            assert!(
+                probes <= definitions,
+                "#1829: the interpreter entry must build at most one summary per definition; \
+                 {definitions} definitions produced {probes} builds"
+            );
+        })
+        .expect("#1829 entry probe thread starts")
+        .join()
+        .expect("#1829 entry probe thread completes");
 }
 
 #[test]
