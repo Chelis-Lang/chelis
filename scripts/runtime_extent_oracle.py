@@ -417,13 +417,13 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "expand.arith_size.named_claim.c",
             "lane_divergent",
-            "lane_divergent",
+            EXECUTES,
             "cli_slice_b.checked_arithmetic_expand_size_under_a_named_claim_agrees_on_every_lane_on_c",
         ),
         _row(
             "expand.arith_size.named_claim.eval",
             "lane_divergent",
-            "lane_divergent",
+            EXECUTES,
             "cli_slice_b.checked_arithmetic_expand_size_under_a_named_claim_agrees_on_every_lane_on_eval",
         ),
         _row(

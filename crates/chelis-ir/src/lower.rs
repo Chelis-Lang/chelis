@@ -11170,30 +11170,30 @@ impl<'program> LowerCtx<'program> {
                             )
                         }
                     }
-                    // (4) Fail closed (chelis#469): a check-clean runtime size
-                    //     the backend cannot yet materialize as an extent —
-                    //     integer arithmetic that COMBINES a `shape(tensor,
-                    //     axis)` read (or a symbolic dim) with another term
-                    //     (`mul(shape(x, 0), 2)`, `add(shape(x, 0), 1)`), which
-                    //     the checker admits as `ShapeSourced` but `DimExpr`
-                    //     has no representation for. Reject loudly rather than
-                    //     the pre-fix silent `Concrete(1)` default, which
-                    //     emitted an extent-1 axis and silently diverged from
-                    //     `eval` — the exact miscompile class #469 exists to
-                    //     prevent.
+                    // (4) chelis#1379: every other checked integer size is an
+                    //     ordinary extent. `spec/04-type-system.md` section
+                    //     4.7.2 puts a "checked integer-arithmetic expression"
+                    //     in the same admissibility list as a parameter, a
+                    //     binding, a cast and a user-function result, and says
+                    //     no stage may reject an extent because of its
+                    //     provenance; section 4.7.4 lowers such an extent as
+                    //     ordinary typed integer dataflow that every lane
+                    //     executes. This arm used to reject the combining forms
+                    //     (`mul(shape(x, 0), 2)`, `add(shape(x, 0), 1)`)
+                    //     because `DimExpr` had no representation for them,
+                    //     which refused a well-typed program on the spelling of
+                    //     its extent while `eval` executed it. `RtDim::Node` is
+                    //     that representation: the size becomes a rank-0
+                    //     `int64` node appended to `inputs`, the same carrier a
+                    //     movement bound uses (chelis#616), so one place
+                    //     decides literal-versus-node for every runtime extent.
+                    //     A literal or named claim over the axis is checked by
+                    //     the section 4.7 runtime extent guards rather than by
+                    //     refusing the program; the silent `Concrete(1)`
+                    //     default that chelis#469 replaced is not reachable
+                    //     from here.
                     else {
-                        raise_fatal_lowering_error(
-                            "`{callee}` size is a runtime expression the backend cannot \
-                             materialize as an extent: integer arithmetic that combines a \
-                             `shape(tensor, axis)` read (or a symbolic dimension) with another \
-                             term (e.g. `mul(shape(x, 0), 2)` or `add(shape(x, 0), 1)`) has no \
-                             single tensor axis to read the extent from. Use an exact `int64` \
-                             literal size, a bare `shape(tensor, int32-axis)` read, or an in-scope \
-                             tensor dimension. Tracked by Chelis-Lang/chelis#469 \
-                             (spec/04-type-system.md \u{00a7}4.7.2)",
-                            Some(app_span),
-                            self.current_span_id.clone(),
-                        );
+                        self.lower_one_bound(size_arg, &mut inputs, "expand size")
                     }
                 } else {
                     RtDim::Lit(1)
@@ -14788,8 +14788,8 @@ impl<'program> LowerCtx<'program> {
             if well_formed {
                 let mut bounds = Vec::with_capacity(elems.len());
                 for (s, e) in elems {
-                    let start = self.lower_one_bound(s, inputs);
-                    let end = self.lower_one_bound(e, inputs);
+                    let start = self.lower_one_bound(s, inputs, "movement bound");
+                    let end = self.lower_one_bound(e, inputs, "movement bound");
                     bounds.push((start, end));
                 }
                 return bounds;
@@ -14803,15 +14803,20 @@ impl<'program> LowerCtx<'program> {
             .collect()
     }
 
-    /// chelis#616: lower a single movement-bound element to a [`RtDim`]. A
+    /// chelis#616: lower a single runtime extent expression to a [`RtDim`]. A
     /// compile-time int becomes `RtDim::Lit`; a runtime expression becomes a
     /// `RtDim::Node` referencing a freshly-lowered rank-0 integer node appended
     /// to `inputs`.
-    fn lower_one_bound(&mut self, expr: &Expr, inputs: &mut Vec<NodeId>) -> RtDim {
+    ///
+    /// chelis#1379: the `expand`/`insert` size slot reaches this helper too, so
+    /// `context` names the slot the caller is lowering rather than assuming a
+    /// movement bound. One helper decides literal-versus-node for every runtime
+    /// extent the lowering admits.
+    fn lower_one_bound(&mut self, expr: &Expr, inputs: &mut Vec<NodeId>, context: &str) -> RtDim {
         if let Some(n) = extract_int_for_dim(expr).and_then(|v| usize::try_from(v).ok()) {
             return RtDim::Lit(n);
         }
-        let node = self.lower_expr_node(expr, "movement bound");
+        let node = self.lower_expr_node(expr, context);
         let slot = inputs.len();
         inputs.push(node);
         RtDim::Node(slot)
@@ -14824,7 +14829,7 @@ impl<'program> LowerCtx<'program> {
     fn lower_stride_bounds(&mut self, exprs: &[Expr], inputs: &mut Vec<NodeId>) -> Vec<RtDim> {
         let mut out = Vec::with_capacity(exprs.len());
         for e in exprs {
-            out.push(self.lower_one_bound(e, inputs));
+            out.push(self.lower_one_bound(e, inputs, "stride step"));
         }
         out
     }

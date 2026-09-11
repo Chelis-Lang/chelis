@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "8152b4af4fd8bb41c1bc07e49ce45c4efa89689200ada851fef0a16472cc0194",
+  "corpus_sha256": "b21aeac04dcf6796288f388beb79ef6d0d48f24ae45ee42711e4b83245527152",
   "rows": [
     {
       "id": "claim.literal.nested_and_unused.eval_c",
@@ -89,13 +89,13 @@
     {
       "id": "expand.arith_size.named_claim.c",
       "baseline": "lane_divergent",
-      "phase_b": "lane_divergent",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.checked_arithmetic_expand_size_under_a_named_claim_agrees_on_every_lane_on_c"
     },
     {
       "id": "expand.arith_size.named_claim.eval",
       "baseline": "lane_divergent",
-      "phase_b": "lane_divergent",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.checked_arithmetic_expand_size_under_a_named_claim_agrees_on_every_lane_on_eval"
     },
     {
