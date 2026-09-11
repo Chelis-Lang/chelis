@@ -755,7 +755,9 @@ chelis#1397's wildcard-root repair moves two further cells of that 55, taking
 the unmet count from 10 to 8. `wildcard.root` and `vmap.shape` both execute on
 Eval and C with their contract values, `main = tensor(shape=[2], data=[2.0,
 3.0])` and `main = tensor(shape=[2, 2], data=[2.0, 3.0, 5.0, 6.0])`. The
-remaining eight belong to #1374, #1376, #1397's declaration half and #1266.
+remaining eight, enumerated by the ignored acceptance runner, are #1374's and
+#1376's two polymorphic root-mismatch cells each and #1266's four record
+cells. #1397's own `shrink.*` declaration cells are met.
 
 The merged B2b-0b numeric kernel repair compares literal and resolved named
 claims against independent nonnegative runtime sizes at live `Expand` and
