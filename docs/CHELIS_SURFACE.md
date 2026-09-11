@@ -175,7 +175,7 @@ broadcast axis). The named-axis and four-argument anchored forms belong to `inse
 |---|---|---|
 | `const` | `(value, shape...) -> tensor[shape,p]` | zero gradient |
 | `load` | `(source, shape...) -> tensor[shape,p]` | zero gradient |
-| `dropout` | `(&tensor[D,p_float], rate: p_float) -> tensor[D,p_float]` | all active float dtypes; fixed-control input AD replays its forward mask; introduces `Random`. **Eval-only — not codegen'd by C/HIP/Metal build yet.** |
+| `dropout` | `(&tensor[D,p_float], rate: p_float) -> tensor[D,p_float]` | all active float dtypes; fixed-control input AD replays its forward mask; introduces `Random`. C build accepts source-fixed rates/seeds through sealed direct entries and host helpers; runtime controls and HIP/Metal remain unsupported. |
 | `uniform_like` | `(&tensor[D,p], lo: f32, hi: f32) -> tensor[D,p]` | active float `p`; zero gradient; introduces `Random`; seeded via `with seed(Ni64) { }` |
 
 Internal-only `RiscOp`s not directly callable from Surf: `Store`, `Copy`, `Drop`,

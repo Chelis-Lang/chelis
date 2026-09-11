@@ -105,6 +105,18 @@ impl ExecutionMetadata {
         }
     }
 
+    pub(crate) fn validate_for_dag(&self, dag: &Dag) -> Result<(), String> {
+        EvaluationPlan {
+            dag: dag.clone(),
+            metadata: self.clone(),
+        }
+        .validate()
+    }
+
+    pub(crate) fn emission_view(&self) -> EvaluationEmissionView<'_> {
+        EvaluationEmissionView { metadata: self }
+    }
+
     pub(crate) fn forward(&mut self, node: NodeId, scope: ScopeId) {
         let draw = DrawId(self.draws);
         self.draws += 1;
@@ -284,6 +296,13 @@ impl<'a> EvaluationEmissionView<'a> {
 }
 
 impl VerifiedEvaluationPlan {
+    /// Inspect the exact ownership-sealed graph without detaching it from its
+    /// execution metadata. This is for ABI/observer projection before the
+    /// consuming emission boundary below.
+    pub fn emission(&self) -> crate::ownership::VerifiedDagView<'_> {
+        self.ownership.emission()
+    }
+
     /// Consume the sealed graph and borrow its own execution information for
     /// one emission. The view cannot outlive this callback; no constructor
     /// permits pairing a view with a different graph for this entry point.
@@ -305,6 +324,9 @@ impl VerifiedEvaluationPlan {
 }
 
 impl EvaluationPlan {
+    pub(crate) fn into_parts(self) -> (Dag, ExecutionMetadata) {
+        (self.dag, self.metadata)
+    }
     /// Seal ownership in the order the source plan actually executes.
     ///
     /// Current lowering preserves graph-node order while inserting controls.

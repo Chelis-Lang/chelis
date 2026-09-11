@@ -8472,6 +8472,47 @@ forty_two = with seed(42i64) { sample(copy(template)) }
     );
 }
 
+/// [05-OP-37]/[05-RNG-1]: a concrete call of a dtype-generic static-rate
+/// helper retains its source draw identity through the CLI host build.
+#[test]
+fn build_c_runs_generic_static_rate_dropout_host_helper() {
+    let dir = tempdir().expect("tempdir");
+    let src = dir.path().join("generic_dropout.ch");
+    let out_dir = dir.path().join("out");
+    write_file(
+        &src,
+        r#"
+def keep[p: Float](x: tensor[4, p]) -> tensor[4, p] = dropout(x, cast(0.5, p))
+result = with seed(42i64) {
+  keep(to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32]))
+}
+"#,
+    );
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            src.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let status = gcc_link_generated(&out_dir, "generic_dropout.c", "generic_dropout");
+    assert!(status.success(), "gcc compile/link of generated C failed");
+    let run = StdCommand::new(out_dir.join("generic_dropout"))
+        .output()
+        .expect("compiled binary must run");
+    assert!(run.status.success(), "compiled binary exited non-zero");
+    assert_eq!(
+        String::from_utf8(run.stdout).unwrap(),
+        "result = tensor(shape=[4], data=[0.0, 2.0, 2.0, 2.0])\n"
+    );
+}
+
 #[test]
 fn build_c_mnist_loss_tail_tensor_pipeline_compiles_object() {
     let dir = tempdir().expect("tempdir");
