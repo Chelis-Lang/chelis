@@ -568,7 +568,7 @@
   "polymorphic.foreign.root.mismatch": {
     "c": {
       "stage": "execute",
-      "stderr": "extent `3`: claimed = 3, x axis 0 = 2\nnumeric trap: domain in load at int64",
+      "stderr": "extent `m`: y axis 0 = 3, x axis 0 = 2\nnumeric trap: domain in load at int64",
       "stdout": "",
       "success": false
     },
@@ -583,7 +583,7 @@
     },
     "eval": {
       "stage": "execute",
-      "stderr": "error: extent `3`: claimed = 3, x axis 0 = 2\nnumeric trap: domain in load at int64",
+      "stderr": "error: extent `m`: y axis 0 = 3, x axis 0 = 2\nnumeric trap: domain in load at int64",
       "stdout": "",
       "success": false
     },
@@ -698,7 +698,7 @@
   "polymorphic.named.root.mismatch": {
     "c": {
       "stage": "execute",
-      "stderr": "extent `2`: claimed = 2, y axis 0 = 3\nnumeric trap: domain in load at int64",
+      "stderr": "extent `n`: x axis 0 = 2, y axis 0 = 3\nnumeric trap: domain in load at int64",
       "stdout": "",
       "success": false
     },
@@ -713,7 +713,7 @@
     },
     "eval": {
       "stage": "execute",
-      "stderr": "error: extent `2`: claimed = 2, y axis 0 = 3\nnumeric trap: domain in load at int64",
+      "stderr": "error: extent `n`: x axis 0 = 2, y axis 0 = 3\nnumeric trap: domain in load at int64",
       "stdout": "",
       "success": false
     },

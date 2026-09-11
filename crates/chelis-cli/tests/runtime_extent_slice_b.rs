@@ -27,6 +27,17 @@
 //! all. That was true of the inlined-root form it measured and over-broad for
 //! the value-binding form, which B2h's rows already used.
 //!
+//! The paragraph above is now history rather than current behaviour, and the
+//! chelis#1782 rows at the end of this file are the reason it has to say so.
+//! PR #1773 gave the inlined root the callee's own declared result claim and
+//! PR #1790 gave it an op-computed one, so a `def main() = f(...)` root is
+//! guarded on both lanes today: chelis#1377's shape, which that paragraph
+//! measured running unguarded at `1a585ba1b`, traps at `d861a6c6f` with
+//! ``extent `4`: claimed = 4, x axis 0 = 5``, which
+//! `an_independent_root_literal_claim_still_names_its_claimed_extent`
+//! asserts. The root rows in this file are therefore guard rows, and they
+//! are marked as such where they sit.
+//!
 //! The order controls belong here for a second reason: ordering a guard
 //! against an in-body trap needs a caller, and a called function's entry sits
 //! exactly where its call sits in the caller's source order.
@@ -3831,4 +3842,435 @@ fn an_overshooting_shrink_span_is_outside_this_slices_cross_lane_claim() {
         c_out.contains("shrink bounds outside input extent"),
         "C's movement plan rejects the span first: {c_out}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// chelis#1782: a root's restated literal claim defers to the callee's named
+// guard.
+//
+// At `def main() = f(...)` the checker infers the root's result type by
+// instantiating `f`'s dimension binder against the argument it was bound
+// from, so the root's result dimension is the LITERAL that binder
+// monomorphized to. Lowering then recorded that literal as a second
+// obligation on the same produced extent, and because it is a requirement on
+// the witness rather than a claim between two witnesses, it rendered first:
+// the user saw ``extent `2`: claimed = 2, y axis 0 = 3`` where
+// `spec/04-type-system.md` section 4.7's [04-NUM-9] asks for both disagreeing
+// sources, which the callee's own named guard already names.
+//
+// The two obligations are one comparison. The named claim asserts that the
+// produced witness and the declaring witness observe the same extent; the
+// declaring witness here observes a tensor whose extent the lowered graph
+// fixes, and that extent IS the literal. A produced extent disagreeing with
+// the literal therefore disagrees with the declaring witness too, so the
+// named guard fires on exactly the inputs the literal guard would have.
+// Section 4.7 evaluates each guard once, so the one that survives is the one
+// naming both sources.
+//
+// These rows are inlined-root rows, which the file header's older paragraph
+// said could not be guarded at all. PR #1773 and PR #1790 changed that; the
+// header is corrected where it makes the claim.
+// ---------------------------------------------------------------------------
+
+/// chelis#1374's reproducer with the issue's original polymorphic binder, in
+/// the inlined-root form. `n` is a single letter, so it desugars to a
+/// polymorphic dimension variable that inference instantiates against `x`.
+fn polymorphic_named_root_source(x_extent: usize, y_extent: usize) -> String {
+    let list = |n: usize| {
+        (1..=n)
+            .map(|v| format!("{v}.0f32"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "module Repro.PolymorphicNamedRoot\n\
+         def f(b: tensor[f32], x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = insert(b, 0i32, shape(y, 0i32))\n\
+         def main() = f(scalar_to_tensor(7.0f32), to_tensor([{}]), to_tensor([{}]))\n",
+        list(x_extent),
+        list(y_extent)
+    )
+}
+
+/// chelis#1376's reproducer with the issue's original polymorphic binders, in
+/// the inlined-root form. The result's two axes resolve to DIFFERENT
+/// witnesses, so a per-witness reorder would repair the row above and not
+/// this one.
+fn polymorphic_foreign_root_source(x_extent: usize, y_extent: usize) -> String {
+    let list = |n: usize| {
+        (1..=n)
+            .map(|v| format!("{v}.0f32"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "module Repro.PolymorphicForeignRoot\n\
+         def f(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, m, f32] = insert(x, 1i32, shape(x, 0i32))\n\
+         def main() = f(to_tensor([{}]), to_tensor([{}]))\n",
+        list(x_extent),
+        list(y_extent)
+    )
+}
+
+/// A root literal claim with NO named claim over its produced extent: the
+/// callee declares a literal result of its own, so nothing relates two
+/// witnesses and the literal is the only check there is.
+fn independent_literal_root_source(x_extent: usize) -> String {
+    let list = (1..=x_extent)
+        .map(|v| format!("{v}.0f32"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "module Repro.IndependentLiteralRoot\n\
+         def f(b: tensor[f32], x: tensor[rows, f32]) -> tensor[4, f32] = insert(b, 0i32, shape(x, 0i32))\n\
+         def main() = f(scalar_to_tensor(7.0f32), to_tensor([{list}]))\n"
+    )
+}
+
+/// A binding whose entailing extent arrives through the ABI: `g`'s binder `n`
+/// is declared by `f`'s parameter `a`, and `a`'s extent is an input promise
+/// the entry guard checks rather than one the lowered graph fixes.
+///
+/// `a_prim` types `f`'s first parameter and `a_arg` spells what `f` hands
+/// `g`, so one helper produces the direct spelling and the two that put a
+/// node between the parameter and the witness.
+fn abi_promised_entailment_source(a_prim: &str, a_arg: &str, b_extent: usize) -> String {
+    let list = |n: usize, prim: &str| {
+        (1..=n)
+            .map(|v| format!("{v}.0{prim}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "module Repro.AbiPromisedEntailment\n\
+         def g(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = insert(scalar_to_tensor(7.0f32), 0i32, shape(y, 0i32))\n\
+         def f(a: tensor[4, {a_prim}], b: tensor[rows, f32]) -> tensor[4, f32] = g({a_arg}, b)\n\
+         out = f(to_tensor([{}]), to_tensor([{}]))\n",
+        list(4, a_prim),
+        list(b_extent, "f32")
+    )
+}
+
+/// polymorphic.named.root.mismatch (chelis#1782, chelis#1374)
+///
+/// EVIDENTIARY STATUS: regression test. Recorded red at `d861a6c6f`, where
+/// both lanes print ``extent `2`: claimed = 2, y axis 0 = 3`` and the named
+/// guard that names both disagreeing sources never runs. The satisfied half
+/// is a parity control: suppressing the restatement must not stop the
+/// agreeing program from producing its value.
+#[test]
+fn issue_1782_a_root_literal_restating_a_binder_defers_to_the_named_guard_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = eval_result(
+        &dir,
+        "poly_named_root.ch",
+        &polymorphic_named_root_source(2, 3),
+    );
+    assert!(
+        !ok,
+        "`n` is witnessed at 2 and the result is produced at 3: {out}"
+    );
+    assert!(out.contains(&domain_trap_line("load")), "{out}");
+    assert!(
+        out.contains("extent `n`: x axis 0 = 2, y axis 0 = 3"),
+        "the guard the user sees names both disagreeing sources: {out}"
+    );
+    assert!(
+        !out.contains("claimed = 2"),
+        "the root's restatement of `n` records no second guard: {out}"
+    );
+
+    let (ok, out) = eval_result(
+        &dir,
+        "poly_named_root_ok.ch",
+        &polymorphic_named_root_source(3, 3),
+    );
+    assert!(ok, "an agreeing pair of witnesses must execute: {out}");
+    assert!(
+        out.contains("tensor(shape=[3], data=[7.0, 7.0, 7.0])"),
+        "and produce the claimed shape: {out}"
+    );
+}
+
+/// polymorphic.named.root.mismatch on the C lane (chelis#1782, chelis#1374)
+///
+/// EVIDENTIARY STATUS: as its eval twin; recorded red at `d861a6c6f` with the
+/// linked binary printing ``extent `2`: claimed = 2, y axis 0 = 3``. The
+/// context line is asserted byte-for-byte against the eval row's.
+#[test]
+fn issue_1782_a_root_literal_restating_a_binder_defers_to_the_named_guard_on_c() {
+    assert!(
+        gcc_available(),
+        "this row executes a linked program; no lane may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(
+        &dir,
+        "poly_named_root_c",
+        &polymorphic_named_root_source(2, 3),
+    );
+    assert!(
+        !ok,
+        "`n` is witnessed at 2 and the result is produced at 3: {out}"
+    );
+    assert!(out.contains(&domain_trap_line("load")), "{out}");
+    assert!(
+        out.contains("extent `n`: x axis 0 = 2, y axis 0 = 3"),
+        "the guard the user sees names both disagreeing sources: {out}"
+    );
+    assert!(
+        !out.contains("claimed = 2"),
+        "the root's restatement of `n` records no second guard: {out}"
+    );
+
+    let (ok, out) = c_run_result(
+        &dir,
+        "poly_named_root_c_ok",
+        &polymorphic_named_root_source(3, 3),
+    );
+    assert!(ok, "an agreeing pair of witnesses must execute: {out}");
+    assert!(
+        out.contains("tensor(shape=[3], data=[7.0, 7.0, 7.0])"),
+        "and produce the claimed shape: {out}"
+    );
+}
+
+/// polymorphic.foreign.root.mismatch (chelis#1782, chelis#1376)
+///
+/// EVIDENTIARY STATUS: regression test. Recorded red at `d861a6c6f`, where
+/// both lanes print ``extent `3`: claimed = 3, x axis 0 = 2``. This row's
+/// literal and named obligations sit on DIFFERENT witnesses, with the
+/// literal's earlier in the schedule, so it fails for a reorder that repairs
+/// the same-witness row above.
+#[test]
+fn issue_1782_a_root_literal_restating_a_foreign_binder_defers_to_the_named_guard_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = eval_result(
+        &dir,
+        "poly_foreign_root.ch",
+        &polymorphic_foreign_root_source(2, 3),
+    );
+    assert!(
+        !ok,
+        "`m` is witnessed at 3 and the result is produced at 2: {out}"
+    );
+    assert!(out.contains(&domain_trap_line("load")), "{out}");
+    assert!(
+        out.contains("extent `m`: y axis 0 = 3, x axis 0 = 2"),
+        "the guard the user sees names both disagreeing sources: {out}"
+    );
+    assert!(
+        !out.contains("claimed = 3"),
+        "the root's restatement of `m` records no second guard: {out}"
+    );
+
+    let (ok, out) = eval_result(
+        &dir,
+        "poly_foreign_root_ok.ch",
+        &polymorphic_foreign_root_source(2, 2),
+    );
+    assert!(ok, "an agreeing pair of witnesses must execute: {out}");
+    assert!(
+        out.contains("tensor(shape=[2, 2], data=[1.0, 1.0, 2.0, 2.0])"),
+        "and produce the claimed shape: {out}"
+    );
+}
+
+/// polymorphic.foreign.root.mismatch on the C lane (chelis#1782, chelis#1376)
+///
+/// EVIDENTIARY STATUS: as its eval twin; recorded red at `d861a6c6f`.
+#[test]
+fn issue_1782_a_root_literal_restating_a_foreign_binder_defers_to_the_named_guard_on_c() {
+    assert!(
+        gcc_available(),
+        "this row executes a linked program; no lane may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(
+        &dir,
+        "poly_foreign_root_c",
+        &polymorphic_foreign_root_source(2, 3),
+    );
+    assert!(
+        !ok,
+        "`m` is witnessed at 3 and the result is produced at 2: {out}"
+    );
+    assert!(out.contains(&domain_trap_line("load")), "{out}");
+    assert!(
+        out.contains("extent `m`: y axis 0 = 3, x axis 0 = 2"),
+        "the guard the user sees names both disagreeing sources: {out}"
+    );
+    assert!(
+        !out.contains("claimed = 3"),
+        "the root's restatement of `m` records no second guard: {out}"
+    );
+
+    let (ok, out) = c_run_result(
+        &dir,
+        "poly_foreign_root_c_ok",
+        &polymorphic_foreign_root_source(2, 2),
+    );
+    assert!(ok, "an agreeing pair of witnesses must execute: {out}");
+    assert!(
+        out.contains("tensor(shape=[2, 2], data=[1.0, 1.0, 2.0, 2.0])"),
+        "and produce the claimed shape: {out}"
+    );
+}
+
+/// The negative twin, on both lanes in one row so the two renderings are
+/// compared against one another.
+///
+/// A root literal claim is suppressed only when a named claim already makes
+/// the same comparison. Here the callee declares its own literal result, no
+/// named claim relates two witnesses over the produced axis, and the literal
+/// guard is the only check there is: it stays, and it still names the claimed
+/// extent.
+///
+/// The sharper twin a reader might expect, a root that DECLARES a literal
+/// disagreeing with the binder's monomorphization, does not exist: the
+/// checker rejects a root whose declared result disagrees with the type it
+/// infers, so a root literal it accepts always equals the instantiation. That
+/// is measured, not assumed; it is why the suppression's premise holds
+/// whenever the restatement is recognised.
+///
+/// EVIDENTIARY STATUS: disposition lock. Both assertions pass at `d861a6c6f`
+/// and describe behaviour this change must not alter.
+#[test]
+fn an_independent_root_literal_claim_still_names_its_claimed_extent() {
+    assert!(
+        gcc_available(),
+        "this row compares two executed lanes; neither may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = independent_literal_root_source(5);
+    let (eval_ok, eval_out) = eval_result(&dir, "independent_literal_root.ch", &source);
+    let (c_ok, c_out) = c_run_result(&dir, "independent_literal_root_c", &source);
+    assert!(
+        !eval_ok,
+        "a literal claim of 4 over a read of 5 traps: {eval_out}"
+    );
+    assert!(
+        !c_ok,
+        "a literal claim of 4 over a read of 5 traps: {c_out}"
+    );
+    for out in [&eval_out, &c_out] {
+        assert!(out.contains(&domain_trap_line("load")), "{out}");
+        assert!(
+            out.contains("extent `4`: claimed = 4, x axis 0 = 5"),
+            "an independent literal keeps its claimed-extent rendering: {out}"
+        );
+    }
+}
+
+/// The rule's FIRST bound, and the negatives that fix it: an entailing extent
+/// that arrives through the ABI keeps its literal guard, however many
+/// pass-through hops separate the parameter from the witness.
+///
+/// The suppression requires the other witness of the named claim to observe an
+/// axis whose extent the lowered GRAPH fixes. Here `g`'s binder `n` is
+/// declared by `f`'s parameter `a`, whose extent reaches the program as an ABI
+/// input spelled `tensor[4, ...]`: a promise the entry guard checks, not a
+/// fact of this graph. `f`'s own literal claim is therefore recorded, and all
+/// three spellings still render `claimed = 4`.
+///
+/// The three spellings are the finding. An earlier version of this row tested
+/// only `g(a, b)` and the code decided "graph-fixed" by matching the observed
+/// node's op against `RiscOp::Load`, so ONE node between the parameter and the
+/// witness defeated the bound: red team round 1 measured `g(mul(a, a), b)` and
+/// `g(cast(a, f32), b)` rendering ``extent `n`: x axis 0 = 4, y axis 0 = 5``
+/// at `a1b54dbc1`, against ``extent `4`: claimed = 4, y axis 0 = 5`` at
+/// `d861a6c6f`. The repair resolves the observed axis to its ORIGIN with
+/// `axis_sources::resolve_axis_extent`, so an `ExternalAxis` origin is
+/// recognised through any number of pass-through hops.
+///
+/// That bound is deliberate rather than a statement that the obligation is
+/// independent here. The entry guard does pin `a axis 0` to 4, so the named
+/// claim plus that guard entail the literal exactly as they do at an inlined
+/// root; declining only on a graph-fixed extent keeps this change inside the
+/// form chelis#1782 reports and leaves the ABI-promised form untouched.
+///
+/// EVIDENTIARY STATUS: mixed, per row. The `mul` and `cast` spellings are
+/// REGRESSION tests, recorded red at `a1b54dbc1` with the named rendering. The
+/// direct spelling is a DISPOSITION LOCK that passes at `d861a6c6f` and at
+/// `a1b54dbc1`. The entry-guard assertion is a lock on why this is a
+/// rendering finding and not a lost check.
+#[test]
+fn an_abi_promised_entailing_extent_keeps_its_literal_guard() {
+    assert!(
+        gcc_available(),
+        "this row compares two executed lanes; neither may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    for (label, a_prim, a_arg) in [
+        ("direct", "f32", "a"),
+        ("through_mul", "f32", "mul(a, a)"),
+        ("through_cast", "f64", "cast(a, f32)"),
+    ] {
+        let source = abi_promised_entailment_source(a_prim, a_arg, 5);
+        let (eval_ok, eval_out) = eval_result(&dir, &format!("abi_{label}.ch"), &source);
+        let (c_ok, c_out, emitted) =
+            c_run_result_with_source(&dir, &format!("abi_{label}_c"), &source);
+        assert!(
+            !eval_ok,
+            "{label}: a literal claim of 4 over a read of 5 traps: {eval_out}"
+        );
+        assert!(
+            !c_ok,
+            "{label}: a literal claim of 4 over a read of 5 traps: {c_out}"
+        );
+        for out in [&eval_out, &c_out] {
+            assert!(out.contains(&domain_trap_line("load")), "{label}: {out}");
+            assert!(
+                out.contains("extent `4`: claimed = 4, y axis 0 = 5"),
+                "{label}: an ABI-promised entailing extent keeps the literal guard: {out}"
+            );
+        }
+        assert!(
+            emitted.contains("chelis_tensor_shape(inputs[0], 0) != 4"),
+            "{label}: the kernel still checks `a`'s promised extent at entry, which is \
+             why the declined suppression would cost no check: {emitted}"
+        );
+    }
+}
+
+/// The rule's SECOND bound: the two call forms that never inline the callee
+/// into a root render exactly as they did.
+///
+/// A value binding applies the exported kernel, so `f`'s parameters are
+/// `Load`s and no enclosing root contributes an inferred literal. The four
+/// exported-kernel cells of the same two programs,
+/// `polymorphic.{named,foreign}.export.mismatch` on both lanes, are locked by
+/// the preparation baseline rather than repeated here.
+///
+/// EVIDENTIARY STATUS: disposition lock. All four assertions pass at
+/// `d861a6c6f` and describe behaviour this change must not alter.
+#[test]
+fn the_value_binding_form_of_a_polymorphic_binder_is_unchanged() {
+    assert!(
+        gcc_available(),
+        "this row compares two executed lanes; neither may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let named = polymorphic_named_root_source(2, 3).replace("def main() = f(", "out = f(");
+    for (ok, out) in [
+        eval_result(&dir, "poly_named_binding.ch", &named),
+        c_run_result(&dir, "poly_named_binding_c", &named),
+    ] {
+        assert!(!ok, "the exported kernel's entry guard still fires: {out}");
+        assert!(
+            out.contains("extent `n`: x axis 0 = 2, y axis 0 = 3"),
+            "the value-binding form's rendering is unchanged: {out}"
+        );
+    }
+
+    let foreign = polymorphic_foreign_root_source(2, 3).replace("def main() = f(", "out = f(");
+    for (ok, out) in [
+        eval_result(&dir, "poly_foreign_binding.ch", &foreign),
+        c_run_result(&dir, "poly_foreign_binding_c", &foreign),
+    ] {
+        assert!(!ok, "the exported kernel's entry guard still fires: {out}");
+        assert!(
+            out.contains("extent `m`: y axis 0 = 3, x axis 0 = 2"),
+            "the value-binding form's rendering is unchanged: {out}"
+        );
+    }
 }

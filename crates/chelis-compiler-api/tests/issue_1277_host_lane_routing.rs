@@ -116,13 +116,18 @@ fn host_applied_def_main_is_a_host_lane_root() {
 ///
 /// The single-letter binders make `n` and `m` polymorphic dimension
 /// variables, which inference instantiates against the literal argument
-/// extents, so the requirement resolves to the literal 3 and the produced
-/// side to `x`'s own witness.
+/// extents. The root's inferred result therefore RESTATED `m` as the literal
+/// 3, and that restatement rendered ahead of the named guard, so this row
+/// asserted `claimed = 3, x axis 0 = 2` and named one source and a number.
+/// chelis#1782 declines a literal claim whose comparison a named claim
+/// already makes, and the guard that survives names both.
 ///
-/// EVIDENTIARY STATUS: regression test for the ATTRIBUTION. Before this
-/// change the program failed at the local extent consumer with
+/// EVIDENTIARY STATUS: regression test for the ATTRIBUTION, in two steps.
+/// The row was first red at the local extent consumer, with
 /// `claimed = 3, node N axis 1 = 2` and `domain in expand`, naming a node
-/// identity rather than the disagreeing sources.
+/// identity rather than any source. It is now red for the restated literal
+/// measured at `d861a6c6f`, and asserts the two disagreeing sources
+/// `spec/04-type-system.md` section 4.7's [04-NUM-9] asks for.
 #[test]
 fn host_applied_mismatch_names_the_disagreeing_sources() {
     let error = eval(EvalRequest {
@@ -138,7 +143,7 @@ fn host_applied_mismatch_names_the_disagreeing_sources() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        messages.contains("extent `3`: claimed = 3, x axis 0 = 2"),
+        messages.contains("extent `m`: y axis 0 = 3, x axis 0 = 2"),
         "{messages}"
     );
     assert!(
