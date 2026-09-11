@@ -417,13 +417,13 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "expand.arith_size.named_claim.c",
             "lane_divergent",
-            "lane_divergent",
+            EXECUTES,
             "cli_slice_b.checked_arithmetic_expand_size_under_a_named_claim_agrees_on_every_lane_on_c",
         ),
         _row(
             "expand.arith_size.named_claim.eval",
             "lane_divergent",
-            "lane_divergent",
+            EXECUTES,
             "cli_slice_b.checked_arithmetic_expand_size_under_a_named_claim_agrees_on_every_lane_on_eval",
         ),
         _row(
@@ -521,7 +521,7 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "expand.piped_shape_read.lint_fix",
             "nonconforming_rejection",
-            "nonconforming_rejection",
+            EXECUTES,
             "cli_slice_b.the_canonical_piped_shape_read_checks_evaluates_and_builds",
         ),
         _row(
@@ -575,7 +575,7 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "expand.record_projection.size",
             "nonconforming_rejection",
-            "nonconforming_rejection",
+            EXECUTES,
             "cli_slice_b.a_record_projection_is_an_admissible_expand_size",
         ),
         _row(

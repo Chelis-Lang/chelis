@@ -548,7 +548,7 @@ pub(super) fn infer_def(
     // chelis#397/#469: record the size provenance (see `infer_top_level` /
     // `infer_let`) so a later `expand` size built from this binding can be
     // checked for materializability. Classified against the pre-binding scope.
-    match classify_expand_size(&kids[1], env) {
+    match classify_expand_size(&kids[1], env, adt_reg) {
         SizeClass::Static => {
             if let Some(value) =
                 fold_static_int_expr(&kids[1], |bound| env.static_size_value(bound))

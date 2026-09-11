@@ -2674,33 +2674,53 @@ fn form3_let_bound_static_expand_size_builds_correct_extent() {
     }
 }
 
-/// chelis#469 fail-closed parity: an expand size that is integer arithmetic
-/// COMBINING a `shape(tensor, axis)` read with another term
-/// (`mul(shape(x, 0), cast(2, int32))`) is admitted at check as `ShapeSourced`
-/// but has no single tensor axis the backend can read the extent from and no
-/// `DimExpr` representation for the arithmetic. It must REJECT loudly at build
-/// with the #469 diagnostic — NEVER the pre-fix silent extent-1 default
-/// (eval `[4, 4]` vs C `[1, 4]`). This is the negative twin of
+/// chelis#1379: an expand size that is integer arithmetic COMBINING a
+/// `shape(tensor, axis)` read with another term
+/// (`mul(shape(x, cast(0, int32)), cast(2, int64))`) builds and agrees with
+/// the evaluator. It is the runtime twin of
 /// `form3_static_arithmetic_expand_size_matches_backend`: all-constant
-/// arithmetic folds and builds; arithmetic that touches a runtime shape does
-/// not (yet) and rejects rather than miscompiles.
+/// arithmetic folds to a literal extent, and arithmetic that touches a runtime
+/// shape becomes an ordinary node-valued extent every lane executes.
+///
+/// This test previously asserted the opposite. The size was admitted at check
+/// as `ShapeSourced` and refused at lowering, because `DimExpr` had no
+/// representation for the arithmetic; that rejection was the fail-closed half
+/// of chelis#469, chosen over the silent extent-1 default that preceded it
+/// (eval `[4, 4]` against C `[1, 4]`). `RtDim::Node` is the representation the
+/// rejection stood in for, so neither the miscompile nor the refusal is the
+/// disposition any more. `spec/04-type-system.md` section 4.7.2 admits the
+/// expression and section 4.7.4 lowers it as ordinary typed integer dataflow.
+///
+/// EVIDENTIARY STATUS: regression test for the admission. Watched failing on
+/// `6dbbbf2bc` with the chelis#469 materialization rejection.
 #[test]
-fn form3_arith_over_shape_expand_size_rejected_at_build() {
+fn form3_arith_over_shape_expand_size_builds_and_matches_backend() {
     let source = "def f(x: &tensor[n, 4, f32], b: &tensor[4, f32]) -> tensor[m, 4, f32] = insert(b, 0, mul(shape(x, cast(0, int32)), cast(2, int64)))\n\
         xs = to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])\n\
         out = f(xs, to_tensor([10.0, 20.0, 30.0, 40.0]))\n";
-    let stderr = build_expecting_failure(source, "issue_469_arith_over_shape");
-    assert!(
-        stderr.contains("cannot")
-            && stderr.contains("materialize")
-            && stderr.contains("chelis#469"),
-        "arithmetic-over-shape expand size must reject at build with the #469 \
-         materialization diagnostic, got: {stderr}"
+    let backend = build_compile_run(source, "issue_1379_arith_over_shape");
+    let tensors = parse_printed_tensors(&backend);
+    let out = tensors
+        .iter()
+        .find(|(n, _, _)| n == "out")
+        .unwrap_or_else(|| panic!("backend output missing `out`: {backend}"));
+    assert_eq!(
+        out.1,
+        vec![4, 4],
+        "n = 2 and the size is 2n, so the result extent is 4, not the pre-#469 \
+         silent extent-1 [1, 4] ({backend})"
     );
-    assert!(
-        !stderr.contains("internal compiler error"),
-        "arith-over-shape expand size must reject cleanly, not ICE: {stderr}"
-    );
+    // The bias row repeated once per inserted position: a wrong extent changes
+    // the row count, and a wrong source changes the values.
+    let expected = [10.0, 20.0, 30.0, 40.0].repeat(4);
+    for (i, e) in expected.iter().enumerate() {
+        assert!(
+            (out.2[i] - e).abs() < 1e-6,
+            "out[{i}]: backend {} != {e}",
+            out.2[i]
+        );
+    }
+    assert_eval_agrees_with_backend(source, "issue_1379_arith_over_shape", &backend);
 }
 
 /// chelis#469 codegen determinism: the spec's canonical Form-3 example

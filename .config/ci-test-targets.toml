@@ -59,6 +59,14 @@ package = "chelis-types"
 name = "issue_1107_stamped_node_ingress_parity"
 
 [[target]]
+package = "chelis-types"
+name = "unresolved_operand_census"
+
+[[target]]
+package = "chelis-types"
+name = "unresolved_operand_matrix"
+
+[[target]]
 package = "chelis-compiler-api"
 name = "pipeline_contract"
 

@@ -4133,6 +4133,21 @@ impl UncarriableWalk<'_> {
                 self.scopes.pop();
                 found
             }
+            Some(DeepTag::Access) => {
+                let base = kids.first()?;
+                if let Some(found) = self.expr(base) {
+                    return Some(found);
+                }
+                if !is_static_constructor(base, self) {
+                    return Some(
+                        "a field projection on a runtime record value, which IR lowering \
+                         resolves only for a compile-time-known record construction \
+                         (chelis#520 D1)"
+                            .to_string(),
+                    );
+                }
+                None
+            }
             Some(DeepTag::Match) => {
                 let scrutinee = kids.first()?;
                 if let Some(found) = self.expr(scrutinee) {
@@ -4342,6 +4357,15 @@ fn is_static_constructor(expr: &Expr, walk: &UncarriableWalk<'_>) -> bool {
         return false;
     };
     match expr_tag {
+        // `(record {} Ctor (kv {} field value) ..)`: the constructor tag and
+        // field layout are compile-time facts, which is exactly what
+        // `lower_record` lowers to a `LoweredValue::Adt` and what both
+        // `lower_access` and `lower_match` then resolve. Only the field
+        // VALUES are runtime. Without this arm a record literal bound to a
+        // name reads as a runtime value, so a projection or a `match` on it
+        // would leave the DAG for the host lane even though the DAG carries
+        // it (chelis#1266).
+        DeepTag::Record => true,
         DeepTag::Var => kids.first().and_then(symbol_name).is_some_and(|name| {
             name.chars().next().is_some_and(char::is_uppercase) || walk.bound(name) == Some(true)
         }),
@@ -4872,12 +4896,7 @@ fn lower_host_function(
     // two lanes cannot answer "is this def a kernel" differently.
     let mut host_body = match lower_def_body_kernel(program, &signature, &mut tensor_helpers)? {
         Some(kernel_call) => kernel_call,
-        None => lower_host_expr(
-            &signature.body_expr,
-            program,
-            &signature.scope,
-            &mut tensor_helpers,
-        )?,
+        None => lower_host_body_with_record_locals(&signature, program, &mut tensor_helpers)?,
     };
     // Per `spec/design/chelis_span_survival.md` §2.3 host-side table, the
     // "Tensor-helper extraction" and "Lowering. Fn-body" rules: every
@@ -5029,6 +5048,446 @@ fn try_lower_tensor_helper_call(
         tensor_helpers,
         expected,
     ))
+}
+
+/// A tensor-typed field projection lifted out of a tensor-helper subtree
+/// (chelis#1266).
+struct HoistedProjection {
+    /// The projection's path, base first: `["inputs", "features", "mask"]`.
+    /// IDENTITY is the path, never the rendered name. A name built by joining
+    /// the segments is not injective, because `_` both separates segments and
+    /// occurs inside field names: `inputs.features.mask` and
+    /// `inputs.features_mask` render the same string, and deduplicating on
+    /// that string gave the second projection the first one's tensor, silently
+    /// and only on the C lane.
+    path: Vec<String>,
+    /// The host local the projection is bound to. The leading index is what
+    /// makes it injective; the joined tail is there so the emitted C names the
+    /// field a reader is looking for.
+    name: String,
+    /// The `(access {} base field)` expression, lowered host-side.
+    source: Expr,
+    ty: TensorType,
+}
+
+/// Record `candidate` if its path is new, and return the local's name.
+///
+/// Both the lookup and the name are keyed on the PATH. The index is the
+/// position of the path's first occurrence in this def, so one path always
+/// resolves to one local and two paths never collide however their segments
+/// spell out.
+fn hoisted_local_name(hoists: &mut Vec<HoistedProjection>, candidate: HoistedProjection) -> String {
+    if let Some(existing) = hoists.iter().find(|entry| entry.path == candidate.path) {
+        return existing.name.clone();
+    }
+    let index = hoists.len();
+    let name = format!("__host_record_field_{index}_{}", candidate.path.join("_"));
+    hoists.push(HoistedProjection {
+        name: name.clone(),
+        ..candidate
+    });
+    name
+}
+
+/// Bind every tensor-typed projection of a runtime record in `expr` to a host
+/// local, returning the rewritten subtree (chelis#1266).
+///
+/// The DAG carries no runtime record, so an `access` anywhere inside a subtree
+/// stops that whole subtree from becoming a tensor helper -- and the C host
+/// lane's expression vocabulary is deliberately narrower than the checked
+/// builtin vocabulary ([04-TOT-2]), so an operation like `expand` left behind
+/// there has no emission at all. The same program with the projection bound to
+/// a local first compiles and runs today, which is why chelis#1266 reports the
+/// prologue-local rewrite as a workaround downstream applies by hand. Binding
+/// it here is that rewrite, performed once by the compiler: the field's tensor
+/// becomes an ordinary host value, and the helper takes it as an input like
+/// any other tensor in scope.
+///
+/// Only a projection whose base chain bottoms out at an unshadowed
+/// record-typed name in `scope` is lifted; a compile-time-known record
+/// construction never reaches here, because `body_form_the_dag_cannot_carry`
+/// keeps that def on its DAG route. Nested fields (`inp.inner.q`) lift as one
+/// local each, keyed by path so a repeated projection binds once.
+fn hoist_record_projections(
+    expr: &Expr,
+    program: &CheckedProgram,
+    scope: &UnordMap<String, HostTypeTerm>,
+    bound: &UnordSet<String>,
+    hoists: &mut Vec<HoistedProjection>,
+) -> Expr {
+    match expr {
+        Expr::Node(node, span) => {
+            if node.tag() == DeepTag::Access
+                && let Some(hoist) = record_projection_hoist(expr, program, scope, bound)
+            {
+                return var_expr_node(&hoisted_local_name(hoists, hoist), *span);
+            }
+            let children = node
+                .children_slice()
+                .iter()
+                .enumerate()
+                .map(|(index, child)| {
+                    if is_bound_bare_projection(node.tag(), index, child) {
+                        child.clone()
+                    } else {
+                        hoist_record_projections(child, program, scope, bound, hoists)
+                    }
+                })
+                .collect();
+            let mut rewritten = node.clone();
+            // A rewrite that the node gate refuses leaves the subtree alone;
+            // the caller then takes the unhoisted path it takes today.
+            if rewritten.try_replace_children(children).is_err() {
+                return expr.clone();
+            }
+            Expr::Node(rewritten, *span)
+        }
+        Expr::List(list, span) => {
+            if tag(list) == Some(DeepTag::Access)
+                && let Some(hoist) = record_projection_hoist(expr, program, scope, bound)
+            {
+                return var_expr_node(&hoisted_local_name(hoists, hoist), *span);
+            }
+            let elements = list
+                .elements
+                .iter()
+                .enumerate()
+                .map(|(index, child)| {
+                    if is_bound_bare_projection(
+                        tag(list).unwrap_or(DeepTag::Var),
+                        // `Expr::List` carries the tag and metadata first.
+                        index.wrapping_sub(2),
+                        child,
+                    ) {
+                        child.clone()
+                    } else {
+                        hoist_record_projections(child, program, scope, bound, hoists)
+                    }
+                })
+                .collect();
+            Expr::List(List { elements }, *span)
+        }
+        Expr::BareList(items, span) => Expr::BareList(
+            items
+                .iter()
+                .map(|item| hoist_record_projections(item, program, scope, bound, hoists))
+                .collect(),
+            *span,
+        ),
+        // Round 2, P3: an unstamped form carries children like any other, and
+        // a typed parameter is one, so the rewriter descends it rather than
+        // relying on the reader having refused first.
+        Expr::UnknownForm(data) => Expr::UnknownForm(Box::new(chelis_deep::ast::UnknownFormData {
+            head: data.head.clone(),
+            meta: data.meta.clone(),
+            children: data
+                .children
+                .iter()
+                .map(|child| hoist_record_projections(child, program, scope, bound, hoists))
+                .collect(),
+            span: data.span,
+        })),
+        Expr::MetaExpr(meta, span) => Expr::MetaExpr(
+            chelis_deep::ast::MetaExpr {
+                metadata: meta.metadata.clone(),
+                expr: Box::new(hoist_record_projections(
+                    &meta.expr, program, scope, bound, hoists,
+                )),
+            },
+            *span,
+        ),
+        _ => expr.clone(),
+    }
+}
+
+/// Lower a host-lane def body, binding any tensor-typed runtime-record
+/// projection inside it to a host local first (chelis#1266).
+///
+/// Only the host route takes this: a body the DAG can carry never reaches it,
+/// so a compile-time-known record construction keeps its kernel lowering.
+fn lower_host_body_with_record_locals(
+    signature: &HostDefSignature,
+    program: &CheckedProgram,
+    tensor_helpers: &mut TensorHelperSink,
+) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+    let mut bound = UnordSet::new();
+    if names_bound_in(&signature.body_expr, &mut bound).is_err() {
+        // Fail closed: hoist nothing, and the definition lowers exactly as it
+        // did before this mechanism existed.
+        return lower_host_expr(
+            &signature.body_expr,
+            program,
+            &signature.scope,
+            tensor_helpers,
+        );
+    }
+    let mut hoists: Vec<HoistedProjection> = Vec::new();
+    let rewritten = hoist_record_projections(
+        &signature.body_expr,
+        program,
+        &signature.scope,
+        &bound,
+        &mut hoists,
+    );
+    if hoists.is_empty() {
+        return lower_host_expr(
+            &signature.body_expr,
+            program,
+            &signature.scope,
+            tensor_helpers,
+        );
+    }
+    let mut scope = signature.scope.clone();
+    for hoist in &hoists {
+        scope.insert(hoist.name.clone(), HostTypeTerm::Tensor(hoist.ty.clone()));
+    }
+    // Re-ask the kernel question on the rewritten body. The projection was the
+    // form the DAG could not carry, and it is gone, so a body that is now
+    // wholly tensor-valued becomes ONE kernel instead of a host `let` around a
+    // body-only helper. That matters for provenance, not for tidiness: a
+    // `let`-bound `shape` read split across the boundary reaches the helper as
+    // an opaque scalar, and the size then resolves to no tensor axis -- the
+    // check-clean / build-red divergence again, for the spelling section
+    // 4.7.2's own suggestion text asks for ("bind that read to a `let`").
+    // Re-asking through `lower_def_body_kernel` rather than calling the helper
+    // directly is what keeps every other reason to stay in host code -- an
+    // effect row the DAG cannot represent (chelis#1528), a callable parameter,
+    // a host-only builtin -- deciding exactly as it did before.
+    //
+    // The hoisted locals join the parameter list for that question only. They
+    // ARE parameters of the rewritten body: the DAG binds them like any other
+    // tensor input, and the emitted function keeps its own declared parameters,
+    // which `lower_host_function` reads from the original signature.
+    let mut params = signature.params.clone();
+    params.extend(hoists.iter().map(|hoist| HostParam {
+        name: hoist.name.clone(),
+        ty: HostTypeTerm::Tensor(hoist.ty.clone()),
+    }));
+    let rewritten_signature = HostDefSignature {
+        name: signature.name.clone(),
+        params,
+        scope: scope.clone(),
+        ret_ty: signature.ret_ty.clone(),
+        body_expr: rewritten.clone(),
+    };
+    let body = match lower_def_body_kernel(program, &rewritten_signature, tensor_helpers)? {
+        Some(kernel_call) => kernel_call,
+        None => lower_host_expr(&rewritten, program, &scope, tensor_helpers)?,
+    };
+    let mut bindings = Vec::with_capacity(hoists.len());
+    for hoist in &hoists {
+        let value = lower_host_expr(&hoist.source, program, &signature.scope, tensor_helpers)?;
+        bindings.push(HostBinding {
+            name: hoist.name.clone(),
+            display_name: None,
+            display_roots: Vec::new(),
+            ty: HostTypeTerm::Tensor(hoist.ty.clone()),
+            value,
+        });
+    }
+    let ty = host_expr_type(&body);
+    Ok(HostExpr::new(HostExprKind::Let {
+        bindings,
+        body: Box::new(body),
+        ty,
+    }))
+}
+
+/// Every name bound anywhere in `expr`, read from the closed vocabulary's own
+/// `Binder` child role rather than from a hand-written list of tag shapes.
+///
+/// This is the question the hoist actually needs: it must not substitute a
+/// local for a projection whose base some inner construct rebinds. Asking
+/// "is this name bound ANYWHERE under the body" instead of reconstructing
+/// lexical scope is deliberately coarse -- a rebinding in an unrelated branch
+/// suppresses a hoist that would have been safe -- and coarse in the only
+/// direction that is safe: the projection then stays where it is, which is
+/// the behaviour this definition had before the hoist existed.
+///
+/// Two defects came out of the hand-written version, and both were the same
+/// shape: a binder spelling the reader did not know. `Deep` renders a TYPED
+/// parameter as `(inp {type: ..})`, an `UnknownForm` whose head is the
+/// parameter name, which no tag match recognized, so a lambda shadowing the
+/// record base had its inner projection rewritten to the outer record's
+/// local -- a wrong answer on C alone, silently and with exit zero. Reading
+/// `child_stamp_role` makes the vocabulary the authority: `Params` children,
+/// `Bind`'s even children and `PatVar`'s child are binder positions because
+/// `spec/03-deep-syntax.md`'s role table says so.
+///
+/// FAILS CLOSED. A binder position this reader cannot decode returns `Err`,
+/// naming the construct, and the caller then hoists nothing at all. A
+/// spelling we cannot read is a spelling we cannot prove safe, and refusing
+/// the optimization is an honest exit where a silent rewrite is not.
+fn names_bound_in(expr: &Expr, out: &mut UnordSet<String>) -> Result<(), String> {
+    match expr {
+        Expr::Atom(_, _) | Expr::Map(_, _) => Ok(()),
+        Expr::MetaExpr(meta, _) => names_bound_in(&meta.expr, out),
+        Expr::BareList(items, _) => items.iter().try_for_each(|item| names_bound_in(item, out)),
+        Expr::UnknownForm(data) => data
+            .children
+            .iter()
+            .try_for_each(|child| names_bound_in(child, out)),
+        Expr::Node(_, _) | Expr::List(_, _) => {
+            let Some((node_tag, _, kids)) = stamped_parts(expr) else {
+                // Round 3, P3: an unstamped form still carries children.
+                // Today the only one at a binder position is a typed
+                // parameter, which holds no binders, so descending changes
+                // nothing; not descending would have been the next place this
+                // class hid.
+                let Expr::List(list, _) = expr else {
+                    return Ok(());
+                };
+                return list
+                    .elements
+                    .iter()
+                    .try_for_each(|child| names_bound_in(child, out));
+            };
+            for (index, child) in kids.iter().enumerate() {
+                if chelis_deep::role::child_stamp_role(node_tag, index, kids.len())
+                    == chelis_deep::role::ChildStampRole::Binder
+                {
+                    collect_binder_position_names(node_tag, index, child, out)?;
+                }
+                names_bound_in(child, out)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Decode the name a binder-position child carries, or account for why it
+/// carries none.
+///
+/// Three shapes reach a binder position and only one of them is a name:
+///
+///   * a STAMPED vocabulary node is a container, not a binder. `fn`'s binder
+///     position holds `params`, and `params`'s own children are the names; the
+///     whole-tree walk visits them, so there is nothing to decode here.
+///   * an UNSTAMPED form whose head is the name is the binder itself. A typed
+///     parameter is written `(t {type: (t-tensor ..)})`, which no closed tag
+///     matches, so `stamped_parts` reads it as nothing and only its head says
+///     what it binds. Two earlier readers missed exactly this, which is why
+///     the oracle beside it builds every fixture through the parser.
+///   * a metadata map or a non-name atom binds nothing.
+///
+/// Anything else FAILS CLOSED, naming the construct. The caller then abandons
+/// the hoist for that definition, which lowers as it did before the mechanism
+/// existed. A spelling we cannot read is one we cannot prove safe.
+fn collect_binder_position_names(
+    node_tag: DeepTag,
+    index: usize,
+    child: &Expr,
+    sink: &mut UnordSet<String>,
+) -> Result<(), String> {
+    if stamped_parts(child).is_some() {
+        return Ok(());
+    }
+    if let Some(name) = binder_child_name(child) {
+        sink.insert(name);
+        return Ok(());
+    }
+    if matches!(child, Expr::Map(_, _) | Expr::Atom(_, _)) {
+        return Ok(());
+    }
+    Err(format!(
+        "a binder position of `{}` at index {index} carries a spelling this \
+         walk cannot read a name from",
+        node_tag.as_str()
+    ))
+}
+
+/// The name an UNSTAMPED binder-position child spells.
+fn binder_child_name(child: &Expr) -> Option<String> {
+    match child {
+        Expr::Atom(Atom::Name(name), _) => Some(name.clone()),
+        Expr::MetaExpr(meta, _) => binder_child_name(&meta.expr),
+        Expr::List(list, _) => list
+            .elements
+            .first()
+            .and_then(symbol_name)
+            .map(str::to_string),
+        Expr::BareList(items, _) => items.first().and_then(symbol_name).map(str::to_string),
+        _ => None,
+    }
+}
+/// A `(var {} name)` reference, the node a hoisted projection leaves behind.
+fn var_expr_node(name: &str, span: chelis_deep::span::Span) -> Expr {
+    Expr::Node(
+        Box::new(chelis_deep::node::Node::new(
+            DeepTag::Var,
+            chelis_deep::Metadata::default(),
+            vec![Expr::Atom(Atom::Name(name.to_string()), span)],
+        )),
+        span,
+    )
+}
+
+/// True when this child is a `let` binding's value AND that value is itself
+/// the bare projection: `q = inp.q` already binds the field to a local, so
+/// hoisting it would add a second alias and change the emitted code for a
+/// spelling that lowers today.
+///
+/// The test is on the VALUE, not on the slot. Exempting the whole slot left
+/// every projection NESTED inside a bind value unhoisted -- including
+/// `a_dim = cast(shape(inp.q, cast(0, int32)), int64)`, which is the spelling
+/// the section 4.7.2 diagnostic's own suggestion text asks for -- so the
+/// checker admitted sizes the C lane then refused, which is the check-clean /
+/// build-red divergence the whole provenance walk exists to prevent.
+fn is_bound_bare_projection(node_tag: DeepTag, index: usize, child: &Expr) -> bool {
+    node_tag == DeepTag::Bind
+        && index % 2 == 1
+        && matches!(stamped_parts(child), Some((DeepTag::Access, _, _)))
+}
+
+/// Decide whether one `(access {} base field)` expression is a tensor-typed
+/// projection of a runtime record, and name the local it binds to.
+fn record_projection_hoist(
+    expr: &Expr,
+    program: &CheckedProgram,
+    scope: &UnordMap<String, HostTypeTerm>,
+    bound: &UnordSet<String>,
+) -> Option<HoistedProjection> {
+    let HostTypeTerm::Tensor(ty) = expr_host_type(expr, program, scope) else {
+        return None;
+    };
+    let path = record_projection_path(expr)?;
+    let base = path.first()?;
+    // Rebound anywhere under this body: leave the projection where it is.
+    if bound.contains(base) {
+        return None;
+    }
+    // The base must be a host value this scope carries and NOT itself a
+    // tensor: a tensor base is not a record, and a name the scope does not
+    // carry is not this subtree's to lift.
+    let base_ty = scope.get(base)?;
+    if tensor_type_from_host_input(base_ty).is_some() {
+        return None;
+    }
+    Some(HoistedProjection {
+        path,
+        // `hoisted_local_name` renders this; the path is the identity.
+        name: String::new(),
+        source: expr.clone(),
+        ty,
+    })
+}
+
+/// The `[base, field, ..]` path of a projection chain whose root is a bare
+/// `var`, or `None` for any other target shape.
+fn record_projection_path(expr: &Expr) -> Option<Vec<String>> {
+    let (tag, _, kids) = stamped_parts(expr)?;
+    if tag == DeepTag::Var {
+        return kids
+            .first()
+            .and_then(symbol_name)
+            .map(|name| vec![name.to_string()]);
+    }
+    if tag != DeepTag::Access {
+        return None;
+    }
+    let mut path = record_projection_path(kids.first()?)?;
+    path.push(kids.get(1).and_then(symbol_name)?.to_string());
+    Some(path)
 }
 
 fn lower_tensor_helper_dag(
@@ -16971,6 +17430,46 @@ def main(x: tensor[4, f32]) -> tensor[4, f32] = with seed(0i64) {
     }
 
     #[test]
+    fn named_execution_plan_keeps_authored_unused_interface_obligations() {
+        let checked = surf_check(
+            r#"
+def main(x: tensor[n, f32], unused: tensor[n, f32]) -> tensor[n, f32] = with seed(0i64) {
+  dropout(x, 0.5f32)
+}
+"#,
+        );
+        let plan = lower_named_tensor_entry_execution_plan(&checked, "main")
+            .expect("fixed entry lowers")
+            .expect("fixed entry retains its execution plan");
+        let loads = plan
+            .dag_for_inspection()
+            .nodes()
+            .iter()
+            .filter_map(|node| match &node.op {
+                crate::dag::RiscOp::Load { name } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            loads,
+            vec!["x", "unused"],
+            "an authored repeated-dimension obligation keeps an unread parameter"
+        );
+        assert!(
+            plan.dag_for_inspection()
+                .nodes()
+                .iter()
+                .any(|node| matches!(
+                    &node.op,
+                    crate::dag::RiscOp::ExtentWitness { parameter, claims, .. }
+                        if parameter == "unused" && !claims.is_empty()
+                ))
+        );
+        plan.verify_ownership()
+            .expect("authored interface plan remains sealed");
+    }
+
+    #[test]
     fn named_tensor_entry_rejects_runtime_dropout_control() {
         let checked = surf_check(
             r#"
@@ -19953,6 +20452,197 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         assert!(
             message.contains("`Adep__Wrapped`") && message.contains("`Blib__Wrapped`"),
             "the rejection must name both candidates; got: {message}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod record_hoist_binder_vocabulary_tests {
+    use super::*;
+    use chelis_deep::role::{ChildStampRole, child_stamp_role};
+    use chelis_deep::tag::DeepTag;
+
+    /// Parse Surf and hand back the canonical Deep the lowerer receives.
+    ///
+    /// The oracle builds every fixture this way and never constructs an `Expr`
+    /// by hand. Round 2 is why: the previous version built its typed-parameter
+    /// fixture as an `UnknownForm`, a shape the parser does not produce at a
+    /// binder position, so its typed leg was green against a spelling that
+    /// never occurs while the real one -- an unstamped list whose head is the
+    /// name -- fell through undecoded. An oracle over a representation nobody
+    /// emits proves nothing about the representation everybody emits.
+    fn deep_program(source: &str) -> Vec<Expr> {
+        let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
+        chelis_surf::desugar::desugar_program(&decls)
+    }
+
+    /// The body of the named `def`, which is the subtree the hoist walks.
+    fn def_body(program: &[Expr], name: &str) -> Expr {
+        let (_, body) = find_top_level_def_named(program, name).expect("the def");
+        let Some((DeepTag::Fn, _, kids)) = stamped_parts(body) else {
+            panic!("a def body is a `fn` node");
+        };
+        kids.get(1).expect("the fn body").clone()
+    }
+
+    fn bound_names(source: &str, def: &str) -> Result<Vec<String>, String> {
+        let program = deep_program(source);
+        let mut out = UnordSet::new();
+        names_bound_in(&def_body(&program, def), &mut out)?;
+        Ok(out.into_sorted())
+    }
+
+    /// One Surf spelling that binds `shadowed` inside `f`'s body, named by the
+    /// binder form it exercises. Every entry is real source the parser accepts.
+    fn binder_spellings() -> Vec<(&'static str, String, &'static str)> {
+        vec![
+            (
+                "typed fn parameter",
+                "def f(x: tensor[1, f32]) -> tensor[1, f32] = \
+                 (fn (shadowed: tensor[1, f32]) -> mul(shadowed, shadowed))(x)\n"
+                    .to_string(),
+                "shadowed",
+            ),
+            (
+                "untyped fn parameter",
+                "def f(x: tensor[1, f32]) -> tensor[1, f32] = \
+                 (fn (shadowed) -> mul(shadowed, shadowed))(x)\n"
+                    .to_string(),
+                "shadowed",
+            ),
+            (
+                "two typed fn parameters",
+                "def f(x: tensor[1, f32]) -> tensor[1, f32] = \
+                 (fn (shadowed: tensor[1, f32], other: tensor[1, f32]) -> mul(shadowed, other))(x, x)\n"
+                    .to_string(),
+                "shadowed",
+            ),
+            (
+                // A typed parameter whose NAME is also a Deep tag spelling.
+                // `stamped_parts` would read `(params {type: ..})` as a
+                // vocabulary node and collect nothing, so the desugarer emits
+                // `^{:type ..} params` instead and the reader's `MetaExpr` arm
+                // is what keeps this whole family correct. Round 3 found that
+                // arm unguarded: mutating it left every other row green while
+                // shipping round 2's defect for this spelling.
+                "typed fn parameter named after a Deep tag",
+                "def f(x: tensor[1, f32]) -> tensor[1, f32] = \
+                 (fn (params: tensor[1, f32]) -> mul(params, params))(x)\n"
+                    .to_string(),
+                "params",
+            ),
+            (
+                "let binding",
+                "def f(x: tensor[1, f32]) -> tensor[1, f32] = {\n  shadowed = mul(x, x)\n  shadowed\n}\n"
+                    .to_string(),
+                "shadowed",
+            ),
+            (
+                "match pattern binder",
+                "type Holder =\n  | Holder { v: tensor[1, f32] }\n\n\
+                 def f(x: tensor[1, f32]) -> tensor[1, f32] = \
+                 match Holder { v: x } with { | Holder { v: shadowed } => mul(shadowed, shadowed) }\n"
+                    .to_string(),
+                "shadowed",
+            ),
+            (
+                "pipe stage over a let binder",
+                "def f(x: tensor[1, f32]) -> tensor[1, f32] = {\n  \
+                 shadowed = x |> mul(x)\n  shadowed\n}\n"
+                    .to_string(),
+                "shadowed",
+            ),
+        ]
+    }
+
+    /// The vocabulary oracle for chelis#1266's hoist, built through the parser.
+    ///
+    /// Every binder spelling Surf can write must yield its name, because the
+    /// hoist substitutes a local for a projection and must never do so under a
+    /// binder it could not see. A spelling that yields nothing is either a
+    /// silent wrong answer or, with the fail-closed exit, a definition whose
+    /// hoist is abandoned and whose C lane then refuses.
+    ///
+    /// EVIDENTIARY STATUS: regression test. Measured RED at `2570da8d1` on the
+    /// "typed fn parameter" and "two typed fn parameters" rows, where the
+    /// reader refused with "a binder position of `fn` at index 0 carries a
+    /// spelling this walk cannot read a name from" and bound nothing.
+    #[test]
+    fn every_surf_binder_spelling_yields_its_name() {
+        for (form, source, binder) in binder_spellings() {
+            let read = bound_names(&source, "f");
+            let names = read.unwrap_or_else(|error| panic!("{form}: the reader refused: {error}"));
+            assert!(
+                names.iter().any(|name| name == binder),
+                "{form}: bound {names:?}, which does not include `{binder}`"
+            );
+        }
+    }
+
+    /// The role table is the authority for WHICH positions bind, and it must
+    /// keep naming the forms above. A tag that gains a binder position joins
+    /// this set on its own.
+    ///
+    /// EVIDENTIARY STATUS: disposition lock on the representation choice.
+    #[test]
+    fn the_role_table_declares_the_binder_positions_the_reader_uses() {
+        let mut tags = Vec::new();
+        for tag in DeepTag::ALL {
+            for arity in [1usize, 2, 3] {
+                for index in 0..arity {
+                    if child_stamp_role(tag, index, arity) == ChildStampRole::Binder
+                        && !tags.contains(&tag)
+                    {
+                        tags.push(tag);
+                    }
+                }
+            }
+        }
+        for required in [DeepTag::Params, DeepTag::Bind, DeepTag::PatVar, DeepTag::Fn] {
+            assert!(
+                tags.contains(&required),
+                "`{}` must declare a binder position: {:?}",
+                required.as_str(),
+                tags.iter().map(|t| t.as_str()).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// The fail-closed half: a binder position carrying a spelling the reader
+    /// cannot decode refuses, so the caller abandons the hoist rather than
+    /// treating the name as unbound.
+    ///
+    /// This one is built by hand deliberately, because its whole subject is a
+    /// shape the parser does NOT produce. It is the only hand-built fixture
+    /// here, and it asserts the refusal path rather than a decode.
+    ///
+    /// EVIDENTIARY STATUS: disposition lock.
+    #[test]
+    fn an_undecodable_binder_position_refuses_instead_of_reading_no_name() {
+        let span = chelis_deep::span::Span::new(0, 0);
+        // An UNSTAMPED form whose head is not a name: no closed tag matches
+        // it, so it is not a container the walk descends, and nothing in it
+        // spells a binder.
+        let unreadable = Expr::Node(
+            Box::new(chelis_deep::node::Node::new(
+                DeepTag::Params,
+                chelis_deep::Metadata::default(),
+                vec![Expr::BareList(
+                    vec![Expr::Atom(Atom::Int(1.into()), span)],
+                    span,
+                )],
+            )),
+            span,
+        );
+        let mut out = UnordSet::new();
+        let read = names_bound_in(&unreadable, &mut out);
+        assert!(
+            read.is_err(),
+            "a binder position holding a node with no name must refuse, got {out:?}"
+        );
+        assert!(
+            read.unwrap_err().contains("params"),
+            "the refusal names the construct"
         );
     }
 }

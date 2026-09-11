@@ -36,40 +36,35 @@
       "function": "integer_binop_result_type",
       "ordinal": 1,
       "pattern": "(Type::Var(_) , Type::Prim(rhs_prec))",
-      "disposition": "defect(#1512)",
-      "reason": "the dtype validators run at `app_post.rs:50-76`, before `finish_unified_app` builds its deferral site at `:370`, and none of them takes the product or the result type, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
+      "disposition": "deferred"
     },
     {
       "file": "app_numeric.rs",
       "function": "integer_binop_result_type",
       "ordinal": 2,
       "pattern": "(Type::Prim(lhs_prec) , Type::Var(_))",
-      "disposition": "defect(#1512)",
-      "reason": "the dtype validators run at `app_post.rs:50-76`, before `finish_unified_app` builds its deferral site at `:370`, and none of them takes the product or the result type, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
+      "disposition": "deferred"
     },
     {
       "file": "app_numeric.rs",
       "function": "integer_binop_result_type",
       "ordinal": 3,
-      "pattern": "(Type::Var(_) , Type::Var(_)) |(Type::Error(_) , _) |(_ , Type::Error(_))",
-      "disposition": "defect(#1512)",
-      "reason": "the dtype validators run at `app_post.rs:50-76`, before `finish_unified_app` builds its deferral site at `:370`, and none of them takes the product or the result type, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
+      "pattern": "(Type::Var(_) , Type::Var(_))",
+      "disposition": "deferred"
     },
     {
       "file": "app_numeric.rs",
       "function": "integer_binop_result_type",
       "ordinal": 4,
-      "pattern": "& lhs , Type::Var(_) | Type::Error(_)",
-      "disposition": "defect(#1512)",
-      "reason": "the dtype validators run at `app_post.rs:50-76`, before `finish_unified_app` builds its deferral site at `:370`, and none of them takes the product or the result type, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
+      "pattern": "(Type::Var(_) , Type::Var(_)) |(Type::Var(_) , Type::Error(_)) |(Type::Error(_) , Type::Var(_))",
+      "disposition": "deferred"
     },
     {
       "file": "app_numeric.rs",
       "function": "integer_binop_result_type",
       "ordinal": 5,
-      "pattern": "& rhs , Type::Var(_) | Type::Error(_)",
-      "disposition": "defect(#1512)",
-      "reason": "the dtype validators run at `app_post.rs:50-76`, before `finish_unified_app` builds its deferral site at `:370`, and none of them takes the product or the result type, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
+      "pattern": "(Type::Var(_) , Type::Prim(prec)) |(Type::Prim(prec) , Type::Var(_))",
+      "disposition": "deferred"
     },
     {
       "file": "app_numeric.rs",
@@ -145,65 +140,64 @@
       "file": "app_numeric.rs",
       "function": "validate_numeric_and_reduction_arguments",
       "ordinal": 1,
-      "pattern": "Type::Tensor(_ , _) | Type::Var(_) | Type::Error(_)",
-      "disposition": "defect(#1512)",
-      "reason": "the dtype validators run at `app_post.rs:50-76`, before `finish_unified_app` builds its deferral site at `:370`, and none of them takes the product or the result type, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
     },
     {
       "file": "app_numeric.rs",
       "function": "validate_numeric_and_reduction_arguments",
       "ordinal": 2,
-      "pattern": "Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_)",
-      "disposition": "defect(#1512)",
-      "reason": "the dtype validators run at `app_post.rs:50-76`, before `finish_unified_app` builds its deferral site at `:370`, and none of them takes the product or the result type, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_numeric.rs",
+      "function": "validate_numeric_and_reduction_arguments",
+      "ordinal": 3,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
     },
     {
       "file": "app_operand_dtype.rs",
       "function": "reject_inadmissible_operand_dtypes",
       "ordinal": 1,
-      "pattern": "Type::Var(_) | Type::Error(_)",
-      "disposition": "defect(#1512)",
-      "reason": "the dtype validators run at `app_post.rs:50-76`, before `finish_unified_app` builds its deferral site at `:370`, and none of them takes the product or the result type, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
     },
     {
       "file": "app_operand_dtype.rs",
       "function": "reject_inadmissible_operand_dtypes",
       "ordinal": 2,
-      "pattern": "Type::Prim(Prim::F32) | Type::Var(_) | Type::Error(_)",
-      "disposition": "defect(#1512)",
-      "reason": "the dtype validators run at `app_post.rs:50-76`, before `finish_unified_app` builds its deferral site at `:370`, and none of them takes the product or the result type, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
     },
     {
       "file": "app_operand_dtype.rs",
       "function": "reject_inadmissible_operand_dtypes",
       "ordinal": 3,
-      "pattern": "Type::Tensor(_ , _) | Type::Var(_) | Type::Error(_)",
-      "disposition": "defect(#1512)",
-      "reason": "the dtype validators run at `app_post.rs:50-76`, before `finish_unified_app` builds its deferral site at `:370`, and none of them takes the product or the result type, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
     },
     {
       "file": "app_operand_dtype.rs",
       "function": "reject_inadmissible_operand_dtypes",
       "ordinal": 4,
-      "pattern": "Type::Prim(Prim::F32) | Type::Var(_) | Type::Error(_)",
-      "disposition": "defect(#1512)",
-      "reason": "the dtype validators run at `app_post.rs:50-76`, before `finish_unified_app` builds its deferral site at `:370`, and none of them takes the product or the result type, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
     },
     {
       "file": "app_operand_dtype.rs",
       "function": "reject_test_assert_close_tensor_operand_dtypes",
       "ordinal": 1,
-      "pattern": "Some(Type::Tensor(_ , TensorPrec::Var(_))) | Some(Type::Var(_)) | Some(Type::Error(_)) | None",
-      "disposition": "defect(#1512)",
-      "reason": "the dtype validators run at `app_post.rs:50-76`, before `finish_unified_app` builds its deferral site at `:370`, and none of them takes the product or the result type, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
+      "pattern": "Some(Type::Var(_))",
+      "disposition": "deferred"
     },
     {
       "file": "app_operand_dtype.rs",
       "function": "reject_test_assert_close_tensor_operand_dtypes",
       "ordinal": 2,
-      "pattern": "Type::Var(_) | Type::Error(_)",
-      "disposition": "defect(#1512)",
-      "reason": "the dtype validators run at `app_post.rs:50-76`, before `finish_unified_app` builds its deferral site at `:370`, and none of them takes the product or the result type, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
     },
     {
       "file": "app_post.rs",

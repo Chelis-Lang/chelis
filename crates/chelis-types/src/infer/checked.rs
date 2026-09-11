@@ -346,6 +346,10 @@ pub(super) enum DeferredShapeRule {
         kids: Vec<deep::Expr>,
     },
     PostApp {
+        /// What the replay runs. Both kinds share one entry, one key and one
+        /// declaration boundary; they differ only in how much of the call is
+        /// re-decided.
+        replay: PostAppReplay,
         /// Address of the `deep::List` this call was registered from, the
         /// same identity `expr_key` uses for owner stamps. The rule owns a
         /// CLONE of that node, so the address has to be recorded rather than
@@ -356,6 +360,27 @@ pub(super) enum DeferredShapeRule {
         func_name: String,
         env: Box<Env>,
     },
+}
+
+/// chelis#1512: how much of a suspended call the replay re-decides.
+///
+/// Both kinds are `PostApp` entries so that one key, one report-once
+/// cancellation and one silent declaration boundary cover them. What separates
+/// them is scope: a route replay re-enters the whole of `finish_unified_app`,
+/// while a dtype replay re-runs only the three dtype-admissibility validators
+/// at its head.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PostAppReplay {
+    /// Re-enter `finish_unified_app`: the route's own arm decides again.
+    Route,
+    /// Re-run the dtype-admissibility validators and nothing else.
+    ///
+    /// Re-entering the whole entry point here would re-run the route's SHAPE
+    /// rule as well, and `sum`, `mean`, `matmul` and `layer_norm` already carry
+    /// their own `Reduction`/`Matmul`/`LayerNorm` entry for the same call, so
+    /// the shape diagnostic would be reported twice. The dtype validators
+    /// overlap no shape rule, so the two replays are independent.
+    DtypeAdmissibility,
 }
 
 #[derive(Clone)]
@@ -561,12 +586,50 @@ impl InferenceProduct {
         }
     }
 
-    /// Is this call already suspended?
+    /// The replay kind of every `PostApp` entry for this call, in ledger order.
+    ///
+    /// chelis#1512: the route and dtype registrations share one key, and which
+    /// one survives is a decision no builtin currently exercises, because no
+    /// callee reaches both a dtype validator and a `site.register` route arm.
+    /// The invariant is still real, so it is asserted here rather than left to
+    /// the first callee that does.
+    #[cfg(test)]
+    pub(super) fn post_app_replays_for(&self, list: &deep::List) -> Vec<PostAppReplay> {
+        let key = self.post_app_key(list);
+        self.deferred_shape_checks
+            .iter()
+            .filter_map(|check| match &check.rule {
+                DeferredShapeRule::PostApp { replay, site, .. } if *site == key => Some(*replay),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Is this call already suspended, under either replay kind?
     pub(super) fn has_post_app_check_for(&self, list: &deep::List) -> bool {
         let key = self.post_app_key(list);
         self.deferred_shape_checks.iter().any(
             |check| matches!(&check.rule, DeferredShapeRule::PostApp { site, .. } if *site == key),
         )
+    }
+
+    /// Is this call already suspended for a FULL route replay?
+    ///
+    /// A dtype-admissibility entry does not answer yes: the route registration
+    /// replaces it rather than standing down for it, because re-entering
+    /// `finish_unified_app` runs those same validators on its way to the route.
+    pub(super) fn has_route_check_for(&self, list: &deep::List) -> bool {
+        let key = self.post_app_key(list);
+        self.deferred_shape_checks.iter().any(|check| {
+            matches!(
+                &check.rule,
+                DeferredShapeRule::PostApp {
+                    replay: PostAppReplay::Route,
+                    site,
+                    ..
+                } if *site == key
+            )
+        })
     }
 
     /// chelis#1512: drop a suspended `PostApp` decision for this call.
@@ -719,6 +782,22 @@ impl InferenceProduct {
                     )
                 }
                 DeferredShapeRule::PostApp {
+                    replay: PostAppReplay::DtypeAdmissibility,
+                    list,
+                    kids,
+                    func_name,
+                    env,
+                    ..
+                } => {
+                    let settled: Vec<Type> =
+                        check.arg_tys.iter().map(|ty| subst.apply(ty)).collect();
+                    replay_dtype_admissibility(
+                        list, kids, func_name, env, &settled, vg, subst, errors, self,
+                    );
+                    continue;
+                }
+                DeferredShapeRule::PostApp {
+                    replay: PostAppReplay::Route,
                     site,
                     list,
                     kids,
