@@ -3926,6 +3926,26 @@ fn independent_literal_root_source(x_extent: usize) -> String {
     )
 }
 
+/// A root whose entailing extent arrives through the ABI: `g`'s binder `n` is
+/// declared by `f`'s parameter `a`, and `a`'s extent is an input promise the
+/// entry guard checks rather than one the lowered graph fixes.
+fn abi_promised_entailment_source(b_extent: usize) -> String {
+    let list = |n: usize| {
+        (1..=n)
+            .map(|v| format!("{v}.0f32"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "module Repro.AbiPromisedEntailment\n\
+         def g(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = insert(scalar_to_tensor(7.0f32), 0i32, shape(y, 0i32))\n\
+         def f(a: tensor[4, f32], b: tensor[rows, f32]) -> tensor[4, f32] = g(a, b)\n\
+         out = f(to_tensor([{}]), to_tensor([{}]))\n",
+        list(4),
+        list(b_extent)
+    )
+}
+
 /// polymorphic.named.root.mismatch (chelis#1782, chelis#1374)
 ///
 /// EVIDENTIARY STATUS: regression test. Recorded red at `d861a6c6f`, where
@@ -4137,28 +4157,93 @@ fn an_independent_root_literal_claim_still_names_its_claimed_extent() {
     }
 }
 
-/// The value-binding form of the same two programs, which reaches the
-/// exported kernel instead of inlining and never carried a root restatement.
+/// The rule's FIRST bound, and the negative that fixes it: an entailing
+/// extent that arrives through the ABI keeps its literal guard.
 ///
-/// EVIDENTIARY STATUS: disposition lock. Both renderings pass at `d861a6c6f`
-/// and are here so a change to the literal arm that reached beyond the
-/// inlined root would be visible.
+/// The suppression above requires the other witness of the named claim to
+/// observe an axis whose extent the lowered GRAPH fixes. Here `g`'s binder
+/// `n` is declared by `f`'s parameter `a`, whose extent reaches the program
+/// as an ABI input spelled `tensor[4, f32]`: a promise the entry guard
+/// checks, not a fact of this graph. `graph_fixed_witness_extent` therefore
+/// declines the partner and `f`'s own literal claim is recorded, so this
+/// program still renders `claimed = 4`.
+///
+/// That bound is deliberate rather than a statement that the obligation is
+/// independent here. The entry guard does pin `a axis 0` to 4, so the named
+/// claim plus that guard entail the literal exactly as they do at an inlined
+/// root; declining only on a graph-fixed extent keeps this change inside the
+/// form chelis#1782 reports and leaves the ABI-promised form untouched.
+///
+/// EVIDENTIARY STATUS: disposition lock with a measured mutation behind it,
+/// not a regression test. Deleting the `RiscOp::Load` exclusion from
+/// `graph_fixed_witness_extent` and rebuilding turns this row's output into
+/// ``extent `n`: x axis 0 = 4, y axis 0 = 5``, so the assertion has teeth.
+#[test]
+fn an_abi_promised_entailing_extent_keeps_its_literal_guard() {
+    assert!(
+        gcc_available(),
+        "this row compares two executed lanes; neither may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = abi_promised_entailment_source(5);
+    let (eval_ok, eval_out) = eval_result(&dir, "abi_entailment.ch", &source);
+    let (c_ok, c_out) = c_run_result(&dir, "abi_entailment_c", &source);
+    assert!(
+        !eval_ok,
+        "a literal claim of 4 over a read of 5 traps: {eval_out}"
+    );
+    assert!(
+        !c_ok,
+        "a literal claim of 4 over a read of 5 traps: {c_out}"
+    );
+    for out in [&eval_out, &c_out] {
+        assert!(out.contains(&domain_trap_line("load")), "{out}");
+        assert!(
+            out.contains("extent `4`: claimed = 4, y axis 0 = 5"),
+            "an ABI-promised entailing extent keeps the literal guard: {out}"
+        );
+    }
+}
+
+/// The rule's SECOND bound: the two call forms that never inline the callee
+/// into a root render exactly as they did.
+///
+/// A value binding applies the exported kernel, so `f`'s parameters are
+/// `Load`s and no enclosing root contributes an inferred literal. The four
+/// exported-kernel cells of the same two programs,
+/// `polymorphic.{named,foreign}.export.mismatch` on both lanes, are locked by
+/// the preparation baseline rather than repeated here.
+///
+/// EVIDENTIARY STATUS: disposition lock. All four assertions pass at
+/// `d861a6c6f` and describe behaviour this change must not alter.
 #[test]
 fn the_value_binding_form_of_a_polymorphic_binder_is_unchanged() {
+    assert!(
+        gcc_available(),
+        "this row compares two executed lanes; neither may skip"
+    );
     let dir = tempfile::tempdir().expect("tempdir");
     let named = polymorphic_named_root_source(2, 3).replace("def main() = f(", "out = f(");
-    let (ok, out) = eval_result(&dir, "poly_named_binding.ch", &named);
-    assert!(!ok, "the exported kernel's entry guard still fires: {out}");
-    assert!(
-        out.contains("extent `n`: x axis 0 = 2, y axis 0 = 3"),
-        "the value-binding form's rendering is unchanged: {out}"
-    );
+    for (ok, out) in [
+        eval_result(&dir, "poly_named_binding.ch", &named),
+        c_run_result(&dir, "poly_named_binding_c", &named),
+    ] {
+        assert!(!ok, "the exported kernel's entry guard still fires: {out}");
+        assert!(
+            out.contains("extent `n`: x axis 0 = 2, y axis 0 = 3"),
+            "the value-binding form's rendering is unchanged: {out}"
+        );
+    }
 
     let foreign = polymorphic_foreign_root_source(2, 3).replace("def main() = f(", "out = f(");
-    let (ok, out) = eval_result(&dir, "poly_foreign_binding.ch", &foreign);
-    assert!(!ok, "the exported kernel's entry guard still fires: {out}");
-    assert!(
-        out.contains("extent `m`: y axis 0 = 3, x axis 0 = 2"),
-        "the value-binding form's rendering is unchanged: {out}"
-    );
+    for (ok, out) in [
+        eval_result(&dir, "poly_foreign_binding.ch", &foreign),
+        c_run_result(&dir, "poly_foreign_binding_c", &foreign),
+    ] {
+        assert!(!ok, "the exported kernel's entry guard still fires: {out}");
+        assert!(
+            out.contains("extent `m`: y axis 0 = 3, x axis 0 = 2"),
+            "the value-binding form's rendering is unchanged: {out}"
+        );
+    }
 }
