@@ -145,3 +145,25 @@ result = with seed(42i64) {
         "each replay, nested-scope, and restored-stream position must remain observable"
     );
 }
+
+#[test]
+fn tensor_loss_gradient_tuple_does_not_feed_the_next_dropout_helper() {
+    let c = ownership_support::emit(
+        r#"
+def loss(x: tensor[4, f32]) -> tensor[f32] = sum(dropout(x, 0.5f32), 0)
+result = with seed(42i64) {
+  x = to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32])
+  gradient = grad(loss)(x)
+  (gradient, dropout(x, 0.5f32))
+}
+"#,
+        "tensor-loss-tuple-next",
+    );
+    let (summary, stdout) = ownership_support::run_program(&c);
+    ownership_support::balanced(&summary);
+    assert_eq!(
+        stdout,
+        "result.0 = tensor(shape=[4], data=[0.0, 2.0, 0.0, 0.0])\n\
+result.1 = tensor(shape=[4], data=[2.0, 0.0, 0.0, 0.0])\n"
+    );
+}

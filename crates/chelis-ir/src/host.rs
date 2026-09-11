@@ -2127,6 +2127,7 @@ pub fn lower_named_tensor_entry_execution_plan(
         scope,
         &context,
         result_claim.as_ref(),
+        true,
         &planning,
     )
     .map(Some)
@@ -3595,6 +3596,7 @@ fn host_def_kernel_product(
             kernel_scope_types(&signature.scope, Some(&signature.params)),
             &context,
             Some(&expected),
+            true,
             execution.expect("fixed profile is only selected by the evaluator"),
         )?;
         let rebound =
@@ -4353,6 +4355,7 @@ fn lower_def_body_kernel(
                 scoped,
                 &context,
                 Some(&expected),
+                true,
                 &planning,
             )?;
             let rebound = remap_tensor_helper_dim_symbols(
@@ -4836,6 +4839,7 @@ fn lower_tensor_helper_product(
                 scoped,
                 &context,
                 Some(expected),
+                false,
                 &planning,
             ) {
                 Ok(plan) => plan,
@@ -16618,6 +16622,46 @@ def main(x: tensor[4, f32]) -> tensor[4, f32] = with seed(0i64) {
                 .is_none(),
             "a no-Dropout entry stays on the legacy DAG path"
         );
+    }
+
+    #[test]
+    fn named_execution_plan_keeps_authored_unused_interface_obligations() {
+        let checked = surf_check(
+            r#"
+def main(x: tensor[n, f32], unused: tensor[n, f32]) -> tensor[n, f32] = with seed(0i64) {
+  dropout(x, 0.5f32)
+}
+"#,
+        );
+        let plan = lower_named_tensor_entry_execution_plan(&checked, "main")
+            .expect("fixed entry lowers")
+            .expect("fixed entry retains its execution plan");
+        let loads = plan
+            .dag_for_inspection()
+            .nodes()
+            .iter()
+            .filter_map(|node| match &node.op {
+                crate::dag::RiscOp::Load { name } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            loads,
+            vec!["x", "unused"],
+            "an authored repeated-dimension obligation keeps an unread parameter"
+        );
+        assert!(
+            plan.dag_for_inspection()
+                .nodes()
+                .iter()
+                .any(|node| matches!(
+                    &node.op,
+                    crate::dag::RiscOp::ExtentWitness { parameter, claims, .. }
+                        if parameter == "unused" && !claims.is_empty()
+                ))
+        );
+        plan.verify_ownership()
+            .expect("authored interface plan remains sealed");
     }
 
     #[test]

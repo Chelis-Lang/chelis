@@ -1677,6 +1677,7 @@ pub fn try_lower_subexpr_evaluation_plan(
         scoped_tensor_types.into_sorted(),
         &context,
         None,
+        false,
         execution,
     )
 }
@@ -1686,6 +1687,7 @@ pub(crate) fn try_lower_subexpr_evaluation_with_ordered_inputs(
     scoped_types: Vec<(String, TensorType)>,
     context: &SubexprLoweringContext,
     result_claim: Option<&TensorType>,
+    authored_signature: bool,
     execution: &crate::evaluation::RandomExecutionContext,
 ) -> Result<crate::evaluation::EvaluationPlan, LowerDiagnostic> {
     if let crate::evaluation::EvaluationProfile::Legacy(reason) =
@@ -1710,7 +1712,7 @@ pub(crate) fn try_lower_subexpr_evaluation_with_ordered_inputs(
             state,
             SubexprLoweringOptions {
                 include_list_controls: false,
-                authored_signature: result_claim.is_some(),
+                authored_signature,
             },
             Some(&mut metadata),
         );
@@ -2124,12 +2126,23 @@ fn normalize_evaluation_dag(
     mut execution: crate::evaluation::ExecutionMetadata,
 ) -> (Dag, crate::evaluation::ExecutionMetadata) {
     execution.spine.record_nodes(&dag);
-    execution.spine.retain_nodes(|node| {
-        !matches!(
-            dag.get(node).map(|node| &node.op),
-            Some(RiscOp::Load { .. })
-        )
-    });
+    execution
+        .spine
+        .retain_nodes(|node| match dag.get(node).map(|node| &node.op) {
+            Some(RiscOp::Load { .. }) => false,
+            // A signatureless helper's synthetic scope inputs still mint axis
+            // witnesses so an actually referenced input can carry shape
+            // dependencies. Empty witnesses assert nothing, though, and are not
+            // execution events. Let DCE remove them (and their unused Loads)
+            // instead of turning every enclosing tensor into a false helper ABI
+            // input merely because an execution spine is being collected.
+            Some(RiscOp::ExtentWitness {
+                requirements,
+                claims,
+                ..
+            }) if requirements.is_empty() && claims.is_empty() => false,
+            _ => true,
+        });
     let (dag, remap) =
         crate::optimize::dead_code_eliminate_with_retained(&dag, &execution.spine.nodes());
     execution
@@ -16096,6 +16109,159 @@ impl<'program> LowerCtx<'program> {
 mod tests {
     use super::*;
     use crate::verify;
+
+    #[test]
+    fn evaluation_normalization_drops_only_inert_scope_witnesses() {
+        let tensor = TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision: Prim::F32,
+        };
+        let extent = TensorType {
+            dims: Vec::new(),
+            precision: Prim::Int64,
+        };
+        let mut dag = Dag::new();
+        let used = dag.add_node(
+            RiscOp::Load {
+                name: "used".into(),
+            },
+            Vec::new(),
+            tensor.clone(),
+            None,
+        );
+        let used_witness = dag.add_node(
+            RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::Caller,
+                parameter: "used".into(),
+                axis: RtAxis::Lit(0),
+                requirements: Vec::new(),
+                claims: Vec::new(),
+            },
+            vec![used],
+            extent.clone(),
+            None,
+        );
+        let unused = dag.add_node(
+            RiscOp::Load {
+                name: "unused".into(),
+            },
+            Vec::new(),
+            tensor.clone(),
+            None,
+        );
+        dag.add_node(
+            RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::Caller,
+                parameter: "unused".into(),
+                axis: RtAxis::Lit(0),
+                requirements: Vec::new(),
+                claims: Vec::new(),
+            },
+            vec![unused],
+            extent.clone(),
+            None,
+        );
+        let required = dag.add_node(
+            RiscOp::Load {
+                name: "required".into(),
+            },
+            Vec::new(),
+            tensor.clone(),
+            None,
+        );
+        dag.add_node(
+            RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::Caller,
+                parameter: "required".into(),
+                axis: RtAxis::Lit(0),
+                requirements: vec![
+                    chelis_types::scalar_from_i64("test", Prim::Int64, 5)
+                        .expect("literal requirement"),
+                ],
+                claims: Vec::new(),
+            },
+            vec![required],
+            extent.clone(),
+            None,
+        );
+        let claimed = dag.add_node(
+            RiscOp::Load {
+                name: "claimed".into(),
+            },
+            Vec::new(),
+            tensor.clone(),
+            None,
+        );
+        dag.add_node(
+            RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::Caller,
+                parameter: "claimed".into(),
+                axis: RtAxis::Lit(0),
+                requirements: Vec::new(),
+                claims: vec![crate::dag::ExtentClaim {
+                    claim: "same".into(),
+                    requirement_declares: true,
+                }],
+            },
+            vec![claimed, used_witness],
+            extent,
+            None,
+        );
+        let result = dag.add_node(RiscOp::Copy, vec![used], tensor, None);
+        dag.add_shape_dep(result, used_witness);
+        dag.add_root(result);
+
+        let (normalized, _) =
+            normalize_evaluation_dag(dag, crate::evaluation::ExecutionMetadata::new(None));
+        let loads = normalized
+            .nodes()
+            .iter()
+            .filter_map(|node| match &node.op {
+                RiscOp::Load { name } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(loads, vec!["used", "required", "claimed"]);
+        assert!(normalized.nodes().iter().any(|node| matches!(
+            &node.op,
+            RiscOp::ExtentWitness { parameter, .. } if parameter == "used"
+        )));
+        assert!(!normalized.nodes().iter().any(|node| matches!(
+            &node.op,
+            RiscOp::ExtentWitness { parameter, .. } if parameter == "unused"
+        )));
+        assert!(normalized.nodes().iter().any(|node| matches!(
+            &node.op,
+            RiscOp::ExtentWitness { parameter, requirements, .. }
+                if parameter == "required" && !requirements.is_empty()
+        )));
+        assert!(normalized.nodes().iter().any(|node| matches!(
+            &node.op,
+            RiscOp::ExtentWitness { parameter, claims, .. }
+                if parameter == "claimed" && !claims.is_empty()
+        )));
+
+        let required_witness = normalized
+            .nodes()
+            .iter()
+            .find(|node| {
+                matches!(
+                    &node.op,
+                    RiscOp::ExtentWitness { parameter, .. } if parameter == "required"
+                )
+            })
+            .expect("required witness remains")
+            .id;
+        let error =
+            crate::eval::eval_tensor_roots_with_strict(&normalized, &[required_witness], |_| {
+                Some(crate::eval::TensorValue::from_vec(vec![4], vec![1.0; 4]))
+            })
+            .expect_err("the retained false extent claim must still reject");
+        assert!(
+            error.contains("claimed = 5, required axis 0 = 4"),
+            "{error}"
+        );
+    }
 
     #[cfg(feature = "lowering-trace")]
     #[test]
