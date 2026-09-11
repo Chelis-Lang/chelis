@@ -2,11 +2,20 @@
 import copy
 import re
 from pathlib import Path
+import tomllib
 import unittest
 
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+NEXTEST_CONFIG = ROOT / ".config/nextest.toml"
+# A `cargo nextest` command naming its profile literally, anywhere a hosted job
+# can reach: the workflow files themselves, and the CI-invoked Python drivers.
+PROFILE_CALL = re.compile(r"--profile[\"',\s]+([a-z][a-z0-9-]*)")
+# Named by `.config/nextest.toml` as the unattended heavy-e2e selection. No
+# workflow invokes it by that literal today; requiring the backstop anyway
+# means a job that starts using it cannot arrive without one.
+ALWAYS_UNATTENDED = {"nightly"}
 MOVED = {
     "dtype-phase3-oracle": ".venv/bin/python scripts/dtype_phase3_oracle.py",
     "faithful-observation-phase2-oracle": ".venv/bin/python scripts/faithful_observation_phase2_oracle.py",
@@ -167,6 +176,43 @@ def assert_extended(test, pr, nightly):
     test.assertEqual(report["steps"][0]["env"]["RESULTS"], "${{ toJSON(needs) }}")
 
 
+def unattended_nextest_profiles():
+    """Every nextest profile a hosted job names in a literal `--profile`.
+
+    Scans the workflow files and the CI-invoked Python drivers. Profiles
+    selected through a variable -- `runtime-representation` and
+    `builtin-atom-closure`, both invoked from acceptance oracles that own their
+    own failure semantics and that also run on a developer workstation -- are
+    deliberately out of this set and are not discovered by this scan.
+    """
+    found = set(ALWAYS_UNATTENDED)
+    sources = sorted((ROOT / ".github/workflows").glob("*.yml"))
+    sources += sorted((ROOT / "scripts").glob("*.py"))
+    for source in sources:
+        if source.name.startswith("test_"):
+            continue
+        text = source.read_text()
+        # Whole-file, because `scripts/gate.py` spells the flag and its value
+        # on separate list elements. Gated on the file mentioning nextest at
+        # all, which is what keeps a Devenv or Cargo `--profile` out.
+        if "nextest" not in text:
+            continue
+        found.update(PROFILE_CALL.findall(text))
+    return found
+
+
+def resolved_slow_timeout(profiles, name):
+    """`name`'s effective slow-timeout, following `inherits` then `default`."""
+    seen = set()
+    while name and name not in seen:
+        seen.add(name)
+        profile = profiles.get(name, {})
+        if "slow-timeout" in profile:
+            return profile["slow-timeout"]
+        name = profile.get("inherits", "default" if name != "default" else None)
+    return None
+
+
 class ExtendedCadenceTests(unittest.TestCase):
     def setUp(self):
         self.pr = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
@@ -315,6 +361,54 @@ class ExtendedCadenceTests(unittest.TestCase):
                 step["run"] = step["run"].split(" -E ")[0]
         with self.assertRaises(AssertionError):
             assert_extended(self, self.pr, nightly)
+
+
+class UnattendedBackstopTests(unittest.TestCase):
+    """chelis#1831: an unattended profile without `terminate-after` lets one
+    pathological row consume the whole hosted budget and report nothing."""
+
+    def setUp(self):
+        self.config = tomllib.loads(NEXTEST_CONFIG.read_text())
+
+    def test_the_scan_finds_the_profiles_hosted_jobs_actually_run(self):
+        # A scan that silently found nothing would pass every other test here.
+        found = unattended_nextest_profiles()
+        self.assertLessEqual({"ci", "ci-fast", "ci-full", "nightly"}, found)
+        for name in found:
+            self.assertIn(name, self.config["profile"], name)
+
+    def test_every_unattended_profile_terminates_a_pathological_row(self):
+        profiles = self.config["profile"]
+        for name in sorted(unattended_nextest_profiles()):
+            with self.subTest(profile=name):
+                timeout = resolved_slow_timeout(profiles, name)
+                self.assertIsNotNone(
+                    timeout,
+                    f"profile `{name}` runs unattended and sets no slow-timeout",
+                )
+                self.assertIn(
+                    "terminate-after",
+                    timeout,
+                    f"profile `{name}` warns forever and never kills the test",
+                )
+                self.assertGreater(timeout["terminate-after"], 0)
+
+    def test_a_profile_whose_backstop_is_removed_is_rejected(self):
+        for mutation in ("drop-timeout", "drop-terminate-after"):
+            profiles = copy.deepcopy(self.config["profile"])
+            if mutation == "drop-timeout":
+                profiles["ci-full"].pop("slow-timeout")
+            else:
+                profiles["ci-full"]["slow-timeout"].pop("terminate-after")
+            with self.subTest(mutation=mutation):
+                timeout = resolved_slow_timeout(profiles, "ci-full")
+                self.assertTrue(timeout is None or "terminate-after" not in timeout)
+
+    def test_the_local_default_profile_keeps_no_backstop(self):
+        # chelis#1607: a load-sensitive cap on a contended workstation fires as
+        # a phantom failure. Inheriting one into `default` would put every
+        # local `cargo nextest run` under it.
+        self.assertNotIn("slow-timeout", self.config["profile"]["default"])
 
 
 if __name__ == "__main__":
