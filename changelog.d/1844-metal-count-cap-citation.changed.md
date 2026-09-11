@@ -1,0 +1,1 @@
+The Metal `count` kernel's fixed-rank device-cap rejection now cites chelis#1844, the live tracker of that Metal residual, instead of chelis#1345, which #1828 resolved for the Python carrier and closed.

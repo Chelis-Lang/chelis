@@ -178,7 +178,7 @@ fn metal_count_grammar_is_rejected_at_the_sealed_ownership_boundary() {
 fn metal_count_rejects_its_device_rank_limit_at_the_backend_boundary() {
     // The rank limit is the device carrier's, not the language's: ownership
     // lowering admits the DAG, and the backend's typed validator reports the
-    // chelis#1345 capability cell before any kernel is emitted.
+    // chelis#1844 capability cell before any kernel is emitted.
     let dag = count_dag(
         lit_ty(&[1; 9], Prim::Bool),
         vec![8],
@@ -190,7 +190,7 @@ fn metal_count_rejects_its_device_rank_limit_at_the_backend_boundary() {
     };
     let rendered = error.to_string();
     assert!(
-        rendered.contains("unimplemented chelis#1345:"),
+        rendered.contains("unimplemented chelis#1844:"),
         "{rendered}"
     );
     assert!(
@@ -203,7 +203,7 @@ fn metal_count_rejects_its_device_rank_limit_at_the_backend_boundary() {
 fn metal_count_rejects_extents_beyond_the_uint32_device_index_limit() {
     // Metal's launch geometry and the kernel's `ChelisCountDims` index in
     // `uint`; an input with more than `u32::MAX` elements is a device carrier
-    // limit (chelis#1345) the typed validator reports before any kernel is
+    // limit (chelis#1844) the typed validator reports before any kernel is
     // emitted.
     let dag = count_dag(
         lit_ty(&[65_536, 65_537], Prim::Bool),
@@ -216,7 +216,7 @@ fn metal_count_rejects_extents_beyond_the_uint32_device_index_limit() {
     };
     let rendered = error.to_string();
     assert!(
-        rendered.contains("unimplemented chelis#1345:"),
+        rendered.contains("unimplemented chelis#1844:"),
         "{rendered}"
     );
     assert!(
