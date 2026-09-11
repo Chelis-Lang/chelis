@@ -80,6 +80,7 @@ pub(crate) fn partition(
     params: &[HostParam],
     external_inputs: &BTreeMap<NodeId, String>,
     host_parameters: &BTreeMap<HostValueId, (String, HostTypeTerm)>,
+    evaluation: Option<&mut crate::evaluation::StagedEvaluationPlan>,
 ) -> Result<HostStagedPlan, String> {
     let [root] = logical.roots() else {
         return Err("a staged tensor region must have exactly one tensor result".into());
@@ -167,6 +168,7 @@ pub(crate) fn partition(
             .map(|id| StageValue::Host(*id))
             .collect(),
         stages: Vec::new(),
+        evaluation,
     };
     let mut start = 0;
     for source in sources {
@@ -233,6 +235,7 @@ struct Partition<'a> {
     reserved: BTreeSet<String>,
     available: BTreeSet<StageValue>,
     stages: Vec<HostStage>,
+    evaluation: Option<&'a mut crate::evaluation::StagedEvaluationPlan>,
 }
 
 impl Partition<'_> {
@@ -329,6 +332,15 @@ impl Partition<'_> {
         }
         self.reserved.insert(completion_name.clone());
         outputs.push(completion_name);
+        if let Some(evaluation) = &mut self.evaluation {
+            // Imported values become Loads, not second executions of their
+            // producers. Only this segment's own nodes transport Random sites.
+            let local = remap
+                .into_iter()
+                .filter(|(node, _)| (start..end).contains(&node.0))
+                .collect();
+            evaluation.append_segment(dag.clone(), &local);
+        }
         self.stages.push(HostStage::Kernel { dag, outputs });
         Ok(())
     }
@@ -569,7 +581,7 @@ mod tests {
     #[test]
     fn staged_plan_has_one_source_and_no_unresolved_helper_inputs() {
         let (dag, sources, params, inputs) = fixture();
-        let plan = partition(&dag, &sources, &params, &inputs, &BTreeMap::new()).unwrap();
+        let plan = partition(&dag, &sources, &params, &inputs, &BTreeMap::new(), None).unwrap();
         assert_eq!(plan.stages().len(), 3);
         let mut available = BTreeSet::from(["x".to_owned()]);
         for stage in plan.stages() {
@@ -606,7 +618,7 @@ mod tests {
             dims: vec![DimInfo::Named("other".into(), Some(2))],
             precision: Prim::F32,
         });
-        partition(&dag, &refined, &params, &inputs, &BTreeMap::new()).unwrap();
+        partition(&dag, &refined, &params, &inputs, &BTreeMap::new(), None).unwrap();
     }
 
     #[test]
@@ -668,7 +680,7 @@ mod tests {
                 _ => unreachable!(),
             }
             assert!(
-                partition(&dag, &sources, &params, &inputs, &host_parameters).is_err(),
+                partition(&dag, &sources, &params, &inputs, &host_parameters, None).is_err(),
                 "{mutation}"
             );
         }

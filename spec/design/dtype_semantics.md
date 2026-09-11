@@ -562,6 +562,18 @@ behavior and is exactly what the atom forbids.
 | C emitted helpers (print, dtype switches) | GENERATED from `format_element` / exhaustive matches | [#716], [#723], [#728] |
 | Metal / HIP | capability table only (already honestly typed / cleanly rejecting) | - |
 
+The fixed-control dropout evaluator uses the sealed
+`dtype_semantics::PreparedDropout` boundary. `new(&TensorStorage, ScalarValue)`
+checks the input family, same-dtype rate and [05-OP-37] domain without allocating
+or consuming Random. After actual source-plan forward/replay entry,
+`apply(seed: u64, ordinal: u64)` computes [05-RNG-1]'s unit, arithmetic-width
+comparison, positive dropped zero, and finalized sub/div into `TensorStorage`.
+The numerical owner has no ambient stream or replay authority. Its private
+fields prevent bypassing preparation; the execution plan retains invocation
+keys, source order and failure-prefix accounting. Both exact compiler-kernel
+callables are registered to [05-OP-37] in C6's off-leg semantic registry, with
+presence/authority controls; that stopgap is not a complete Rust API census.
+
 **Performance contract:** finalize is per-buffer monomorphized loops (or
 direct element-type compute once storage is per-dtype), never per-element
 dyn dispatch; `cargo test --workspace` stays inside the ~60s inner-loop
@@ -1724,6 +1736,36 @@ the generated tensor and Python/DLPack wrapper implementation. A wire
 registration proves none of those runtime exits. The respective non-regression
 oracles remain required whenever their boundary is touched.
 
+**Bounded dropout evaluator adoption.** Fixed-control source evaluation and
+first-order input AD now carry an opaque, non-serialized execution plan through
+lowering, normalization, AD replay, selected declarations, host helpers, and
+ordinary/prepared/contextual evaluation. [05-OP-37] uses arithmetic-width unit
+rounding and finalized sub/div at every active float dtype. The selected source
+spine retains dead draws and preceding local failures independently of value
+liveness. Scope identities distinguish equal-seed handlers; invocation-local
+forward keys authorize backward replay without another ambient draw. The host
+counter remains wrapping u64, not an unbounded proof event count.
+
+Checked tensor helpers with host-produced reshape sizes construct the complete
+checked logical graph before partitioning. The evaluator retains an opaque
+companion with the partitioner's exact local-node mappings; imported values
+become Loads and never duplicate their producers' Random sites. One invocation
+frame carries realized forward keys and scope counters through every numeric
+segment, while host sources execute at their original cuts and synchronize the
+inherited stream. This preserves a preceding accepted draw when a later local
+extent guard fails, and preserves replay keys across cuts. Host-source bindings
+retain their checked tensor types for primitive and transform routing. The public legacy
+`HostDefKernel`, `HostStagedPlan`, and wire layouts do not change. Existing
+Random-handler host boundaries still dispatch through host control.
+
+This is not completion of #1295 or #1297. Explicitly excluded runtime rates,
+rate cotangents, higher-order AD, random vmap, resource scopes, dynamic/recursive control, and
+general UniformLike numerics keep their compatibility boundary. Legacy Dag-only
+Rust entrypoints and serialized lowered libraries do not carry this plan; their
+baked-seed projection remains an adoption dependency. No new mask tensor owner,
+public wire field, compiled-dropout support, or native effect certificate is
+implied by the evaluator's private key table.
+
 ---
 
 # Part II - process rules that hold at every phase boundary
@@ -1747,6 +1789,14 @@ oracles remain required whenever their boundary is touched.
 behavior. If your phase needs a frozen contract to change, stop, update
 this document and [#729] first, and say so in the PR - that is the
 protocol, not a failure.
+
+The fixed-control dropout owner consolidation amends C5's kernel boundary with
+the sealed `PreparedDropout::new` / `PreparedDropout::apply` split described
+above. It moves the existing pure numerical implementation into the semantics
+owner without changing numeric bits, source guards, draw timing, public wire
+formats or existing Rust signatures. The exact new kernel registrations and
+their tests accompany this amendment; [05-OP-37] and [05-RNG-1] already govern
+the behavior, so no new numbered atom or capability completion is asserted.
 
 [#1294] adds exact builtin identity incorporation to the existing governing
 operation atoms and authors [05-OP-46..64] for the remaining builtin families.

@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "freeze_sha256": "b98c8b64a15af0e3d8395b86b98c1729af6b5253b7f7de8faea83cfd1746567f",
+  "freeze_sha256": "6de229484dcf97e72bab1d6ef0ed8206458b6a60c5b64ad82bd049464b8c64c0",
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -2602,7 +2602,7 @@
       "artifact": "the frozen INVENTORY_SOURCES file list",
       "enumerator": "chelis-repr-inventory: syn for Rust; clang's front end under fixed target lanes, a committed stub SDK, and a scrubbed environment for C and Objective-C headers, classified with the capacity census's closed type-word lists",
       "universe": {
-        "registered_sources": 74,
+        "registered_sources": 75,
         "roots": [
           "crates/chelis-runtime/src/**/*.rs",
           "crates/chelis-runtime/include/**/*.h",

@@ -1612,6 +1612,15 @@ fn validate_shape_against_type(
 /// on live nodes only: the full structural `verify` would reject the dead
 /// symbolic-dim-source Loads that root-scoped eval keeps alive.
 fn verify_bound_movement_bounds(dag: &Dag, live: Option<&[bool]>) -> Result<(), String> {
+    for node in dag.nodes() {
+        if live.is_none_or(|mask| mask.get(node.id.0).copied().unwrap_or(false)) {
+            verify_bound_movement_node(dag, node)?;
+        }
+    }
+    Ok(())
+}
+
+fn verify_bound_movement_node(dag: &Dag, node: &DagNode) -> Result<(), String> {
     fn known_size(dim: &DimInfo) -> Option<usize> {
         match dim {
             DimInfo::Lit(n) => Some(*n),
@@ -1619,57 +1628,50 @@ fn verify_bound_movement_bounds(dag: &Dag, live: Option<&[bool]>) -> Result<(), 
             DimInfo::Named(_, None) => None,
         }
     }
-    for node in dag.nodes() {
-        if let Some(mask) = live
-            && !mask.get(node.id.0).copied().unwrap_or(false)
-        {
-            continue;
-        }
-        let input_dims = match node.inputs.first().and_then(|id| dag.get(*id)) {
-            Some(input) => &input.output_type.dims,
-            None => continue,
-        };
-        match &node.op {
-            RiscOp::Shrink { bounds } => {
-                for (axis, (start, end)) in bounds.iter().enumerate() {
-                    // chelis#616: a `ToEnd` sentinel is resolved to the axis
-                    // extent by `bind_symbolic_dims`, and a runtime `Node` bound
-                    // is validated by the evaluator (it needs the input values).
-                    // Only compile-time `(Lit, Lit)` bounds are statically
-                    // checkable here.
-                    let (Some(start), Some(end)) = (start.as_lit(), end.as_lit()) else {
-                        continue;
-                    };
-                    if start > end {
-                        return Err(format!(
-                            "post-bind shrink at node {} axis {axis}: start {start} > end {end} \
+    let input_dims = match node.inputs.first().and_then(|id| dag.get(*id)) {
+        Some(input) => &input.output_type.dims,
+        None => return Ok(()),
+    };
+    match &node.op {
+        RiscOp::Shrink { bounds } => {
+            for (axis, (start, end)) in bounds.iter().enumerate() {
+                // chelis#616: a `ToEnd` sentinel is resolved to the axis
+                // extent by `bind_symbolic_dims`, and a runtime `Node` bound
+                // is validated by the evaluator (it needs the input values).
+                // Only compile-time `(Lit, Lit)` bounds are statically
+                // checkable here.
+                let (Some(start), Some(end)) = (start.as_lit(), end.as_lit()) else {
+                    continue;
+                };
+                if start > end {
+                    return Err(format!(
+                        "post-bind shrink at node {} axis {axis}: start {start} > end {end} \
                              (chelis#523)",
-                            node.id.0
-                        ));
-                    }
-                    if let Some(in_size) = input_dims.get(axis).and_then(known_size)
-                        && end > in_size
-                    {
-                        return Err(format!(
-                            "post-bind shrink at node {} axis {axis}: end {end} > input extent \
+                        node.id.0
+                    ));
+                }
+                if let Some(in_size) = input_dims.get(axis).and_then(known_size)
+                    && end > in_size
+                {
+                    return Err(format!(
+                        "post-bind shrink at node {} axis {axis}: end {end} > input extent \
                              {in_size} (chelis#523)",
-                            node.id.0
-                        ));
-                    }
+                        node.id.0
+                    ));
                 }
             }
-            RiscOp::Stride { strides } => {
-                for (axis, step) in strides.iter().enumerate() {
-                    if step.as_lit() == Some(0) {
-                        return Err(format!(
-                            "post-bind stride at node {} axis {axis}: step 0 (chelis#523)",
-                            node.id.0
-                        ));
-                    }
-                }
-            }
-            _ => {}
         }
+        RiscOp::Stride { strides } => {
+            for (axis, step) in strides.iter().enumerate() {
+                if step.as_lit() == Some(0) {
+                    return Err(format!(
+                        "post-bind stride at node {} axis {axis}: step 0 (chelis#523)",
+                        node.id.0
+                    ));
+                }
+            }
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -2025,6 +2027,7 @@ fn eval_tensor_internal<F>(
     live: Option<&[bool]>,
     strict_loads: bool,
     random_counter: u64,
+    mut execution: Option<&mut crate::evaluation::ExecutionFrame<'_>>,
     mut load_input: F,
 ) -> Result<(UnordMap<NodeId, TensorValue>, u64), String>
 where
@@ -2220,7 +2223,9 @@ where
         // bounds on LIVE nodes only — the full `verify` would flag the dead
         // symbolic-dim-source Loads that root-scoped eval deliberately keeps
         // alive ("node N is dangling"), over-rejecting legitimate programs.
-        verify_bound_movement_bounds(&bound, live)?;
+        if execution.is_none() {
+            verify_bound_movement_bounds(&bound, live)?;
+        }
         bound
     } else {
         dag.clone()
@@ -2262,7 +2267,14 @@ where
     // load behind an `Option` test.
     let cancel = chelis_types::current_cancel_token();
 
-    for node in bound_dag.nodes() {
+    let order = match execution.as_ref() {
+        Some(frame) => frame.order().to_vec(),
+        None => bound_dag.nodes().iter().map(|node| node.id).collect(),
+    };
+    for id in order {
+        let node = bound_dag
+            .get(id)
+            .ok_or("evaluation schedule references a missing node")?;
         if let Some(cancel) = &cancel
             && cancel.is_cancelled()
         {
@@ -2272,6 +2284,9 @@ where
             && !mask[node.id.0]
         {
             continue;
+        }
+        if execution.is_some() {
+            verify_bound_movement_node(&bound_dag, node)?;
         }
 
         // `spec/04-type-system.md` section 4.7: a guard comparing a locally
@@ -2544,7 +2559,20 @@ where
             // `f64::round`, which rounds half away from zero.
             RiscOp::Round => unary_elementwise(ElementwiseUnOp::Round, &values[&node.inputs[0]])?,
             RiscOp::UniformLike { low, high, seed } => {
-                let effective_seed = if let Some(activation) = node.inputs.get(1) {
+                let key = if let Some(frame) = execution.as_deref_mut() {
+                    let active = match node.inputs.get(1) {
+                        Some(activation) => match values[activation].storage().to_raw() {
+                            RawTensor::Int(values) if values.len() == 1 => values[0] != 0,
+                            _ => {
+                                return Err(
+                                    "uniform_like path activation is not a scalar Bool".into()
+                                );
+                            }
+                        },
+                        None => true,
+                    };
+                    frame.uniform_key(node.id, *seed, active)?
+                } else if let Some(activation) = node.inputs.get(1) {
                     let active = match values[activation].storage().to_raw() {
                         RawTensor::Int(values) if values.len() == 1 => values[0] != 0,
                         _ => {
@@ -2555,16 +2583,22 @@ where
                         }
                     };
                     if active {
-                        let effective =
-                            *seed ^ path_random_counter.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-                        path_random_counter = path_random_counter.saturating_add(1);
-                        effective
+                        Some((*seed, path_random_counter))
                     } else {
-                        *seed
+                        None
                     }
                 } else {
-                    *seed
+                    None
                 };
+                // One legacy value-kernel seed fold for both planned keys
+                // and activation-gated legacy execution. No canonical
+                // UniformLike numeric claim is made by plan admission.
+                let effective_seed = key.map_or(*seed, |(raw_seed, path_random_counter)| {
+                    raw_seed ^ path_random_counter.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                });
+                if execution.is_none() && key.is_some() {
+                    path_random_counter = path_random_counter.saturating_add(1);
+                }
                 uniform_like(
                     &values[&node.inputs[0]].shape.clone(),
                     *low,
@@ -2573,9 +2607,10 @@ where
                     out_prim,
                 )?
             }
-            RiscOp::Dropout { rate, seed } => {
-                dropout(&values[&node.inputs[0]], *rate, *seed, out_prim)?
-            }
+            RiscOp::Dropout { rate, seed } => match execution.as_deref_mut() {
+                Some(frame) => frame.dropout(node.id, &values[&node.inputs[0]], *rate, *seed)?,
+                None => dropout(&values[&node.inputs[0]], *rate, *seed, out_prim)?,
+            },
             RiscOp::MaxElem => binary_elementwise(
                 ElementwiseBinOp::Max,
                 &values[&node.inputs[0]],
@@ -3075,6 +3110,45 @@ fn local_guard_verdict(
     Ok(())
 }
 
+/// Evaluate a source-owned plan. The context records the executed prefix on
+/// both success and failure; legacy Dag-only entrypoints remain unchanged.
+pub fn eval_tensor_plan_with_strict<F>(
+    plan: &crate::evaluation::EvaluationPlan,
+    context: &mut crate::evaluation::RandomExecutionContext,
+    load_input: F,
+) -> Result<UnordMap<NodeId, TensorValue>, String>
+where
+    F: FnMut(&str) -> Option<TensorValue>,
+{
+    let dag = plan.dag_for_inspection();
+    let starting_counter = context.state().counter;
+    let mut frame = plan.frame(context)?;
+    let mut live = vec![false; dag.len()];
+    for id in frame.order() {
+        live[id.0] = true;
+    }
+    eval_tensor_internal(
+        dag,
+        Some(&live),
+        true,
+        starting_counter,
+        Some(&mut frame),
+        load_input,
+    )
+    .map(|(values, _)| values)
+}
+
+pub(crate) fn eval_tensor_segment_with_strict<F>(
+    dag: &Dag,
+    frame: &mut crate::evaluation::ExecutionFrame<'_>,
+    load_input: F,
+) -> Result<UnordMap<NodeId, TensorValue>, String>
+where
+    F: FnMut(&str) -> Option<TensorValue>,
+{
+    eval_tensor_internal(dag, None, true, 0, Some(frame), load_input).map(|(values, _)| values)
+}
+
 pub fn eval_tensor_with<F>(
     dag: &Dag,
     load_input: F,
@@ -3082,8 +3156,15 @@ pub fn eval_tensor_with<F>(
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
-    eval_tensor_internal(dag, None, false, INITIAL_RANDOM_STREAM_ORDINAL, load_input)
-        .map(|(values, _)| values)
+    eval_tensor_internal(
+        dag,
+        None,
+        false,
+        INITIAL_RANDOM_STREAM_ORDINAL,
+        None,
+        load_input,
+    )
+    .map(|(values, _)| values)
 }
 
 pub fn eval_tensor_with_strict<F>(
@@ -3093,8 +3174,15 @@ pub fn eval_tensor_with_strict<F>(
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
-    eval_tensor_internal(dag, None, true, INITIAL_RANDOM_STREAM_ORDINAL, load_input)
-        .map(|(values, _)| values)
+    eval_tensor_internal(
+        dag,
+        None,
+        true,
+        INITIAL_RANDOM_STREAM_ORDINAL,
+        None,
+        load_input,
+    )
+    .map(|(values, _)| values)
 }
 
 pub fn eval_tensor_roots_with<F>(
@@ -3106,8 +3194,15 @@ where
     F: FnMut(&str) -> Option<TensorValue>,
 {
     if roots.is_empty() {
-        return eval_tensor_internal(dag, None, false, INITIAL_RANDOM_STREAM_ORDINAL, load_input)
-            .map(|(values, _)| values);
+        return eval_tensor_internal(
+            dag,
+            None,
+            false,
+            INITIAL_RANDOM_STREAM_ORDINAL,
+            None,
+            load_input,
+        )
+        .map(|(values, _)| values);
     }
     reject_drop_roots(dag, roots)?;
     let live = live_mask_for_roots(dag, roots);
@@ -3116,6 +3211,7 @@ where
         Some(&live),
         false,
         INITIAL_RANDOM_STREAM_ORDINAL,
+        None,
         load_input,
     )
     .map(|(values, _)| values)
@@ -3130,8 +3226,15 @@ where
     F: FnMut(&str) -> Option<TensorValue>,
 {
     if roots.is_empty() {
-        return eval_tensor_internal(dag, None, true, INITIAL_RANDOM_STREAM_ORDINAL, load_input)
-            .map(|(values, _)| values);
+        return eval_tensor_internal(
+            dag,
+            None,
+            true,
+            INITIAL_RANDOM_STREAM_ORDINAL,
+            None,
+            load_input,
+        )
+        .map(|(values, _)| values);
     }
     reject_drop_roots(dag, roots)?;
     let live = live_mask_for_roots(dag, roots);
@@ -3140,6 +3243,7 @@ where
         Some(&live),
         true,
         INITIAL_RANDOM_STREAM_ORDINAL,
+        None,
         load_input,
     )
     .map(|(values, _)| values)
@@ -3158,11 +3262,11 @@ where
     F: FnMut(&str) -> Option<TensorValue>,
 {
     if roots.is_empty() {
-        return eval_tensor_internal(dag, None, true, random_counter, load_input);
+        return eval_tensor_internal(dag, None, true, random_counter, None, load_input);
     }
     reject_drop_roots(dag, roots)?;
     let live = live_mask_for_roots(dag, roots);
-    eval_tensor_internal(dag, Some(&live), true, random_counter, load_input)
+    eval_tensor_internal(dag, Some(&live), true, random_counter, None, load_input)
 }
 
 fn reject_drop_roots(dag: &Dag, roots: &[NodeId]) -> Result<(), String> {
@@ -3285,6 +3389,19 @@ mod tests {
         let expected = uniform_like(&[2], 0.0, 1.0, expected_seed, Prim::F32).unwrap();
         assert_eq!(values[&executed], expected);
         let skipped_expected = uniform_like(&[2], 0.0, 1.0, 17, Prim::F32).unwrap();
+        assert_eq!(values[&skipped], skipped_expected);
+
+        let (values, next) =
+            eval_tensor_roots_with_strict_random_progress(&dag, &roots, u64::MAX, |name| {
+                (name == "template").then(|| TensorValue::from_vec(vec![2], vec![0.0; 2]))
+            })
+            .expect("legacy Random progress retains its saturation boundary");
+        assert_eq!(next, u64::MAX);
+        let expected_seed = 17 ^ u64::MAX.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        assert_eq!(
+            values[&executed],
+            uniform_like(&[2], 0.0, 1.0, expected_seed, Prim::F32).unwrap()
+        );
         assert_eq!(values[&skipped], skipped_expected);
     }
 

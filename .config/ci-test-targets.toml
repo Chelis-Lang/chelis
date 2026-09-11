@@ -55,6 +55,18 @@ package = "chelis-compiler-api"
 name = "fragment_parity"
 
 [[target]]
+package = "chelis-ir"
+name = "dropout_fixed_stream_ir"
+
+[[target]]
+package = "chelis-compiler-api"
+name = "dropout_fixed_stream_api"
+
+[[target]]
+package = "chelis-cli"
+name = "dropout_fixed_stream_cli"
+
+[[target]]
 package = "chelis-cli"
 name = "dp_check_ingest"
 
