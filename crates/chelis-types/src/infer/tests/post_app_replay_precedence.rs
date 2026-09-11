@@ -29,7 +29,14 @@ use super::*;
 use crate::infer::checked::PostAppReplay;
 use crate::infer::operand_deferral::{DtypeAdmissibilitySite, UnresolvedOperandSite};
 
-fn probe() -> (deep::List, Vec<deep::Expr>, Env, InferenceProduct, Subst, Vec<Type>) {
+fn probe() -> (
+    deep::List,
+    Vec<deep::Expr>,
+    Env,
+    InferenceProduct,
+    Subst,
+    Vec<Type>,
+) {
     (
         deep::List { elements: vec![] },
         Vec::new(),

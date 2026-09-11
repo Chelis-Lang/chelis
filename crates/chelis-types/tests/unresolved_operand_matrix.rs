@@ -1273,9 +1273,9 @@ fn a_late_bound_tensor_precision_is_not_validated_yet() {
     let errors = check("def f(x: tensor[3, int32]) -> tensor[int32] = mean(x, 0i32)\n")
         .expect_err("a settled integer operand must be rejected");
     assert!(
-        errors
-            .iter()
-            .any(|e| e.message.contains("mean on operand precision `int32` is not admitted")),
+        errors.iter().any(|e| e
+            .message
+            .contains("mean on operand precision `int32` is not admitted")),
         "the resolved rejection must still name the dtype policy:\n{}",
         summary(&errors)
     );
@@ -1338,7 +1338,10 @@ fn an_empty_literal_the_declared_result_determines_is_now_validated() {
             "def f() -> tensor[3, f32] = softmax(to_tensor([]), 0i32)\n",
         ),
         ("sqrt", "def f() -> tensor[3, f32] = sqrt(to_tensor([]))\n"),
-        ("mean", "def f() -> tensor[f32] = mean(to_tensor([]), 0i32)\n"),
+        (
+            "mean",
+            "def f() -> tensor[f32] = mean(to_tensor([]), 0i32)\n",
+        ),
     ] {
         check(program).unwrap_or_else(|e| {
             panic!(
