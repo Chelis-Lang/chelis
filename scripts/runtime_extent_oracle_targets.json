@@ -46,6 +46,8 @@
         "mode": "all"
       },
       "expected": [
+        "a_refuted_claim_under_a_runtime_extent_root_traps_on_both_lanes",
+        "a_runtime_extent_nullary_root_executes_identically_on_both_lanes",
         "bare_dimension_binder_executes_and_builds_without_symbolic_dim_ice",
         "insert_def_body_wrong_rank_names_the_callee",
         "negative_extent_remains_a_static_type_error",

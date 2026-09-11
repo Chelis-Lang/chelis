@@ -1889,7 +1889,10 @@ mod tests {
                 "rank variable",
                 "(t-tensor {} (d-rank {} r) (t-prim {} f32))",
             ),
-            ("dim variable", "(t-tensor {} (d-var {} d0) (t-prim {} f32))"),
+            (
+                "dim variable",
+                "(t-tensor {} (d-var {} d0) (t-prim {} f32))",
+            ),
             ("type variable", "(t-tensor {} (d-lit {} 2) (t-var {} p))"),
             (
                 "nested under a function result",
