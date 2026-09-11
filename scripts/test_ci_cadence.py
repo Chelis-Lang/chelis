@@ -74,22 +74,24 @@ def assert_extended(test, pr, nightly):
     test.assertEqual(pr["jobs"]["integration"]["needs"], ["changes", "ci-fast"])
     # chelis#1742: the runtime-extent oracle runs in this workflow and
     # nowhere else, so the nightly is the only place its receipts are
-    # enforced. Phase A must PASS. Phase B enforces the same receipts, the
-    # same digests and the same lattice while chelis#1277's remaining rows
-    # land, and `--allow-shortfall` downgrades the recorded ROW shortfall
-    # alone; nothing else about the run is excused. The B2b-3 flip pull
-    # request drops the flag and this assertion with it.
+    # enforced. Since the B2b-3 flip that is ONE command, `--phase final`,
+    # chelis#1277's completion oracle: it runs both registered phases'
+    # deduplicated targets, checks the same receipts, digests and lattice,
+    # and refuses `--allow-shortfall` outright. The equality is the point.
+    # A second step that named a phase which CAN be excused would let the
+    # job report a shortfall again, and that is what this rejects.
     extents = jobs["runtime-extent-oracle"]
     test.assertNotIn("runtime-extent-oracle", pr["jobs"])
     test.assertNotIn("if", extents)
     test.assertFalse(extents.get("continue-on-error", False))
     extent_commands = [step.get("run") for step in extents["steps"]]
-    test.assertIn(
-        ".venv/bin/python scripts/runtime_extent_oracle.py --phase a", extent_commands
-    )
-    test.assertIn(
-        ".venv/bin/python scripts/runtime_extent_oracle.py --phase b --allow-shortfall",
-        extent_commands,
+    test.assertEqual(
+        [
+            command
+            for command in extent_commands
+            if command and "runtime_extent_oracle.py" in command
+        ],
+        [".venv/bin/python scripts/runtime_extent_oracle.py --phase final"],
     )
     for step in extents["steps"]:
         test.assertNotIn("if", step)
@@ -129,7 +131,7 @@ class ExtendedCadenceTests(unittest.TestCase):
         # could stop enforcing must fail this lock, including dropping it
         # from the nightly report's needs, which is what would let it go red
         # unnoticed.
-        for mutation in ("remove", "skip", "ignore", "steps", "needs", "shortfall"):
+        for mutation in ("remove", "skip", "ignore", "steps", "needs", "downgrade"):
             nightly = copy.deepcopy(self.nightly)
             job = nightly["jobs"]["runtime-extent-oracle"]
             if mutation == "remove":
@@ -147,8 +149,11 @@ class ExtendedCadenceTests(unittest.TestCase):
                     if name != "runtime-extent-oracle"
                 ]
             else:
+                # The completion oracle swapped for a phase whose row
+                # shortfall can be excused: the job would still be green,
+                # still be named, and no longer enforce the exit.
                 job["steps"][-1]["run"] = job["steps"][-1]["run"].replace(
-                    " --allow-shortfall", " --allow-everything"
+                    "--phase final", "--phase b --allow-shortfall"
                 )
             with self.subTest(mutation=mutation):
                 with self.assertRaises((AssertionError, KeyError)):

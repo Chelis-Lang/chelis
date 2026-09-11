@@ -472,6 +472,21 @@ fn emitted_guards(c_source: &str) -> Vec<(String, String, String)> {
     found
 }
 
+/// Every executable Phase 0 example, sorted: the `.ch` files directly under
+/// `examples/`, which the repository's example-corpus policy defines as the
+/// executable set. `examples/illustrative/` is a subdirectory and is therefore
+/// not reached, which is the policy's intent.
+fn executable_examples() -> Vec<std::path::PathBuf> {
+    let mut paths: Vec<std::path::PathBuf> = fs::read_dir("../../examples")
+        .expect("read examples")
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.is_file())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "ch"))
+        .collect();
+    paths.sort();
+    paths
+}
+
 fn build_c(path: &str, out_subdir: &std::path::Path) -> std::process::Output {
     Command::cargo_bin("chelis")
         .expect("chelis binary")
@@ -543,38 +558,24 @@ fn the_census_reader_finds_a_guard_that_is_there() {
 ///
 /// # Coverage
 ///
-/// The corpus it must cover is `common::EXECUTABLE_PHASE_0_EXAMPLES`, the
-/// shared roster, and not a count written here. chelis#1787 is what the hand
-/// written count cost: it was pinned at 31, an unrelated merge added a 32nd
-/// example without touching this line, and `main` went red on a number rather
-/// than on a finding. A count derived from this test's own `read_dir` would
-/// have been worse, since it agrees with a reader that has stopped
-/// enumerating. The roster is an independent statement of the corpus, and
-/// `parity.rs`'s `parity_corpus_is_complete` is the one test that compares it
-/// against the directory.
+/// It censuses whatever `executable_examples()` finds, with no count written
+/// here. chelis#1787 is what the hand-written count cost: it was pinned at 31,
+/// an unrelated merge added a 32nd example without touching this line, and
+/// `main` went red on a number rather than on a finding. A count derived from
+/// the same `read_dir` would be worse, since it agrees with a reader that has
+/// stopped enumerating.
+///
+/// Whether the directory still holds the corpus the project decided to ship is
+/// a different question with an owner: `parity.rs`'s `parity_corpus_is_complete`
+/// holds the roster and fails naming the drift in either direction. It runs per
+/// pull request, and `faithful_observation_phase3_oracle.py` freezes its
+/// definition digest, so the roster cannot be edited quietly. This census does
+/// not repeat that comparison; what keeps it from measuring an empty directory
+/// is the refusal list below, whose entries must all be reached.
 #[test]
 fn no_shipped_example_gains_a_return_boundary_guard() {
     let dir = tempdir().expect("tempdir");
-    let mut examples: Vec<std::path::PathBuf> = fs::read_dir("../../examples")
-        .expect("read examples")
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.extension().is_some_and(|ext| ext == "ch"))
-        .collect();
-    examples.sort();
-    let found: Vec<String> = examples
-        .iter()
-        .filter_map(|path| path.file_name().and_then(|name| name.to_str()))
-        .map(String::from)
-        .collect();
-    let mut expected: Vec<String> = common::EXECUTABLE_PHASE_0_EXAMPLES
-        .iter()
-        .map(|name| (*name).to_string())
-        .collect();
-    expected.sort();
-    assert_eq!(
-        found, expected,
-        "the census must cover every executable Phase 0 example on the shared roster"
-    );
+    let examples = executable_examples();
 
     let mut census: Vec<String> = Vec::new();
     let mut refused: Vec<String> = Vec::new();
@@ -610,7 +611,7 @@ fn no_shipped_example_gains_a_return_boundary_guard() {
             .map(|(name, _)| (*name).to_string())
             .collect::<Vec<_>>(),
         "every recorded refusal must be reached: a name that no longer matches an \
-         example silently shrinks the census"
+         example, or an enumeration that returned nothing, silently shrinks the census"
     );
 
     assert_eq!(

@@ -56,11 +56,8 @@
 //! causes `tensor_structural_ops` parity to fail with a precise
 //! line/element diff).
 
-mod common;
-
 use assert_cmd::Command;
 use chelis_types::agreement::compare_exact_observations;
-use common::EXECUTABLE_PHASE_0_EXAMPLES;
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -699,14 +696,47 @@ fn parity_resource_target_cpu_library_only() {
 /// Catch the silent-shrinkage failure mode: if someone adds a new `.ch` file
 /// to `examples/` without wiring it into the parity harness, this test
 /// fails so the harness can't quietly stop covering the new file.
-///
-/// The roster itself is `common::EXECUTABLE_PHASE_0_EXAMPLES`, shared because
-/// the chelis#1739 example census needs the same list and chelis#1787 is what
-/// keeping a second copy of it cost. This test is the roster's guard: it is
-/// the one place that compares the names against the directory.
 #[test]
 fn parity_corpus_is_complete() {
-    let known: &[&str] = EXECUTABLE_PHASE_0_EXAMPLES;
+    let known: &[&str] = &[
+        "source-file-names.ch",
+        "checked_reshape.ch",
+        "checked_sparse_axes.ch",
+        "checked_window_geometry.ch",
+        "constraint_directed_risk_guards.ch",
+        "count_bool_axes.ch",
+        "count_bool_device_entry.ch",
+        "dict_foundation.ch",
+        "dropout_fixed_stream.ch",
+        "dropout_staged_claim.ch",
+        "explicit_normalization.ch",
+        "generic_explicit_shape.ch",
+        "generic_value_roots.ch",
+        "hash_order_determinism.ch",
+        "hello_tensor.ch",
+        "induction_bond.ch",
+        "integer_functions.ch",
+        "iter_foundation.ch",
+        "kinded_nominal_dimensions.ch",
+        "linreg.ch",
+        "list_foundation.ch",
+        "literal_extent_claim.ch",
+        "ordered_extent_claims.ch",
+        "checked_runtime_extents.ch",
+        "mnist.ch",
+        "opaque_invariants.ch",
+        "opaque_invariants_simplex.ch",
+        "rank_poly_borrow.ch",
+        "record_input_broadcast.ch",
+        "recursive_cast_targets.ch",
+        "recursive_generic.ch",
+        "resource_target_cpu.ch",
+        "scalar_string_foundation.ch",
+        "signed_seed.ch",
+        "tensor_structural_ops.ch",
+        "transformer_block.ch",
+        "vmap_relu.ch",
+    ];
     let actual: Vec<String> = discover_executable_examples()
         .iter()
         .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(String::from))
@@ -722,7 +752,7 @@ fn parity_corpus_is_complete() {
         .collect();
     assert!(
         missing.is_empty() && extra.is_empty(),
-        "parity harness corpus drifted from examples/.\n  known but missing on disk: {missing:?}\n  on disk but not wired into harness: {extra:?}\nUpdate common::EXECUTABLE_PHASE_0_EXAMPLES, then add a per-file test here for any new entries.",
+        "parity harness corpus drifted from examples/.\n  known but missing on disk: {missing:?}\n  on disk but not wired into harness: {extra:?}\nUpdate parity.rs to add a per-file test for any new entries.",
     );
 }
 
