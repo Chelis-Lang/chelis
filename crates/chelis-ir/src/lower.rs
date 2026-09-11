@@ -1823,15 +1823,8 @@ impl SubexprLoweringContext {
         expr: &Expr,
         bound: &[(String, TensorType)],
     ) -> crate::evaluation::EvaluationProfile {
-        let defs = self
-            .program_defs
-            .iter()
-            .filter(|(name, _)| !bound.iter().any(|(bound, _)| bound == *name))
-            .map(|(name, body)| (name.clone(), body.clone()))
-            .collect();
-        static_controls::profile(
+        self.evaluation_profile_with_resource_policy(
             expr,
-            &defs,
             bound,
             crate::evaluation::ResourcePolicy::Legacy,
         )

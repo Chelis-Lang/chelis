@@ -8,14 +8,6 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- **C fixed-control lowering now retains selected Resource requirements in an
-  opt-in full-spine observation.** Resource markers remain value-free and use
-  the existing checked-source target validator; Resource-only programs and the
-  evaluator keep their prior lanes. The established random-only Rust carriers,
-  wire formats, C ABI, and shell surface are unchanged. A lazy private sidecar
-  preserves mixed Resource/Random order through AD and normalization without
-  adding storage to Resource-free Random schedules.
-
 - **ReLU now retains its dedicated [05-OP-43] identity and adjoint
   (chelis#1313).** Reverse-mode AD returns the complete incoming cotangent
   only where `0 < x`, and exact positive zero at both signed zeros and NaN;
