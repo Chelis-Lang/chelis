@@ -62,6 +62,18 @@ fn messages(report: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn kinds(report: &serde_json::Value) -> Vec<String> {
+    report["errors"]
+        .as_array()
+        .map(|errors| {
+            errors
+                .iter()
+                .filter_map(|e| e["kind"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// A dim-polymorphic higher-order helper: `v` is an unresolved variable while
 /// the lambda body is inferred, and `n` is not fixed until the argument is.
 const HELPER: &str =
@@ -85,12 +97,21 @@ fn a_let_bound_deferred_result_is_checked_against_the_declaration() {
         ("copy(v)", "tensor[100, 3, f32]"),
         ("cast(v, f64)", "tensor[100, 3, f64]"),
     ] {
-        let found = messages(&check_json(&let_bound("Issue1489GenLie", call, lie)));
+        let report = check_json(&let_bound("Issue1489GenLie", call, lie));
         assert!(
-            !found.is_empty(),
+            !messages(&report).is_empty(),
             "{call}: the true result is 4 x 3, so a declared {lie} is FALSE and must \
              be rejected. A clean report means `let` generalized the suspended \
              result variable and the declaration was never checked"
+        );
+        // And for the right reason: the declared extent disagrees with the one
+        // the call produces. Any error at all would satisfy the check above,
+        // including an unrelated one this change happened to introduce.
+        assert!(
+            kinds(&report).iter().any(|k| k == "DimensionMismatch"),
+            "{call}: expected a DimensionMismatch against the declared {lie}; got \
+             {:?}",
+            messages(&report)
         );
     }
 }
@@ -184,6 +205,35 @@ fn a_rank_polymorphic_pending_result_keeps_its_rank_monomorphic() {
         "`g` is rank 2 once `v` settles, so a declared rank-3 result is FALSE; a \
          clean report means the rank variable the pending result was partly \
          unified with got generalized"
+    );
+}
+
+/// The same door through a DTYPE variable. `id_dt` is dtype-polymorphic, so
+/// applying it inside the `let`'s right-hand side unifies the pending result
+/// with `tensor[4, 3, p']` for a fresh `p'`. A tensor's precision variable is a
+/// type variable here, so it is the type-variable exclusion that keeps `p'`
+/// monomorphic -- and until this test, nothing pinned that path.
+#[test]
+fn a_dtype_polymorphic_pending_result_keeps_its_dtype_monomorphic() {
+    let source = |declared: &str| {
+        format!(
+            "module Issue1489GenDtype\n\
+             {HELPER}\
+             def id_dt[p](x: tensor[4, 3, p]) -> tensor[4, 3, p] = x\n\
+             def probe(t: tensor[4, 3, f32]) -> {declared} =\n\
+            \x20 apply_n(fn (v) -> {{ g = id_dt(copy(v))\n\
+            \x20   g }}, t)\n"
+        )
+    };
+    assert!(
+        !messages(&check_json(&source("tensor[4, 3, f64]"))).is_empty(),
+        "`g` is f32 once `v` settles, so a declared f64 result is FALSE; a clean \
+         report means the precision variable the pending result was partly \
+         unified with got generalized"
+    );
+    assert!(
+        messages(&check_json(&source("tensor[4, 3, f32]"))).is_empty(),
+        "the true f32 declaration must still be accepted"
     );
 }
 
