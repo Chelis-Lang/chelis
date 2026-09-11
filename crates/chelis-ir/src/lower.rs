@@ -13510,7 +13510,9 @@ impl<'program> LowerCtx<'program> {
                 }
                 self.reshape_targets.insert(target, axis);
                 inputs[slot] = target;
-                ty_dims[axis] = DimInfo::Named(format!("_rt_dim_{}_{axis}", actual.0), None);
+                // `ty_dims[axis]` already holds `_rt_dim_{actual}_{axis}`:
+                // every branch that pushes to `computed_targets` sets it from
+                // the same node this loop reads back out of `inputs[slot]`.
             }
             Some((op_dims, ty_dims, srcs))
         }

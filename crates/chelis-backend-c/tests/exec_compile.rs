@@ -8055,3 +8055,165 @@ int main(void) {{
         }
     }
 }
+
+/// chelis#1775 C-lane receipt: a runtime extent shared by two reshapes is
+/// declared ONCE in the emitted C and re-checked at the second carrier.
+///
+/// The PR that keyed a computed reshape extent by its producing scalar rests a
+/// safety argument on this: two reshapes sized from one scalar now carry the
+/// same dim symbol, and the emitter must declare that symbol at the first site
+/// and emit a runtime equality abort at the later one rather than redeclaring
+/// it. Nothing else in that change set reaches the C lane, so this is the
+/// fixture that proves the argument instead of asserting it.
+///
+/// REGRESSION TEST for the shared-name build (it cannot even be constructed
+/// before the repair: the two rows disagree, `concat` falls to its rank-0 host
+/// placeholder and there is no `Pad` cascade to emit).
+/// DISPOSITION LOCK for the mutation arm: the later carrier's guard is live on
+/// both sides of the repair, and this pins that it aborts rather than reading
+/// a second, silently different extent.
+#[test]
+fn shared_runtime_extent_declares_once_and_rechecks_the_later_carrier() {
+    use chelis_unord::UnordMap;
+
+    // `let m = cast(shape(x, 0), int64) in concat([reshape(x, [1, m]),
+    //  reshape(x, [1, m])], 0)` - the minimal shape of the #368 window stack.
+    let row = "(app {} (var {} reshape) (var {} x) \
+       (app {} (var {} Cons) (cast {} (lit {} 1) (t-prim {} int64)) \
+         (app {} (var {} Cons) (var {} m) (var {} Nil))))";
+    let src = format!(
+        "(let {{}} (bind {{}} m (cast {{}} (app {{}} (var {{}} shape) (var {{}} x) \
+           (cast {{}} (lit {{}} 0) (t-prim {{}} int32))) (t-prim {{}} int64))) \
+         (app {{}} (var {{}} concat) \
+           (app {{}} (var {{}} Cons) {row} (app {{}} (var {{}} Cons) {row} (var {{}} Nil))) \
+           (cast {{}} (lit {{}} 0) (t-prim {{}} int32))))"
+    );
+    let mut exprs = chelis_deep::parser::parse_str(&src).expect("deep parse");
+    assert_eq!(exprs.len(), 1);
+    let expr = exprs.pop().unwrap();
+    let mut scoped = UnordMap::new();
+    scoped.insert(
+        "x".to_string(),
+        TensorType {
+            dims: vec![DimInfo::Named("n".into(), None)],
+            precision: Prim::F32,
+        },
+    );
+    let dag =
+        chelis_ir::lower::lower_subexpr_program(&expr, scoped, UnordMap::new(), UnordMap::new());
+
+    // The premise: one shared symbol across both rows, and the differentiable
+    // Pad+Add cascade rather than the rank-0 host `concat` placeholder.
+    let axis_names: Vec<String> = dag
+        .nodes()
+        .iter()
+        .filter(|node| matches!(node.op, RiscOp::Reshape { .. }))
+        .map(|node| match &node.output_type.dims[1] {
+            DimInfo::Named(name, None) => name.clone(),
+            other => panic!("expected a generated runtime dim, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(axis_names.len(), 2, "two rows: {dag:?}");
+    assert_eq!(axis_names[0], axis_names[1], "one extent, one symbol");
+    assert_eq!(
+        dag.nodes()
+            .iter()
+            .filter(|node| matches!(node.op, RiscOp::Pad { .. }))
+            .count(),
+        2,
+        "the concat must be the Pad cascade: {dag:?}"
+    );
+
+    let generated = codegen(&dag, "shared_extent").expect("shared-extent DAG must emit C");
+
+    // The symbol is declared once. Every later mention is a use or a guard.
+    let declarations = generated
+        .c_source
+        .lines()
+        .filter(|line| line.contains(&format!("int64_t {};", axis_names[0])))
+        .count()
+        + generated
+            .c_source
+            .lines()
+            .filter(|line| line.contains(&format!("int64_t {} =", axis_names[0])))
+            .count();
+    assert_eq!(
+        declarations, 1,
+        "the shared runtime extent is declared exactly once:\n{}",
+        generated.c_source
+    );
+
+    // 1.0f as its exact IEEE-754 binary32 image; the runtime takes scalar
+    // bits, never an untagged double ([04-NUM-11]).
+    let harness = r#"
+#include "chelis_runtime.h"
+void shared_extent(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {
+    int64_t shape[] = {4};
+    chelis_tensor *x = chelis_alloc(1, shape, CHELIS_DTYPE_F32);
+    chelis_tensor_write *guard = chelis_tensor_begin_write(x);
+    chelis_fill_scalar(guard, chelis_scalar_from_bits(CHELIS_DTYPE_F32, UINT64_C(0x3F800000)));
+    chelis_tensor_end_write(guard);
+    chelis_tensor *inputs[] = {x}, *outputs[] = {NULL};
+    shared_extent(inputs, 1, outputs, 1);
+    if (chelis_tensor_rank(outputs[0]) != 2) return 4;
+    if (chelis_tensor_shape(outputs[0], 0) != 2) return 5;
+    if (chelis_tensor_shape(outputs[0], 1) != 4) return 6;
+    chelis_read_view out = chelis_tensor_read_view(outputs[0]);
+    if (out.count != 8) return 7;
+    for (int64_t i = 0; i < out.count; ++i)
+        if (((const float *)out.data)[i] != 1.0f) return 8;
+    chelis_tensor_release(outputs[0]); chelis_tensor_release(x);
+    puts("SHARED EXTENT PASS"); return 0;
+}
+"#;
+
+    let (ok, text) =
+        compile_and_run_kernel_capturing("shared_runtime_extent", &generated.c_source, harness);
+    assert!(ok, "shared-extent kernel must build, link and run: {text}");
+    assert!(
+        text.contains("SHARED EXTENT PASS"),
+        "the stack must materialize as [2, 4]: {text}"
+    );
+
+    // The later carrier's guard is LIVE, not decorative. Make the second
+    // reshape read a different extent than the declared symbol and the binary
+    // must trap instead of sizing an axis from a second, unequal value. The
+    // guard's own `fprintf` names the node, so find its read by that line and
+    // perturb the read the comparison performs.
+    let guard_line = generated
+        .c_source
+        .lines()
+        .filter(|line| line.contains(&format!("extent `{}`: claimed", axis_names[0])))
+        .nth(1)
+        .expect("the later carrier carries its own equality guard")
+        .to_owned();
+    let carrier = guard_line
+        .split("(long long)(")
+        .nth(2)
+        .and_then(|rest| rest.strip_suffix("));"))
+        .expect("the guard prints the carrier read it compared")
+        .to_owned();
+    assert!(
+        carrier.contains("_data)[0]"),
+        "expected a carrier read, got {carrier}"
+    );
+    let comparison = format!("if (({carrier}) != {})", axis_names[0]);
+    assert!(
+        generated.c_source.contains(&comparison),
+        "the later guard compares the carrier against the declared symbol:\n{}",
+        generated.c_source
+    );
+    let mutated = generated.c_source.replacen(
+        &comparison,
+        &format!("if ((({carrier}) + 1) != {})", axis_names[0]),
+        1,
+    );
+    let (ok, text) =
+        compile_and_run_kernel_capturing("shared_runtime_extent_trap", &mutated, harness);
+    assert!(!ok, "a disagreeing later carrier must abort: {text}");
+    assert!(
+        text.contains("numeric trap: domain in reshape at int64"),
+        "the abort must be the typed reshape domain trap: {text}"
+    );
+}
