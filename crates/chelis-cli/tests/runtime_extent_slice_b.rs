@@ -5384,8 +5384,11 @@ fn a_bare_runtime_scalar_expand_size_is_still_sourceless() {
 /// carrier with `stride` and `slice` bounds, so it reports through that
 /// carrier's message, which says "movement bound" about an `insert` size and is
 /// not [04-NUM-9]'s `numeric trap` form. Newly reachable through chelis#1379's
-/// admission and tracked separately; repairing it here would change text shared
-/// with rows this change does not own.
+/// admission, because the only node-valued sizes before it came from extent
+/// witnesses, which carry real axis extents and are never negative. Tracked by
+/// chelis#1802; repairing it here would change text shared with rows this
+/// change does not own, so the wording is locked below and that issue has to
+/// update the lock.
 ///
 /// EVIDENTIARY STATUS: disposition lock on the rendering, regression test on
 /// the trap. On `fc5b6aa99` the program was refused at lowering, so no lane
