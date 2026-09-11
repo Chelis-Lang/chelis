@@ -16765,7 +16765,9 @@ def bad[b](box: Box[b]) -> bool =
             .stack_size(64 * 1024 * 1024)
             .spawn(move || {
                 let checked = surf_check(&issue_1829_fanout_source(depth));
-                let names = (0..=depth).map(|level| format!("f{level}")).collect::<Vec<_>>();
+                let names = (0..=depth)
+                    .map(|level| format!("f{level}"))
+                    .collect::<Vec<_>>();
                 reset_host_work_profile();
                 reset_host_summary_probe_builds();
                 {
@@ -16862,10 +16864,14 @@ def bad[b](box: Box[b]) -> bool =
     #[test]
     fn issue_1829_entering_scope_evicts_only_its_own_program_address() {
         let outer = surf_check("module Demo.Held\n\ndef held_fn(x: int64) -> int64 = x\n");
-        let entering = surf_check("module Demo.Entering\n\ndef entering_fn(x: int64) -> int64 = x\n");
+        let entering =
+            surf_check("module Demo.Entering\n\ndef entering_fn(x: int64) -> int64 = x\n");
         let outer_key = &outer as *const CheckedProgram as usize;
         let entering_key = &entering as *const CheckedProgram as usize;
-        assert_ne!(outer_key, entering_key, "two live programs have two addresses");
+        assert_ne!(
+            outer_key, entering_key,
+            "two live programs have two addresses"
+        );
 
         let outer_scope = begin_host_lowering_cache_scope(&outer);
         cached_program_defs(&outer);
