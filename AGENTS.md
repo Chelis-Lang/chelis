@@ -1012,14 +1012,14 @@ lease.
 `scripts/regen_all.py` is the regeneration entry point on its own as well. Default
 tiers 0 and 1 write (tier 1 is the std bundle and needs cargo); `--check` reports every
 stale artifact; `--full` adds tier 2, the capacity census and the
-runtime-representation inventory, and the executed Python-binding graph-identity
-writer. That writer may update only `graph_identity` fields after the complete current
-binding census proves the existing rows, flags, authorities, and contracts; surface or
-authority drift fails instead of being regenerated. Full regeneration exits 2 naming
-the manual action when a census row lands with citation `TODO` or the regenerated
-inventory's digest differs from the reviewed `FREEZE_SHA256`. It never writes a frozen
-digest, the loud-unsupported `BASELINE`, the wire census JSON, the dtype C header, or
-the tree-sitter parsers.
+runtime-representation inventory. The Python-binding baseline stores only stable
+reviewed rows, flags, authorities, and contracts; current graph identities are
+execution evidence from the dedicated binding acceptance test and are never persisted
+or regenerated. Full regeneration exits 2 naming the manual action when a census row
+lands with citation `TODO` or the regenerated inventory's digest differs from the
+reviewed `FREEZE_SHA256`. It never writes a frozen digest, the loud-unsupported
+`BASELINE`, the binding or wire census JSON, the dtype C header, or the tree-sitter
+parsers.
 
 `--fast`, `--local`, and the bare full gate run a preflight before the first command:
 the environment checks (`PYO3_PYTHON`, `CARGO_TARGET_DIR` containment, an explicit

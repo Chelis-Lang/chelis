@@ -171,8 +171,6 @@ class LegManifestTests(unittest.TestCase):
             [
                 "cargo nextest run -p chelis-cli --test capacity_census_tripwire",
                 f"{PYTHON} scripts/runtime_representation_oracle.py --phase 0 --regenerate",
-                "cargo nextest run -p chelis-python --test capacity_census_bindings "
-                "-E test(=registered_pyfunctions_match_the_reviewed_rustdoc_signatures)",
                 "cargo nextest run -p chelis-runtime --test runtime_dtype_generated_header",
                 "cargo nextest run -p chelis-compiler-api --test capacity_census_wire",
             ],
@@ -297,33 +295,6 @@ class CensusEnvTests(unittest.TestCase):
             if "capacity_census_tripwire" not in argv:
                 self.assertNotIn(regen_all.CENSUS_WRITE_ENV, env)
 
-    def test_binding_census_write_leg_carries_its_env_and_check_does_not(self):
-        with tempfile.TemporaryDirectory() as td:
-            root = _fake_repo(Path(td))
-            writer = _Recorder()
-            _run(["--full", "--tier", "2"], repo_root=root, recorder=writer)
-            checker = _Recorder(corpus=root / regen_all.OPAQUE_CORPUS_DIR)
-            _run(["--check", "--full", "--tier", "2"], repo_root=root, recorder=checker)
-        write_env = [
-            env
-            for argv, env in writer.calls
-            if "capacity_census_bindings" in argv
-        ]
-        check_env = [
-            env
-            for argv, env in checker.calls
-            if "capacity_census_bindings" in argv
-        ]
-        self.assertEqual(len(write_env), 1)
-        self.assertEqual(
-            write_env[0].get(regen_all.BINDING_CENSUS_WRITE_ENV), "1"
-        )
-        self.assertEqual(len(check_env), 1)
-        self.assertNotIn(regen_all.BINDING_CENSUS_WRITE_ENV, check_env[0])
-        for argv, env in writer.calls:
-            if "capacity_census_bindings" not in argv:
-                self.assertNotIn(regen_all.BINDING_CENSUS_WRITE_ENV, env)
-
     def test_check_mode_child_env_never_carries_a_leg_env_key(self):
         # An ambient leftover from a manual census write must not turn the
         # check-mode tripwire into a writer that then compares against what
@@ -331,7 +302,6 @@ class CensusEnvTests(unittest.TestCase):
         ambient = {
             "PATH": "/usr/bin",
             regen_all.CENSUS_WRITE_ENV: "1",
-            regen_all.BINDING_CENSUS_WRITE_ENV: "1",
             "KEEP": "yes",
         }
         with tempfile.TemporaryDirectory() as td:
@@ -342,14 +312,12 @@ class CensusEnvTests(unittest.TestCase):
         self.assertGreaterEqual(len(checker.calls), 8)
         for argv, env in checker.calls:
             self.assertNotIn(regen_all.CENSUS_WRITE_ENV, env, argv)
-            self.assertNotIn(regen_all.BINDING_CENSUS_WRITE_ENV, env, argv)
             self.assertEqual(env.get("KEEP"), "yes")
 
     def test_write_mode_scrubs_the_seam_from_every_leg_but_its_owner(self):
         ambient = {
             "PATH": "/usr/bin",
             regen_all.CENSUS_WRITE_ENV: "1",
-            regen_all.BINDING_CENSUS_WRITE_ENV: "1",
         }
         with tempfile.TemporaryDirectory() as td:
             root = _fake_repo(Path(td))
@@ -359,32 +327,19 @@ class CensusEnvTests(unittest.TestCase):
         census_carriers = [
             argv for argv, env in writer.calls if regen_all.CENSUS_WRITE_ENV in env
         ]
-        binding_carriers = [
-            argv
-            for argv, env in writer.calls
-            if regen_all.BINDING_CENSUS_WRITE_ENV in env
-        ]
         self.assertEqual(len(census_carriers), 1)
         self.assertIn("capacity_census_tripwire", census_carriers[0])
-        self.assertEqual(len(binding_carriers), 1)
-        self.assertIn("capacity_census_bindings", binding_carriers[0])
 
     def test_scrub_environment_is_keyed_on_every_leg_declaration(self):
         keys = regen_all.leg_env_keys(regen_all.regen_legs(PYTHON))
         self.assertEqual(
             keys,
-            frozenset(
-                {
-                    regen_all.CENSUS_WRITE_ENV,
-                    regen_all.BINDING_CENSUS_WRITE_ENV,
-                }
-            ),
+            frozenset({regen_all.CENSUS_WRITE_ENV}),
         )
         scrubbed = regen_all.scrub_environment(
             {
                 "A": "1",
                 regen_all.CENSUS_WRITE_ENV: "1",
-                regen_all.BINDING_CENSUS_WRITE_ENV: "1",
             },
             keys,
         )
@@ -399,11 +354,7 @@ class CensusEnvTests(unittest.TestCase):
             "capacity-census (cargo): CHELIS_CAPACITY_CENSUS_WRITE=1 cargo nextest run",
             output,
         )
-        self.assertIn(
-            "capacity-census-bindings (cargo): "
-            "CHELIS_CAPACITY_CENSUS_BINDINGS_WRITE=1 cargo nextest run",
-            output,
-        )
+        self.assertNotIn("capacity-census-bindings", output)
 
 
 class ManualActionTests(unittest.TestCase):
@@ -510,12 +461,12 @@ class LaunchFailureTests(unittest.TestCase):
             code, output = _run(["--check", "--full"], repo_root=root, recorder=recorder)
         self.assertEqual(code, 1)
         self.assertIn("stale: could not launch cargo", output)
-        # Every selected leg still ran: the Python legs passed, the four
+        # Every selected leg still ran: the Python legs passed, the three
         # cargo legs are stale for the launch reason.
         self.assertTrue(
             output.rstrip().endswith(
-                "REGEN ALL: STALE (capacity-census, capacity-census-bindings, "
-                "dtype-c-header, capacity-census-wire)"
+                "REGEN ALL: STALE (capacity-census, dtype-c-header, "
+                "capacity-census-wire)"
             ),
             output,
         )
@@ -642,6 +593,7 @@ class NeverWritesFrozenArtifactsTests(unittest.TestCase):
         "runtime_extent_oracle_baseline",
         "copy_drop_fixture_fitness_baseline",
         "test_timing_baseline",
+        "capacity_census_bindings.json",
         "capacity_census_wire.json",
         "chelis_runtime_dtype.h",
         "tree-sitter generate",
@@ -677,6 +629,7 @@ class NeverWritesFrozenArtifactsTests(unittest.TestCase):
             "runtime_extent_oracle_baseline.json",
             "copy_drop_fixture_fitness_baseline.json",
             "test_timing_baseline.json",
+            "capacity_census_bindings.json",
             "capacity_census_wire.json",
             "chelis_runtime_dtype.h",
             "grammars/",

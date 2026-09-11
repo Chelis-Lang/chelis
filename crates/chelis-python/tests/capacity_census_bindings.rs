@@ -6,7 +6,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::{env, io::Write};
 
 use pyo3::prelude::*;
 use pyo3::types::{PyCFunction, PyModule, PyType};
@@ -27,7 +26,6 @@ use capacity_census_authority::{AuthorityRegistries, StaticSurfaceDescriptor, Su
 use capacity_census_compiler_json::{DiscoveredRow, VerifiedBindingCensus};
 
 const BINDING_CENSUS_FAMILY: &str = "pyo3-binding";
-const BINDING_CENSUS_WRITE_ENV: &str = "CHELIS_CAPACITY_CENSUS_BINDINGS_WRITE";
 
 const NONNUMERIC_BINDINGS: &[StaticSurfaceDescriptor] = &[
     StaticSurfaceDescriptor::new(
@@ -93,14 +91,14 @@ struct SurfaceRow {
     flags: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Baseline {
     version: u32,
     rows: Vec<BaselineRow>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BaselineRow {
     flags: Vec<String>,
@@ -110,8 +108,6 @@ struct BaselineRow {
     citation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     authority: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    graph_identity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     contract: Option<String>,
 }
@@ -382,92 +378,6 @@ fn baseline_bytes() -> Vec<u8> {
         .expect("read reviewed binding census baseline")
 }
 
-fn valid_graph_identity(identity: &str) -> bool {
-    identity.len() == 64
-        && identity
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-fn refresh_binding_baseline_graphs(
-    bytes: &[u8],
-    current: &[DiscoveredRow],
-) -> Result<Vec<u8>, String> {
-    if let Some(problem) = baseline_problem(bytes) {
-        return Err(format!(
-            "refusing to rewrite an invalid binding baseline: {problem}"
-        ));
-    }
-    let mut baseline: Baseline = serde_json::from_slice(bytes)
-        .map_err(|error| format!("invalid binding baseline: {error}"))?;
-    if current.len() != baseline.rows.len() {
-        return Err("binding writer cannot add or remove baseline rows".into());
-    }
-    let mut seen = std::collections::BTreeSet::new();
-    for discovered in current {
-        let identity = discovered
-            .identity
-            .as_deref()
-            .filter(|identity| valid_graph_identity(identity))
-            .ok_or_else(|| format!("{} lacks a current graph identity", discovered.id))?;
-        if discovered.problem.is_some() {
-            return Err(format!("{} has an unresolved current graph", discovered.id));
-        }
-        let Some(expected) = baseline
-            .rows
-            .iter_mut()
-            .find(|row| row.kind == discovered.kind && row.id == discovered.id)
-        else {
-            return Err(format!(
-                "binding writer cannot classify a changed surface: {}",
-                discovered.id
-            ));
-        };
-        if !seen.insert((discovered.kind.as_str(), discovered.id.as_str())) {
-            return Err(format!("duplicate discovered binding {}", discovered.id));
-        }
-        let expected_authority = match expected.authority.as_deref() {
-            Some("nonnumeric") => None,
-            _ => expected.authority.as_deref(),
-        };
-        if discovered.flags != expected.flags
-            || discovered.authority.as_deref() != expected_authority
-            || discovered.contract != expected.contract
-        {
-            return Err(format!(
-                "binding writer cannot change flags or authority: {}",
-                discovered.id
-            ));
-        }
-        expected.graph_identity = Some(identity.to_string());
-    }
-    if seen.len() != baseline.rows.len() {
-        return Err("binding writer did not cover every reviewed row".into());
-    }
-    let mut rendered = serde_json::to_vec_pretty(&baseline).map_err(|error| error.to_string())?;
-    rendered.push(b'\n');
-    if let Some(problem) = baseline_problem(&rendered) {
-        return Err(format!("rewritten binding baseline is invalid: {problem}"));
-    }
-    Ok(rendered)
-}
-
-fn write_binding_baseline(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| "binding baseline has no parent directory".to_string())?;
-    let mut temporary =
-        tempfile::NamedTempFile::new_in(parent).map_err(|error| error.to_string())?;
-    temporary
-        .write_all(bytes)
-        .and_then(|()| temporary.as_file_mut().sync_all())
-        .map_err(|error| error.to_string())?;
-    temporary
-        .persist(path)
-        .map_err(|error| error.error.to_string())?;
-    Ok(())
-}
-
 fn current_authority_problem(
     current: &[SurfaceRow],
     execution: Option<&VerifiedBindingCensus>,
@@ -521,14 +431,8 @@ fn baseline_problem(bytes: &[u8]) -> Option<String> {
                 row.authority.as_deref(),
                 Some("nonnumeric" | "TaggedTransport" | "NumericOperation")
             )
-            || !row
-                .graph_identity
-                .as_ref()
-                .is_some_and(|id| id.len() == 64 && id.bytes().all(|c| c.is_ascii_hexdigit()))
         {
-            return Some(
-                "final binding requires only its authority and current graph identity".into(),
-            );
+            return Some("final binding requires only stable reviewed authority".into());
         }
         match row.authority.as_deref() {
             Some("TaggedTransport") => {
@@ -665,9 +569,6 @@ fn discovered_problem(
         if surface.flags != expected.flags {
             return Some(format!("changed binding capacity {}", row.id));
         }
-        if row.identity != expected.graph_identity {
-            return Some(format!("changed reachable binding graph {}", row.id));
-        }
         if matches!(
             expected.authority.as_deref(),
             Some("TaggedTransport" | "NumericOperation")
@@ -685,29 +586,14 @@ fn discovered_problem(
 
 #[test]
 fn registered_pyfunctions_match_the_reviewed_rustdoc_signatures() {
-    // The baseline cannot issue authority, so collect the sealed current
-    // execution witness before comparing any persisted identity.
+    // The baseline cannot issue authority or persist execution-derived graph
+    // hashes, so collect the sealed current witness before comparing the
+    // stable reviewed surface and authority rows.
     let execution =
         run_typed_enumerator(&registered_surface(false)).unwrap_or_else(|error| panic!("{error}"));
-    let path = workspace_root().join("spec/design/capacity_census_bindings.json");
-    let mut bytes = baseline_bytes();
+    let bytes = baseline_bytes();
     assert_eq!(baseline_problem(&bytes), None);
     let current = execution.rows();
-    match env::var(BINDING_CENSUS_WRITE_ENV) {
-        Ok(value) => {
-            assert_eq!(
-                value, "1",
-                "{BINDING_CENSUS_WRITE_ENV} accepts only the exact value 1"
-            );
-            bytes = refresh_binding_baseline_graphs(&bytes, current)
-                .unwrap_or_else(|problem| panic!("{problem}"));
-            write_binding_baseline(&path, &bytes)
-                .unwrap_or_else(|problem| panic!("cannot write {}: {problem}", path.display()));
-            println!("refreshed executed graph identities in {}", path.display());
-        }
-        Err(env::VarError::NotPresent) => {}
-        Err(error) => panic!("{BINDING_CENSUS_WRITE_ENV} is invalid: {error}"),
-    }
     let baseline: Baseline = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(
         discovered_problem(current, &baseline, Some(&execution)),
@@ -886,7 +772,7 @@ fn final_bindings_require_successful_current_exposure() {
                 id: row.id.clone(),
                 flags: row.flags.clone(),
                 legacy_flags: row.flags.clone(),
-                identity: row.graph_identity.clone(),
+                identity: Some("a".repeat(64)),
                 authority: row.authority.clone(),
                 contract: row.contract.clone(),
                 problem: None,
@@ -911,11 +797,20 @@ fn final_bindings_require_successful_current_exposure() {
         discovered_problem(&structural_current, &structural_baseline, None),
         None
     );
+    let mut changed_graphs = structural_current.clone();
+    for row in &mut changed_graphs {
+        row.identity = Some("f".repeat(64));
+    }
+    assert_eq!(
+        discovered_problem(&changed_graphs, &structural_baseline, None),
+        None,
+        "execution-derived graph hashes are not persisted comparison data"
+    );
     assert!(
         discovered_problem(&make_current(), &baseline, None).is_some(),
         "baseline rows cannot issue numeric binding authority"
     );
-    for mutation in ["unresolved", "numeric", "stale", "missing", "duplicate"] {
+    for mutation in ["unresolved", "numeric", "missing", "duplicate"] {
         let mut current = make_current();
         let row = current
             .iter_mut()
@@ -924,7 +819,6 @@ fn final_bindings_require_successful_current_exposure() {
         match mutation {
             "unresolved" => row.problem = Some("missing defining artifact".into()),
             "numeric" => row.flags = vec!["float-carrier".into(), "numeric-return".into()],
-            "stale" => row.identity = Some("f".repeat(64)),
             "missing" => row.identity = None,
             "duplicate" => {
                 let duplicate = current.remove(0);
@@ -962,84 +856,4 @@ fn a_registered_pyfunction_with_a_raw_dtype_parameter_is_rejected() {
         String::from_utf8_lossy(&mutation.stdout),
         String::from_utf8_lossy(&mutation.stderr)
     );
-}
-
-fn writer_fixture_rows() -> Vec<DiscoveredRow> {
-    let baseline: Baseline = serde_json::from_slice(&baseline_bytes()).unwrap();
-    baseline
-        .rows
-        .into_iter()
-        .map(|row| DiscoveredRow {
-            kind: row.kind,
-            id: row.id,
-            flags: row.flags.clone(),
-            legacy_flags: row.flags,
-            identity: row.graph_identity,
-            problem: None,
-            implementation: "executed fixture".into(),
-            authority: match row.authority.as_deref() {
-                Some("nonnumeric") => None,
-                _ => row.authority,
-            },
-            contract: row.contract,
-        })
-        .collect()
-}
-
-#[test]
-fn binding_baseline_writer_changes_only_executed_graph_identities() {
-    let before = baseline_bytes();
-    let mut rows = writer_fixture_rows();
-    rows[0].identity = Some("b".repeat(64));
-    let after = refresh_binding_baseline_graphs(&before, &rows).unwrap();
-    assert_eq!(baseline_problem(&after), None);
-
-    let mut before_value: serde_json::Value = serde_json::from_slice(&before).unwrap();
-    let mut after_value: serde_json::Value = serde_json::from_slice(&after).unwrap();
-    let before_rows = before_value["rows"].as_array_mut().unwrap();
-    let after_rows = after_value["rows"].as_array_mut().unwrap();
-    for (before_row, after_row) in before_rows.iter_mut().zip(after_rows.iter_mut()) {
-        before_row.as_object_mut().unwrap().remove("graph_identity");
-        after_row.as_object_mut().unwrap().remove("graph_identity");
-    }
-    assert_eq!(before_value, after_value);
-    assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&after).unwrap()["rows"][0]["graph_identity"],
-        "b".repeat(64)
-    );
-    assert_eq!(
-        refresh_binding_baseline_graphs(&after, &rows).unwrap(),
-        after,
-        "a current executed graph must be byte-idempotent"
-    );
-}
-
-#[test]
-fn binding_baseline_writer_rejects_surface_and_authority_drift() {
-    let before = baseline_bytes();
-    for mutation in [
-        "missing",
-        "identity",
-        "flags",
-        "authority",
-        "contract",
-        "problem",
-    ] {
-        let mut rows = writer_fixture_rows();
-        match mutation {
-            "missing" => {
-                rows.pop();
-            }
-            "identity" => rows[0].id.push_str(" changed"),
-            "flags" => rows[0].flags.push("numeric-param".into()),
-            "authority" => rows[0].authority = Some("NumericOperation".into()),
-            "contract" => rows[0].contract = Some("[05-OP-999]".into()),
-            "problem" => rows[0].problem = Some("unresolved current graph".into()),
-            _ => unreachable!(),
-        }
-        assert!(
-            refresh_binding_baseline_graphs(&before, &rows).is_err(),
-            "{mutation}"
-        );
-    }
 }
