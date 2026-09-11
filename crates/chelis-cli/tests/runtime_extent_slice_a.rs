@@ -481,6 +481,168 @@ fn a_runtime_extent_nullary_root_executes_identically_on_both_lanes() {
     );
 }
 
+/// chelis#1397 regression test for the two composite root topologies, and the
+/// executable form of this change's "no unsizable runtime-extent output"
+/// claim. `emit_main` materializes no static buffer for a manifest root: a bare
+/// runtime-extent root is a `chelis_tensor*` the runtime sizes, and a tuple or
+/// ADT root is read back through `chelis_value` and the per-tag printers. Both
+/// topologies therefore carry a runtime extent without a sizing decision, and
+/// both were silent on the base sha.
+///
+/// Evidentiary status: every assertion here is a regression assertion. On the
+/// base sha both programs evaluated to nothing and emitted no `int main(`.
+///
+/// The ADT row asserts each lane's exact line separately rather than asserting
+/// the two are equal, because the lanes disagree on the *label* of a top-level
+/// record-field root: eval prints the bare field name and C qualifies it with
+/// the binding. That split is chelis#1359, it predates this change, and it is
+/// not caused by the runtime extent - a concrete `tensor[2, f32]` field splits
+/// the same way. The payload, which is what a runtime extent decides, agrees.
+#[test]
+fn runtime_extent_tuple_and_record_roots_size_their_outputs_on_both_lanes() {
+    let shrink_to_last_two =
+        "def g(x: tensor[n, f32]) -> tensor[m, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n";
+
+    let tuple_source = format!(
+        "{shrink_to_last_two}def main() = (g(to_tensor([1.0f32, 2.0f32, 3.0f32])), 7.0f32)\n"
+    );
+    let (evaluated, compiled) = run_both_lanes(&tuple_source, "tuple_root");
+    assert_eq!(
+        evaluated, "main.0 = tensor(shape=[2], data=[2.0, 3.0])\nmain.1 = 7.0",
+        "a tuple root sizes its runtime-extent field from the realized extent"
+    );
+    assert_eq!(
+        compiled, evaluated,
+        "both lanes render a runtime-extent tuple root identically"
+    );
+
+    let record_source = format!(
+        "type Out =\n  | Out {{ t: tensor[m, f32] }}\n\
+         {shrink_to_last_two}\
+         def main() = Out {{ t: g(to_tensor([1.0f32, 2.0f32, 3.0f32])) }}\n"
+    );
+    let (evaluated, compiled) = run_both_lanes(&record_source, "record_root");
+    assert_eq!(
+        evaluated, "t = tensor(shape=[2], data=[2.0, 3.0])",
+        "eval renders the record field root under its bare label (chelis#1359)"
+    );
+    assert_eq!(
+        compiled, "main.t = tensor(shape=[2], data=[2.0, 3.0])",
+        "C qualifies the same field root with its binding (chelis#1359)"
+    );
+}
+
+/// Disposition lock for chelis#1801, not a regression test: this is the current
+/// behaviour on both lanes and it was the same before this change.
+///
+/// A nullary root whose result keeps an unresolved dim *variable* is still
+/// dropped. `h`'s claim `k` unifies with `g`'s runtime extent and the call site
+/// generalizes, so `main` checks as `() -> tensor[d0, f32]` even though it is
+/// applied to concrete operands. `type_expr_has_unresolved_observation_parameter`
+/// refuses that root through its `DeepTag::DVar` arm, which this change keeps:
+/// an uninstantiated variable has no ABI, and the repair belongs in the checker
+/// that left the variable free. The correct output would be
+/// `main = tensor(shape=[2], data=[4.0, 6.0])`; when chelis#1801 is fixed this
+/// test flips and is the receipt for it.
+#[test]
+fn a_root_that_keeps_a_dim_variable_is_still_dropped_on_both_lanes() {
+    let source = "def g(x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
+        def h(y: tensor[k, f32]) -> tensor[k, f32] = add(y, y)\n\
+        def main() = h(g(to_tensor([1.0f32, 2.0f32, 3.0f32])))\n";
+    let report = check(source);
+    assert_eq!(report["score"].as_f64(), Some(1.0), "{report}");
+    assert!(errors(&report).is_empty(), "{report}");
+
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("dim_variable_root.ch");
+    fs::write(&path, source).expect("fixture");
+
+    let eval = eval_file(&path);
+    assert!(
+        eval.status.success(),
+        "{}",
+        String::from_utf8_lossy(&eval.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&eval.stdout).trim_end(),
+        "",
+        "chelis#1801: the dim-variable root renders nothing"
+    );
+    assert!(
+        String::from_utf8_lossy(&eval.stderr)
+            .contains("input contains only def declarations; nothing to evaluate"),
+        "{}",
+        String::from_utf8_lossy(&eval.stderr)
+    );
+
+    let out_dir = dir.path().join("out");
+    let build = build_c(&path, &out_dir);
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let emitted_path = out_dir.join("dim_variable_root.c");
+    let emitted = fs::read_to_string(&emitted_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", emitted_path.display()));
+    assert!(
+        !emitted.contains("int main("),
+        "chelis#1801: the dim-variable root emits no C entry:\n{emitted}"
+    );
+}
+
+/// Check, evaluate, build and run one source on both lanes, returning the
+/// trimmed stdout of each. Every stage must succeed; a lane that fails panics
+/// with its own diagnostic rather than returning an empty string.
+fn run_both_lanes(source: &str, stem: &str) -> (String, String) {
+    let report = check(source);
+    assert_eq!(report["score"].as_f64(), Some(1.0), "{stem}: {report}");
+    assert!(errors(&report).is_empty(), "{stem}: {report}");
+
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join(format!("{stem}.ch"));
+    fs::write(&path, source).expect("fixture");
+
+    let eval = eval_file(&path);
+    assert!(
+        eval.status.success(),
+        "{stem} eval: {}",
+        String::from_utf8_lossy(&eval.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&eval.stderr).contains("nothing to evaluate"),
+        "{stem}: a runtime-extent root is not a bare declaration: {}",
+        String::from_utf8_lossy(&eval.stderr)
+    );
+
+    let out_dir = dir.path().join("out");
+    let build = build_c(&path, &out_dir);
+    assert!(
+        build.status.success(),
+        "{stem} build: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let emitted_path = out_dir.join(format!("{stem}.c"));
+    let emitted = fs::read_to_string(&emitted_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", emitted_path.display()));
+    assert!(
+        emitted.contains("int main("),
+        "{stem}: a runtime-extent root owes a C entry point:\n{emitted}"
+    );
+    let compiled = compile_and_run_c(&out_dir, stem);
+    assert!(
+        compiled.status.success(),
+        "{stem} run: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    (
+        String::from_utf8_lossy(&eval.stdout).trim_end().to_string(),
+        String::from_utf8_lossy(&compiled.stdout)
+            .trim_end()
+            .to_string(),
+    )
+}
+
 /// Negative parity for the row above, and a chelis#1397 regression test in its
 /// own right. Executing a runtime-extent root must not execute one whose claim
 /// is refuted: `bad` claims one extent `k` for both parameters and receives a
