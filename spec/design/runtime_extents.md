@@ -57,10 +57,15 @@ inlining, graph rewrites and cache transport. Their bounded oracle retains
 independent declaration, value and failure assertions. Remaining failure boundaries:
 
 - #1397: the declared result of a runtime-bound movement is retained and
-  guarded at the outermost activation. A parameter-bound named result consumed
-  inside another def's body is not (#1800), a general wildcard-returning root
-  can still disappear from eval and from entry emission, and #1378's public
-  vmap witness remains masked by that root failure.
+  guarded at the outermost activation, and a root whose result type carries a
+  runtime extent executes on both lanes. A parameter-bound named result
+  consumed inside another def's body is still not retained (#1800), and the
+  unread-signature-witness half is residual under #1798. A root that keeps an
+  unresolved dim VARIABLE rather than a runtime extent is still dropped from
+  both lanes; that is a different arm of the same predicate and is #1801, whose
+  cause is the checker leaving the variable free at a concretely applied root.
+  #1378's public vmap witness is no longer masked and executes with its exact
+  value on both lanes.
 - #1266/#569: the provenance walk still rejects equivalent field/pipe forms.
 - #1379: local op-computed extents have guard sites, and `shrink` is the
   admitted owner. What remains is acceptance: the lowering still rejects an
@@ -676,15 +681,17 @@ command currently fails because `SLICE_PHASES` still requires unregistered
 passing phase or erase outstanding B rows. `--phase a` and `--phase b`
 retain their names and row-transition checks.
 
-`--phase a` does not reach its row report on current `main`. Its
-`symbolic_window` target runs
+`--phase a` reaches its row report and PASSes. Its `symbolic_window` target runs
 `issue_368_runtime_symbolic_window_grad_is_half_everywhere`, whose `grad`
-lowering fails backward-DAG verification; chelis#1775 owns that regression and
-names chelis#1693 as its first failing commit. Every other phase-A and phase-B
-target passes with no receipt drift, so that one cell is what stands between
-the oracle and a phase-A row report. The nightly `runtime-extent-oracle` job
-requires `--phase a` to PASS and is therefore red until chelis#1775 lands,
-deliberately: the red is the signal that the row is still short.
+lowering failed backward-DAG verification until chelis#1775 landed in #1780.
+The nightly `runtime-extent-oracle` job requires `--phase a` to PASS, which it
+now does; a red there is again the signal that a row is short rather than a
+known outstanding regression.
+
+Phase A's `vmap.shared_shape_bound.concrete_c_emit` row left `PHASE_A_DEFERRED`
+with chelis#1397's wildcard-root repair: the guard it was waiting on is that
+repair, so the row exits at `EXECUTES` instead of repeating its start state.
+`PHASE_A_DEFERRED` retains one entry, `expand.input_axis.metal_device`.
 
 Phase A's wire capacity leg executes the Python binding facade through the
 interpreter `PYO3_PYTHON` names, falling back to the checkout's `.venv`, and
@@ -740,9 +747,18 @@ routes, and satisfied/refuted runtime unit operands through export/binding
 routes. They assert exact signatures where applicable, shapes, values and
 failure context. Phase B registers this execution receipt as
 `expand.positional.replacement.shape_size.eval_c`. The broader 55-case
-baseline changes only the two #1619 C results and #1266's record-alias C
-result: all three now execute with their expected values. The record-alias
-Eval failure and direct-field failures remain; #1266 is still open.
+baseline changed at #1619 only in the two #1619 C results and #1266's
+record-alias C result: all three now execute with their expected values. The
+record-alias Eval failure and direct-field failures remain; #1266 is still open.
+
+chelis#1397's wildcard-root repair moves two further cells of that 55, taking
+the unmet count from 10 to 8. `wildcard.root` and `vmap.shape` both execute on
+Eval and C with their contract values, `main = tensor(shape=[2], data=[2.0,
+3.0])` and `main = tensor(shape=[2, 2], data=[2.0, 3.0, 5.0, 6.0])`. The
+remaining eight are `polymorphic.named.root.mismatch.{eval,c}` (#1374),
+`polymorphic.foreign.root.mismatch.{eval,c}` (#1376), and
+`record.direct.{check,eval,c}` with `record.alias.eval` (#1266). #1397's own
+`shrink.*` declaration cells are met.
 
 The merged B2b-0b numeric kernel repair compares literal and resolved named
 claims against independent nonnegative runtime sizes at live `Expand` and
@@ -857,7 +873,7 @@ All are Slice B work under #1277 unless expressly separated.
 |---|---|---|
 | B2b-0b: remaining local guards | merged B2r/S2b and #1658's broadcast preparation repair | guard literal and resolved numeric claims from independent local size sources; op-computed local extents; exact positive/negative C/Eval rows. The op-computed admission and #1397's declaration half are delivered for `shrink` at the OUTERMOST activation (exported def, value binding, inlined root); `pad` and `stride` remain unadmitted owners. A helper whose parameter-bound NAMED result is consumed inside another def's body keeps its claim erased by the enclosing signature's own result name and is residual under #1800; the literal half survives that nesting |
 | B2b-1: claim transport | C2 contract and red fixtures; integrates B2b-0b | preserve the shipped helper-order and C2.4 checked-reshape/unit receipts (#1686/#1687); finish general scoped checked/lowered identities, explicit caller witnesses, multi-claim axes, rebuild/wire transport and migrated binding consumers; #1397's declaration-erasure half, with #1377's literal call/inlined-root exit established by the witness subset. Named result claims and the unread signature witness (#1374, #1376, #1566) are delivered |
-| B2b-root: root execution | can start independently; acceptance composes B2b-1 | #1397's general wildcard-root boundary; run or diagnose every accepted root; unlock and reverify #1378's exact public value witness |
+| B2b-root: root execution | can start independently; acceptance composes B2b-1 | #1397's general wildcard-root boundary is closed: a nullary root whose result type carries a runtime extent is kept in the root manifest, so eval renders it and the C host emits an entry. On eval and C such a root is admitted and sized by the runtime rather than needing a sizing diagnosis, because the manifest print path sizes from the realized extent and never materializes a static buffer; guards and device capability diagnostics still apply, and an empty realized bound renders differently per lane under #1795. #1378's exact public value witness is unlocked and reverified. A root that keeps an unresolved dim variable is still dropped and is residual under #1801 |
 | B2b-2: sources and acceptance | guards and claim transport for every newly admitted row | declaration sources are finished (#665/#1556/#1566); supply #1482's missing shape source, remove provenance restrictions (#1266/#569/#1379). `shape_deps` removal moves out of this row and is residual under #1372, which must now also migrate B2b-0b's declaring-parameter dependency rather than drop it |
 | B2b-3: phase exit | preceding host repairs and per-row platform dispositions | register actual passing receipts, correct measured stale baselines, retire phase c from final selection; phase b/final remain red until their named obligations pass |
 | #1512 audit | no dependency on the B2b carrier or withdrawn C | enumerate reachable non-expand unresolved producers and consumer decisions; resolved/unresolved positive and negative pairs; distinguish error cascade suppression; assign each surviving defect a repair under #1512 |
@@ -870,9 +886,10 @@ witness, with invocation dependencies preserving discarded checks. B2b-1
 still owns the named scoped identities and unread named caller witnesses
 needed by #1374/#1376/#1566. Kernel guard tests alone do not close those
 public contracts.
-B2b-root is separately bounded within #1397 so a declaration fix cannot
-silently close its broader root failure. #1378 stays open until the public
-witness executes; its typed Slice A mechanism need not be reimplemented.
+B2b-root was separately bounded within #1397 so a declaration fix could not
+silently close its broader root failure. Both halves have now landed as
+separate changes, and #1378's public witness executes, so the bound has served
+its purpose. Its typed Slice A mechanism was not reimplemented.
 
 The helper signature-order repair shipped in #1688. A helper lowered from a declared
 function receives tensor inputs in that function's parameter order, including

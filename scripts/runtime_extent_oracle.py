@@ -250,7 +250,7 @@ def generated_phase_a_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "vmap.shared_shape_bound.concrete_c_emit",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli.vmap_shape_bound_with_concrete_batch_emits_c_without_to_end_ice",
         ),
         _row(
@@ -927,10 +927,6 @@ PHASE_A_DEFERRED: Mapping[str, str] = {
     "expand.input_axis.metal_device": (
         "runtime_extents.md C2.5: no Metal device-path expand row executes until "
         "chelis#1383 lands expand emission and symbolic-dim Load support"
-    ),
-    "vmap.shared_shape_bound.concrete_c_emit": (
-        "runtime_extents.md C2.7: the guard this row waits on is Slice B's, so "
-        "Slice A records it at its main baseline"
     ),
 }
 
