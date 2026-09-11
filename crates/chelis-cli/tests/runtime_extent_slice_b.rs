@@ -4274,3 +4274,458 @@ fn the_value_binding_form_of_a_polymorphic_binder_is_unchanged() {
         );
     }
 }
+
+// ===========================================================================
+// Record-field and pipe shape sources (chelis#1266, chelis#569).
+//
+// Rows `expand.record_projection.size` and `expand.piped_shape_read.lint_fix`.
+//
+// Both issues are one question asked twice: does a `shape(...)` read reach
+// the size slot when it is SPELLED differently. A record field and a pipe
+// stage are both spellings a person and a tool actually produce -- every
+// hydronnx model with more than one input takes its arguments as a record,
+// and `chelis lint --fix` rewrites a nested call chain into a pipe -- and
+// `spec/04-type-system.md` section 4.7.2 admits an extent by what supplies
+// it, never by how it is written: "no stage may reject an extent because of
+// its provenance".
+//
+// The claim these rows carry is admissibility plus execution on both lanes.
+// It is NOT that a declared result NAME survives: `f(inp: Inputs)` under
+// `sig f: Inputs -> tensor[batch, f32]` still checks to `tensor[*, f32]`,
+// because `batch` appears nowhere in the parameter list for unification to
+// bind it to. That erasure is chelis#1397's checker half. The C lane does
+// declare the extent by name from the field's axis (`int64_t batch =
+// chelis_tensor_shape(inputs[0], 0)`), which is what makes the compiled
+// program agree with eval below.
+// ===========================================================================
+
+/// chelis#1266's own reproducer: the projection read inline in the size slot.
+const RECORD_PROJECTION_DIRECT: &str = "module Repro.RecordDirect\n\
+     type Inputs = | Inputs { q: tensor[batch, 4, f32] }\n\
+     sig f: Inputs -> tensor[batch, f32]\n\
+     def f(inp: Inputs) = expand(to_tensor([0.25f32]), 0i32, shape(inp.q, 0i32))\n\
+     out = f(Inputs { q: to_tensor([[1.0f32, 2.0f32, 3.0f32, 4.0f32], \
+     [5.0f32, 6.0f32, 7.0f32, 8.0f32]]) })\n";
+
+/// The same read through a local, the rewrite chelis#1266 reports downstream
+/// applying by hand. It is the control: identical semantics, and the whole
+/// difference is the spelling.
+const RECORD_PROJECTION_ALIAS: &str = "module Repro.RecordAlias\n\
+     type Inputs = | Inputs { q: tensor[batch, 4, f32] }\n\
+     sig f: Inputs -> tensor[batch, f32]\n\
+     def f(inp: Inputs) = { q = inp.q\n\
+     expand(to_tensor([0.25f32]), 0i32, shape(q, 0i32)) }\n\
+     out = f(Inputs { q: to_tensor([[1.0f32, 2.0f32, 3.0f32, 4.0f32], \
+     [5.0f32, 6.0f32, 7.0f32, 8.0f32]]) })\n";
+
+/// A field of a field. The projection resolves through the whole chain, and
+/// each link binds one host local.
+const RECORD_PROJECTION_NESTED: &str = "module Repro.RecordNested\n\
+     type Inner = | Inner { q: tensor[batch, 4, f32] }\n\
+     type Outer = | Outer { inner: Inner }\n\
+     sig f: Outer -> tensor[batch, f32]\n\
+     def f(o: Outer) = expand(to_tensor([0.25f32]), 0i32, shape(o.inner.q, 0i32))\n\
+     out = f(Outer { inner: Inner { q: to_tensor([[1.0f32, 2.0f32, 3.0f32, 4.0f32], \
+     [5.0f32, 6.0f32, 7.0f32, 8.0f32]]) } })\n";
+
+/// The shape chelis#1266 was filed for: `forward(inputs: ForwardInputs)` with
+/// two tensor fields, one sizing a broadcast against the other.
+const RECORD_PROJECTION_FORWARD: &str = "module Repro.RecordForward\n\
+     type ForwardInputs = | ForwardInputs { a: tensor[batch, f32], b: tensor[1, f32] }\n\
+     sig forward: ForwardInputs -> tensor[batch, f32]\n\
+     def forward(inputs: ForwardInputs) = \
+     add(expand(inputs.b, 0i32, shape(inputs.a, 0i32)), inputs.a)\n\
+     out = forward(ForwardInputs { a: to_tensor([1.0f32, 2.0f32, 3.0f32]), \
+     b: to_tensor([0.25f32]) })\n";
+
+/// The record reaches the projecting def as a PARAMETER of another def, so
+/// the base is a runtime value at two removes from the construction.
+const RECORD_PROJECTION_THROUGH_A_DEF: &str = "module Repro.RecordThroughDef\n\
+     type Inputs = | Inputs { q: tensor[batch, 4, f32] }\n\
+     sig inner: Inputs -> tensor[batch, f32]\n\
+     def inner(inp: Inputs) = expand(to_tensor([0.25f32]), 0i32, shape(inp.q, 0i32))\n\
+     sig outer: Inputs -> tensor[batch, f32]\n\
+     def outer(inp: Inputs) = inner(inp)\n\
+     out = outer(Inputs { q: to_tensor([[1.0f32, 2.0f32, 3.0f32, 4.0f32], \
+     [5.0f32, 6.0f32, 7.0f32, 8.0f32]]) })\n";
+
+/// A record built at compile time and projected inside the same body. The
+/// constructor is a compile-time fact, so `lower_access` projects it and the
+/// def keeps its DAG route: no `chelis_adt_get_field` reaches the emitted C.
+const COMPILE_TIME_RECORD_PROJECTION: &str = "module Repro.StaticRecord\n\
+     type Pair = | Pair { lhs: tensor[2, f32], rhs: tensor[2, f32] }\n\
+     sig f: tensor[2, f32] -> tensor[2, f32]\n\
+     def f(x: tensor[2, f32]) = { p = Pair { lhs: x, rhs: to_tensor([10.0f32, 20.0f32]) }\n\
+     add(p.lhs, p.rhs) }\n\
+     out = f(to_tensor([1.0f32, 2.0f32]))\n";
+
+/// chelis#569's `with_pipe_cast` in today's canonical spelling. The v0.18
+/// lambda the issue quotes (`|> fn (p) -> cast(p, int64)`) is now a parse
+/// error; `|> cast(int64)` is what the parser and the formatter produce.
+const PIPED_SHAPE_READ: &str = "module Repro.PipedShapeRead\n\
+     sig broadcast_rows: tensor[a, f32] -> tensor[1, f32] -> tensor[a, f32]\n\
+     def broadcast_rows(x: tensor[a, f32], b: tensor[1, f32]) = \
+     { a_dim = x |> shape(cast(0, int32)) |> cast(int64)\n\
+     expand(b, cast(0, int32), a_dim) }\n\
+     out = broadcast_rows(to_tensor([1.0f32, 2.0f32, 3.0f32]), to_tensor([0.25f32]))\n";
+
+/// chelis#569's `with_direct_cast`: the form that builds, and the one
+/// `prefer-pipe-operator` rewrites. The inputs are bound to names so the only
+/// replacement the fix makes is the shape read under test; a call written
+/// inline would also be piped, and a bare-name pipe stage at a call site
+/// still loses its shape source at lowering (chelis#1791, out of scope here).
+const DIRECT_SHAPE_READ_FOR_LINT_FIX: &str = "sig broadcast_rows: tensor[a, f32] -> tensor[1, f32] -> tensor[a, f32]\n\
+     def broadcast_rows(x: tensor[a, f32], b: tensor[1, f32]) = {\n  \
+     a_dim = cast(shape(x, cast(0, int32)), int64)\n  \
+     expand(b, cast(0, int32), a_dim)\n\
+     }\n\
+     xs = to_tensor([1.0f32, 2.0f32, 3.0f32])\n\
+     bias = to_tensor([0.25f32])\n\
+     out = broadcast_rows(xs, bias)\n";
+
+/// A piped read of a value that is not a tensor. The stage parameter carries
+/// the upstream value's class, so a runtime scalar stays sourceless through
+/// however many stages.
+const PIPED_SOURCELESS_SCALAR: &str = "module Repro.PipedSourceless\n\
+     sig f: tensor[a, f32] -> int32 -> tensor[a, f32]\n\
+     def f(x: tensor[a, f32], k: int32) = { a_dim = k |> cast(int64)\n\
+     expand(to_tensor([0.25f32]), 0i32, a_dim) }\n";
+
+/// The projection with an axis the field does not have.
+const RECORD_PROJECTION_BAD_AXIS: &str = "module Repro.RecordBadAxis\n\
+     type Inputs = | Inputs { q: tensor[batch, 4, f32] }\n\
+     sig f: Inputs -> tensor[batch, f32]\n\
+     def f(inp: Inputs) = expand(to_tensor([0.25f32]), 0i32, shape(inp.q, 2i32))\n";
+
+/// Run a fixture on both lanes and assert they agree byte for byte on the
+/// expected rendering.
+fn assert_both_lanes_render(stem: &str, source: &str, expected: &str) {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(&dir, stem, source);
+    assert!(ok, "the compiled program must run: {out}");
+    assert!(
+        out.contains(expected),
+        "the compiled binary must render {expected}: {out}"
+    );
+    let evaluated = eval(&fixture(&dir, &format!("{stem}_eval.ch"), source));
+    assert!(
+        evaluated.status.success(),
+        "eval must succeed: {}",
+        String::from_utf8_lossy(&evaluated.stderr)
+    );
+    assert_eq!(
+        out,
+        String::from_utf8_lossy(&evaluated.stdout),
+        "the compiled binary and eval must agree byte for byte"
+    );
+}
+
+/// Oracle row `expand.record_projection.size` (chelis#1266).
+///
+/// Both spellings of the same read are admissible sizes that check, evaluate
+/// and build, and the two agree with each other as well as across lanes.
+///
+/// EVIDENTIARY STATUS: regression test, per assertion.
+///   * the direct spelling on CHECK: measured RED on `33cc78e84`, where
+///     `chelis check` scores 0.976 and reports "`expand` size resolves to a
+///     runtime scalar, but no tensor in scope carries it".
+///   * the direct spelling on C: measured RED on `33cc78e84` once the check
+///     arm admitted it, with `unsupported: builtin `expand` on `chelis build`
+///     host emission (codegen:c)`.
+///   * the alias spelling on EVAL: measured RED on `33cc78e84` with "`access`
+///     on a runtime value is not supported by IR lowering".
+///   * the alias spelling on C: measured GREEN on `33cc78e84`; that assertion
+///     is a disposition lock, and it is here because the two spellings must
+///     not diverge again.
+#[test]
+fn a_record_projection_is_an_admissible_expand_size() {
+    assert_both_lanes_render(
+        "record_direct",
+        RECORD_PROJECTION_DIRECT,
+        "shape=[2], data=[0.25, 0.25]",
+    );
+    assert_both_lanes_render(
+        "record_alias",
+        RECORD_PROJECTION_ALIAS,
+        "shape=[2], data=[0.25, 0.25]",
+    );
+    assert_both_lanes_render(
+        "record_nested",
+        RECORD_PROJECTION_NESTED,
+        "shape=[2], data=[0.25, 0.25]",
+    );
+}
+
+/// The record reaches the projecting def through a second def's parameter.
+///
+/// EVIDENTIARY STATUS: regression test. Measured RED on `33cc78e84` with the
+/// same check-lane rejection as the direct spelling.
+#[test]
+fn a_record_field_reached_through_a_def_parameter_is_an_admissible_expand_size() {
+    assert_both_lanes_render(
+        "record_through_def",
+        RECORD_PROJECTION_THROUGH_A_DEF,
+        "shape=[2], data=[0.25, 0.25]",
+    );
+}
+
+/// The shape chelis#1266 names as the reason it matters: a multi-input
+/// forward whose broadcast is sized from a sibling field.
+///
+/// EVIDENTIARY STATUS: regression test. Measured RED on `33cc78e84` with the
+/// check-lane sourceless rejection.
+#[test]
+fn a_multi_input_record_forward_sizes_its_broadcast_from_a_sibling_field() {
+    assert_both_lanes_render(
+        "record_forward",
+        RECORD_PROJECTION_FORWARD,
+        "shape=[3], data=[1.25, 2.25, 3.25]",
+    );
+}
+
+/// The projection becomes the helper's own tensor input, which is what makes
+/// the direct spelling reach the same lowering as the local-alias spelling
+/// rather than a second mechanism.
+///
+/// EVIDENTIARY STATUS: regression test. Measured RED on `33cc78e84`: the
+/// direct spelling emitted no tensor helper at all, because the host lane
+/// rejected `expand` outright.
+#[test]
+fn a_record_projection_becomes_the_tensor_helper_s_own_input() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out_dir = dir.path().join("record_direct_c-out");
+    let build = build_c(
+        &fixture(&dir, "record_direct_c.ch", RECORD_PROJECTION_DIRECT),
+        &out_dir,
+    );
+    assert!(
+        build.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let emitted = fs::read_to_string(out_dir.join("record_direct_c.c")).expect("generated C");
+    assert!(
+        emitted.contains("__host_record_field_inp_q"),
+        "the projected field is bound to a host local: {emitted}"
+    );
+    assert!(
+        emitted.contains("input `__host_record_field_inp_q` at slot 0"),
+        "and that local is the helper's slot-0 tensor input: {emitted}"
+    );
+    assert!(
+        emitted.contains("int64_t batch = chelis_tensor_shape(inputs[0], 0);"),
+        "the kept extent is declared from the field's own axis: {emitted}"
+    );
+}
+
+/// Negative parity for the decision above: a record whose constructor IS a
+/// compile-time fact keeps the DAG route `lower_access` already serves.
+///
+/// EVIDENTIARY STATUS: regression test for this pull request's own risk.
+/// Measured RED against an intermediate head of this branch, where the new
+/// uncarriable arm fired on a `let`-bound `(record ..)` literal and pushed
+/// the whole def onto the host lane.
+#[test]
+fn a_compile_time_record_projection_keeps_its_dag_route() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out_dir = dir.path().join("static_record-out");
+    let build = build_c(
+        &fixture(&dir, "static_record.ch", COMPILE_TIME_RECORD_PROJECTION),
+        &out_dir,
+    );
+    assert!(
+        build.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let emitted = fs::read_to_string(out_dir.join("static_record.c")).expect("generated C");
+    assert!(
+        !emitted.contains("chelis_adt_get_field"),
+        "a compile-time record is projected at lowering, never through the \
+         runtime ADT accessor: {emitted}"
+    );
+    assert!(
+        !emitted.contains("__host_record_field_"),
+        "and it needs no hoisted host local: {emitted}"
+    );
+    let evaluated = eval(&fixture(
+        &dir,
+        "static_record_eval.ch",
+        COMPILE_TIME_RECORD_PROJECTION,
+    ));
+    assert!(
+        String::from_utf8_lossy(&evaluated.stdout).contains("data=[11.0, 22.0]"),
+        "and it still evaluates: {}",
+        String::from_utf8_lossy(&evaluated.stdout)
+    );
+}
+
+/// Negative parity for the admissible projection: an axis the field does not
+/// have is still rejected, and now for the RIGHT reason.
+///
+/// EVIDENTIARY STATUS: regression test on the reason, disposition lock on the
+/// rejection. Measured on `33cc78e84`: the program was already rejected, but
+/// with the sourceless-size diagnostic, because the walk never resolved the
+/// operand far enough to check its rank. The rejection must stay, and the
+/// diagnostic must now name the axis.
+#[test]
+fn a_record_projection_with_an_out_of_range_axis_is_still_rejected() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let checked = check(&fixture(
+        &dir,
+        "record_bad_axis.ch",
+        RECORD_PROJECTION_BAD_AXIS,
+    ));
+    let report = String::from_utf8_lossy(&checked.stdout).to_string();
+    assert!(
+        report.contains("shape axis 2 is out of bounds for rank 2 tensor"),
+        "the axis bound is what rejects it: {report}"
+    );
+    assert!(
+        !report.contains("no tensor in scope carries it"),
+        "and it is no longer reported as having no shape source: {report}"
+    );
+}
+
+/// Oracle row `expand.piped_shape_read.lint_fix` (chelis#569), positive half.
+///
+/// EVIDENTIARY STATUS: regression test, per assertion.
+///   * CHECK: measured RED on `33cc78e84`, where the pipe node fell to the
+///     classifier's fail-closed default and `chelis check` reported "`expand`
+///     size resolves to the symbolic dimension `a_dim`, but no tensor in
+///     scope carries it".
+///   * EVAL and C: measured RED on `33cc78e84` after the check arm admitted
+///     it, with "`expand` size resolves to `a_dim`, but no in-scope tensor
+///     axis supplies that extent" from the lowerer -- the check-versus-build
+///     disagreement chelis#469 exists to prevent.
+#[test]
+fn the_canonical_piped_shape_read_checks_evaluates_and_builds() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let checked = check(&fixture(&dir, "piped_shape_read.ch", PIPED_SHAPE_READ));
+    assert!(
+        checked.status.success(),
+        "the piped read must check: {}",
+        String::from_utf8_lossy(&checked.stdout)
+    );
+    assert_both_lanes_render(
+        "piped_shape_read",
+        PIPED_SHAPE_READ,
+        "shape=[3], data=[0.25, 0.25, 0.25]",
+    );
+}
+
+/// The row's own name: what `chelis lint --fix` produces must still work.
+///
+/// This runs the real style path -- no `--allow-style-violations`, no
+/// `CHELIS_STYLE_GATE_DISABLE` -- because the defect chelis#569 reports is
+/// that following the style tool breaks a building program.
+///
+/// EVIDENTIARY STATUS: regression test. Measured RED on `33cc78e84`: the
+/// fixture evaluates before the fix, `chelis lint --fix` rewrites the shape
+/// read into the pipe form, and `chelis check` then rejects it.
+#[test]
+fn a_lint_fix_of_a_direct_shape_read_still_checks_evaluates_and_builds() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = fixture(&dir, "lint_fix.ch", DIRECT_SHAPE_READ_FOR_LINT_FIX);
+    let styled = |args: &[&str]| {
+        Command::cargo_bin("chelis")
+            .expect("chelis")
+            .args(args)
+            .output()
+            .expect("styled chelis invocation")
+    };
+    let before = styled(&["eval", "--file", path.to_str().unwrap()]);
+    assert!(
+        String::from_utf8_lossy(&before.stdout).contains("data=[0.25, 0.25, 0.25]"),
+        "the direct spelling works before the fix: {}",
+        String::from_utf8_lossy(&before.stderr)
+    );
+
+    let fixed = styled(&["lint", "--fix", path.to_str().unwrap()]);
+    assert!(
+        String::from_utf8_lossy(&fixed.stdout).contains("fixed 1 replacement"),
+        "the fix rewrites exactly the shape read: {}{}",
+        String::from_utf8_lossy(&fixed.stdout),
+        String::from_utf8_lossy(&fixed.stderr)
+    );
+    let formatted = styled(&["fmt", "--inplace", path.to_str().unwrap()]);
+    assert!(formatted.status.success(), "fmt must succeed");
+    let rewritten = fs::read_to_string(&path).expect("rewritten fixture");
+    assert!(
+        rewritten.contains("a_dim = x |> shape(cast(0, int32)) |> cast(int64)"),
+        "the pipe form is what the tools produce: {rewritten}"
+    );
+
+    let relinted = styled(&["lint", "--check", path.to_str().unwrap()]);
+    assert!(
+        relinted.status.success(),
+        "and the fixed program is lint-clean: {}",
+        String::from_utf8_lossy(&relinted.stderr)
+    );
+    let checked = styled(&["check", path.to_str().unwrap()]);
+    assert!(
+        checked.status.success(),
+        "the fixed program must still check: {}",
+        String::from_utf8_lossy(&checked.stdout)
+    );
+    let evaluated = styled(&["eval", "--file", path.to_str().unwrap()]);
+    assert!(
+        String::from_utf8_lossy(&evaluated.stdout).contains("data=[0.25, 0.25, 0.25]"),
+        "and evaluate to the same tensor: {}",
+        String::from_utf8_lossy(&evaluated.stderr)
+    );
+    let out_dir = dir.path().join("lint_fix-out");
+    let built = styled(&[
+        "build",
+        path.to_str().unwrap(),
+        "--target",
+        "c",
+        "-o",
+        out_dir.to_str().unwrap(),
+    ]);
+    assert!(
+        built.status.success(),
+        "and build: {}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let status = link_generated(&out_dir, "lint_fix.c", "lint_fix");
+    assert!(status.success(), "link failed: {status}");
+    let run = StdCommand::new(out_dir.join("lint_fix"))
+        .output()
+        .expect("run compiled binary");
+    assert!(
+        String::from_utf8_lossy(&run.stdout).contains("data=[0.25, 0.25, 0.25]"),
+        "and run: {}",
+        String::from_utf8_lossy(&run.stdout)
+    );
+}
+
+/// Negative parity for the pipe arm: a piped read of a non-tensor stays
+/// sourceless, with the section 4.7.2 diagnostic unchanged.
+///
+/// EVIDENTIARY STATUS: disposition lock. Measured GREEN on `33cc78e84` and it
+/// must stay green: admitting a pipe stage must not admit the bare runtime
+/// scalar the pipe carries.
+#[test]
+fn a_piped_shape_read_of_a_non_tensor_is_still_sourceless() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let checked = check(&fixture(
+        &dir,
+        "piped_sourceless.ch",
+        PIPED_SOURCELESS_SCALAR,
+    ));
+    let report = String::from_utf8_lossy(&checked.stdout).to_string();
+    assert!(
+        report.contains(
+            "`expand` size resolves to the symbolic dimension `a_dim`, but no tensor in \
+             scope carries it"
+        ),
+        "the piped runtime scalar keeps the section 4.7.2 rejection: {report}"
+    );
+}

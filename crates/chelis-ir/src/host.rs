@@ -3586,6 +3586,21 @@ impl UncarriableWalk<'_> {
                 self.scopes.pop();
                 found
             }
+            Some(DeepTag::Access) => {
+                let base = kids.first()?;
+                if let Some(found) = self.expr(base) {
+                    return Some(found);
+                }
+                if !is_static_constructor(base, self) {
+                    return Some(
+                        "a field projection on a runtime record value, which IR lowering \
+                         resolves only for a compile-time-known record construction \
+                         (chelis#520 D1)"
+                            .to_string(),
+                    );
+                }
+                None
+            }
             Some(DeepTag::Match) => {
                 let scrutinee = kids.first()?;
                 if let Some(found) = self.expr(scrutinee) {
@@ -3795,6 +3810,15 @@ fn is_static_constructor(expr: &Expr, walk: &UncarriableWalk<'_>) -> bool {
         return false;
     };
     match expr_tag {
+        // `(record {} Ctor (kv {} field value) ..)`: the constructor tag and
+        // field layout are compile-time facts, which is exactly what
+        // `lower_record` lowers to a `LoweredValue::Adt` and what both
+        // `lower_access` and `lower_match` then resolve. Only the field
+        // VALUES are runtime. Without this arm a record literal bound to a
+        // name reads as a runtime value, so a projection or a `match` on it
+        // would leave the DAG for the host lane even though the DAG carries
+        // it (chelis#1266).
+        DeepTag::Record => true,
         DeepTag::Var => kids.first().and_then(symbol_name).is_some_and(|name| {
             name.chars().next().is_some_and(char::is_uppercase) || walk.bound(name) == Some(true)
         }),
@@ -4211,12 +4235,7 @@ fn lower_host_function(
     // two lanes cannot answer "is this def a kernel" differently.
     let mut host_body = match lower_def_body_kernel(program, &signature, &mut tensor_helpers)? {
         Some(kernel_call) => kernel_call,
-        None => lower_host_expr(
-            &signature.body_expr,
-            program,
-            &signature.scope,
-            &mut tensor_helpers,
-        )?,
+        None => lower_host_body_with_record_locals(&signature, program, &mut tensor_helpers)?,
     };
     // Per `spec/design/chelis_span_survival.md` §2.3 host-side table, the
     // "Tensor-helper extraction" and "Lowering. Fn-body" rules: every
@@ -4354,6 +4373,287 @@ fn try_lower_tensor_helper_call(
         tensor_helpers,
         expected,
     ))
+}
+
+/// A tensor-typed field projection lifted out of a tensor-helper subtree
+/// (chelis#1266).
+struct HoistedProjection {
+    /// The host local the projection is bound to.
+    name: String,
+    /// The `(access {} base field)` expression, lowered host-side.
+    source: Expr,
+    ty: TensorType,
+}
+
+/// Bind every tensor-typed projection of a runtime record in `expr` to a host
+/// local, returning the rewritten subtree (chelis#1266).
+///
+/// The DAG carries no runtime record, so an `access` anywhere inside a subtree
+/// stops that whole subtree from becoming a tensor helper -- and the C host
+/// lane's expression vocabulary is deliberately narrower than the checked
+/// builtin vocabulary ([04-TOT-2]), so an operation like `expand` left behind
+/// there has no emission at all. The same program with the projection bound to
+/// a local first compiles and runs today, which is why chelis#1266 reports the
+/// prologue-local rewrite as a workaround downstream applies by hand. Binding
+/// it here is that rewrite, performed once by the compiler: the field's tensor
+/// becomes an ordinary host value, and the helper takes it as an input like
+/// any other tensor in scope.
+///
+/// Only a projection whose base chain bottoms out at an unshadowed
+/// record-typed name in `scope` is lifted; a compile-time-known record
+/// construction never reaches here, because `body_form_the_dag_cannot_carry`
+/// keeps that def on its DAG route. Nested fields (`inp.inner.q`) lift as one
+/// local each, keyed by path so a repeated projection binds once.
+fn hoist_record_projections(
+    expr: &Expr,
+    program: &CheckedProgram,
+    scope: &UnordMap<String, HostTypeTerm>,
+    shadowed: &mut UnordSet<String>,
+    hoists: &mut Vec<HoistedProjection>,
+) -> Expr {
+    match expr {
+        Expr::Node(node, span) => {
+            if node.tag() == DeepTag::Access
+                && let Some(hoist) = record_projection_hoist(expr, program, scope, shadowed)
+            {
+                let name = hoist.name.clone();
+                if !hoists.iter().any(|existing| existing.name == name) {
+                    hoists.push(hoist);
+                }
+                return Expr::Node(
+                    Box::new(chelis_deep::node::Node::new(
+                        DeepTag::Var,
+                        chelis_deep::Metadata::default(),
+                        vec![Expr::Atom(Atom::Name(name), *span)],
+                    )),
+                    *span,
+                );
+            }
+            let mut inner = shadowed.clone();
+            collect_scope_binders(node.tag(), node.children_slice(), &mut inner);
+            let children = node
+                .children_slice()
+                .iter()
+                .enumerate()
+                .map(|(index, child)| {
+                    if is_bound_projection_child(node.tag(), index) {
+                        child.clone()
+                    } else {
+                        hoist_record_projections(child, program, scope, &mut inner, hoists)
+                    }
+                })
+                .collect();
+            let mut rewritten = node.clone();
+            // A rewrite that the node gate refuses leaves the subtree alone;
+            // the caller then takes the unhoisted path it takes today.
+            if rewritten.try_replace_children(children).is_err() {
+                return expr.clone();
+            }
+            Expr::Node(rewritten, *span)
+        }
+        Expr::List(list, span) => {
+            if tag(list) == Some(DeepTag::Access)
+                && let Some(hoist) = record_projection_hoist(expr, program, scope, shadowed)
+            {
+                let name = hoist.name.clone();
+                if !hoists.iter().any(|existing| existing.name == name) {
+                    hoists.push(hoist);
+                }
+                return var_expr_node(&name, *span);
+            }
+            let mut inner = shadowed.clone();
+            collect_scope_binders(
+                tag(list).unwrap_or(DeepTag::Var),
+                children(list),
+                &mut inner,
+            );
+            let elements = list
+                .elements
+                .iter()
+                .enumerate()
+                .map(|(index, child)| {
+                    if is_bound_projection_value(list, index) {
+                        child.clone()
+                    } else {
+                        hoist_record_projections(child, program, scope, &mut inner, hoists)
+                    }
+                })
+                .collect();
+            Expr::List(List { elements }, *span)
+        }
+        Expr::BareList(items, span) => Expr::BareList(
+            items
+                .iter()
+                .map(|item| hoist_record_projections(item, program, scope, shadowed, hoists))
+                .collect(),
+            *span,
+        ),
+        Expr::MetaExpr(meta, span) => Expr::MetaExpr(
+            chelis_deep::ast::MetaExpr {
+                metadata: meta.metadata.clone(),
+                expr: Box::new(hoist_record_projections(
+                    &meta.expr, program, scope, shadowed, hoists,
+                )),
+            },
+            *span,
+        ),
+        _ => expr.clone(),
+    }
+}
+
+/// Lower a host-lane def body, binding any tensor-typed runtime-record
+/// projection inside it to a host local first (chelis#1266).
+///
+/// Only the host route takes this: a body the DAG can carry never reaches it,
+/// so a compile-time-known record construction keeps its kernel lowering.
+fn lower_host_body_with_record_locals(
+    signature: &HostDefSignature,
+    program: &CheckedProgram,
+    tensor_helpers: &mut Vec<HostTensorHelper>,
+) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+    let mut hoists: Vec<HoistedProjection> = Vec::new();
+    let rewritten = hoist_record_projections(
+        &signature.body_expr,
+        program,
+        &signature.scope,
+        &mut UnordSet::new(),
+        &mut hoists,
+    );
+    if hoists.is_empty() {
+        return lower_host_expr(
+            &signature.body_expr,
+            program,
+            &signature.scope,
+            tensor_helpers,
+        );
+    }
+    let mut scope = signature.scope.clone();
+    for hoist in &hoists {
+        scope.insert(hoist.name.clone(), HostTypeTerm::Tensor(hoist.ty.clone()));
+    }
+    let body = lower_host_expr(&rewritten, program, &scope, tensor_helpers)?;
+    let mut bindings = Vec::with_capacity(hoists.len());
+    for hoist in &hoists {
+        let value = lower_host_expr(&hoist.source, program, &signature.scope, tensor_helpers)?;
+        bindings.push(HostBinding {
+            name: hoist.name.clone(),
+            display_name: None,
+            display_roots: Vec::new(),
+            ty: HostTypeTerm::Tensor(hoist.ty.clone()),
+            value,
+        });
+    }
+    let ty = host_expr_type(&body);
+    Ok(HostExpr::new(HostExprKind::Let {
+        bindings,
+        body: Box::new(body),
+        ty,
+    }))
+}
+
+/// Add the names a node introduces into scope for its own children, so a
+/// projection whose base a nested binder shadows is left where it is.
+///
+/// Only the binder SLOTS are read. Harvesting names from every child would
+/// treat the `(var {} inp)` inside `inp.q` as a binder and suppress every
+/// hoist.
+fn collect_scope_binders(node_tag: DeepTag, kids: &[Expr], out: &mut UnordSet<String>) {
+    match node_tag {
+        DeepTag::Fn | DeepTag::Arm => {
+            if let Some(binders) = kids.first() {
+                collect_binder_names(binders, out);
+            }
+        }
+        DeepTag::Let => {
+            // `(let {} (bind {} n1 v1 ..) body)`: the binder names live in
+            // the `bind` child and scope over the body.
+            if let Some(bind) = kids.first()
+                && let Some((DeepTag::Bind, _, bind_kids)) = stamped_parts(bind)
+            {
+                for name in bind_kids.iter().step_by(2) {
+                    collect_binder_names(name, out);
+                }
+            }
+        }
+        DeepTag::Bind => {
+            for name in kids.iter().step_by(2) {
+                collect_binder_names(name, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A `(var {} name)` reference, the node a hoisted projection leaves behind.
+fn var_expr_node(name: &str, span: chelis_deep::span::Span) -> Expr {
+    Expr::Node(
+        Box::new(chelis_deep::node::Node::new(
+            DeepTag::Var,
+            chelis_deep::Metadata::default(),
+            vec![Expr::Atom(Atom::Name(name.to_string()), span)],
+        )),
+        span,
+    )
+}
+
+/// True at a `let` binding's VALUE slot: a projection written there is already
+/// being bound to a local, so hoisting it would add a second alias and change
+/// the emitted code for a spelling that already lowers.
+fn is_bound_projection_child(node_tag: DeepTag, index: usize) -> bool {
+    node_tag == DeepTag::Bind && index % 2 == 1
+}
+
+fn is_bound_projection_value(list: &List, index: usize) -> bool {
+    // `Expr::List` carries the tag and metadata at indices 0 and 1.
+    tag(list) == Some(DeepTag::Bind) && index >= 2 && index % 2 == 1
+}
+
+/// Decide whether one `(access {} base field)` expression is a tensor-typed
+/// projection of a runtime record, and name the local it binds to.
+fn record_projection_hoist(
+    expr: &Expr,
+    program: &CheckedProgram,
+    scope: &UnordMap<String, HostTypeTerm>,
+    shadowed: &UnordSet<String>,
+) -> Option<HoistedProjection> {
+    let HostTypeTerm::Tensor(ty) = expr_host_type(expr, program, scope) else {
+        return None;
+    };
+    let path = record_projection_path(expr)?;
+    let (base, fields) = path.split_first()?;
+    if shadowed.contains(base) {
+        return None;
+    }
+    // The base must be a host value this scope carries and NOT itself a
+    // tensor: a tensor base is not a record, and a name the scope does not
+    // carry is not this subtree's to lift.
+    let base_ty = scope.get(base)?;
+    if tensor_type_from_host_input(base_ty).is_some() {
+        return None;
+    }
+    Some(HoistedProjection {
+        name: format!("__host_record_field_{base}_{}", fields.join("_")),
+        source: expr.clone(),
+        ty,
+    })
+}
+
+/// The `[base, field, ..]` path of a projection chain whose root is a bare
+/// `var`, or `None` for any other target shape.
+fn record_projection_path(expr: &Expr) -> Option<Vec<String>> {
+    let (tag, _, kids) = stamped_parts(expr)?;
+    if tag == DeepTag::Var {
+        return kids
+            .first()
+            .and_then(symbol_name)
+            .map(|name| vec![name.to_string()]);
+    }
+    if tag != DeepTag::Access {
+        return None;
+    }
+    let mut path = record_projection_path(kids.first()?)?;
+    path.push(kids.get(1).and_then(symbol_name)?.to_string());
+    Some(path)
 }
 
 fn lower_tensor_helper_dag(

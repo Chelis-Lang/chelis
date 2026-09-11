@@ -4910,6 +4910,10 @@ fn shape_app_operand_axis(expr: &Expr) -> Option<(&Expr, usize)> {
     if tag == DeepTag::Cast {
         return kids.first().and_then(shape_app_operand_axis);
     }
+    // chelis#569: the pipe spelling of the same read.
+    if tag == DeepTag::Pipe {
+        return pipe_shape_read(kids);
+    }
     if app_var_name_and_args(expr).map(|(name, _)| name) != Some("shape") {
         return None;
     }
@@ -4919,6 +4923,61 @@ fn shape_app_operand_axis(expr: &Expr) -> Option<(&Expr, usize)> {
     let axis = kids.get(2).and_then(extract_int_for_dim)?;
     let axis = usize::try_from(axis).ok()?;
     Some((operand, axis))
+}
+
+/// Recognize the pipe spelling of a `shape(operand, axis)` read (chelis#569).
+///
+/// `chelis lint --fix` rewrites `cast(shape(x, cast(0, int32)), int64)` into
+/// `x |> shape(cast(0, int32)) |> cast(int64)`; both denote the same extent,
+/// so one recognizer answers for both and the lint cannot turn a building
+/// program into one the lowerer refuses.
+///
+/// `(pipe {} v s1 .. sn)` denotes `sn(..s1(v))`, and each `s` is the
+/// `(fn {} (params {} p) body)` node the Surf parser synthesizes for a call
+/// stage. The read is recognized when the FIRST stage reads `shape` off its
+/// own parameter and every later stage only re-types the result, which is
+/// what the trailing `|> cast(ty)` stages do. Any other stage returns `None`:
+/// the operand a later stage would name is a computed value, not the tensor
+/// whose axis supplies the extent.
+fn pipe_shape_read(kids: &[Expr]) -> Option<(&Expr, usize)> {
+    let operand = kids.first()?;
+    let mut axis: Option<usize> = None;
+    for stage in &kids[1..] {
+        let (param, body) = pipe_stage_lambda(stage)?;
+        match axis {
+            None => {
+                let (read_operand, read_axis) = shape_app_operand_axis(body)?;
+                if bare_var_name(strip_cast_wrappers(read_operand))? != param {
+                    return None;
+                }
+                axis = Some(read_axis);
+            }
+            Some(_) => {
+                if bare_var_name(strip_cast_wrappers(body))? != param {
+                    return None;
+                }
+            }
+        }
+    }
+    Some((operand, axis?))
+}
+
+/// The parameter name and body of a synthesized unary pipe-stage lambda,
+/// the `(fn {} (params {} p) body)` shape `parse_pipe_stage` produces.
+fn pipe_stage_lambda(stage: &Expr) -> Option<(String, &Expr)> {
+    let (DeepTag::Fn, _, kids) = stamped_parts(stage)? else {
+        return None;
+    };
+    let (DeepTag::Params, _, param_kids) = stamped_parts(kids.first()?)? else {
+        return None;
+    };
+    if param_kids.len() != 1 {
+        return None;
+    }
+    let Some(Expr::Atom(Atom::Name(name), _)) = param_kids.first() else {
+        return None;
+    };
+    Some((name.clone(), kids.get(1)?))
 }
 
 /// If `expr` is `(var {} <name>)`, return `<name>` as a `String`.
