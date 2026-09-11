@@ -776,7 +776,7 @@ fn an_entry_obligation_witness_emits_the_legacy_hip_guard_pending_1786() {
     );
 }
 
-/// chelis#616 left the HIP prologue walking `symbolic_occurrences` and
+/// chelis#616 left the HIP prologue walking the legacy occurrence list and
 /// asserting a `Load` source for every occurrence, with a `panic!` backstop
 /// (`require_load_source`) for the op-declared case on the reasoning that
 /// `reject_unsupported_hip_ops` had already refused it. It had not:
@@ -789,9 +789,11 @@ fn an_entry_obligation_witness_emits_the_legacy_hip_guard_pending_1786() {
 /// and the backstop is unreachable rather than merely unhit. This row asserts
 /// what the user gets: the program emits.
 ///
-/// EVIDENTIARY STATUS: regression test. Measured red by restoring the HIP
-/// emitter's two call sites to `symbolic_bindings()`, which reproduces the
-/// panic on this exact program.
+/// EVIDENTIARY STATUS: regression test, measured red by restoring the HIP
+/// emitter's two call sites to the legacy name-keyed grouping, which
+/// reproduced the panic on this exact program. That reproduction is no
+/// longer performable: chelis#665 deleted the grouping and the `panic!` arm
+/// with it, so what this row pins now is that the program still emits.
 #[test]
 fn an_op_declared_witness_reaches_the_hip_prologue_without_panicking() {
     let example = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2533,5 +2535,290 @@ fn issue_1376_same_tensor_read_under_a_foreign_claim_is_guarded_on_c() {
     assert!(
         out.contains("shape=[2, 2]"),
         "and produce the claimed shape: {out}"
+    );
+}
+
+// chelis#665 / chelis#1556: a kept output axis whose extent an operation
+// computes.
+//
+// `insert(stride(x, 2i64), 0i32, shape(x, 0i32))`. The `Stride` output axis 0
+// carries a fresh runtime extent that no `Load` declares, and the `insert`'s
+// KEPT axis 1 inherits that extent under a different spelling (the lowerer's
+// `_anon_dim_2_1`). `crates/chelis-ir/tests/runtime_extent_slice_b_sources.rs`
+// already pins the derivation's answer for that axis: `InputAxis { input: 0,
+// axis: Lit(0) }` into the stride, whose own axis is `OpComputed`. Declaring
+// the kept name from that resolved source is what these rows measure.
+// ===========================================================================
+
+/// chelis#665's reproducer in current Surf. The issue's text predates S2a, so
+/// the rank-RAISING form is `insert`, the axis carrier is `0i32` and the size
+/// carrier is int64.
+const EXPAND_OVER_STRIDE: &str = "module Repro.ExpandOverStride\n\
+     sig f: tensor[n, f32] -> tensor[m, u, f32]\n\
+     def f(x) = insert(stride(x, 2i64), 0i32, shape(x, 0i32))\n\
+     out = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]))\n";
+
+/// The same family reached through a rank-RAISING `reshape` rather than an
+/// `insert`, which is the variant chelis#665's own comment records: the
+/// reshape's axis 0 is the strided extent under a second spelling.
+const RESHAPE_OVER_STRIDE: &str = "module Repro.ReshapeOverStride\n\
+     sig f: tensor[n, f32] -> tensor[m, u, f32]\n\
+     def f(x) = reshape(stride(x, 2i64), [shape(stride(x, 2i64), 0i32), 1i64])\n\
+     out = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]))\n";
+
+/// chelis#665's third spelling: a RUNTIME-bounded `shrink` under the same
+/// kept-axis `insert`. A statically bounded `shrink` is not in the family
+/// (its output axis is a literal), which is what the negative twin below
+/// holds fixed.
+const EXPAND_OVER_RUNTIME_SHRINK: &str = "module Repro.ExpandOverRuntimeShrink\n\
+     sig f: tensor[n, f32] -> tensor[m, u, f32]\n\
+     def f(x) = insert(shrink(x, [[0i64, sub(shape(x, 0i32), 2i64)]]), 0i32, shape(x, 0i32))\n\
+     out = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]))\n";
+
+/// chelis#665's C row (`expand.kept_axis.op_declared_source.c`).
+///
+/// The kept axis's name is declared from the extent its source produces, so
+/// the emitted C compiles, links and runs, and its result equals the eval
+/// lane's byte for byte.
+///
+/// EVIDENTIARY STATUS: regression test. Measured RED on `3dc3f54f6`, where
+/// `chelis build --target c` exits 101 with `internal compiler error:
+/// symbolic dim `_anon_dim_2_1` is referenced by a non-Load node (id 2, op
+/// Expand { axis: 0, size: InputAxis { tensor: 1, axis: Lit(0) } }) but no
+/// Load input declares it` from `crates/chelis-ir/src/dag.rs`.
+#[test]
+fn issue_665_expand_over_stride_builds_and_runs() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(&dir, "expand_over_stride", EXPAND_OVER_STRIDE);
+    assert!(ok, "the compiled kept-axis program must run: {out}");
+    assert!(
+        out.contains("shape=[6, 3]"),
+        "the kept axis is the strided extent 3 under the inserted 6: {out}"
+    );
+    assert!(
+        out.contains(
+            "data=[1.0, 3.0, 5.0, 1.0, 3.0, 5.0, 1.0, 3.0, 5.0, 1.0, 3.0, 5.0, \
+             1.0, 3.0, 5.0, 1.0, 3.0, 5.0]"
+        ),
+        "every inserted row is the strided `1, 3, 5`: {out}"
+    );
+    let evaluated = eval(&fixture(
+        &dir,
+        "expand_over_stride_eval.ch",
+        EXPAND_OVER_STRIDE,
+    ));
+    assert!(
+        evaluated.status.success(),
+        "eval must agree: {}",
+        String::from_utf8_lossy(&evaluated.stderr)
+    );
+    assert_eq!(
+        out,
+        String::from_utf8_lossy(&evaluated.stdout),
+        "the compiled binary and eval must agree byte for byte"
+    );
+}
+
+/// The same kept-axis source reached through a rank-raising `reshape`.
+///
+/// EVIDENTIARY STATUS: regression test. Measured RED on `3dc3f54f6` with the
+/// same ICE on `_anon_dim_3_0` at the `Reshape` node.
+#[test]
+fn a_kept_axis_over_a_rank_raising_reshape_of_a_strided_input_builds_and_runs() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(&dir, "reshape_over_stride", RESHAPE_OVER_STRIDE);
+    assert!(ok, "the compiled reshape variant must run: {out}");
+    assert!(
+        out.contains("shape=[3, 1]") && out.contains("data=[1.0, 3.0, 5.0]"),
+        "the reshape target's axis 0 is the strided extent: {out}"
+    );
+}
+
+/// The same kept-axis source over a RUNTIME-bounded `shrink`.
+///
+/// EVIDENTIARY STATUS: regression test. Measured RED on `3dc3f54f6` with the
+/// same ICE on `_anon_dim_5_1` at the `Expand` node.
+#[test]
+fn a_kept_axis_over_a_runtime_bounded_shrink_builds_and_runs() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(&dir, "expand_over_shrink", EXPAND_OVER_RUNTIME_SHRINK);
+    assert!(ok, "the compiled runtime-shrink variant must run: {out}");
+    assert!(
+        out.contains("shape=[6, 4]"),
+        "the kept axis is the shrunk extent 4 under the inserted 6: {out}"
+    );
+}
+
+/// chelis#665's eval row (`expand.kept_axis.op_declared_source.eval`).
+///
+/// EVIDENTIARY STATUS: disposition lock, NOT a regression test. Measured
+/// GREEN on `3dc3f54f6`: `chelis eval --file` already prints
+/// `shape=[6, 3]` with `data=[1.0, 3.0, 5.0, ...]` for this program. The row
+/// exists because the C lane's declaration change must not move the eval
+/// lane, and because the byte-for-byte parity assertion in the C row above
+/// has no meaning unless this side is pinned independently.
+#[test]
+fn an_op_declared_axis_on_an_expand_input_flows_through_the_kept_output_axis_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = eval_result(&dir, "kept_axis_eval.ch", EXPAND_OVER_STRIDE);
+    assert!(ok, "the kept-axis program must evaluate: {out}");
+    assert!(
+        out.contains("shape=[6, 3]"),
+        "the kept axis is the strided extent 3 under the inserted 6: {out}"
+    );
+    assert!(
+        out.contains(
+            "data=[1.0, 3.0, 5.0, 1.0, 3.0, 5.0, 1.0, 3.0, 5.0, 1.0, 3.0, 5.0, \
+             1.0, 3.0, 5.0, 1.0, 3.0, 5.0]"
+        ),
+        "every inserted row is the strided `1, 3, 5`: {out}"
+    );
+}
+
+/// The negative twin of the three kept-axis rows: a STATICALLY bounded
+/// `shrink` under the same `insert` has a literal kept extent, so it is not
+/// in the family at all and must keep executing on both lanes with the
+/// literal shape. A repair that declared every kept axis from a computed
+/// source would show up here as a changed extent.
+///
+/// EVIDENTIARY STATUS: disposition lock. Measured GREEN on `3dc3f54f6`.
+#[test]
+fn a_kept_axis_over_a_statically_bounded_shrink_keeps_its_literal_extent() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = "module Repro.ExpandOverStaticShrink\n\
+         sig f: tensor[n, f32] -> tensor[m, u, f32]\n\
+         def f(x) = insert(shrink(x, [[0i64, 4i64]]), 0i32, shape(x, 0i32))\n\
+         out = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]))\n";
+    let (ok, out) = eval_result(&dir, "static_shrink_eval.ch", source);
+    assert!(ok, "a static shrink bound is not a runtime extent: {out}");
+    assert!(
+        out.contains("shape=[6, 4]"),
+        "the kept axis keeps the literal 4: {out}"
+    );
+    if !gcc_available() {
+        return;
+    }
+    let (c_ok, c_out) = c_run_result(&dir, "static_shrink_c", source);
+    assert!(
+        c_ok,
+        "the static-bound program must still build and run: {c_out}"
+    );
+    assert!(
+        c_out.contains("shape=[6, 4]"),
+        "the compiled binary keeps the same literal extent: {c_out}"
+    );
+}
+
+// ===========================================================================
+// chelis#1556: `uniform_like` over a symbolic parameter inlined into a
+// nullary kernel.
+//
+// These rows are DISPOSITION LOCKS, not regression tests, and the difference
+// is worth recording rather than glossing. The issue's program cannot be
+// written verbatim any more: it spells the rank-raising form `expand(
+// scalar_to_tensor(..), 0, 3i64)`, and since S2a a rank-0 operand makes that
+// a check-time type error naming `insert`. Measured on `3dc3f54f6` in its
+// faithful modern spelling, and in three further nullary shapes, the ICE does
+// not reproduce: every one builds, links and runs, and no synthesized
+// `d<N>`-style name reaches the emitted C. No bisect was run for which
+// earlier change closed it, and the issue's own fix hypothesis - substitute
+// the argument's static extent for the inlined parameter's dim at inlining -
+// was never needed.
+//
+// What the rows are for is the other direction. This change moves every
+// declaration onto the axis source, and a nullary kernel with no `Load` at
+// all is the shape with the least to recover a name from, so it is exactly
+// where a declaration regression would surface first.
+// ===========================================================================
+
+/// The issue's program in current Surf.
+const UNIFORM_OVER_INLINED_PARAMETER: &str = "module Repro.UniformInline\n\
+     def noise(x: tensor[n, f32]) -> tensor[n, f32] = add(x, uniform_like(x, 0.0f32, 1.0f32))\n\
+     def main() = with seed(42i64) { add(noise(insert(scalar_to_tensor(1.0f32), 0i32, 3i64)), \
+     noise(insert(scalar_to_tensor(2.0f32), 0i32, 3i64))) }\n";
+
+/// The same inlined parameter over an operand whose extent an OPERATION
+/// computes rather than a literal, still in a nullary kernel.
+const UNIFORM_OVER_INLINED_STRIDE: &str = "module Repro.UniformInlineStride\n\
+     def noise(x: tensor[n, f32]) -> tensor[n, f32] = add(x, uniform_like(x, 0.0f32, 1.0f32))\n\
+     def main() = with seed(42i64) { noise(stride(insert(scalar_to_tensor(1.0f32), 0i32, 6i64), \
+     2i64)) }\n";
+
+/// The same shape reached through an exported def and a value binding, so the
+/// kernel has a `Load` while the inlined parameter's dim still does not.
+const UNIFORM_OVER_EXPORTED_STRIDE: &str = "module Repro.UniformExportedStride\n\
+     sig g: tensor[n, f32] -> tensor[m, f32]\n\
+     def g(x) = stride(x, 2i64)\n\
+     def noise(x: tensor[k, f32]) -> tensor[k, f32] = add(x, uniform_like(x, 0.0f32, 1.0f32))\n\
+     out = with seed(42i64) { noise(g(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]))) }\n";
+
+/// Build, link, run and evaluate one nullary-kernel program, and assert that
+/// both lanes print `expected` and that no synthesized `d<N>` name survives
+/// into the emitted C.
+fn assert_nullary_kernel_lanes_agree(stem: &str, source: &str, expected: &str) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = eval_result(&dir, &format!("{stem}_eval.ch"), source);
+    assert!(ok, "the nullary kernel must evaluate: {out}");
+    assert!(out.contains(expected), "eval prints {expected}: {out}");
+    if !gcc_available() {
+        return;
+    }
+    let (c_ok, c_out, emitted) = c_run_result_with_source(&dir, stem, source);
+    assert!(c_ok, "the compiled nullary kernel must run: {c_out}");
+    assert_eq!(
+        c_out, out,
+        "the compiled binary and eval must agree byte for byte"
+    );
+    let synthesized = emitted
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .find(|token| {
+            token.len() > 1
+                && token.starts_with('d')
+                && token[1..].chars().all(|c| c.is_ascii_digit())
+        });
+    assert_eq!(
+        synthesized, None,
+        "no synthesized `d<N>` dimension name reaches the emitted C"
+    );
+}
+
+/// chelis#1556's own program, in its current spelling.
+///
+/// EVIDENTIARY STATUS: disposition lock. Measured GREEN on `3dc3f54f6`.
+#[test]
+fn issue_1556_uniform_over_an_inlined_parameter_builds_and_runs() {
+    assert_nullary_kernel_lanes_agree(
+        "uniform_inline",
+        UNIFORM_OVER_INLINED_PARAMETER,
+        "data=[4.3952804, 4.3952804, 4.5689626]",
+    );
+}
+
+/// EVIDENTIARY STATUS: disposition lock. Measured GREEN on `3dc3f54f6`.
+#[test]
+fn a_nullary_kernel_whose_inlined_parameter_is_sized_by_a_stride_builds_and_runs() {
+    assert_nullary_kernel_lanes_agree(
+        "uniform_inline_stride",
+        UNIFORM_OVER_INLINED_STRIDE,
+        "data=[1.6537157, 1.7415649, 1.849176]",
+    );
+}
+
+/// EVIDENTIARY STATUS: disposition lock. Measured GREEN on `3dc3f54f6`.
+#[test]
+fn an_exported_stride_under_an_inlined_uniform_parameter_builds_and_runs() {
+    assert_nullary_kernel_lanes_agree(
+        "uniform_exported_stride",
+        UNIFORM_OVER_EXPORTED_STRIDE,
+        "data=[1.6537157, 3.7415648, 5.849176]",
     );
 }

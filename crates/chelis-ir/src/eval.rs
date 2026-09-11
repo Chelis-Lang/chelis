@@ -20,8 +20,7 @@ use std::borrow::Cow;
 
 use crate::dag::{
     Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStepOp, NodeId,
-    ReduceWindowKind, RiscOp, RtDim, SHRINK_TO_END, SymbolicDimSource, TensorType,
-    bind_symbolic_dims, symbolic_bindings,
+    ReduceWindowKind, RiscOp, RtDim, SHRINK_TO_END, TensorType, bind_symbolic_dims,
 };
 use chelis_types::dtype_semantics::{
     ArgReduceOp, CheckedCastPlan, CompareOp, ExtremaOperand as KernelExtremaOperand, FloatBinOp,
@@ -1675,12 +1674,39 @@ fn verify_bound_movement_bounds(dag: &Dag, live: Option<&[bool]>) -> Result<(), 
     Ok(())
 }
 
+/// The pre-eval bindings for every runtime extent a caller supplies.
+///
+/// chelis#1566: this reads the scoped derivation
+/// ([`crate::axis_sources::derive_dim_witnesses`]), which is the same
+/// derivation the C and HIP prologues declare and guard from, so the three
+/// lanes cannot disagree about which axes are one extent. The legacy
+/// name-keyed grouping it replaces put two independent signatures that merely
+/// SPELL a binder `seq` into one group and rejected a correct merged kernel;
+/// `split_by_scope` separates them by the results they reach.
+///
+/// **One structural limit, stated rather than papered over.** The map
+/// [`crate::dag::bind_symbolic_dims`] consumes is keyed by NAME, so two
+/// scopes of one name that resolve to DIFFERENT extents cannot both be
+/// represented. The honest rule is therefore: bind the name once when the
+/// scopes agree, and bind nothing for it when they disagree. Nothing is lost
+/// silently - an unbound multi-scope name leaves every axis carrying it to be
+/// computed from actual values, and a live node that reads the name BY VALUE
+/// (a `Reshape` target's `RtDim::Sym`) still refuses in `bind_symbolic_dims`.
+/// The structural fix is a per-scope rename and belongs to the claim
+/// transport, not here.
+///
+/// The second return value is exactly that set: the names this function
+/// DELIBERATELY left out because their scopes disagreed. It is returned
+/// rather than re-derived because disagreement is a property of the supplied
+/// values and not of the graph, so nothing downstream can recover it; keying
+/// the tolerance on multi-scope membership instead would excuse an agreeing
+/// name a caller simply omitted, which is an omitted binding like any other.
 fn infer_symbolic_bindings_from_inputs(
     dag: &Dag,
     inputs: &UnordMap<String, TensorValue>,
     required_symbols: &UnordSet<String>,
     live: Option<&[bool]>,
-) -> Result<UnordMap<String, usize>, String> {
+) -> Result<(UnordMap<String, usize>, UnordSet<String>), String> {
     let mut bindings = UnordMap::new();
     let mut load_types = UnordMap::<String, TensorType>::new();
 
@@ -1708,36 +1734,68 @@ fn infer_symbolic_bindings_from_inputs(
         })
         .collect::<UnordSet<_>>();
 
-    for binding in symbolic_bindings(dag)
-        .into_iter()
-        .filter(|binding| required_symbols.contains(&binding.name))
-    {
-        let mut occurrences = std::iter::once(&binding.canonical)
-            .chain(binding.others.iter())
-            .collect::<Vec<_>>();
-        let has_live_op_declaration = occurrences.iter().any(|occurrence| {
-            matches!(
-                occurrence.source,
-                SymbolicDimSource::OpDeclared { node, .. }
-                    if live.is_none_or(|mask| mask[node.0])
-            )
-        });
-        let live_load_occurrences = occurrences
+    let read_axis = |label: &str, axis: usize, claim: &str| -> Result<usize, String> {
+        let value = inputs.get(label).ok_or_else(|| {
+            format!("missing required input `{label}` for symbolic dimension `{claim}`")
+        })?;
+        value.shape.get(axis).copied().ok_or_else(|| {
+            format!("input `{label}` is missing axis {axis} for symbolic dimension `{claim}`")
+        })
+    };
+
+    // One entry per SCOPE, folded into one entry per name afterwards.
+    let mut per_scope: Vec<(String, usize)> = Vec::new();
+    // Every required name some class ANSWERED for, whether by binding it or
+    // by deliberately declining to. The source fallback below must not
+    // overrule an answer; it exists for names no class spoke for at all.
+    let mut claimed: Vec<String> = Vec::new();
+    // The names `bind_symbolic_dims` tolerates unbound because the evaluator
+    // computes them from actual values (chelis#616). Declining to bind one is
+    // an answer; declining to bind anything else would just be a hole, so the
+    // two decisions stay keyed on the same set.
+    let op_declared = crate::dag::op_declared_dim_names(dag);
+    for class in crate::axis_sources::derive_dim_witnesses(dag) {
+        let crate::axis_sources::DimClaim::Name(name) = class.claim else {
+            continue;
+        };
+        if !required_symbols.contains(&name) {
+            continue;
+        }
+
+        // "An input tensor's axis" has two spellings in the DAG, and
+        // `member_load_axis` accepts both: a `Load`'s own output axis and a
+        // folded `shape(t, k)` read of that same tensor.
+        let mut witnesses = class
+            .members
             .iter()
-            .copied()
-            .filter(|occurrence| {
-                matches!(
-                    &occurrence.source,
-                    SymbolicDimSource::Load { input_label, .. }
-                        if live_loads.contains(input_label.as_str())
-                )
+            .filter_map(|member| {
+                let (load, axis) = crate::axis_sources::member_load_axis(dag, member)?;
+                let RiscOp::Load { name: label } = &dag.get(load)?.op else {
+                    return None;
+                };
+                Some((label.as_str(), axis))
             })
             .collect::<Vec<_>>();
-        if !live_load_occurrences.is_empty() {
-            occurrences = live_load_occurrences;
-        } else if has_live_op_declaration {
-            // chelis#616: a live op-declared dim has no external input;
-            // the evaluator resolves it from the owning op's actual values.
+        // chelis#616: a locally computed extent has no external input; the
+        // evaluator resolves it from the owning operation's actual values.
+        let has_live_local_source = class.members.iter().any(|member| {
+            matches!(
+                member.source,
+                crate::axis_sources::AxisSource::OpComputed { .. }
+                    | crate::axis_sources::AxisSource::ScalarInput { .. }
+            ) && live.is_none_or(|mask| mask[member.node.0])
+        });
+        let live_witnesses = witnesses
+            .iter()
+            .copied()
+            .filter(|(label, _)| live_loads.contains(label))
+            .collect::<Vec<_>>();
+        if !live_witnesses.is_empty() {
+            witnesses = live_witnesses;
+        } else if has_live_local_source && op_declared.contains(&name) {
+            if !claimed.contains(&name) {
+                claimed.push(name);
+            }
             continue;
         } else {
             // chelis#351: a shape-only dependency Load can be outside the
@@ -1747,76 +1805,102 @@ fn infer_symbolic_bindings_from_inputs(
             // happens to be supplied lets an unrelated declaration satisfy a
             // live shape obligation (chelis#991). Fail closed on that
             // ambiguity instead of guessing from caller inputs.
-            let mut dead_loads = occurrences
+            let mut dead_loads = witnesses
                 .iter()
-                .filter_map(|occurrence| match &occurrence.source {
-                    SymbolicDimSource::Load { input_label, .. } => Some(input_label.as_str()),
-                    SymbolicDimSource::OpDeclared { .. } => None,
-                })
+                .map(|(label, _)| *label)
                 .collect::<Vec<_>>();
             dead_loads.sort_unstable();
             dead_loads.dedup();
             if dead_loads.len() > 1 {
                 return Err(format!(
-                    "ambiguous dead-load sources {:?} for live symbolic dimension `{}`",
-                    dead_loads, binding.name
+                    "ambiguous dead-load sources {dead_loads:?} for live symbolic dimension `{name}`"
                 ));
             }
         }
 
-        let Some((canonical_label, canonical_axis)) =
-            occurrences
-                .iter()
-                .find_map(|occurrence| match &occurrence.source {
-                    SymbolicDimSource::Load { input_label, axis } => Some((input_label, axis)),
-                    SymbolicDimSource::OpDeclared { .. } => None,
-                })
-        else {
+        let Some((canonical_label, canonical_axis)) = witnesses.first().copied() else {
             continue;
         };
-        let canonical_value = inputs.get(canonical_label).ok_or_else(|| {
-            format!(
-                "missing required input `{canonical_label}` for symbolic dimension `{}`",
-                binding.name
-            )
-        })?;
-        let value = *canonical_value.shape.get(*canonical_axis).ok_or_else(|| {
-            format!(
-                "input `{canonical_label}` is missing axis {canonical_axis} for symbolic \
-                 dimension `{}`",
-                binding.name
-            )
-        })?;
-        bindings.insert(binding.name.clone(), value);
-
-        for occurrence in occurrences.into_iter().skip(1) {
-            // Op-declared guard sites are checked at run time by the C
-            // backend and from actual values by the evaluator, not here.
-            let SymbolicDimSource::Load { input_label, axis } = &occurrence.source else {
-                continue;
-            };
-            let other_value = inputs.get(input_label).ok_or_else(|| {
-                format!(
-                    "missing required input `{input_label}` for symbolic dimension `{}`",
-                    binding.name
-                )
-            })?;
-            let other = *other_value.shape.get(*axis).ok_or_else(|| {
-                format!(
-                    "input `{input_label}` is missing axis {axis} for symbolic dimension `{}`",
-                    binding.name
-                )
-            })?;
+        let value = read_axis(canonical_label, canonical_axis, &name)?;
+        for (label, axis) in witnesses.iter().skip(1) {
+            let other = read_axis(label, *axis, &name)?;
             if other != value {
                 return Err(format!(
-                    "symbolic dimension `{}` mismatch: canonical {canonical_label}[{canonical_axis}] = {value}, but {input_label}[{axis}] = {other}",
-                    binding.name,
+                    "symbolic dimension `{name}` mismatch: canonical {canonical_label}[{canonical_axis}] = {value}, but {label}[{axis}] = {other}",
                 ));
+            }
+        }
+        if !claimed.contains(&name) {
+            claimed.push(name.clone());
+        }
+        per_scope.push((name, value));
+    }
+
+    let mut folded: Vec<(String, Option<usize>)> = Vec::new();
+    for (name, value) in per_scope {
+        match folded.iter_mut().find(|(existing, _)| *existing == name) {
+            Some((_, resolved)) => {
+                if *resolved != Some(value) {
+                    *resolved = None;
+                }
+            }
+            None => folded.push((name, Some(value))),
+        }
+    }
+    let mut deliberately_unbound = UnordSet::new();
+    for (name, value) in folded {
+        match value {
+            Some(value) => {
+                bindings.insert(name, value);
+            }
+            None => {
+                deliberately_unbound.insert(name);
             }
         }
     }
 
-    Ok(bindings)
+    // A required symbol the classes did not cover still needs its value, and
+    // the axis SOURCE supplies it. Two kinds reach here and neither is a
+    // witness of anything: a name carried only by an op-INTERNAL field (a
+    // `Reshape` target's `RtDim::Sym`, one of `BlasMatmul`'s dimension
+    // expressions) has no output axis to form a class from, and a name whose
+    // every output axis is statically bound (`Named(name, Some(4))`) carries
+    // no runtime claim for a class to group. The legacy walk reached both
+    // through `bind_symbol_from_any_load`, which searched every `Load` for a
+    // matching string; resolving the origin names the exact declaring input
+    // instead.
+    for (name, origin) in crate::axis_sources::dim_extent_origins(dag) {
+        if !required_symbols.contains(&name)
+            || bindings.contains_key(&name)
+            || claimed.contains(&name)
+        {
+            continue;
+        }
+        match origin {
+            crate::axis_sources::ExtentOrigin::ExternalAxis { load, axis } => {
+                let Some(RiscOp::Load { name: label }) = dag.get(load).map(|node| &node.op) else {
+                    continue;
+                };
+                // Absence is not an error here: the name may belong to a dead
+                // scope the caller supplied nothing for, and a live one that
+                // genuinely needs it fails loudly in `bind_symbolic_dims`.
+                if let Some(value) = inputs.get(label.as_str())
+                    && let Some(extent) = value.shape.get(axis)
+                {
+                    bindings.insert(name, *extent);
+                }
+            }
+            crate::axis_sources::ExtentOrigin::Literal(extent) => {
+                if let Ok(extent) = usize::try_from(extent) {
+                    bindings.insert(name, extent);
+                }
+            }
+            crate::axis_sources::ExtentOrigin::OpComputed { .. }
+            | crate::axis_sources::ExtentOrigin::ScalarInput { .. } => {}
+        }
+    }
+
+    Ok((bindings, deliberately_unbound))
 }
 
 fn collect_dim_expr_symbols(expr: &DimExpr, symbols: &mut UnordSet<String>) {
@@ -1975,7 +2059,7 @@ where
                 if bounds.iter().any(|(_, end)| matches!(end, RtDim::ToEnd)))
         });
     // chelis#351: symbolic-dim inference reads shapes from the Loads
-    // that `symbolic_occurrences` nominates as each dim's declaring
+    // the derivation nominates as each dim's declaring
     // inputs — and such a Load can be DEAD under the roots' live mask
     // while the dim itself is live (e.g. `vmap(grad(f))` where the
     // gradient is constant in `x`: the backward DAG never consumes the
@@ -2108,21 +2192,21 @@ where
 
     let mut prebound_dims: UnordMap<String, usize> = UnordMap::new();
     let bound_dag = if needs_symbolic_binding {
-        let mut bindings =
+        let (mut bindings, deliberately_unbound) =
             infer_symbolic_bindings_from_inputs(dag, &resolved_inputs, &required_symbols, live)?;
         // `bind_symbolic_dims` rebuilds the complete DAG to preserve node ids.
         // Dead named dimensions therefore need a harmless placeholder even
         // though their nodes cannot execute under this root mask. Live names
         // are never defaulted: they were inferred above or failed loudly.
         if live.is_some() {
-            for binding in symbolic_bindings(dag) {
-                if !required_symbols.contains(&binding.name) {
-                    bindings.entry(binding.name).or_insert(1);
+            for name in crate::axis_sources::rendered_dim_names(dag) {
+                if !required_symbols.contains(&name) {
+                    bindings.entry(name).or_insert(1);
                 }
             }
         }
         prebound_dims = bindings.clone();
-        let bound = bind_symbolic_dims(dag, &bindings)?;
+        let bound = bind_symbolic_dims(dag, &bindings, &deliberately_unbound)?;
         // chelis#523: `verify` (grad.rs, before eval) runs BEFORE binding, so
         // its C10 shrink/stride bound checks are SKIPPED on symbolic axes
         // (extent unknown). Once `bind_symbolic_dims` makes those extents
@@ -2962,8 +3046,7 @@ where
 /// insert in the same loop, which binds the same symbol when the same node
 /// evaluates. The lanes line up case by case.
 ///
-/// The residual window is a derivation site that the legacy
-/// `symbolic_occurrences` walk records nowhere, for a symbol nothing declares.
+/// The residual window is a derivation site for a symbol nothing declares.
 /// Neither this author nor a reviewer could construct one. It stays a latent
 /// asymmetry in one derivation's two consumers, recorded rather than papered
 /// over, and closing it means giving the derivation the answer rather than

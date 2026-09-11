@@ -63,10 +63,12 @@ independent declaration, value and failure assertions. Remaining failure boundar
 - #1266/#569: the provenance walk still rejects equivalent field/pipe forms.
 - #1379: local op-computed extents need guard sites beyond the folded-axis
   and scalar-target forms B2r serves.
-- #665/#1556: declaration consumers still use legacy name recovery. #1482
-  additionally needs an actual shape source for a synthesized constant.
-- #1566: evaluator binding inference can identify separate signatures by
-  binder spelling.
+- #1482 needs an actual shape source for a synthesized constant. The
+  declaration consumers no longer use legacy name recovery: every name a lane
+  renders resolves through `ExtentOrigin`, and a name that resolves to none is
+  a typed receipt. #665's kept-axis instance and #1566's binder-spelling
+  instance are closed; #1556's published instance does not reproduce in its
+  current spelling.
 - #1512: the old deferred-expand witnesses are unreachable, but unresolved
   variables have other origins. The remaining early-return validation audit
   is open; neither the old census nor four `sum` probes closes it.
@@ -569,13 +571,51 @@ fresh extents, including symbolic shrink; literal stride one and zero pad
 retain identity under spec/04 §4.7. Derive sources after each final rewrite,
 never retain stale node ids in a cached class list.
 
-Replace both binding and DECLARATION consumers of `symbolic_occurrences`,
-`op_declared_output_axes`, `shape_source_for_axis` and `symbolic_bindings`.
-#665 is a declaration-consumer failure and cannot close merely because an
-entry guard passes. A synthesized Const's value supplies no shape: #1482
-needs an actual axis source, not a guessed dimension or a bypass of the
-cardinality check. Recheck the current sigmoid/silu/gelu witnesses; the ReLU
-mechanism was removed by #1313.
+Both binding and DECLARATION consumers now read the derivation.
+`symbolic_occurrences`, `bind_symbol_from_any_load` and `symbolic_bindings` are
+deleted; `op_declared_output_axes`, `shape_source_for_axis` and
+`op_internal_symbolic_dims` retain five other callers and their migration is a
+separate slice. A declaration comes from `resolve_axis_extent`'s terminal
+`ExtentOrigin`: an input tensor's axis goes in the prologue, and an extent an
+operation produces is declared at that operation, which is how a kept axis
+forwards its exact input axis without renaming the claim it carries. Choosing
+among a name's candidate axes follows where a declaration can GO, not which
+answer is most certain: an input axis wins, an operation-produced extent comes
+next because it names a site, and a literal comes last because no lane declares
+an entry literal today, so preferring one over an available site would leave
+the name undeclared.
+#665 was a declaration-consumer failure and did not close because an entry
+guard passed; it closes because the kept name is declared from its source. A
+name that resolves to no origin is a typed receipt from
+`check_rendered_dim_origins`, which is an emission obligation rather than a
+lowering one, and `CEmitter::declared_dim_names` is the executable invariant
+that the two declaration loops cover the rendered set between them. A
+synthesized Const's value supplies no shape: #1482 needs an actual axis source,
+not a guessed dimension or a bypass of the cardinality check. Recheck the
+current sigmoid/silu/gelu witnesses; the ReLU mechanism was removed by #1313.
+
+Three rules bind the binding consumer, and each is here because its absence
+was measured. A binding consumer skips a class whose extent an operation
+computes only when `op_declared_dim_names` carries the name, because that is
+exactly the set `bind_symbolic_dims` leaves unbound, and the two decisions
+read one set rather than two lists that can drift. A required name that no
+class speaks for takes its value from its resolved origin, which is how an
+op-internal `Sym` carrier or a statically bound axis is reached at all; a
+class that answered, by binding or by declining, is never overruled by that
+fallback. A name the scope split finds in more than one class has no single
+pre-eval extent, so when its scopes disagree it binds to nothing and every
+axis carrying it is computed from actual values, and that tolerance stops at
+the type: a live node reading the name BY VALUE, a `Reshape` target's
+`RtDim::Sym`, still refuses. Which scopes disagree is a property of the
+supplied values rather than of the graph, so the set is the caller's to name
+and the tolerance covers exactly it; a multi-scope name whose scopes AGREE has
+one extent and an omitted binding for it is refused like any other. The
+declarations are not yet scoped the way these guards are: two scopes of one
+binder lowered into ONE emitted function still share one declaration, which
+#1788 records as residual and the per-scope rename in the claim transport
+fixes. Deleting a declaration mechanism that holds a
+loud-unsupported census site shrinks that site's baseline in the same change,
+under `spec/design/loud_unsupported.md` B1, which owns that rule.
 
 Record projection also needs an executable lowering route: the preparation
 alias fixture passes checking and C execution after #1658, but eval still
@@ -586,8 +626,10 @@ spelling variants to execute, not merely that the provenance error disappear.
 Only after these consumers and guards protect the admitted domain may B2b-2
 remove `SizeClass`, `classify_expand_size`, `classify_arith_app`,
 `sourceless_expand_size_error`, `Env::size_provenance`, and the lowerer's
-provenance rejection sites. Remove `shape_deps` once each remaining use has
-an actual typed dependency and no reader remains. Guards may land earlier;
+provenance rejection sites. `shape_deps` stays: `root_reach` traverses it, so
+removing it would silently merge scopes and reintroduce #1566, and it is a
+declared WireDag v9 transport whose removal is a schema change with its own
+numeric census obligations. That removal is residual under #1372. Guards may land earlier;
 acceptance may not widen earlier. A best-effort identity recognizer may
 remain as a refinement whose miss yields a fresh guarded extent.
 
@@ -790,7 +832,7 @@ All are Slice B work under #1277 unless expressly separated.
 | B2b-0b: remaining local guards | merged B2r/S2b and #1658's broadcast preparation repair | guard literal and resolved numeric claims from independent local size sources; op-computed local extents; exact positive/negative C/Eval rows |
 | B2b-1: claim transport | C2 contract and red fixtures; integrates B2b-0b | preserve the shipped helper-order and C2.4 checked-reshape/unit receipts (#1686/#1687); finish general scoped checked/lowered identities, explicit caller witnesses, multi-claim axes, rebuild/wire transport and migrated binding consumers; #1397's declaration-erasure half, with #1377's literal call/inlined-root exit established by the witness subset. Named result claims and the unread signature witness (#1374, #1376, #1566) are delivered |
 | B2b-root: root execution | can start independently; acceptance composes B2b-1 | #1397's general wildcard-root boundary; run or diagnose every accepted root; unlock and reverify #1378's exact public value witness |
-| B2b-2: sources and acceptance | guards and claim transport for every newly admitted row | finish declaration sources (#665/#1556), supply #1482's missing shape source, remove provenance restrictions (#1266/#569/#1379), then remove unused `shape_deps` |
+| B2b-2: sources and acceptance | guards and claim transport for every newly admitted row | declaration sources are finished (#665/#1556/#1566); supply #1482's missing shape source, remove provenance restrictions (#1266/#569/#1379). `shape_deps` removal moves out of this row and is residual under #1372 |
 | B2b-3: phase exit | preceding host repairs and per-row platform dispositions | register actual passing receipts, correct measured stale baselines, retire phase c from final selection; phase b/final remain red until their named obligations pass |
 | #1512 audit | no dependency on the B2b carrier or withdrawn C | enumerate reachable non-expand unresolved producers and consumer decisions; resolved/unresolved positive and negative pairs; distinguish error cascade suppression; assign each surviving defect a repair under #1512 |
 

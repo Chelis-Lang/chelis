@@ -11263,8 +11263,8 @@ fn remap_tensor_helper_dim_symbols(
     // declared return still owns the ROOT's shape: retype the root
     // POSITIONALLY, anon axis by anon axis — but ONLY on axes the root
     // op itself can declare at run time (`dag::op_declarable_axes`). A
-    // symbol painted anywhere else has no declaring Load or op and trips
-    // the `symbolic_occurrences` ICE; those axes stay anon and size
+    // symbol painted anywhere else has no declaring Load or op and resolves
+    // to no extent origin at emission; those axes stay anon and size
     // themselves per node.
     if let (Some(root_id), Some(actual_output)) =
         (dag.roots().first().copied(), actual_inputs.last())
@@ -11918,8 +11918,8 @@ fn actualize_tensor_helper_types(
     // OUTPUT types only, leaving op-internal fields (`Expand::size`,
     // `Reshape::new_shape`, `BlasMatmul` dims) holding the stale minted
     // names — the mixed state (`type: [Named("n")]` next to
-    // `size: Sym("d47")`) that `dag::symbolic_occurrences`' Bucket 4d
-    // sweep rejects because no Load declares the alias. Apply the
+    // `size: Sym("d47")`) the declaration derivation rejects because
+    // nothing declares the alias. Apply the
     // collected renames to every dim reference so the helper DAG stays
     // internally consistent. Non-synthetic (user-facing) names are
     // never in the map and pass through untouched.

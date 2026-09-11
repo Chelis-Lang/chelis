@@ -441,13 +441,23 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "expand.kept_axis.op_declared_source.c",
             "ice",
-            "ice",
+            EXECUTES,
             "cli_slice_b.issue_665_expand_over_stride_builds_and_runs",
         ),
+        # An explicit BASELINE CORRECTION, not a relabelled improvement. This
+        # row recorded `main` as `ice` and that was wrong: measured on
+        # `3dc3f54f6`, `chelis eval --file` of chelis#665's program prints
+        # `shape=[6, 3]` and exits zero. The only eval-lane reader of the
+        # legacy walk was the binding inference, which does not abort, and no
+        # command-line program reaches an eval-lane version of the failure
+        # because `chelis eval --file` binds no inputs and every extent is
+        # concrete by then. The receipt is a disposition lock; the `.c` row
+        # above carries the byte-for-byte parity assertion that gives the pair
+        # its teeth.
         _row(
             "expand.kept_axis.op_declared_source.eval",
-            "ice",
-            "ice",
+            EXECUTES,
+            EXECUTES,
             "cli_slice_b.an_op_declared_axis_on_an_expand_input_flows_through_the_kept_output_axis_on_eval",
         ),
         _row(

@@ -1688,8 +1688,8 @@ pub fn remap_tensor_dim_symbols(
 /// carry dims (`Reshape::new_shape`,
 /// `BlasMatmul::{batch_dims, m, n, k}`). Rewriting only output types
 /// while op fields keep the stale names produces the chelis#345 mixed
-/// state (`Load: n` next to `Expand { size: Sym("dN") }`) that the
-/// Bucket 4d sweep in `dag::symbolic_occurrences` panics on. Shared by
+/// state (`Load: n` next to `Expand { size: Sym("dN") }`) that leaves the
+/// op-internal name with no extent origin at emission. Shared by
 /// [`remap_tensor_dim_symbols`] (call-site formal/actual remapping) and
 /// `host::actualize_tensor_helper_types` (synthetic `dN` actualization).
 pub(crate) fn apply_dim_substitutions(dag: &Dag, substitutions: &UnordMap<String, DimInfo>) -> Dag {
@@ -5570,9 +5570,9 @@ impl<'program> LowerCtx<'program> {
     /// `input_dims` with `axis` removed. That rule breaks when a
     /// wildcard placeholder dim reaches the reduction op via meta
     /// `ty.dims`: host emit's `rename_anonymous_dims` renames it to
-    /// `_anon_dim_*`, and `crates/chelis-ir/src/dag.rs`'s
-    /// `symbolic_occurrences` panics because no Load input declares
-    /// the synthesized name (issue Chelis-Lang/chelis#218 R1 HIGH-2).
+    /// `_anon_dim_*`, and the synthesized name then has no extent origin
+    /// for the emitter to declare it from (issue Chelis-Lang/chelis#218 R1
+    /// HIGH-2).
     ///
     /// The corrected rule mirrors `elementwise_out_ty`'s precedent
     /// ("Prefer the input DAG node's dims ... `ty` after type
@@ -8841,7 +8841,7 @@ impl<'program> LowerCtx<'program> {
         // rank-(N+1) vmap argument (`y: tensor[batch, seq, head]`), the
         // substitution is dropped, and a two-stage named reduce leaves a
         // `Named("seq")` dim in the vmapped body with no declaring Load —
-        // tripping the `dag::symbolic_occurrences` Bucket-4c guard at build
+        // leaving the emitter no extent source for it at build
         // time even though check and eval are clean. The canonical batch dim
         // is the one `vectorize_axis0` itself prepended.
         let vmapped_param_types: Vec<TensorType> = param_types
@@ -10200,9 +10200,8 @@ impl<'program> LowerCtx<'program> {
                 // let-bound `k = shape(x, 0); reshape(&x, [k, 1])` idiom) must
                 // be resolved to the operand's declaring source, NOT left as a
                 // bare `Named("k", None)` symbol. Left unresolved, the reduce/
-                // reshape backward `Expand`/`Sum` inherits `Sym("k")` and
-                // `symbolic_occurrences` ICEs ("symbolic dim `k` ... no Load
-                // input declares it"). Resolving to the operand dim folds it to
+                // reshape backward `Expand`/`Sum` inherits `Sym("k")` that
+                // nothing declares. Resolving to the operand dim folds it to
                 // a concrete `Lit` when the operand axis is static and to a
                 // Load-carried `Named` (kept live via a `shape_dep`) when
                 // symbolic, so the dim traces to a declaring input either way.
@@ -12536,8 +12535,8 @@ impl<'program> LowerCtx<'program> {
     /// shape-source arm) and [`Self::extract_reshape_dim_list`]'s per-element
     /// vocabulary could not express: the unresolvable element aborted the
     /// walk and the reshape fell back to the checker's `Named("*")` wildcard
-    /// dims, which the backward `Expand`/`Sum` inherited and
-    /// `symbolic_occurrences` ICE'd on.
+    /// dims, which the backward `Expand`/`Sum` inherited and the C lane
+    /// ICE'd on.
     ///
     /// Exactness contract: folds ONLY when every leaf is independently static.
     ///   - producing literal axes, external declarations checked at entry, and
@@ -12638,8 +12637,9 @@ impl<'program> LowerCtx<'program> {
     /// binding can satisfy that anon dim with a coincidental extent taken
     /// from an input axis, SILENTLY accepting a program whose written target
     /// expression is never evaluated (it may not even be shape-consistent).
-    /// The C build lane ICEs on the same anon dim in `symbolic_occurrences`.
-    /// Refusing at lowering replaces both with one located diagnostic.
+    /// The C build lane refuses the same anon dim for want of an extent
+    /// source. Refusing at lowering replaces both with one located
+    /// diagnostic.
     /// Admitted runtime arithmetic is lowered before this legacy fallback;
     /// it retains the computed target and its independent result claims.
     ///
@@ -13634,7 +13634,7 @@ impl<'program> LowerCtx<'program> {
     /// output-type dims, and the lowered source nodes to record as
     /// `shape_dep`s so the declaring input survives DCE. A static operand
     /// axis folds to `Lit`; a symbolic one becomes a `Load`-carried `Named`
-    /// that `symbolic_occurrences` can trace, closing the reshape/reduce
+    /// the declaration derivation can resolve, closing the reshape/reduce
     /// backward `Expand`/`Sum` symbolic-dim ICE.
     ///
     /// chelis#616: a target dim that is runtime integer arithmetic over

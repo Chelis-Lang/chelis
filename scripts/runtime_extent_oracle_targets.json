@@ -239,6 +239,9 @@
         "mode": "all"
       },
       "expected": [
+        "a_kept_axis_under_a_second_spelling_resolves_to_the_operation_that_computes_it",
+        "a_named_axis_with_no_source_resolves_to_no_origin_and_is_reported",
+        "a_shape_preserving_axis_over_a_literal_operand_resolves_to_the_literal",
         "binding_a_to_end_bound_rejects_a_start_that_is_not_literal_zero",
         "every_risc_op_yields_exactly_one_source_per_output_axis",
         "expand_insert_maps_later_output_axes_to_input_minus_one",
@@ -311,6 +314,9 @@
         "a_container_nested_binder_is_unchecked_pending_the_container_walk",
         "a_cross_tensor_read_under_a_named_claim_is_guarded_on_eval",
         "a_fresh_binder_over_a_node_valued_reshape_target_executes_on_both_lanes",
+        "a_kept_axis_over_a_rank_raising_reshape_of_a_strided_input_builds_and_runs",
+        "a_kept_axis_over_a_runtime_bounded_shrink_builds_and_runs",
+        "a_kept_axis_over_a_statically_bounded_shrink_keeps_its_literal_extent",
         "a_later_trap_is_preempted_by_the_extent_guard_on_eval",
         "a_literal_claim_over_a_cross_tensor_read_traps_on_c",
         "a_literal_claim_over_a_cross_tensor_read_traps_on_eval",
@@ -323,6 +329,7 @@
         "a_node_valued_reshape_target_that_agrees_with_its_claim_executes_on_eval",
         "a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_c",
         "a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_eval",
+        "a_nullary_kernel_whose_inlined_parameter_is_sized_by_a_stride_builds_and_runs",
         "a_positional_expand_replaces_a_unit_axis_instead_of_inserting_on_eval",
         "a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_eval",
         "a_same_tensor_read_under_a_foreign_claim_is_guarded_on_eval",
@@ -336,13 +343,17 @@
         "an_effect_before_the_guard_runs_when_the_guard_traps_on_c",
         "an_effect_before_the_guard_runs_when_the_guard_traps_on_eval",
         "an_entry_obligation_witness_emits_the_legacy_hip_guard_pending_1786",
+        "an_exported_stride_under_an_inlined_uniform_parameter_builds_and_runs",
+        "an_op_declared_axis_on_an_expand_input_flows_through_the_kept_output_axis_on_eval",
         "an_op_declared_witness_reaches_the_hip_prologue_without_panicking",
         "c_independent_trap_after_a_mismatch_loses",
         "c_independent_trap_before_a_mismatch_wins",
         "every_local_member_of_one_class_is_guarded_at_its_operation_on_c",
         "issue_1374_cross_tensor_read_under_a_named_claim_is_guarded_on_c",
         "issue_1376_same_tensor_read_under_a_foreign_claim_is_guarded_on_c",
+        "issue_1556_uniform_over_an_inlined_parameter_builds_and_runs",
         "issue_597_positional_same_rank_replacement_executes_on_c",
+        "issue_665_expand_over_stride_builds_and_runs",
         "load_load_named_class_guards_every_non_canonical_member_on_eval",
         "no_environment_variable_disables_the_named_claim_guard",
         "runtime_bound_shrink_consumed_elementwise_reports_a_typed_receipt",
@@ -369,11 +380,37 @@
         "an_all_interface_class_runs_when_its_witnesses_agree",
         "an_all_interface_class_traps_at_entry_when_its_witnesses_disagree",
         "entry_guards_run_in_assigned_slot_order_not_claim_name_order",
+        "issue_1788_two_scopes_in_one_function_share_one_declaration",
         "local_reshape_guards_follow_declaration_order",
         "numeric_local_extent_claims_execute_exactly",
         "shared_runtime_extent_declares_once_and_rechecks_the_later_carrier"
       ],
       "note": "A CLI-rooted program is not the exported kernel: `def main() = f(...)` over literal tensors inlines the def, every extent becomes a literal, and the classes disappear, so guard placement and rendering on C are proved by DRIVEN rows that compile the exported kernel and call it with runtime inputs. This target is where those rows live. `exec_compile` is a large shared binary, so this target names its rows with `--exact` rather than running the whole file: the receipt check requires the observed set to EQUAL the expected one, and an unfiltered run would tie this phase's oracle to every unrelated numeric row in that file."
+    },
+    {
+      "phase": "b",
+      "id": "ir_eval_guard",
+      "package": "chelis-ir",
+      "kind": "test",
+      "file": "crates/chelis-ir/tests/runtime_extent_slice_b_eval_guard.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "a_disagreeing_class_conveys_its_sources_axis_and_values",
+        "a_disagreeing_class_traps_with_the_numeric_trap_line",
+        "a_locally_placed_unit_claim_that_holds_broadcasts",
+        "a_locally_placed_unit_claim_traps_at_the_expand_that_makes_it",
+        "a_non_unit_operand_extent_refutes_the_unit_claim_and_traps",
+        "a_unit_operand_extent_satisfies_the_claim_and_broadcasts",
+        "an_agreeing_class_evaluates",
+        "one_scope_with_two_disagreeing_witnesses_of_a_binder_still_refuses_on_eval",
+        "the_guard_precedes_the_allocation_it_protects",
+        "two_disagreeing_scopes_refuse_when_a_live_node_reads_the_binder_by_value",
+        "two_roots_spelling_one_binder_are_two_claims_not_one_class",
+        "two_signatures_spelling_one_binder_bind_independently_on_eval"
+      ],
+      "note": "The DAG evaluator's own guard and binding rows, with inputs bound at the API boundary. No corpus row cites them, because `chelis eval --file` supplies no input bindings and so cannot reach this evaluator for any fixture form; that is the reason the file exists, recorded in its header. Registering the target anyway makes the oracle execute them and makes a rename here fail the fast gate, which is what chelis#1742 added the manifest for."
     }
   ]
 }

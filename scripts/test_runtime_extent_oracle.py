@@ -164,14 +164,19 @@ class RuntimeExtentOracleTests(unittest.TestCase):
             by_id["shrink.elementwise_const.build"].exit_state,
             "typed_unsupported(#1482)",
         )
-        # chelis#665 and the class/guard rows stay at their main baseline
-        # until Slice B's second half. Both lanes carry the same baseline:
-        # the row is split because its guard lands per lane, not because the
-        # lanes start anywhere different.
-        for lane in ("c", "eval"):
-            row = by_id[f"expand.kept_axis.op_declared_source.{lane}"]
-            self.assertEqual(row.baseline, "ice")
-            self.assertEqual(row.exit_state, "ice")
+        # chelis#665's pair reaches exit in B2b-2, and the two lanes carry
+        # DIFFERENT baselines, which is the point of the row rather than an
+        # asymmetry to tidy away. The C lane aborted; the eval lane did not,
+        # and its recorded `ice` baseline was corrected with the measurement
+        # (`chelis eval --file` prints the program's shape and exits zero on
+        # `3dc3f54f6`). The eval receipt is therefore a disposition lock and
+        # the C receipt asserts byte-for-byte parity against it.
+        c_row = by_id["expand.kept_axis.op_declared_source.c"]
+        self.assertEqual(c_row.baseline, "ice")
+        self.assertEqual(c_row.exit_state, ORACLE.EXECUTES)
+        eval_row = by_id["expand.kept_axis.op_declared_source.eval"]
+        self.assertEqual(eval_row.baseline, ORACLE.EXECUTES)
+        self.assertEqual(eval_row.exit_state, ORACLE.EXECUTES)
         # The HIP prologue row is new in Slice B's second half and starts at
         # the same `require_load_source` panic, on the one lane that has it.
         hip = by_id["expand.op_declared_source.hip_prologue"]
@@ -510,13 +515,19 @@ class RuntimeExtentOracleTests(unittest.TestCase):
             )
 
     def test_phase_b_is_registered_but_not_yet_at_exit(self) -> None:
-        # PR B1 records two moves and leaves the rest of Slice B's rows at
-        # their main baseline, so `--phase b` must fail honestly.
+        # Slice B's rows reach exit one owning change at a time, so
+        # `--phase b` must keep failing honestly while any remains short.
         shortfall = ORACLE.exit_shortfall(ORACLE.PHASE_REGISTRY["b"])
         self.assertNotIn("ir.axis_source.cardinality", shortfall)
         self.assertNotIn("shrink.elementwise_const.build", shortfall)
-        self.assertIn("expand.kept_axis.op_declared_source.c", shortfall)
-        self.assertIn("expand.kept_axis.op_declared_source.eval", shortfall)
+        # B2b-2's own pair left the shortfall with chelis#665's fix.
+        self.assertNotIn("expand.kept_axis.op_declared_source.c", shortfall)
+        self.assertNotIn("expand.kept_axis.op_declared_source.eval", shortfall)
+        # A row whose owning slice has not started, named so this assertion
+        # does not go stale every time a sibling change moves a row: #1266's
+        # record projection is the provenance work B2b-2 explicitly defers.
+        self.assertIn("expand.record_projection.size", shortfall)
+        self.assertNotEqual(shortfall, ())
         self.assertEqual(ORACLE.exit_shortfall(ORACLE.PHASE_REGISTRY["a"]), ())
 
     def test_authoritative_run_rejects_dirty_worktree(self) -> None:
