@@ -4641,6 +4641,8 @@ fn lower_def_body_kernel(
             return Ok(None);
         }
     };
+    #[cfg(not(feature = "lowering-trace"))]
+    let _ = trace;
     if kernel_dag_loads_builtin(&dag).is_some() {
         record_host_work(|profile| {
             profile.tensor_helper_fallbacks += 1;
@@ -5084,6 +5086,8 @@ fn lower_tensor_helper_product(
     collect_execution: bool,
     collect_trace: bool,
 ) -> Option<LoweredTensorHelper> {
+    #[cfg(not(feature = "lowering-trace"))]
+    let _ = collect_trace;
     if collect_execution {
         let context = cached_subexpr_lowering_context(program);
         let scoped = collect_tensor_scope(scope).into_sorted();
@@ -5133,6 +5137,8 @@ fn lower_tensor_helper_product(
                 }
                 Err(_) => return None,
             };
+            #[cfg(not(feature = "lowering-trace"))]
+            let _ = trace;
             let rebound =
                 remap_tensor_helper_dim_symbols(plan.dag_for_inspection(), scope, expected);
             let plan = plan.rebind_dimensions(rebound).unwrap_or_else(|message| {

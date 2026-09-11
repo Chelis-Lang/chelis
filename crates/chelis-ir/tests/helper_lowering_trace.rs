@@ -246,7 +246,6 @@ def duplicated(x: tensor[3, f32], flag: bool)
         .iter()
         .find(|function| function.name == "duplicated")
         .expect("duplicated function");
-    let helper = &function.tensor_helpers[0];
     let trace = plan
         .function_helper_trace("duplicated", 0)
         .unwrap()
