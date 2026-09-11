@@ -19,7 +19,7 @@ from scripts.dtype_builtin_atom_closure_oracle import source_identity
 ROOT = phase1.ROOT
 OracleFailure = phase1.OracleFailure
 MANIFEST = ROOT / "spec/design/runtime_representation_phase2_tests.json"
-MANIFEST_SHA256 = "10b0111d48b505e6c7799680d915725d56902dc92243e52b83d7d14401b82303"
+MANIFEST_SHA256 = "f030e891e1c2c4b217d8855a46c1aaf0fdc6d7735bcf7679b9a227bbe9eb6483"
 
 
 def check_options(argv):

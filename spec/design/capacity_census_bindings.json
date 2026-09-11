@@ -9,7 +9,7 @@
       "id": "chelis_python::check_json(py: Python<'_>, source: &str, source_kind: &str) -> PyResult<compiler_json::CheckJson>",
       "kind": "binding-pyfunction",
       "authority": "TaggedTransport",
-      "graph_identity": "6fbcb837204d8f9eb4c7be4c4782229b8b469e063f81ec437f34df9936de8f80",
+      "graph_identity": "8ad36de3df311d23e993edf83390732e2d43ab03b9a78dee4d92b5af880c976c",
       "contract": "compiler-json/chelis_python::check_json"
     },
     {
@@ -26,7 +26,7 @@
       "id": "chelis_python::compile_json(py: Python<'_>, source: &str, target: &str, source_kind: &str, entry_name: Option<String>) -> PyResult<compiler_json::CompileJson>",
       "kind": "binding-pyfunction",
       "authority": "TaggedTransport",
-      "graph_identity": "4246382987ffc2b6671a8b5842444f980bf7cd9717ddc91984a923fafe4df153",
+      "graph_identity": "46e367edcb0f92f743bb500e55945419c08933bafc0ba8c34c30cc2d82961baa",
       "contract": "compiler-json/chelis_python::compile_json"
     },
     {
@@ -44,7 +44,7 @@
       "id": "chelis_python::desugar_json(py: Python<'_>, source: &str) -> PyResult<compiler_json::DesugarJson>",
       "kind": "binding-pyfunction",
       "authority": "TaggedTransport",
-      "graph_identity": "8e631ef6e1943bdd67b39eebf004391dfd3716bdbfbf24229baf8d01cb2285c3",
+      "graph_identity": "581aea364bd85156be82c786b72d2ac8b98f5018fcd79c99e2b9a6a2a58c610e",
       "contract": "compiler-json/chelis_python::desugar_json"
     },
     {
@@ -56,7 +56,7 @@
       "id": "chelis_python::eval_json(py: Python<'_>, source: &str, bindings_json: compiler_json::EvalBindingsJson, source_kind: &str, project_root: Option<&str>) -> PyResult<compiler_json::EvalJson>",
       "kind": "binding-pyfunction",
       "authority": "TaggedTransport",
-      "graph_identity": "4ea4812d3e88ce4b9b68764d70eedda85b8a02049368055ff1bce1fcf63cbf29",
+      "graph_identity": "7489d34b781b9d09d7ca8da108b0519e905e015fd7b1dbc5e4a073178ffff628",
       "contract": "compiler-json/chelis_python::eval_json"
     },
     {
@@ -82,7 +82,7 @@
       "id": "chelis_python::CompiledModel::__call__(self: &Self, py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<CompiledTensorResults>",
       "kind": "binding-pymethod",
       "authority": "TaggedTransport",
-      "graph_identity": "e3a84285cbd056eb71fcb5c9f6018e1d0f0d76e5c71731d87e07f10f8f7411b3",
+      "graph_identity": "776ef234ab4be0ff310a1b7d2e9308b806b31d0ab45b8eaaef36253575907761",
       "contract": "native/compiled-tensor-call"
     },
     {
@@ -122,7 +122,7 @@
       "id": "chelis_python::NativeTensor::__dlpack__(self: &Self, stream: Option<DLPackStreamRequest>, max_version: Option<DLPackVersionRequest>, dl_device: Option<DLPackDeviceRequest>, copy: Option<bool>) -> PyResult<DLPackCapsule>",
       "kind": "binding-pymethod",
       "authority": "TaggedTransport",
-      "graph_identity": "ec9e416c22c94f2c17ba5c2bb4833fb3f1918935da2fbbaf6f1774cb4a84a551",
+      "graph_identity": "a0029330debfe65985caadca6963c05ca66e371b35368cf3d2337230b3461815",
       "contract": "native/dlpack-capsule"
     },
     {
@@ -132,7 +132,7 @@
       "id": "chelis_python::NativeTensor::__dlpack_device__(self: &Self) -> DLPackDevice",
       "kind": "binding-pymethod",
       "authority": "TaggedTransport",
-      "graph_identity": "e3eacd75d0c4fbf722a6bb3ca368339355be20e2599009bd61a23dcebee26bdd",
+      "graph_identity": "70a0f97593cd8085a72e57decb930a24268bddcfbe400727f7a57e69597b09ee",
       "contract": "native/dlpack-device"
     },
     {
@@ -149,7 +149,7 @@
       "id": "chelis_python::NativeTensor::shape(self: &Self) -> Vec<i64>",
       "kind": "binding-pymethod",
       "authority": "NumericOperation",
-      "graph_identity": "d6958c69e64f763ff078d6963ee88c6b49504eb55937553a686ae57e6bc98513",
+      "graph_identity": "8612bb1b189c55a1ea412ee81b2d7fc6fb0c5c92a2910c4dc7191cc9a80ab9eb",
       "contract": "[05-OP-45]"
     }
   ]

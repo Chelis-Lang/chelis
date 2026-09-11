@@ -53,8 +53,8 @@
         "-p",
         "chelis-python"
       ],
-      "selected_count": 145,
-      "selected_sha256": "89b7ce978dfae168dcfd0fec067757a6442de869d794ba9462bdb99a5fd11595"
+      "selected_count": 147,
+      "selected_sha256": "5ac1d17395d875d8f5c029f876da69e9a120c5736d0a4830e144cb3a4bcf6e62"
     },
     {
       "name": "backend runtime-header capacity census",
