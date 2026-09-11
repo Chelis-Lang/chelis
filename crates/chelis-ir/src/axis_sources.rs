@@ -2190,6 +2190,81 @@ pub enum LocalGuardObservation {
     /// Read the site node's realized output extent at the site's axis, after
     /// that node runs.
     RealizedExtent,
+    /// Compute the extent the site's node is ABOUT to produce, from that
+    /// node's own bounds, before it runs.
+    ///
+    /// This is the third quantity, and it is neither of the first two. An
+    /// [`AxisSource::OpComputed`] axis has no carrier: no `RtDim` on the
+    /// operation states the extent, because the operation derives it from its
+    /// own output-shape rule. [`Self::RealizedExtent`] does state it, but only
+    /// after the node has run, and for an op-computed axis the node IS the
+    /// allocation - C2.5 rejects that read in terms: "An extent computed by
+    /// the operation must be computed/validated before its first
+    /// shape-dependent allocation/access, not recovered from a tensor
+    /// allocated using the unvalidated claim. Merely checking after a wrong
+    /// allocation is not a conforming implementation of C1.3."
+    ///
+    /// So the derivation states HOW to compute it, once, and both lanes read
+    /// that one answer rather than each asking the operation again.
+    ComputedExtent(ComputedAxisExtent),
+}
+
+/// The extent an admitted [`AxisSource::OpComputed`] axis will produce,
+/// expressed from the operation's own carriers.
+///
+/// One variant per admitted owner, because the arithmetic is the owner's own
+/// output-shape rule and there is no rule shared across owners to factor out.
+/// `spec/04-type-system.md` section 4.7's movement paragraph makes `shrink`
+/// the owner whose symbolic axes "always mint fresh extents"; a `pad` with
+/// non-zero padding and a `stride` with a non-unit step mint fresh extents
+/// under the same sentence and are NOT admitted here (chelis#1379 owns the
+/// arithmetic-sized forms). They keep the behaviour they have rather than
+/// becoming newly silent: no site existed for them before this variant and
+/// none exists after it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComputedAxisExtent {
+    /// `shrink`'s half-open span on one axis: the extent is `end - start`
+    /// (`spec/05-risc-primitives.md` section 2.4).
+    ///
+    /// `RtDim::ToEnd` resolves to the OPERAND's realized extent at
+    /// `operand_axis`, which is readable before the shrink runs because the
+    /// operand is one of the shrink's producers. `operand_axis` is carried
+    /// rather than re-derived from the site key, so a consumer reading this
+    /// variant needs nothing but the variant.
+    ///
+    /// A span whose `start` is not below its `end` computes no extent. The
+    /// operation's own domain rejection owns that failure on both lanes and
+    /// runs first (the C runtime's movement plan rejects it before the guard
+    /// site is reached), so the guard yields nothing rather than comparing a
+    /// fabricated number.
+    ShrinkSpan {
+        start: RtDim,
+        end: RtDim,
+        operand_axis: usize,
+    },
+}
+
+/// The computed extent of `axis`, when `op` is an admitted op-computed owner.
+///
+/// ONE admission answer for two callers: [`local_dim_guard_sites`], which
+/// turns it into a guard site, and lowering's declared-result stamp, which
+/// may write a claim onto an op-computed result axis only where this function
+/// produces the guard that enforces it. Splitting the two would let a claim
+/// be stamped with no site to check it, which is a silently wrong shape on
+/// the evaluator and the legacy movement failure on C.
+pub fn op_computed_axis_extent(op: &RiscOp, axis: usize) -> Option<ComputedAxisExtent> {
+    match op {
+        RiscOp::Shrink { bounds } => {
+            bounds
+                .get(axis)
+                .map(|(start, end)| ComputedAxisExtent::ShrinkSpan {
+                    start: start.clone(),
+                    end: end.clone(),
+                    operand_axis: axis,
+                })
+        }
+        _ => None,
+    }
 }
 
 /// What a local guard reports, what it compares against, and how it reads the
