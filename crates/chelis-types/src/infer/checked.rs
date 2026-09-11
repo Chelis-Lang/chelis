@@ -369,7 +369,7 @@ pub(super) enum DeferredShapeRule {
 /// them is scope: a route replay re-enters the whole of `finish_unified_app`,
 /// while a dtype replay re-runs only the three dtype-admissibility validators
 /// at its head.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum PostAppReplay {
     /// Re-enter `finish_unified_app`: the route's own arm decides again.
     Route,
@@ -584,6 +584,25 @@ impl InferenceProduct {
             Some((clone_addr, original_site)) if clone_addr == addr => original_site,
             _ => addr,
         }
+    }
+
+    /// The replay kind of every `PostApp` entry for this call, in ledger order.
+    ///
+    /// chelis#1512: the route and dtype registrations share one key, and which
+    /// one survives is a decision no builtin currently exercises, because no
+    /// callee reaches both a dtype validator and a `site.register` route arm.
+    /// The invariant is still real, so it is asserted here rather than left to
+    /// the first callee that does.
+    #[cfg(test)]
+    pub(super) fn post_app_replays_for(&self, list: &deep::List) -> Vec<PostAppReplay> {
+        let key = self.post_app_key(list);
+        self.deferred_shape_checks
+            .iter()
+            .filter_map(|check| match &check.rule {
+                DeferredShapeRule::PostApp { replay, site, .. } if *site == key => Some(*replay),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Is this call already suspended, under either replay kind?

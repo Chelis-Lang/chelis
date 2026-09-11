@@ -2054,5 +2054,6 @@ fn builtin_conv_rejects_kernel_precision_mismatch() {
 mod issue_1316;
 mod more;
 mod post_app_ledger_key;
+mod post_app_replay_precedence;
 mod recursion_uniformity;
 mod schedule_invariants;
