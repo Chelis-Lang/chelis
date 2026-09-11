@@ -55,7 +55,7 @@ impl RandomExecutionContext {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ScopeId(pub(crate) usize);
 
 impl ScopeId {
@@ -64,7 +64,7 @@ impl ScopeId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DrawId(pub(crate) usize);
 
 impl DrawId {
@@ -80,7 +80,7 @@ pub(crate) struct Scope {
 
 /// An immutable lowering-owned association. Inspecting a site does not permit
 /// constructing an execution plan or attaching it to another graph.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RandomSite {
     Forward { draw: DrawId, scope: ScopeId },
     Replay { draw: DrawId },
@@ -151,6 +151,52 @@ impl ExecutionMetadata {
     }
 
     pub(crate) fn merge_child(
+        &mut self,
+        child: Self,
+        inherited: ScopeId,
+        remap: &UnordMap<NodeId, NodeId>,
+        dag: &Dag,
+    ) -> Result<(), String> {
+        self.merge_child_inner(child, inherited, remap, dag)
+    }
+
+    #[cfg(feature = "lowering-trace")]
+    pub(crate) fn merge_child_observed(
+        &mut self,
+        child: Self,
+        inherited: ScopeId,
+        remap: &UnordMap<NodeId, NodeId>,
+        dag: &Dag,
+    ) -> Result<crate::lowering_trace::EffectRemap, String> {
+        let occurrence_offset = self.spine.occurrence_count();
+        let draw_offset = self.draws;
+        let scope_offset = self.scopes.len();
+        let occurrences = (0..child.spine.occurrence_count())
+            .map(|index| (OccurrenceId(index), OccurrenceId(index + occurrence_offset)))
+            .collect();
+        let draws = (0..child.draws)
+            .map(|index| (DrawId(index), DrawId(index + draw_offset)))
+            .collect();
+        let scopes = (0..child.scopes.len())
+            .map(|index| {
+                let source = ScopeId(index);
+                let target = if index == 0 {
+                    inherited
+                } else {
+                    ScopeId(scope_offset + index - 1)
+                };
+                (source, target)
+            })
+            .collect();
+        self.merge_child_inner(child, inherited, remap, dag)?;
+        Ok(crate::lowering_trace::EffectRemap {
+            occurrences,
+            draws,
+            scopes,
+        })
+    }
+
+    fn merge_child_inner(
         &mut self,
         mut child: Self,
         inherited: ScopeId,

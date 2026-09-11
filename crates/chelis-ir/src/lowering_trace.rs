@@ -22,6 +22,7 @@ pub struct ContextId(pub usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextKind {
     Library,
+    Helper,
     Gradient,
     Vmap,
     VmapGradient,
@@ -138,6 +139,79 @@ pub struct EvaluationLoweringTrace {
     pub executions: Vec<ExecutionGradient>,
 }
 
+/// The execution identities changed by one actual child-plan splice. Node
+/// identities are retained by the matching [`Application::remap`]; these maps
+/// record the source/effect identities that an ordinary DAG cannot carry.
+#[derive(Debug, Clone, Default)]
+pub struct EffectRemap {
+    pub occurrences:
+        BTreeMap<crate::execution_spine::OccurrenceId, crate::execution_spine::OccurrenceId>,
+    pub draws: BTreeMap<crate::evaluation::DrawId, crate::evaluation::DrawId>,
+    pub scopes: BTreeMap<crate::evaluation::ScopeId, crate::evaluation::ScopeId>,
+}
+
+/// Owned execution metadata at a graph boundary already present in the
+/// enclosing trace. This deliberately does not clone that graph again.
+#[derive(Debug, Clone)]
+pub struct ExecutionObservation {
+    pub steps: Vec<crate::execution_spine::Step>,
+    pub source: Vec<crate::execution_spine::Occurrence>,
+    pub sites: BTreeMap<crate::dag::NodeId, crate::evaluation::RandomSite>,
+    pub draw_count: usize,
+    pub inherited_seed: Option<u64>,
+}
+
+/// Effect-bearing observations for the matching ordinary gradient
+/// application. `gradient` indexes [`LoweringTrace::gradients`].
+#[derive(Debug, Clone)]
+pub struct ExecutionApplication {
+    pub gradient: usize,
+    pub remap: EffectRemap,
+    pub before_splice: ExecutionObservation,
+    pub after_splice: ExecutionObservation,
+    pub after_packing: ExecutionObservation,
+}
+
+/// Actual helper normalization metadata. The matching graphs and node maps
+/// live in [`LoweringTrace::normalization`].
+#[derive(Debug, Clone)]
+pub struct ExecutionNormalization {
+    pub before_dce: ExecutionObservation,
+    pub after_dce: ExecutionObservation,
+    pub after_copies: ExecutionObservation,
+    pub after_drops: ExecutionObservation,
+}
+
+/// One successful helper's owned observations. This value is retained in the
+/// same private helper product as its execution metadata and is only exposed
+/// by borrowed host-plan accessors.
+#[derive(Debug, Clone)]
+pub struct HelperLoweringTrace {
+    pub lowering: LoweringTrace,
+    pub executions: Vec<ExecutionGradient>,
+    pub applications: Vec<ExecutionApplication>,
+    /// Execution-spine observations are present only when this helper was
+    /// actually lowered through the fixed-control execution path. Ordinary
+    /// helper observation must not manufacture execution metadata.
+    pub normalization: Option<ExecutionNormalization>,
+    /// Every root after helper-local result packing and before normalization,
+    /// in ABI order.
+    pub packed_roots: Vec<NodeId>,
+    /// The helper result structure whose leaves are `packed_roots` entries.
+    pub packed_result: Value,
+    /// The actual output of the later host dimension-rebinding boundary.
+    /// `None` is explicit when this trace did not pass through that boundary
+    /// (for example, a hostless named-entry plan).
+    pub after_dimension_rebinding: Option<Dag>,
+}
+
+impl HelperLoweringTrace {
+    pub(crate) fn record_dimension_rebinding(&mut self, dag: &Dag) {
+        assert!(self.after_dimension_rebinding.is_none());
+        self.after_dimension_rebinding = Some(dag.clone());
+    }
+}
+
 pub fn try_lower_program_to_evaluation_library_with_trace(
     program: &CheckedProgram,
 ) -> Result<(crate::lower::EvaluationLibrary, EvaluationLoweringTrace), LowerDiagnostic> {
@@ -160,6 +234,9 @@ struct State {
     normalization: Option<Normalization>,
     capture_execution: bool,
     executions: Vec<ExecutionGradient>,
+    execution_applications: Vec<ExecutionApplication>,
+    execution_normalization: Option<ExecutionNormalization>,
+    helper_result: Option<(Vec<NodeId>, Value)>,
 }
 
 /// Explicitly inherited by child contexts; never global or thread-local.
@@ -198,6 +275,35 @@ impl Collector {
         collector
     }
 
+    pub(crate) fn new_helper() -> Self {
+        let collector = Self::new();
+        collector.state.borrow_mut().contexts[0].kind = ContextKind::Helper;
+        collector
+    }
+
+    pub(crate) fn new_execution_helper() -> Self {
+        let collector = Self::new_execution();
+        collector.state.borrow_mut().contexts[0].kind = ContextKind::Helper;
+        collector
+    }
+
+    pub(crate) fn execution_observation(
+        dag: &Dag,
+        execution: &crate::evaluation::ExecutionMetadata,
+    ) -> ExecutionObservation {
+        let mut execution = execution.clone();
+        execution
+            .complete(dag)
+            .expect("observed helper boundary preserves node order");
+        ExecutionObservation {
+            steps: execution.spine.steps.clone(),
+            source: execution.spine.source.clone(),
+            sites: execution.sites.into_sorted().into_iter().collect(),
+            draw_count: execution.draws,
+            inherited_seed: execution.scopes[0].seed,
+        }
+    }
+
     pub(crate) fn execution_before_ad(
         &self,
         dag: &Dag,
@@ -229,6 +335,33 @@ impl Collector {
             lowering: self.finish(),
             executions,
         }
+    }
+
+    pub(crate) fn finish_helper(self) -> HelperLoweringTrace {
+        let executions = std::mem::take(&mut self.state.borrow_mut().executions);
+        let applications = std::mem::take(&mut self.state.borrow_mut().execution_applications);
+        let normalization = self.state.borrow_mut().execution_normalization.take();
+        let (packed_roots, packed_result) = self
+            .state
+            .borrow_mut()
+            .helper_result
+            .take()
+            .expect("successful helper lowering records its packed result");
+        HelperLoweringTrace {
+            lowering: self.finish(),
+            executions,
+            applications,
+            normalization,
+            packed_roots,
+            packed_result,
+            after_dimension_rebinding: None,
+        }
+    }
+
+    pub(crate) fn helper_result(&self, roots: &[NodeId], result: Value) {
+        let mut state = self.state.borrow_mut();
+        assert!(state.helper_result.is_none());
+        state.helper_result = Some((roots.to_vec(), result));
     }
 
     pub(crate) fn child(&self, kind: ContextKind) -> Self {
@@ -281,6 +414,13 @@ impl Collector {
         gradient.application = Some(application);
     }
 
+    pub(crate) fn execution_application(&self, application: ExecutionApplication) {
+        self.state
+            .borrow_mut()
+            .execution_applications
+            .push(application);
+    }
+
     pub(crate) fn normalization(
         &self,
         before_dce: &Dag,
@@ -297,6 +437,23 @@ impl Collector {
             after_drops: after_drops.clone(),
             dce_remap: ordered(dce_remap),
             copy_remap: ordered(copy_remap),
+        });
+    }
+
+    pub(crate) fn execution_normalization(
+        &self,
+        before_dce: ExecutionObservation,
+        after_dce: ExecutionObservation,
+        after_copies: ExecutionObservation,
+        after_drops: ExecutionObservation,
+    ) {
+        let mut state = self.state.borrow_mut();
+        assert!(state.execution_normalization.is_none());
+        state.execution_normalization = Some(ExecutionNormalization {
+            before_dce,
+            after_dce,
+            after_copies,
+            after_drops,
         });
     }
 
@@ -319,6 +476,12 @@ mod tests {
     use super::*;
     use crate::dag::{DimInfo, RiscOp, TensorType};
     use chelis_types::types::Prim;
+
+    #[test]
+    fn retained_helper_trace_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<HelperLoweringTrace>();
+    }
 
     // This checks the collector's metadata fidelity, not host-entry coverage.
     // Source-driven library-path tests live in tests/lowering_trace.rs.

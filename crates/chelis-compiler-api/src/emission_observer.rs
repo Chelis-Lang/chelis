@@ -36,19 +36,38 @@ pub struct EmissionObservation<'a> {
     pub selected: SelectedEmission<'a>,
 }
 
-pub(crate) type Observer<'a> = &'a mut dyn FnMut(EmissionObservation<'_>);
+pub(crate) enum Observer<'a> {
+    Emission(&'a mut dyn FnMut(EmissionObservation<'_>)),
+    #[cfg(feature = "compilation-trace")]
+    Compilation(crate::compilation_trace::Observer<'a>),
+}
+
+impl Observer<'_> {
+    #[cfg(feature = "compilation-trace")]
+    pub(crate) fn captures_lowering(&self) -> bool {
+        matches!(self, Self::Compilation(_))
+    }
+}
 
 pub(crate) fn observe(
     observer: &mut Option<Observer<'_>>,
     program: &ManifestedProgram,
     lowered_host: Option<&ConcreteHostProgram>,
     selected: SelectedEmission<'_>,
+    #[cfg(feature = "compilation-trace")] lowering: crate::compilation_trace::SelectedLowering<'_>,
 ) {
     if let Some(observer) = observer {
-        observer(EmissionObservation {
+        let emission = EmissionObservation {
             program,
             lowered_host,
             selected,
-        });
+        };
+        match observer {
+            Observer::Emission(observer) => observer(emission),
+            #[cfg(feature = "compilation-trace")]
+            Observer::Compilation(observer) => {
+                observer(crate::compilation_trace::CompilationObservation { emission, lowering })
+            }
+        }
     }
 }

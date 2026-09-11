@@ -12,6 +12,8 @@ emission-observer = []
 # Forward the private native Random observer into generated C. No public Rust
 # or generated-header surface depends on this non-default feature.
 native-random-observer = ["chelis-backend-c/native-random-observer"]
+# Same-compilation helper captures and a final-success-bound projection; default off.
+compilation-trace = ["emission-observer", "chelis-ir/lowering-trace", "chelis-pipeline-core/lowering-trace"]
 
 [dependencies]
 chelis-unord.workspace = true

@@ -2,6 +2,8 @@
 
 pub(crate) mod cache_envelope;
 pub mod check_report;
+#[cfg(feature = "compilation-trace")]
+pub mod compilation_trace;
 pub mod compiler;
 pub mod context;
 pub mod decode;
