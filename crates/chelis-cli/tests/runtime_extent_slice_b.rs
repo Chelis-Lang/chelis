@@ -1109,6 +1109,44 @@ fn c_run_result_with_source(dir: &TempDir, stem: &str, source: &str) -> (bool, S
 /// kernel C extracts for `f(seed, x)` (`run__tensor_N`, with `f` inlined and
 /// the same entry guard `f__tensor_0` carries), in the order `effect_first`
 /// names; inside that kernel the entry guard before its first allocation.
+/// One host body's DEFINITION, located by NAME rather than by its exact
+/// parameter list.
+///
+/// The emitted file carries a forward declaration and a definition for the
+/// same symbol, so the name alone is ambiguous; the definition is the
+/// occurrence whose parameter list is followed by `{` instead of `;`.
+///
+/// Matching the full signature instead is what chelis#1808 was: chelis#1799
+/// gave every host body a `chelis_rng_state *__chelis_rng` parameter and
+/// renamed the extracted kernels to `..._with_rng`, and a literal match on the
+/// old spelling then failed with "the IO body is emitted as host code". That
+/// read as the emission having MOVED off the host lane, which would be a real
+/// regression in what these rows assert. It had not moved: the body is still
+/// host code, the print is still inline in it, and the ordering property these
+/// rows exist for was intact throughout. A precondition that cannot tell a
+/// changed signature from a changed lane is worse than no precondition, so
+/// this one keys on the structure it actually needs.
+fn host_body_definition<'a>(emitted: &'a str, name: &str) -> &'a str {
+    let needle = format!("{name}(");
+    let mut at = 0;
+    while let Some(found) = emitted[at..].find(&needle) {
+        let start = at + found;
+        let rest = &emitted[start..];
+        // No parameter of a host body carries a nested parenthesis, so the
+        // first `)` closes the list.
+        if let Some(close) = rest.find(')')
+            && rest[close + 1..].trim_start().starts_with('{')
+        {
+            return rest;
+        }
+        at = start + needle.len();
+    }
+    panic!(
+        "no definition of `{name}` in the emitted C: the IO body is expected on the host lane, \
+         and a forward declaration alone means it moved off it"
+    );
+}
+
 fn assert_effect_order_in_emitted_c(emitted: &str, effect_first: bool) {
     // The kernel C extracts for `f(seed, x)` is the `run__tensor_N` whose
     // body carries the entry guard (`seed`'s own sub-expression is another
@@ -1133,10 +1171,7 @@ fn assert_effect_order_in_emitted_c(emitted: &str, effect_first: bool) {
         guard_at < alloc_at,
         "the entry guard precedes the kernel's first allocation"
     );
-    let body_start = emitted
-        .find("run__chelis_owned_body(chelis_tensor* x) {")
-        .expect("the IO body is emitted as host code");
-    let body = &emitted[body_start..];
+    let body = host_body_definition(emitted, "run__chelis_owned_body");
     let print_at = body
         .find("chelis_string_from_cstr(\"effect\")")
         .expect("the print is emitted in the host body (chelis#1528)");

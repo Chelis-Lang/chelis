@@ -169,3 +169,21 @@ name = "runtime_extent_authored_claims"
 [[target]]
 package = "chelis-compiler-api"
 name = "hip_entry_obligation_witness"
+
+# chelis#1808: the phase-b oracle's receipt leg reads this file, so a sibling
+# merge that changes the C emission turns `runtime_extent_oracle.py --phase b`
+# red on `main` itself. It went unnoticed once because neither this target nor
+# the preparation matrix ran in any per-pull-request job. 70 tests, 13.4 s
+# measured warm.
+[[target]]
+package = "chelis-cli"
+name = "runtime_extent_slice_b"
+
+# The same oracle leg reads the preparation matrix. 28 tests, 177 s measured
+# warm, which is the cost of compiling and linking a C fixture per cell; it is
+# registered because the rows it pins are exactly the ones a C-emission change
+# moves, and discovering that from a red `main` costs more than three minutes
+# a pull request.
+[[target]]
+package = "chelis-cli"
+name = "runtime_extent_claim_preparation"
