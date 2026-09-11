@@ -4954,7 +4954,7 @@ fn hoist_record_projections(
 fn lower_host_body_with_record_locals(
     signature: &HostDefSignature,
     program: &CheckedProgram,
-    tensor_helpers: &mut Vec<HostTensorHelper>,
+    tensor_helpers: &mut TensorHelperSink,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
     let mut bound = UnordSet::new();
     if names_bound_in(&signature.body_expr, &mut bound).is_err() {
