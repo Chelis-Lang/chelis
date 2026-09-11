@@ -318,9 +318,11 @@ is the argument's own `ConstTensor`. The bound is decided by PROVENANCE, with
 `resolve_axis_extent`, and its four origins are total: `Literal` is fixed,
 while `ExternalAxis`, `ScalarInput` and `OpComputed` are not. An ABI
 parameter's axis is an interface obligation the entry guard checks rather than
-a fact of the graph, so it never entails a literal however many pass-through
-hops separate the parameter from the witness, and the exported-kernel and
-value-binding forms keep every requirement they had. Deciding this by the
+a fact of the graph, so it never entails a literal however many PASS-THROUGH
+hops separate the parameter from the witness, and those spellings keep the
+requirement. An operation that fixes the extent itself, a `reshape` to a
+literal target among them, has a `Literal` origin and does entail it; such an
+operation imposes that extent or traps before the declared result exists. Deciding this by the
 neighbouring operation instead does not hold: matching the observed node's op
 against `Load` loses the bound at the first intervening `mul` or `cast`, which
 is what a syntactic stand-in for provenance costs. The declared dimension is
@@ -772,10 +774,11 @@ chelis#1397's wildcard-root repair moves two further cells of that 55, taking
 the unmet count from 10 to 8. `wildcard.root` and `vmap.shape` both execute on
 Eval and C with their contract values, `main = tensor(shape=[2], data=[2.0,
 3.0])` and `main = tensor(shape=[2, 2], data=[2.0, 3.0, 5.0, 6.0])`. The
-remaining eight are `polymorphic.named.root.mismatch.{eval,c}` (#1374),
-`polymorphic.foreign.root.mismatch.{eval,c}` (#1376), and
-`record.direct.{check,eval,c}` with `record.alias.eval` (#1266). #1397's own
-`shrink.*` declaration cells are met.
+remaining eight were `polymorphic.named.root.mismatch.{eval,c}` (#1374) and
+`polymorphic.foreign.root.mismatch.{eval,c}` (#1376), which #1782's deferred
+root restatement then met, and `record.direct.{check,eval,c}` with
+`record.alias.eval` (#1266), which stand. #1397's own `shrink.*` declaration
+cells are met.
 
 The merged B2b-0b numeric kernel repair compares literal and resolved named
 claims against independent nonnegative runtime sizes at live `Expand` and
@@ -833,10 +836,10 @@ baseline at that delivery had 51 unmet cells: 24 declared signatures were
 preserved and two formerly silent #1377 inlined failures trapped. C2.4's
 checked transport reduces the same preparation baseline to 35 unmet cells.
 The preserved named `insert` declarations and executable roots do not prove
-caller equality or attribution; #1397's general root gap remains open.
-#1374/#1376's caller equality landed with the named claim, and its inlined-root
-attribution with #1782, which leaves the baseline at 8 unmet cells: #1378's
-`vmap.shape`, #1397's `wildcard.root` and #1266's four record cells.
+caller equality or attribution. #1374/#1376's caller equality landed with the
+named claim and its inlined-root attribution with #1782; #1397's general
+wildcard-root boundary and #1378's public value witness landed with B2b-root.
+Four cells remain, all #1266's, and the ignored acceptance runner reports them.
 
 The suite's rows distinguish:
 
