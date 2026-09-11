@@ -414,7 +414,14 @@ fn classify_arith_app(kids: &[deep::Expr], ctx: &SizeCtx<'_>) -> SizeClass {
 /// operator on the same category, decided opposite ways by two enumerations
 /// (chelis#1379).
 const INT_ARITH: &[&str] = &[
-    "add", "sub", "mul", "div", "floor_div", "trunc_div", "mod", "neg",
+    "add",
+    "sub",
+    "mul",
+    "div",
+    "floor_div",
+    "trunc_div",
+    "mod",
+    "neg",
 ];
 
 /// Fold operand classes, shared by the application and bare-pipe-stage
