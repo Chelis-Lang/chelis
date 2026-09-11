@@ -359,9 +359,12 @@ fn every_directory_entry_carries_a_report_never_a_display_string() {
     //
     // This is a REGRESSION GUARD, not a test of that change. It passes
     // against the parent commit as well, because chelis#1679 had already
-    // made every one of these fixtures produce a report, so no `Err` reached
-    // the arm in practice. The test that distinguishes the change is
-    // `a_failure_building_inferred_signatures_is_reported_not_propagated`.
+    // made every one of THESE fixtures produce a report. The `Err` arm was
+    // still reachable on the parent -- a `.dp` with a negative extent,
+    // checked with `--show-inferred`, produced a display-string entry and
+    // exit 1 -- but that input depends on chelis#1768 and is deliberately
+    // kept out of this fixture set. The test that distinguishes the change
+    // is `a_failure_building_inferred_signatures_is_reported_not_propagated`.
     let dir = tempdir().expect("tempdir");
     fs::write(
         dir.path().join("ok.ch"),
@@ -429,7 +432,12 @@ fn a_failure_building_inferred_signatures_is_reported_not_propagated() {
     // a live [04-FIT-12] bypass. It is now a diagnostic on the report.
     //
     // The negative extent being accepted at all is a separate checker
-    // defect; this test pins only that its consequence is transported.
+    // defect, chelis#1768, and this fixture DEPENDS on it. When #1768 is
+    // fixed the program will be rejected during type analysis, the rows will
+    // never be built, and this whole test will fail -- not as a regression,
+    // but because the fixture stopped reaching the path. Replace the fixture
+    // with another way of making inferred-signature construction fail; do
+    // not restore the checker's acceptance to make this pass.
     let dir = tempdir().expect("tempdir");
     let path = write(
         &dir,
@@ -466,8 +474,14 @@ fn a_failure_building_inferred_signatures_is_reported_not_propagated() {
         "a non-empty errors array exits 2"
     );
 
-    // Negative control: without the flag the rows are never built, so the
-    // same program still checks clean. The failure is scoped to the request.
+    // Negative control, scoped to what "the failure is confined to the
+    // request" actually means: without the flag the rows are never built,
+    // so no inferred-signature diagnostic is produced.
+    //
+    // It deliberately does NOT assert that this program checks clean
+    // without the flag. It does today, but only because of chelis#1768;
+    // asserting exit 0 would pin that defect as correct behaviour and make
+    // its fix look like a regression here.
     let plain = Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
@@ -475,9 +489,14 @@ fn a_failure_building_inferred_signatures_is_reported_not_propagated() {
         .arg(&path)
         .output()
         .expect("run chelis check");
-    assert_eq!(
-        plain.status.code(),
-        Some(0),
-        "without --show-inferred it checks clean"
+    let plain_stdout = String::from_utf8_lossy(&plain.stdout).to_string();
+    let plain_report: WireCheckResult = serde_json::from_str(&plain_stdout)
+        .unwrap_or_else(|e| panic!("without the flag a report is still emitted ({e})"));
+    assert!(
+        !plain_report
+            .errors
+            .iter()
+            .any(|d| d.message.contains("inferred signatures unavailable")),
+        "the rows were not requested, so their failure cannot be reported; got {plain_stdout}"
     );
 }

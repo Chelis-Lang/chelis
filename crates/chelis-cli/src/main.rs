@@ -2922,18 +2922,48 @@ mod check_path_totality_tests {
     //! type cannot.
 
     use super::{
-        EMPTY_PROGRAM_MESSAGE, PreparedCliReport, assemble_check_json, check_prepared_for_cli,
-        cmd_check_one, cmd_check_one_deep, cmd_check_one_on_grown_stack,
-        synthetic_check_report_with_error, synthetic_check_report_with_errors,
+        EMPTY_PROGRAM_MESSAGE, assemble_check_json, check_prepared_for_cli, cmd_check_one,
+        cmd_check_one_deep, cmd_check_one_on_grown_stack, synthetic_check_report_with_error,
+        synthetic_check_report_with_errors,
     };
     use std::path::Path;
+
+    /// `assemble_check_json`'s signature, spelled out so the pin stays
+    /// readable.
+    type AssembleCheckJson = fn(
+        chelis_types::FitnessReport,
+        &[chelis_effects::EffectError],
+        &[chelis_types::errors::CheckError],
+        Option<Vec<chelis_compiler_api::schema::WireInferredSignature>>,
+    ) -> (String, bool);
+
+    /// `check_prepared_for_cli`'s signature, with its return tuple spelled
+    /// out HERE rather than through the production alias
+    /// `PreparedCliReport`.
+    ///
+    /// Naming the production alias made the pin dodgeable: a red-team
+    /// mutant redefined `PreparedCliReport` itself as a `Result`, restored
+    /// the original `?` inside the function, and built with every pin
+    /// present, because the pin and the function changed together. A pin
+    /// has to name the shape independently of the code it constrains.
+    type CheckPreparedForCli = fn(
+        chelis_compiler_api::pipeline::PreparedProgram,
+        bool,
+    ) -> (
+        chelis_types::FitnessReport,
+        Vec<chelis_effects::EffectError>,
+        Vec<chelis_types::errors::CheckError>,
+        Option<Vec<chelis_compiler_api::schema::WireInferredSignature>>,
+    );
 
     /// Every function on the per-file check path, pinned at its signature.
     ///
     /// This is the test that actually carries the guarantee. A function
     /// pointer of an explicit type only accepts a function of exactly that
     /// type, so if any of these six regains a `Result`, THIS BINDING stops
-    /// compiling -- whether or not anything calls it with `?` yet.
+    /// compiling -- whether or not anything calls it with `?` yet. Every
+    /// type here is spelled out locally; none is borrowed from production,
+    /// where it could be widened along with the function it describes.
     ///
     /// An earlier revision of this module bound only the report producer. A
     /// red-team mutation re-widened `cmd_check_one`,
@@ -2942,22 +2972,12 @@ mod check_path_totality_tests {
     /// module stayed green: the five functions that had held all 21 `?`
     /// sites were not pinned at all. The type system enforces nothing about a
     /// signature that no binding names.
-    /// `assemble_check_json`'s signature, named so the pin below stays
-    /// readable. Any change to its return type breaks the pin.
-    type AssembleCheckJson = fn(
-        chelis_types::FitnessReport,
-        &[chelis_effects::EffectError],
-        &[chelis_types::errors::CheckError],
-        Option<Vec<chelis_compiler_api::schema::WireInferredSignature>>,
-    ) -> (String, bool);
-
     #[test]
     fn every_check_path_signature_is_total() {
         let _: fn(&Path, bool, bool) -> (String, bool) = cmd_check_one;
         let _: fn(&Path, bool, bool) -> (String, bool) = cmd_check_one_on_grown_stack;
         let _: fn(&str, bool) -> (String, bool) = cmd_check_one_deep;
-        let _: fn(chelis_compiler_api::pipeline::PreparedProgram, bool) -> PreparedCliReport =
-            check_prepared_for_cli;
+        let _: CheckPreparedForCli = check_prepared_for_cli;
         let _: AssembleCheckJson = assemble_check_json;
         let _: fn(&[String]) -> String = synthetic_check_report_with_errors;
         let _: fn(&str) -> String = synthetic_check_report_with_error;
@@ -3051,9 +3071,15 @@ fn inferred_signatures_or_diagnostic(
     match inferred_signatures_value(checked) {
         Ok(rows) => Some(rows),
         Err(error) => {
+            let message = format!("inferred signatures unavailable: {error}");
+            // stderr keeps a line, as on every other path this series
+            // transports: the atom asks for the failure to REACH the report,
+            // not for the terminal line to be taken away. When this failure
+            // propagated, `main`'s error arm printed it; now nothing would.
+            eprintln!("error: {message}");
             fitness.errors.push(chelis_types::errors::CheckError {
                 kind: chelis_types::errors::CheckErrorKind::Other,
-                message: format!("inferred signatures unavailable: {error}"),
+                message,
                 severity: 0.5,
                 expected: None,
                 got: None,
