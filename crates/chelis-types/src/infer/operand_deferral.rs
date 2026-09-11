@@ -59,11 +59,71 @@ impl<'a> UnresolvedOperandSite<'a> {
         // A route that inspects several operands reaches such an arm once per
         // unresolved operand. One suspended entry per CALL is what the replay
         // needs; a second would re-enter the route and report twice.
+        if product.has_route_check_for(self.list) {
+            return;
+        }
+        // chelis#1512 follow-up: a dtype-admissibility suspension for this same
+        // call is REPLACED rather than kept. The dtype validators run at the
+        // head of `finish_unified_app`, so they register first, and this replay
+        // re-enters that function and runs them again before it reaches the
+        // route. The route replay therefore subsumes the narrower one, and
+        // keeping both would run the validators twice.
+        product.cancel_post_app_check_for(self.list);
+        product.defer_shape_check(
+            DeferredShapeRule::PostApp {
+                replay: PostAppReplay::Route,
+                site: product.post_app_key(self.list),
+                list: self.list.clone(),
+                kids: self.kids.to_vec(),
+                func_name: self.fname.to_string(),
+                env: Box::new(self.env.clone()),
+            },
+            Vec::new(),
+            arg_tys.to_vec(),
+            result_ty.clone(),
+        );
+    }
+
+    /// chelis#1512: suspend one dtype-admissibility decision.
+    ///
+    /// The three validators in `app_numeric.rs` and `app_operand_dtype.rs` run
+    /// at the head of `finish_unified_app`, ahead of the route dispatch that
+    /// owns [`Self::register`]. They decide whether the operand's DTYPE is
+    /// admitted, not what shape the result has, so the replay re-runs those
+    /// three functions and nothing else. Re-entering `finish_unified_app`
+    /// instead would re-run the route's shape rule too, and `sum`, `mean`,
+    /// `matmul` and `layer_norm` already carry their own ledger entry for the
+    /// same call, so the shape diagnostic would be reported twice.
+    ///
+    /// The entry shares [`InferenceProduct::post_app_key`] with the route
+    /// registration above, so chelis#1774's key translation, its report-once
+    /// cancellation and its silent declaration boundary all apply unchanged.
+    pub(super) fn register_dtype_admissibility(
+        &self,
+        arg_tys: &[Type],
+        result_ty: &Type,
+        subst: &Subst,
+        product: &mut InferenceProduct,
+    ) {
+        // chelis#731 cascade suppression. An error witness never binds, the
+        // readiness predicate does not wait for it, and the replay would print
+        // this route's own diagnostic on top of the upstream failure that
+        // produced the witness. The eager pass already admits such an operand;
+        // leaving the call unsuspended keeps that.
+        if arg_tys
+            .iter()
+            .any(|ty| matches!(type_for_readonly_check(ty, subst), Type::Error(_)))
+        {
+            return;
+        }
+        // One entry per CALL, as above: a validator that reads several operands
+        // reaches its unresolved arm once per operand.
         if product.has_post_app_check_for(self.list) {
             return;
         }
         product.defer_shape_check(
             DeferredShapeRule::PostApp {
+                replay: PostAppReplay::DtypeAdmissibility,
                 site: product.post_app_key(self.list),
                 list: self.list.clone(),
                 kids: self.kids.to_vec(),
@@ -192,4 +252,81 @@ pub(super) fn check_shape_route_signature(
             errors,
         ),
     }
+}
+
+/// chelis#1512: re-run the dtype-admissibility validators against an operand
+/// that has settled since the call was inferred.
+///
+/// The deferred path IS the eager path. These are the same three functions
+/// [`finish_unified_app`] calls at its head, in the same order and with the
+/// same arguments, so a relocated decision cannot silently drop what the eager
+/// one did.
+///
+/// It validates rather than produces, which is why nothing is reconciled
+/// against the type the suspended call published. Two of the three return a
+/// type only when they REJECT, and the arms of the third that suspend all
+/// publish the left operand itself, which by replay time is the very type
+/// `integer_binop_result_type` derives from it.
+///
+/// `None` for the suspension: a replay decides against a settled operand, so
+/// no arm here can suspend the call a second time.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn replay_dtype_admissibility(
+    list: &deep::List,
+    kids: &[deep::Expr],
+    func_name: &str,
+    env: &Env,
+    arg_tys: &[Type],
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
+) {
+    let owned_name = Some(func_name.to_string());
+    let mut route_observed = false;
+    let result_ty = Type::Unit;
+    if validate_numeric_and_reduction_arguments(
+        list,
+        kids,
+        &owned_name,
+        arg_tys,
+        subst,
+        errors,
+        &mut route_observed,
+        None,
+        &result_ty,
+        product,
+    )
+    .is_some()
+    {
+        return;
+    }
+    if reject_inadmissible_operand_dtypes(
+        list,
+        kids,
+        Some(func_name),
+        arg_tys,
+        env,
+        subst,
+        errors,
+        &mut route_observed,
+        None,
+        &result_ty,
+        product,
+    )
+    .is_some()
+    {
+        return;
+    }
+    let _ = integer_binop_result_type(
+        list,
+        Some(func_name),
+        arg_tys,
+        vg,
+        subst,
+        errors,
+        None,
+        &result_ty,
+        product,
+    );
 }

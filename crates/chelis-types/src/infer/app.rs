@@ -341,8 +341,19 @@ fn infer_app_inner(
     // unification reports its lower-level precision pair. Unresolved generic
     // wrappers pass this precheck and are constrained by the shared variable.
     if matches!(func_name.as_deref(), Some("test_assert_close_tensor"))
-        && let Some(rejected) =
-            reject_test_assert_close_tensor_operand_dtypes(list, &arg_tys, subst, errors)
+        && let Some(rejected) = reject_test_assert_close_tensor_operand_dtypes(
+            list,
+            &arg_tys,
+            subst,
+            errors,
+            // No suspension: this pass runs before signature unification has
+            // constrained anything, and `finish_unified_app` calls the same
+            // function again on the types unification produced. That later call
+            // is the one that decides, so it is the one that suspends.
+            None,
+            &Type::Unit,
+            product,
+        )
     {
         return rejected;
     }

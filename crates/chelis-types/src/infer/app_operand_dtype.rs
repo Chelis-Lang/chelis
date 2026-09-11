@@ -19,11 +19,21 @@ use super::*;
 /// diagnostic. [`reject_inadmissible_operand_dtypes`] calls it again after
 /// successful unification so unresolved polymorphic calls still participate
 /// in the checked-route accounting and float-only propagation rules.
+///
+/// Only the second of those two calls carries a suspension. chelis#1512's
+/// deferral belongs to the call that DECIDES, and the pre-unification one is a
+/// diagnostic-quality pass whose operands unification has not constrained yet;
+/// suspending from there would register a call the second one goes on to
+/// decide anyway.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn reject_test_assert_close_tensor_operand_dtypes(
     list: &deep::List,
     arg_tys: &[Type],
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
+    suspension: Option<&UnresolvedOperandSite<'_>>,
+    result_ty: &Type,
+    product: &mut InferenceProduct,
 ) -> Option<Type> {
     let actual = arg_tys.first().map(|ty| type_for_readonly_check(ty, subst));
     let tensor_prim = match actual {
@@ -44,10 +54,14 @@ pub(super) fn reject_test_assert_close_tensor_operand_dtypes(
                 ),
             );
         }
-        Some(Type::Tensor(_, TensorPrec::Var(_)))
-        | Some(Type::Var(_))
-        | Some(Type::Error(_))
-        | None => None,
+        // chelis#1512: the operand is not a tensor at a known dtype YET.
+        Some(Type::Var(_)) => {
+            if let Some(site) = suspension {
+                site.register_dtype_admissibility(arg_tys, result_ty, subst, product);
+            }
+            None
+        }
+        Some(Type::Tensor(_, TensorPrec::Var(_))) | Some(Type::Error(_)) | None => None,
         Some(other) => {
             return reject(
                 errors,
@@ -86,7 +100,13 @@ pub(super) fn reject_test_assert_close_tensor_operand_dtypes(
                     );
                 }
             }
-            Type::Var(_) | Type::Error(_) => {}
+            // chelis#1512: the tolerance has no dtype YET.
+            Type::Var(_) => {
+            if let Some(site) = suspension {
+                site.register_dtype_admissibility(arg_tys, result_ty, subst, product);
+            }
+            }
+            Type::Error(_) => {}
             other => {
                 return reject(
                     errors,
@@ -121,14 +141,17 @@ pub(super) fn reject_inadmissible_operand_dtypes(
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
     checked_route_observed: &mut bool,
+    suspension: Option<&UnresolvedOperandSite<'_>>,
+    result_ty: &Type,
+    product: &mut InferenceProduct,
 ) -> Option<Type> {
     if let Some(fname) = func_name
         && fname == "test_assert_close_tensor"
     {
         *checked_route_observed = true;
-        if let Some(rejected) =
-            reject_test_assert_close_tensor_operand_dtypes(list, arg_tys, subst, errors)
-        {
+        if let Some(rejected) = reject_test_assert_close_tensor_operand_dtypes(
+            list, arg_tys, subst, errors, suspension, result_ty, product,
+        ) {
             return Some(rejected);
         }
     }
@@ -160,7 +183,16 @@ pub(super) fn reject_inadmissible_operand_dtypes(
                         ),
                     );
                 }
-                Type::Var(_) | Type::Error(_) => {}
+                // chelis#1512: `uniform_like`'s template parameter is a bare
+                // type variable in the builtin scheme, so signature
+                // unification does not bind it and an operand really does
+                // reach this arm unresolved.
+                Type::Var(_) => {
+                if let Some(site) = suspension {
+                    site.register_dtype_admissibility(arg_tys, result_ty, subst, product);
+                }
+                }
+                Type::Error(_) => {}
                 _ => {
                     return reject(
                         errors,
@@ -183,7 +215,14 @@ pub(super) fn reject_inadmissible_operand_dtypes(
         for (index, arg_ty) in arg_tys.iter().enumerate().skip(1).take(2) {
             let resolved = type_for_readonly_check(arg_ty, subst);
             match &resolved {
-                Type::Prim(Prim::F32) | Type::Var(_) | Type::Error(_) => {}
+                Type::Prim(Prim::F32) => {}
+                // chelis#1512: the bound has no dtype YET.
+                Type::Var(_) => {
+                if let Some(site) = suspension {
+                    site.register_dtype_admissibility(arg_tys, result_ty, subst, product);
+                }
+                }
+                Type::Error(_) => {}
                 _ => {
                     return reject(
                         errors,
@@ -237,7 +276,13 @@ pub(super) fn reject_inadmissible_operand_dtypes(
             let resolved = type_for_readonly_check(first_arg, subst);
             match &resolved {
                 Type::Tensor(_, TensorPrec::Concrete(prim)) if prim.is_float() => {}
-                Type::Tensor(_, TensorPrec::Var(_)) | Type::Var(_) | Type::Error(_) => {}
+                // chelis#1512: not a tensor at a known dtype YET.
+                Type::Var(_) => {
+                if let Some(site) = suspension {
+                    site.register_dtype_admissibility(arg_tys, result_ty, subst, product);
+                }
+                }
+                Type::Tensor(_, TensorPrec::Var(_)) | Type::Error(_) => {}
                 _ => {
                     return reject(
                         errors,
@@ -262,7 +307,13 @@ pub(super) fn reject_inadmissible_operand_dtypes(
             match &resolved {
                 Type::Prim(prim)
                     if prim.is_float() && tensor_prim.is_none_or(|input| input == *prim) => {}
-                Type::Var(_) | Type::Error(_) => {}
+                // chelis#1512: the rate has no dtype YET.
+                Type::Var(_) => {
+                if let Some(site) = suspension {
+                    site.register_dtype_admissibility(arg_tys, result_ty, subst, product);
+                }
+                }
+                Type::Error(_) => {}
                 _ => {
                     return reject(
                         errors,

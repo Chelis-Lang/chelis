@@ -277,6 +277,7 @@ pub(super) fn operand_dtype_rejection(
 ///
 /// `None` permits later operation-family checks. `Some` carries the original
 /// early rejection type and its diagnostic.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn validate_numeric_and_reduction_arguments(
     list: &deep::List,
     kids: &[deep::Expr],
@@ -285,6 +286,9 @@ pub(super) fn validate_numeric_and_reduction_arguments(
     subst: &Subst,
     errors: &mut DiagnosticSink<'_>,
     route_observed: &mut bool,
+    suspension: Option<&UnresolvedOperandSite<'_>>,
+    result_ty: &Type,
+    product: &mut InferenceProduct,
 ) -> Option<Type> {
     macro_rules! reject {
         ($($arg:tt)*) => {
@@ -299,18 +303,35 @@ pub(super) fn validate_numeric_and_reduction_arguments(
         *route_observed = true;
         for arg_ty in arg_tys {
             let resolved = type_for_readonly_check(arg_ty, subst);
-            if let Some((kind, message, hints)) = operand_dtype_rejection(fname, &resolved) {
-                reject!(
-                    errors,
-                    CheckError::new(
-                        kind,
-                        with_macro_provenance(
-                            &deep::Expr::List(list.clone(), zero_span()),
-                            message,
-                        ),
-                        hints,
-                    ),
-                );
+            match &resolved {
+                // chelis#1512: not admissible YET. `operand_dtype_rejection`
+                // admits every unresolved operand, so this loop decided
+                // nothing about it and nothing revisited the decision once it
+                // settled. Suspending the call runs this same loop against the
+                // bound type, where the policy it enforces is the one a direct
+                // call gets.
+                Type::Var(_) => {
+                    if let Some(site) = suspension {
+                        site.register_dtype_admissibility(arg_tys, result_ty, subst, product);
+                    }
+                }
+                _ => {
+                    if let Some((kind, message, hints)) =
+                        operand_dtype_rejection(fname, &resolved)
+                    {
+                        reject!(
+                            errors,
+                            CheckError::new(
+                                kind,
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    message,
+                                ),
+                                hints,
+                            ),
+                        );
+                    }
+                }
             }
         }
     }
@@ -333,7 +354,15 @@ pub(super) fn validate_numeric_and_reduction_arguments(
         if let Some(first_arg) = arg_tys.first() {
             let resolved = type_for_readonly_check(first_arg, subst);
             match &resolved {
-                Type::Tensor(_, _) | Type::Var(_) | Type::Error(_) => {}
+                // chelis#1512: the operand is not a tensor YET, and the dtype
+                // rule below admits every unresolved type. Suspend so both
+                // checks decide against the bound one.
+                Type::Var(_) => {
+                    if let Some(site) = suspension {
+                        site.register_dtype_admissibility(arg_tys, result_ty, subst, product);
+                    }
+                }
+                Type::Tensor(_, _) | Type::Error(_) => {}
                 _ => {
                     reject!(
                         errors,
@@ -366,7 +395,14 @@ pub(super) fn validate_numeric_and_reduction_arguments(
         if let Some(axis_arg) = arg_tys.get(1) {
             let resolved = subst.apply(axis_arg);
             match &resolved {
-                Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_) => {}
+                Type::Prim(Prim::Int32) => {}
+                // chelis#1512: the axis is not an `int32` YET.
+                Type::Var(_) => {
+                    if let Some(site) = suspension {
+                        site.register_dtype_admissibility(arg_tys, result_ty, subst, product);
+                    }
+                }
+                Type::Error(_) => {}
                 _ => {
                     reject!(
                         errors,
@@ -422,6 +458,7 @@ pub(super) fn validate_numeric_and_reduction_arguments(
 /// result type rather than only rejecting a bad one: `Some(ty)` short-circuits
 /// the rest of application checking with `ty`, and `None` means `func_name` is
 /// not one of these operations.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn integer_binop_result_type(
     list: &deep::List,
     func_name: Option<&str>,
@@ -429,6 +466,9 @@ pub(super) fn integer_binop_result_type(
     vg: &mut VarGen,
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
+    suspension: Option<&UnresolvedOperandSite<'_>>,
+    result_ty: &Type,
+    product: &mut InferenceProduct,
 ) -> Option<Type> {
     if let Some(fname) = func_name
         && INT_BINOPS.contains(&fname)
@@ -447,13 +487,33 @@ pub(super) fn integer_binop_result_type(
             {
                 return Some(Type::Prim(*lhs_prec));
             }
+            // chelis#1512: the operands are not known to MATCH yet. Each of
+            // these three arms published the left operand without ever
+            // comparing the two, so `mod(t, 3i32)` with `t` binding to `int64`
+            // was accepted while the same call on a resolved `int64` is
+            // rejected. Suspending re-runs this rule against both bound types,
+            // and the arm above is the one that then decides.
             (Type::Var(_), Type::Prim(rhs_prec)) if rhs_prec.is_integer() => {
+                if let Some(site) = suspension {
+                    site.register_dtype_admissibility(arg_tys, result_ty, subst, product);
+                }
                 return Some(lhs);
             }
             (Type::Prim(lhs_prec), Type::Var(_)) if lhs_prec.is_integer() => {
+                if let Some(site) = suspension {
+                    site.register_dtype_admissibility(arg_tys, result_ty, subst, product);
+                }
                 return Some(lhs);
             }
-            (Type::Var(_), Type::Var(_)) | (Type::Error(_), _) | (_, Type::Error(_)) => {
+            (Type::Var(_), Type::Var(_)) => {
+                if let Some(site) = suspension {
+                    site.register_dtype_admissibility(arg_tys, result_ty, subst, product);
+                }
+                return Some(lhs);
+            }
+            // chelis#731 cascade suppression, split out of the arm above: an
+            // error witness is not a deferred decision, and it never binds.
+            (Type::Error(_), _) | (_, Type::Error(_)) => {
                 return Some(lhs);
             }
             _ => {
@@ -486,27 +546,65 @@ pub(super) fn integer_binop_result_type(
             .get(1)
             .map(|ty| subst.apply(ty))
             .unwrap_or_else(|| vg.fresh_type());
-        let lhs_ok = matches!(&lhs, Type::Prim(prec) if prec.is_integer())
-            || matches!(&lhs, Type::Var(_) | Type::Error(_));
-        let rhs_ok = matches!(&rhs, Type::Prim(prec) if prec.is_integer())
-            || matches!(&rhs, Type::Var(_) | Type::Error(_));
-        if lhs_ok && rhs_ok {
-            return Some(lhs);
-        }
-        return reject(
-            errors,
-            CheckError::new(
-                CheckErrorKind::TypeMismatch,
-                with_macro_provenance(
-                    &deep::Expr::List(list.clone(), zero_span()),
-                    format!(
-                        "{} requires integer lhs and shift amount, got {} and {}",
-                        fname, lhs, rhs
+        // chelis#1512: admissibility used to be two `matches!` disjunctions
+        // folded into one boolean, which admitted an unresolved operand with no
+        // arm to suspend from. The arms below are that boolean, per operand
+        // pair: each side is admissible when it is an integer primitive, an
+        // unresolved variable, or an error witness, and the call is admitted
+        // when both sides are.
+        match (&lhs, &rhs) {
+            (Type::Prim(lhs_prec), Type::Prim(rhs_prec))
+                if lhs_prec.is_integer() && rhs_prec.is_integer() =>
+            {
+                return Some(lhs);
+            }
+            // At least one operand is still a variable and the other is
+            // admissible. Suspend so this rule decides against the bound type:
+            // `shl(t, 1i32)` with `t` binding to `f32` is rejected here now,
+            // as the same call on a resolved `f32` always was.
+            (Type::Var(_), Type::Var(_))
+            | (Type::Var(_), Type::Error(_))
+            | (Type::Error(_), Type::Var(_)) => {
+                if let Some(site) = suspension {
+                    site.register_dtype_admissibility(arg_tys, result_ty, subst, product);
+                }
+                return Some(lhs);
+            }
+            (Type::Var(_), Type::Prim(prec)) | (Type::Prim(prec), Type::Var(_))
+                if prec.is_integer() =>
+            {
+                if let Some(site) = suspension {
+                    site.register_dtype_admissibility(arg_tys, result_ty, subst, product);
+                }
+                return Some(lhs);
+            }
+            // chelis#731 cascade suppression: an error witness beside an
+            // admissible operand, which the boolean above also admitted.
+            (Type::Error(_), Type::Error(_)) => {
+                return Some(lhs);
+            }
+            (Type::Error(_), Type::Prim(prec)) | (Type::Prim(prec), Type::Error(_))
+                if prec.is_integer() =>
+            {
+                return Some(lhs);
+            }
+            _ => {
+                return reject(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::TypeMismatch,
+                        with_macro_provenance(
+                            &deep::Expr::List(list.clone(), zero_span()),
+                            format!(
+                                "{} requires integer lhs and shift amount, got {} and {}",
+                                fname, lhs, rhs
+                            ),
+                        ),
+                        vec![],
                     ),
-                ),
-                vec![],
-            ),
-        );
+                );
+            }
+        }
     }
 
     None
