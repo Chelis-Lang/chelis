@@ -53,12 +53,10 @@ use tempfile::{TempDir, tempdir};
 /// Fixed-control Dropout is compiled and joins the ordinary guard census.
 /// When the staged build succeeds, this row fails and that example must join
 /// the censused set too.
-const REFUSED_BY_A_CAPABILITY_GATE: &[(&str, &str)] = &[
-    (
-        "dropout_staged_claim.ch",
-        "unimplemented chelis#1192: compiled `dropout` kernels are not implemented",
-    ),
-];
+const REFUSED_BY_A_CAPABILITY_GATE: &[(&str, &str)] = &[(
+    "dropout_staged_claim.ch",
+    "unimplemented chelis#1192: compiled `dropout` kernels are not implemented",
+)];
 
 /// A two-row operand: `min(2, 4) = 2`.
 const TWO_BY_FOUR: &str = "[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]]";
