@@ -37,6 +37,10 @@ struct Site {
     ordinal: usize,
     pattern: String,
     suspends: bool,
+    /// Whether the arm records the variable on one of the checker's ledgers
+    /// that revisit it when it binds (`Subst::record_deferred_*`, the tuple
+    /// projection ledger). An arm that does that has not skipped anything.
+    gates: bool,
     /// Whether the enclosing function is a checked ROUTE: it publishes a
     /// type AND can report a diagnostic. Both halves matter. A predicate or
     /// a `bool` guard publishes nothing to skip validation for, and a total
@@ -100,6 +104,17 @@ fn mentions_error(pattern: &str) -> bool {
     pattern.contains("Type::Error")
 }
 
+/// Does the arm hand the variable to a ledger that revisits it on binding?
+///
+/// These are the chelis#1577 tensor-operand gate and its siblings, the
+/// deferred borrow, opaque-use and tuple-projection ledgers. They are a
+/// different mechanism from this issue's shape ledger and they predate it, but
+/// the property the census cares about is the same one: the arm does not
+/// publish an unvalidated answer and walk away.
+fn body_gates(body: &str) -> bool {
+    body.contains("record_deferred_") || body.contains("defer_tuple_projection")
+}
+
 fn body_suspends(body: &str) -> bool {
     body.contains("site . defer")
         || body.contains("site . register")
@@ -108,7 +123,7 @@ fn body_suspends(body: &str) -> bool {
 }
 
 impl Census {
-    fn record(&mut self, pattern: String, suspends: bool) {
+    fn record(&mut self, pattern: String, suspends: bool, gates: bool) {
         let (function, is_route) = self
             .function
             .last()
@@ -123,6 +138,7 @@ impl Census {
             ordinal: *ordinal,
             pattern,
             suspends,
+            gates,
             is_route,
         });
     }
@@ -155,8 +171,17 @@ impl<'ast> Visit<'ast> for Census {
             let pat = normalize(quote::ToTokens::to_token_stream(&arm.pat).to_string());
             let body = quote::ToTokens::to_token_stream(&arm.body).to_string();
             let suspends = body_suspends(&body);
-            if mentions_var(&pat) && (mentions_error(&pat) || suspends) {
-                self.record(pat, suspends);
+            // chelis#1512 round 1 P2-2: EVERY arm naming `Type::Var` inside a
+            // route, whatever its body. The narrower key (merged with
+            // `Type::Error`, or a body that suspends) went blind the moment
+            // this pull request split about forty-six merged arms, because the
+            // split spelling is the one a maintainer now copies: a fresh route
+            // written with separate `Type::Error` and `Type::Var` arms, the
+            // second returning early, is this issue's exact defect and was
+            // invisible. Whether an arm matters is the disposition
+            // vocabulary's decision, not the recognizer's.
+            if mentions_var(&pat) {
+                self.record(pat, suspends, body_gates(&body));
             }
             syn::visit::visit_arm(self, arm);
         }
@@ -166,7 +191,7 @@ impl<'ast> Visit<'ast> for Census {
         if node.mac.path.is_ident("matches") {
             let rendered = normalize(node.mac.tokens.to_string());
             if mentions_var(&rendered) && mentions_error(&rendered) {
-                self.record(rendered, false);
+                self.record(rendered, false, false);
             }
         }
         syn::visit::visit_expr_macro(self, node);
@@ -257,6 +282,14 @@ const DISPOSITIONS: &[&str] = &[
     "caught_downstream",
     // Still skips a check. `reason` says why it is not repaired here.
     "defect(#1512)",
+    // The arm hands the variable to one of the checker's other ledgers, which
+    // revisits it when it binds. Machine-checked against the arm body.
+    "gated_on_binding",
+    // The arm neither suspends nor publishes an unvalidated answer: it unifies
+    // the variable, keeps it deliberately symbolic, or derives its result from
+    // operands that are already settled. `reason` says which, in one line,
+    // because no recognizer can read that off the syntax.
+    "constrains_the_variable",
     // Owned by pull request #1690's conversion of the shape-computing routes.
     "converted_by(#1690)",
     // Not a checked route: the enclosing function either publishes no type or
@@ -321,10 +354,18 @@ fn problems_for(site: &Site, row: &serde_json::Value, ledger: &str, matrix: &str
             Some(_) => {}
         }
     }
-    if disposition == "defect(#1512)" && row["reason"].as_str().is_none() {
+    if disposition == "gated_on_binding" && !site.gates {
         problems.push(format!(
-            "{where_}: `defect(#1512)` must carry a one-line reason"
+            "{where_}: recorded `gated_on_binding`, but the arm body records the variable on no \
+             ledger"
         ));
+    }
+    for needs_reason in ["defect(#1512)", "constrains_the_variable"] {
+        if disposition == needs_reason && row["reason"].as_str().is_none() {
+            problems.push(format!(
+                "{where_}: `{needs_reason}` must carry a one-line reason"
+            ));
+        }
     }
     let recorded = row["pattern"].as_str().expect("pattern");
     if recorded != site.pattern {
@@ -428,11 +469,17 @@ fn a_planted_unresolved_operand_arm_is_detected() {
     );
 }
 
-/// NEGATIVE CONTROL for the recognizer: an arm that merely inspects a type
-/// variable inside a predicate is not an early return out of a route, and the
-/// census must not inflate itself with those.
+/// The recognizer now records EVERY arm naming `Type::Var`, so a predicate
+/// helper's arm is enumerated too. What keeps the census from inflating is no
+/// longer the recognizer but the signature rule: a function that publishes no
+/// type and holds no diagnostic sink can only ever be `not_a_route`.
+///
+/// This replaces an earlier control that asserted such an arm was not recorded
+/// at all. That property had to go with round 1's P2-2: keying the recognizer
+/// on the arm's SHAPE made it blind to the split spelling this pull request
+/// makes canonical.
 #[test]
-fn a_predicate_arm_over_a_type_variable_is_not_enumerated() {
+fn a_predicate_arm_over_a_type_variable_can_only_be_not_a_route() {
     let predicate = r#"
         fn type_is_concrete(ty: Type) -> bool {
             match ty {
@@ -447,11 +494,88 @@ fn a_predicate_arm_over_a_type_variable_is_not_enumerated() {
         ..Census::default()
     };
     census.visit_file(&parsed);
-    assert!(
-        census.sites.is_empty(),
-        "a bare `Type::Var` predicate arm is not an unresolved-operand site, got {:?}",
+    assert_eq!(
+        census.sites.len(),
+        1,
+        "the arm is recorded, got {:?}",
         census.sites
     );
+    assert!(
+        !census.sites[0].is_route,
+        "a `-> bool` predicate holding no diagnostic sink is not a route"
+    );
+    let problems = problems_for(
+        &census.sites[0],
+        &synthetic_row("deferred", serde_json::json!({})),
+        "",
+        "",
+    );
+    assert!(
+        problems.iter().any(|p| p.contains("is not a route")),
+        "a route disposition on a predicate arm must still be rejected, got {problems:?}"
+    );
+}
+
+/// MUTATION CONTROL for round 1's P2-2, the reviewer's own probe. A route
+/// written in the spelling this pull request makes canonical, `Type::Error`
+/// and `Type::Var` as SEPARATE arms with the second returning early, is
+/// exactly the chelis#1512 defect. The earlier recognizer left it invisible
+/// and all eight census tests stayed green over it.
+#[test]
+fn a_route_with_a_separate_non_suspending_var_arm_is_enumerated() {
+    let planted = r#"
+        fn probe_unresolved_route(
+            operand: Type,
+            result_ty: Type,
+            errors: &mut DiagnosticSink<'_>,
+        ) -> Type {
+            match operand {
+                Type::Tensor(dims, prec) => Type::Tensor(dims, prec),
+                Type::Error(_) => result_ty.clone(),
+                Type::Var(_) => result_ty,
+                other => report(errors, other),
+            }
+        }
+    "#;
+    let parsed = syn::parse_file(planted).expect("planted source parses");
+    let mut census = Census {
+        file: "planted.rs".to_string(),
+        ..Census::default()
+    };
+    census.visit_file(&parsed);
+    assert_eq!(
+        census.sites.len(),
+        1,
+        "the separate `Type::Var` arm must be enumerated, got {:?}",
+        census.sites
+    );
+    let site = &census.sites[0];
+    assert_eq!(site.pattern, "Type::Var(_)");
+    assert!(
+        site.is_route,
+        "the planted function publishes a type and can report"
+    );
+    assert!(
+        !site.suspends && !site.gates,
+        "it neither suspends nor gates: it returns early"
+    );
+    // And it cannot be waved through: every disposition that would excuse it
+    // is contradicted by what the machine can read off the arm.
+    for disposition in ["not_a_route", "deferred", "gated_on_binding"] {
+        let problems = problems_for(
+            site,
+            &synthetic_row(
+                disposition,
+                serde_json::json!({ "pattern": "Type::Var(_)" }),
+            ),
+            "",
+            "",
+        );
+        assert!(
+            !problems.is_empty(),
+            "`{disposition}` must not be assertable for a planted early return, got no problems"
+        );
+    }
 }
 
 /// Print the enumerated sites as the fixture the first test wants. Run with
@@ -495,6 +619,7 @@ fn synthetic(function: &str, is_route: bool, suspends: bool) -> Site {
         ordinal: 1,
         pattern: "Type::Var(_) | Type::Error(_)".to_string(),
         suspends,
+        gates: false,
         is_route,
     }
 }

@@ -542,6 +542,23 @@ impl InferenceProduct {
         )
     }
 
+    /// chelis#1512: drop a suspended `PostApp` decision for this call.
+    ///
+    /// A call that FAILS on the eager pass has nothing left to decide. It may
+    /// still have registered a suspension a moment earlier, for a different
+    /// operand that was not the one it rejected on, and replaying it would
+    /// re-enter the whole route and re-report the rejection the eager pass
+    /// already made. Cancelling the deferral is what fixes that, rather than
+    /// filtering the duplicate out afterwards: a filter keyed on the message
+    /// cannot tell a re-report from a second call that legitimately fails the
+    /// same way, and these diagnostics carry no span to tell them apart.
+    pub(super) fn cancel_post_app_check_for(&mut self, list: &deep::List) {
+        let key = std::ptr::from_ref(list).addr();
+        self.deferred_shape_checks.retain(
+            |check| !matches!(&check.rule, DeferredShapeRule::PostApp { site, .. } if *site == key),
+        );
+    }
+
     pub(super) fn defer_shape_check(
         &mut self,
         rule: DeferredShapeRule,
@@ -567,6 +584,7 @@ impl InferenceProduct {
         &mut self,
         vg: &mut VarGen,
         subst: &mut Subst,
+        adt_reg: &AdtRegistry,
         errors: &mut DiagnosticSink<'_>,
     ) {
         if self.replaying_shape_checks {
@@ -579,7 +597,7 @@ impl InferenceProduct {
         // to `finish_deferred_shape_checks` and reported as never bound.
         loop {
             let before = self.deferred_shape_checks.len();
-            self.replay_ready_shape_checks_once(vg, subst, errors);
+            self.replay_ready_shape_checks_once(vg, subst, adt_reg, errors);
             if self.deferred_shape_checks.len() >= before {
                 break;
             }
@@ -591,6 +609,7 @@ impl InferenceProduct {
         &mut self,
         vg: &mut VarGen,
         subst: &mut Subst,
+        adt_reg: &AdtRegistry,
         errors: &mut DiagnosticSink<'_>,
     ) {
         self.resolve_deferred_type_derivations(subst, errors);
@@ -687,6 +706,7 @@ impl InferenceProduct {
                         &mut replay_env,
                         vg,
                         subst,
+                        adt_reg,
                         errors,
                         self,
                         None,
@@ -705,9 +725,10 @@ impl InferenceProduct {
         &mut self,
         vg: &mut VarGen,
         subst: &mut Subst,
+        adt_reg: &AdtRegistry,
         errors: &mut DiagnosticSink<'_>,
     ) {
-        self.replay_ready_shape_checks(vg, subst, errors);
+        self.replay_ready_shape_checks(vg, subst, adt_reg, errors);
         for check in self.deferred_shape_checks.drain(..) {
             let operation = match check.rule {
                 DeferredShapeRule::Matmul => "matmul".to_string(),
@@ -997,12 +1018,9 @@ impl InferenceProduct {
     }
 }
 
-/// A semantic shape rule can decide symbolic tensor dimensions and precision
-/// variables. It must wait only while an operand's *type constructor* is still
-/// unknown; treating every free variable as pending would reject legitimate
-/// rank/dtype-polymorphic signatures at their declaration boundary.
-/// chelis#1512: bind a replayed route's own answer to the type the suspended
-/// call already published to its consumer.
+/// chelis#1512: unify a replayed route's answer with the type the suspended
+/// call already published to its consumer, and report loudly when the two
+/// disagree.
 ///
 /// A route that builds its result out of band rather than through unification
 /// (chelis#1265's class) hands its answer back without ever meeting the
@@ -1012,13 +1030,12 @@ impl InferenceProduct {
 ///
 /// A replay that REJECTED returns `Type::Error`, which unifies with anything,
 /// so a rejected call reports once and not twice.
-/// Unify a replayed route's answer with the type the suspended call
-/// published, and report loudly when they disagree.
 ///
-/// `pub(super)` so `infer::tests` can drive it directly: the disagreement
-/// branch is the one place where a relocated decision could quietly overwrite
-/// a published type, and a test that can only reach it through a whole
-/// program cannot show that the returned value is the PRODUCED one.
+/// `pub(super)` so `ReconcileMutationCase` can drive it directly from
+/// `session.rs`: the disagreement branch is the one place where a relocated
+/// decision could quietly overwrite a published type, and a test that can only
+/// reach it through a whole program cannot show that the returned value is the
+/// PRODUCED one.
 pub(super) fn reconcile_replayed_result(
     operation: &str,
     published: &Type,
@@ -1040,6 +1057,10 @@ pub(super) fn reconcile_replayed_result(
     produced
 }
 
+/// A semantic shape rule can decide symbolic tensor dimensions and precision
+/// variables. It must wait only while an operand's *type constructor* is still
+/// unknown; treating every free variable as pending would reject legitimate
+/// rank/dtype-polymorphic signatures at their declaration boundary.
 pub(super) fn shape_operand_awaits_binding(ty: &Type, subst: &Subst) -> bool {
     match subst.apply(ty) {
         Type::Var(_) => true,

@@ -539,218 +539,19 @@ pub(super) fn finish_unified_app(
                     return subst.apply(first_arg);
                 }
             }
-            "string_len" => {
-                if let Some(first_arg) = arg_tys.first() {
-                    match subst.apply(first_arg) {
-                        Type::Prim(Prim::String) | Type::Error(_) => {
-                            return Type::Prim(Prim::Int64);
-                        }
-                        Type::Var(_) => {
-                            return site.defer(
-                                &arg_tys,
-                                &result_ty,
-                                product,
-                                Type::Prim(Prim::Int64),
-                            );
-                        }
-                        other => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("string_len expects string input, got {other}"),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                    }
-                }
-            }
-            "string_concat" => {
-                for arg_ty in &arg_tys {
-                    match subst.apply(arg_ty) {
-                        Type::Prim(Prim::String) | Type::Error(_) => {}
-                        Type::Var(_) => site.register(&arg_tys, &result_ty, product),
-                        other => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "string_concat expects string arguments, got {other}"
-                                        ),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                    }
-                }
-                return Type::Prim(Prim::String);
-            }
-            "string_slice" => {
-                if let Some(first_arg) = arg_tys.first() {
-                    match subst.apply(first_arg) {
-                        Type::Prim(Prim::String) | Type::Error(_) => {}
-                        Type::Var(_) => site.register(&arg_tys, &result_ty, product),
-                        other => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("string_slice expects string input, got {other}"),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                    }
-                }
-                for (index, arg_ty) in arg_tys.iter().enumerate().skip(1) {
-                    match subst.apply(arg_ty) {
-                        Type::Prim(precision) if precision.is_integer() => {}
-                        Type::Error(_) => {}
-                        Type::Var(_) => site.register(&arg_tys, &result_ty, product),
-                        other => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "string_slice expects integer index arguments; arg {} was {other}",
-                                            index + 1
-                                        ),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                    }
-                }
-                return Type::Prim(Prim::String);
-            }
-            "string_contains" | "string_starts_with" | "string_ends_with" => {
-                for arg_ty in &arg_tys {
-                    match subst.apply(arg_ty) {
-                        Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {}
-                        other => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("{} expects string arguments, got {other}", fname),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                    }
-                }
-                return Type::Prim(Prim::Bool);
-            }
-            "string_trim" => {
-                if let Some(first_arg) = arg_tys.first() {
-                    match subst.apply(first_arg) {
-                        Type::Prim(Prim::String) | Type::Error(_) => {
-                            return Type::Prim(Prim::String);
-                        }
-                        Type::Var(_) => {
-                            return site.defer(
-                                &arg_tys,
-                                &result_ty,
-                                product,
-                                Type::Prim(Prim::String),
-                            );
-                        }
-                        other => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("string_trim expects string input, got {other}"),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                    }
+            name if string_route_owns(name) => {
+                // chelis#1512: the string-operand group lives in `app_string.rs`.
+                // `None` is its fall-through, which the `string_contains`
+                // family needs: it validates its arguments and leaves the
+                // result to the generic path below.
+                if let Some(result) = string_route_result(
+                    name, list, &arg_tys, &result_ty, &site, product, subst, errors,
+                ) {
+                    return result;
                 }
             }
             "to_string" => {
                 return Type::Prim(Prim::String);
-            }
-            "to_int" => {
-                if let Some(first_arg) = arg_tys.first() {
-                    match subst.apply(first_arg) {
-                        Type::Prim(Prim::String) | Type::Error(_) => {
-                            return Type::Adt("Option".to_string(), vec![Type::Prim(Prim::Int64)]);
-                        }
-                        Type::Var(_) => {
-                            return site.defer(
-                                &arg_tys,
-                                &result_ty,
-                                product,
-                                Type::Adt("Option".to_string(), vec![Type::Prim(Prim::Int64)]),
-                            );
-                        }
-                        other => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("to_int expects string input, got {other}"),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                    }
-                }
-            }
-            "to_float" => {
-                if let Some(first_arg) = arg_tys.first() {
-                    match subst.apply(first_arg) {
-                        Type::Prim(Prim::String) | Type::Error(_) => {
-                            return Type::Adt("Option".to_string(), vec![Type::Prim(Prim::F64)]);
-                        }
-                        Type::Var(_) => {
-                            return site.defer(
-                                &arg_tys,
-                                &result_ty,
-                                product,
-                                Type::Adt("Option".to_string(), vec![Type::Prim(Prim::F64)]),
-                            );
-                        }
-                        other => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("to_float expects string input, got {other}"),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                    }
-                }
             }
             "rank" => {
                 if let Some(first_arg) = arg_tys.first() {
@@ -3141,6 +2942,6 @@ pub(super) fn finish_unified_app(
         );
     }
 
-    product.replay_ready_shape_checks(vg, subst, errors);
+    product.replay_ready_shape_checks(vg, subst, adt_reg, errors);
     subst.apply(&result_ty)
 }

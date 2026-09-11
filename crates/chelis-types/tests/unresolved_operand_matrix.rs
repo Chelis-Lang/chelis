@@ -827,3 +827,53 @@ fn a_never_bound_generic_operand_is_accepted_and_validated_at_its_binding() {
         summary(&errors)
     );
 }
+
+/// A route can suspend on one operand and reject on ANOTHER in the same eager
+/// pass. The replay re-enters the whole route, so without cancelling the
+/// suspension that rejection is reported twice: the call is counted as two
+/// failures, and the machine-facing `types` score moves with it.
+///
+/// REGRESSION TEST, round 1 P2-1. On the reviewed head each of these reported
+/// its diagnostic TWICE; on `e813415d0`, which suspends nothing, each reports
+/// once. Asserting the COUNT is the point: cell 4 of every table above uses
+/// `.any(...)` and passes either way, which is exactly why nothing caught it.
+#[test]
+fn a_call_that_suspends_and_then_rejects_eagerly_reports_once() {
+    for (route, program, diagnostic) in [
+        (
+            "string_slice",
+            "def f(x: string) -> string = {\n  g = fn (t) -> string_slice(t, 0i64, 1.5f32)\n  g(x)\n}\n",
+            "string_slice expects integer index arguments",
+        ),
+        (
+            "string_concat",
+            "def f(x: string) -> string = {\n  g = fn (t) -> string_concat(t, 5i64)\n  g(x)\n}\n",
+            "string_concat expects string arguments",
+        ),
+    ] {
+        let errors = check(program).expect_err(&format!("{route}: the call must be rejected"));
+        let hits = errors
+            .iter()
+            .filter(|e| e.message.contains(diagnostic))
+            .count();
+        assert_eq!(
+            hits,
+            1,
+            "{route}: the eager rejection must be reported once, not re-reported by the replay; \
+             got {hits} copies in:\n{}",
+            summary(&errors)
+        );
+    }
+
+    // NEGATIVE TWIN. Cancelling a failed call's suspension must not cancel the
+    // validation of a call that did NOT fail eagerly: the same route, invalid
+    // only in the operand that binds late, still rejects.
+    let errors = check(
+        "def f(x: int32) -> string = {\n  g = fn (t) -> string_slice(t, 0i64, 1i64)\n  g(x)\n}\n",
+    )
+    .expect_err("string_slice over a late-bound non-string must be rejected");
+    assert!(
+        !errors.is_empty(),
+        "the late-bound operand's own validation must still run"
+    );
+}

@@ -9,28 +9,67 @@
       "disposition": "not_a_route"
     },
     {
+      "file": "app_helpers.rs",
+      "function": "types_structurally_equal",
+      "ordinal": 1,
+      "pattern": "(Type::Var(_) , Type::Var(_))",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "app_hostio.rs",
+      "function": "check_round_to_builtin_signature",
+      "ordinal": 1,
+      "pattern": "Type::Var(_)",
+      "disposition": "constrains_the_variable",
+      "reason": "unifies the host slot eagerly through `unify_host_slot_eager`; chelis#1489 records the deliberate non-deferral at the arm"
+    },
+    {
+      "file": "app_hostio.rs",
+      "function": "loose_integer_host_slot",
+      "ordinal": 1,
+      "pattern": "Type::Var(_)",
+      "disposition": "constrains_the_variable",
+      "reason": "unifies the slot with int64 and answers with the unification's own verdict, so nothing is published unvalidated"
+    },
+    {
       "file": "app_numeric.rs",
       "function": "integer_binop_result_type",
       "ordinal": 1,
-      "pattern": "(Type::Var(_) , Type::Var(_)) |(Type::Error(_) , _) |(_ , Type::Error(_))",
+      "pattern": "(Type::Var(_) , Type::Prim(rhs_prec))",
       "disposition": "defect(#1512)",
-      "reason": "the dtype validators run before `finish_unified_app` builds its deferral site, and they express admissibility as `matches!` disjunctions inside one boolean rather than as a match arm with a `Type::Var` branch, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
+      "reason": "the dtype validators run at `app_post.rs:50-76`, before `finish_unified_app` builds its deferral site at `:370`, and none of them takes the product or the result type, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
     },
     {
       "file": "app_numeric.rs",
       "function": "integer_binop_result_type",
       "ordinal": 2,
-      "pattern": "& lhs , Type::Var(_) | Type::Error(_)",
+      "pattern": "(Type::Prim(lhs_prec) , Type::Var(_))",
       "disposition": "defect(#1512)",
-      "reason": "the dtype validators run before `finish_unified_app` builds its deferral site, and they express admissibility as `matches!` disjunctions inside one boolean rather than as a match arm with a `Type::Var` branch, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
+      "reason": "the dtype validators run at `app_post.rs:50-76`, before `finish_unified_app` builds its deferral site at `:370`, and none of them takes the product or the result type, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
     },
     {
       "file": "app_numeric.rs",
       "function": "integer_binop_result_type",
       "ordinal": 3,
+      "pattern": "(Type::Var(_) , Type::Var(_)) |(Type::Error(_) , _) |(_ , Type::Error(_))",
+      "disposition": "defect(#1512)",
+      "reason": "the dtype validators run at `app_post.rs:50-76`, before `finish_unified_app` builds its deferral site at `:370`, and none of them takes the product or the result type, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
+    },
+    {
+      "file": "app_numeric.rs",
+      "function": "integer_binop_result_type",
+      "ordinal": 4,
+      "pattern": "& lhs , Type::Var(_) | Type::Error(_)",
+      "disposition": "defect(#1512)",
+      "reason": "the dtype validators run at `app_post.rs:50-76`, before `finish_unified_app` builds its deferral site at `:370`, and none of them takes the product or the result type, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
+    },
+    {
+      "file": "app_numeric.rs",
+      "function": "integer_binop_result_type",
+      "ordinal": 5,
       "pattern": "& rhs , Type::Var(_) | Type::Error(_)",
       "disposition": "defect(#1512)",
-      "reason": "the dtype validators run before `finish_unified_app` builds its deferral site, and they express admissibility as `matches!` disjunctions inside one boolean rather than as a match arm with a `Type::Var` branch, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
+      "reason": "the dtype validators run at `app_post.rs:50-76`, before `finish_unified_app` builds its deferral site at `:370`, and none of them takes the product or the result type, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
     },
     {
       "file": "app_numeric.rs",
@@ -108,7 +147,7 @@
       "ordinal": 1,
       "pattern": "Type::Tensor(_ , _) | Type::Var(_) | Type::Error(_)",
       "disposition": "defect(#1512)",
-      "reason": "the dtype validators run before `finish_unified_app` builds its deferral site, and they express admissibility as `matches!` disjunctions inside one boolean rather than as a match arm with a `Type::Var` branch, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
+      "reason": "the dtype validators run at `app_post.rs:50-76`, before `finish_unified_app` builds its deferral site at `:370`, and none of them takes the product or the result type, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
     },
     {
       "file": "app_numeric.rs",
@@ -116,7 +155,7 @@
       "ordinal": 2,
       "pattern": "Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_)",
       "disposition": "defect(#1512)",
-      "reason": "the dtype validators run before `finish_unified_app` builds its deferral site, and they express admissibility as `matches!` disjunctions inside one boolean rather than as a match arm with a `Type::Var` branch, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
+      "reason": "the dtype validators run at `app_post.rs:50-76`, before `finish_unified_app` builds its deferral site at `:370`, and none of them takes the product or the result type, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
     },
     {
       "file": "app_operand_dtype.rs",
@@ -124,7 +163,7 @@
       "ordinal": 1,
       "pattern": "Type::Var(_) | Type::Error(_)",
       "disposition": "defect(#1512)",
-      "reason": "the dtype validators run before `finish_unified_app` builds its deferral site, and they express admissibility as `matches!` disjunctions inside one boolean rather than as a match arm with a `Type::Var` branch, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
+      "reason": "the dtype validators run at `app_post.rs:50-76`, before `finish_unified_app` builds its deferral site at `:370`, and none of them takes the product or the result type, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
     },
     {
       "file": "app_operand_dtype.rs",
@@ -132,7 +171,7 @@
       "ordinal": 2,
       "pattern": "Type::Prim(Prim::F32) | Type::Var(_) | Type::Error(_)",
       "disposition": "defect(#1512)",
-      "reason": "the dtype validators run before `finish_unified_app` builds its deferral site, and they express admissibility as `matches!` disjunctions inside one boolean rather than as a match arm with a `Type::Var` branch, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
+      "reason": "the dtype validators run at `app_post.rs:50-76`, before `finish_unified_app` builds its deferral site at `:370`, and none of them takes the product or the result type, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
     },
     {
       "file": "app_operand_dtype.rs",
@@ -140,7 +179,7 @@
       "ordinal": 3,
       "pattern": "Type::Tensor(_ , _) | Type::Var(_) | Type::Error(_)",
       "disposition": "defect(#1512)",
-      "reason": "the dtype validators run before `finish_unified_app` builds its deferral site, and they express admissibility as `matches!` disjunctions inside one boolean rather than as a match arm with a `Type::Var` branch, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
+      "reason": "the dtype validators run at `app_post.rs:50-76`, before `finish_unified_app` builds its deferral site at `:370`, and none of them takes the product or the result type, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
     },
     {
       "file": "app_operand_dtype.rs",
@@ -148,7 +187,7 @@
       "ordinal": 4,
       "pattern": "Type::Prim(Prim::F32) | Type::Var(_) | Type::Error(_)",
       "disposition": "defect(#1512)",
-      "reason": "the dtype validators run before `finish_unified_app` builds its deferral site, and they express admissibility as `matches!` disjunctions inside one boolean rather than as a match arm with a `Type::Var` branch, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
+      "reason": "the dtype validators run at `app_post.rs:50-76`, before `finish_unified_app` builds its deferral site at `:370`, and none of them takes the product or the result type, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
     },
     {
       "file": "app_operand_dtype.rs",
@@ -156,7 +195,7 @@
       "ordinal": 1,
       "pattern": "Some(Type::Tensor(_ , TensorPrec::Var(_))) | Some(Type::Var(_)) | Some(Type::Error(_)) | None",
       "disposition": "defect(#1512)",
-      "reason": "the dtype validators run before `finish_unified_app` builds its deferral site, and they express admissibility as `matches!` disjunctions inside one boolean rather than as a match arm with a `Type::Var` branch, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
+      "reason": "the dtype validators run at `app_post.rs:50-76`, before `finish_unified_app` builds its deferral site at `:370`, and none of them takes the product or the result type, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
     },
     {
       "file": "app_operand_dtype.rs",
@@ -164,7 +203,7 @@
       "ordinal": 2,
       "pattern": "Type::Var(_) | Type::Error(_)",
       "disposition": "defect(#1512)",
-      "reason": "the dtype validators run before `finish_unified_app` builds its deferral site, and they express admissibility as `matches!` disjunctions inside one boolean rather than as a match arm with a `Type::Var` branch, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
+      "reason": "the dtype validators run at `app_post.rs:50-76`, before `finish_unified_app` builds its deferral site at `:370`, and none of them takes the product or the result type, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
     },
     {
       "file": "app_post.rs",
@@ -213,16 +252,16 @@
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 7,
-      "pattern": "Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_)",
-      "disposition": "caught_downstream",
-      "witness": "a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule"
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
     },
     {
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 8,
-      "pattern": "Type::Var(_)",
-      "disposition": "deferred"
+      "pattern": "Type::Var(p)",
+      "disposition": "constrains_the_variable",
+      "reason": "guarded on `subst.tvar_restriction(p).is_some()`, so the arm runs only for a variable that already carries a dtype restriction and republishes that same restricted variable"
     },
     {
       "file": "app_post.rs",
@@ -235,7 +274,7 @@
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 10,
-      "pattern": "Type::Var(_)",
+      "pattern": "(Type::Var(_) , _ , _) |(_ , Type::Var(_) , _) |(_ , _ , Type::Var(_))",
       "disposition": "deferred"
     },
     {
@@ -249,7 +288,7 @@
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 12,
-      "pattern": "Type::Var(_)",
+      "pattern": "(Type::Var(_) , _ , _) |(_ , Type::Var(_) , _) |(_ , _ , Type::Var(_))",
       "disposition": "deferred"
     },
     {
@@ -284,28 +323,28 @@
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 17,
-      "pattern": "(Type::Var(_) , _ , _) |(_ , Type::Var(_) , _) |(_ , _ , Type::Var(_))",
+      "pattern": "Type::Var(_)",
       "disposition": "deferred"
     },
     {
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 18,
-      "pattern": "Type::Var(_)",
+      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_))",
       "disposition": "deferred"
     },
     {
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 19,
-      "pattern": "(Type::Var(_) , _ , _) |(_ , Type::Var(_) , _) |(_ , _ , Type::Var(_))",
+      "pattern": "Type::Var(_)",
       "disposition": "deferred"
     },
     {
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 20,
-      "pattern": "Type::Var(_)",
+      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_))",
       "disposition": "deferred"
     },
     {
@@ -340,21 +379,22 @@
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 25,
-      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_))",
-      "disposition": "deferred"
-    },
-    {
-      "file": "app_post.rs",
-      "function": "finish_unified_app",
-      "ordinal": 26,
       "pattern": "Type::Var(_)",
       "disposition": "deferred"
     },
     {
       "file": "app_post.rs",
       "function": "finish_unified_app",
+      "ordinal": 26,
+      "pattern": "Type::Var(tv)",
+      "disposition": "constrains_the_variable",
+      "reason": "publishes the element's own type variable as the precision rather than a placeholder, so outer inference pins both together"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
       "ordinal": 27,
-      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_))",
+      "pattern": "Type::Var(_)",
       "disposition": "deferred"
     },
     {
@@ -368,7 +408,7 @@
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 29,
-      "pattern": "Type::Var(_)",
+      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_))",
       "disposition": "deferred"
     },
     {
@@ -403,35 +443,39 @@
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 34,
-      "pattern": "Type::Var(_)",
-      "disposition": "deferred"
+      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_)) |(Type::Error(_) , _) |(_ , Type::Error(_))",
+      "disposition": "caught_downstream",
+      "witness": "a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule"
     },
     {
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 35,
-      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_))",
-      "disposition": "deferred"
+      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_)) |(Type::Error(_) , _) |(_ , Type::Error(_))",
+      "disposition": "caught_downstream",
+      "witness": "a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule"
     },
     {
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 36,
-      "pattern": "Type::Var(_)",
-      "disposition": "deferred"
+      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_)) |(Type::Error(_) , _) |(_ , Type::Error(_))",
+      "disposition": "caught_downstream",
+      "witness": "a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule"
     },
     {
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 37,
-      "pattern": "Type::Var(_)",
-      "disposition": "deferred"
+      "pattern": "(Type::Var(_) , _ , _) |(_ , Type::Var(_) , _) |(_ , _ , Type::Var(_)) |(Type::Error(_) , _ , _) |(_ , Type::Error(_) , _) |(_ , _ , Type::Error(_))",
+      "disposition": "caught_downstream",
+      "witness": "a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule"
     },
     {
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 38,
-      "pattern": "Type::Var(_)",
+      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_))",
       "disposition": "deferred"
     },
     {
@@ -445,39 +489,35 @@
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 40,
-      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_)) |(Type::Error(_) , _) |(_ , Type::Error(_))",
-      "disposition": "caught_downstream",
-      "witness": "a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule"
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
     },
     {
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 41,
-      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_)) |(Type::Error(_) , _) |(_ , Type::Error(_))",
-      "disposition": "caught_downstream",
-      "witness": "a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule"
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
     },
     {
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 42,
-      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_)) |(Type::Error(_) , _) |(_ , Type::Error(_))",
-      "disposition": "caught_downstream",
-      "witness": "a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule"
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
     },
     {
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 43,
-      "pattern": "(Type::Var(_) , _ , _) |(_ , Type::Var(_) , _) |(_ , _ , Type::Var(_)) |(Type::Error(_) , _ , _) |(_ , Type::Error(_) , _) |(_ , _ , Type::Error(_))",
-      "disposition": "caught_downstream",
-      "witness": "a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule"
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
     },
     {
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 44,
-      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_))",
+      "pattern": "Type::Var(_)",
       "disposition": "deferred"
     },
     {
@@ -491,48 +531,6 @@
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 46,
-      "pattern": "Type::Var(_)",
-      "disposition": "deferred"
-    },
-    {
-      "file": "app_post.rs",
-      "function": "finish_unified_app",
-      "ordinal": 47,
-      "pattern": "Type::Var(_)",
-      "disposition": "deferred"
-    },
-    {
-      "file": "app_post.rs",
-      "function": "finish_unified_app",
-      "ordinal": 48,
-      "pattern": "Type::Var(_)",
-      "disposition": "deferred"
-    },
-    {
-      "file": "app_post.rs",
-      "function": "finish_unified_app",
-      "ordinal": 49,
-      "pattern": "Type::Var(_)",
-      "disposition": "deferred"
-    },
-    {
-      "file": "app_post.rs",
-      "function": "finish_unified_app",
-      "ordinal": 50,
-      "pattern": "Type::Var(_)",
-      "disposition": "deferred"
-    },
-    {
-      "file": "app_post.rs",
-      "function": "finish_unified_app",
-      "ordinal": 51,
-      "pattern": "Type::Var(_)",
-      "disposition": "deferred"
-    },
-    {
-      "file": "app_post.rs",
-      "function": "finish_unified_app",
-      "ordinal": 52,
       "pattern": "Type::Var(_)",
       "disposition": "deferred"
     },
@@ -632,6 +630,63 @@
       "disposition": "deferred"
     },
     {
+      "file": "app_string.rs",
+      "function": "string_route_result",
+      "ordinal": 1,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_string.rs",
+      "function": "string_route_result",
+      "ordinal": 2,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_string.rs",
+      "function": "string_route_result",
+      "ordinal": 3,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_string.rs",
+      "function": "string_route_result",
+      "ordinal": 4,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_string.rs",
+      "function": "string_route_result",
+      "ordinal": 5,
+      "pattern": "Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_)",
+      "disposition": "caught_downstream",
+      "witness": "a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule"
+    },
+    {
+      "file": "app_string.rs",
+      "function": "string_route_result",
+      "ordinal": 6,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_string.rs",
+      "function": "string_route_result",
+      "ordinal": 7,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_string.rs",
+      "function": "string_route_result",
+      "ordinal": 8,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
       "file": "app_tensor.rs",
       "function": "check_conv_signature",
       "ordinal": 1,
@@ -646,6 +701,14 @@
       "pattern": "Type::Var(_) | Type::Error(_)",
       "disposition": "deferred_by_caller",
       "witness": "app_tensor_ledger_family_validates_a_late_bound_operand"
+    },
+    {
+      "file": "app_tensor.rs",
+      "function": "check_expand_signature",
+      "ordinal": 2,
+      "pattern": "Type::Var(_)",
+      "disposition": "constrains_the_variable",
+      "reason": "spec/04-type-system.md \u00a74.7.2: expand's one shape follows from the operand, the axis and the size alone, all settled here, with nothing to record"
     },
     {
       "file": "app_tensor.rs",
@@ -703,6 +766,27 @@
       "disposition": "not_a_route"
     },
     {
+      "file": "checked.rs",
+      "function": "resolve_deferred_type_derivations",
+      "ordinal": 1,
+      "pattern": "Type::Var(_)",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "checked.rs",
+      "function": "shape_operand_awaits_binding",
+      "ordinal": 1,
+      "pattern": "Type::Var(_)",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "checked.rs",
+      "function": "shape_operand_awaits_lambda_binding",
+      "ordinal": 1,
+      "pattern": "Type::Var(current)",
+      "disposition": "not_a_route"
+    },
+    {
       "file": "common.rs",
       "function": "param_bound_dims",
       "ordinal": 1,
@@ -738,6 +822,55 @@
       "disposition": "not_a_route"
     },
     {
+      "file": "declarations.rs",
+      "function": "validate_deferred_borrow_vars",
+      "ordinal": 1,
+      "pattern": "Type::Var(_) | Type::Prim(_) | Type::Unit | Type::Fn(_ , _)",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "declarations.rs",
+      "function": "validate_deferred_borrow_vars",
+      "ordinal": 2,
+      "pattern": "Type::Var(resolved_var)",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "declarations.rs",
+      "function": "validate_deferred_opaque_uses",
+      "ordinal": 1,
+      "pattern": "Type::Var(_)",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "deferred_operands.rs",
+      "function": "subject_for",
+      "ordinal": 1,
+      "pattern": "Type::Var(resolved_var)",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "expr.rs",
+      "function": "infer_copy",
+      "ordinal": 1,
+      "pattern": "Type::Var(tv)",
+      "disposition": "gated_on_binding"
+    },
+    {
+      "file": "expr.rs",
+      "function": "infer_expr_with_type_metadata_ownership",
+      "ordinal": 1,
+      "pattern": "Type::Var(tv)",
+      "disposition": "gated_on_binding"
+    },
+    {
+      "file": "expr.rs",
+      "function": "infer_expr_with_type_metadata_ownership",
+      "ordinal": 2,
+      "pattern": "Type::Var(tv)",
+      "disposition": "gated_on_binding"
+    },
+    {
       "file": "expr_pattern.rs",
       "function": "check_literal_pattern",
       "ordinal": 1,
@@ -746,17 +879,68 @@
     },
     {
       "file": "expr_record.rs",
+      "function": "cast_result_from_source",
+      "ordinal": 1,
+      "pattern": "Type::Var(source_var)",
+      "disposition": "gated_on_binding"
+    },
+    {
+      "file": "expr_record.rs",
+      "function": "infer_access",
+      "ordinal": 1,
+      "pattern": "Type::Var(tv)",
+      "disposition": "gated_on_binding"
+    },
+    {
+      "file": "expr_record.rs",
       "function": "infer_cast",
       "ordinal": 1,
+      "pattern": "Type::Var(target)",
+      "disposition": "constrains_the_variable",
+      "reason": "spec [05-OP-35]: a cast inside a declaration may name that declaration's bounded dtype variable, so the target stays symbolic and the declared signature selects the concrete dtype"
+    },
+    {
+      "file": "expr_record.rs",
+      "function": "infer_cast",
+      "ordinal": 2,
       "pattern": "Type::Var(_) | Type::Error(_)",
       "disposition": "caught_downstream",
       "witness": "a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule"
+    },
+    {
+      "file": "expr_record.rs",
+      "function": "infer_record_update",
+      "ordinal": 1,
+      "pattern": "Type::Var(tv)",
+      "disposition": "gated_on_binding"
+    },
+    {
+      "file": "expr_record.rs",
+      "function": "infer_tuple_get",
+      "ordinal": 1,
+      "pattern": "Type::Var(_)",
+      "disposition": "gated_on_binding"
     },
     {
       "file": "expr_transform.rs",
       "function": "cotangent",
       "ordinal": 1,
       "pattern": "Type::Fn(_ , _) | Type::Unit | Type::Var(_) | Type::Error(_)",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "expr_transform.rs",
+      "function": "infer_grad",
+      "ordinal": 1,
+      "pattern": "Type::Var(_)",
+      "disposition": "constrains_the_variable",
+      "reason": "publishes a fresh variable that commits to nothing, which is what the checker does with an unresolved input elsewhere; chelis#874 R4 / [04-TOT-1] documents the arm"
+    },
+    {
+      "file": "recursion.rs",
+      "function": "begin_caller",
+      "ordinal": 1,
+      "pattern": "Type::Var(v)",
       "disposition": "not_a_route"
     },
     {
@@ -767,12 +951,33 @@
       "disposition": "not_a_route"
     },
     {
+      "file": "recursion.rs",
+      "function": "render_type",
+      "ordinal": 1,
+      "pattern": "Type::Var(v)",
+      "disposition": "not_a_route"
+    },
+    {
       "file": "static_value.rs",
       "function": "reject_non_int32_axis",
       "ordinal": 1,
       "pattern": "Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_)",
       "disposition": "caught_downstream",
       "witness": "a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule"
+    },
+    {
+      "file": "validate.rs",
+      "function": "type_carries_error",
+      "ordinal": 1,
+      "pattern": "Type::Prim(_) | Type::Tensor(_ , _) | Type::Var(_) | Type::Unit",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "validate.rs",
+      "function": "type_to_deep_expr_with",
+      "ordinal": 1,
+      "pattern": "Type::Var(var)",
+      "disposition": "not_a_route"
     }
   ]
 }
