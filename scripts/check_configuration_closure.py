@@ -140,7 +140,7 @@ CLIPPY_MATRIX: tuple[ClippyRun, ...] = (
             "--all-targets",
             "--features",
             "chelis-backend-c/sleef,"
-            "chelis-compiler-api/emission-observer,"
+            "chelis-compiler-api/compilation-trace,"
             "chelis-e2e/hip-local-gpu,"
             "chelis-ir/lowering-trace,"
             "chelis-prove/clarabel,"

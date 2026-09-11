@@ -836,7 +836,8 @@ class StageUnionTests(unittest.TestCase):
 
     def test_lowering_trace_runs_with_its_feature_locally_and_in_ci_support(self):
         command = ["cargo", "nextest", "run", "-p", "chelis-ir", "--features",
-                   "lowering-trace", "--lib", "--test", "lowering_trace"]
+                   "lowering-trace", "--lib", "--test", "lowering_trace",
+                   "--test", "helper_lowering_trace"]
         self.assertEqual(gate.LOWERING_TRACE_TESTS, command)
         self.assertEqual(gate.LOCAL_STATIC_COMMANDS.count(command), 1)
         commands = gate.selected_stage_commands(
@@ -860,8 +861,8 @@ class StageUnionTests(unittest.TestCase):
 
     def test_emission_observer_runs_with_its_feature_locally_and_in_ci_support(self):
         command = ["cargo", "nextest", "run", "-p", "chelis-compiler-api", "--features",
-                   "emission-observer", "--test", "emission_observer",
-                   "--test", "execution_artifact_metadata"]
+                   "compilation-trace", "--lib", "--test", "emission_observer",
+                   "--test", "execution_artifact_metadata", "--test", "compilation_trace"]
         self.assertEqual(gate.EMISSION_OBSERVER_TESTS, command)
         self.assertEqual(gate.LOCAL_STATIC_COMMANDS.count(command), 1)
         commands = gate.selected_stage_commands(

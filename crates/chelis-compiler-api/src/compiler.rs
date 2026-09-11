@@ -1481,6 +1481,9 @@ fn entry_lane_decision<'a>(
     host_only: bool,
     strictness: EntryStrictness,
     allow_execution: bool,
+    #[cfg(feature = "compilation-trace")] trace_out: Option<
+        &mut Option<chelis_ir::lowering_trace::HelperLoweringTrace>,
+    >,
 ) -> Result<EntryLaneOutcome<'a>> {
     use EntryLaneOutcome::Decline;
 
@@ -1518,15 +1521,11 @@ fn entry_lane_decision<'a>(
         }));
     }
     let execution = if allow_execution {
-        chelis_ir::host::lower_named_tensor_entry_execution_plan(checked, entry).map_err(
-            |diagnostic| {
-                stage_error_with_span(
-                    "lower",
-                    diagnostic.to_string(),
-                    GeneralKind::LowerError,
-                    deep_span_to_diagnostic(diagnostic.span),
-                )
-            },
+        lower_selected_execution_plan(
+            checked,
+            entry,
+            #[cfg(feature = "compilation-trace")]
+            trace_out,
         )?
     } else {
         None
@@ -1588,6 +1587,35 @@ pub fn compile_for_execution(request: CompileRequest) -> Result<CompiledExecutio
     compile_for_execution_impl(request, EntryStrictness::Strict)
 }
 
+fn lower_selected_execution_plan(
+    checked: &CheckedProgram,
+    entry: &str,
+    #[cfg(feature = "compilation-trace")] trace_out: Option<
+        &mut Option<chelis_ir::lowering_trace::HelperLoweringTrace>,
+    >,
+) -> Result<Option<chelis_ir::evaluation::EvaluationPlan>> {
+    let error = |diagnostic: chelis_ir::lower::LowerDiagnostic| {
+        stage_error_with_span(
+            "lower",
+            diagnostic.to_string(),
+            GeneralKind::LowerError,
+            deep_span_to_diagnostic(diagnostic.span),
+        )
+    };
+    #[cfg(feature = "compilation-trace")]
+    if let Some(trace_out) = trace_out {
+        return chelis_ir::host::lower_named_tensor_entry_execution_plan_with_trace(checked, entry)
+            .map(|result| {
+                result.map(|(plan, trace)| {
+                    *trace_out = Some(trace);
+                    plan
+                })
+            })
+            .map_err(error);
+    }
+    chelis_ir::host::lower_named_tensor_entry_execution_plan(checked, entry).map_err(error)
+}
+
 /// Opt-in observation of the same strict compilation as [`compile_for_execution`].
 /// The callback sees the actual immutable ownership-verified emission payload.
 /// The separate initial host snapshot is unverified and may contain functions
@@ -1609,8 +1637,45 @@ pub fn compile_for_execution_with_observer(
         request.target,
         request.entry_name.as_deref(),
         EntryStrictness::Strict,
-        Some(observer),
+        Some(crate::emission_observer::Observer::Emission(observer)),
     )
+}
+
+/// Capture actual selected helper passes without rerunning lowering or AD.
+/// Projection executes at the emission boundary and cannot change the payload.
+/// The returned pairing requires final compilation success and exactly one
+/// selected observation. Missing pass coverage is explicit in the observation;
+/// this API is not a certificate, native execution trace, or numerical proof.
+#[cfg(feature = "compilation-trace")]
+pub fn compile_for_execution_with_trace<T>(
+    request: CompileRequest,
+    project: impl FnOnce(crate::compilation_trace::CompilationObservation<'_>) -> T,
+) -> Result<crate::compilation_trace::TracedCompilation<T>> {
+    let mut capture = crate::compilation_trace::Capture::new();
+    let mut project = Some(project);
+    let mut observer = |observation: crate::compilation_trace::CompilationObservation<'_>| {
+        capture.observe(|| project.take().expect("projection executes only once")(observation))
+    };
+    let artifact = compile_source_scoped_mode(
+        request.source_kind,
+        &request.source,
+        None,
+        manifest_target(request.target),
+        true,
+        true,
+    )
+    .and_then(|compiled| {
+        execution_artifact_from_compiled_observed(
+            compiled,
+            request.target,
+            request.entry_name.as_deref(),
+            EntryStrictness::Strict,
+            Some(crate::emission_observer::Observer::Compilation(
+                &mut observer,
+            )),
+        )
+    });
+    capture.finish(artifact)
 }
 
 fn compile_for_execution_impl(
@@ -1882,6 +1947,12 @@ fn execution_artifact_from_compiled_observed(
     >,
 ) -> Result<CompiledExecutionArtifact> {
     let build_target = BuildTarget::from(target);
+    #[cfg(feature = "compilation-trace")]
+    let collect_trace = observer
+        .as_ref()
+        .is_some_and(crate::emission_observer::Observer::captures_lowering);
+    #[cfg(feature = "compilation-trace")]
+    let mut entry_trace = None;
     reject_host_only_builtins_before_host_lowering(compiled.checked(), build_target)?;
     let lower_error = |diagnostic: chelis_ir::lower::LowerDiagnostic| {
         stage_error_with_span(
@@ -2010,6 +2081,8 @@ fn execution_artifact_from_compiled_observed(
                     host_only,
                     strictness,
                     execution_host.is_some(),
+                    #[cfg(feature = "compilation-trace")]
+                    collect_trace.then_some(&mut entry_trace),
                 )? {
                     EntryLaneOutcome::Claim {
                         entry,
@@ -2046,11 +2119,12 @@ fn execution_artifact_from_compiled_observed(
                 // legacy file-stem/whole-program selection out of this lane.
                 match resolve_in_context_entry(&compiled, entry_name)? {
                     Some((entry, ordinary)) => {
-                        let execution = chelis_ir::host::lower_named_tensor_entry_execution_plan(
+                        let execution = lower_selected_execution_plan(
                             compiled.checked(),
                             entry,
-                        )
-                        .map_err(lower_error)?;
+                            #[cfg(feature = "compilation-trace")]
+                            collect_trace.then_some(&mut entry_trace),
+                        )?;
                         let dag = execution
                             .as_ref()
                             .map(|plan| plan.dag_for_inspection().clone())
@@ -2087,6 +2161,11 @@ fn execution_artifact_from_compiled_observed(
                             unfused: &entry_dag,
                             selected: verified.emission(),
                         },
+                        #[cfg(feature = "compilation-trace")]
+                        entry_trace.as_ref().map_or(
+                            crate::compilation_trace::SelectedLowering::Unavailable,
+                            crate::compilation_trace::SelectedLowering::Dag,
+                        ),
                     );
                     let result = chelis_backend_c::codegen_evaluation_with_options(
                         verified,
@@ -2129,6 +2208,8 @@ fn execution_artifact_from_compiled_observed(
                         unfused: &entry_dag,
                         selected: verified.emission(),
                     },
+                    #[cfg(feature = "compilation-trace")]
+                    crate::compilation_trace::SelectedLowering::Unavailable,
                 );
                 let result =
                     chelis_backend_c::codegen_with_options(verified, entry_symbol, options)
@@ -2217,6 +2298,8 @@ fn execution_artifact_from_compiled_observed(
                     .globals
                     .iter()
                     .all(|global| matches!(&global.ty, chelis_ir::ConcreteHostType::Scalar(_)));
+                #[cfg(feature = "compilation-trace")]
+                let mut selected_host_trace = None;
                 let ownership = if let Some(plan) = execution_host.take() {
                     let selected = match projected_host_program {
                         Some(projected) => plan
@@ -2239,6 +2322,12 @@ fn execution_artifact_from_compiled_observed(
                     let selected =
                         chelis_backend_c::prepare_host_execution_plan_for_codegen(selected)
                             .map_err(unsupported_stage_error)?;
+                    #[cfg(feature = "compilation-trace")]
+                    if collect_trace {
+                        selected_host_trace = Some(
+                            crate::compilation_trace::HostLoweringTrace::snapshot(&selected)?,
+                        );
+                    }
                     chelis_ir::ownership::lower_host_execution_ownership(
                         &compiled.program,
                         selected,
@@ -2264,6 +2353,11 @@ fn execution_artifact_from_compiled_observed(
                     &compiled.program,
                     observed_host.as_ref(),
                     crate::emission_observer::SelectedEmission::Host(verified.emission()),
+                    #[cfg(feature = "compilation-trace")]
+                    selected_host_trace.as_ref().map_or(
+                        crate::compilation_trace::SelectedLowering::Unavailable,
+                        crate::compilation_trace::SelectedLowering::Host,
+                    ),
                 );
                 let result = chelis_backend_c::codegen_host_program(&verified, &func_name)
                     .map_err(unsupported_stage_error)?;
@@ -2321,6 +2415,8 @@ fn execution_artifact_from_compiled_observed(
                     unfused: &compiled.dag,
                     selected: verified.emission(),
                 },
+                #[cfg(feature = "compilation-trace")]
+                crate::compilation_trace::SelectedLowering::Unavailable,
             );
             let result = chelis_backend_c::codegen_with_options(verified, &func_name, options)
                 .map_err(unsupported_stage_error)?;
@@ -2424,6 +2520,8 @@ fn execution_artifact_from_compiled_observed(
                     &compiled.program,
                     observed_host.as_ref(),
                     crate::emission_observer::SelectedEmission::Host(verified.emission()),
+                    #[cfg(feature = "compilation-trace")]
+                    crate::compilation_trace::SelectedLowering::Unavailable,
                 );
                 let result =
                     chelis_backend_hip::codegen_hip_host_program(&verified, &func_name, helpers)
@@ -2469,6 +2567,8 @@ fn execution_artifact_from_compiled_observed(
                     unfused: &hip_dag,
                     selected: verified.emission(),
                 },
+                #[cfg(feature = "compilation-trace")]
+                crate::compilation_trace::SelectedLowering::Unavailable,
             );
             let result = chelis_backend_hip::codegen_hip(verified, &func_name)
                 .map_err(unsupported_stage_error)?;
@@ -3810,7 +3910,15 @@ fn compile_source_for_codegen(
     source: &str,
     target: Target,
 ) -> Result<CompiledSource> {
-    compile_source_scoped_mode(source_kind, source, None, target, true)
+    compile_source_scoped_mode(
+        source_kind,
+        source,
+        None,
+        target,
+        true,
+        #[cfg(feature = "compilation-trace")]
+        false,
+    )
 }
 
 /// Like [`compile_source`], but when `entry` is `Some`, prune the expanded
@@ -3827,7 +3935,15 @@ fn compile_source_scoped(
     entry: Option<&str>,
     target: Target,
 ) -> Result<CompiledSource> {
-    compile_source_scoped_mode(source_kind, source, entry, target, false)
+    compile_source_scoped_mode(
+        source_kind,
+        source,
+        entry,
+        target,
+        false,
+        #[cfg(feature = "compilation-trace")]
+        false,
+    )
 }
 
 fn compile_source_scoped_mode(
@@ -3836,6 +3952,7 @@ fn compile_source_scoped_mode(
     entry: Option<&str>,
     target: Target,
     codegen: bool,
+    #[cfg(feature = "compilation-trace")] collect_trace: bool,
 ) -> Result<CompiledSource> {
     // eval_for_target(C) still evaluates a value graph using a C manifest;
     // requesting that manifest must not silently select native host emission.
@@ -3864,7 +3981,14 @@ fn compile_source_scoped_mode(
                 checked.program(),
                 &realizability,
             );
-            crate::pipeline::lower_checked_for_c_execution(
+            let lower_c = crate::pipeline::lower_checked_for_c_execution;
+            #[cfg(feature = "compilation-trace")]
+            let lower_c = if collect_trace {
+                crate::pipeline::lower_checked_for_c_execution_with_trace
+            } else {
+                lower_c
+            };
+            lower_c(
                 checked,
                 &manifest,
                 crate::pipeline::LoweringMode::AllowHostOnly,

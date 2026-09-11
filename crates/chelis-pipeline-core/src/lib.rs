@@ -99,6 +99,8 @@ pub use artifacts::{
     PreparedLibraryAnalysis, PreparedProgram, PreparedTypeAnalysis, PreparedTypeAnalysisOutcome,
     RootCountContext, RootMetadata, SemanticContext, SemanticRejection, TensorRootNames,
 };
+#[cfg(feature = "lowering-trace")]
+pub use lower::lower_checked_for_c_execution_with_trace;
 pub use lower::{
     LoweredLibrary, lower_checked, lower_checked_for_c_execution, lower_checked_for_evaluation,
     lower_checked_with_context, lower_checked_with_evaluation_context, lower_library,

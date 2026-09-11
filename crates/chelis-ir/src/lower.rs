@@ -2284,15 +2284,17 @@ fn normalize_evaluation_dag_with_trace(
     #[cfg(feature = "lowering-trace")] trace: Option<&crate::lowering_trace::Collector>,
 ) -> (Dag, crate::evaluation::ExecutionMetadata) {
     execution.spine.record_nodes(&dag);
-    execution.spine.retain_nodes(|node| match dag.get(node).map(|node| &node.op) {
-        Some(RiscOp::Load { .. }) => false,
-        Some(RiscOp::ExtentWitness {
-            requirements,
-            claims,
-            ..
-        }) if requirements.is_empty() && claims.is_empty() => false,
-        _ => true,
-    });
+    execution
+        .spine
+        .retain_nodes(|node| match dag.get(node).map(|node| &node.op) {
+            Some(RiscOp::Load { .. }) => false,
+            Some(RiscOp::ExtentWitness {
+                requirements,
+                claims,
+                ..
+            }) if requirements.is_empty() && claims.is_empty() => false,
+            _ => true,
+        });
     #[cfg(feature = "lowering-trace")]
     let before_dce_execution =
         trace.map(|_| crate::lowering_trace::Collector::execution_observation(&dag, &execution));
