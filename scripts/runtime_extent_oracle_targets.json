@@ -360,7 +360,8 @@
         "an_all_interface_class_traps_at_entry_when_its_witnesses_disagree",
         "entry_guards_run_in_assigned_slot_order_not_claim_name_order",
         "local_reshape_guards_follow_declaration_order",
-        "numeric_local_extent_claims_execute_exactly"
+        "numeric_local_extent_claims_execute_exactly",
+        "shared_runtime_extent_declares_once_and_rechecks_the_later_carrier"
       ],
       "note": "A CLI-rooted program is not the exported kernel: `def main() = f(...)` over literal tensors inlines the def, every extent becomes a literal, and the classes disappear, so guard placement and rendering on C are proved by DRIVEN rows that compile the exported kernel and call it with runtime inputs. This target is where those rows live. `exec_compile` is a large shared binary, so this target names its rows with `--exact` rather than running the whole file: the receipt check requires the observed set to EQUAL the expected one, and an unfiltered run would tie this phase's oracle to every unrelated numeric row in that file."
     }

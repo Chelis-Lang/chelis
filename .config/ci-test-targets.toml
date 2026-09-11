@@ -125,3 +125,11 @@ name = "issue_1291_count_device_helpers_cli"
 [[target]]
 package = "chelis-cli"
 name = "issue_1291_count_device_entry"
+
+[[target]]
+package = "chelis-cli"
+name = "issue_368_grad_concat_windows"
+
+[[target]]
+package = "chelis-ir"
+name = "issue_1775_runtime_extent_producer_identity"

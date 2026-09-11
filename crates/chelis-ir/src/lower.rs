@@ -10145,8 +10145,7 @@ impl<'program> LowerCtx<'program> {
                     )
                 };
                 let (new_shape, ty_dims, shape_srcs) = if args.len() >= 2 {
-                    let checker_dims = ty.dims.clone();
-                    self.extract_reshape_dim_list(&args[1], &checker_dims, &mut inputs)
+                    self.extract_reshape_dim_list(&args[1], &mut inputs)
                         .or_else(|| {
                             let template = tensor_shape_template_expr(&args[1])?;
                             let source = self.lower_expr_node(template, "tensor_shape template");
@@ -13364,14 +13363,25 @@ impl<'program> LowerCtx<'program> {
     /// chelis#616: a target dim that is runtime integer arithmetic over
     /// `shape()` reads (the former chelis#513 refuse-to-lower arm) or a term
     /// variable bound to a rank-0 integer scalar (the inlined window count
-    /// `m`) now lowers to a real scalar node appended to `inputs`, referenced
-    /// as `RtDim::Node(slot)` exactly like a movement bound. Its output-type
-    /// dim keeps the checker's symbol for the axis so downstream types keep
-    /// resolving; the eval and C lanes size the axis from the scalar value.
+    /// `m`) lowers to a real scalar node appended to `inputs`, referenced as
+    /// `RtDim::Node(slot)` exactly like a movement bound. The eval and C lanes
+    /// size the axis from that scalar's value.
+    ///
+    /// chelis#1775: such an axis is NAMED after the scalar node that produces
+    /// it (`_rt_dim_<producer>_<axis>`), never after the reshape that consumes
+    /// it and never after the checker's symbol for the axis. Producer identity
+    /// is what makes the name mean something: two reshapes sized from one
+    /// scalar node hold the same extent by construction and must agree on the
+    /// name, because a later consumer that compares dims (`concat`'s
+    /// non-concat-axis agreement check) reads a disagreement as two unrelated
+    /// extents and falls back to its host-runtime lane. The checker's symbol
+    /// cannot carry that identity: two calls of one helper passing DIFFERENT
+    /// runtime extents share the symbol the signature declares. Distinct
+    /// producers therefore stay distinct even when their values coincide at
+    /// run time, which is conservative in the safe direction.
     fn extract_reshape_dim_list(
         &mut self,
         expr: &Expr,
-        checker_dims: &[DimInfo],
         inputs: &mut Vec<NodeId>,
     ) -> Option<(Vec<RtDim>, Vec<DimInfo>, Vec<NodeId>)> {
         let elements: Vec<Expr> = collect_cons_chain(expr)?.into_iter().cloned().collect();
@@ -13474,49 +13484,6 @@ impl<'program> LowerCtx<'program> {
                 }
                 op_dims.push(RtDim::Lit(value as usize));
                 ty_dims.push(DimInfo::Lit(value as usize));
-            } else if self.is_shape_derived_arith_dim(elem) || self.is_runtime_scalar_var(elem) {
-                // chelis#616: lower the runtime target expression to a rank-0
-                // integer scalar node (replacing the chelis#513 loud refusal).
-                // The extent is now checked at run time: the eval lane reads
-                // the scalar and enforces the numel invariant, and the C lane
-                // declares the dim from the scalar behind negativity + numel
-                // abort guards. A non-scalar or non-integer lowering is a
-                // producing-pass bug and stays fail-closed.
-                let node = self.lower_expr_node(elem, "reshape target dim");
-                let node_ty = self
-                    .dag
-                    .get(node)
-                    .map(|n| n.output_type.clone())
-                    .unwrap_or_else(Self::default_type);
-                if !node_ty.dims.is_empty() || !node_ty.precision.is_integer() {
-                    raise_lowering_error(
-                        format!(
-                            "reshape target dim expression must lower to a rank-0 integer \
-                             scalar, got rank {} `{}` (chelis#616)",
-                            node_ty.dims.len(),
-                            node_ty.precision.name()
-                        ),
-                        Some(elem.span()),
-                        elem.span_id().map(ToOwned::to_owned),
-                    );
-                }
-                let slot = inputs.len();
-                inputs.push(node);
-                op_dims.push(RtDim::Node(slot));
-                // The output-type dim keeps the checker's symbol for this
-                // axis (downstream types reference it; the C lane declares it
-                // from the scalar). A wildcard, concrete, or missing checker
-                // dim gets a fresh GENERATED name instead — never a guessed
-                // extent, and never the bare `*`/`""` wildcard (both lanes
-                // need one stable, unique name per runtime extent: the eval
-                // lane binds it from the scalar's value mid-evaluation and
-                // the C lane declares it at the op).
-                ty_dims.push(match checker_dims.get(axis) {
-                    Some(dim @ DimInfo::Named(name, None)) if !name.is_empty() && name != "*" => {
-                        dim.clone()
-                    }
-                    _ => DimInfo::Named(format!("_rt_dim_{}_{axis}", node.0), None),
-                });
             } else {
                 let name = symbolic_dim_var_name(elem)?;
                 op_dims.push(RtDim::Sym(name.clone()));
@@ -13543,7 +13510,9 @@ impl<'program> LowerCtx<'program> {
                 }
                 self.reshape_targets.insert(target, axis);
                 inputs[slot] = target;
-                ty_dims[axis] = DimInfo::Named(format!("_rt_dim_{}_{axis}", target.0), None);
+                // `ty_dims[axis]` already holds `_rt_dim_{actual}_{axis}`:
+                // every branch that pushes to `computed_targets` sets it from
+                // the same node this loop reads back out of `inputs[slot]`.
             }
             Some((op_dims, ty_dims, srcs))
         }
