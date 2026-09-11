@@ -44,6 +44,71 @@ fn checked_surf(source: &str) -> CheckedProgram {
     chelis_types::check_ir_program(&exprs).expect("ir check")
 }
 
+/// chelis#1829: the interpreter entry arms the host-lowering memo, so the
+/// kernel-decision probes behind `def_kernel` are bounded by the number of
+/// definitions rather than expanding the call graph as a tree.
+///
+/// Evidentiary status: REGRESSION TEST for the entry point. On the base this
+/// function armed nothing, so the same fixture builds hundreds of thousands of
+/// summaries (measured: 398,574 at depth 12) and takes minutes.
+///
+/// The fixture uses one program rather than a composed library plus caller,
+/// because `CheckedProgram::compose` requires a `library_proof_id` that only
+/// the real context pipeline mints and a lib unit test cannot. The exposure
+/// #1693 actually opened, an imported library definition reaching this probe,
+/// is covered end to end by the `csv_io`, `json_io` and `issue_1314_json_bigint`
+/// CLI rows. What this pins is the part those rows cannot: an exact probe count
+/// at the entry that arms the scope.
+///
+/// The negative twin is the mutation run recorded in the pull request: with the
+/// scope neutered this assertion reads five orders of magnitude higher.
+#[test]
+fn issue_1829_interpreter_entry_bounds_kernel_decision_probes() {
+    const DEPTH: usize = 12;
+    let mut source = String::new();
+    for level in 0..DEPTH {
+        source.push_str(&format!(
+            "def f{level}(x: int64) -> int64 = add(f{next}(x), f{next}(x))\n",
+            next = level + 1
+        ));
+    }
+    source.push_str(&format!("def f{DEPTH}(x: int64) -> int64 = x\n"));
+    source.push_str("result = f0(cast(1, int64))\n");
+
+    let checked = checked_surf(&source);
+    let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
+    chelis_ir::host::reset_host_summary_probe_builds();
+    let inputs = HostEvaluationInputs {
+        roots: &empty_tensors,
+        bindings: None,
+    };
+    let outcome =
+        evaluate_host_program_with_library_and_types(&checked, None, None, inputs, None, None)
+            .expect("#1829 fanout fixture evaluates");
+    let probes = chelis_ir::host::host_summary_probe_builds();
+    let definitions = u64::try_from(DEPTH + 1).expect("definition count fits");
+
+    let result = outcome
+        .host_bindings
+        .get("result")
+        .map(render_value)
+        .expect("#1829 fixture binds `result`");
+    assert_eq!(
+        result, "4096",
+        "#1829 fixture must still compute the right answer"
+    );
+    assert!(
+        probes > 0,
+        "#1829: the fixture must actually reach the kernel-decision probe, or this \
+         receipt would pass without measuring anything"
+    );
+    assert!(
+        probes <= definitions,
+        "#1829: the interpreter entry must build at most one summary per definition; \
+         {definitions} definitions produced {probes} builds"
+    );
+}
+
 #[test]
 fn dropout_entered_error_prefix_and_nested_handler_unwind_preserve_parent() {
     let checked = checked_surf(
