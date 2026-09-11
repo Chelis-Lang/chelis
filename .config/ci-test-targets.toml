@@ -7,6 +7,10 @@ package = "chelis-compiler-api"
 name = "invocation_local_random"
 
 [[target]]
+package = "chelis-compiler-api"
+name = "fixed_control_c"
+
+[[target]]
 package = "chelis-cli"
 name = "issue_771_seed_width_parity"
 
