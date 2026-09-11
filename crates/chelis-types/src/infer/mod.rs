@@ -136,8 +136,8 @@ pub use validate::type_to_deep_expr;
 pub(crate) use checked::checked_program_with_effect_annotations_in_session;
 #[cfg(test)]
 pub(crate) use checked::{
-    FinalizationMutationCase, TypeStampMutationCase, run_finalization_mutation_case,
-    run_type_stamp_mutation_case,
+    FinalizationMutationCase, ReconcileMutationCase, TypeStampMutationCase,
+    run_finalization_mutation_case, run_reconcile_mutation_case, run_type_stamp_mutation_case,
 };
 pub(crate) use declarations::{param_has_consuming_use, param_has_consuming_use_in_session};
 pub(crate) use program::{

@@ -319,9 +319,18 @@ fn an_error_operand_still_suppresses_the_routes_own_diagnostic() {
     }
 }
 
-/// An operand that never acquires an outer constructor is rejected at the
-/// declaration boundary rather than accepted. REGRESSION TEST: before the
-/// repair `permute` accepted this and `len` accepted its twin.
+/// A SHAPE route's operand that never acquires an outer constructor is
+/// rejected at the declaration boundary rather than accepted. These routes
+/// cannot derive a result type at all without a shape, which is the
+/// acceptance boundary the shape-computed builtins have carried since
+/// chelis#1489.
+///
+/// The boundary is per route KIND, and the collection, host and string
+/// routes deliberately do NOT behave this way; their twin is
+/// `a_never_bound_generic_operand_is_accepted_and_validated_at_its_binding`
+/// below.
+///
+/// REGRESSION TEST: before the repair `permute` accepted this.
 #[test]
 fn an_operand_that_never_binds_is_rejected_at_the_declaration_boundary() {
     for (route, program) in [
@@ -330,8 +339,8 @@ fn an_operand_that_never_binds_is_rejected_at_the_declaration_boundary() {
             "def f() -> int32 = {\n  g = fn (t) -> permute(t, 1i32, 0i32)\n  1i32\n}\n",
         ),
         (
-            "len",
-            "def f() -> int32 = {\n  g = fn (t) -> len(t)\n  1i32\n}\n",
+            "reshape",
+            "def f() -> int32 = {\n  g = fn (t) -> reshape(t, [6i64])\n  1i32\n}\n",
         ),
     ] {
         let errors = check(program).expect_err("a never-bound operand is not a typed program");
@@ -577,5 +586,244 @@ fn a_never_bound_operand_is_reported_exactly_once() {
             .contains("unresolved `permute` shape obligation"),
         "the one diagnostic must name the suspended route, got {:?}",
         errors[0].message
+    );
+}
+
+/// A route whose unresolved operand is not the FIRST one, or whose valid and
+/// invalid twins need different declarations, cannot use [`Row`]: that helper
+/// substitutes one binding into both calls. These carry their three programs
+/// written out instead.
+struct Cell {
+    route: &'static str,
+    /// Resolved control: the rule that was always right, and its exact wording.
+    resolved_invalid: &'static str,
+    /// The operand binds after the route ran, and the call is invalid.
+    late_invalid: &'static str,
+    /// The same shape with a valid operand: the repair must not reject it.
+    late_valid: &'static str,
+    diagnostic: &'static str,
+}
+
+fn run_cell(cell: &Cell) {
+    let Cell {
+        route,
+        resolved_invalid,
+        late_invalid,
+        late_valid,
+        diagnostic,
+    } = cell;
+
+    // DISPOSITION LOCK. The resolved rejection pins the wording the late-bound
+    // one has to equal.
+    let eager = check(resolved_invalid).expect_err(&format!(
+        "{route}: an invalid resolved call must be rejected"
+    ));
+    assert!(
+        eager.iter().any(|e| e.message.contains(diagnostic)),
+        "{route}: the resolved rejection must name its own rule, got:\n{}",
+        summary(&eager)
+    );
+
+    // REGRESSION TEST. Accepted on `e813415d0` at score 1 with an empty error
+    // list; this is the cell chelis#1512 is about.
+    let late = check(late_invalid).expect_err(&format!(
+        "{route}: an invalid call over a late-bound operand must be rejected"
+    ));
+    assert!(
+        late.iter().any(|e| e.message.contains(diagnostic)),
+        "{route}: the late-bound rejection must carry the SAME diagnostic as the resolved one \
+         ({diagnostic:?}), got:\n{}",
+        summary(&late)
+    );
+
+    // NEGATIVE TWIN, and the one that matters for blast radius: suspending the
+    // call must not reject the correct program.
+    check(late_valid).unwrap_or_else(|e| {
+        panic!(
+            "{route}: a valid call over a late-bound operand must check:\n{}",
+            summary(&e)
+        )
+    });
+}
+
+/// The routes whose unresolved operand is a later argument, or whose rule
+/// reads several operands at once. Each was MEASURED accepting its invalid
+/// program on `e813415d0`.
+#[test]
+fn a_late_bound_secondary_operand_is_validated_too() {
+    for cell in [
+        Cell {
+            route: "where",
+            resolved_invalid: "def f(c: tensor[3, bool], a: tensor[3, f32], b: tensor[2, f32]) -> tensor[3, f32] = where(c, a, b)\n",
+            late_invalid: "def f(c: tensor[3, bool], a: tensor[3, f32], b: tensor[2, f32]) -> tensor[3, f32] = {\n  g = fn (t) -> where(c, t, b)\n  g(a)\n}\n",
+            late_valid: "def f(c: tensor[3, bool], a: tensor[3, f32], b: tensor[3, f32]) -> tensor[3, f32] = {\n  g = fn (t) -> where(c, t, b)\n  g(a)\n}\n",
+            diagnostic: "where expects cond/both branches to have matching tensor shapes and branch precision",
+        },
+        Cell {
+            route: "clamp",
+            resolved_invalid: "def f(x: tensor[3, f32], lo: tensor[2, f32], hi: tensor[3, f32]) -> tensor[3, f32] = clamp(x, lo, hi)\n",
+            late_invalid: "def f(x: tensor[3, f32], lo: tensor[2, f32], hi: tensor[3, f32]) -> tensor[3, f32] = {\n  g = fn (t) -> clamp(t, lo, hi)\n  g(x)\n}\n",
+            late_valid: "def f(x: tensor[3, f32], lo: tensor[3, f32], hi: tensor[3, f32]) -> tensor[3, f32] = {\n  g = fn (t) -> clamp(t, lo, hi)\n  g(x)\n}\n",
+            diagnostic: "clamp expects tensor input plus scalar-tensor or matching-shape tensor bounds of the same precision",
+        },
+        Cell {
+            route: "index",
+            resolved_invalid: "def f(xs: List[int32], k: f32) -> int32 = index(xs, k)\n",
+            late_invalid: "def f(xs: List[int32], k: f32) -> int32 = {\n  g = fn (n) -> index(xs, n)\n  g(k)\n}\n",
+            late_valid: "def f(xs: List[int32], k: int64) -> int32 = {\n  g = fn (n) -> index(xs, n)\n  g(k)\n}\n",
+            diagnostic: "index expects integer index, got f32",
+        },
+        Cell {
+            // `concat`'s List/List rule IS a unification of the element types,
+            // so its own wording is the precision mismatch. Draft #1690
+            // rewrites the SIBLING tensor-concat branch of this same match and
+            // leaves this arm alone.
+            route: "concat",
+            resolved_invalid: "def f(x: List[int32], y: List[f32]) -> List[int32] = concat(x, y)\n",
+            late_invalid: "def f(x: List[int32], y: List[f32]) -> List[int32] = {\n  g = fn (t) -> concat(x, t)\n  g(y)\n}\n",
+            late_valid: "def f(x: List[int32], y: List[int32]) -> List[int32] = {\n  g = fn (t) -> concat(x, t)\n  g(y)\n}\n",
+            diagnostic: "precision mismatch: expected int32, got f32",
+        },
+        Cell {
+            route: "zip",
+            resolved_invalid: "def f(x: List[int32], y: int32) -> List[(int32, int32)] = zip(x, y)\n",
+            late_invalid: "def f(x: List[int32], y: int32) -> List[(int32, int32)] = {\n  g = fn (t) -> zip(x, t)\n  g(y)\n}\n",
+            late_valid: "def f(x: List[int32], y: List[int32]) -> List[(int32, int32)] = {\n  g = fn (t) -> zip(x, t)\n  g(y)\n}\n",
+            diagnostic: "zip expects List inputs, got List int32 and int32",
+        },
+        Cell {
+            route: "dict_merge",
+            resolved_invalid: "def f(d: Dict[string, int32], e: Dict[string, f32]) -> Dict[string, int32] = dict_merge(d, e)\n",
+            late_invalid: "def f(d: Dict[string, int32], e: Dict[string, f32]) -> Dict[string, int32] = {\n  g = fn (t) -> dict_merge(d, t)\n  g(e)\n}\n",
+            late_valid: "def f(d: Dict[string, int32], e: Dict[string, int32]) -> Dict[string, int32] = {\n  g = fn (t) -> dict_merge(d, t)\n  g(e)\n}\n",
+            diagnostic: "precision mismatch: expected int32, got f32",
+        },
+        Cell {
+            route: "split sizes",
+            resolved_invalid: "def f(x: tensor[4, f32], s: List[f32]) -> List[tensor[2, f32]] = split(x, 0i32, s)\n",
+            late_invalid: "def f(x: tensor[4, f32], s: List[f32]) -> List[tensor[2, f32]] = {\n  g = fn (t) -> split(x, 0i32, t)\n  g(s)\n}\n",
+            late_valid: "def f(x: tensor[4, f32], s: List[int64]) -> List[tensor[2, f32]] = {\n  g = fn (t) -> split(x, 0i32, t)\n  g(s)\n}\n",
+            diagnostic: "split expects List[int] sizes",
+        },
+        Cell {
+            route: "split input",
+            resolved_invalid: "def f(x: List[int32], s: List[int64]) -> List[tensor[2, f32]] = split(x, 0i32, s)\n",
+            late_invalid: "def f(x: List[int32], s: List[int64]) -> List[tensor[2, f32]] = {\n  g = fn (t) -> split(t, 0i32, s)\n  g(x)\n}\n",
+            late_valid: "def f(x: tensor[4, f32], s: List[int64]) -> List[tensor[2, f32]] = {\n  g = fn (t) -> split(t, 0i32, s)\n  g(x)\n}\n",
+            diagnostic: "split expects tensor input and List[int] sizes",
+        },
+        Cell {
+            route: "take",
+            resolved_invalid: "def f(x: List[int32], k: f32) -> List[int32] = take(x, k)\n",
+            late_invalid: "def f(x: List[int32], k: f32) -> List[int32] = {\n  g = fn (n) -> take(x, n)\n  g(k)\n}\n",
+            late_valid: "def f(x: List[int32], k: int64) -> List[int32] = {\n  g = fn (n) -> take(x, n)\n  g(k)\n}\n",
+            diagnostic: "take expects integer count, got f32",
+        },
+        Cell {
+            // `drop` shares `take`'s arm; the cell is here because the
+            // diagnostic interpolates the callee name and a shared arm that
+            // named one of them would pass with the other silently wrong.
+            route: "drop",
+            resolved_invalid: "def f(x: List[int32], k: f32) -> List[int32] = drop(x, k)\n",
+            late_invalid: "def f(x: List[int32], k: f32) -> List[int32] = {\n  g = fn (n) -> drop(x, n)\n  g(k)\n}\n",
+            late_valid: "def f(x: List[int32], k: int64) -> List[int32] = {\n  g = fn (n) -> drop(x, n)\n  g(k)\n}\n",
+            diagnostic: "drop expects integer count, got f32",
+        },
+        Cell {
+            route: "chunk",
+            resolved_invalid: "def f(x: List[int32], k: f32) -> List[List[int32]] = chunk(x, k)\n",
+            late_invalid: "def f(x: List[int32], k: f32) -> List[List[int32]] = {\n  g = fn (n) -> chunk(x, n)\n  g(k)\n}\n",
+            late_valid: "def f(x: List[int32], k: int64) -> List[List[int32]] = {\n  g = fn (n) -> chunk(x, n)\n  g(k)\n}\n",
+            diagnostic: "chunk expects integer size, got f32",
+        },
+        Cell {
+            // The window family suspended on its TENSOR operand only, so an
+            // axis or step that bound late slipped past the route's own guard
+            // while the tensor was already settled.
+            route: "permute axis",
+            resolved_invalid: "def f(x: tensor[3, 2, f32], a: int64) -> tensor[2, 3, f32] = permute(x, a, 0i32)\n",
+            late_invalid: "def f(x: tensor[3, 2, f32], a: int64) -> tensor[2, 3, f32] = {\n  g = fn (v) -> permute(x, v, 0i32)\n  g(a)\n}\n",
+            late_valid: "def f(x: tensor[3, 2, f32]) -> tensor[2, 3, f32] = {\n  g = fn (t) -> permute(t, 1i32, 0i32)\n  g(x)\n}\n",
+            diagnostic: "permute expects int32 axis indices, got int64",
+        },
+        Cell {
+            route: "stride step",
+            resolved_invalid: "def f(x: tensor[2, 4, f32], a: int32) -> tensor[2, 2, f32] = stride(x, a, 2i64)\n",
+            late_invalid: "def f(x: tensor[2, 4, f32], a: int32) -> tensor[2, 2, f32] = {\n  g = fn (v) -> stride(x, v, 2i64)\n  g(a)\n}\n",
+            late_valid: "def f(x: tensor[2, 4, f32]) -> tensor[2, 2, f32] = {\n  g = fn (t) -> stride(t, 1i64, 2i64)\n  g(x)\n}\n",
+            diagnostic: "stride expects int64 strides (write 2i64), got int32",
+        },
+    ] {
+        run_cell(&cell);
+    }
+}
+
+/// The other half of the per-route-kind boundary rule, and the reason it has
+/// to be per kind at all.
+///
+/// A collection, host or string route's operand is NOT required to be a
+/// tensor carrying a shape. A polymorphic definition legitimately calls
+/// `dict_of`, `len` or `where` over a value that acquires its constructor
+/// only at a call site, and `packages/chelis-std/src/io/json.ch` really does:
+/// `parse_object` returns `Some((dict_of([]), ...))` under a declared
+/// `Dict[string, Json]`, where the empty list literal's element type never
+/// binds inside the declaration. Rejecting that at the boundary took the
+/// whole standard library out.
+///
+/// So the obligation is discharged silently, and the route's own validation
+/// runs at each binding instead. REGRESSION TEST for the acceptance halves,
+/// which a boundary rule that did not distinguish route kinds rejected;
+/// DISPOSITION LOCK for the rejection, which is the same cell the
+/// collection-route table above already asserts.
+#[test]
+fn a_never_bound_generic_operand_is_accepted_and_validated_at_its_binding() {
+    // Never applied: accepted, with no diagnostic at all.
+    for (route, program) in [
+        (
+            "len",
+            "def f() -> int32 = {\n  g = fn (t) -> len(t)\n  1i32\n}\n",
+        ),
+        (
+            "where",
+            "def f(c: tensor[3, bool], b: tensor[3, f32]) -> int32 = {\n  g = fn (t) -> where(c, t, b)\n  1i32\n}\n",
+        ),
+        (
+            "index",
+            "def f(xs: List[int32]) -> int32 = {\n  g = fn (n) -> index(xs, n)\n  1i32\n}\n",
+        ),
+    ] {
+        check(program).unwrap_or_else(|e| {
+            panic!(
+                "{route}: a generic operand that never binds must be accepted, not reported:\n{}",
+                summary(&e)
+            )
+        });
+    }
+
+    // The standard library's own shape, reduced to one declaration.
+    check("def f() -> Dict[string, int32] = dict_of([])\n").unwrap_or_else(|e| {
+        panic!(
+            "dict_of: the declared result decides an empty literal's element type, and the \
+             operand never binds:\n{}",
+            summary(&e)
+        )
+    });
+
+    // Applied once, validly: still accepted, and the route ran.
+    check("def f(x: List[int32]) -> int64 = {\n  g = fn (t) -> len(t)\n  g(x)\n}\n")
+        .unwrap_or_else(|e| panic!("len: a valid binding must check:\n{}", summary(&e)));
+
+    // Applied once, invalidly: rejected with the ROUTE's own text. Accepting
+    // the never-bound case is not the same as not checking; this is the cell
+    // that separates the two.
+    let errors =
+        check("def f(x: tensor[3, f32]) -> int64 = {\n  g = fn (t) -> len(t)\n  g(x)\n}\n")
+            .expect_err("len over a tensor must be rejected once the operand binds");
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("len expects List or Dict input")),
+        "the binding must be validated by `len`'s own rule, got:\n{}",
+        summary(&errors)
     );
 }

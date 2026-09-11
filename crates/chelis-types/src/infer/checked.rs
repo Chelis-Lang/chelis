@@ -717,7 +717,22 @@ impl InferenceProduct {
                 DeferredShapeRule::Conv => "conv".to_string(),
                 DeferredShapeRule::ScatterElements { .. } => "scatter_elements".to_string(),
                 DeferredShapeRule::ShapeRoute { route, .. } => route.builtin(),
-                DeferredShapeRule::PostApp { func_name, .. } => func_name,
+                // chelis#1512: a collection, host or string route's operand is
+                // NOT required to be a tensor carrying a shape, so an operand
+                // that never binds is not an error here. A polymorphic
+                // definition legitimately calls `dict_of`, `len` or `where`
+                // over a value that acquires its constructor per call site,
+                // and the replay discharges the route's own validation at each
+                // of those bindings. The eager pass already published the
+                // unconstrained result this arm published before the repair,
+                // so discharging the obligation silently leaves the program
+                // exactly as it was.
+                //
+                // The rules above keep the rejection because their operand
+                // must be a tensor with a shape: without one, no result type
+                // can be derived at all, which is the acceptance boundary the
+                // shape-computed builtins have carried since chelis#1489.
+                DeferredShapeRule::PostApp { .. } => continue,
             };
             errors.push(CheckError::new(
                 CheckErrorKind::TypeMismatch,
@@ -1145,6 +1160,39 @@ pub(crate) enum TypeStampMutationCase {
     IncompatibleRepeat,
     UnregisteredSynthesized,
     RuntimeNonStampOwnerLookup,
+}
+
+/// chelis#1512: the two branches of [`reconcile_replayed_result`], driven
+/// from `session.rs` where a `DiagnosticSink` can be constructed.
+#[cfg(test)]
+pub(crate) enum ReconcileMutationCase {
+    /// The replayed rule produces a type the suspended call did not publish.
+    Disagrees,
+    /// The rule produces the type a fresh published variable can take.
+    Agrees,
+}
+
+/// Returns the rendered produced type and whether the published type ended up
+/// bound to it.
+#[cfg(test)]
+pub(crate) fn run_reconcile_mutation_case(
+    case: ReconcileMutationCase,
+    errors: &mut DiagnosticSink<'_>,
+) -> (String, bool) {
+    let tensor = |dim: i64| Type::Tensor(vec![Dim::Lit(dim)], TensorPrec::Concrete(Prim::F32));
+    let mut subst = Subst::new();
+    let mut vg = VarGen::default();
+    let published = match case {
+        ReconcileMutationCase::Disagrees => tensor(3),
+        ReconcileMutationCase::Agrees => Type::Var(vg.fresh_tvar()),
+    };
+    let produce = match case {
+        ReconcileMutationCase::Disagrees => tensor(4),
+        ReconcileMutationCase::Agrees => tensor(3),
+    };
+    let produced = reconcile_replayed_result("permute", &published, produce, &mut subst, errors);
+    let bound = subst.apply(&published) == produced;
+    (produced.to_string(), bound)
 }
 
 #[cfg(test)]

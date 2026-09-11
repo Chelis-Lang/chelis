@@ -14,7 +14,7 @@
       "ordinal": 1,
       "pattern": "(Type::Var(_) , Type::Var(_)) |(Type::Error(_) , _) |(_ , Type::Error(_))",
       "disposition": "defect(#1512)",
-      "reason": "needs a suspend-without-requiring-binding mode to distinguish a never-bound operand from a genuine generic dtype parameter; measured: the repair broke nine polymorphic-body tests, all of the 'a polymorphic body stays accepted' kind; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted"
+      "reason": "the dtype validators run before `finish_unified_app` builds its deferral site, and they express admissibility as `matches!` disjunctions inside one boolean rather than as a match arm with a `Type::Var` branch, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
     },
     {
       "file": "app_numeric.rs",
@@ -22,7 +22,7 @@
       "ordinal": 2,
       "pattern": "& lhs , Type::Var(_) | Type::Error(_)",
       "disposition": "defect(#1512)",
-      "reason": "needs a suspend-without-requiring-binding mode to distinguish a never-bound operand from a genuine generic dtype parameter; measured: the repair broke nine polymorphic-body tests, all of the 'a polymorphic body stays accepted' kind; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted"
+      "reason": "the dtype validators run before `finish_unified_app` builds its deferral site, and they express admissibility as `matches!` disjunctions inside one boolean rather than as a match arm with a `Type::Var` branch, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
     },
     {
       "file": "app_numeric.rs",
@@ -30,7 +30,7 @@
       "ordinal": 3,
       "pattern": "& rhs , Type::Var(_) | Type::Error(_)",
       "disposition": "defect(#1512)",
-      "reason": "needs a suspend-without-requiring-binding mode to distinguish a never-bound operand from a genuine generic dtype parameter; measured: the repair broke nine polymorphic-body tests, all of the 'a polymorphic body stays accepted' kind; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted"
+      "reason": "the dtype validators run before `finish_unified_app` builds its deferral site, and they express admissibility as `matches!` disjunctions inside one boolean rather than as a match arm with a `Type::Var` branch, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
     },
     {
       "file": "app_numeric.rs",
@@ -108,7 +108,7 @@
       "ordinal": 1,
       "pattern": "Type::Tensor(_ , _) | Type::Var(_) | Type::Error(_)",
       "disposition": "defect(#1512)",
-      "reason": "needs a suspend-without-requiring-binding mode to distinguish a never-bound operand from a genuine generic dtype parameter; measured: the repair broke nine polymorphic-body tests, all of the 'a polymorphic body stays accepted' kind; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted"
+      "reason": "the dtype validators run before `finish_unified_app` builds its deferral site, and they express admissibility as `matches!` disjunctions inside one boolean rather than as a match arm with a `Type::Var` branch, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
     },
     {
       "file": "app_numeric.rs",
@@ -116,7 +116,7 @@
       "ordinal": 2,
       "pattern": "Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_)",
       "disposition": "defect(#1512)",
-      "reason": "needs a suspend-without-requiring-binding mode to distinguish a never-bound operand from a genuine generic dtype parameter; measured: the repair broke nine polymorphic-body tests, all of the 'a polymorphic body stays accepted' kind; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted"
+      "reason": "the dtype validators run before `finish_unified_app` builds its deferral site, and they express admissibility as `matches!` disjunctions inside one boolean rather than as a match arm with a `Type::Var` branch, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
     },
     {
       "file": "app_operand_dtype.rs",
@@ -124,7 +124,7 @@
       "ordinal": 1,
       "pattern": "Type::Var(_) | Type::Error(_)",
       "disposition": "defect(#1512)",
-      "reason": "needs a suspend-without-requiring-binding mode to distinguish a never-bound operand from a genuine generic dtype parameter; measured: the repair broke nine polymorphic-body tests, all of the 'a polymorphic body stays accepted' kind; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted"
+      "reason": "the dtype validators run before `finish_unified_app` builds its deferral site, and they express admissibility as `matches!` disjunctions inside one boolean rather than as a match arm with a `Type::Var` branch, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
     },
     {
       "file": "app_operand_dtype.rs",
@@ -132,7 +132,7 @@
       "ordinal": 2,
       "pattern": "Type::Prim(Prim::F32) | Type::Var(_) | Type::Error(_)",
       "disposition": "defect(#1512)",
-      "reason": "needs a suspend-without-requiring-binding mode to distinguish a never-bound operand from a genuine generic dtype parameter; measured: the repair broke nine polymorphic-body tests, all of the 'a polymorphic body stays accepted' kind; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted"
+      "reason": "the dtype validators run before `finish_unified_app` builds its deferral site, and they express admissibility as `matches!` disjunctions inside one boolean rather than as a match arm with a `Type::Var` branch, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
     },
     {
       "file": "app_operand_dtype.rs",
@@ -140,7 +140,7 @@
       "ordinal": 3,
       "pattern": "Type::Tensor(_ , _) | Type::Var(_) | Type::Error(_)",
       "disposition": "defect(#1512)",
-      "reason": "needs a suspend-without-requiring-binding mode to distinguish a never-bound operand from a genuine generic dtype parameter; measured: the repair broke nine polymorphic-body tests, all of the 'a polymorphic body stays accepted' kind; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted"
+      "reason": "the dtype validators run before `finish_unified_app` builds its deferral site, and they express admissibility as `matches!` disjunctions inside one boolean rather than as a match arm with a `Type::Var` branch, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
     },
     {
       "file": "app_operand_dtype.rs",
@@ -148,7 +148,7 @@
       "ordinal": 4,
       "pattern": "Type::Prim(Prim::F32) | Type::Var(_) | Type::Error(_)",
       "disposition": "defect(#1512)",
-      "reason": "needs a suspend-without-requiring-binding mode to distinguish a never-bound operand from a genuine generic dtype parameter; measured: the repair broke nine polymorphic-body tests, all of the 'a polymorphic body stays accepted' kind; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted"
+      "reason": "the dtype validators run before `finish_unified_app` builds its deferral site, and they express admissibility as `matches!` disjunctions inside one boolean rather than as a match arm with a `Type::Var` branch, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
     },
     {
       "file": "app_operand_dtype.rs",
@@ -156,7 +156,7 @@
       "ordinal": 1,
       "pattern": "Some(Type::Tensor(_ , TensorPrec::Var(_))) | Some(Type::Var(_)) | Some(Type::Error(_)) | None",
       "disposition": "defect(#1512)",
-      "reason": "needs a suspend-without-requiring-binding mode to distinguish a never-bound operand from a genuine generic dtype parameter; measured: the repair broke nine polymorphic-body tests, all of the 'a polymorphic body stays accepted' kind; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted"
+      "reason": "the dtype validators run before `finish_unified_app` builds its deferral site, and they express admissibility as `matches!` disjunctions inside one boolean rather than as a match arm with a `Type::Var` branch, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
     },
     {
       "file": "app_operand_dtype.rs",
@@ -164,7 +164,7 @@
       "ordinal": 2,
       "pattern": "Type::Var(_) | Type::Error(_)",
       "disposition": "defect(#1512)",
-      "reason": "needs a suspend-without-requiring-binding mode to distinguish a never-bound operand from a genuine generic dtype parameter; measured: the repair broke nine polymorphic-body tests, all of the 'a polymorphic body stays accepted' kind; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted"
+      "reason": "the dtype validators run before `finish_unified_app` builds its deferral site, and they express admissibility as `matches!` disjunctions inside one boolean rather than as a match arm with a `Type::Var` branch, so registering the call needs three signature changes and a new registration helper rather than the arm split the rest of the class uses; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted and `sqrt(x)` on the same int32 is rejected"
     },
     {
       "file": "app_post.rs",
@@ -284,9 +284,8 @@
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 17,
-      "pattern": "(Type::Var(_) , _ , _) |(_ , Type::Var(_) , _) |(_ , _ , Type::Var(_)) |(Type::Error(_) , _ , _) |(_ , Type::Error(_) , _) |(_ , _ , Type::Error(_))",
-      "disposition": "defect(#1512)",
-      "reason": "`where` over a late-bound branch accepts mismatched branch shapes: `def f(c: tensor[3, bool], a: tensor[3, f32], b: tensor[2, f32]) -> tensor[3, f32] = { g = fn (t) -> where(c, t, b)  g(a) }` is accepted, and rejected when resolved"
+      "pattern": "(Type::Var(_) , _ , _) |(_ , Type::Var(_) , _) |(_ , _ , Type::Var(_))",
+      "disposition": "deferred"
     },
     {
       "file": "app_post.rs",
@@ -299,9 +298,8 @@
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 19,
-      "pattern": "(Type::Var(_) , _ , _) |(_ , Type::Var(_) , _) |(_ , _ , Type::Var(_)) |(Type::Error(_) , _ , _) |(_ , Type::Error(_) , _) |(_ , _ , Type::Error(_))",
-      "disposition": "defect(#1512)",
-      "reason": "`clamp` over a late-bound input accepts mismatched bound shapes: `def f(x: tensor[3, f32], lo: tensor[2, f32], hi: tensor[3, f32]) -> tensor[3, f32] = { g = fn (t) -> clamp(t, lo, hi)  g(x) }` is accepted, and rejected when resolved"
+      "pattern": "(Type::Var(_) , _ , _) |(_ , Type::Var(_) , _) |(_ , _ , Type::Var(_))",
+      "disposition": "deferred"
     },
     {
       "file": "app_post.rs",
@@ -321,9 +319,8 @@
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 22,
-      "pattern": "index_arg , Type::Var(_) | Type::Error(_)",
-      "disposition": "defect(#1512)",
-      "reason": "`index` over a late-bound index accepts a non-integer index: `def f(x: List[int32], k: f32) -> int32 = { g = fn (n) -> index(x, n)  g(k) }` is accepted, and rejected when resolved"
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
     },
     {
       "file": "app_post.rs",
@@ -343,33 +340,29 @@
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 25,
-      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_)) |(Type::Error(_) , _) |(_ , Type::Error(_))",
-      "disposition": "defect(#1512)",
-      "reason": "`concat` over a late-bound second list accepts mismatched element types: `def f(x: List[int32], y: List[f32]) -> List[int32] = { g = fn (t) -> concat(x, t)  g(y) }` is accepted, and rejected when resolved"
+      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_))",
+      "disposition": "deferred"
     },
     {
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 26,
-      "pattern": "& args [0] , Type::Var(_) | Type::Error(_)",
-      "disposition": "defect(#1512)",
-      "reason": "`split` over a late-bound sizes list accepts non-integer sizes: `def f(x: tensor[4, f32], s: List[f32]) -> List[tensor[2, f32]] = { g = fn (t) -> split(x, 0i32, t)  g(s) }` is accepted, and rejected when resolved"
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
     },
     {
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 27,
-      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_)) |(Type::Error(_) , _) |(_ , Type::Error(_))",
-      "disposition": "defect(#1512)",
-      "reason": "`split` over a late-bound tensor accepts a non-tensor input: `def f(x: List[int32], s: List[int64]) -> List[tensor[2, f32]] = { g = fn (t) -> split(t, 0i32, s)  g(x) }` is accepted, and rejected when resolved"
+      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_))",
+      "disposition": "deferred"
     },
     {
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 28,
-      "pattern": "count_arg , Type::Var(_) | Type::Error(_)",
-      "disposition": "defect(#1512)",
-      "reason": "`take`/`drop` over a late-bound count accept a non-integer count: `def f(x: List[int32], k: f32) -> List[int32] = { g = fn (n) -> take(x, n)  g(k) }` is accepted, and rejected when resolved"
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
     },
     {
       "file": "app_post.rs",
@@ -382,9 +375,8 @@
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 30,
-      "pattern": "count_arg , Type::Var(_) | Type::Error(_)",
-      "disposition": "defect(#1512)",
-      "reason": "`chunk` over a late-bound size accepts a non-integer size: `def f(x: List[int32], k: f32) -> List[List[int32]] = { g = fn (n) -> chunk(x, n)  g(k) }` is accepted, and rejected when resolved"
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
     },
     {
       "file": "app_post.rs",
@@ -418,9 +410,8 @@
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 35,
-      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_)) |(Type::Error(_) , _) |(_ , Type::Error(_))",
-      "disposition": "defect(#1512)",
-      "reason": "`zip` over a late-bound second argument accepts a non-List: `def f(x: List[int32], y: int32) -> List[(int32, int32)] = { g = fn (t) -> zip(x, t)  g(y) }` is accepted, and rejected when resolved"
+      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_))",
+      "disposition": "deferred"
     },
     {
       "file": "app_post.rs",
@@ -486,9 +477,8 @@
       "file": "app_post.rs",
       "function": "finish_unified_app",
       "ordinal": 44,
-      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_)) |(Type::Error(_) , _) |(_ , Type::Error(_))",
-      "disposition": "defect(#1512)",
-      "reason": "`dict_merge` over a late-bound second dict accepts mismatched value types: `def f(d: Dict[string, int32], e: Dict[string, f32]) -> Dict[string, int32] = { g = fn (t) -> dict_merge(d, t)  g(e) }` is accepted, and rejected when resolved"
+      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_))",
+      "disposition": "deferred"
     },
     {
       "file": "app_post.rs",
@@ -583,8 +573,8 @@
       "function": "check_permute_signature",
       "ordinal": 1,
       "pattern": "Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_)",
-      "disposition": "defect(#1512)",
-      "reason": "`permute` over a late-bound axis accepts a non-int32 axis: `def f(x: tensor[3, 2, f32], a: int64) -> tensor[3, 2, f32] = { g = fn (v) -> permute(x, v, 0i32)  g(a) }` is accepted, and rejected when resolved; the route suspends on its tensor operand only"
+      "disposition": "deferred_by_caller",
+      "witness": "a_late_bound_secondary_operand_is_validated_too"
     },
     {
       "file": "app_shape.rs",
@@ -615,8 +605,8 @@
       "function": "check_stride_signature",
       "ordinal": 1,
       "pattern": "Type::Prim(Prim::Int64) | Type::Var(_) | Type::Error(_)",
-      "disposition": "defect(#1512)",
-      "reason": "`stride` over a late-bound step accepts a non-int64 step: `def f(x: tensor[2, 4, f32], a: int32) -> tensor[2, 2, f32] = { g = fn (v) -> stride(x, v, 2i64)  g(a) }` is accepted, and rejected when resolved; the route suspends on its tensor operand only"
+      "disposition": "deferred_by_caller",
+      "witness": "a_late_bound_secondary_operand_is_validated_too"
     },
     {
       "file": "app_shape.rs",

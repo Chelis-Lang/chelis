@@ -232,6 +232,75 @@ mod authoritative_type_stamp_tests {
 }
 
 #[cfg(test)]
+mod unresolved_operand_reconcile_tests {
+    use super::*;
+    use crate::errors::CheckErrorKind;
+    use crate::infer::{ReconcileMutationCase, run_reconcile_mutation_case};
+
+    /// This module lives here, beside the finalization cases below, for the
+    /// same reason they do: `DiagnosticSink`'s constructor is private to this
+    /// file on purpose, and adding a second production constructor to hand
+    /// one to a test would be exactly the seam
+    /// `rt800_checker_session_source_contract.rs` pins shut. The case runs in
+    /// `infer`; only the sink is built here.
+    fn run(case: ReconcileMutationCase) -> (String, bool, Vec<CheckError>) {
+        let mut errors = Vec::new();
+        let (produced, bound) = {
+            let mut sink = DiagnosticSink {
+                errors: &mut errors,
+            };
+            run_reconcile_mutation_case(case, &mut sink)
+        };
+        (produced, bound, errors)
+    }
+
+    /// REGRESSION TEST for chelis#1512's disagreement branch. Reconciling a
+    /// replayed answer against the type the suspended call published must
+    /// push exactly one typed error AND hand back the PRODUCED type.
+    /// Returning the published type instead would be a silent override: the
+    /// program would disagree with itself and still check clean.
+    #[test]
+    fn a_replayed_answer_that_disagrees_is_reported_and_never_silently_overridden() {
+        let (produced, _, errors) = run(ReconcileMutationCase::Disagrees);
+        assert_eq!(
+            produced, "tensor[4, f32]",
+            "the replayed rule's own answer is what the call produces"
+        );
+        assert_eq!(
+            errors.len(),
+            1,
+            "a disagreement is one diagnostic, got {errors:?}"
+        );
+        assert!(matches!(errors[0].kind, CheckErrorKind::TypeMismatch));
+        assert!(
+            errors[0].message.contains(
+                "`permute` result does not match the type this call produces once its operand is known"
+            ),
+            "the diagnostic must say which call disagreed, got {:?}",
+            errors[0].message
+        );
+    }
+
+    /// NEGATIVE TWIN. Agreement is silent, and the published variable is
+    /// bound to the produced type rather than left free: a suspended call
+    /// publishes a fresh variable, so leaving it unbound would strand every
+    /// consumer of the call.
+    #[test]
+    fn a_replayed_answer_that_agrees_reports_nothing_and_binds_the_published_variable() {
+        let (produced, bound, errors) = run(ReconcileMutationCase::Agrees);
+        assert_eq!(produced, "tensor[3, f32]");
+        assert!(
+            bound,
+            "the published variable must be bound to the rule's answer"
+        );
+        assert!(
+            errors.is_empty(),
+            "agreement must be silent, got {errors:?}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod annotated_totality_finalization_tests {
     use super::*;
     use crate::infer::{FinalizationMutationCase, run_finalization_mutation_case};
@@ -289,29 +358,6 @@ mod result_boundary_tests {
         assert_eq!(result.typed_nodes, 0);
         assert_eq!(result.total_nodes, 0);
     }
-}
-
-/// Run `body` against a fresh sink and hand back its value together with the
-/// diagnostics it pushed.
-///
-/// The sink's storage stays private: `body` never sees the vector, and the
-/// vector is only returned once `body` has finished, so the "no early
-/// extraction or replacement" property above is unchanged. This exists so an
-/// in-crate unit test can drive one checker function directly instead of
-/// reaching it through a whole program, which is the only way to observe what
-/// a function RETURNS on a branch that also reports.
-#[cfg(test)]
-pub(crate) fn with_test_sink<R>(
-    body: impl FnOnce(&mut DiagnosticSink<'_>) -> R,
-) -> (R, Vec<CheckError>) {
-    let mut errors = Vec::new();
-    let value = {
-        let mut sink = DiagnosticSink {
-            errors: &mut errors,
-        };
-        body(&mut sink)
-    };
-    (value, errors)
 }
 
 fn run_result<T>(
