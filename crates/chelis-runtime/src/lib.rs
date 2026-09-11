@@ -2548,7 +2548,11 @@ fn metadata_plan_input_rank(rank: chelis_scalar) -> usize {
 }
 
 fn metadata_plan_array_preflight(values: *const chelis_scalar, rank: usize) {
-    if rank != 0 && (values.is_null() || values.addr() % std::mem::align_of::<chelis_scalar>() != 0)
+    if rank != 0
+        && (values.is_null()
+            || !values
+                .addr()
+                .is_multiple_of(std::mem::align_of::<chelis_scalar>()))
     {
         affine_result::<()>(
             Err(MetadataError::Domain(
@@ -2562,7 +2566,11 @@ fn metadata_plan_array_preflight(values: *const chelis_scalar, rank: usize) {
 unsafe fn metadata_plan_owner<'a>(plan: *const chelis_metadata_plan) -> &'a chelis_metadata_plan {
     // Physical allocation and live-owner provenance remain the C caller's
     // obligation. Null/alignment checks precede creating any Rust reference.
-    if plan.is_null() || plan.addr() % std::mem::align_of::<chelis_metadata_plan>() != 0 {
+    if plan.is_null()
+        || !plan
+            .addr()
+            .is_multiple_of(std::mem::align_of::<chelis_metadata_plan>())
+    {
         affine_result::<()>(
             Err(MetadataError::Domain(
                 "null or misaligned metadata plan".into(),
