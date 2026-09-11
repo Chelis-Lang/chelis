@@ -15,10 +15,10 @@
 //!     Then assert the eval lane and the C lane agree: every line
 //!     byte-equal, tensor lines included.
 //!
-//! The explicitly evaluator-only dropout examples have bounded
-//! per-file exceptions: clean check, exact executable eval output, and the
-//! current typed C rejection are all tested. It makes no compiled parity
-//! claim; the ordinary three-lane driver remains unchanged for other files.
+//! The runtime-shaped dropout example retains a bounded per-file exception:
+//! clean check, exact executable eval output, and the current typed C rejection
+//! are all tested. The fixed-stream example runs the ordinary three-lane
+//! driver and also pins its exact values, including the next draw after AD.
 //!
 //! There is deliberately NO tolerant fallback for tensor lines. The old
 //! mismatch path (re-parse both lines as `Vec<f64>`, compare under 1e-6)
@@ -442,11 +442,13 @@ fn parity_dict_foundation() {
 }
 
 #[test]
-fn parity_dropout_fixed_stream_eval_and_c_rejection() {
-    check_dropout_eval_and_c_rejection(
-        "dropout_fixed_stream.ch",
+fn parity_dropout_fixed_stream() {
+    let path = examples_root().join("dropout_fixed_stream.ch");
+    assert_eq!(
+        run_eval(&path),
         b"main.0 = tensor(shape=[4], data=[0.0, 2.0, 0.0, 0.0])\nmain.1 = tensor(shape=[4], data=[2.0, 0.0, 0.0, 0.0])\n",
     );
+    drive_parity(&path, true);
 }
 
 #[test]

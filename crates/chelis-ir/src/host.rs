@@ -473,20 +473,22 @@ impl HostExecutionPlan {
         Ok(projected)
     }
 
-    pub fn has_unplanned_random_helper(&self) -> bool {
-        fn random(helper: &HostTensorHelper) -> bool {
-            helper.dag.nodes().iter().any(|node| {
-                matches!(
-                    node.op,
-                    crate::dag::RiscOp::Dropout { .. } | crate::dag::RiscOp::UniformLike { .. }
-                )
-            })
+    /// Dropout requires a source-owned execution association. Ordinary
+    /// UniformLike helpers retain their existing C host admission and stream
+    /// advancement; their presence must not invalidate a planned sibling.
+    pub fn has_unplanned_dropout_helper(&self) -> bool {
+        fn dropout(helper: &HostTensorHelper) -> bool {
+            helper
+                .dag
+                .nodes()
+                .iter()
+                .any(|node| matches!(node.op, crate::dag::RiscOp::Dropout { .. }))
         }
         self.program
             .global_tensor_helpers
             .iter()
             .zip(&self.global)
-            .any(|(helper, execution)| random(helper) && execution.is_none())
+            .any(|(helper, execution)| dropout(helper) && execution.is_none())
             || self
                 .program
                 .functions
@@ -497,7 +499,7 @@ impl HostExecutionPlan {
                         .tensor_helpers
                         .iter()
                         .zip(executions)
-                        .any(|(helper, execution)| random(helper) && execution.is_none())
+                        .any(|(helper, execution)| dropout(helper) && execution.is_none())
                 })
     }
 
