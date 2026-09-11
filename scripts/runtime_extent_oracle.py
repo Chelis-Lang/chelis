@@ -363,7 +363,7 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "class.load_op_output.eval",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.load_and_op_output_members_share_one_guarded_class_on_eval",
         ),
         _row(
@@ -381,13 +381,13 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "class.op_output_op_output.c",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.two_op_output_members_guard_against_the_canonical_member_on_c",
         ),
         _row(
             "class.op_output_op_output.eval",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.two_op_output_members_guard_against_the_canonical_member_on_eval",
         ),
         _row(
@@ -405,13 +405,13 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "class.splice_f_of_n_n.c",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.splicing_f_of_n_n_yields_one_member_per_output_axis_on_c",
         ),
         _row(
             "class.splice_f_of_n_n.eval",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.splicing_f_of_n_n_yields_one_member_per_output_axis_on_eval",
         ),
         _row(
@@ -581,13 +581,13 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "expand.shape_derived.declared_result_survives.c",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.a_shape_derived_bound_keeps_its_declared_result_dimension_on_c",
         ),
         _row(
             "expand.shape_derived.declared_result_survives.eval",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.a_shape_derived_bound_keeps_its_declared_result_dimension_on_eval",
         ),
         # B2h: the eval effect rows stay at baseline. `chelis eval` emits a
