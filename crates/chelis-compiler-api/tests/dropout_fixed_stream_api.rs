@@ -111,6 +111,102 @@ fn fixed_dropout_composes_with_host_produced_checked_reshape_targets() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+#[test]
+fn host_only_random_source_does_not_cache_the_first_callers_seed() {
+    use chelis_compiler_api::compiler::{eval_in_context, prepare_eval_in_context};
+    use chelis_compiler_api::{COMPILER_VERSION, compile_reef_context};
+
+    fn ones(count: usize) -> String {
+        format!(
+            "to_tensor([{}])",
+            std::iter::repeat_n("1.0f32", count)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+
+    fn check(result: EvalResult, first: u64, second: u64, lane: &str) {
+        for (name, expected) in [
+            ("main.0.0", vec![1.0; 4]),
+            ("main.0.1", mask_with_seed(first, 1)[..4].to_vec()),
+            ("main.1.0", vec![1.0; 4]),
+            ("main.1.1", mask_with_seed(second, 1)[..4].to_vec()),
+        ] {
+            assert_eq!(
+                tensor(&result, name),
+                expected,
+                "{lane} seeds={first},{second} root={name}"
+            );
+        }
+    }
+
+    let definition = "def draw(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = reshape(x, [numel(dropout(source, 0.0f32)), 2i64])";
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::create_dir(directory.path().join("src")).unwrap();
+    std::fs::write(
+        directory.path().join("reef.toml"),
+        format!(
+            "[package]\nname = \"round_four_seed\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Probe\"\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        directory.path().join("src/draw.ch"),
+        format!("module Probe.Draw\nexport (draw)\n{definition}\n"),
+    )
+    .unwrap();
+    let context = compile_reef_context(directory.path(), directory.path()).unwrap();
+    let bytes = context.encode().unwrap();
+    let decoded = chelis_compiler_api::context::CompiledContext::decode(&bytes).unwrap();
+
+    for (first, second) in [(42, 42), (42, 7), (7, 42)] {
+        let main = format!(
+            "def main() = {{\n source = {}\n x = {}\n a = with seed({first}i64) {{\n shaped = draw(copy(source), copy(x))\n (shaped, dropout(copy(x), 0.5f32))\n }}\n b = with seed({second}i64) {{\n shaped = draw(source, copy(x))\n (shaped, dropout(x, 0.5f32))\n }}\n (a, b)\n}}",
+            ones(2),
+            ones(4)
+        );
+        let source = format!("{definition}\n{main}");
+        check(
+            eval_selected(request(&source), &["main".into()]).unwrap(),
+            first,
+            second,
+            "ordinary",
+        );
+        let prepared = prepare_eval(request(&source)).unwrap();
+        for repetition in 0..2 {
+            check(
+                prepared.eval_root(BTreeMap::new(), "main").unwrap(),
+                first,
+                second,
+                &format!("prepared-{repetition}"),
+            );
+        }
+
+        let client = format!("module Probe.Eval\nimport Probe.Draw (draw)\n{main}");
+        for (label, checked_context) in [("context", &context), ("decoded", &decoded)] {
+            check(
+                eval_in_context(checked_context, &client).unwrap(),
+                first,
+                second,
+                label,
+            );
+            let prepared = prepare_eval_in_context(checked_context, &client).unwrap();
+            for repetition in 0..2 {
+                check(
+                    prepared.eval_root(BTreeMap::new(), "main").unwrap(),
+                    first,
+                    second,
+                    &format!("{label}-prepared-{repetition}"),
+                );
+            }
+            assert_eq!(checked_context.encode().unwrap(), bytes);
+        }
+    }
+    assert_eq!(context.encode().unwrap(), bytes);
+    assert_eq!(decoded.encode().unwrap(), bytes);
+}
+
 fn bindings() -> BTreeMap<String, TensorValue> {
     BTreeMap::from([(
         "x".into(),
