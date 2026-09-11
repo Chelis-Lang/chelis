@@ -545,7 +545,12 @@ fn no_environment_variable_disables_the_named_claim_guard() {
             .expect("chelis")
             .env("CHELIS_STYLE_GATE_DISABLE", "1")
             .env(name, "1")
-            .args(["eval", "--allow-style-violations", "--file", path.to_str().unwrap()])
+            .args([
+                "eval",
+                "--allow-style-violations",
+                "--file",
+                path.to_str().unwrap(),
+            ])
             .output()
             .expect("eval");
         let text = format!(
