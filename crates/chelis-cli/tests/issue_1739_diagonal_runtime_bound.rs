@@ -531,12 +531,12 @@ fn no_shipped_example_gains_a_return_boundary_guard() {
     // manifest to read this from, so the number is pinned here: change it in
     // the same commit that adds or removes an executable example, and read the
     // census result before you do.
-    // chelis#1787: the pin read 31 against a corpus of 32 before this line
-    // moved, so the census was already failing on `main`; adding
-    // `record_input_broadcast.ch` makes it 33. The pin's own instruction is to
-    // change it in the commit that adds an example, which is this one. The
-    // cause chelis#1787 tracks -- nothing derives this number -- is unchanged.
-    const EXECUTABLE_PHASE_0_EXAMPLES: usize = 33;
+    // chelis#1787: nothing derives this number, so it drifts. It read 31
+    // against a corpus of 35 on `main` at the rebase, having missed three
+    // examples added since; `record_input_broadcast.ch` makes 36. The pin's
+    // own instruction is to change it in the commit that adds an example, so
+    // this one sets the true count. The cause chelis#1787 tracks is unchanged.
+    const EXECUTABLE_PHASE_0_EXAMPLES: usize = 36;
     assert_eq!(
         examples.len(),
         EXECUTABLE_PHASE_0_EXAMPLES,

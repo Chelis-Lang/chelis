@@ -4437,18 +4437,16 @@ fn hoist_record_projections(
     expr: &Expr,
     program: &CheckedProgram,
     scope: &UnordMap<String, HostTypeTerm>,
-    shadowed: &mut UnordSet<String>,
+    bound: &UnordSet<String>,
     hoists: &mut Vec<HoistedProjection>,
 ) -> Expr {
     match expr {
         Expr::Node(node, span) => {
             if node.tag() == DeepTag::Access
-                && let Some(hoist) = record_projection_hoist(expr, program, scope, shadowed)
+                && let Some(hoist) = record_projection_hoist(expr, program, scope, bound)
             {
                 return var_expr_node(&hoisted_local_name(hoists, hoist), *span);
             }
-            let mut inner = shadowed.clone();
-            collect_scope_binders(node.tag(), node.children_slice(), &mut inner);
             let children = node
                 .children_slice()
                 .iter()
@@ -4457,7 +4455,7 @@ fn hoist_record_projections(
                     if is_bound_bare_projection(node.tag(), index, child) {
                         child.clone()
                     } else {
-                        hoist_record_projections(child, program, scope, &mut inner, hoists)
+                        hoist_record_projections(child, program, scope, bound, hoists)
                     }
                 })
                 .collect();
@@ -4471,16 +4469,10 @@ fn hoist_record_projections(
         }
         Expr::List(list, span) => {
             if tag(list) == Some(DeepTag::Access)
-                && let Some(hoist) = record_projection_hoist(expr, program, scope, shadowed)
+                && let Some(hoist) = record_projection_hoist(expr, program, scope, bound)
             {
                 return var_expr_node(&hoisted_local_name(hoists, hoist), *span);
             }
-            let mut inner = shadowed.clone();
-            collect_scope_binders(
-                tag(list).unwrap_or(DeepTag::Var),
-                children(list),
-                &mut inner,
-            );
             let elements = list
                 .elements
                 .iter()
@@ -4494,7 +4486,7 @@ fn hoist_record_projections(
                     ) {
                         child.clone()
                     } else {
-                        hoist_record_projections(child, program, scope, &mut inner, hoists)
+                        hoist_record_projections(child, program, scope, bound, hoists)
                     }
                 })
                 .collect();
@@ -4503,7 +4495,7 @@ fn hoist_record_projections(
         Expr::BareList(items, span) => Expr::BareList(
             items
                 .iter()
-                .map(|item| hoist_record_projections(item, program, scope, shadowed, hoists))
+                .map(|item| hoist_record_projections(item, program, scope, bound, hoists))
                 .collect(),
             *span,
         ),
@@ -4511,7 +4503,7 @@ fn hoist_record_projections(
             chelis_deep::ast::MetaExpr {
                 metadata: meta.metadata.clone(),
                 expr: Box::new(hoist_record_projections(
-                    &meta.expr, program, scope, shadowed, hoists,
+                    &meta.expr, program, scope, bound, hoists,
                 )),
             },
             *span,
@@ -4530,12 +4522,23 @@ fn lower_host_body_with_record_locals(
     program: &CheckedProgram,
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+    let mut bound = UnordSet::new();
+    if names_bound_in(&signature.body_expr, &mut bound).is_err() {
+        // Fail closed: hoist nothing, and the definition lowers exactly as it
+        // did before this mechanism existed.
+        return lower_host_expr(
+            &signature.body_expr,
+            program,
+            &signature.scope,
+            tensor_helpers,
+        );
+    }
     let mut hoists: Vec<HoistedProjection> = Vec::new();
     let rewritten = hoist_record_projections(
         &signature.body_expr,
         program,
         &signature.scope,
-        &mut UnordSet::new(),
+        &bound,
         &mut hoists,
     );
     if hoists.is_empty() {
@@ -4602,37 +4605,104 @@ fn lower_host_body_with_record_locals(
     }))
 }
 
-/// Add the names a node introduces into scope for its own children, so a
-/// projection whose base a nested binder shadows is left where it is.
+/// Every name bound anywhere in `expr`, read from the closed vocabulary's own
+/// `Binder` child role rather than from a hand-written list of tag shapes.
 ///
-/// Only the binder SLOTS are read. Harvesting names from every child would
-/// treat the `(var {} inp)` inside `inp.q` as a binder and suppress every
-/// hoist.
-fn collect_scope_binders(node_tag: DeepTag, kids: &[Expr], out: &mut UnordSet<String>) {
-    match node_tag {
-        DeepTag::Fn | DeepTag::Arm => {
-            if let Some(binders) = kids.first() {
-                collect_binder_names(binders, out);
-            }
-        }
-        DeepTag::Let => {
-            // `(let {} (bind {} n1 v1 ..) body)`: the binder names live in
-            // the `bind` child and scope over the body.
-            if let Some(bind) = kids.first()
-                && let Some((DeepTag::Bind, _, bind_kids)) = stamped_parts(bind)
-            {
-                for name in bind_kids.iter().step_by(2) {
-                    collect_binder_names(name, out);
+/// This is the question the hoist actually needs: it must not substitute a
+/// local for a projection whose base some inner construct rebinds. Asking
+/// "is this name bound ANYWHERE under the body" instead of reconstructing
+/// lexical scope is deliberately coarse -- a rebinding in an unrelated branch
+/// suppresses a hoist that would have been safe -- and coarse in the only
+/// direction that is safe: the projection then stays where it is, which is
+/// the behaviour this definition had before the hoist existed.
+///
+/// Two defects came out of the hand-written version, and both were the same
+/// shape: a binder spelling the reader did not know. `Deep` renders a TYPED
+/// parameter as `(inp {type: ..})`, an `UnknownForm` whose head is the
+/// parameter name, which no tag match recognized, so a lambda shadowing the
+/// record base had its inner projection rewritten to the outer record's
+/// local -- a wrong answer on C alone, silently and with exit zero. Reading
+/// `child_stamp_role` makes the vocabulary the authority: `Params` children,
+/// `Bind`'s even children and `PatVar`'s child are binder positions because
+/// `spec/03-deep-syntax.md`'s role table says so.
+///
+/// FAILS CLOSED. A binder position this reader cannot decode returns `Err`,
+/// naming the construct, and the caller then hoists nothing at all. A
+/// spelling we cannot read is a spelling we cannot prove safe, and refusing
+/// the optimization is an honest exit where a silent rewrite is not.
+fn names_bound_in(expr: &Expr, out: &mut UnordSet<String>) -> Result<(), String> {
+    match expr {
+        Expr::Atom(_, _) | Expr::Map(_, _) => Ok(()),
+        Expr::MetaExpr(meta, _) => names_bound_in(&meta.expr, out),
+        Expr::BareList(items, _) => items.iter().try_for_each(|item| names_bound_in(item, out)),
+        Expr::UnknownForm(data) => data
+            .children
+            .iter()
+            .try_for_each(|child| names_bound_in(child, out)),
+        Expr::Node(_, _) | Expr::List(_, _) => {
+            let Some((node_tag, _, kids)) = stamped_parts(expr) else {
+                return Ok(());
+            };
+            for (index, child) in kids.iter().enumerate() {
+                if chelis_deep::role::child_stamp_role(node_tag, index, kids.len())
+                    == chelis_deep::role::ChildStampRole::Binder
+                {
+                    collect_binder_position_names(node_tag, index, child, out)?;
                 }
+                names_bound_in(child, out)?;
             }
+            Ok(())
         }
-        DeepTag::Bind => {
-            for name in kids.iter().step_by(2) {
-                collect_binder_names(name, out);
-            }
-        }
-        _ => {}
     }
+}
+
+/// Decode the name (or names, for a pattern) a binder-position child carries.
+fn collect_binder_position_names(
+    node_tag: DeepTag,
+    index: usize,
+    child: &Expr,
+    sink: &mut UnordSet<String>,
+) -> Result<(), String> {
+    // Decode into a fresh set, never by watching `sink` grow: two pipe stages
+    // share the synthesized parameter name, so the second one adds nothing to
+    // `out` and a growth test would call a perfectly readable binder
+    // unreadable.
+    let mut decoded: UnordSet<String> = UnordSet::new();
+    let out = &mut decoded;
+    match child {
+        // The bare spelling, and the typed spelling: `(inp {type: ..})` is an
+        // `UnknownForm` whose head IS the parameter name.
+        Expr::Atom(Atom::Name(name), _) => {
+            out.insert(name.clone());
+        }
+        Expr::UnknownForm(data) => {
+            out.insert(data.head.clone());
+        }
+        Expr::MetaExpr(meta, _) => {
+            let mut nested = UnordSet::new();
+            collect_binder_position_names(node_tag, index, &meta.expr, &mut nested)?;
+            decoded.extend(nested.into_sorted());
+            let result = decoded.clone();
+            sink.extend(result.into_sorted());
+            return Ok(());
+        }
+        // A pattern binds by the names inside it.
+        Expr::Node(_, _) | Expr::List(_, _) | Expr::BareList(_, _) => {
+            collect_binder_names(child, out);
+        }
+        // A binder position holding a literal or a metadata map binds nothing;
+        // an empty `params` reaches here as no child at all, not as this arm.
+        Expr::Atom(_, _) | Expr::Map(_, _) => return Ok(()),
+    }
+    if decoded.is_empty() {
+        return Err(format!(
+            "a binder position of `{}` at index {index} carries a spelling this \
+             walk cannot read a name from",
+            node_tag.as_str()
+        ));
+    }
+    sink.extend(decoded.into_sorted());
+    Ok(())
 }
 
 /// A `(var {} name)` reference, the node a hoisted projection leaves behind.
@@ -4670,14 +4740,15 @@ fn record_projection_hoist(
     expr: &Expr,
     program: &CheckedProgram,
     scope: &UnordMap<String, HostTypeTerm>,
-    shadowed: &UnordSet<String>,
+    bound: &UnordSet<String>,
 ) -> Option<HoistedProjection> {
     let HostTypeTerm::Tensor(ty) = expr_host_type(expr, program, scope) else {
         return None;
     };
     let path = record_projection_path(expr)?;
     let base = path.first()?;
-    if shadowed.contains(base) {
+    // Rebound anywhere under this body: leave the projection where it is.
+    if bound.contains(base) {
         return None;
     }
     // The base must be a host value this scope carries and NOT itself a
@@ -19390,6 +19461,153 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         assert!(
             message.contains("`Adep__Wrapped`") && message.contains("`Blib__Wrapped`"),
             "the rejection must name both candidates; got: {message}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod record_hoist_binder_vocabulary_tests {
+    use super::*;
+    use chelis_deep::ast::{Atom, Expr, UnknownFormData};
+    use chelis_deep::role::{ChildStampRole, child_stamp_role};
+    use chelis_deep::tag::DeepTag;
+
+    fn name(text: &str) -> Expr {
+        Expr::Atom(
+            Atom::Name(text.to_string()),
+            chelis_deep::span::Span::new(0, 0),
+        )
+    }
+
+    /// A TYPED binder: Deep renders `fn (inp: Inputs)` as an `UnknownForm`
+    /// whose head is the parameter name. This is the spelling that made the
+    /// hand-written reader miss a shadowing parameter (chelis#1266 round 1,
+    /// P1-3).
+    fn typed_name(text: &str) -> Expr {
+        Expr::UnknownForm(Box::new(UnknownFormData {
+            head: text.to_string(),
+            meta: chelis_deep::Metadata::default(),
+            children: Vec::new(),
+            span: chelis_deep::span::Span::new(0, 0),
+        }))
+    }
+
+    fn node(tag: DeepTag, children: Vec<Expr>) -> Expr {
+        Expr::Node(
+            Box::new(chelis_deep::node::Node::new(
+                tag,
+                chelis_deep::Metadata::default(),
+                children,
+            )),
+            chelis_deep::span::Span::new(0, 0),
+        )
+    }
+
+    /// Which tags declare a binder child position, taken from the closed
+    /// vocabulary's own role table rather than from a list anyone typed here.
+    /// A tag that gains a binder position later joins this set on its own and
+    /// the assertions below then apply to it.
+    fn tags_with_binder_positions() -> Vec<(DeepTag, usize)> {
+        let mut found = Vec::new();
+        for tag in DeepTag::ALL {
+            // Two children is enough to separate `Bind`'s alternating roles
+            // from `Params`'s uniform one.
+            for arity in [1usize, 2] {
+                for index in 0..arity {
+                    if child_stamp_role(tag, index, arity) == ChildStampRole::Binder
+                        && !found.iter().any(|(seen, _)| *seen == tag)
+                    {
+                        found.push((tag, index));
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    /// The vocabulary oracle for chelis#1266's hoist. Every binder position
+    /// the closed vocabulary declares must yield a name, in BOTH the bare and
+    /// the typed spelling.
+    ///
+    /// EVIDENTIARY STATUS: regression test. The typed spelling is measured RED
+    /// against the hand-written reader this replaced: `collect_binder_names`
+    /// had no `UnknownForm` arm, so a typed `(params {} (inp {type: ..}))`
+    /// contributed no name and a lambda shadowing a record base had its inner
+    /// projection rewritten to the outer record's local.
+    #[test]
+    fn every_binder_position_in_the_closed_vocabulary_yields_a_name() {
+        let binder_tags = tags_with_binder_positions();
+        // Measured on this vocabulary: module, def, defsig, deftype,
+        // typealias, variant, field, defdim, fn, pat-var, pat-as, params,
+        // bind. The scan is the authority; these three are spot checks that
+        // it did not silently come back near-empty.
+        for required in [DeepTag::Params, DeepTag::Bind, DeepTag::PatVar] {
+            assert!(
+                binder_tags.iter().any(|(tag, _)| *tag == required),
+                "the vocabulary scan must find `{}`: {binder_tags:?}",
+                required.as_str()
+            );
+        }
+        for (tag, index) in binder_tags {
+            for (spelling, binder) in [
+                ("bare", name("shadowed")),
+                ("typed", typed_name("shadowed")),
+            ] {
+                let mut children = vec![name("filler"); index + 1];
+                children[index] = binder;
+                let Ok(built) =
+                    std::panic::catch_unwind(|| node(tag, children.clone())).map_err(|_| ())
+                else {
+                    // A tag whose arity contract refuses this shape is not a
+                    // counterexample: the reader is only claimed for nodes the
+                    // vocabulary admits.
+                    continue;
+                };
+                let mut out = UnordSet::new();
+                let read = names_bound_in(&built, &mut out);
+                assert!(
+                    read.is_ok(),
+                    "`{}` refused its own {spelling} binder position {index}: {read:?}",
+                    tag.as_str()
+                );
+                assert!(
+                    out.contains("shadowed"),
+                    "`{}` binder position {index} ({spelling}) contributed no name",
+                    tag.as_str()
+                );
+            }
+        }
+    }
+
+    /// The fail-closed half: a binder position carrying a spelling the reader
+    /// cannot decode refuses, and the caller then hoists nothing rather than
+    /// treating the name as unbound.
+    ///
+    /// EVIDENTIARY STATUS: disposition lock on the refusal path. Without it a
+    /// future binder spelling would silently rejoin the class this replaced.
+    #[test]
+    fn an_undecodable_binder_position_refuses_instead_of_reading_no_name() {
+        let opaque = Expr::Map(
+            chelis_deep::Metadata::default(),
+            chelis_deep::span::Span::new(0, 0),
+        );
+        let params = node(DeepTag::Params, vec![opaque]);
+        let mut out = UnordSet::new();
+        // A metadata map at a binder position binds nothing and says so; the
+        // reader must not silently return an empty set for a NAME-shaped slot.
+        assert!(names_bound_in(&params, &mut out).is_ok());
+        assert!(out.is_empty());
+
+        let unreadable = node(DeepTag::Params, vec![node(DeepTag::TUnit, Vec::new())]);
+        let mut out = UnordSet::new();
+        let read = names_bound_in(&unreadable, &mut out);
+        assert!(
+            read.is_err(),
+            "a binder position holding a node with no name must refuse, got {out:?}"
+        );
+        assert!(
+            read.unwrap_err().contains("params"),
+            "the refusal names the construct"
         );
     }
 }

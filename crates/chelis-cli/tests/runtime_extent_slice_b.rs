@@ -4862,3 +4862,70 @@ fn the_local_alias_spelling_emits_the_same_c_it_always_did() {
         "it still reads the field on the host lane: {emitted}"
     );
 }
+
+/// Round 1, P1-3. A lambda whose TYPED parameter shadows the record base.
+/// Deep renders a typed parameter as an `UnknownForm` whose head is the name,
+/// which the hand-written shadow reader did not recognize, so the inner
+/// projection was rewritten to the OUTER record's local.
+const TYPED_LAMBDA_SHADOWS_THE_RECORD_BASE: &str = "module Repro.TypedShadow\n\
+     type Inputs = | Inputs { q: tensor[2, f32] }\n\
+     def g(t: tensor[2, f32]) -> tensor[2, f32] = add(t, to_tensor([100.0f32, 100.0f32]))\n\
+     sig f: Inputs -> tensor[2, f32]\n\
+     def f(inp: Inputs) = add(inp.q, \
+     (fn (inp: Inputs) -> g(inp.q))(Inputs { q: to_tensor([7.0f32, 8.0f32]) }))\n\
+     out = f(Inputs { q: to_tensor([1.0f32, 2.0f32]) })\n";
+
+/// The same shadow inside a `let` value, which the round-1 slot-wide exemption
+/// had masked and the narrowed exemption exposed.
+const TYPED_LAMBDA_SHADOW_IN_A_LET_VALUE: &str = "module Repro.TypedShadowLet\n\
+     type Inputs = | Inputs { q: tensor[2, f32] }\n\
+     def g(t: tensor[2, f32]) -> tensor[2, f32] = add(t, to_tensor([100.0f32, 100.0f32]))\n\
+     sig f: Inputs -> tensor[2, f32]\n\
+     def f(inp: Inputs) = \
+     { y = (fn (inp: Inputs) -> g(inp.q))(Inputs { q: to_tensor([7.0f32, 8.0f32]) })\n\
+     add(inp.q, y) }\n\
+     out = f(Inputs { q: to_tensor([1.0f32, 2.0f32]) })\n";
+
+/// The UNTYPED twin. Its binder is a bare name, the spelling the old reader
+/// did handle, so it was correct before and must stay correct.
+const UNTYPED_LAMBDA_SHADOWS_THE_RECORD_BASE: &str = "module Repro.UntypedShadow\n\
+     type Inputs = | Inputs { q: tensor[2, f32] }\n\
+     def g(t: tensor[2, f32]) -> tensor[2, f32] = add(t, to_tensor([100.0f32, 100.0f32]))\n\
+     sig f: Inputs -> tensor[2, f32]\n\
+     def f(inp: Inputs) = add(inp.q, \
+     (fn (inp) -> g(inp.q))(Inputs { q: to_tensor([7.0f32, 8.0f32]) }))\n\
+     out = f(Inputs { q: to_tensor([1.0f32, 2.0f32]) })\n";
+
+/// Round 1, P1-3. A rebinding of the record base suppresses the hoist, in
+/// every binder spelling.
+///
+/// The hoist no longer reconstructs lexical scope from tag shapes. It asks one
+/// question -- is this name bound anywhere under the body -- and answers it
+/// from the closed vocabulary's own `Binder` child role, failing closed on a
+/// spelling it cannot decode. `crates/chelis-ir/src/host.rs`'s
+/// `every_binder_position_in_the_closed_vocabulary_yields_a_name` is the
+/// oracle over that vocabulary; these are the surface programs.
+///
+/// EVIDENTIARY STATUS: regression test for the two typed rows, disposition
+/// lock for the untyped one. Measured at `eccdcb7e2`: the typed lambda gave
+/// eval `[108.0, 110.0]` against compiled C `[102.0, 104.0]`, exit 0 and no
+/// diagnostic, in both the body and the let-value position. The untyped twin
+/// was correct there and on `33cc78e84`.
+#[test]
+fn a_binder_that_shadows_the_record_base_suppresses_the_hoist() {
+    assert_both_lanes_render(
+        "typed_shadow",
+        TYPED_LAMBDA_SHADOWS_THE_RECORD_BASE,
+        "shape=[2], data=[108.0, 110.0]",
+    );
+    assert_both_lanes_render(
+        "typed_shadow_let",
+        TYPED_LAMBDA_SHADOW_IN_A_LET_VALUE,
+        "shape=[2], data=[108.0, 110.0]",
+    );
+    assert_both_lanes_render(
+        "untyped_shadow",
+        UNTYPED_LAMBDA_SHADOWS_THE_RECORD_BASE,
+        "shape=[2], data=[108.0, 110.0]",
+    );
+}

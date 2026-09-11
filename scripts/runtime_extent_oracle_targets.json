@@ -313,6 +313,7 @@
         "mode": "all"
       },
       "expected": [
+        "a_binder_that_shadows_the_record_base_suppresses_the_hoist",
         "a_class_with_no_movement_bound_consumer_still_guards_on_c",
         "a_class_with_no_movement_bound_consumer_still_guards_on_eval",
         "a_compile_time_record_projection_keeps_its_dag_route",
