@@ -8217,3 +8217,73 @@ int main(void) {
         "the abort must be the typed reshape domain trap: {text}"
     );
 }
+
+/// chelis#1788: two scopes of one binder, lowered into ONE emitted function,
+/// share one declaration.
+///
+/// chelis#1536 scoped a claim's identity so no entry guard pairs axes from
+/// different scopes, and chelis#665 moved declarations onto axis sources. The
+/// declarations are still keyed by NAME across the whole graph, so when both
+/// scopes land in one emitted function the second reads the first's
+/// declaration and no guard compares them. Reaching this needs the codegen
+/// API: `chelis build` gives each root its own function, where `seq` is then
+/// declared per function from the right input.
+///
+/// EVIDENTIARY STATUS: **behaviour lock, and a pass here is NOT a correctness
+/// claim.** What it asserts is exactly what the C lane does today, so that a
+/// later change to declaration scoping has to come past it deliberately
+/// rather than by accident. The correct behaviour is two declarations, which
+/// needs the two scopes to carry distinct names in the emitted text: that is
+/// the per-scope rename chelis#1277's claim transport owns, and doing it here
+/// would emit two `int64_t seq` into one function. The failure this locks is
+/// loud rather than silent, a run-time trap in the runtime's elementwise index
+/// step, which is why chelis#1788 is residual rather than a merge blocker.
+#[test]
+fn issue_1788_two_scopes_in_one_function_share_one_declaration() {
+    use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+    let ty = |dims: Vec<DimInfo>| TensorType {
+        dims,
+        precision: Prim::F32,
+    };
+    let named = |name: &str| DimInfo::Named(name.into(), None);
+
+    let mut dag = Dag::new();
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty(vec![named("seq")]),
+        None,
+    );
+    let y = dag.add_node(
+        RiscOp::Load { name: "y".into() },
+        vec![],
+        ty(vec![named("batch"), named("seq")]),
+        None,
+    );
+    let from_x = dag.add_node(RiscOp::Neg, vec![x], ty(vec![named("seq")]), None);
+    let from_y = dag.add_node(
+        RiscOp::Neg,
+        vec![y],
+        ty(vec![named("batch"), named("seq")]),
+        None,
+    );
+    dag.add_root(from_x);
+    dag.add_root(from_y);
+
+    let emitted = codegen(&dag, "two_scopes")
+        .expect("a merged two-scope kernel still emits")
+        .c_source;
+    assert_eq!(
+        emitted.matches("int64_t seq = ").count(),
+        1,
+        "today the two scopes share one declaration; chelis#1788: {emitted}"
+    );
+    assert!(
+        emitted.contains("int64_t seq = chelis_tensor_shape(inputs[0], 0);"),
+        "the one declaration is taken from the first input slot: {emitted}"
+    );
+    assert!(
+        !emitted.contains("numeric trap: domain in load at int64"),
+        "and no entry guard compares the two scopes' axes, which is the defect: {emitted}"
+    );
+}

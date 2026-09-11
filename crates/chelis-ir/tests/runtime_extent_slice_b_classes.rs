@@ -806,6 +806,7 @@ fn classes_survive_bind_symbolic_dims_unchanged() {
     let bound = chelis_ir::dag::bind_symbolic_dims(
         &dag,
         &chelis_unord::UnordMap::from([("n".to_string(), 4usize)]),
+        &chelis_unord::UnordSet::new(),
     )
     .expect("bind n");
     let after = derive_runtime_dim_classes(&bound);
@@ -1036,6 +1037,7 @@ fn every_rebuild_pass_preserves_the_derived_classes() {
     let bound = chelis_ir::dag::bind_symbolic_dims(
         &dag,
         &chelis_unord::UnordMap::from([("nn".to_string(), 4usize)]),
+        &chelis_unord::UnordSet::new(),
     )
     .expect("bind nn");
     assert_rebuild_preserves_classes("bind_symbolic_dims", &dag, &bound, "y", "nn", 0, &[]);

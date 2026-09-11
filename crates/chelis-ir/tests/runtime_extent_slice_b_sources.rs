@@ -1252,7 +1252,11 @@ fn binding_a_to_end_bound_rejects_a_start_that_is_not_literal_zero() {
     let mut bindings = chelis_unord::UnordMap::new();
     bindings.insert("n".to_string(), 4usize);
 
-    let resolved = chelis_ir::dag::bind_symbolic_dims(&bound(RtDim::Lit(0)), &bindings)
+    let resolved = chelis_ir::dag::bind_symbolic_dims(
+        &bound(RtDim::Lit(0)),
+        &bindings,
+        &chelis_unord::UnordSet::new(),
+    )
         .expect("the identity slice binds");
     assert!(matches!(
         &resolved.get(NodeId(1)).expect("shrink").op,
@@ -1260,7 +1264,11 @@ fn binding_a_to_end_bound_rejects_a_start_that_is_not_literal_zero() {
             if bounds == &vec![(RtDim::Lit(0), RtDim::Lit(4))]
     ));
 
-    let error = chelis_ir::dag::bind_symbolic_dims(&bound(RtDim::Lit(1)), &bindings)
+    let error = chelis_ir::dag::bind_symbolic_dims(
+        &bound(RtDim::Lit(1)),
+        &bindings,
+        &chelis_unord::UnordSet::new(),
+    )
         .expect_err("a nonzero start is a malformed bound, not a slice");
     assert!(error.contains("requires a literal zero start"), "{error}");
 }

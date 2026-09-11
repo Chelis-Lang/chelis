@@ -606,7 +606,14 @@ fallback. A name the scope split finds in more than one class has no single
 pre-eval extent, so when its scopes disagree it binds to nothing and every
 axis carrying it is computed from actual values, and that tolerance stops at
 the type: a live node reading the name BY VALUE, a `Reshape` target's
-`RtDim::Sym`, still refuses. Deleting a declaration mechanism that holds a
+`RtDim::Sym`, still refuses. Which scopes disagree is a property of the
+supplied values rather than of the graph, so the set is the caller's to name
+and the tolerance covers exactly it; a multi-scope name whose scopes AGREE has
+one extent and an omitted binding for it is refused like any other. The
+declarations are not yet scoped the way these guards are: two scopes of one
+binder lowered into ONE emitted function still share one declaration, which
+#1788 records as residual and the per-scope rename in the claim transport
+fixes. Deleting a declaration mechanism that holds a
 loud-unsupported census site shrinks that site's baseline in the same change,
 under `spec/design/loud_unsupported.md` B1, which owns that rule.
 

@@ -1694,12 +1694,19 @@ fn verify_bound_movement_bounds(dag: &Dag, live: Option<&[bool]>) -> Result<(), 
 /// (a `Reshape` target's `RtDim::Sym`) still refuses in `bind_symbolic_dims`.
 /// The structural fix is a per-scope rename and belongs to the claim
 /// transport, not here.
+///
+/// The second return value is exactly that set: the names this function
+/// DELIBERATELY left out because their scopes disagreed. It is returned
+/// rather than re-derived because disagreement is a property of the supplied
+/// values and not of the graph, so nothing downstream can recover it; keying
+/// the tolerance on multi-scope membership instead would excuse an agreeing
+/// name a caller simply omitted, which is an omitted binding like any other.
 fn infer_symbolic_bindings_from_inputs(
     dag: &Dag,
     inputs: &UnordMap<String, TensorValue>,
     required_symbols: &UnordSet<String>,
     live: Option<&[bool]>,
-) -> Result<UnordMap<String, usize>, String> {
+) -> Result<(UnordMap<String, usize>, UnordSet<String>), String> {
     let mut bindings = UnordMap::new();
     let mut load_types = UnordMap::<String, TensorType>::new();
 
@@ -1840,9 +1847,15 @@ fn infer_symbolic_bindings_from_inputs(
             None => folded.push((name, Some(value))),
         }
     }
+    let mut deliberately_unbound = UnordSet::new();
     for (name, value) in folded {
-        if let Some(value) = value {
-            bindings.insert(name, value);
+        match value {
+            Some(value) => {
+                bindings.insert(name, value);
+            }
+            None => {
+                deliberately_unbound.insert(name);
+            }
         }
     }
 
@@ -1887,7 +1900,7 @@ fn infer_symbolic_bindings_from_inputs(
         }
     }
 
-    Ok(bindings)
+    Ok((bindings, deliberately_unbound))
 }
 
 fn collect_dim_expr_symbols(expr: &DimExpr, symbols: &mut UnordSet<String>) {
@@ -2179,7 +2192,7 @@ where
 
     let mut prebound_dims: UnordMap<String, usize> = UnordMap::new();
     let bound_dag = if needs_symbolic_binding {
-        let mut bindings =
+        let (mut bindings, deliberately_unbound) =
             infer_symbolic_bindings_from_inputs(dag, &resolved_inputs, &required_symbols, live)?;
         // `bind_symbolic_dims` rebuilds the complete DAG to preserve node ids.
         // Dead named dimensions therefore need a harmless placeholder even
@@ -2193,7 +2206,7 @@ where
             }
         }
         prebound_dims = bindings.clone();
-        let bound = bind_symbolic_dims(dag, &bindings)?;
+        let bound = bind_symbolic_dims(dag, &bindings, &deliberately_unbound)?;
         // chelis#523: `verify` (grad.rs, before eval) runs BEFORE binding, so
         // its C10 shrink/stride bound checks are SKIPPED on symbolic axes
         // (extent unknown). Once `bind_symbolic_dims` makes those extents

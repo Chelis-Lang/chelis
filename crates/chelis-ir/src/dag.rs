@@ -2246,8 +2246,13 @@ pub fn symbolic_params(dag: &Dag) -> Vec<String> {
 /// Names the scoped derivation finds in more than one equality class.
 ///
 /// C2.4 scopes a claim by the results it reaches, so one spelling in two
-/// independent signatures is two claims. [`bind_symbolic_dims`] reads this to
-/// tolerate such a name being unbound; see the comment at its use.
+/// independent signatures is two claims. This is NOT what
+/// [`bind_symbolic_dims`] tolerates being unbound - that set is the caller's
+/// `unbound`, the names whose scopes actually disagreed - and the difference
+/// is the point: a multi-scope name whose scopes AGREE has one extent and
+/// must be supplied. The predicate exists so a test can assert that a fixture
+/// really does put a name in two scopes before asserting what follows.
+#[cfg(test)]
 fn multi_scope_dim_names(dag: &Dag) -> UnordSet<String> {
     let mut seen: Vec<String> = Vec::new();
     let mut repeated = UnordSet::new();
@@ -2264,7 +2269,21 @@ fn multi_scope_dim_names(dag: &Dag) -> UnordSet<String> {
     repeated
 }
 
-pub fn bind_symbolic_dims(dag: &Dag, bindings: &UnordMap<String, usize>) -> Result<Dag, String> {
+/// Resolve every named dimension the bindings map supplies, and refuse any
+/// the graph still needs.
+///
+/// `unbound` is the set the CALLER deliberately left out, which is
+/// information only the caller has: chelis#1566's rule is that a name whose
+/// two scopes resolve to DIFFERENT extents binds to nothing, and whether two
+/// scopes disagree is a property of the supplied values rather than of the
+/// graph. Passing an empty set is therefore the strict reading, and every
+/// name the graph needs must be present. An agreeing multi-scope name a
+/// caller merely omits is an omitted binding like any other and is refused.
+pub fn bind_symbolic_dims(
+    dag: &Dag,
+    bindings: &UnordMap<String, usize>,
+    unbound: &UnordSet<String>,
+) -> Result<Dag, String> {
     // chelis#616: an op-declared dim (a node-valued movement output extent)
     // has no pre-eval value — the evaluator computes it from actual bound
     // scalars. Leave it unbound instead of raising the loud missing-binding
@@ -2273,17 +2292,16 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &UnordMap<String, usize>) -> Resu
     // referenceable symbol, and the evaluator computes the real extent from
     // values.
     let op_declared = op_declared_dim_names(dag);
-    // chelis#1566: a name that `split_by_scope` finds in MORE THAN ONE scope
-    // has no single pre-eval extent, because two independent signatures that
-    // merely spell a binder the same way are two claims rather than one. The
-    // binding map is keyed by name and cannot hold both, so the inference
-    // deliberately leaves such a name unbound when its scopes disagree, and
-    // every axis carrying it is computed from actual values instead. The
-    // tolerance stops at the TYPE: a live node that reads the name BY VALUE
-    // (a `Reshape` target's `RtDim::Sym`) still refuses below, because there
-    // is no value to give it. A per-scope rename is the structural fix and
-    // belongs to the claim transport.
-    let multi_scope = multi_scope_dim_names(dag);
+    // chelis#1566: a name whose two scopes resolve to DIFFERENT extents has no
+    // single pre-eval extent, because the binding map is keyed by name and
+    // cannot hold both. The inference leaves such a name out and names it in
+    // `unbound`; every axis carrying it is then computed from actual values.
+    // The tolerance is exactly that set and no wider - an agreeing multi-scope
+    // name a caller merely omits is an omitted binding like any other - and it
+    // stops at the TYPE: a live node that reads the name BY VALUE (a `Reshape`
+    // target's `RtDim::Sym`) still refuses below, because there is no value to
+    // give it. A per-scope rename is the structural fix and belongs to the
+    // claim transport.
     let bind_dim = |dim: &DimInfo| -> Result<DimInfo, String> {
         match dim {
             DimInfo::Lit(size) => Ok(DimInfo::Lit(*size)),
@@ -2291,7 +2309,7 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &UnordMap<String, usize>) -> Resu
             DimInfo::Named(name, None) => match bindings.get(name) {
                 Some(size) => Ok(DimInfo::Named(name.clone(), Some(*size))),
                 None if op_declared.contains(name)
-                    || multi_scope.contains(name)
+                    || unbound.contains(name)
                     || name.is_empty()
                     || name == "*" =>
                 {
@@ -2654,6 +2672,7 @@ mod tests {
                 ("batch".to_string(), 3usize),
                 ("hidden".to_string(), 8usize),
             ]),
+            &UnordSet::new(),
         )
         .expect("bindings should apply");
         let node = rebound.get(y).unwrap();
@@ -2712,7 +2731,11 @@ mod tests {
         );
         dag.add_root(shrunk);
 
-        let rebound = bind_symbolic_dims(&dag, &UnordMap::from([("m".to_string(), 3usize)]))
+        let rebound = bind_symbolic_dims(
+            &dag,
+            &UnordMap::from([("m".to_string(), 3usize)]),
+            &UnordSet::new(),
+        )
             .expect("bindings should apply");
         let node = rebound.get(shrunk).unwrap();
         // The concrete axis-0 bound is untouched; the sentinel axis-1 bound
@@ -2758,8 +2781,134 @@ mod tests {
         dag.add_root(shrunk);
         // No binding for `m`: bind_dim fails first on the output type, but
         // even a partial binding map must not silently drop the sentinel.
-        let err = bind_symbolic_dims(&dag, &UnordMap::new());
+        let err = bind_symbolic_dims(&dag, &UnordMap::new(), &UnordSet::new());
         assert!(err.is_err(), "unbound symbolic dim must fail closed");
+    }
+
+    /// chelis#1566's tolerance is for DISAGREEING scopes, and only those.
+    ///
+    /// A name the scope split finds in two scopes has no single pre-eval
+    /// extent when those scopes resolve differently, and the inference then
+    /// binds nothing for it. It does NOT follow that every multi-scope name
+    /// may go unbound: two scopes that agree have one extent, a caller that
+    /// omits it has omitted a required binding, and the answer is the same
+    /// loud refusal any other missing binding gets.
+    ///
+    /// EVIDENTIARY STATUS: regression test, watched failing on `bd84d2619`,
+    /// where keying the tolerance on multi-scope membership alone returned
+    /// `Ok` with the dims still `Named("seq", None)`.
+    #[test]
+    fn an_agreeing_multi_scope_name_still_requires_its_binding() {
+        let ty = |dims: Vec<DimInfo>| TensorType {
+            dims,
+            precision: Prim::F32,
+        };
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty(vec![DimInfo::Named("seq".into(), None)]),
+            None,
+        );
+        let y = dag.add_node(
+            RiscOp::Load { name: "y".into() },
+            vec![],
+            ty(vec![
+                DimInfo::Named("batch".into(), None),
+                DimInfo::Named("seq".into(), None),
+            ]),
+            None,
+        );
+        let from_x = dag.add_node(
+            RiscOp::Neg,
+            vec![x],
+            ty(vec![DimInfo::Named("seq".into(), None)]),
+            None,
+        );
+        let from_y = dag.add_node(
+            RiscOp::Neg,
+            vec![y],
+            ty(vec![
+                DimInfo::Named("batch".into(), None),
+                DimInfo::Named("seq".into(), None),
+            ]),
+            None,
+        );
+        dag.add_root(from_x);
+        dag.add_root(from_y);
+        assert_eq!(
+            multi_scope_dim_names(&dag).to_sorted(),
+            vec![&"seq".to_string()],
+            "the fixture must actually put `seq` in two scopes",
+        );
+
+        let error = bind_symbolic_dims(&dag, &UnordMap::new(), &UnordSet::new())
+            .expect_err("an omitted binding is an omitted binding, multi-scope or not");
+        assert!(
+            error.contains("missing symbolic dimension binding `seq`"),
+            "the refusal names the missing binder: {error}",
+        );
+    }
+
+    /// The other side of the same rule: a name the CALLER deliberately left
+    /// unbound, because its scopes disagreed, is tolerated in a type.
+    ///
+    /// EVIDENTIARY STATUS: regression test for the repair's own mechanism.
+    /// Without it chelis#1566's witness cannot evaluate, which is the
+    /// measurement the witness carries.
+    #[test]
+    fn a_deliberately_unbound_name_is_tolerated_in_a_type() {
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Named("seq".into(), None)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        dag.add_root(x);
+
+        let unbound = UnordSet::from([("seq".to_string())]);
+        let bound = bind_symbolic_dims(&dag, &UnordMap::new(), &unbound)
+            .expect("a deliberately unbound name leaves its axis to be computed from values");
+        assert_eq!(
+            bound.get(x).expect("the load").output_type.dims,
+            vec![DimInfo::Named("seq".into(), None)],
+            "the axis keeps its unresolved claim rather than taking a guessed extent",
+        );
+
+        // The tolerance stops at a by-value read: a `Reshape` target that
+        // SPELLS the name needs a number and there is none to give it.
+        let mut reading = Dag::new();
+        let y = reading.add_node(
+            RiscOp::Load { name: "y".into() },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Named("seq".into(), None)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        let reshaped = reading.add_node(
+            RiscOp::Reshape {
+                new_shape: vec![RtDim::Sym("seq".into())],
+            },
+            vec![y],
+            TensorType {
+                dims: vec![DimInfo::Named("seq".into(), None)],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        reading.add_root(reshaped);
+        let error = bind_symbolic_dims(&reading, &UnordMap::new(), &unbound)
+            .expect_err("a by-value read of an unbound name has no answer");
+        assert!(
+            error.contains("missing symbolic dimension binding `seq`"),
+            "the refusal names the binder it cannot resolve: {error}",
+        );
     }
 
     // --- chelis#345: op-internal symbolic references (Bucket 4d) ---

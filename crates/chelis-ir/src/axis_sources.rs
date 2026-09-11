@@ -580,27 +580,45 @@ pub fn check_axis_sources(dag: &Dag, stage: Stage) -> Result<(), Unsupported> {
 /// a name no lane has to render: the evaluator computes every extent from
 /// actual values and refuses a name it genuinely needs with its own
 /// missing-binding error.
+///
+/// The C emitter is the only lane that calls this today, and that is a stated
+/// boundary rather than an oversight. HIP declares from the interface
+/// bindings alone and Metal consumes none of this derivation, so neither is
+/// migrated onto origins and neither owes the check yet; adding it to a lane
+/// whose declarations come from elsewhere would refuse programs that lane
+/// emits correctly. Migrating them is the residual, tracked with the rest of
+/// the declaration work.
+///
+/// The scan walks nodes rather than names, so the node the receipt blames is
+/// the carrier the scan found, never a positional fallback: a name reaches
+/// [`unresolved_dim_names`] only by way of a node that carries it, so there
+/// is nothing to fall back to and an empty graph reports nothing.
 pub fn check_rendered_dim_origins(dag: &Dag, stage: Stage) -> Result<(), Unsupported> {
-    let Some(name) = unresolved_dim_names(dag).into_iter().next() else {
+    let unresolved = unresolved_dim_names(dag);
+    if unresolved.is_empty() {
         return Ok(());
-    };
-    let node = dag
-        .nodes()
-        .iter()
-        .find(|node| {
-            node.output_type
-                .dims
-                .iter()
-                .any(|dim| matches!(dim, DimInfo::Named(other, _) if *other == name))
-                || crate::dag::op_internal_symbolic_dims(&node.op).contains(&name)
-        })
-        .unwrap_or(&dag.nodes()[0]);
-    Err(receipt(
-        format!("extent `{name}` resolves to no source"),
-        node,
-        stage,
-        true,
-    ))
+    }
+    for node in dag.nodes() {
+        let carried = node
+            .output_type
+            .dims
+            .iter()
+            .filter_map(|dim| match dim {
+                DimInfo::Named(name, None) => Some(name.clone()),
+                _ => None,
+            })
+            .chain(crate::dag::op_internal_symbolic_dims(&node.op))
+            .find(|name| unresolved.contains(name));
+        if let Some(name) = carried {
+            return Err(receipt(
+                format!("extent `{name}` resolves to no source"),
+                node,
+                stage,
+                true,
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn receipt(what: String, node: &DagNode, stage: Stage, sourceless: bool) -> Unsupported {

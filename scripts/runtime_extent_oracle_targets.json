@@ -380,11 +380,37 @@
         "an_all_interface_class_runs_when_its_witnesses_agree",
         "an_all_interface_class_traps_at_entry_when_its_witnesses_disagree",
         "entry_guards_run_in_assigned_slot_order_not_claim_name_order",
+        "issue_1788_two_scopes_in_one_function_share_one_declaration",
         "local_reshape_guards_follow_declaration_order",
         "numeric_local_extent_claims_execute_exactly",
         "shared_runtime_extent_declares_once_and_rechecks_the_later_carrier"
       ],
       "note": "A CLI-rooted program is not the exported kernel: `def main() = f(...)` over literal tensors inlines the def, every extent becomes a literal, and the classes disappear, so guard placement and rendering on C are proved by DRIVEN rows that compile the exported kernel and call it with runtime inputs. This target is where those rows live. `exec_compile` is a large shared binary, so this target names its rows with `--exact` rather than running the whole file: the receipt check requires the observed set to EQUAL the expected one, and an unfiltered run would tie this phase's oracle to every unrelated numeric row in that file."
+    },
+    {
+      "phase": "b",
+      "id": "ir_eval_guard",
+      "package": "chelis-ir",
+      "kind": "test",
+      "file": "crates/chelis-ir/tests/runtime_extent_slice_b_eval_guard.rs",
+      "selector": {
+        "mode": "all"
+      },
+      "expected": [
+        "a_disagreeing_class_conveys_its_sources_axis_and_values",
+        "a_disagreeing_class_traps_with_the_numeric_trap_line",
+        "a_locally_placed_unit_claim_that_holds_broadcasts",
+        "a_locally_placed_unit_claim_traps_at_the_expand_that_makes_it",
+        "a_non_unit_operand_extent_refutes_the_unit_claim_and_traps",
+        "a_unit_operand_extent_satisfies_the_claim_and_broadcasts",
+        "an_agreeing_class_evaluates",
+        "one_scope_with_two_disagreeing_witnesses_of_a_binder_still_refuses_on_eval",
+        "the_guard_precedes_the_allocation_it_protects",
+        "two_disagreeing_scopes_refuse_when_a_live_node_reads_the_binder_by_value",
+        "two_roots_spelling_one_binder_are_two_claims_not_one_class",
+        "two_signatures_spelling_one_binder_bind_independently_on_eval"
+      ],
+      "note": "The DAG evaluator's own guard and binding rows, with inputs bound at the API boundary. No corpus row cites them, because `chelis eval --file` supplies no input bindings and so cannot reach this evaluator for any fixture form; that is the reason the file exists, recorded in its header. Registering the target anyway makes the oracle execute them and makes a rename here fail the fast gate, which is what chelis#1742 added the manifest for."
     }
   ]
 }
