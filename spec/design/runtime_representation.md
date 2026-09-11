@@ -1222,6 +1222,16 @@ classifier rules and mutation implementations. The existing
 `unregistered-inventory-source` mutation covers the additional source; no
 numbered representation semantics change.
 
+The typed static-rate profile registers `chelis-ir/src/lower/static_controls.rs`
+in the Phase 0 source universe (70 Rust sources and seven headers). It consumes
+checked dtype facts and existing typed scalar carriers without inspecting
+tensor payloads or adding a representation seam. This source-list-only freeze
+move changes the source count and integrity digest; all 358 foundation rows,
+290 active-debt rows, classifier rules and mutation implementations remain
+unchanged. The existing `unregistered-inventory-source` and subdirectory
+closure witnesses cover the added source. No numbered representation semantics
+change.
+
 The staged fixed-control evaluator composes those existing owners without a
 new numeric carrier. Its opaque companion retains exact partition mappings
 and one invocation's Random keys/counters; host sources and checked numeric

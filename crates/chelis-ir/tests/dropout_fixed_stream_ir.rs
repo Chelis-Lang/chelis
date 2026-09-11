@@ -32,6 +32,44 @@ fn typed_rate_plan(source: &str) -> Result<EvaluationPlan, String> {
 }
 
 #[test]
+fn typed_static_rate_checks_only_actual_transitive_captures() {
+    let reference =
+        typed_rate_plan("def sample(x: tensor[8, f32]) -> tensor[8, f32] = dropout(x, 0.5f32)")
+            .unwrap();
+    let execute = |plan: &EvaluationPlan| {
+        let mut context = RandomExecutionContext::new(RandomLoweringState {
+            seed: Some(42),
+            counter: 0,
+        });
+        let values = eval_tensor_plan_with_strict(plan, &mut context, |_| {
+            Some(TensorValue::from_vec(vec![8], vec![1.0; 8]))
+        })
+        .unwrap();
+        (
+            values[&plan.dag_for_inspection().roots()[0]].to_f64_lossy_vec(),
+            context.state().counter,
+        )
+    };
+    for body in [
+        "unrelated = 0.5f32\n f = fn (v: tensor[8, f32]) -> dropout(v, 0.5f32)\n unrelated = 0.25f32\n f(x)",
+        "rate = 0.5f32\n inner = fn (v: tensor[8, f32]) -> dropout(v, rate)\n alias = inner\n outer = fn (v: tensor[8, f32]) -> alias(v)\n unrelated = 0.25f32\n outer(x)",
+        "rate = 0.25f32\n f = fn (v: tensor[8, f32]) -> { rate = 0.5f32\n alias = rate\n dropout(v, alias) }\n rate = 0.75f32\n f(x)",
+    ] {
+        let source = format!("def sample(x: tensor[8, f32]) -> tensor[8, f32] = {{ {body}\n }}");
+        let plan = typed_rate_plan(&source).unwrap_or_else(|error| panic!("{source}\n{error}"));
+        assert_eq!(execute(&plan), execute(&reference), "{source}");
+    }
+    for body in [
+        "rate = 0.5f32\n inner = fn (v: tensor[8, f32]) -> dropout(v, rate)\n alias = inner\n outer = fn (v: tensor[8, f32]) -> alias(v)\n rate = 0.25f32\n outer(x)",
+        "rate = 0.5f32\n loss = fn (v: tensor[8, f32]) -> tensor_to_scalar(sum(dropout(v, rate), 0i32))\n outer = fn (v: tensor[8, f32]) -> grad(loss)(v)\n rate = 0.25f32\n outer(x)",
+        "neg = fn (v: f32) -> 0.25f32\n f = fn (v: tensor[8, f32]) -> dropout(v, neg(-0.5f32))\n f(x)",
+    ] {
+        let source = format!("def sample(x: tensor[8, f32]) -> tensor[8, f32] = {{ {body}\n }}");
+        assert!(typed_rate_plan(&source).is_err(), "{source}");
+    }
+}
+
+#[test]
 fn typed_static_rate_specializes_helpers_and_gradient_captures() {
     for (dtype, prim) in [
         ("f16", Prim::F16),

@@ -20,9 +20,13 @@ host Dropout dispatch. A non-generic host wrapper containing a captured-rate
 gradient also reaches that boundary through its helper-summary probe. Direct
 checked execution-plan entries are the supported surface of this slice.
 Late shadowing of a captured scalar remains outside the bounded profile: the
-existing lowerer has no general lexical closure carrier. Admission compares
-captured controls with the caller before entering a closure and rejects a
-changed binding. Host entry admission reads the original checked function body,
+existing lowerer has no general lexical closure carrier. Admission forgets a
+captured scalar's static fact when its caller binding differs. Only a rate
+read depending on that fact causes rejection; nested helper calls and aliases
+propagate the missing fact. Unrelated rebound scalars (including discarded
+reads) do not reject a literal-rate closure. Function-local binders and actual
+arguments establish their own static facts.
+Host entry admission reads the original checked function body,
 before signature preparation's local-callable substitution could erase that
 distinction. Ordinary non-plan lowering and its legacy extractor are unchanged.
 
@@ -63,10 +67,17 @@ captures, all four active float dtypes, distinct callsite rates, source f32 to
 f64 width, argument draws exactly once, and a reused plan's next stream ordinal.
 Negative tests cover runtime parameters, alias/formal shadowing, late closure
 and gradient-capture shadowing, unresolved dtype targets, and shadowed `neg`.
+The R1 public regression compares complete values and the following draw after
+rebinding an unrelated scalar. Paired IR probes preserve stable indirect
+captures and local binding shadowing while rejecting changed transitive
+captures, including gradient and inherited shadowed-primitive cases. Profile
+precision comes only from checked metadata and scoped dtype facts, not from
+inspecting a staged literal's payload. The structural inventory registers the
+private module without adding or reclassifying representation debt.
 The exact public #1764 repro remains a lower-stage rejection with no transcript.
 Existing fixed-stream API acceptance tests remain unchanged.
 
-Final focused oracle, using the environment above:
+Initial focused oracle, using the environment above:
 
 `cargo nextest run -p chelis-ir -p chelis-compiler-api --lib --test dropout_fixed_stream_ir --test dropout_fixed_stream_api -E 'test(typed_static_control) | binary(~dropout_fixed_stream)' --no-fail-fast`
 
@@ -75,3 +86,17 @@ execution 1.041 seconds, run `608a9651-d39a-4a6c-9162-94c30785db45`.
 This is an
 IR specialization slice, not completion of #1764 or any native/public transport
 phase. Fresh review and CI are required before merge.
+
+Round-one author repairs reproduced the unrelated-capture API failure and the
+matching direct-plan admission failure before changing the guard. An additional
+discarded-capture probe failed an intermediate eager dependency check; forgetting
+only unavailable static facts repairs both witnesses without evaluating closures.
+The expanded owning command above, with `--test-threads 2`, passes 50/50 tests
+(1,151 unrelated unit tests filtered), build 43.42 seconds, execution 1.792 seconds,
+run `0aa128d6-428d-449d-b275-7d2d6ab53798`.
+`python -m unittest scripts.test_runtime_representation_oracle scripts.test_runtime_representation_phase1`
+passes 66 tests in 12.683 seconds using the worktree's managed environment.
+The live structural scan validates 290 rows and zero rows in the added module;
+all 358 foundation and 290 active rows equal the pre-repair inventory. These are
+author repair checks, not a new review round or Phase 1 certification. The standing
+reviewer must verify the repaired pushed head before either finding is closed.

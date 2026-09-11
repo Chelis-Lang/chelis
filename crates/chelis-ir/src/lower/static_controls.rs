@@ -144,27 +144,6 @@ struct Profile<'a> {
 }
 
 impl Profile<'_> {
-    fn precision(&self, expr: &Expr, env: &Environment) -> Option<Prim> {
-        env.precision(expr).or_else(|| {
-            // The ordinary lowerer already recognizes this closed tensor
-            // constructor. Use only its unanimous typed leaves, never a
-            // guessed default or a runtime tensor value.
-            if env.bound.contains("to_tensor") || self.defs.contains_key("to_tensor") {
-                return None;
-            }
-            let literal = static_to_tensor_literal(expr)?;
-            let prim = match literal.data.first()? {
-                StagedScalar::Typed(value) => value.prim(),
-                _ => return None,
-            };
-            literal
-                .data
-                .iter()
-                .all(|value| matches!(value, StagedScalar::Typed(value) if value.prim() == prim))
-                .then_some(prim)
-        })
-    }
-
     fn callable(&self, expr: &Expr, env: &Environment) -> Option<Closure> {
         if stamped_parts(expr).is_some_and(|(tag, _, _)| tag == DeepTag::Fn) {
             return Some(Closure {
@@ -218,22 +197,24 @@ impl Profile<'_> {
         };
         let Some(body) = kids.get(1) else { return };
         let mut env = (*closure.environment).clone();
-        // The existing lowerer has no lexical closure carrier. Do not admit
-        // a static capture that its current scope would resolve differently.
-        // Stable captures are supported; later shadowing remains rejected.
-        let mut formal_names = UnordSet::new();
-        for param in params {
-            collect_param_bound_names(param, &mut formal_names);
-        }
-        if env.values.to_sorted().into_iter().any(|(name, value)| {
-            !formal_names.contains(name) && caller.values.get(name) != Some(value)
-        }) {
-            self.reason.get_or_insert(Reason::RuntimeRate);
-        }
+        // The lowerer has no general lexical closure carrier. A captured
+        // scalar with a different caller binding is no longer proven static
+        // for this invocation. Forget that fact, rather than rejecting an
+        // unrelated closure. An actual rate read (also through nested helper
+        // calls/aliases) then declines admission; literals and callee-local
+        // bindings retain their own proof. Ordinary value evaluation is not
+        // performed or changed by this source-only profile.
+        env.values = env
+            .values
+            .to_sorted()
+            .into_iter()
+            .filter(|(name, value)| caller.values.get(*name) == Some(*value))
+            .map(|(name, value)| (name.clone(), *value))
+            .collect();
         let actual_types = args
             .iter()
             .map(|arg| {
-                self.precision(arg, caller).map(|precision| TensorType {
+                caller.precision(arg).map(|precision| TensorType {
                     dims: vec![],
                     precision,
                 })
@@ -258,7 +239,7 @@ impl Profile<'_> {
                 env.bind(
                     &name,
                     args.get(index).and_then(|arg| caller.scalar(arg)),
-                    args.get(index).and_then(|arg| self.precision(arg, caller)),
+                    args.get(index).and_then(|arg| caller.precision(arg)),
                 );
             }
         }
@@ -352,7 +333,7 @@ impl Profile<'_> {
                         self.visit(&pair[1], depth, &scoped);
                     }
                     let value = scoped.scalar(&pair[1]);
-                    let precision = self.precision(&pair[1], &scoped);
+                    let precision = scoped.precision(&pair[1]);
                     if let Some(name) = symbol_name(&pair[0]) {
                         scoped.bind(name, value, precision);
                         if let Some(callable) = callable {
