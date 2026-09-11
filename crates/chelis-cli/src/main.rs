@@ -8,8 +8,9 @@ mod style_gate;
 
 use chelis_compiler_api::compiler::{BuildTarget, CompilerError};
 use chelis_compiler_api::schema::{
-    CheckResult, Diagnostic, EvalRequest, SourceKind, WireInferredAdtArg, WireInferredDim,
-    WireInferredDimensionArg, WireInferredEffect, WireInferredPrecision, WireInferredType,
+    CheckDirectoryEntry, CheckDirectoryReport, CheckResult, Diagnostic, EntryPath, EvalRequest,
+    SourceKind, WireInferredAdtArg, WireInferredDim, WireInferredDimensionArg, WireInferredEffect,
+    WireInferredPrecision, WireInferredType,
 };
 use chelis_deep::DeepTag;
 use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr};
@@ -927,15 +928,13 @@ fn main() {
             file,
             show_inferred,
             allow_style_violations,
-        }) => match cmd_check(&file, show_inferred, allow_style_violations) {
-            // Issue #207: exit code mirrors the JSON `errors` array
-            // (0 iff empty, CHECK_ERRORS_EXIT_CODE otherwise).
-            Ok(code) => std::process::exit(code),
-            Err(err) => {
-                eprintln!("error: {err}");
-                std::process::exit(1);
-            }
-        },
+        }) => {
+            // Issue #207: exit code mirrors the document's error lists (0 iff
+            // all are empty, CHECK_ERRORS_EXIT_CODE otherwise). `cmd_check` is
+            // total, so there is no exit-1 arm: every failure is in the
+            // document it printed (chelis#886, chelis#1678).
+            std::process::exit(cmd_check(&file, show_inferred, allow_style_violations))
+        }
         Some(Command::Cost { file, json }) => cmd_cost(&file, json),
         Some(Command::Validate {
             surf,
@@ -2226,7 +2225,7 @@ const EMPTY_PROGRAM_MESSAGE: &str = "empty program: no declarations found";
 /// `errors[]` array carries a single `Other`-kind entry with the
 /// supplied message; the rest of the report shape mirrors a zero-
 /// node program with score 0.
-fn synthetic_check_report_with_error(message: &str) -> String {
+fn synthetic_check_report_with_error(message: &str) -> CheckResult {
     synthetic_check_report_with_errors(std::slice::from_ref(&message.to_string()))
 }
 
@@ -2239,7 +2238,7 @@ fn synthetic_check_report_with_error(message: &str) -> String {
 /// transcript into a machine-facing field -- the shape chelis#886 exists to
 /// remove -- and would make `errors.len()` disagree with the number of
 /// problems found.
-fn synthetic_check_report_with_errors(messages: &[String]) -> String {
+fn synthetic_check_report_with_errors(messages: &[String]) -> CheckResult {
     // chelis#886 [04-FIT-12]: the early-failure path is not a second
     // producer. It builds the same `CheckResult` the checker's path builds
     // and renders it through the same serializer, so a failure that
@@ -2272,22 +2271,38 @@ fn synthetic_check_report_with_errors(messages: &[String]) -> String {
         total_nodes: 0,
         unresolved_names: vec![],
     };
-    // Both `expect`s are the boundary of the whole design, so they are
-    // justified rather than hopeful. Every numeric field here is a literal
-    // constant -- score 0, four components 0, three counters 0, severity 0.5
-    // -- so `try_from_fitness`'s validation cannot reject them; and the
-    // serializer sees only owned `String`s and already-validated numbers, so
-    // it has no failure mode either. The messages are never inspected.
+    // This `expect` is the boundary of the whole design, so it is justified
+    // rather than hopeful. Every numeric field here is a literal constant --
+    // score 0, four components 0, three counters 0, severity 0.5 -- so
+    // `try_from_fitness`'s validation cannot reject them. The messages are
+    // never inspected.
     //
-    // If either could fail there would be nothing to emit, and inventing a
+    // If it could fail there would be nothing to emit, and inventing a
     // fallback document here would be the second producer [04-FIT-11]
-    // forbids. Panicking is the honest response to a broken serializer;
-    // returning a `Result` would only push the same impossibility onto every
-    // caller and reopen the `?` channel this function exists to close.
-    CheckResult::try_from_fitness(&report)
-        .expect("fixed synthetic report has valid numeric fields")
-        .to_report_json()
-        .expect("a report of owned strings and validated numbers serializes")
+    // forbids. Panicking is the honest response; returning a `Result` would
+    // only push the same impossibility onto every caller and reopen the `?`
+    // channel this function exists to close.
+    CheckResult::try_from_fitness(&report).expect("fixed synthetic report has valid numeric fields")
+}
+
+/// Print a file's report and return the exit status `spec/04` § Gating
+/// assigns it: `0` iff its `errors` list is empty.
+///
+/// The serializer sees only owned strings and numbers every producer has
+/// already validated, so it has no failure mode left to report; the `expect`
+/// states that rather than hoping it.
+fn print_check_report(report: &CheckResult) -> i32 {
+    println!(
+        "{}",
+        report
+            .to_report_json()
+            .expect("a validated report serializes")
+    );
+    if report.errors.is_empty() {
+        0
+    } else {
+        CHECK_ERRORS_EXIT_CODE
+    }
 }
 
 /// Exit-code contract (issue #207, supersedes RT-205 F7):
@@ -2322,205 +2337,327 @@ fn synthetic_check_report_with_errors(messages: &[String]) -> String {
 /// behaved that way for an unreadable file while the Surf arm did
 /// not.
 ///
-/// Exit `1` survives only where no per-file report exists to carry
-/// the failure: `chelis check <dir>` on a directory it cannot
-/// enumerate fails in [`discover_check_files`] before any file is
-/// reached. That is the directory envelope's surface, which
-/// `spec/04` does not specify; chelis#1678 owns it, and §6.4 keeps
-/// its "not fully implemented" caveat until it is resolved.
-fn cmd_check(
-    target: &Path,
-    show_inferred: bool,
-    allow_style_violations: bool,
-) -> Result<i32, Box<dyn std::error::Error>> {
-    // Bucket 6b: when given a directory, walk it and run the per-file
-    // check on every `.ch` file found. We use the same dot-prefix and
-    // `target/` skip rules as `discover_test_files`, so editor tempfiles
-    // and build artifacts don't poison the corpus.
+/// Directory mode follows the same rule over every list in its envelope
+/// (spec/04 [04-FIT-25], chelis#1678). A failure of the walk itself -- a
+/// directory that cannot be read, a path the envelope cannot write, an empty
+/// corpus -- is a diagnostic in the envelope's own `errors`, so there is no
+/// exit `1` left anywhere in `chelis check`.
+fn cmd_check(target: &Path, show_inferred: bool, allow_style_violations: bool) -> i32 {
     if target.is_dir() {
-        let files = discover_check_files(target)?;
-        if files.is_empty() {
-            // Empty corpus is legitimate (e.g. a fresh `examples/` skeleton).
-            // Match `chelis test` ergonomics and report an empty corpus
-            // explicitly rather than silently exiting 0 with no output.
-            println!("{{\"files\":[],\"errors\":[]}}");
-            return Ok(0);
-        }
-        let mut any_errors_in_report = false;
-        let mut entries: Vec<String> = Vec::with_capacity(files.len());
-        for file in &files {
-            // The `Err` arm that used to sit here emitted
-            // `{"file":...,"error":"<display string>"}` -- a message where a
-            // report belongs. It is not handled any more because it can no
-            // longer be constructed: `cmd_check_one` is total, so every
-            // entry carries a report by type (chelis#886 [04-FIT-12]).
-            // Deleting it is the point of making the function total, not a
-            // side effect of it.
-            let (json, errors_in_report) =
-                cmd_check_one(file, show_inferred, allow_style_violations);
-            if errors_in_report {
-                any_errors_in_report = true;
-            }
-            let rel = file.strip_prefix(target).unwrap_or(file).display();
-            entries.push(format!(
-                "{{\"file\":{},\"report\":{json}}}",
-                serde_json::to_string(&rel.to_string()).unwrap_or_default(),
-            ));
-        }
-        println!("{{\"files\":[{}]}}", entries.join(","));
-        // Issue #207 invariant: any file with a non-empty errors array
-        // in its report triggers the same exit code as the single-file
-        // path. There is no per-file exit-1 path any more: `cmd_check_one`
-        // is total, so a file that fails to be read, formatted or checked
-        // contributes a report with errors like any other (chelis#886).
-        return Ok(if any_errors_in_report {
+        let envelope = check_directory(target, show_inferred, allow_style_violations);
+        println!("{}", render_check_directory(&envelope));
+        return if envelope.has_errors() {
             CHECK_ERRORS_EXIT_CODE
         } else {
             0
-        });
+        };
     }
-
-    let (json, errors_in_report) = cmd_check_one(target, show_inferred, allow_style_violations);
-    println!("{json}");
-    Ok(if errors_in_report {
-        CHECK_ERRORS_EXIT_CODE
-    } else {
-        0
-    })
+    print_check_report(&cmd_check_one(
+        target,
+        show_inferred,
+        allow_style_violations,
+    ))
 }
 
-/// Walk a directory and collect all `.ch` files, mirroring
-/// `discover_test_files` exclusion rules (skip dot-prefixed entries and
-/// any `target/` directories that accumulate build artifacts).
+/// The directory envelope as `chelis check <dir>` publishes it.
 ///
-/// The root entry (depth 0) is exempt from the dot-prefix filter so
-/// callers can point the walker at e.g. `tempfile::tempdir()` paths
-/// (`/tmp/.tmpXyZ/...`) without the entire walk getting filtered out
-/// because the temp-dir name starts with a dot.
-fn discover_check_files(target: &Path) -> Result<Vec<PathBuf>, String> {
-    walk_sources(
+/// [04-FIT-19]: one serialization of one typed value, through the report's
+/// own `ReportFormatter`, so each report inside is written exactly as a
+/// file's report is -- the envelope is not rendered report-by-report and
+/// spliced. Everything inside `files` sits inside an array, so the formatter
+/// prints it compactly.
+///
+/// The serializer sees only owned strings and numbers every producer has
+/// already validated, so it has no failure mode left to report; the
+/// `expect`s state that rather than hoping it.
+fn render_check_directory(envelope: &CheckDirectoryReport) -> String {
+    let mut bytes = Vec::new();
+    let mut serializer = serde_json::Serializer::with_formatter(
+        &mut bytes,
+        chelis_compiler_api::check_report::ReportFormatter::default(),
+    );
+    envelope
+        .serialize(&mut serializer)
+        .expect("an envelope of validated reports serializes");
+    String::from_utf8(bytes).expect("serde_json emits UTF-8")
+}
+
+/// `chelis check <dir>`: one envelope for the whole directory (spec/04
+/// § Directory mode, chelis#1678).
+///
+/// This used to splice each file's rendered report into a `format!` wrapper,
+/// print a differently shaped document for an empty directory, and print
+/// nothing at all -- exit 1 -- when any subdirectory could not be read. Each
+/// report is now a member of one typed value ([04-FIT-19]), and a failure of
+/// the walk is a diagnostic in it that does not stop the walk ([04-FIT-23]).
+fn check_directory(
+    target: &Path,
+    show_inferred: bool,
+    allow_style_violations: bool,
+) -> CheckDirectoryReport {
+    let mut entries = Vec::new();
+    let mut failures = Vec::new();
+    // Walk order is the envelope's order ([04-FIT-22]), for failures too.
+    for item in walk_sources(target, &CHECK_WALK) {
+        let file = match item {
+            WalkItem::Source(file) => file,
+            WalkItem::Failure(message) => {
+                failures.push(message);
+                continue;
+            }
+        };
+        // Every walked path is `target` joined with names, so the prefix is
+        // always there. Were it not, the absolute path is refused by
+        // `EntryPath::new` and reported, rather than panicking with no
+        // document ([04-FIT-12]).
+        let relative = file.strip_prefix(target).unwrap_or(&file);
+        match EntryPath::new(relative) {
+            Ok(path) => entries.push(CheckDirectoryEntry::new(
+                path,
+                cmd_check_one(&file, show_inferred, allow_style_violations),
+            )),
+            // [04-FIT-21]: a path the envelope cannot write is not an entry,
+            // and the file is not checked for a report with nowhere to go.
+            Err(unrepresentable) => failures.push(unrepresentable.to_string()),
+        }
+    }
+    CheckDirectoryReport::from_walk(entries, failures)
+        .unwrap_or_else(|empty| empty.into_report(describe_empty_corpus(target)))
+}
+
+/// The `empty_corpus` message: the target, and what the exclusions removed
+/// ([04-FIT-24]).
+///
+/// An empty result has several causes a user would act on differently -- a
+/// mistyped path landing on a sibling, a level whose only sources sit under
+/// `target/`, a directory of Markdown -- so the message counts the sources the
+/// exclusions hid. That takes a second walk with the exclusions off, which is
+/// why it runs only here, after the corpus is known to be empty.
+fn describe_empty_corpus(target: &Path) -> String {
+    let unfiltered = walk_sources(
         target,
-        |entry| {
-            if entry.depth() == 0 {
-                return true;
-            }
-            let name = entry.file_name().to_string_lossy();
-            if name.starts_with('.') {
-                return false;
-            }
-            if entry.file_type().is_dir() && name == "target" {
-                return false;
-            }
-            true
+        &WalkRules {
+            exclusions: false,
+            ..CHECK_WALK
         },
-        // Collect both Surf (`.ch`) and Deep (`.dp`) sources so a mixed
-        // directory checks both surfaces. The per-file `cmd_check_one`
-        // routes `.dp` through the Deep ingestion helper; both surfaces
-        // emit the same CheckResult JSON shape.
-        |path| {
-            matches!(
-                path.extension().and_then(|e| e.to_str()),
-                Some("ch") | Some("dp")
-            )
-        },
+    );
+    let excluded = unfiltered
+        .iter()
+        .filter(|item| matches!(item, WalkItem::Source(_)))
+        .count();
+    // The first walk completed, so a failure here lies under an excluded
+    // entry. It makes the count a lower bound, and the message says so rather
+    // than presenting a partial count as exact.
+    let bound = if unfiltered
+        .iter()
+        .any(|item| matches!(item, WalkItem::Failure(_)))
+    {
+        "at least "
+    } else {
+        ""
+    };
+    format!(
+        "no .ch or .dp files to check under {}: {bound}{excluded} excluded under dot-prefixed \
+         entries or `target` directories",
+        target.display()
     )
 }
 
-/// Walk `target` for source files, following symlinks (chelis#1678).
+/// One step of a directory walk, in walk order.
+#[derive(Debug)]
+enum WalkItem {
+    /// A checkable file, under the path the walk reached it by.
+    Source(PathBuf),
+    /// A failure of the walk itself: a directory it could not read, or an
+    /// entry it could not resolve.
+    Failure(String),
+}
+
+/// What a walk excludes and what it collects.
+struct WalkRules {
+    /// Skip every dot-prefixed entry, and every directory named `target`.
+    exclusions: bool,
+    /// Apply the exclusions to the target itself as well.
+    exclude_root: bool,
+    /// Which file names count as sources.
+    is_source: fn(&Path) -> bool,
+}
+
+/// `chelis check <dir>` (spec/04 [04-FIT-20]). The target itself is never
+/// excluded, so a walk rooted at e.g. a `tempfile::tempdir()` path
+/// (`/tmp/.tmpXyZ/...`) is not pruned whole for its name.
+const CHECK_WALK: WalkRules = WalkRules {
+    exclusions: true,
+    exclude_root: false,
+    is_source: is_check_source,
+};
+
+/// `chelis test <dir>`. Unlike `check` it has always applied its filter to the
+/// target too, and still does.
+const TEST_WALK: WalkRules = WalkRules {
+    exclusions: true,
+    exclude_root: true,
+    is_source: is_test_source,
+};
+
+/// Surf (`.ch`) and Deep (`.dp`): `cmd_check_one` routes `.dp` through the
+/// Deep ingestion helper, and both surfaces emit the same report.
+fn is_check_source(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("ch") | Some("dp")
+    )
+}
+
+fn is_test_source(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()) == Some("ch")
+}
+
+/// Dot-prefixed, read from the name's bytes, so a name that is not UTF-8 is
+/// classified exactly rather than through a lossy rendering.
+fn is_hidden(name: &std::ffi::OsStr) -> bool {
+    name.as_encoded_bytes().first() == Some(&b'.')
+}
+
+/// Walk `target` for sources, following symlinks (chelis#1678).
 ///
 /// `chelis check <dir>` and `chelis test <dir>` both walk a directory for
-/// sources, and both used to skip every symlink: `walkdir` does not follow
-/// links by default, and each caller then dropped any entry that was not a
-/// regular file. A symlinked source, or a symlinked directory of them, was
-/// never checked or run -- with a successful exit and no warning. A type
-/// error could be hidden just by putting it behind a link.
+/// sources, and both used to skip every symlink, so a symlinked source -- or
+/// a symlinked directory of them -- was never checked or run, with a
+/// successful exit. #1827 fixed that on top of `walkdir`, and a red-team pass
+/// found what `walkdir` could not do: it resolves a followed link BEFORE its
+/// entry filter sees the link's name, so a dot-named link that failed to
+/// resolve aborted the walk; its loop check reported a failure with no path;
+/// and nothing stopped one file being reached many times over, exponentially
+/// many through links that double back. This walk is written out so that each
+/// of those is decided rather than inherited:
 ///
-/// Following links adds three failure modes the unfollowed walk never met,
-/// and `walkdir` reports each as an error on its entry, which the old code
-/// propagated, aborting the whole run:
+/// - **the name filter runs before a link is resolved**, so an excluded link
+///   contributes nothing, whatever its target;
+/// - **every file and directory is visited once**, identified by its canonical
+///   path, and the first path in walk order names it. That subsumes loop
+///   detection, and it bounds the walk by the tree's real size;
+/// - **an entry that cannot be resolved** is collected when its own name is a
+///   source name, so its report carries the read failure, as naming it
+///   directly would; contributes nothing when its referent does not exist;
+///   and is otherwise a walk failure;
+/// - **a directory that cannot be read** is a walk failure naming it, and the
+///   walk continues past it.
 ///
-/// - **a loop** (a link back to an ancestor): skipped. Following it would
-///   only revisit files already collected.
-/// - **a dangling link named like a source**: collected, so the caller
-///   reports it unreadable exactly as if the user had named it directly,
-///   rather than skipping it silently.
-/// - **a dangling link to anything else**: skipped, like any non-source.
+/// Links are followed wherever they point, including out of the target.
 ///
-/// Every other error propagates and aborts the walk: a directory that cannot
-/// be read, and any link that fails to resolve for a reason other than
-/// `NotFound` (a link to an unreadable directory, a self-referencing link, a
-/// link through a file). That holds whatever the link is named, including a
-/// dot-name `keep` would have pruned: `walkdir` resolves a followed link
-/// before `keep` sees it, and the error from its loop check carries no path,
-/// so the entry cannot always be identified here. Reporting directory-level
-/// failures without aborting is the next chelis#1678 change.
-///
-/// `keep` is the caller's own entry filter and `is_source` its own suffix
-/// rule. The two walks genuinely differ in both, and this deliberately
-/// shares only the link handling.
-fn walk_sources(
-    target: &Path,
-    keep: impl FnMut(&walkdir::DirEntry) -> bool,
-    is_source: impl Fn(&Path) -> bool,
-) -> Result<Vec<PathBuf>, String> {
-    let mut files = Vec::new();
-    let walker = walkdir::WalkDir::new(target)
-        .follow_links(true)
-        .sort_by_file_name()
-        .into_iter()
-        .filter_entry(keep);
-    for entry in walker {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) => {
-                if error.loop_ancestor().is_some() {
-                    continue;
-                }
-                if let Some(path) = error.path()
-                    && is_dangling_link(&error, path)
-                {
-                    // An entry that fails to resolve reaches us as an error
-                    // BEFORE `keep` sees it, so the dot-prefix rule every
-                    // caller applies has to be applied here as well.
-                    let hidden = path
-                        .file_name()
-                        .is_some_and(|name| name.to_string_lossy().starts_with('.'));
-                    if !hidden && is_source(path) {
-                        files.push(path.to_path_buf());
-                    }
-                    continue;
-                }
-                return Err(format!("failed to walk {}: {error}", target.display()));
-            }
-        };
-        // With `follow_links`, a link's file type is its target's, so a link
-        // to a source file passes this and is collected under the link's own
-        // path -- the name the user sees in their directory.
-        if entry.file_type().is_file() && is_source(entry.path()) {
-            files.push(entry.path().to_path_buf());
+/// Order is depth-first pre-order with each directory's entries sorted by the
+/// bytes of their names ([04-FIT-22], the order [05-HOST-4] fixes for
+/// `list_dir`), with an explicit stack so a deep tree cannot exhaust the
+/// native one.
+fn walk_sources(target: &Path, rules: &WalkRules) -> Vec<WalkItem> {
+    let mut items = Vec::new();
+    if rules.exclusions && rules.exclude_root {
+        // As `walkdir` named the root: its file name, or the whole path when
+        // it has none. `chelis test`'s discovery depends on it.
+        let name = target.file_name().unwrap_or(target.as_os_str());
+        if is_hidden(name) || (name == "target" && target.is_dir()) {
+            return items;
         }
     }
-    Ok(files)
+    let mut visited = BTreeSet::new();
+    match fs::canonicalize(target) {
+        Ok(identity) => {
+            visited.insert(identity);
+        }
+        Err(error) => {
+            items.push(WalkItem::Failure(format!(
+                "cannot read directory {}: {error}",
+                target.display()
+            )));
+            return items;
+        }
+    }
+    let mut stack = Vec::new();
+    match sorted_entries(target) {
+        Ok(entries) => stack.push(entries.into_iter()),
+        Err(message) => items.push(WalkItem::Failure(message)),
+    }
+    while let Some(entries) = stack.last_mut() {
+        let Some((name, path)) = entries.next() else {
+            stack.pop();
+            continue;
+        };
+        if rules.exclusions && is_hidden(&name) {
+            continue;
+        }
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                if (rules.is_source)(&path) {
+                    items.push(WalkItem::Source(path));
+                } else if error.kind() != io::ErrorKind::NotFound {
+                    items.push(WalkItem::Failure(format!(
+                        "cannot resolve {}: {error}",
+                        path.display()
+                    )));
+                }
+                continue;
+            }
+        };
+        if metadata.is_dir() {
+            if rules.exclusions && name == "target" {
+                continue;
+            }
+            match fs::canonicalize(&path) {
+                Ok(identity) => {
+                    if !visited.insert(identity) {
+                        continue;
+                    }
+                }
+                Err(error) => {
+                    items.push(WalkItem::Failure(format!(
+                        "cannot resolve {}: {error}",
+                        path.display()
+                    )));
+                    continue;
+                }
+            }
+            match sorted_entries(&path) {
+                Ok(entries) => stack.push(entries.into_iter()),
+                Err(message) => items.push(WalkItem::Failure(message)),
+            }
+        } else if metadata.is_file() && (rules.is_source)(&path) {
+            match fs::canonicalize(&path) {
+                Ok(identity) => {
+                    if visited.insert(identity) {
+                        items.push(WalkItem::Source(path));
+                    }
+                }
+                // It resolved a moment ago. Collect it and let the read
+                // report whatever changed, rather than dropping it here.
+                Err(_) => items.push(WalkItem::Source(path)),
+            }
+        }
+    }
+    items
 }
 
-/// Whether a walk error is a symlink whose target does not exist.
+/// A directory's entries, sorted by the bytes of their names.
 ///
-/// Both halves are needed. `NotFound` alone would also match an entry that
-/// vanished mid-walk, and a symlink alone would also match a link to a
-/// directory that exists but cannot be read -- which is a real failure, not
-/// a dangling link, and must keep propagating.
-fn is_dangling_link(error: &walkdir::Error, path: &Path) -> bool {
-    error
-        .io_error()
-        .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
-        && fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+/// A directory that fails part-way through is reported whole: sorting and
+/// walking a partial listing would present it as complete.
+fn sorted_entries(dir: &Path) -> Result<Vec<(std::ffi::OsString, PathBuf)>, String> {
+    let read = || -> io::Result<Vec<(std::ffi::OsString, PathBuf)>> {
+        fs::read_dir(dir)?
+            .map(|entry| entry.map(|entry| (entry.file_name(), entry.path())))
+            .collect()
+    };
+    let mut entries =
+        read().map_err(|error| format!("cannot read directory {}: {error}", dir.display()))?;
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(entries)
 }
 
-/// Returns the JSON report plus a flag indicating whether the report's
-/// `errors` array is non-empty. The flag is the source of truth for
-/// the issue #207 exit-code invariant; callers must thread it back
-/// through to the process exit status.
-fn cmd_check_one(file: &Path, show_inferred: bool, allow_style_violations: bool) -> (String, bool) {
+/// The file's report. Its `errors` list is the source of truth for the
+/// issue #207 exit-code invariant; there is no separate flag that could
+/// disagree with it.
+fn cmd_check_one(file: &Path, show_inferred: bool, allow_style_violations: bool) -> CheckResult {
     // WI-1 follow-up: run the WHOLE check operation on a grown native stack.
     // The chelis-types check entries grow the stack around their own recursion,
     // but the reef/deep loader, the linked-program `clone()`, the desugarer,
@@ -2539,7 +2676,7 @@ fn cmd_check_one_on_grown_stack(
     file: &Path,
     show_inferred: bool,
     allow_style_violations: bool,
-) -> (String, bool) {
+) -> CheckResult {
     // chelis#886 [04-FIT-12]: a failure before the checker is transported by
     // the report, not by a display string on stderr and an empty stdout.
     //
@@ -2558,8 +2695,7 @@ fn cmd_check_one_on_grown_stack(
         Err(error) => {
             let message = format!("failed to read {}: {error}", file.display());
             eprintln!("error: {message}");
-            let json = synthetic_check_report_with_error(&message);
-            return (json, true);
+            return synthetic_check_report_with_error(&message);
         }
     };
     if let Err(rejection) =
@@ -2580,8 +2716,7 @@ fn cmd_check_one_on_grown_stack(
         // putting it in a machine-facing `message` is the shape chelis#886
         // removes, not one to reintroduce while closing it.
         eprintln!("error: {}", rejection.report);
-        let json = synthetic_check_report_with_errors(&rejection.issues);
-        return (json, true);
+        return synthetic_check_report_with_errors(&rejection.issues);
     }
     emit_advisory_lint_warnings_for_file(file);
     // Deep (`.dp`) ingestion: a standalone `.dp` is already-lowered IR,
@@ -2606,8 +2741,7 @@ fn cmd_check_one_on_grown_stack(
     let prepared = match chelis_reef::prepare_program_for_file(file) {
         Ok(prepared) => prepared,
         Err(message) => {
-            let json = synthetic_check_report_with_error(&message);
-            return (json, true);
+            return synthetic_check_report_with_error(&message);
         }
     };
     // Wave-1 red-team M2 (#207 follow-up): inside a reef package the
@@ -2619,8 +2753,7 @@ fn cmd_check_one_on_grown_stack(
     if let Some(prepared_ref) = &prepared
         && prepared_ref.entry_decls.is_empty()
     {
-        let json = synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE);
-        return (json, true);
+        return synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE);
     }
 
     // RFC v5 (RT-1 F2 bypass): inside a reef package every decl checked
@@ -2665,8 +2798,7 @@ fn cmd_check_one_on_grown_stack(
                     // joins them with "; " for the terminal, and a joined
                     // string in one `message` makes `errors.len()` disagree
                     // with the number of problems.
-                    let json = synthetic_check_report_with_errors(&compiler_error_list(&error));
-                    return (json, true);
+                    return synthetic_check_report_with_errors(&compiler_error_list(&error));
                 }
             }
         }
@@ -2736,8 +2868,7 @@ fn cmd_check_one_on_grown_stack(
                     match chelis_surf::parser::parse_str(&source) {
                         Ok(decls) => decls,
                         Err(err) => {
-                            let json = synthetic_check_report_with_error(&err.to_string());
-                            return (json, true);
+                            return synthetic_check_report_with_error(&err.to_string());
                         }
                     }
                 }
@@ -2748,8 +2879,7 @@ fn cmd_check_one_on_grown_stack(
             // `chelis check` and `chelis build` now reject it with the
             // same canonical message so the two surfaces agree.
             if decls.is_empty() {
-                let json = synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE);
-                return (json, true);
+                return synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE);
             }
             // [04-FIT-12]: "any preparation failure occurring before type
             // checking begins" is the atom's own wording, so this is
@@ -2762,8 +2892,7 @@ fn cmd_check_one_on_grown_stack(
                     // reads in a terminal rather than parses out of JSON.
                     let message = error.to_string();
                     eprintln!("error: {message}");
-                    let json = synthetic_check_report_with_error(&message);
-                    return (json, true);
+                    return synthetic_check_report_with_error(&message);
                 }
             };
             // chelis#1664 made this call fallible when inferred signatures
@@ -2772,7 +2901,7 @@ fn cmd_check_one_on_grown_stack(
             // rows becomes a diagnostic inside `check_prepared_for_cli`.
             check_prepared_for_cli(prepared, show_inferred)
         };
-    assemble_check_json(
+    assemble_check_report(
         report,
         &effect_errors,
         &linearity_errors,
@@ -2823,8 +2952,8 @@ fn check_prepared_for_cli(
     }
 }
 
-/// Assemble the typed `chelis check` JSON report and the issue
-/// #207 non-empty-errors flag from the post-pipeline analysis outputs.
+/// Assemble the typed `chelis check` report from the post-pipeline analysis
+/// outputs.
 ///
 /// Shared verbatim between the `.ch` monolithic / layered arm of
 /// [`cmd_check_one`] and the `.dp` helper [`cmd_check_one_deep`] so the
@@ -2834,14 +2963,13 @@ fn check_prepared_for_cli(
 /// are produced; the score-adjust and JSON emission MUST NOT drift, so
 /// both surfaces call exactly this function.
 ///
-/// Returns `(json, errors_in_report)`; the caller maps a non-empty
-/// errors array to [`CHECK_ERRORS_EXIT_CODE`].
-fn assemble_check_json(
+/// The caller maps a non-empty `errors` list to [`CHECK_ERRORS_EXIT_CODE`].
+fn assemble_check_report(
     report: chelis_types::FitnessReport,
     effect_errors: &[chelis_effects::EffectError],
     linearity_errors: &[chelis_types::errors::CheckError],
     inferred_signatures: Option<Vec<chelis_compiler_api::schema::WireInferredSignature>>,
-) -> (String, bool) {
+) -> CheckResult {
     // Infallible by construction (chelis#886 [04-FIT-12]). A validation
     // failure below means the CHECKER measured something outside its own
     // declared domain -- a NaN score, a severity outside [0, 1]. That is a
@@ -2853,31 +2981,28 @@ fn assemble_check_json(
     // So the fallback re-enters the SAME producer with a different input.
     // It is not a second producer: `synthetic_check_report_with_errors` is
     // the one this file already uses for every pre-checker failure.
-    match assemble_validated_check_json(
+    match assemble_validated_check_report(
         report,
         effect_errors,
         linearity_errors,
         inferred_signatures,
     ) {
         Ok(result) => result,
-        Err(message) => (
-            synthetic_check_report_with_errors(&[format!(
-                "the checker produced a report outside its declared numeric domain: {message}"
-            )]),
-            true,
-        ),
+        Err(message) => synthetic_check_report_with_errors(&[format!(
+            "the checker produced a report outside its declared numeric domain: {message}"
+        )]),
     }
 }
 
-/// The fallible half of [`assemble_check_json`], kept separate so the caller
+/// The fallible half of [`assemble_check_report`], kept separate so the caller
 /// above can be total. Its `Err` is a message, not a `Box<dyn Error>`,
 /// because the only consumer turns it into a diagnostic.
-fn assemble_validated_check_json(
+fn assemble_validated_check_report(
     mut report: chelis_types::FitnessReport,
     effect_errors: &[chelis_effects::EffectError],
     linearity_errors: &[chelis_types::errors::CheckError],
     inferred_signatures: Option<Vec<chelis_compiler_api::schema::WireInferredSignature>>,
-) -> Result<(String, bool), String> {
+) -> Result<CheckResult, String> {
     use chelis_compiler_api::schema::numbers::UnitInterval;
     // Validate the measured report before applying the specified penalties;
     // otherwise max(0) could turn an invalid NaN score into a plausible zero.
@@ -2902,15 +3027,10 @@ fn assemble_validated_check_json(
             .collect::<Result<Vec<_>, _>>()?,
     );
     wire.inferred_signatures = inferred_signatures;
-    let errors_in_report = !wire.errors.is_empty();
-    // Same justification as the synthetic producer's: the value is owned
-    // strings and already-validated numbers, so the serializer has no
-    // failure mode left to report.
-    Ok((
-        wire.to_report_json()
-            .expect("a validated report serializes"),
-        errors_in_report,
-    ))
+    // Serialization re-checks the counter relationship `try_from_fitness`
+    // already enforced, so a report returned from here always renders.
+    wire.validate()?;
+    Ok(wire)
 }
 
 /// `chelis check` ingestion for a standalone Deep (`.dp`) file.
@@ -2922,7 +3042,7 @@ fn assemble_validated_check_json(
 /// uses the same compiler-API pipeline as the `.ch` arm.
 ///
 /// [`check_prepared_for_cli`] calls `analyze_prepared` and `complete_checks`.
-/// It then sends their typed results to [`assemble_check_json`].
+/// It then sends their typed results to [`assemble_check_report`].
 ///
 /// `parse_and_stamp_file` keeps the `.dp`
 /// check surface on the same closed-vocabulary tag gate as
@@ -2931,26 +3051,24 @@ fn assemble_validated_check_json(
 /// caught and routed through `synthetic_check_report_with_error` so a
 /// malformed `.dp` produces the same JSON-report-plus-exit-2 shape the
 /// `.ch` parse-error path produces, never a propagated boxed `Err`.
-fn cmd_check_one_deep(source: &str, show_inferred: bool) -> (String, bool) {
+fn cmd_check_one_deep(source: &str, show_inferred: bool) -> CheckResult {
     let deep_source = style_gate::strip_deep_lint_directive_lines(source);
     let deep_exprs = match chelis_deep::parse_and_stamp_file(&deep_source) {
         Ok(deep_exprs) => deep_exprs,
         Err(err) => {
-            let json = synthetic_check_report_with_error(&err.to_string());
-            return (json, true);
+            return synthetic_check_report_with_error(&err.to_string());
         }
     };
     // Parity with the `.ch` empty-file path (a parse-clean file with
     // zero top-level exprs): reject with the same canonical message so
     // the `.dp` and `.ch` surfaces agree.
     if deep_exprs.is_empty() {
-        let json = synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE);
-        return (json, true);
+        return synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE);
     }
     let prepared = chelis_compiler_api::pipeline::prepare_deep(deep_exprs, None);
     let (report, effect_errors, linearity_errors, inferred) =
         check_prepared_for_cli(prepared, show_inferred);
-    assemble_check_json(report, &effect_errors, &linearity_errors, inferred)
+    assemble_check_report(report, &effect_errors, &linearity_errors, inferred)
 }
 
 fn advisory_lint_scope(file: &Path) -> &Path {
@@ -3030,20 +3148,21 @@ mod check_path_totality_tests {
     //! type cannot.
 
     use super::{
-        EMPTY_PROGRAM_MESSAGE, assemble_check_json, check_prepared_for_cli, cmd_check_one,
-        cmd_check_one_deep, cmd_check_one_on_grown_stack, synthetic_check_report_with_error,
-        synthetic_check_report_with_errors,
+        EMPTY_PROGRAM_MESSAGE, assemble_check_report, check_directory, check_prepared_for_cli,
+        cmd_check, cmd_check_one, cmd_check_one_deep, cmd_check_one_on_grown_stack,
+        synthetic_check_report_with_error, synthetic_check_report_with_errors,
     };
+    use chelis_compiler_api::schema::{CheckDirectoryReport, CheckResult};
     use std::path::Path;
 
-    /// `assemble_check_json`'s signature, spelled out so the pin stays
+    /// `assemble_check_report`'s signature, spelled out so the pin stays
     /// readable.
-    type AssembleCheckJson = fn(
+    type AssembleCheckReport = fn(
         chelis_types::FitnessReport,
         &[chelis_effects::EffectError],
         &[chelis_types::errors::CheckError],
         Option<Vec<chelis_compiler_api::schema::WireInferredSignature>>,
-    ) -> (String, bool);
+    ) -> CheckResult;
 
     /// `check_prepared_for_cli`'s signature, with its return tuple spelled
     /// out HERE rather than through the production alias
@@ -3073,6 +3192,11 @@ mod check_path_totality_tests {
     /// type here is spelled out locally; none is borrowed from production,
     /// where it could be widened along with the function it describes.
     ///
+    /// chelis#1678 added the top of the path: `cmd_check` itself and the
+    /// directory envelope's producer. Directory mode was the last place a
+    /// `?` could still discard every report (an unreadable subdirectory exited
+    /// 1 with nothing on stdout), so it is pinned with the rest.
+    ///
     /// An earlier revision of this module bound only the report producer. A
     /// red-team mutation re-widened `cmd_check_one`,
     /// `cmd_check_one_on_grown_stack` and `cmd_check_one_deep` back to
@@ -3082,13 +3206,15 @@ mod check_path_totality_tests {
     /// signature that no binding names.
     #[test]
     fn every_check_path_signature_is_total() {
-        let _: fn(&Path, bool, bool) -> (String, bool) = cmd_check_one;
-        let _: fn(&Path, bool, bool) -> (String, bool) = cmd_check_one_on_grown_stack;
-        let _: fn(&str, bool) -> (String, bool) = cmd_check_one_deep;
+        let _: fn(&Path, bool, bool) -> i32 = cmd_check;
+        let _: fn(&Path, bool, bool) -> CheckDirectoryReport = check_directory;
+        let _: fn(&Path, bool, bool) -> CheckResult = cmd_check_one;
+        let _: fn(&Path, bool, bool) -> CheckResult = cmd_check_one_on_grown_stack;
+        let _: fn(&str, bool) -> CheckResult = cmd_check_one_deep;
         let _: CheckPreparedForCli = check_prepared_for_cli;
-        let _: AssembleCheckJson = assemble_check_json;
-        let _: fn(&[String]) -> String = synthetic_check_report_with_errors;
-        let _: fn(&str) -> String = synthetic_check_report_with_error;
+        let _: AssembleCheckReport = assemble_check_report;
+        let _: fn(&[String]) -> CheckResult = synthetic_check_report_with_errors;
+        let _: fn(&str) -> CheckResult = synthetic_check_report_with_error;
     }
 
     /// The keystone. If this binding ever needs `?` or `.unwrap()`, the
@@ -3096,7 +3222,8 @@ mod check_path_totality_tests {
     /// propagate again.
     #[test]
     fn the_report_producer_is_total() {
-        let json: String = synthetic_check_report_with_errors(&["probe".to_string()]);
+        let report: CheckResult = synthetic_check_report_with_errors(&["probe".to_string()]);
+        let json: String = report.to_report_json().expect("the report renders");
         let parsed: serde_json::Value =
             serde_json::from_str(&json).expect("the producer emits JSON");
         assert_eq!(parsed["errors"].as_array().map(Vec::len), Some(1));
@@ -3105,9 +3232,12 @@ mod check_path_totality_tests {
     /// The singular wrapper is total too, and agrees with the plural form.
     #[test]
     fn the_singular_wrapper_is_total_and_agrees() {
-        let one: String = synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE);
-        let plural: String =
-            synthetic_check_report_with_errors(&[EMPTY_PROGRAM_MESSAGE.to_string()]);
+        let one = synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE)
+            .to_report_json()
+            .expect("render");
+        let plural = synthetic_check_report_with_errors(&[EMPTY_PROGRAM_MESSAGE.to_string()])
+            .to_report_json()
+            .expect("render");
         assert_eq!(one, plural, "the wrapper is the plural form at n = 1");
     }
 
@@ -3118,7 +3248,9 @@ mod check_path_totality_tests {
     fn every_message_becomes_its_own_diagnostic() {
         for count in [0usize, 1, 2, 17] {
             let messages: Vec<String> = (0..count).map(|i| format!("issue {i}")).collect();
-            let json = synthetic_check_report_with_errors(&messages);
+            let json = synthetic_check_report_with_errors(&messages)
+                .to_report_json()
+                .expect("render");
             let parsed: serde_json::Value = serde_json::from_str(&json).expect("JSON");
             assert_eq!(
                 parsed["errors"].as_array().map(Vec::len),
@@ -3142,7 +3274,9 @@ mod check_path_totality_tests {
             "x".repeat(6000),
             "quote \" backslash \\ brace }".to_string(),
         ];
-        let json = synthetic_check_report_with_errors(&messages);
+        let json = synthetic_check_report_with_errors(&messages)
+            .to_report_json()
+            .expect("render");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("JSON");
         assert_eq!(
             parsed["errors"].as_array().map(Vec::len),
@@ -8102,24 +8236,23 @@ fn discover_test_files(target: &Path) -> Result<Vec<PathBuf>, String> {
         }
         return Ok(vec![target.to_path_buf()]);
     }
-    walk_sources(
-        target,
-        |entry| {
-            // Skip dot-prefixed files AND directories (editor temp files, build
-            // dirs like `.git` or `target/.rustc_info.json`, hidden fixtures).
-            // Also skip `target/` directories which accumulate build artifacts
-            // and have bitten us in red-team testing.
-            let name = entry.file_name().to_string_lossy();
-            if name.starts_with('.') {
-                return false;
+    // Skip dot-prefixed files AND directories (editor temp files, build dirs
+    // like `.git` or `target/.rustc_info.json`, hidden fixtures), and
+    // `target/` directories, which accumulate build artifacts and have bitten
+    // us in red-team testing.
+    //
+    // A walk failure still aborts `chelis test`, as it always has: its
+    // directory-level reporting is chelis#1825's, not the check envelope's.
+    let mut files = Vec::new();
+    for item in walk_sources(target, &TEST_WALK) {
+        match item {
+            WalkItem::Source(file) => files.push(file),
+            WalkItem::Failure(message) => {
+                return Err(format!("failed to walk {}: {message}", target.display()));
             }
-            if entry.file_type().is_dir() && name == "target" {
-                return false;
-            }
-            true
-        },
-        |path| path.extension().and_then(|e| e.to_str()) == Some("ch"),
-    )
+        }
+    }
+    Ok(files)
 }
 
 /// Render the signal that killed a worker (e.g. "SIGABRT (6)").

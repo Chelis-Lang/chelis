@@ -9,7 +9,15 @@ Chelis ships one CLI with machine-facing and human-facing subcommands.
 - `chelis check` parses, desugars, type-checks, and reports fitness/errors.
   Accepts both Surf (`.ch`) and already-lowered Deep (`.dp`) inputs; a
   `.dp` skips desugaring and is type/effect/linearity-checked directly,
-  emitting the same JSON report shape as the `.ch` path.
+  emitting the same JSON report shape as the `.ch` path. Given a
+  directory, it checks every `.ch` and `.dp` file under it (following
+  symlinks, skipping dot-prefixed entries and `target/` directories) and
+  emits one envelope, `{"files": [{"file", "report"}...], "errors": [...]}`.
+  `errors` holds the failures that belong to no single file: a directory
+  that cannot be read (`directory_walk_error`) and a directory with nothing
+  to check (`empty_corpus`). It exits 0 only when every error list in the
+  envelope is empty, and 2 otherwise. `spec/04-type-system.md`
+  § Directory mode is the contract.
 - `chelis deep` prints canonical Deep for a Surf program.
 - `chelis surf` decompiles Deep back to Surf.
 - `chelis eval` runs the host/runtime evaluator. `chelis eval --file`

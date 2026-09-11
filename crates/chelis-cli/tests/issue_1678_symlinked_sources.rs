@@ -335,3 +335,54 @@ fn chelis_test_is_not_aborted_by_a_symlink_loop() {
     assert_eq!(summary, serde_json::json!({"passed": 1, "failed": 0}));
     assert_eq!(code, Some(0));
 }
+
+// ---------------------------------------------------------------------------
+// The walk `check` and `test` share visits each file once and filters a link
+// by its own name before resolving it (spec/04 [04-FIT-20]). #1827's
+// red-team round found `chelis test` running an aliased test twice, and a
+// dot-named link to an unreadable directory aborting the run.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn chelis_test_runs_a_test_reached_by_two_paths_once() {
+    let (_dir, pkg) = make_test_package();
+    fs::write(
+        pkg.join("tests/real.ch"),
+        "module Probe.Tests.Real\n\ndef test_real_passes() -> unit = test_assert(true, \"real\")\n",
+    )
+    .expect("write");
+    symlink("real.ch", pkg.join("tests/alias.ch")).expect("symlink");
+
+    let (code, summary) = run_tests(&pkg);
+    assert_eq!(
+        summary,
+        serde_json::json!({"passed": 1, "failed": 0}),
+        "one test, run once"
+    );
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn chelis_test_skips_a_dot_named_link_to_an_unreadable_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, pkg) = make_test_package();
+    fs::write(
+        pkg.join("tests/real.ch"),
+        "module Probe.Tests.Real\n\ndef test_real_passes() -> unit = test_assert(true, \"real\")\n",
+    )
+    .expect("write");
+    let locked = dir.path().join("locked");
+    fs::create_dir_all(&locked).expect("mkdir");
+    symlink(&locked, pkg.join("tests/.cache")).expect("symlink");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).expect("chmod");
+    let enforced = fs::read_dir(&locked).is_err();
+
+    let (code, summary) = run_tests(&pkg);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).expect("restore");
+    if !enforced {
+        eprintln!("skipped: permissions are not enforced for this user");
+        return;
+    }
+    assert_eq!(summary, serde_json::json!({"passed": 1, "failed": 0}));
+    assert_eq!(code, Some(0));
+}

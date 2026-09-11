@@ -7898,23 +7898,26 @@ fn check_relative_file_emits_non_blocking_lint_warning() {
         .stderr(predicate::str::contains("redundant-linearity-call"));
 }
 
-/// Bucket 6b: empty directory is a legitimate state (fresh project,
-/// every file filtered) — must not error.
+/// chelis#1678 [04-FIT-24]: an empty corpus is an error, not the success
+/// Bucket 6b first chose. The cases where a directory target holds nothing
+/// to check are mostly mistakes -- a typo landing on a sibling, a level
+/// whose only sources sit under `target/` -- and a success beside exit 0 is
+/// what an agent-driven gate ignores. It is symmetric with an empty `.ch`,
+/// which has been an error since #247's M2.
 #[test]
-fn check_empty_directory_emits_empty_files_array() {
+fn check_empty_directory_is_an_empty_corpus_error() {
     let dir = tempdir().expect("tempdir");
     let output = Command::cargo_bin("chelis")
         .expect("binary")
         .args(["check", dir.path().to_str().unwrap()])
         .assert()
-        .success()
+        .code(2)
         .get_output()
         .clone();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("\"files\":[]"),
-        "expected empty files array, got: {stdout}"
-    );
+    let parsed: Value =
+        serde_json::from_slice(&output.stdout).expect("an empty corpus still emits the envelope");
+    assert_eq!(parsed["files"], serde_json::json!([]));
+    assert_eq!(parsed["errors"][0]["kind"], "empty_corpus", "{parsed}");
 }
 
 /// Bucket 6b regression: single-file `chelis check` continues to emit
