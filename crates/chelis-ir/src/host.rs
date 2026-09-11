@@ -4642,7 +4642,7 @@ fn lower_def_body_kernel(
         &expected,
         None,
     );
-    let (dag, trace) = match lowered {
+    let (dag, _trace) = match lowered {
         #[cfg(feature = "lowering-trace")]
         Ok(((dag, _), trace)) => {
             let dag = remap_tensor_helper_dim_symbols(&dag, &signature.scope, &expected);
@@ -4665,8 +4665,6 @@ fn lower_def_body_kernel(
             return Ok(None);
         }
     };
-    #[cfg(not(feature = "lowering-trace"))]
-    let _ = trace;
     if kernel_dag_loads_builtin(&dag).is_some() {
         record_host_work(|profile| {
             profile.tensor_helper_fallbacks += 1;
@@ -4679,7 +4677,7 @@ fn lower_def_body_kernel(
         dag,
         None,
         #[cfg(feature = "lowering-trace")]
-        trace,
+        _trace,
         &signature.scope,
         tensor_helpers,
         expected,
@@ -5589,15 +5587,13 @@ fn lower_tensor_helper_product(
                 &planning,
             )
             .map(|plan| (plan, ()));
-            let (plan, trace) = match lowered {
+            let (plan, _trace) = match lowered {
                 Ok(lowered) => lowered,
                 Err(diagnostic) if diagnostic.fatal => {
                     crate::lower::raise_fatal_lowering_diagnostic(diagnostic)
                 }
                 Err(_) => return None,
             };
-            #[cfg(not(feature = "lowering-trace"))]
-            let _ = trace;
             let rebound =
                 remap_tensor_helper_dim_symbols(plan.dag_for_inspection(), scope, expected);
             let plan = plan.rebind_dimensions(rebound).unwrap_or_else(|message| {
@@ -5606,7 +5602,7 @@ fn lower_tensor_helper_product(
                 )
             });
             #[cfg(feature = "lowering-trace")]
-            let mut trace = trace;
+            let mut trace = _trace;
             #[cfg(feature = "lowering-trace")]
             if let Some(trace) = &mut trace {
                 trace.record_dimension_rebinding(plan.dag_for_inspection());
