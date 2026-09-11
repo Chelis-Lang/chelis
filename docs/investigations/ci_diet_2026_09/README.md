@@ -52,12 +52,18 @@ admitting the same class a day at a time.
 
 ## Status of these files
 
-Point-in-time artifacts, **not maintained automation**. The harness is exempt from the
-phase-gate and example-corpus policies for the same reason the probe corpus in
-[`../probes/`](../probes/) is: it is neither an executable example nor a gate script, and
-it describes the tree as it stood on 2026-09-11. It is kept here rather than in that
-directory because `../probes/README.md` indexes one named sweep and should keep matching
-its own contents.
+Point-in-time artifacts, **not maintained automation**. The harness is outside the
+phase-gate and example-corpus policies rather than exempted from them: those govern
+`examples/`, and it is neither an executable example nor a gate script. It describes the
+tree as it stood on 2026-09-11.
+
+It is kept here rather than moved into [`../probes/`](../probes/) because that
+directory's `README.md` indexes one named 2026-07 sweep and its Layout table would have
+stopped matching its own contents. Keeping it here costs one thing, which is paid rather
+than dodged: **this directory is registered in `pyrightconfig.json`'s analysis roots**,
+because `scripts/check_pyright_scope.py` enumerates every tracked `*.py` in the
+repository and fails closed on one that lives outside those roots. Adding a Python file
+here without that registration turns `main` red.
 
 The live trackers are the issues, not these documents. Where a file here describes an
 issue as open that has since closed, the issue is right and the file is history.
