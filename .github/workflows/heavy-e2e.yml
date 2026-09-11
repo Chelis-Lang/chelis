@@ -424,6 +424,11 @@ jobs:
           shared-key: linux-workspace
           save-if: false
 
+      # Phase A must PASS. It does not on current `main`: its `symbolic_window`
+      # target runs `issue_368_runtime_symbolic_window_grad_is_half_everywhere`,
+      # whose `grad` lowering regressed in chelis#1693 and is owned by
+      # chelis#1775. This step is red until that lands, deliberately, because
+      # the row really is short. Do not add `continue-on-error`.
       - name: Runtime extent oracle (phase A)
         run: .venv/bin/python scripts/runtime_extent_oracle.py --phase a
 

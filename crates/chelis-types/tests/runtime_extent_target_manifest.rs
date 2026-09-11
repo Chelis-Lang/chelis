@@ -179,6 +179,33 @@ fn path_attribute(attrs: &[syn::Attribute]) -> Option<String> {
     })
 }
 
+/// The conditional-compilation attribute that makes an item's presence, or
+/// its `#[ignore]`, unreadable from the source alone.
+///
+/// `#[cfg(test)]` is the exception and returns `None`: every source a
+/// manifest row names is compiled as a test binary, so that gate is always
+/// on. Everything else is refused rather than guessed. `#[cfg_attr(..)]` can
+/// attach `ignore` under a condition this parser cannot evaluate, and a
+/// `#[cfg(..)]` on a test or on a module holding tests decides whether the
+/// binary contains them at all; counting either one unconditionally would
+/// make the comparison quietly wrong instead of loudly unavailable.
+fn conditional_gate(attrs: &[syn::Attribute]) -> Option<String> {
+    attrs.iter().find_map(|attr| {
+        if attr.path().is_ident("cfg_attr") {
+            return Some("#[cfg_attr(...)]".to_string());
+        }
+        if !attr.path().is_ident("cfg") {
+            return None;
+        }
+        let tokens = attr
+            .meta
+            .require_list()
+            .map(|list| list.tokens.to_string())
+            .unwrap_or_default();
+        (tokens.trim() != "test").then(|| format!("#[cfg({tokens})]"))
+    })
+}
+
 /// Where a file-backed `mod NAME;` declaration resolves, by Rust's own two
 /// spellings, or the `#[path]` override when one is present.
 fn module_source(directory: &Path, name: &str, attrs: &[syn::Attribute]) -> Option<PathBuf> {
@@ -203,45 +230,56 @@ fn module_source(directory: &Path, name: &str, attrs: &[syn::Attribute]) -> Opti
 /// modules. A second level is not followed; `incomplete` records the module
 /// whose contents were not read, so an equality row can refuse to compare a
 /// partial inventory.
+#[derive(Default)]
+struct Scan {
+    inventory: Inventory,
+    /// Modules whose contents were not read, so the inventory is partial.
+    incomplete: Vec<String>,
+    /// Tests whose presence or `#[ignore]` is conditional, as (name, reason).
+    /// A row refuses to compare when its selector reaches one of these.
+    conditional: Vec<(String, String)>,
+}
+
 fn collect_tests(
     items: &[syn::Item],
     directory: &Path,
     prefix: &str,
     follow_files: bool,
-    inventory: &mut Inventory,
-    incomplete: &mut Vec<String>,
+    gate: Option<&str>,
+    scan: &mut Scan,
 ) {
     for item in items {
         match item {
             syn::Item::Fn(function) if has_attribute(&function.attrs, "test") => {
                 let name = format!("{prefix}{}", function.sig.ident);
+                if let Some(reason) =
+                    conditional_gate(&function.attrs).or_else(|| gate.map(str::to_string))
+                {
+                    scan.conditional.push((name, reason));
+                    continue;
+                }
                 let ignored = has_attribute(&function.attrs, "ignore");
                 assert!(
-                    inventory.insert(name.clone(), ignored).is_none(),
+                    scan.inventory.insert(name.clone(), ignored).is_none(),
                     "two tests named {name}"
                 );
             }
             syn::Item::Mod(module) => {
                 let nested = format!("{prefix}{}::", module.ident);
+                let own = conditional_gate(&module.attrs);
+                let inherited = own.as_deref().or(gate);
                 if let Some((_, inner)) = &module.content {
-                    collect_tests(
-                        inner,
-                        directory,
-                        &nested,
-                        follow_files,
-                        inventory,
-                        incomplete,
-                    );
+                    collect_tests(inner, directory, &nested, follow_files, inherited, scan);
                     continue;
                 }
                 if !follow_files {
-                    incomplete.push(nested);
+                    scan.incomplete.push(nested);
                     continue;
                 }
                 let Some(source) =
                     module_source(directory, &module.ident.to_string(), &module.attrs)
                 else {
-                    incomplete.push(nested);
+                    scan.incomplete.push(nested);
                     continue;
                 };
                 let file = parse_source(&source);
@@ -249,7 +287,7 @@ fn collect_tests(
                     .parent()
                     .expect("a module source has a parent directory")
                     .to_path_buf();
-                collect_tests(&file.items, &parent, &nested, false, inventory, incomplete);
+                collect_tests(&file.items, &parent, &nested, false, inherited, scan);
             }
             _ => {}
         }
@@ -263,7 +301,7 @@ fn collect_tests(
 /// single file is a convention rather than a resolution of the crate's module
 /// tree, which is the second reason `lib` rows are checked for containment
 /// only.
-fn inventory_for(root: &Path, row: &Row) -> (Inventory, Vec<String>) {
+fn inventory_for(root: &Path, row: &Row) -> Scan {
     let source = root.join(&row.file);
     let file = parse_source(&source);
     let directory = source
@@ -284,17 +322,9 @@ fn inventory_for(root: &Path, row: &Row) -> (Inventory, Vec<String>) {
     } else {
         String::new()
     };
-    let mut inventory = Inventory::new();
-    let mut incomplete = Vec::new();
-    collect_tests(
-        &file.items,
-        &directory,
-        &prefix,
-        true,
-        &mut inventory,
-        &mut incomplete,
-    );
-    (inventory, incomplete)
+    let mut scan = Scan::default();
+    collect_tests(&file.items, &directory, &prefix, true, None, &mut scan);
+    scan
 }
 
 fn selects(row: &Row, name: &str) -> bool {
@@ -316,7 +346,30 @@ fn check_row(root: &Path, row: &Row) -> Result<(), String> {
             row.id, row.file, row.package
         ));
     }
-    let (inventory, incomplete) = inventory_for(root, row);
+    let Scan {
+        inventory,
+        incomplete,
+        conditional,
+    } = inventory_for(root, row);
+    // A conditional test is refused when the row's selector reaches it, on
+    // every row shape rather than equality rows alone: under `#[cfg_attr]`
+    // the unreadable part is the `#[ignore]` check, and that check runs on
+    // containment rows too. A conditional test the selector does not reach
+    // changes no verdict, so it is left alone. `crates/chelis-ir/src/host.rs`
+    // holds one such test behind `#[cfg(debug_assertions)]`, outside the
+    // `host_actualization` row's single named test.
+    let reached: Vec<String> = conditional
+        .iter()
+        .filter(|(name, _)| selects(row, name))
+        .map(|(name, reason)| format!("{name} carries {reason}"))
+        .collect();
+    if !reached.is_empty() {
+        return Err(format!(
+            "{}: cannot read this source's test inventory, {}",
+            row.id,
+            reached.join("; ")
+        ));
+    }
     if row.requires_equality() && !incomplete.is_empty() {
         return Err(format!(
             "{}: cannot compare a complete inventory, these modules were not read: {}",
@@ -386,12 +439,16 @@ fn check_row(root: &Path, row: &Row) -> Result<(), String> {
 }
 
 fn fixture_row(selector: Value, expected: &[&str], list_only: bool) -> Row {
+    fixture_row_over("target_fixture.rs", selector, expected, list_only)
+}
+
+fn fixture_row_over(source: &str, selector: Value, expected: &[&str], list_only: bool) -> Row {
     let mut value = serde_json::json!({
         "phase": "a",
         "id": "fixture",
         "package": "chelis-types",
         "kind": "test",
-        "file": "crates/chelis-types/tests/fixtures/runtime_extent_manifest/target_fixture.rs",
+        "file": format!("crates/chelis-types/tests/fixtures/runtime_extent_manifest/{source}"),
         "selector": selector,
         "expected": expected,
     });
@@ -560,6 +617,46 @@ fn an_exact_selector_whose_named_test_is_absent_is_rejected() {
 }
 
 #[test]
+fn a_conditionally_compiled_test_is_refused_rather_than_counted() {
+    // Whether `present_only_under_a_feature` is in the binary depends on a
+    // feature this parser cannot evaluate, so the inventory is unreadable
+    // rather than short by one. Counting it either way would make an
+    // equality row silently wrong.
+    let root = workspace_root();
+    let row = fixture_row_over(
+        "conditional_fixture.rs",
+        serde_json::json!({"mode": "substring", "value": "present_only"}),
+        &["present_only_under_a_feature"],
+        false,
+    );
+    let error = check_row(&root, &row).expect_err("a cfg-gated test must be refused");
+    assert!(
+        error.contains("present_only_under_a_feature carries #[cfg(feature"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_conditionally_ignored_test_is_refused_rather_than_counted() {
+    // `#[cfg_attr(target_os = "macos", ignore)]` attaches `#[ignore]` under a
+    // condition, so the ignore check this tripwire runs cannot be answered
+    // from the source. The whole row is refused, containment rows included,
+    // because that check runs on those too.
+    let root = workspace_root();
+    let row = fixture_row_over(
+        "conditional_fixture.rs",
+        serde_json::json!({"mode": "exact"}),
+        &["ignored_only_on_one_platform"],
+        false,
+    );
+    let error = check_row(&root, &row).expect_err("a cfg_attr test must be refused");
+    assert!(
+        error.contains("ignored_only_on_one_platform carries #[cfg_attr(...)]"),
+        "{error}"
+    );
+}
+
+#[test]
 fn a_row_naming_a_missing_source_is_rejected() {
     let root = workspace_root();
     let mut row = fixture_row(
@@ -584,8 +681,10 @@ fn a_path_module_contributes_its_tests_under_its_module_prefix() {
         &["alpha_is_selected"],
         false,
     );
-    let (inventory, incomplete) = inventory_for(&root, &row);
-    assert!(incomplete.is_empty(), "{incomplete:?}");
+    let scan = inventory_for(&root, &row);
+    assert!(scan.incomplete.is_empty(), "{:?}", scan.incomplete);
+    assert!(scan.conditional.is_empty(), "{:?}", scan.conditional);
+    let inventory = scan.inventory;
     assert_eq!(
         inventory.keys().cloned().collect::<Vec<_>>(),
         vec![

@@ -599,6 +599,16 @@ command currently fails because `SLICE_PHASES` still requires unregistered
 passing phase or erase outstanding B rows. `--phase a` and `--phase b`
 retain their names and row-transition checks.
 
+`--phase a` does not reach its row report on current `main`. Its
+`symbolic_window` target runs
+`issue_368_runtime_symbolic_window_grad_is_half_everywhere`, whose `grad`
+lowering fails backward-DAG verification; chelis#1775 owns that regression and
+names chelis#1693 as its first failing commit. Every other phase-A and phase-B
+target passes with no receipt drift, so that one cell is what stands between
+the oracle and a phase-A row report. The nightly `runtime-extent-oracle` job
+requires `--phase a` to PASS and is therefore red until chelis#1775 lands,
+deliberately: the red is the signal that the row is still short.
+
 Phase A's wire capacity leg executes the Python binding facade through the
 interpreter `PYO3_PYTHON` names, falling back to the checkout's `.venv`, and
 not through the interpreter running the oracle. Install that facade's

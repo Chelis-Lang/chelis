@@ -299,6 +299,7 @@ UNCOMPILED_EXCEPTIONS: tuple[UncompiledException, ...] = (
         ),
         owning_gate="crates/chelis-types/tests/runtime_extent_target_manifest.rs",
         sources=(
+            "crates/chelis-types/tests/fixtures/runtime_extent_manifest/conditional_fixture.rs",
             "crates/chelis-types/tests/fixtures/runtime_extent_manifest/included_fixture.rs",
             "crates/chelis-types/tests/fixtures/runtime_extent_manifest/target_fixture.rs",
         ),

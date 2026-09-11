@@ -626,6 +626,12 @@ class RuntimeExtentOracleTests(unittest.TestCase):
             "sorted and unique",
         )
         reject(lambda p: p["targets"].append(p["targets"][0]), "repeats target")
+        reject(
+            lambda p: p["targets"][0].update(
+                list_only=True, selector={"mode": "all"}
+            ),
+            "listed, which needs a substring selector",
+        )
         reject(lambda p: p.update(schema_version=2), "unsupported target manifest")
         reject(lambda p: p.update(targets=[]), "non-empty targets list")
 

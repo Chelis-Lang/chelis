@@ -835,6 +835,14 @@ def load_target_manifest(path: Path | None = None) -> tuple[Mapping[str, object]
             raise OracleFailure(f"target {row['id']!r} file must live under its own package")
         if not (REPO_ROOT / source).is_file():
             raise OracleFailure(f"target {row['id']!r} names a missing source file {source!r}")
+        if row.get("list_only") and selector["mode"] != "substring":
+            # `--ignored --list` names its tests with one filter, so
+            # `target_argv` reads `selector["value"]` for a listed row.
+            # Without this the loader admits the row and the command builder
+            # dies on a bare KeyError instead of a named failure.
+            raise OracleFailure(
+                f"target {row['id']!r} is listed, which needs a substring selector"
+            )
         if row["kind"] == "test" and f"crates/{row['package']}/tests/" not in source:
             raise OracleFailure(f"target {row['id']!r} is an integration target outside tests/")
     return tuple(rows)
