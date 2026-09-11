@@ -68,11 +68,14 @@
 //!
 //! The independent trap divides by a RUNTIME zero rather than a literal
 //! `0i64`, so constant folding cannot turn it into a check-time rejection and
-//! remove the control's teeth. The extent under test is locally computed
-//! (chelis#1379's `mul(shape(x, 0), 2i64)`) rather than interface-valued: an
-//! all-interface class runs at ENTRY, before any other operation of the
-//! function, so ordering one against an in-body trap would make both controls
-//! pass wherever the local guards went.
+//! remove the control's teeth. The extent under test is an input tensor's
+//! axis, so its guard runs at `f`'s ENTRY, and the control still discriminates
+//! because a called function's entry sits exactly where its call sits in the
+//! caller's source order. `guard_order_source`'s own comment records the
+//! measurement behind that placement; the emitted C is its oracle. An earlier
+//! version of this paragraph called the extent locally computed and cited
+//! chelis#1379's arithmetic form as the example, which described neither the
+//! fixture nor the placement.
 //!
 //! ## Trap rendering
 //!
@@ -447,9 +450,13 @@ fn c_run_result(dir: &TempDir, stem: &str, source: &str) -> (bool, String) {
 ///
 /// A class whose witnesses are two `Load` axes would NOT work here: its guard
 /// runs in `f`'s prologue either way, so both controls would pass wherever
-/// the guards went. chelis#1379's arithmetic form would not work either -
-/// the C lane rejects `mul(shape(x, 0), 2i64)` outright under chelis#469, and
-/// a control that fails at build time is not measuring order.
+/// the guards went. chelis#1379's arithmetic form was unusable here for a
+/// different reason, that the C lane refused to build `mul(shape(x, 0), 2i64)`
+/// at all under chelis#469, and a control that fails at build time is not
+/// measuring order. That rejection is gone and the form now lands a local
+/// guard at its own operation, so it would serve; this fixture keeps the
+/// shape-read spelling because that is the form its measurements were taken
+/// on.
 fn guard_order_source(claim: u32, trap_first: bool) -> String {
     let trap = "boom = floor_div(1i64, sub(shape(xb, 0), shape(xb, 0)))";
     let widen = "widened = f(seed, x)";
