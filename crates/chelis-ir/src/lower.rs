@@ -13948,9 +13948,13 @@ impl<'program> LowerCtx<'program> {
         };
         for (axis, dim) in declared.dims.iter().enumerate() {
             let resolved = match dim {
-                DimInfo::Lit(required) => self.preserve_literal_result_axis(id, axis, *required),
+                DimInfo::Lit(required) => {
+                    self.preserve_literal_result_axis(id, axis, *required)
+                        || self.preserve_op_computed_result_axis(id, axis, None)
+                }
                 DimInfo::Named(binder, _) if !binder.is_empty() && binder != "*" => {
                     self.preserve_named_result_axis(id, axis, binder)
+                        || self.preserve_op_computed_result_axis(id, axis, Some(binder))
                 }
                 _ => false,
             };
@@ -13958,6 +13962,107 @@ impl<'program> LowerCtx<'program> {
                 self.dag.node_mut(id).expect("result").output_type.dims[axis] = dim.clone();
             }
         }
+    }
+
+    /// chelis#1397's declaration half: keep a declared result dimension over an
+    /// extent the OPERATION computes.
+    ///
+    /// The witness arms above both need a witness that OBSERVED the produced
+    /// extent, and an [`AxisSource::OpComputed`] axis has none: no input
+    /// carries the extent, so `axis_literal_witness` and
+    /// `axis_interface_witness` both decline and the declared dimension was
+    /// dropped, leaving the lowered result carrying the synthesized
+    /// `_rt_shrink_dim_N_A` instead of the `tensor[2, f32]` the user wrote.
+    /// Measured before this arm: `def f(x: tensor[rows, f32]) -> tensor[2, f32]
+    /// = shrink(x, [[1i64, shape(x, 0i32)]])` printed `shape=[3]` and exited
+    /// zero on both lanes.
+    ///
+    /// So this arm records NO requirement edge. Section 4.7 places the check at
+    /// "the source position of the operation that introduces the guarded
+    /// extent", and `local_dim_guard_sites`' op-computed arm is that site; a
+    /// witness comparison would be a second, differently placed check of the
+    /// same claim.
+    ///
+    /// Two conditions, and both are about not stamping a claim nothing checks:
+    ///
+    /// - `axis_sources::op_computed_axis_extent` must admit the owner. It is
+    ///   the SAME call the guard site makes, so an unadmitted owner keeps its
+    ///   existing disposition rather than gaining a claim with no guard, which
+    ///   on the evaluator would be a silently wrong shape.
+    /// - A NAMED claim must be declared by a parameter of this AUTHORED
+    ///   signature. `signature_is_authored` is PR #1773's gate, so a
+    ///   synthesized multi-root kernel stamps nothing, and `signature_witness`
+    ///   requires the binder to be a parameter axis of the same activation.
+    ///
+    ///   The claim then makes that parameter a DEPENDENCY of the result, and
+    ///   this arm records it. Without that the declaring parameter can be
+    ///   eliminated as dead before the kernel is formed: PR #1773 mints one
+    ///   witness per declared parameter axis but
+    ///   `retain_invocation_witnesses` keeps only the ones carrying a
+    ///   requirement or a claim, which a binder declared by a SINGLE parameter
+    ///   has neither of. For `f(w: tensor[n, f32], x: tensor[r, f32]) ->
+    ///   tensor[n, f32]` with `w` unread, the kernel was then not even given
+    ///   `w`, the class had one member, and the program returned the extent the
+    ///   operation computed at exit zero on both lanes. Recording the
+    ///   dependency makes `w` a kernel input exactly as `scope.unread`'s
+    ///   repeated binder already made its unread parameter one, and the
+    ///   canonical value is then the caller's, not the operation's own.
+    ///
+    ///   This records a data dependency, not a second check. The comparison
+    ///   stays where section 4.7 puts it, at the operation that introduces the
+    ///   extent, so the trap names `shrink` rather than `load`.
+    ///
+    ///   A result name declared NOWHERE else needs no such gate: it is the
+    ///   checker's fresh-extent representation under section 4.7.2 and is still
+    ///   published as `*`, which reaches neither this arm nor a class.
+    fn preserve_op_computed_result_axis(
+        &mut self,
+        id: NodeId,
+        axis: usize,
+        binder: Option<&str>,
+    ) -> bool {
+        use crate::axis_sources::AxisSource;
+        if let Some(binder) = binder
+            && (!self.signature_is_authored || self.signature_witness(binder).is_none())
+        {
+            return false;
+        }
+        let Some(AxisSource::OpComputed { axis: computed, .. }) =
+            crate::axis_sources::output_axis_sources(&self.dag, id)
+                .get(axis)
+                .cloned()
+        else {
+            return false;
+        };
+        let Some(node) = self.dag.get(id) else {
+            return false;
+        };
+        if crate::axis_sources::op_computed_axis_extent(&node.op, computed).is_none() {
+            return false;
+        }
+        // A NAMED claim's canonical value is the declaring parameter's axis, so
+        // the kernel needs that parameter even when the body never reads it.
+        // Record the dependency; without it the declaring `Load` is eliminated
+        // as dead, the kernel is not given the parameter, the class has one
+        // member and the claim executes unchecked.
+        //
+        // This is the same retention `scope.unread` relies on, reached a
+        // different way. `retain_invocation_witnesses` keeps a witness that
+        // carries a requirement or a claim, and PR #1773 gives one to a binder
+        // REPEATED across parameters; a binder declared once has neither, so
+        // the claim this arm stamps is what makes its witness live. The
+        // comparison itself stays where section 4.7 puts it, at the operation
+        // that introduces the extent, so the trap names `shrink` rather than
+        // `load`: this records a data dependency, not a second check.
+        if let Some(binder) = binder
+            && let Some(witness) = self.signature_witness(binder)
+        {
+            let result = self.dag.node_mut(id).expect("result");
+            if !result.shape_deps.contains(&witness) {
+                result.shape_deps.push(witness);
+            }
+        }
+        true
     }
 
     /// chelis#1377's half: a literal claim becomes a tagged requirement on the

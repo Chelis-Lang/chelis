@@ -1772,11 +1772,13 @@ fn an_expand_sized_from_a_computed_tensor_is_a_local_guard_site() {
 /// fact read two ways, and the `else { continue }` guarding the carrier read in
 /// `local_dim_guard_sites` is unreachable rather than a silent drop.
 ///
-/// That correspondence is what lets [`LocalGuardObservation`] have two variants
-/// instead of three: no class site needs a "cannot be observed" state. If a
-/// future change admits a third source without giving it a carrier, sites would
-/// vanish from BOTH lanes with nothing to show for it, so the property is
-/// asserted rather than trusted.
+/// That correspondence is why no class site needs a "cannot be observed"
+/// state: every admitted source names a readable quantity. If a future change
+/// admits a source without giving it a read instruction, sites would vanish
+/// from BOTH lanes with nothing to show for it, so the property is asserted
+/// rather than trusted. The `OpComputed` admission added its own read
+/// instruction rather than widening the filter alone, which is the shape this
+/// row asks a future widening to take.
 ///
 /// EVIDENTIARY STATUS: disposition lock. It cannot fail on today's tree; it
 /// fails on the tree that widens the source filter without widening the read.
@@ -1823,10 +1825,12 @@ fn every_local_class_site_carries_the_carrier_its_source_names() {
     for ((node, axis), claim) in sites {
         match claim.observed {
             chelis_ir::axis_sources::LocalGuardObservation::Carrier(_) => {}
-            chelis_ir::axis_sources::LocalGuardObservation::RealizedExtent => {
-                // A unit-extent site legitimately has no carrier; this fixture
-                // builds none, so reaching here means the class loop took the
-                // wrong branch.
+            chelis_ir::axis_sources::LocalGuardObservation::RealizedExtent
+            | chelis_ir::axis_sources::LocalGuardObservation::ComputedExtent(_) => {
+                // A unit-extent site legitimately has no carrier, and an
+                // op-computed site legitimately computes its own; this fixture
+                // builds neither, so reaching here means the class loop took
+                // the wrong branch.
                 panic!("node {node} axis {axis} is a class site with no carrier");
             }
         }
