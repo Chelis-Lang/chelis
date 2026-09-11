@@ -363,10 +363,14 @@ mod tests {
         let manifest =
             chelis_effects::realizability::compute_root_manifest(checked.program(), &realizability);
         let ordinary = lower_checked(checked.clone(), LoweringMode::Strict).unwrap();
+        let expected_host =
+            chelis_ir::host::try_lower_compiled_program_with_manifest(checked.program(), &manifest)
+                .unwrap()
+                .host;
         for mode in [LoweringMode::AllowHostOnly, LoweringMode::AllowHostBackend] {
             let (actual, ordinary_host, plan) =
                 lower_checked_for_c_execution(checked.clone(), &manifest, mode).unwrap();
-            assert!(ordinary_host.is_some());
+            assert_eq!(ordinary_host.is_some(), expected_host.is_some());
             assert!(
                 !plan
                     .as_ref()
