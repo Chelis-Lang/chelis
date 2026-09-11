@@ -424,23 +424,23 @@ jobs:
           shared-key: linux-workspace
           save-if: false
 
-      # Phase A must PASS. It does not on current `main`: its `symbolic_window`
-      # target runs `issue_368_runtime_symbolic_window_grad_is_half_everywhere`,
-      # whose `grad` lowering regressed in chelis#1693 and is owned by
-      # chelis#1775. This step is red until that lands, deliberately, because
-      # the row really is short. Do not add `continue-on-error`.
+      # Phase A must PASS, and does: its `symbolic_window` target runs
+      # `issue_368_runtime_symbolic_window_grad_is_half_everywhere`, whose
+      # `grad` lowering regressed in chelis#1693 and was repaired under
+      # chelis#1775. A red here is again the signal that a row is short or a
+      # receipt drifted, not a known outstanding regression. Do not add
+      # `continue-on-error`.
       - name: Runtime extent oracle (phase A)
         run: .venv/bin/python scripts/runtime_extent_oracle.py --phase a
 
-      # Phase B's receipts are enforced here; its ROW shortfall is not a
-      # failure yet. chelis#1277's B2b slices are still landing the 19 rows
-      # recorded short, so the run reports them and ends with
-      # `RECEIPTS PASS, ROWS SHORT OF EXIT` rather than PASS. A drifted
-      # receipt, a moved digest or a failing test still fails this step.
-      # The B2b-3 flip pull request drops `--allow-shortfall`, at which point
-      # the step demands PASS.
-      - name: Runtime extent oracle (phase B receipts and row report)
-        run: .venv/bin/python scripts/runtime_extent_oracle.py --phase b --allow-shortfall
+      # Phase B must PASS too. Every row chelis#1277's B2b slices recorded
+      # short has reached an exit state, so the B2b-3 flip dropped
+      # `--allow-shortfall` from this step: a row that falls back to a start
+      # state now fails the job rather than being reported under
+      # `RECEIPTS PASS, ROWS SHORT OF EXIT`. A drifted receipt, a moved
+      # digest or a failing test fails it as before.
+      - name: Runtime extent oracle (phase B)
+        run: .venv/bin/python scripts/runtime_extent_oracle.py --phase b
 
   generalize-sweep-oracle-shard:
     name: Typecheck Level Generalization Oracle (shard ${{ matrix.shard }}/4)
