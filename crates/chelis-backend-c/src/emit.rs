@@ -6211,26 +6211,29 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
             .collect::<Vec<_>>();
         self.emit_affine_bounds(&format!("t{id}_start"), &start);
         self.emit_affine_bounds(&format!("t{id}_end"), &end);
+        self.emit_affine_plan(id, a, ty, "shrink", &format!("t{id}_start, t{id}_end"));
         // Preserve the existing runtime-bound empty-range rejection shared
         // with Eval. The metadata API also serves statically empty tensors;
         // this operation-level admission rule is separate from shape safety.
         //
-        // It runs BEFORE the plan and therefore before any extent guard the
-        // plan's site emits, because an empty span is the OPERATION's own
-        // domain rejection and not a disagreement with a claim. The evaluator
-        // already orders it that way: its guard declines a span it cannot
-        // compute an extent from, and the `Shrink` arm's own check reports it.
-        // With this emission after the plan, C answered the same program with
-        // `extent \`2\`: claimed = 2, shrink axis 0 = 0`, attributing an
-        // out-of-domain span to a claim mismatch while eval named the span.
-        // `ShapeMetadata::shrunk` accepts `start == end` and builds a plan of
-        // extent 0, so the plan does not reject it first.
+        // It stays AFTER the plan, and therefore after any extent guard the
+        // plan's site emits, because `spec/05-risc-primitives.md` section
+        // 2.4.1 does NOT make an empty span a runtime-bound error: its closed
+        // list is a negative bound, a shrink range overshoot, a non-positive
+        // stride step and the two reshape errors. `spec/04-type-system.md`
+        // section 4.7.2 makes only a NEGATIVE size an error. So an extent-0
+        // result under a declared `tensor[2, f32]` is a CLAIM mismatch and the
+        // guard reporting it is the conforming diagnostic; this rejection is
+        // chelis#616's operation-level admission rule, which the numbered spec
+        // does not require, and the evaluator's matching rejection is what
+        // diverges from it. Round 1 of chelis#1397 read the order the other way
+        // round and this comment records why that reading was wrong, so the
+        // next reader does not re-derive it.
         for (axis, (start, end)) in bounds.iter().enumerate() {
             if start.node_input().is_some() || end.node_input().is_some() {
                 self.line(&format!("if (t{id}_start[{axis}].bits == t{id}_end[{axis}].bits) {{ chelis_numeric_trap(\"numeric trap: domain in shrink at int64\"); }}"));
             }
         }
-        self.emit_affine_plan(id, a, ty, "shrink", &format!("t{id}_start, t{id}_end"));
         self.emit_slot_wrapper(id, ty);
         self.line(&format!(
             "for (int64_t i = 0; i < chelis_movement_count(t{id}_movement); i++) {{"

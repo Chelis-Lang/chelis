@@ -3522,23 +3522,33 @@ fn empty_span_source(len: usize) -> String {
     )
 }
 
-/// An empty span is the OPERATION's domain rejection, and neither lane may
-/// report it as a claim mismatch.
+/// An empty span: the two lanes disagree about WHICH failure it is, and the
+/// numbered spec says the compiled lane is right.
 ///
-/// `ShapeMetadata::shrunk` rejects only `end < start`, so `start == end` builds
-/// a movement plan of extent 0 and the C guard used to run first, answering
-/// `extent `2`: claimed = 2, shrink axis 0 = 0` while the evaluator named the
-/// span. The evaluator was already right: its guard declines a span it cannot
-/// compute an extent from, and the `Shrink` arm reports it. The C emitter now
-/// emits the operation's own empty-range rejection ahead of the plan.
+/// `spec/05-risc-primitives.md` section 2.4.1 lists the runtime-bound errors
+/// as a negative bound, a shrink range overshoot, a non-positive stride step
+/// and the two reshape errors. An empty span is not among them, and
+/// `spec/04-type-system.md` section 4.7.2 makes only a NEGATIVE size an error.
+/// So `start == end` should produce an extent-0 result, and an extent-0 result
+/// under a declared `tensor[2, f32]` is a claim mismatch: C's
+/// `claimed = 2, shrink axis 0 = 0` is the conforming diagnostic. The
+/// evaluator instead rejects the span under chelis#616's operation-level
+/// admission rule, which the numbered spec does not require.
 ///
-/// EVIDENTIARY STATUS: regression test for the C assertions, which reported the
-/// claim on the reviewed head `cab086ef4`. Disposition lock for the eval
-/// assertions, which already named the span there. The two lanes still word the
-/// rejection differently, which is the operation's pre-existing diagnostic and
-/// not this slice's.
+/// Round 1 read this the other way round and asked for C to be reordered
+/// behind the evaluator. I made that change, then checked the atom, and took
+/// it out: it would have moved the conforming lane onto the non-conforming
+/// one. The divergence is chelis#616's admission rule against section 2.4.1's
+/// closed list, it predates this slice, and mere discovery during review does
+/// not bring it into scope.
+///
+/// EVIDENTIARY STATUS: disposition lock on both lanes, not a regression test.
+/// Both assertions describe the behaviour on the reviewed head `cab086ef4` and
+/// on this one. The row exists so the divergence is recorded with its spec
+/// citation rather than rediscovered, and so that changing either lane has to
+/// update it.
 #[test]
-fn an_empty_shrink_span_is_the_operations_rejection_on_both_lanes() {
+fn an_empty_shrink_span_diverges_across_lanes_under_the_616_admission_rule() {
     assert!(
         gcc_available(),
         "this row compares two executed lanes; neither may skip"
@@ -3552,20 +3562,15 @@ fn an_empty_shrink_span_is_the_operations_rejection_on_both_lanes() {
         "an empty span does not produce a value: {eval_out}"
     );
     assert!(!c_ok, "an empty span does not produce a value: {c_out}");
-    for (lane, out) in [("eval", &eval_out), ("c", &c_out)] {
-        assert!(
-            !out.contains("claimed = 2"),
-            "{lane}: the span is out of domain, so no lane may attribute it to \
-             the claim: {out}"
-        );
-    }
     assert!(
         eval_out.contains("shrink axis 0 bound [4, 4] is empty or inverted"),
-        "eval names the span: {eval_out}"
+        "eval rejects the span itself (chelis#616): {eval_out}"
     );
     assert!(
-        c_out.contains(&domain_trap_line("shrink")),
-        "C raises the operation's own trap: {c_out}"
+        c_out.contains("extent `2`: claimed = 2, shrink axis 0 = 0")
+            && c_out.contains(&domain_trap_line("shrink")),
+        "C reports the claim the extent-0 result refutes, which is what \
+         section 2.4.1's closed error list implies: {c_out}"
     );
 }
 

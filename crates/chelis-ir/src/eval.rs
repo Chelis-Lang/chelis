@@ -2324,23 +2324,30 @@ where
                     crate::axis_sources::LocalGuardObservation::ComputedExtent(computed) => {
                         match computed_axis_extent_value(computed, node, &values)? {
                             Some(extent) => extent,
-                            // A span that selects nothing computes no extent,
-                            // so the guard yields rather than comparing a
-                            // fabricated number: an empty span is the
-                            // OPERATION's domain rejection, and attributing it
-                            // to a claim mismatch names the wrong defect.
+                            // A span that selects nothing computes no extent
+                            // to compare, so the guard yields rather than
+                            // comparing a fabricated number.
                             //
                             // An earlier version of this comment justified the
                             // decline by saying the C runtime's movement plan
                             // rejects such a span before the site is reached.
-                            // That is false and was checkable:
-                            // `ShapeMetadata::shrunk` rejects only `end <
-                            // start`, so `start == end` builds a plan of extent
-                            // 0 and C's guard ran first, reporting `shrink axis
-                            // 0 = 0` against the claim. The C emitter now emits
-                            // the operation's own empty-range rejection ahead
-                            // of the plan, which is what makes the two lanes
-                            // agree on WHICH failure this is.
+                            // That was checkable and false:
+                            // `ShapeMetadata::shrunk` rejects only
+                            // `end < start`, so `start == end` builds a plan of
+                            // extent 0 and C's guard runs and reports the claim.
+                            //
+                            // C is the conforming lane there.
+                            // `spec/05-risc-primitives.md` section 2.4.1's
+                            // closed list of runtime-bound errors does not
+                            // include an empty span, and section 4.7.2 makes
+                            // only a NEGATIVE size an error, so an extent-0
+                            // result under a declared `tensor[2, f32]` is a
+                            // claim mismatch. This lane instead rejects the
+                            // span itself under chelis#616's operation-level
+                            // admission rule, which the numbered spec does not
+                            // require; the divergence is that rule's, is
+                            // pre-existing, and is pinned rather than repaired
+                            // here.
                             None => continue,
                         }
                     }
