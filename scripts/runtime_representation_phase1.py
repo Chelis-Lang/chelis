@@ -249,12 +249,84 @@ def phase1_legs():
     return tuple(legs)
 
 
+def managed_python_environment(root: Path):
+    """Select the checkout's dependency-bearing Python for native tests.
+
+    The oracle itself may be launched by `uv run --no-project`, whose isolated
+    interpreter intentionally has no project packages. PyO3 builds and embedded
+    Python probes need the explicitly configured interpreter, or the checkout
+    `.venv` when no explicit setting exists.
+    """
+    configured = os.environ.get('PYO3_PYTHON')
+    if configured:
+        candidate = Path(configured)
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        if not candidate.is_file():
+            raise OracleFailure(
+                'PYO3_PYTHON is set, but its configured interpreter does not '
+                f'exist at {candidate}; the explicit setting is authoritative'
+            )
+    else:
+        candidate = root / '.venv/bin/python'
+        if not candidate.is_file():
+            raise OracleFailure(
+                'no managed Python interpreter was configured: PYO3_PYTHON is '
+                f'unset and the checkout fallback does not exist at {candidate}'
+            )
+    probe = subprocess.run(
+        [
+            str(candidate),
+            '-I',
+            '-c',
+            (
+                'import json, sys; '
+                'print(json.dumps({"prefix": sys.prefix, '
+                '"version": list(sys.version_info[:3])}))'
+            ),
+        ],
+        cwd=root,
+        env=os.environ,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    try:
+        packet = load_json(probe.stdout)
+        version = packet['version']
+        prefix = packet['prefix']
+        valid = (
+            probe.returncode == 0
+            and isinstance(version, list)
+            and len(version) == 3
+            and all(type(part) is int for part in version)
+            and tuple(version) >= (3, 11, 0)
+            and isinstance(prefix, str)
+            and prefix
+        )
+    except (OracleFailure, KeyError, TypeError):
+        valid = False
+    if not valid:
+        detail = probe.stderr.strip() or probe.stdout.strip() or f'exit {probe.returncode}'
+        label = 'PYO3_PYTHON' if configured else 'checkout managed Python'
+        raise OracleFailure(
+            f'{label} at {candidate} is not a usable Python 3.11+ interpreter: {detail}'
+        )
+    return {'PYO3_PYTHON': str(candidate), 'VIRTUAL_ENV': prefix}
+
+
 def command(argv, root, directory: Path, label: str, *, expected_exit=0):
     directory.mkdir(parents=True, exist_ok=True)
-    environment = {**os.environ, 'PYO3_PYTHON': sys.executable, 'VIRTUAL_ENV': sys.prefix}
+    environment = {**os.environ, **managed_python_environment(Path(root))}
     with (directory / f'{label}.stdout').open('w') as stdout, (directory / f'{label}.stderr').open('w') as stderr:
         result = subprocess.run(argv, cwd=root, env=environment, stdout=stdout, stderr=stderr, check=False)
-    (directory / f'{label}.process.json').write_text(json.dumps({'argv': argv, 'cwd': str(root), 'returncode': result.returncode}, indent=2) + '\n')
+    (directory / f'{label}.process.json').write_text(json.dumps({
+        'argv': argv,
+        'cwd': str(root),
+        'returncode': result.returncode,
+        'PYO3_PYTHON': environment['PYO3_PYTHON'],
+        'VIRTUAL_ENV': environment['VIRTUAL_ENV'],
+    }, indent=2) + '\n')
     if result.returncode != expected_exit:
         raise OracleFailure(f'{label} failed ({result.returncode}); see {directory}')
     return (directory / f'{label}.stdout').read_text()
