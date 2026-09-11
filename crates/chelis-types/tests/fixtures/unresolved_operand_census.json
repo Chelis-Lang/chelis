@@ -1,0 +1,788 @@
+{
+  "issue": "chelis#1512",
+  "rows": [
+    {
+      "file": "annotate.rs",
+      "function": "type_is_safe_annotation_stamp",
+      "ordinal": 1,
+      "pattern": "Type::Var(_) | Type::Error(_)",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "app_numeric.rs",
+      "function": "integer_binop_result_type",
+      "ordinal": 1,
+      "pattern": "(Type::Var(_) , Type::Var(_)) |(Type::Error(_) , _) |(_ , Type::Error(_))",
+      "disposition": "defect(#1512)",
+      "reason": "needs a suspend-without-requiring-binding mode to distinguish a never-bound operand from a genuine generic dtype parameter; measured: the repair broke nine polymorphic-body tests, all of the 'a polymorphic body stays accepted' kind; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted"
+    },
+    {
+      "file": "app_numeric.rs",
+      "function": "integer_binop_result_type",
+      "ordinal": 2,
+      "pattern": "& lhs , Type::Var(_) | Type::Error(_)",
+      "disposition": "defect(#1512)",
+      "reason": "needs a suspend-without-requiring-binding mode to distinguish a never-bound operand from a genuine generic dtype parameter; measured: the repair broke nine polymorphic-body tests, all of the 'a polymorphic body stays accepted' kind; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted"
+    },
+    {
+      "file": "app_numeric.rs",
+      "function": "integer_binop_result_type",
+      "ordinal": 3,
+      "pattern": "& rhs , Type::Var(_) | Type::Error(_)",
+      "disposition": "defect(#1512)",
+      "reason": "needs a suspend-without-requiring-binding mode to distinguish a never-bound operand from a genuine generic dtype parameter; measured: the repair broke nine polymorphic-body tests, all of the 'a polymorphic body stays accepted' kind; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted"
+    },
+    {
+      "file": "app_numeric.rs",
+      "function": "operand_dtype_rejection",
+      "ordinal": 1,
+      "pattern": "resolved , Type::Tensor(_ , _) | Type::Var(_) | Type::Error(_)",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "app_numeric.rs",
+      "function": "operand_dtype_rejection",
+      "ordinal": 2,
+      "pattern": "resolved , Type::Tensor(_ , _) | Type::Var(_) | Type::Error(_)",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "app_numeric.rs",
+      "function": "operand_dtype_rejection",
+      "ordinal": 3,
+      "pattern": "resolved , Type::Tensor(_ , _) | Type::Var(_) | Type::Error(_)",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "app_numeric.rs",
+      "function": "operand_dtype_rejection",
+      "ordinal": 4,
+      "pattern": "resolved , Type::Tensor(_ , TensorPrec::Var(_)) | Type::Var(_) | Type::Error(_)",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "app_numeric.rs",
+      "function": "operand_dtype_rejection",
+      "ordinal": 5,
+      "pattern": "resolved , Type::Tensor(_ , TensorPrec::Var(_)) | Type::Var(_) | Type::Error(_)",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "app_numeric.rs",
+      "function": "operand_dtype_rejection",
+      "ordinal": 6,
+      "pattern": "resolved , Type::Tensor(_ , TensorPrec::Var(_)) | Type::Var(_) | Type::Error(_)",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "app_numeric.rs",
+      "function": "operand_dtype_rejection",
+      "ordinal": 7,
+      "pattern": "resolved , Type::Tensor(_ , _) | Type::Var(_) | Type::Error(_)",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "app_numeric.rs",
+      "function": "operand_dtype_rejection",
+      "ordinal": 8,
+      "pattern": "resolved , Type::Tensor(_ , _) | Type::Var(_) | Type::Error(_)",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "app_numeric.rs",
+      "function": "operand_dtype_rejection",
+      "ordinal": 9,
+      "pattern": "resolved , Type::Tensor(_ , TensorPrec::Concrete(Prim::Bool)) | Type::Var(_) | Type::Error(_)",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "app_numeric.rs",
+      "function": "operand_dtype_rejection",
+      "ordinal": 10,
+      "pattern": "resolved , Type::Tensor(_ , _) | Type::Var(_) | Type::Error(_)",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "app_numeric.rs",
+      "function": "validate_numeric_and_reduction_arguments",
+      "ordinal": 1,
+      "pattern": "Type::Tensor(_ , _) | Type::Var(_) | Type::Error(_)",
+      "disposition": "defect(#1512)",
+      "reason": "needs a suspend-without-requiring-binding mode to distinguish a never-bound operand from a genuine generic dtype parameter; measured: the repair broke nine polymorphic-body tests, all of the 'a polymorphic body stays accepted' kind; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted"
+    },
+    {
+      "file": "app_numeric.rs",
+      "function": "validate_numeric_and_reduction_arguments",
+      "ordinal": 2,
+      "pattern": "Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_)",
+      "disposition": "defect(#1512)",
+      "reason": "needs a suspend-without-requiring-binding mode to distinguish a never-bound operand from a genuine generic dtype parameter; measured: the repair broke nine polymorphic-body tests, all of the 'a polymorphic body stays accepted' kind; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted"
+    },
+    {
+      "file": "app_operand_dtype.rs",
+      "function": "reject_inadmissible_operand_dtypes",
+      "ordinal": 1,
+      "pattern": "Type::Var(_) | Type::Error(_)",
+      "disposition": "defect(#1512)",
+      "reason": "needs a suspend-without-requiring-binding mode to distinguish a never-bound operand from a genuine generic dtype parameter; measured: the repair broke nine polymorphic-body tests, all of the 'a polymorphic body stays accepted' kind; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted"
+    },
+    {
+      "file": "app_operand_dtype.rs",
+      "function": "reject_inadmissible_operand_dtypes",
+      "ordinal": 2,
+      "pattern": "Type::Prim(Prim::F32) | Type::Var(_) | Type::Error(_)",
+      "disposition": "defect(#1512)",
+      "reason": "needs a suspend-without-requiring-binding mode to distinguish a never-bound operand from a genuine generic dtype parameter; measured: the repair broke nine polymorphic-body tests, all of the 'a polymorphic body stays accepted' kind; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted"
+    },
+    {
+      "file": "app_operand_dtype.rs",
+      "function": "reject_inadmissible_operand_dtypes",
+      "ordinal": 3,
+      "pattern": "Type::Tensor(_ , _) | Type::Var(_) | Type::Error(_)",
+      "disposition": "defect(#1512)",
+      "reason": "needs a suspend-without-requiring-binding mode to distinguish a never-bound operand from a genuine generic dtype parameter; measured: the repair broke nine polymorphic-body tests, all of the 'a polymorphic body stays accepted' kind; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted"
+    },
+    {
+      "file": "app_operand_dtype.rs",
+      "function": "reject_inadmissible_operand_dtypes",
+      "ordinal": 4,
+      "pattern": "Type::Prim(Prim::F32) | Type::Var(_) | Type::Error(_)",
+      "disposition": "defect(#1512)",
+      "reason": "needs a suspend-without-requiring-binding mode to distinguish a never-bound operand from a genuine generic dtype parameter; measured: the repair broke nine polymorphic-body tests, all of the 'a polymorphic body stays accepted' kind; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted"
+    },
+    {
+      "file": "app_operand_dtype.rs",
+      "function": "reject_test_assert_close_tensor_operand_dtypes",
+      "ordinal": 1,
+      "pattern": "Some(Type::Tensor(_ , TensorPrec::Var(_))) | Some(Type::Var(_)) | Some(Type::Error(_)) | None",
+      "disposition": "defect(#1512)",
+      "reason": "needs a suspend-without-requiring-binding mode to distinguish a never-bound operand from a genuine generic dtype parameter; measured: the repair broke nine polymorphic-body tests, all of the 'a polymorphic body stays accepted' kind; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted"
+    },
+    {
+      "file": "app_operand_dtype.rs",
+      "function": "reject_test_assert_close_tensor_operand_dtypes",
+      "ordinal": 2,
+      "pattern": "Type::Var(_) | Type::Error(_)",
+      "disposition": "defect(#1512)",
+      "reason": "needs a suspend-without-requiring-binding mode to distinguish a never-bound operand from a genuine generic dtype parameter; measured: the repair broke nine polymorphic-body tests, all of the 'a polymorphic body stays accepted' kind; witness: `def f(x: int32) -> int32 = { g = fn (t) -> sqrt(t)  g(x) }` is accepted"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 1,
+      "pattern": "Type::Tensor(_ , TensorPrec::Concrete(Prim::Bool)) | Type::Prim(Prim::Bool) | Type::Var(_) | Type::Error(_)",
+      "disposition": "caught_downstream",
+      "witness": "a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 2,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 3,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 4,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 5,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 6,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 7,
+      "pattern": "Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_)",
+      "disposition": "caught_downstream",
+      "witness": "a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 8,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 9,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 10,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 11,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 12,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 13,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 14,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 15,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 16,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 17,
+      "pattern": "(Type::Var(_) , _ , _) |(_ , Type::Var(_) , _) |(_ , _ , Type::Var(_)) |(Type::Error(_) , _ , _) |(_ , Type::Error(_) , _) |(_ , _ , Type::Error(_))",
+      "disposition": "defect(#1512)",
+      "reason": "`where` over a late-bound branch accepts mismatched branch shapes: `def f(c: tensor[3, bool], a: tensor[3, f32], b: tensor[2, f32]) -> tensor[3, f32] = { g = fn (t) -> where(c, t, b)  g(a) }` is accepted, and rejected when resolved"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 18,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 19,
+      "pattern": "(Type::Var(_) , _ , _) |(_ , Type::Var(_) , _) |(_ , _ , Type::Var(_)) |(Type::Error(_) , _ , _) |(_ , Type::Error(_) , _) |(_ , _ , Type::Error(_))",
+      "disposition": "defect(#1512)",
+      "reason": "`clamp` over a late-bound input accepts mismatched bound shapes: `def f(x: tensor[3, f32], lo: tensor[2, f32], hi: tensor[3, f32]) -> tensor[3, f32] = { g = fn (t) -> clamp(t, lo, hi)  g(x) }` is accepted, and rejected when resolved"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 20,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 21,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 22,
+      "pattern": "index_arg , Type::Var(_) | Type::Error(_)",
+      "disposition": "defect(#1512)",
+      "reason": "`index` over a late-bound index accepts a non-integer index: `def f(x: List[int32], k: f32) -> int32 = { g = fn (n) -> index(x, n)  g(k) }` is accepted, and rejected when resolved"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 23,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 24,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 25,
+      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_)) |(Type::Error(_) , _) |(_ , Type::Error(_))",
+      "disposition": "defect(#1512)",
+      "reason": "`concat` over a late-bound second list accepts mismatched element types: `def f(x: List[int32], y: List[f32]) -> List[int32] = { g = fn (t) -> concat(x, t)  g(y) }` is accepted, and rejected when resolved"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 26,
+      "pattern": "& args [0] , Type::Var(_) | Type::Error(_)",
+      "disposition": "defect(#1512)",
+      "reason": "`split` over a late-bound sizes list accepts non-integer sizes: `def f(x: tensor[4, f32], s: List[f32]) -> List[tensor[2, f32]] = { g = fn (t) -> split(x, 0i32, t)  g(s) }` is accepted, and rejected when resolved"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 27,
+      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_)) |(Type::Error(_) , _) |(_ , Type::Error(_))",
+      "disposition": "defect(#1512)",
+      "reason": "`split` over a late-bound tensor accepts a non-tensor input: `def f(x: List[int32], s: List[int64]) -> List[tensor[2, f32]] = { g = fn (t) -> split(t, 0i32, s)  g(x) }` is accepted, and rejected when resolved"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 28,
+      "pattern": "count_arg , Type::Var(_) | Type::Error(_)",
+      "disposition": "defect(#1512)",
+      "reason": "`take`/`drop` over a late-bound count accept a non-integer count: `def f(x: List[int32], k: f32) -> List[int32] = { g = fn (n) -> take(x, n)  g(k) }` is accepted, and rejected when resolved"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 29,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 30,
+      "pattern": "count_arg , Type::Var(_) | Type::Error(_)",
+      "disposition": "defect(#1512)",
+      "reason": "`chunk` over a late-bound size accepts a non-integer size: `def f(x: List[int32], k: f32) -> List[List[int32]] = { g = fn (n) -> chunk(x, n)  g(k) }` is accepted, and rejected when resolved"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 31,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 32,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 33,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 34,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 35,
+      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_)) |(Type::Error(_) , _) |(_ , Type::Error(_))",
+      "disposition": "defect(#1512)",
+      "reason": "`zip` over a late-bound second argument accepts a non-List: `def f(x: List[int32], y: int32) -> List[(int32, int32)] = { g = fn (t) -> zip(x, t)  g(y) }` is accepted, and rejected when resolved"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 36,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 37,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 38,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 39,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 40,
+      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_)) |(Type::Error(_) , _) |(_ , Type::Error(_))",
+      "disposition": "caught_downstream",
+      "witness": "a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 41,
+      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_)) |(Type::Error(_) , _) |(_ , Type::Error(_))",
+      "disposition": "caught_downstream",
+      "witness": "a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 42,
+      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_)) |(Type::Error(_) , _) |(_ , Type::Error(_))",
+      "disposition": "caught_downstream",
+      "witness": "a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 43,
+      "pattern": "(Type::Var(_) , _ , _) |(_ , Type::Var(_) , _) |(_ , _ , Type::Var(_)) |(Type::Error(_) , _ , _) |(_ , Type::Error(_) , _) |(_ , _ , Type::Error(_))",
+      "disposition": "caught_downstream",
+      "witness": "a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 44,
+      "pattern": "(Type::Var(_) , _) |(_ , Type::Var(_)) |(Type::Error(_) , _) |(_ , Type::Error(_))",
+      "disposition": "defect(#1512)",
+      "reason": "`dict_merge` over a late-bound second dict accepts mismatched value types: `def f(d: Dict[string, int32], e: Dict[string, f32]) -> Dict[string, int32] = { g = fn (t) -> dict_merge(d, t)  g(e) }` is accepted, and rejected when resolved"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 45,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 46,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 47,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 48,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 49,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 50,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 51,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_post.rs",
+      "function": "finish_unified_app",
+      "ordinal": 52,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_scatter.rs",
+      "function": "check_scatter_elements",
+      "ordinal": 1,
+      "pattern": "Type::Var(_) | Type::Error(_)",
+      "disposition": "deferred_by_caller",
+      "witness": "app_tensor_ledger_family_validates_a_late_bound_operand"
+    },
+    {
+      "file": "app_scatter.rs",
+      "function": "check_scatter_elements",
+      "ordinal": 2,
+      "pattern": "Type::Var(_) | Type::Error(_)",
+      "disposition": "deferred_by_caller",
+      "witness": "app_tensor_ledger_family_validates_a_late_bound_operand"
+    },
+    {
+      "file": "app_scatter.rs",
+      "function": "check_scatter_elements",
+      "ordinal": 3,
+      "pattern": "Type::Var(_) | Type::Error(_)",
+      "disposition": "deferred_by_caller",
+      "witness": "app_tensor_ledger_family_validates_a_late_bound_operand"
+    },
+    {
+      "file": "app_shape.rs",
+      "function": "check_pad_signature",
+      "ordinal": 1,
+      "pattern": "Type::Var(_) | Type::Error(_)",
+      "disposition": "deferred_by_caller",
+      "witness": "app_shape_window_family_validates_a_late_bound_operand"
+    },
+    {
+      "file": "app_shape.rs",
+      "function": "check_permute_signature",
+      "ordinal": 1,
+      "pattern": "Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_)",
+      "disposition": "defect(#1512)",
+      "reason": "`permute` over a late-bound axis accepts a non-int32 axis: `def f(x: tensor[3, 2, f32], a: int64) -> tensor[3, 2, f32] = { g = fn (v) -> permute(x, v, 0i32)  g(a) }` is accepted, and rejected when resolved; the route suspends on its tensor operand only"
+    },
+    {
+      "file": "app_shape.rs",
+      "function": "check_permute_signature",
+      "ordinal": 2,
+      "pattern": "input_ty , Type::Var(_) | Type::Error(_)",
+      "disposition": "deferred_by_caller",
+      "witness": "app_shape_window_family_validates_a_late_bound_operand"
+    },
+    {
+      "file": "app_shape.rs",
+      "function": "check_reduce_window_signature",
+      "ordinal": 1,
+      "pattern": "Type::Var(_) | Type::Error(_)",
+      "disposition": "deferred_by_caller",
+      "witness": "app_shape_window_family_validates_a_late_bound_operand"
+    },
+    {
+      "file": "app_shape.rs",
+      "function": "check_shrink_signature",
+      "ordinal": 1,
+      "pattern": "Type::Var(_) | Type::Error(_)",
+      "disposition": "deferred_by_caller",
+      "witness": "app_shape_window_family_validates_a_late_bound_operand"
+    },
+    {
+      "file": "app_shape.rs",
+      "function": "check_stride_signature",
+      "ordinal": 1,
+      "pattern": "Type::Prim(Prim::Int64) | Type::Var(_) | Type::Error(_)",
+      "disposition": "defect(#1512)",
+      "reason": "`stride` over a late-bound step accepts a non-int64 step: `def f(x: tensor[2, 4, f32], a: int32) -> tensor[2, 2, f32] = { g = fn (v) -> stride(x, v, 2i64)  g(a) }` is accepted, and rejected when resolved; the route suspends on its tensor operand only"
+    },
+    {
+      "file": "app_shape.rs",
+      "function": "check_stride_signature",
+      "ordinal": 2,
+      "pattern": "Type::Var(_) | Type::Error(_)",
+      "disposition": "deferred_by_caller",
+      "witness": "app_shape_window_family_validates_a_late_bound_operand"
+    },
+    {
+      "file": "app_shape.rs",
+      "function": "infer_expand_app",
+      "ordinal": 1,
+      "pattern": "Type::Prim(Prim::Int64) | Type::Var(_) | Type::Error(_)",
+      "disposition": "caught_downstream",
+      "witness": "a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule"
+    },
+    {
+      "file": "app_shape.rs",
+      "function": "infer_reshape_app",
+      "ordinal": 1,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_tensor.rs",
+      "function": "check_conv_signature",
+      "ordinal": 1,
+      "pattern": "(Type::Var(_) | Type::Error(_) , _) |(_ , Type::Var(_) | Type::Error(_))",
+      "disposition": "deferred_by_caller",
+      "witness": "app_tensor_ledger_family_validates_a_late_bound_operand"
+    },
+    {
+      "file": "app_tensor.rs",
+      "function": "check_expand_signature",
+      "ordinal": 1,
+      "pattern": "Type::Var(_) | Type::Error(_)",
+      "disposition": "deferred_by_caller",
+      "witness": "app_tensor_ledger_family_validates_a_late_bound_operand"
+    },
+    {
+      "file": "app_tensor.rs",
+      "function": "check_layer_norm_signature",
+      "ordinal": 1,
+      "pattern": "Type::Var(_) | Type::Error(_)",
+      "disposition": "deferred_by_caller",
+      "witness": "app_tensor_ledger_family_validates_a_late_bound_operand"
+    },
+    {
+      "file": "app_tensor.rs",
+      "function": "check_layer_norm_signature",
+      "ordinal": 2,
+      "pattern": "Type::Var(_) | Type::Error(_)",
+      "disposition": "deferred_by_caller",
+      "witness": "app_tensor_ledger_family_validates_a_late_bound_operand"
+    },
+    {
+      "file": "app_tensor.rs",
+      "function": "check_layer_norm_signature",
+      "ordinal": 3,
+      "pattern": "Type::Var(_) | Type::Error(_)",
+      "disposition": "deferred_by_caller",
+      "witness": "app_tensor_ledger_family_validates_a_late_bound_operand"
+    },
+    {
+      "file": "app_tensor.rs",
+      "function": "check_matmul_signature",
+      "ordinal": 1,
+      "pattern": "Type::Var(_) | Type::Error(_)",
+      "disposition": "deferred_by_caller",
+      "witness": "app_tensor_ledger_family_validates_a_late_bound_operand"
+    },
+    {
+      "file": "app_tensor.rs",
+      "function": "check_matmul_signature",
+      "ordinal": 2,
+      "pattern": "Type::Var(_) | Type::Error(_)",
+      "disposition": "deferred_by_caller",
+      "witness": "app_tensor_ledger_family_validates_a_late_bound_operand"
+    },
+    {
+      "file": "app_tensor.rs",
+      "function": "check_reduction_signature",
+      "ordinal": 1,
+      "pattern": "Type::Var(_) | Type::Error(_)",
+      "disposition": "deferred_by_caller",
+      "witness": "app_tensor_ledger_family_validates_a_late_bound_operand"
+    },
+    {
+      "file": "app_tensor.rs",
+      "function": "peel_to_tensor_argument",
+      "ordinal": 1,
+      "pattern": "Type::Var(_) | Type::Error(_)",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "common.rs",
+      "function": "param_bound_dims",
+      "ordinal": 1,
+      "pattern": "Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error(_)",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "common.rs",
+      "function": "resolve_inner",
+      "ordinal": 1,
+      "pattern": "Type::Tensor(_ , _) | Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error(_)",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "common.rs",
+      "function": "type_contains_rank",
+      "ordinal": 1,
+      "pattern": "Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error(_)",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "declarations.rs",
+      "function": "type_carries_tensor_with_carriers",
+      "ordinal": 1,
+      "pattern": "Type::Fn(_ , _) | Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error(_)",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "declarations.rs",
+      "function": "type_contains_tensor",
+      "ordinal": 1,
+      "pattern": "Type::Fn(_ , _) | Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error(_)",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "expr_pattern.rs",
+      "function": "check_literal_pattern",
+      "ordinal": 1,
+      "pattern": "resolved , Type::Var(_) | Type::Error(_)",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "expr_record.rs",
+      "function": "infer_cast",
+      "ordinal": 1,
+      "pattern": "Type::Var(_) | Type::Error(_)",
+      "disposition": "caught_downstream",
+      "witness": "a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule"
+    },
+    {
+      "file": "expr_transform.rs",
+      "function": "cotangent",
+      "ordinal": 1,
+      "pattern": "Type::Fn(_ , _) | Type::Unit | Type::Var(_) | Type::Error(_)",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "recursion.rs",
+      "function": "finish_group",
+      "ordinal": 1,
+      "pattern": "Type::Var(_) | Type::Error(_)",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "static_value.rs",
+      "function": "reject_non_int32_axis",
+      "ordinal": 1,
+      "pattern": "Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_)",
+      "disposition": "caught_downstream",
+      "witness": "a_route_whose_arm_admits_a_variable_is_still_rejected_by_a_later_rule"
+    }
+  ]
+}
