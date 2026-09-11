@@ -36,6 +36,7 @@ pub fn checkpoint_iter_compile_probe(
 ) {
     let _ = sink.iter_since(checkpoint.0);
 }
+pub mod static_seed;
 pub mod types;
 pub mod unify;
 pub mod unsupported;

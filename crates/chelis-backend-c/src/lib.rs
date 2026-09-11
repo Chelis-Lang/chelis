@@ -230,6 +230,9 @@ pub fn host_tensor_helper_codegen(
 }
 
 /// Generate C source code from a RISC DAG with explicit backend options.
+///
+/// Fixed-control programs use `codegen_evaluation_with_options` instead:
+/// ordinary graph ownership alone grants no forward/replay association.
 pub fn codegen_with_options(
     dag: chelis_ir::ownership::VerifiedDagProgram,
     func_name: &str,
@@ -261,6 +264,43 @@ pub fn codegen_with_options(
         input_labels,
         output_labels,
         symbolic_dims,
+    })
+}
+
+/// Emit an unfused source execution plan with its exact ownership payload.
+/// Public entries retain the four-argument tensor ABI; inherited Random must
+/// therefore be handled in the submitted source, not supplied by a hidden
+/// global or a baked lowering context.
+///
+/// ```compile_fail
+/// fn bypass(dag: chelis_ir::ownership::VerifiedDagProgram) {
+///     let _ = chelis_backend_c::codegen_evaluation_with_options(dag, "sample", Default::default());
+/// }
+/// ```
+///
+/// ```compile_fail
+/// fn substitute(plan: chelis_ir::evaluation::VerifiedEvaluationPlan,
+///               ownership: chelis_ir::ownership::VerifiedDagProgram) {
+///     let _ = chelis_ir::evaluation::VerifiedEvaluationPlan { ownership, ..plan };
+/// }
+/// ```
+pub fn codegen_evaluation_with_options(
+    plan: chelis_ir::evaluation::VerifiedEvaluationPlan,
+    func_name: &str,
+    options: CodegenOptions,
+) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
+    plan.with_emission(|dag, execution| {
+        let emission = dag.emission();
+        let input_labels = emit::CEmitter::input_labels(emission);
+        let output_labels = emit::CEmitter::output_labels(emission);
+        let symbolic_dims = emission.symbolic_params();
+        let c_source = emit::CEmitter::emit_evaluation(dag, execution, func_name, options)?;
+        Ok(CodegenResult {
+            c_source,
+            h_header: format!("void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"),
+            requirements: toolchain::CodegenRequirements { wants_openmp: true, needs_blas: false },
+            input_labels, output_labels, symbolic_dims,
+        })
     })
 }
 

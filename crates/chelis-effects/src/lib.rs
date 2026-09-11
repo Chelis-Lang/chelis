@@ -929,10 +929,15 @@ fn validate_handler_kind(
     errors: &mut Vec<EffectError>,
 ) {
     match effect_kind {
-        Ok(EffectKind::Random) if kids.first().and_then(int_literal).is_none() => {
+        Ok(EffectKind::Random)
+            if kids
+                .first()
+                .and_then(|seed| chelis_types::static_seed::literal_seed(seed, true))
+                .is_none() =>
+        {
             errors.push(EffectError {
                 kind: EffectErrorKind::InvalidHandler,
-                message: "with seed(...) currently requires an int literal seed".to_string(),
+                message: "with seed(...) requires a signed int64 literal seed".to_string(),
                 suggestions: vec![
                     "Use `with seed(42i64) { ... }` with an explicit int64-suffixed integer seed"
                         .to_string(),
@@ -1231,19 +1236,6 @@ fn symbol_name(expr: &Expr) -> Option<&str> {
     }
 }
 
-fn int_literal(expr: &Expr) -> Option<i64> {
-    match expr {
-        Expr::Atom(Atom::Int(value), _) => Some(*value),
-        Expr::List(list, _) if get_tag(list) == Some(DeepTag::Lit) => {
-            match children(list).first() {
-                Some(Expr::Atom(Atom::Int(value), _)) => Some(*value),
-                _ => None,
-            }
-        }
-        _ => None,
-    }
-}
-
 fn string_literal(expr: &Expr) -> Option<&str> {
     match expr {
         Expr::Atom(Atom::Str(value), _) => Some(value.as_str()),
@@ -1475,9 +1467,61 @@ mod tests {
     }
 
     #[test]
+    fn signed_seed_constants_cross_type_and_effect_boundaries() {
+        for seed in [
+            "(lit {type: (t-prim {} int64)} -1)",
+            "(lit {type: (t-prim {} int64)} -9223372036854775808)",
+            "(lit {type: (t-prim {} int64)} 9223372036854775807)",
+            "(app {} (var {} neg) (lit {type: (t-prim {} int64)} 1))",
+        ] {
+            let source = format!(
+                "(def {{}} value (handle-effect {{effect: random}} {seed} (lit {{type: (t-prim {{}} f32)}} 1.0)))"
+            );
+            let deep = parse_str(&source).unwrap();
+            let typed = chelis_types::check_ir_program(&deep).expect("signed int64 constant");
+            check_program(&typed).unwrap_or_else(|errors| panic!("{seed}: {errors:?}"));
+        }
+    }
+
+    #[test]
+    fn malformed_seed_constants_never_cross_the_effect_boundary() {
+        let malformed = "(def {} value (handle-effect {effect: random} \
+            (lit {type: (t-prim {} int64)} 1 2) (lit {type: (t-prim {} f32)} 1.0)))";
+        assert!(
+            parse_str(malformed)
+                .unwrap_err()
+                .to_string()
+                .contains("wrong child count for `lit`")
+        );
+        for seed in [
+            "(lit {type: (t-prim {} int64)} 1.0)",
+            "(lit {type: (t-prim {} bool)} true)",
+            "(lit {type: (t-prim {} f64)} 1)",
+            "(app {} (var {} neg) (lit {type: (t-prim {} bool)} 1))",
+            "(app {} (var {} neg) (lit {type: (t-prim {} int64)} -1))",
+            "(app {} (var {} neg) (app {} (var {} neg) (lit {type: (t-prim {} int64)} 1)))",
+            "(app {type: (t-prim {} int64)} (var {} neg) (lit {type: (t-prim {} int32)} 1))",
+            "(cast {type: (t-prim {} int32)} (lit {type: (t-prim {} int64)} 1) (t-prim {} int64))",
+            "(cast {} (lit {type: (t-prim {} int32)} 1) (t-prim {} int64) trunc)",
+            "(cast {} (var {} runtime) (t-prim {} int64))",
+            "(cast {} (lit {type: (t-prim {} int32)} -1) (t-prim {} int64))",
+        ] {
+            let source = format!(
+                "(def {{}} value (handle-effect {{effect: random}} {seed} (lit {{type: (t-prim {{}} f32)}} 1.0)))"
+            );
+            let deep = parse_str(&source).unwrap();
+            if let Ok(typed) = chelis_types::check_ir_program(&deep) {
+                let errors = check_program(&typed).expect_err(seed);
+                assert_eq!(errors.len(), 1, "{seed}: {errors:?}");
+                assert_eq!(errors[0].kind, EffectErrorKind::InvalidHandler, "{seed}");
+            }
+        }
+    }
+
+    #[test]
     fn nonliteral_handlers_are_rejected_once_by_the_effect_owner() {
         for (effect, expected) in [
-            ("random", "requires an int literal seed"),
+            ("random", "requires a signed int64 literal seed"),
             ("resource", "requires a string literal device"),
         ] {
             let source = format!(

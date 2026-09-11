@@ -6,10 +6,13 @@ use chelis_ir::dag::{
     Dag, DagNode, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStep, FusedStepOp, NodeId,
     ReduceWindowKind, RiscOp, RtAxis, RtDim, TensorType,
 };
+use chelis_ir::evaluation::{DrawId, EvaluationEmissionView, RandomSite};
+use chelis_ir::execution_spine::{Control, Step};
 use chelis_ir::ownership::{
     CStorageLane, ReusableOwnedStorage, VerifiedDagAction, VerifiedDagProgram, VerifiedDagView,
     VerifiedStoragePlan, plan_c_storage, plan_c_storage_layout,
 };
+use chelis_types::dtype_semantics::DropoutParameters;
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 use chelis_types::{CheckedCastKind, CheckedCastPlan, ElementRef, NumericTrap, ScalarValue};
@@ -93,6 +96,73 @@ enum SparseEmission {
     Elements,
 }
 
+enum UniformSeed {
+    Legacy(u64),
+    Saved(DrawId),
+}
+
+#[derive(Clone, Copy)]
+enum UnaryEmission {
+    Neg,
+    Dropout {
+        rate: ScalarValue,
+        denominator: ScalarValue,
+        draw: DrawId,
+    },
+}
+
+impl UnaryEmission {
+    fn expression(self, value: &str) -> String {
+        match self {
+            Self::Neg => format!("-{value}"),
+            Self::Dropout {
+                rate,
+                denominator,
+                draw,
+            } => {
+                let literal = |value: ScalarValue| {
+                    if value.prim() == Prim::F64 {
+                        format!(
+                            "chelis_f64_from_bits(UINT64_C(0x{:016x}))",
+                            value.as_f64_lossy().to_bits()
+                        )
+                    } else {
+                        format!(
+                            "chelis_f32_from_bits(0x{:08x}u)",
+                            (value.as_f64_lossy() as f32).to_bits()
+                        )
+                    }
+                };
+                let sample = if rate.prim() == Prim::F64 {
+                    "chelis_dropout_unit"
+                } else {
+                    "chelis_dropout_unit_f32"
+                };
+                let draw = draw.index();
+                // The unary loop supplies a nonnegative linear i. The sampler's
+                // declared parameter performs its exact unsigned conversion.
+                format!(
+                    "({sample}(__chelis_draw_seed_{draw}, __chelis_draw_ordinal_{draw}, i) < {} ? 0 : ({value}) / {})",
+                    literal(rate),
+                    literal(denominator)
+                )
+            }
+        }
+    }
+}
+
+fn unsupported_fixed_execution(detail: impl Into<String>) -> Unsupported {
+    Unsupported::new(
+        UnsupportedKind::Op("fixed-control Random".into()),
+        detail.into(),
+        Stage::Codegen("c"),
+        chelis_types::deliberate_rejection!(
+            "[04-TOT-2]",
+            "native fixed-control emission requires exact source execution and ownership authority"
+        ),
+    )
+}
+
 struct MatmulEmitSpec {
     a: NodeId,
     b: NodeId,
@@ -133,13 +203,40 @@ impl CEmitter {
         options: crate::CodegenOptions,
     ) -> Result<String, Unsupported> {
         let mut plan = plan_c_storage(dag).map_err(unsupported_storage_plan)?;
-        Self::emit_storage_plan_with_options(&mut plan, func_name, options)
+        Self::emit_storage_plan_with_options(&mut plan, func_name, options, None)
+    }
+
+    pub(crate) fn emit_evaluation(
+        dag: VerifiedDagProgram,
+        execution: EvaluationEmissionView<'_>,
+        func_name: &str,
+        options: crate::CodegenOptions,
+    ) -> Result<String, Unsupported> {
+        for node in dag.emission().nodes() {
+            if matches!(execution.site(node.id), Some(RandomSite::Forward { scope, .. }) if scope.index() == 0)
+            {
+                return Err(unsupported_fixed_execution(
+                    "public tensor entry cannot receive inherited Random",
+                ));
+            }
+            if matches!(
+                node.op,
+                RiscOp::FusedElem { .. } | RiscOp::BlasMatmul { .. }
+            ) {
+                return Err(unsupported_fixed_execution(
+                    "fixed-control emission requires the unfused payload",
+                ));
+            }
+        }
+        let mut storage = plan_c_storage(dag).map_err(unsupported_storage_plan)?;
+        Self::emit_storage_plan_with_options(&mut storage, func_name, options, Some(execution))
     }
 
     fn emit_storage_plan_with_options(
         plan: &mut VerifiedStoragePlan<CStorageLane>,
         func_name: &str,
         options: crate::CodegenOptions,
+        execution: Option<EvaluationEmissionView<'_>>,
     ) -> Result<String, Unsupported> {
         let memory_plan = MemoryPlan::from_shared(plan);
         let nodes = plan
@@ -164,6 +261,7 @@ impl CEmitter {
             func_name,
             options,
             false,
+            execution,
         )
     }
 
@@ -184,7 +282,15 @@ impl CEmitter {
                 fused_reuse.insert(node, token);
             }
         }
-        Self::emit_preplanned(dag, memory_plan, fused_reuse, func_name, options, true)
+        Self::emit_preplanned(
+            dag,
+            memory_plan,
+            fused_reuse,
+            func_name,
+            options,
+            true,
+            None,
+        )
     }
 
     fn emit_preplanned(
@@ -194,6 +300,7 @@ impl CEmitter {
         func_name: &str,
         options: crate::CodegenOptions,
         private_random_context: bool,
+        execution: Option<EvaluationEmissionView<'_>>,
     ) -> Result<String, Unsupported> {
         // chelis#1277 C4.1/C4.3: before anything reads a shape, every
         // realized output axis must have one checked extent source. This
@@ -376,6 +483,23 @@ impl CEmitter {
         e.line("    return fma(high - low, unit, low);");
         e.line("}");
         e.line("/* CHELIS_UNIFORM_HELPERS_END */");
+        if execution.is_some() {
+            e.line("static inline uint64_t chelis_dropout_mix(uint64_t value) {");
+            e.line("    value += 0x9E3779B97F4A7C15ULL;");
+            e.line("    value = (value ^ (value >> 30)) * 0xBF58476D1CE4E5B9ULL;");
+            e.line("    value = (value ^ (value >> 27)) * 0x94D049BB133111EBULL;");
+            e.line("    return value ^ (value >> 31);");
+            e.line("}");
+            e.line("static inline double chelis_dropout_unit(uint64_t seed, uint64_t ordinal, uint64_t index) {");
+            e.line("    uint64_t call = chelis_dropout_mix(ordinal);");
+            e.line("    uint64_t element = chelis_dropout_mix(index);");
+            e.line("    uint64_t word = chelis_dropout_mix(seed ^ ((call << 17) | (call >> 47)) ^ ((element << 41) | (element >> 23)));");
+            e.line("    return (double)(word >> 11) / (double)(1ULL << 53);");
+            e.line("}");
+            e.line("static inline float chelis_dropout_unit_f32(uint64_t seed, uint64_t ordinal, uint64_t index) {");
+            e.line("    return (float)chelis_dropout_unit(seed, ordinal, index);");
+            e.line("}");
+        }
         // [05-OP-31]/[05-OP-44] make every published host tensor descriptor
         // canonical row-major storage.  The old runtime ABI exposed mutable
         // stride fields and therefore needed a runtime contiguity probe; the
@@ -491,7 +615,53 @@ impl CEmitter {
 
         e.emit_input_shape_preamble(dag, &input_slots, func_name);
 
-        for node in dag.nodes() {
+        if execution.is_some() {
+            e.line("uint64_t __chelis_fixed_seed = 0ULL, __chelis_fixed_counter = 0ULL;");
+        }
+        let ordinary_steps;
+        let steps = if let Some(execution) = execution {
+            execution.steps()
+        } else {
+            ordinary_steps = dag
+                .nodes()
+                .iter()
+                .map(|node| Step::Node(node.id))
+                .collect::<Vec<_>>();
+            &ordinary_steps
+        };
+        for step in steps {
+            let node = match *step {
+                Step::Control {
+                    control: Control::Enter { scope, seed },
+                    ..
+                } => {
+                    let scope = scope.index();
+                    e.line(&format!("uint64_t __chelis_saved_seed_{scope} = __chelis_fixed_seed, __chelis_saved_counter_{scope} = __chelis_fixed_counter;"));
+                    e.line(&format!(
+                        "__chelis_fixed_seed = {seed}ULL; __chelis_fixed_counter = 0ULL;"
+                    ));
+                    continue;
+                }
+                Step::Control {
+                    control: Control::Leave { scope },
+                    ..
+                } => {
+                    let scope = scope.index();
+                    e.line(&format!("__chelis_fixed_seed = __chelis_saved_seed_{scope}; __chelis_fixed_counter = __chelis_saved_counter_{scope};"));
+                    continue;
+                }
+                Step::Node(id) => dag
+                    .get(id)
+                    .ok_or_else(|| unsupported_fixed_execution("missing scheduled node"))?,
+            };
+            // Source entry belongs to the schedule driver, not a numerical
+            // expression or tensor loop. Replay never enters this branch.
+            if let Some(RandomSite::Forward { draw, .. }) =
+                execution.and_then(|view| view.site(node.id))
+            {
+                let index = draw.index();
+                e.line(&format!("uint64_t __chelis_draw_seed_{index} = __chelis_fixed_seed, __chelis_draw_ordinal_{index} = __chelis_fixed_counter++;"));
+            }
             // Skip FusedElem nodes inlined into a trailing reduction.
             if e.reduction_inlined.contains(&node.id.0) {
                 continue;
@@ -504,7 +674,11 @@ impl CEmitter {
                 e.emit_load(node.id.0, input_idx);
             } else {
                 e.emit_span_comments(node);
-                e.emit_node(node, dag)?;
+                if let Some(execution) = execution {
+                    e.emit_fixed_node(node, dag, execution)?;
+                } else {
+                    e.emit_node(node, dag)?;
+                }
             }
         }
 
@@ -981,7 +1155,7 @@ impl CEmitter {
             RiscOp::Relu => self.emit_relu(id, &node.inputs, &node.output_type),
             RiscOp::ReluAdjoint => self.emit_relu_adjoint(id, &node.inputs, &node.output_type),
             RiscOp::CmpLt => self.emit_cmplt(id, &node.inputs, &node.output_type, dag),
-            RiscOp::Neg => self.emit_unary(id, "-", &node.inputs, &node.output_type),
+            RiscOp::Neg => self.emit_unary(id, UnaryEmission::Neg, &node.inputs, &node.output_type),
             RiscOp::Recip => self.emit_recip(id, &node.inputs, &node.output_type),
             RiscOp::Exp => self.emit_unary_func(id, "expf", &node.inputs, &node.output_type),
             RiscOp::Log => self.emit_unary_func(id, "logf", &node.inputs, &node.output_type),
@@ -1000,11 +1174,18 @@ impl CEmitter {
             // which defaults to ties-to-even — matching the evaluator's
             // `f64::round_ties_even`. (`roundf` would be ties-away-from-zero.)
             RiscOp::Round => self.emit_unary_func(id, "rintf", &node.inputs, &node.output_type),
-            RiscOp::UniformLike { low, high, seed } => {
-                self.emit_uniform_like(id, *low, *high, *seed, &node.inputs, &node.output_type)
-            }
+            RiscOp::UniformLike { low, high, seed } => self.emit_uniform_like(
+                id,
+                *low,
+                *high,
+                UniformSeed::Legacy(*seed),
+                &node.inputs,
+                &node.output_type,
+            ),
             RiscOp::Dropout { .. } => {
-                unreachable!("dropout should be rejected before C code generation")
+                return Err(unsupported_fixed_execution(
+                    "dropout requires a sealed source execution plan",
+                ));
             }
             RiscOp::Copy => self.emit_realize(id, &node.inputs, &node.output_type),
             RiscOp::Drop => {
@@ -2844,7 +3025,7 @@ impl CEmitter {
     }
 
     // ---- Unary elementwise ----
-    fn emit_unary(&mut self, id: usize, op: &str, inputs: &[NodeId], ty: &TensorType) {
+    fn emit_unary(&mut self, id: usize, op: UnaryEmission, inputs: &[NodeId], ty: &TensorType) {
         if Self::is_reduced_float(ty) {
             self.emit_unary_reduced_f(id, op, inputs, ty);
             return;
@@ -2852,7 +3033,7 @@ impl CEmitter {
         let a = inputs[0].0;
         let et = Self::elem_type(ty);
         let elem_expr = |value: String| -> String {
-            if op == "-" && ty.precision.is_integer() {
+            if matches!(op, UnaryEmission::Neg) && ty.precision.is_integer() {
                 let message = NumericTrap::Overflow {
                     op: "neg",
                     prim: ty.precision,
@@ -2863,7 +3044,7 @@ impl CEmitter {
                     Self::integer_width(ty.precision)
                 )
             } else {
-                format!("{op}{value}")
+                op.expression(&value)
             }
         };
         let identity = self.emit_elementwise_index_steps(id, inputs, ty);
@@ -2876,7 +3057,7 @@ impl CEmitter {
         self.line(&format!(
             "const {et}* restrict __in_a_{id} = (const {et}*)t{a}_data;"
         ));
-        if ty.precision.is_integer() && op == "-" {
+        if ty.precision.is_integer() && matches!(op, UnaryEmission::Neg) {
             self.line("#pragma omp parallel for");
         } else {
             self.line("#pragma omp parallel for simd");
@@ -3182,7 +3363,13 @@ impl CEmitter {
     /// each element is loaded into `f32` via the runtime helper, the
     /// op is applied in `f32`, and the result is converted back via
     /// the inverse helper before storage.
-    fn emit_unary_reduced_f(&mut self, id: usize, op: &str, inputs: &[NodeId], ty: &TensorType) {
+    fn emit_unary_reduced_f(
+        &mut self,
+        id: usize,
+        op: UnaryEmission,
+        inputs: &[NodeId],
+        ty: &TensorType,
+    ) {
         let a = inputs[0].0;
         let load = Self::reduced_to_f32_fn(ty.precision);
         let store = Self::f32_to_reduced_fn(ty.precision);
@@ -3202,7 +3389,10 @@ impl CEmitter {
         self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));
         self.indent += 1;
         self.line(&format!("float __av = {load}(__in_a_{id}[i]);"));
-        self.line(&format!("__out_{id}[i] = {store}({op}__av);"));
+        self.line(&format!(
+            "__out_{id}[i] = {store}({});",
+            op.expression("__av")
+        ));
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
@@ -3215,7 +3405,10 @@ impl CEmitter {
         self.line(&format!(
             "float __av = {load}(((uint16_t*)t{a}_data)[idx]);"
         ));
-        self.line(&format!("((uint16_t*)t{id}_data)[i] = {store}({op}__av);"));
+        self.line(&format!(
+            "((uint16_t*)t{id}_data)[i] = {store}({});",
+            op.expression("__av")
+        ));
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
@@ -3570,36 +3763,104 @@ impl CEmitter {
         }
     }
 
+    fn emit_fixed_node(
+        &mut self,
+        node: &DagNode,
+        dag: VerifiedDagView<'_>,
+        execution: EvaluationEmissionView<'_>,
+    ) -> Result<(), Unsupported> {
+        let parameters = if let RiscOp::Dropout { rate, .. } = node.op {
+            let rate = chelis_types::scalar_from_f64("dropout", node.output_type.precision, rate)
+                .map_err(|error| unsupported_fixed_execution(error.to_string()))?;
+            Some(
+                DropoutParameters::new(node.output_type.precision, rate)
+                    .map_err(|error| unsupported_fixed_execution(error.to_string()))?,
+            )
+        } else {
+            None
+        };
+        let draw = match execution.site(node.id) {
+            Some(RandomSite::Forward { draw, .. }) => Some(draw),
+            Some(RandomSite::Replay { draw }) => Some(draw),
+            None => None,
+        };
+        match node.op {
+            RiscOp::Dropout { .. } => {
+                let draw =
+                    draw.ok_or_else(|| unsupported_fixed_execution("dropout has no source key"))?;
+                let parameters = parameters.expect("validated dropout parameters");
+                let denominator = parameters
+                    .denominator()
+                    .map_err(|error| unsupported_fixed_execution(error.to_string()))?;
+                self.emit_unary(
+                    node.id.0,
+                    UnaryEmission::Dropout {
+                        rate: parameters.rate(),
+                        denominator,
+                        draw,
+                    },
+                    &node.inputs,
+                    &node.output_type,
+                );
+                Ok(())
+            }
+            RiscOp::UniformLike { low, high, .. } => {
+                if node.inputs.len() != 1 {
+                    return Err(unsupported_fixed_execution(
+                        "fixed-control Uniform cannot carry a dynamic activation",
+                    ));
+                }
+                let draw =
+                    draw.ok_or_else(|| unsupported_fixed_execution("uniform has no source key"))?;
+                self.emit_uniform_like(
+                    node.id.0,
+                    low,
+                    high,
+                    UniformSeed::Saved(draw),
+                    &node.inputs,
+                    &node.output_type,
+                );
+                Ok(())
+            }
+            _ => self.emit_node(node, dag),
+        }
+    }
+
     fn emit_uniform_like(
         &mut self,
         id: usize,
         low: f64,
         high: f64,
-        seed: u64,
+        seed: UniformSeed,
         inputs: &[NodeId],
         ty: &TensorType,
     ) {
         self.emit_slot_wrapper(id, ty);
-        if let Some(activation) = inputs.get(1) {
-            // The activation is a rank-0 Bool predicate, and chelis#1308's
-            // tagged-carrier ABI stores Bool tensors as one uint8 per
-            // element. Reading it through `(float*)` was correct only under
-            // the pre-#1308 float-backed Bool storage; against uint8
-            // storage it reads one valid byte plus three out-of-bounds
-            // heap bytes, so an untaken branch's gate could go active on
-            // whatever the allocator left there (Linux CI caught the RNG
-            // parity break; macOS zero-fill masked it).
-            self.line(&format!(
-                "int t{id}_active = ((const uint8_t*)t{}_data)[0] != 0 ? 1 : 0;",
-                activation.0
-            ));
-            self.line(&format!(
+        if let UniformSeed::Saved(draw) = seed {
+            let draw = draw.index();
+            self.line(&format!("uint64_t t{id}_seed = __chelis_draw_seed_{draw} ^ (__chelis_draw_ordinal_{draw} * 0x9E3779B97F4A7C15ULL);"));
+        } else if let UniformSeed::Legacy(seed) = seed {
+            if let Some(activation) = inputs.get(1) {
+                // The activation is a rank-0 Bool predicate, and chelis#1308's
+                // tagged-carrier ABI stores Bool tensors as one uint8 per
+                // element. Reading it through `(float*)` was correct only under
+                // the pre-#1308 float-backed Bool storage; against uint8
+                // storage it reads one valid byte plus three out-of-bounds
+                // heap bytes, so an untaken branch's gate could go active on
+                // whatever the allocator left there (Linux CI caught the RNG
+                // parity break; macOS zero-fill masked it).
+                self.line(&format!(
+                    "int t{id}_active = ((const uint8_t*)t{}_data)[0] != 0 ? 1 : 0;",
+                    activation.0
+                ));
+                self.line(&format!(
                 "uint64_t t{id}_seed = t{id}_active ? CHELIS_EFFECTIVE_UNIFORM_SEED({seed}ULL) : {seed}ULL;"
             ));
-        } else {
-            self.line(&format!(
-                "uint64_t t{id}_seed = CHELIS_EFFECTIVE_UNIFORM_SEED({seed}ULL);"
-            ));
+            } else {
+                self.line(&format!(
+                    "uint64_t t{id}_seed = CHELIS_EFFECTIVE_UNIFORM_SEED({seed}ULL);"
+                ));
+            }
         }
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int64_t i = 0; i < t{id}_size; i++) {{"));

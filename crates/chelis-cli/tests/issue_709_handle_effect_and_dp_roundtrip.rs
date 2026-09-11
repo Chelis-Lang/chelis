@@ -307,24 +307,17 @@ fn unsuffixed_seed_literal_is_rejected() {
     );
 }
 
-/// Negative parity for the §C1.5 negative-seed rule (chelis#731 red team F2): a
-/// negative int64-literal seed is `.dp`-reachable (Surf's `-1i64` desugars to a
-/// non-literal `neg` the effects gate rejects). The lanes themselves honor
-/// [05-RNG-1]'s two's-complement reinterpretation of a signed seed
-/// (chelis#794); the checker rejects it anyway, narrowing the accepted
-/// front-end surface until chelis#735 authors the `with seed` contract.
-/// Positive parity is `with_seed_well_typed_body_checks_clean` (a non-negative
-/// `42i64` seed checks clean).
+/// [05-RNG-1] admits signed int64 seed bits in both source representations.
 #[test]
-fn negative_int64_seed_literal_is_rejected() {
+fn negative_int64_seed_literal_is_accepted() {
     let score = check_score(
         "(module {} m.main (def {} out (handle-effect {effect: random} \
          (lit {type: (t-prim {} int64)} -1) (lit {type: (t-prim {} f32)} 2.5))))\n",
         ".dp",
     );
     assert!(
-        score < 1.0,
-        "a negative int64 seed literal must be rejected, got score {score}"
+        score == 1.0,
+        "a negative int64 seed literal must be accepted, got score {score}"
     );
 }
 

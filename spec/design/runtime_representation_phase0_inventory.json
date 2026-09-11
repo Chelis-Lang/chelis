@@ -1590,7 +1590,7 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::emit_uniform_like",
-      "sample": "uint64_t t{id}_seed = t{id}_active ? CHELIS_EFFECTIVE_UNIFORM_SEED({seed}ULL) : {seed}ULL;"
+      "sample": "uint64_t t{id}_seed = __chelis_draw_seed_{draw} ^ (__chelis_draw_ordinal_{draw} * 0x9E3779B97F4A7..."
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::integer_abs_expr",

@@ -78,8 +78,10 @@ pub(crate) struct Scope {
     pub(crate) seed: Option<u64>,
 }
 
+/// An immutable lowering-owned association. Inspecting a site does not permit
+/// constructing an execution plan or attaching it to another graph.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum RandomSite {
+pub enum RandomSite {
     Forward { draw: DrawId, scope: ScopeId },
     Replay { draw: DrawId },
 }
@@ -243,7 +245,94 @@ pub struct EvaluationPlan {
     metadata: ExecutionMetadata,
 }
 
+/// One unfused execution schedule sealed with ownership of that exact graph.
+/// Neither graph inspection nor a separately verified graph can construct this
+/// carrier. Backend payload rewrites must happen before this boundary.
+#[derive(Debug)]
+pub struct VerifiedEvaluationPlan {
+    ownership: crate::ownership::VerifiedDagProgram,
+    metadata: ExecutionMetadata,
+}
+
+/// Borrowed execution information from a consumed, ownership-sealed plan.
+/// This is not a serialized certificate or a plan-construction API.
+#[derive(Clone, Copy)]
+pub struct EvaluationEmissionView<'a> {
+    metadata: &'a ExecutionMetadata,
+}
+
+impl<'a> EvaluationEmissionView<'a> {
+    pub fn steps(self) -> &'a [Step] {
+        &self.metadata.spine.steps
+    }
+
+    pub fn source(self) -> &'a [crate::execution_spine::Occurrence] {
+        &self.metadata.spine.source
+    }
+
+    pub fn site(self, node: NodeId) -> Option<RandomSite> {
+        self.metadata.sites.get(&node).copied()
+    }
+
+    pub fn draw_count(self) -> usize {
+        self.metadata.draws
+    }
+
+    pub fn inherited_seed(self) -> Option<u64> {
+        self.metadata.scopes[0].seed
+    }
+}
+
+impl VerifiedEvaluationPlan {
+    /// Consume the sealed graph and borrow its own execution information for
+    /// one emission. The view cannot outlive this callback; no constructor
+    /// permits pairing a view with a different graph for this entry point.
+    pub fn with_emission<R>(
+        self,
+        emit: impl FnOnce(crate::ownership::VerifiedDagProgram, EvaluationEmissionView<'_>) -> R,
+    ) -> R {
+        let Self {
+            ownership,
+            metadata,
+        } = self;
+        emit(
+            ownership,
+            EvaluationEmissionView {
+                metadata: &metadata,
+            },
+        )
+    }
+}
+
 impl EvaluationPlan {
+    /// Seal ownership in the order the source plan actually executes.
+    ///
+    /// Current lowering preserves graph-node order while inserting controls.
+    /// Reject a different schedule rather than applying a DAG-order lifetime
+    /// plan to it, or silently reordering effects to fit that lifetime plan.
+    pub fn verify_ownership(self) -> Result<VerifiedEvaluationPlan, String> {
+        self.validate()?;
+        let scheduled = self
+            .metadata
+            .spine
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::Node(node) => Some(*node),
+                Step::Control { .. } => None,
+            });
+        if !scheduled.eq(self.dag.nodes().iter().map(|node| node.id)) {
+            return Err("native execution order differs from ownership graph order".into());
+        }
+        let ownership = crate::ownership::lower_dag_ownership(self.dag)
+            .and_then(crate::ownership::verify_ownership)
+            .map_err(|error| error.to_string())?;
+        Ok(VerifiedEvaluationPlan {
+            ownership,
+            metadata: self.metadata,
+        })
+    }
+
     /// Inspect the graph's types and value roots. Cloning/serializing this
     /// view does not preserve the plan and cannot recreate one.
     pub fn dag_for_inspection(&self) -> &Dag {
@@ -725,6 +814,76 @@ mod tests {
             seed: Some(42),
             counter: 0,
         })
+    }
+
+    #[test]
+    fn ownership_seal_retains_actual_forward_replay_and_payload() {
+        let plan = fixture(&[0.5, 0.5], 4, true);
+        let expected_steps = plan.steps_for_inspection().to_vec();
+        let expected_source = plan.source_for_inspection().to_vec();
+        plan.verify_ownership()
+            .unwrap()
+            .with_emission(|owned, execution| {
+                assert_eq!(owned.emission().roots(), &[NodeId(2)]);
+                assert_eq!(owned.emission().len(), 3);
+                assert_eq!(execution.steps(), expected_steps);
+                assert_eq!(execution.source(), expected_source);
+                assert_eq!(execution.draw_count(), 1);
+                assert_eq!(execution.inherited_seed(), Some(42));
+                assert!(matches!(
+                    execution.site(NodeId(1)),
+                    Some(RandomSite::Forward {
+                        draw: DrawId(0),
+                        scope: ScopeId(0)
+                    })
+                ));
+                assert!(matches!(
+                    execution.site(NodeId(2)),
+                    Some(RandomSite::Replay { draw: DrawId(0) })
+                ));
+            });
+    }
+
+    #[test]
+    fn ownership_seal_rejects_a_different_valid_topological_schedule() {
+        let mut dag = Dag::new();
+        let ty = TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision: Prim::F32,
+        };
+        for name in ["x", "y"] {
+            let node = dag.add_node(RiscOp::Load { name: name.into() }, vec![], ty.clone(), None);
+            dag.add_root(node);
+        }
+        let mut metadata = ExecutionMetadata::new(None);
+        metadata.spine.record_nodes(&dag);
+        metadata.complete(&dag).unwrap();
+        metadata.spine.steps.swap(0, 1);
+        // Evaluator ordering is valid, but a DAG-order storage plan cannot be
+        // applied to a different schedule merely because both are topological.
+        let plan = EvaluationPlan::new(dag, metadata).unwrap();
+        assert_eq!(
+            plan.verify_ownership().unwrap_err(),
+            "native execution order differs from ownership graph order"
+        );
+    }
+
+    #[test]
+    fn ownership_seal_checks_ownership_not_only_execution_metadata() {
+        let mut plan = fixture(&[0.5], 4, false);
+        let source = plan.dag.roots()[0];
+        let ty = plan.dag.get(source).unwrap().output_type.clone();
+        for _ in 0..2 {
+            plan.dag
+                .add_node(RiscOp::Drop, vec![source], ty.clone(), None);
+        }
+        plan.metadata.spine.record_nodes(&plan.dag);
+        plan.metadata.complete(&plan.dag).unwrap();
+        plan.validate().unwrap();
+        assert!(
+            plan.verify_ownership().is_err(),
+            "duplicate logical termination must reject"
+        );
     }
 
     #[test]
