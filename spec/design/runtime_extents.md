@@ -681,9 +681,13 @@ prologue-local rewrite it needed before, and the C lane names the construct
 under [04-TOT-2] instead of substituting the wrong tensor. A binder position
 the walk cannot read a name from abandons the hoist for that def entirely, on
 the same reasoning. The enumerable part of the claim is the oracle beside the
-reader: every binder spelling Surf can write is built through the parser and
-asserted to yield its name, because a reader checked against a shape the
-parser never emits proves nothing about the shape it always emits. The necessity is the one #1266
+reader: it builds seven binder spellings from Surf source through the parser
+and the desugarer, and asserts each yields its name. Those seven are a typed
+parameter, an untyped parameter, two typed parameters, a typed parameter named
+after a Deep tag (which the desugarer emits as `^{:type ..} name`), a `let`
+binding, a `match` pattern binder and a pipe stage. Every fixture goes through
+the parser rather than being constructed, because a reader checked against a
+shape the parser never emits proves nothing about the shape it always emits. The necessity is the one #1266
 names: both spelling variants must execute, and the direct spelling otherwise
 leaves `expand` to a C host vocabulary that deliberately has no emission for
 it ([04-TOT-2]). A record whose constructor is a compile-time fact keeps its
@@ -804,9 +808,16 @@ root restatement then met, and `record.direct.{check,eval,c}` with
 `record.alias.eval` (#1266), which #1266/#569 meet below. #1397's own
 `shrink.*` declaration cells are met.
 
-chelis#1266/#569 move the four remaining record cells: `record.direct` on
-check, Eval and C, and `record.alias` on Eval. All four now execute
-`[0.25, 0.25]`. UNMET_PLACEHOLDER
+chelis#1266/#569 move the four record cells: `record.direct` on check, Eval
+and C, and `record.alias` on Eval. All four now execute `[0.25, 0.25]`, taking
+the unmet count from eight to four. Measured with the ignored acceptance
+runner rather than counted by hand:
+`cargo nextest run -p chelis-cli --test runtime_extent_claim_preparation
+--run-ignored all -E 'test(claimed_extent_contract)'` reports
+`55 cases, 4 unmet contract cells`. The four are
+`polymorphic.named.root.mismatch.{eval,c}` (#1374) and
+`polymorphic.foreign.root.mismatch.{eval,c}` (#1376), each trapping with a
+claimed-versus-observed extent where the contract expects execution.
 
 The merged B2b-0b numeric kernel repair compares literal and resolved named
 claims against independent nonnegative runtime sizes at live `Expand` and

@@ -4654,7 +4654,18 @@ fn names_bound_in(expr: &Expr, out: &mut UnordSet<String>) -> Result<(), String>
             .try_for_each(|child| names_bound_in(child, out)),
         Expr::Node(_, _) | Expr::List(_, _) => {
             let Some((node_tag, _, kids)) = stamped_parts(expr) else {
-                return Ok(());
+                // Round 3, P3: an unstamped form still carries children.
+                // Today the only one at a binder position is a typed
+                // parameter, which holds no binders, so descending changes
+                // nothing; not descending would have been the next place this
+                // class hid.
+                let Expr::List(list, _) = expr else {
+                    return Ok(());
+                };
+                return list
+                    .elements
+                    .iter()
+                    .try_for_each(|child| names_bound_in(child, out));
             };
             for (index, child) in kids.iter().enumerate() {
                 if chelis_deep::role::child_stamp_role(node_tag, index, kids.len())
@@ -19522,30 +19533,48 @@ mod record_hoist_binder_vocabulary_tests {
 
     /// One Surf spelling that binds `shadowed` inside `f`'s body, named by the
     /// binder form it exercises. Every entry is real source the parser accepts.
-    fn binder_spellings() -> Vec<(&'static str, String)> {
+    fn binder_spellings() -> Vec<(&'static str, String, &'static str)> {
         vec![
             (
                 "typed fn parameter",
                 "def f(x: tensor[1, f32]) -> tensor[1, f32] = \
                  (fn (shadowed: tensor[1, f32]) -> mul(shadowed, shadowed))(x)\n"
                     .to_string(),
+                "shadowed",
             ),
             (
                 "untyped fn parameter",
                 "def f(x: tensor[1, f32]) -> tensor[1, f32] = \
                  (fn (shadowed) -> mul(shadowed, shadowed))(x)\n"
                     .to_string(),
+                "shadowed",
             ),
             (
                 "two typed fn parameters",
                 "def f(x: tensor[1, f32]) -> tensor[1, f32] = \
                  (fn (shadowed: tensor[1, f32], other: tensor[1, f32]) -> mul(shadowed, other))(x, x)\n"
                     .to_string(),
+                "shadowed",
+            ),
+            (
+                // A typed parameter whose NAME is also a Deep tag spelling.
+                // `stamped_parts` would read `(params {type: ..})` as a
+                // vocabulary node and collect nothing, so the desugarer emits
+                // `^{:type ..} params` instead and the reader's `MetaExpr` arm
+                // is what keeps this whole family correct. Round 3 found that
+                // arm unguarded: mutating it left every other row green while
+                // shipping round 2's defect for this spelling.
+                "typed fn parameter named after a Deep tag",
+                "def f(x: tensor[1, f32]) -> tensor[1, f32] = \
+                 (fn (params: tensor[1, f32]) -> mul(params, params))(x)\n"
+                    .to_string(),
+                "params",
             ),
             (
                 "let binding",
                 "def f(x: tensor[1, f32]) -> tensor[1, f32] = {\n  shadowed = mul(x, x)\n  shadowed\n}\n"
                     .to_string(),
+                "shadowed",
             ),
             (
                 "match pattern binder",
@@ -19553,12 +19582,14 @@ mod record_hoist_binder_vocabulary_tests {
                  def f(x: tensor[1, f32]) -> tensor[1, f32] = \
                  match Holder { v: x } with { | Holder { v: shadowed } => mul(shadowed, shadowed) }\n"
                     .to_string(),
+                "shadowed",
             ),
             (
                 "pipe stage over a let binder",
                 "def f(x: tensor[1, f32]) -> tensor[1, f32] = {\n  \
                  shadowed = x |> mul(x)\n  shadowed\n}\n"
                     .to_string(),
+                "shadowed",
             ),
         ]
     }
@@ -19577,12 +19608,12 @@ mod record_hoist_binder_vocabulary_tests {
     /// spelling this walk cannot read a name from" and bound nothing.
     #[test]
     fn every_surf_binder_spelling_yields_its_name() {
-        for (form, source) in binder_spellings() {
+        for (form, source, binder) in binder_spellings() {
             let read = bound_names(&source, "f");
             let names = read.unwrap_or_else(|error| panic!("{form}: the reader refused: {error}"));
             assert!(
-                names.iter().any(|name| name == "shadowed"),
-                "{form}: bound {names:?}, which does not include the binder"
+                names.iter().any(|name| name == binder),
+                "{form}: bound {names:?}, which does not include `{binder}`"
             );
         }
     }
