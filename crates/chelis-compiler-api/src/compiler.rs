@@ -1588,7 +1588,7 @@ pub fn compile_for_execution_with_observer(
     request: CompileRequest,
     observer: &mut dyn FnMut(crate::emission_observer::EmissionObservation<'_>),
 ) -> Result<CompiledExecutionArtifact> {
-    let compiled = compile_source_for_target(
+    let compiled = compile_source_for_codegen(
         request.source_kind,
         &request.source,
         manifest_target(request.target),
@@ -1606,7 +1606,7 @@ fn compile_for_execution_impl(
     request: CompileRequest,
     strictness: EntryStrictness,
 ) -> Result<CompiledExecutionArtifact> {
-    let compiled = compile_source_for_target(
+    let compiled = compile_source_for_codegen(
         request.source_kind,
         &request.source,
         manifest_target(request.target),
@@ -3737,6 +3737,14 @@ fn compile_source_for_target(
     compile_source_scoped(source_kind, source, None, target)
 }
 
+fn compile_source_for_codegen(
+    source_kind: SourceKind,
+    source: &str,
+    target: Target,
+) -> Result<CompiledSource> {
+    compile_source_scoped_mode(source_kind, source, None, target, true)
+}
+
 /// Like [`compile_source`], but when `entry` is `Some`, prune the expanded
 /// program to the defs reachable from that named entry BEFORE the type
 /// checker runs. This is the WI-3 entrypoint-isolation path: it lets a caller
@@ -3751,12 +3759,25 @@ fn compile_source_scoped(
     entry: Option<&str>,
     target: Target,
 ) -> Result<CompiledSource> {
+    compile_source_scoped_mode(source_kind, source, entry, target, false)
+}
+
+fn compile_source_scoped_mode(
+    source_kind: SourceKind,
+    source: &str,
+    entry: Option<&str>,
+    target: Target,
+    codegen: bool,
+) -> Result<CompiledSource> {
+    // eval_for_target(C) still evaluates a value graph using a C manifest;
+    // requesting that manifest must not silently select native host emission.
+    let planned_c = codegen && target == Target::C;
     bail_if_cancelled("parse")?;
     let outcome = crate::pipeline::run_source(crate::pipeline::PipelineRequest {
         source_kind,
         source,
         entry,
-        goal: if target == Target::C {
+        goal: if planned_c {
             crate::pipeline::PipelineGoal::FullCheck
         } else {
             crate::pipeline::PipelineGoal::Lower(crate::pipeline::LoweringMode::AllowHostOnly)
@@ -3766,7 +3787,7 @@ fn compile_source_scoped(
     .map_err(|error| cancelled_or("check", error))?;
     let (lowered, host_execution) = match outcome {
         crate::pipeline::PipelineOutcome::Lowered(lowered) => (lowered, None),
-        crate::pipeline::PipelineOutcome::Checked(checked) if target == Target::C => {
+        crate::pipeline::PipelineOutcome::Checked(checked) if planned_c => {
             let realizability = chelis_effects::realizability::infer_realizability(
                 checked.program(),
                 crate::target_capability::tensor_capable_prims(target),
@@ -9026,6 +9047,20 @@ b: tensor[2, f32] = b
         };
         assert_eq!(inputs_for("a"), ["a".to_string()].into_iter().collect());
         assert_eq!(inputs_for("b"), ["b".to_string()].into_iter().collect());
+    }
+
+    #[test]
+    fn c_manifest_evaluation_retains_its_value_root_ingress() {
+        let source = "input: tensor[2, f32] = input\n";
+        let compiled = compile_source_for_target(SourceKind::Surf, source, Target::C).unwrap();
+        assert!(compiled.host_execution.is_none());
+        assert!(!compiled.dag.roots().is_empty());
+        assert!(
+            compiled
+                .named_roots
+                .get(&crate::pipeline::IrName::new("input"))
+                .is_some()
+        );
     }
 
     #[test]
