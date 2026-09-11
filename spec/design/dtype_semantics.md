@@ -2698,9 +2698,36 @@ The [#1287] child command is
 `.venv/bin/python scripts/dtype_count_oracle.py`; success ends with
 `DTYPE COUNT ORACLE: PASS`. It owns the checker grammar, dedicated non-alias
 `Count` IR, evaluator/C execution, exact WireDag v6 boundary, registered wire
-capacity, loud [#1291] device receipts, semantic registration, and executable
-example parity. [#1291] later replaces those device receipts with its hardware
-execution oracle; it does not weaken or bypass the [#1287] core receipt.
+capacity, semantic registration, and executable example parity. Its device leg
+delegates to `.venv/bin/python scripts/dtype_count_device_oracle.py`; success
+ends with `DTYPE COUNT DEVICE STRUCTURAL ORACLE: PASS`. That child runs the
+HIP/Metal kernel, compiler-API, CLI, host-helper, direct-entry, and example
+source tests, then proves by controlled mutations that a Count-to-Sum dispatch
+alias or restoration of C-host helper emission makes the focused tests fail.
+Each mutation refuses a dirty owner and restores the original bytes.
+
+The structural child is not [#1291]'s numerical completion receipt. It proves
+that both device lanes route a canonical `Count` node to a dedicated kernel
+over the exact `Bool8` carrier that [#1289] landed, that a Count-bearing
+host-program helper is emitted as its own device translation unit rather than
+C, and that no Sum alias, cast-plus-Sum composition, C-host helper fallback,
+or Metal abort stub survives a controlled mutation. Numerical acceptance is
+owned by the named ignored `count_` tests in both backends' `gpu_correctness.rs`
+suites, which cover positional and named multi-axis Count, empty selected
+extents, odd and large leaf counts, and the runtime's `Bool8` write-boundary
+domain trap. The kernels' overflow and stack-limit status codes are
+unreachable for any representable tensor (fewer than 2^63 leaves cannot
+overflow `int64`, and 64 frames bound every such leaf count), so no hardware
+test claims them; the device carrier limits are locked structurally in the
+codegen suites. The two authoritative manual gates are
+`scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness count_ --
+--ignored --test-threads=1` on real HIP hardware and
+`cargo test -p chelis-backend-metal --test gpu_correctness count_ --
+--ignored --test-threads=1` on an Apple Silicon Metal device. Both must match
+the evaluator and compiled C lane exactly and exit 0. [#1291] stays open, and
+its HIP and Metal capability cells keep citing it, until both gates have
+recorded passes; a recorded Metal pass alone closes neither. This extends, and
+never weakens or bypasses, [#1287]'s core receipt.
 
 **Pre-4C framework delivery.** `scripts/dtype_pre_phase4c_oracle.py` now owns
 the prerequisite command manifest and rejects missing owners before executing

@@ -2208,6 +2208,12 @@ fn execution_artifact_from_compiled_observed(
                 reject_unsupported_effect_ops_in_host_program(host_program, BuildTarget::Hip)?;
                 reject_unsupported_hip_ops_in_host_program(host_program)?;
                 let selected = host_compiled.host.take().expect("host branch selected");
+                // The helper manifest is read before C payload selection so a
+                // Count-bearing helper reaches the HIP backend as its source
+                // DAG and is lowered exactly like a HIP tensor entry.
+                let (helpers, selected) =
+                    chelis_backend_c::host_tensor_helper_codegen(selected, &func_name)
+                        .map_err(unsupported_stage_error)?;
                 let selected = chelis_backend_c::prepare_host_program_for_codegen(selected)
                     .map_err(unsupported_stage_error)?;
                 let verified = chelis_ir::ownership::verify_ownership(
@@ -2226,12 +2232,13 @@ fn execution_artifact_from_compiled_observed(
                     observed_host.as_ref(),
                     crate::emission_observer::SelectedEmission::Host(verified.emission()),
                 );
-                let result = chelis_backend_c::codegen_host_program(&verified, &func_name)
-                    .map_err(unsupported_stage_error)?;
+                let result =
+                    chelis_backend_hip::codegen_hip_host_program(&verified, &func_name, helpers)
+                        .map_err(unsupported_stage_error)?;
                 return Ok(compiled_execution_artifact(
                     &func_name,
                     None,
-                    compile_result_hip_host(target, &func_name, &result),
+                    compile_result_hip_host(target, &func_name, &result)?,
                     manifest_result(&compiled.program),
                     Vec::new(),
                     Vec::new(),
@@ -3773,41 +3780,75 @@ fn compile_result_hip(
 fn compile_result_hip_host(
     target: CompileTarget,
     func_name: &str,
-    result: &CodegenResult,
-) -> CompileResult {
-    let mut toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.requirements);
+    result: &chelis_backend_hip::HipHostProgramCodegenResult,
+) -> Result<CompileResult> {
+    let mut toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.host.requirements);
     toolchain.compile_flags.retain(|flag| flag != "-fopenmp");
     toolchain.link_flags.retain(|flag| flag != "-fopenmp");
-    CompileResult {
+    let mut files = vec![
+        GeneratedFile {
+            path: format!("{func_name}_hip.cpp"),
+            contents: result.host.c_source.clone(),
+        },
+        GeneratedFile {
+            path: format!("{func_name}_hip.h"),
+            contents: result.host.h_header.clone(),
+        },
+    ];
+    for helper in &result.device_helpers {
+        files.push(GeneratedFile {
+            path: format!("{}_hip.cpp", helper.name),
+            contents: helper.result.c_source.clone(),
+        });
+        for flag in &helper.result.compile_flags {
+            if !toolchain.compile_flags.contains(flag) {
+                toolchain.compile_flags.push(flag.clone());
+            }
+        }
+        for flag in &helper.result.link_flags {
+            if !toolchain.link_flags.contains(flag) {
+                toolchain.link_flags.push(flag.clone());
+            }
+        }
+    }
+    files.extend([
+        GeneratedFile {
+            path: "chelis_runtime.h".to_string(),
+            contents: RUNTIME_H.to_string(),
+        },
+        GeneratedFile {
+            path: "chelis_runtime_dtype.h".to_string(),
+            contents: RUNTIME_DTYPE_H.to_string(),
+        },
+        GeneratedFile {
+            path: "chelis_hip_runtime.h".to_string(),
+            contents: HIP_RUNTIME_H.to_string(),
+        },
+    ]);
+    // Device helpers run one at a time from the host wrapper, so the peak
+    // is the largest single helper estimate; an unknown helper estimate
+    // makes the whole estimate unknown rather than silently smaller.
+    let peak_device_bytes_estimate = if result.device_helpers.is_empty() {
+        None
+    } else {
+        result
+            .device_helpers
+            .iter()
+            .map(|helper| helper.result.peak_device_bytes_estimate)
+            .try_fold(0usize, |peak, bytes| bytes.map(|bytes| peak.max(bytes)))
+    };
+    Ok(CompileResult {
         target,
         entry_name: func_name.to_string(),
-        files: vec![
-            GeneratedFile {
-                path: format!("{func_name}_hip.cpp"),
-                contents: result.c_source.clone(),
-            },
-            GeneratedFile {
-                path: format!("{func_name}_hip.h"),
-                contents: result.h_header.clone(),
-            },
-            GeneratedFile {
-                path: "chelis_runtime.h".to_string(),
-                contents: RUNTIME_H.to_string(),
-            },
-            GeneratedFile {
-                path: "chelis_runtime_dtype.h".to_string(),
-                contents: RUNTIME_DTYPE_H.to_string(),
-            },
-            GeneratedFile {
-                path: "chelis_hip_runtime.h".to_string(),
-                contents: HIP_RUNTIME_H.to_string(),
-            },
-        ],
+        files,
         compile_flags: toolchain.compile_flags,
         link_flags: toolchain.link_flags,
-        peak_device_bytes_estimate: None,
+        peak_device_bytes_estimate: peak_device_bytes_estimate
+            .map(TryInto::try_into)
+            .transpose()
+            .map_err(|error| stage_error("compile", error, GeneralKind::Other))?,
         manifest: RootManifestResult::default(),
-    }
+    })
 }
 
 fn execution_input_specs(dag: &Dag, labels: &[String]) -> Result<Vec<ExecutionTensorSpec>> {
@@ -4396,44 +4437,45 @@ pub fn reject_unsupported_windowed_reductions_in_host_program(
     })
 }
 
-fn guard_count_for_device(
-    dag: &Dag,
-    target: &'static str,
-) -> std::result::Result<(), CompilerError> {
-    for node in dag.nodes() {
-        if matches!(node.op, RiscOp::Count { .. }) {
-            return Err(unsupported_gate_error(
-                format!(
-                    "`chelis build --target {target}` does not support `count`; lowered node {} requires it. chelis#1291 owns the dedicated {target} kernel; use `--target c`.",
-                    node.id.0
-                ),
-                target,
-                chelis_types::unimplemented_rejection!(
-                    1291,
-                    "first-class count ships on eval and C-host/C-DAG in chelis#1287; chelis#1291 owns the dedicated HIP/Metal kernels"
-                ),
-            ));
-        }
-    }
-    Ok(())
+/// Whether a tensor-helper DAG is emitted as device code under a device host
+/// program: every helper containing [05-OP-29] `Count` becomes its own
+/// device translation unit (`codegen_hip_host_program` /
+/// `codegen_metal_host_program`); every other helper keeps the C-host
+/// disposition.
+fn helper_is_device_emitted(dag: &Dag) -> bool {
+    dag.nodes()
+        .iter()
+        .any(|node| matches!(node.op, RiscOp::Count { .. }))
 }
 
-/// Reject Count in every tensor-helper DAG emitted with a HIP host program.
-/// Other helper operations retain their C-host fallback semantics; full HIP
-/// capability policy applies only to DAGs emitted as HIP device code.
+/// Apply the full HIP capability policy to every tensor-helper DAG a HIP
+/// host program emits as HIP device code, namely each Count-bearing helper.
+/// Other helper operations retain their C-host fallback semantics.
 pub fn reject_unsupported_hip_ops_in_host_program(
     program: &chelis_ir::host::ConcreteHostProgram,
 ) -> std::result::Result<(), CompilerError> {
-    for_each_host_helper_dag(program, |dag| guard_count_for_device(dag, "hip"))
+    for_each_host_helper_dag(program, |dag| {
+        if helper_is_device_emitted(dag) {
+            reject_unsupported_hip_ops(dag)
+        } else {
+            Ok(())
+        }
+    })
 }
 
-/// Reject Count in every tensor-helper DAG emitted with a Metal host program.
-/// Other helper operations retain their C-host fallback semantics; full Metal
-/// capability policy applies only to DAGs emitted as Metal device code.
+/// Apply the full Metal capability policy to every tensor-helper DAG a Metal
+/// host program emits as Metal device code, namely each Count-bearing
+/// helper. Other helper operations retain their C-host fallback semantics.
 pub fn reject_unsupported_metal_ops_in_host_program(
     program: &chelis_ir::host::ConcreteHostProgram,
 ) -> std::result::Result<(), CompilerError> {
-    for_each_host_helper_dag(program, |dag| guard_count_for_device(dag, "metal"))
+    for_each_host_helper_dag(program, |dag| {
+        if helper_is_device_emitted(dag) {
+            reject_unsupported_metal_ops(dag)
+        } else {
+            Ok(())
+        }
+    })
 }
 
 /// Metal-specific early capability policy. The IR verifier and backend
@@ -4441,7 +4483,6 @@ pub fn reject_unsupported_metal_ops_in_host_program(
 /// provides the typed public diagnostic without allowing CLI/compiler-api
 /// copies to drift.
 pub fn reject_unsupported_metal_ops(dag: &Dag) -> std::result::Result<(), CompilerError> {
-    guard_count_for_device(dag, "metal")?;
     for node in dag.nodes() {
         let direct_arithmetic = match &node.op {
             RiscOp::Sub => Some("sub"),
@@ -4706,7 +4747,7 @@ mod metal_runtime_dim_reject_tests {
     }
 
     #[test]
-    fn metal_seam_rejects_count_with_issue_1291_receipt() {
+    fn metal_seam_accepts_count_for_the_dedicated_tensor_entry_kernel() {
         let mut dag = Dag::new();
         let input = dag.add_node(
             RiscOp::Load { name: "x".into() },
@@ -4721,18 +4762,8 @@ mod metal_runtime_dim_reject_tests {
             None,
         );
 
-        let error = reject_unsupported_metal_ops(&dag)
-            .expect_err("Metal must reject Count until its dedicated kernel lands");
-        let message = &error.errors[0].message;
-        assert!(message.contains("unimplemented chelis#1291:"), "{message}");
-        assert!(
-            message.contains("count") && message.contains("--target c"),
-            "{message}"
-        );
-        assert_eq!(
-            error.errors[0].kind(),
-            chelis_vocab::DiagnosticKind::UnsupportedFeature
-        );
+        reject_unsupported_metal_ops(&dag)
+            .expect("Metal must admit Count to its dedicated tensor-entry kernel");
     }
 
     fn direct_arithmetic_dag(op: RiscOp) -> Dag {
@@ -4814,7 +4845,6 @@ mod metal_runtime_dim_reject_tests {
 }
 
 pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), CompilerError> {
-    guard_count_for_device(dag, "hip")?;
     for node in dag.nodes() {
         let fused_direct_ops = match &node.op {
             RiscOp::FusedElem { ops } => Some(ops),
@@ -6940,7 +6970,7 @@ mod tests {
     }
 
     #[test]
-    fn hip_rejects_count_with_issue_1291_receipt() {
+    fn hip_accepts_count_for_the_dedicated_tensor_entry_kernel() {
         let mut dag = Dag::new();
         let input = dag.add_node(
             RiscOp::Load { name: "x".into() },
@@ -6955,18 +6985,8 @@ mod tests {
             None,
         );
 
-        let error = reject_unsupported_hip_ops(&dag)
-            .expect_err("HIP must reject Count until its dedicated kernel lands");
-        let message = &error.errors[0].message;
-        assert!(message.contains("unimplemented chelis#1291:"), "{message}");
-        assert!(
-            message.contains("count") && message.contains("--target c"),
-            "{message}"
-        );
-        assert_eq!(
-            error.errors[0].kind(),
-            chelis_vocab::DiagnosticKind::UnsupportedFeature
-        );
+        reject_unsupported_hip_ops(&dag)
+            .expect("HIP must admit Count to its dedicated tensor-entry kernel");
     }
 
     #[test]

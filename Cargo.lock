@@ -471,8 +471,11 @@ dependencies = [
 name = "chelis-backend-hip"
 version = "0.18.6"
 dependencies = [
+ "chelis-backend-c",
+ "chelis-effects",
  "chelis-ir",
  "chelis-runtime",
+ "chelis-surf",
  "chelis-types",
  "chelis-unord",
  "chelis-vocab",
@@ -485,8 +488,11 @@ dependencies = [
 name = "chelis-backend-metal"
 version = "0.18.6"
 dependencies = [
+ "chelis-backend-c",
+ "chelis-effects",
  "chelis-ir",
  "chelis-runtime",
+ "chelis-surf",
  "chelis-types",
  "chelis-unord",
  "chelis-vocab",

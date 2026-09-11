@@ -112,7 +112,9 @@ fn host_applied_def_main_is_a_host_lane_root() {
 
 /// Measured #1376 residue: the mismatch now fails at the local extent
 /// consumer. Correct declaring-caller witness attribution remains #1277 work;
-/// this disposition lock is not the named-claim acceptance oracle.
+/// this disposition lock is not the named-claim acceptance oracle. The
+/// rank-increasing route traps as `insert` since the #1277 expand/insert
+/// split (#1547, #1590); chelis#1778 records the stale `expand` spelling.
 #[test]
 fn host_applied_mismatch_preserves_the_current_local_failure() {
     let error = eval(EvalRequest {
@@ -129,7 +131,7 @@ fn host_applied_mismatch_preserves_the_current_local_failure() {
         .join("\n");
     assert!(messages.contains("claimed = 3, node "), "{messages}");
     assert!(
-        messages.ends_with("axis 1 = 2\nnumeric trap: domain in expand at int64"),
+        messages.ends_with("axis 1 = 2\nnumeric trap: domain in insert at int64"),
         "{messages}"
     );
 }

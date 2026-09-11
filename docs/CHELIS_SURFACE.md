@@ -132,7 +132,8 @@ float upcast (their default `divide`); use a `cast` first for that.
 - `count` requires one or more unique axes. Concrete-rank calls may use several
   positional axes in any order; rank-polymorphic calls use named axes only. It lowers
   to one dedicated `Count` node whose normalized original positions are stored in
-  descending order. Eval and C implement it; HIP/Metal reject pending chelis#1291.
+  descending order. Eval, C, HIP, and Metal implement it with dedicated kernels;
+  the HIP hardware gate is still pending under chelis#1291.
 - **`accumulator` (sum only)** controls running-sum precision and result dtype.
   Defaults (no implicit promotion): bf16/f16→f32, f32→f32, f64→f64, int8/int16→int32,
   int32→int32, int64→int64. Full table: `spec/04` §5.7.1.

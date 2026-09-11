@@ -548,7 +548,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/05-risc-primitives.md",
         "### 2.1 Elementwise Binary",
         "### 2.4 Movement",
-        "5cfbd4054d35b0c496c60ef70fb5d526431dbcbf391c229039e0d5fa656389ee",
+        "53a56bb68ec04334105f5c84e8eb499d101007bc657f4c9b36a2ec32630402b2",
     ),
     "logical builtin contract": (
         "spec/05-risc-primitives.md",
@@ -590,13 +590,13 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/capability_table.md",
         "## Seed dispositions the table must ship with",
         "## New numeric ops before the table lands (added 2026-07-30)",
-        "b236eef3448e4147a85f531b7d8b1a7bfcc8b9d933f96470deff2a305a7c011b",
+        "965b58fa0644d6b56f5106b66b35ad0917dfd4201c70737d42c132f94686dc14",
     ),
     "Phase 4 handoff": (
         "spec/design/dtype_semantics.md",
         "## Phase 4 - the capability table becomes the permanent guard",
         "## I1. Interlock with loud unsupported ([#730])",
-        "d21e93e6b327941813f93a47f2ecdf1cc5983a7eb6bf77528f25c25ed1cf3713",
+        "ec2eac5ae6f31c8fb4b60f5ae835908b1afa7f866a357be6c7eaf04130ab2103",
     ),
     "compiled stdlib consumer": (
         "spec/design/loud_unsupported.md",

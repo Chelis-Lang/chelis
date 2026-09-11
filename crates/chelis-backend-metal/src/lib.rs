@@ -154,6 +154,18 @@ pub struct MetalCodegenResult {
     peak_device_bytes_static_extra: usize,
 }
 
+/// One device translation unit used by a host-program wrapper.
+pub struct MetalHostTensorHelperCodegen {
+    pub name: String,
+    pub result: MetalCodegenResult,
+}
+
+/// A scalar/container host wrapper plus every Count-bearing Metal helper it calls.
+pub struct MetalHostProgramCodegenResult {
+    pub host: chelis_backend_c::CodegenResult,
+    pub device_helpers: Vec<MetalHostTensorHelperCodegen>,
+}
+
 impl MetalCodegenResult {
     /// Resolve `peak_device_bytes_estimate` against runtime symbolic-dim
     /// bindings. The M-phase today emits no symbolic terms, so this
@@ -297,6 +309,84 @@ pub fn codegen_metal(
         peak_device_bytes_terms: Vec::new(),
         peak_device_bytes_static_extra: peak_device_bytes,
     })
+}
+
+/// Compile a verified host program whose Count-bearing tensor helpers run
+/// on the device.
+///
+/// `helpers` is the wrapper's helper manifest, read off the concrete program
+/// by [`chelis_backend_c::host_tensor_helper_codegen`] before payload
+/// selection and ownership lowering. Every helper whose DAG contains `Count`
+/// becomes its own Metal translation unit: the C wrapper declares it as an
+/// external symbol, and this function lowers the helper's source DAG through
+/// ownership lowering, verification, and the no-reuse plan a tensor entry
+/// receives before emitting it with [`codegen_metal`]. Other tensor helpers
+/// keep their C-host disposition. There is no C fallback for a Count helper
+/// and no abort stub for an unsupported one: the selection predicate below is
+/// the only place that decides, and the typed emitter error propagates.
+pub fn codegen_metal_host_program(
+    program: &chelis_ir::ownership::VerifiedHostProgram,
+    func_name: &str,
+    helpers: Vec<chelis_backend_c::HostTensorHelperCodegen>,
+) -> Result<MetalHostProgramCodegenResult, Unsupported> {
+    let count_helpers = helpers
+        .into_iter()
+        .filter(|helper| {
+            helper
+                .dag
+                .nodes()
+                .iter()
+                .any(|node| matches!(node.op, chelis_ir::dag::RiscOp::Count { .. }))
+        })
+        .collect::<Vec<_>>();
+    let external_names = count_helpers
+        .iter()
+        .map(|helper| helper.name.clone())
+        .collect::<Vec<_>>();
+    let host = chelis_backend_c::codegen_host_program_with_external_tensor_helpers(
+        program,
+        func_name,
+        &external_names,
+    )?;
+    let device_helpers = count_helpers
+        .into_iter()
+        .map(|helper| {
+            let verified = verified_host_helper_dag(&helper.name, helper.dag)?;
+            Ok(MetalHostTensorHelperCodegen {
+                result: codegen_metal(plan_metal(verified), &helper.name)?,
+                name: helper.name,
+            })
+        })
+        .collect::<Result<Vec<_>, Unsupported>>()?;
+    Ok(MetalHostProgramCodegenResult {
+        host,
+        device_helpers,
+    })
+}
+
+/// Lower one externalized helper DAG exactly as a Metal tensor entry is
+/// lowered: ownership lowering, then verification.
+fn verified_host_helper_dag(
+    helper_name: &str,
+    dag: chelis_ir::dag::Dag,
+) -> Result<VerifiedDagProgram, Unsupported> {
+    let unsupported = |error: chelis_ir::ownership::OwnershipError| {
+        Unsupported::new(
+            chelis_types::unsupported::UnsupportedKind::Construct(format!(
+                "Metal device helper `{helper_name}` ownership lowering"
+            )),
+            error.to_string(),
+            chelis_types::unsupported::Stage::Codegen("metal"),
+            chelis_types::deliberate_rejection!(
+                "[04-SHAPE-1]",
+                "a device-emitted host tensor helper requires the same verified ownership plan as a tensor entry"
+            ),
+        )
+    };
+    chelis_ir::ownership::verify_ownership(
+        chelis_ir::ownership::lower_dag_ownership(dag).map_err(unsupported)?,
+    )
+    .map_err(unsupported)
 }
 
 #[cfg(test)]

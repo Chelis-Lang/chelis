@@ -462,6 +462,11 @@ fn parity_generic_explicit_shape() {
 }
 
 #[test]
+fn parity_count_bool_device_entry_library_only() {
+    drive_parity(&examples_root().join("count_bool_device_entry.ch"), false);
+}
+
+#[test]
 fn parity_constraint_directed_risk_guards_library_only() {
     drive_parity(
         &examples_root().join("constraint_directed_risk_guards.ch"),
@@ -614,6 +619,7 @@ fn parity_corpus_is_complete() {
         "checked_window_geometry.ch",
         "constraint_directed_risk_guards.ch",
         "count_bool_axes.ch",
+        "count_bool_device_entry.ch",
         "dict_foundation.ch",
         "explicit_normalization.ch",
         "generic_explicit_shape.ch",
