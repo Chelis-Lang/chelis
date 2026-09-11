@@ -767,3 +767,83 @@ pub fn assert_elements_in_domain(prim: &str, printed: &str, context: &str) {
         }
     }
 }
+
+/// One emitted host body's DEFINITION, located by NAME rather than by its
+/// exact parameter list, returned from the definition's first character to
+/// the end of `emitted`. Callers slice their own end.
+///
+/// The emitted file carries a forward declaration and a definition for the
+/// same symbol, so the name alone is ambiguous; the definition is the
+/// occurrence whose parameter list is followed by `{` instead of `;`.
+///
+/// Matching the full signature instead is what chelis#1808 and chelis#1820
+/// were: chelis#1799 gave every host body a `chelis_rng_state` parameter, and
+/// a literal match on the old parameter list then failed before the row
+/// counted anything, reporting a changed SIGNATURE as a missing definition. A
+/// precondition that cannot tell a changed signature from a missing or
+/// relocated body is worse than no precondition, so this one keys on the
+/// structure it actually needs. chelis#1810 established the shape in
+/// `runtime_extent_slice_b.rs` and chelis#1834 closed its two misreads there;
+/// this carries the same two closures, shared. When that file next moves, it
+/// can drop its private copy for this one.
+///
+/// The two misreads, both closed here. A match with no left word boundary
+/// accepts `g_run__chelis_owned_body(` as `run__chelis_owned_body`, and the
+/// wrong function's body then satisfies the caller's assertions for the wrong
+/// reason. And taking the first `)` as the end of the parameter list mistakes
+/// a nested parenthesis for the end of the signature, so the `{` test fails
+/// and this reports a body that is present as having left the host lane --
+/// chelis#1808's own misdiagnosis in a new spelling.
+///
+/// A third shape is unmodelled and stays that way deliberately. Neither
+/// closure describes what sits BETWEEN the `)` and the `{`, and `trim_start`
+/// consumes only whitespace, so a definition carrying an attribute or a
+/// calling convention there -- `void f(int x) __attribute__((hot)) {` -- is
+/// rejected and produces misread two's wrong diagnosis again. Nothing in
+/// `crates/chelis-backend-c/src/` emits `__attribute__` or `__asm__`, so it is
+/// latent rather than live; a case would pin a spelling the emitter does not
+/// have. If one ever appears, this is where it lands.
+pub fn host_body_definition<'a>(emitted: &'a str, name: &str) -> &'a str {
+    /// The `)` that closes the first `(` in `text`, counting nesting.
+    fn closing_paren(text: &str) -> Option<usize> {
+        let open = text.find('(')?;
+        let mut depth = 0usize;
+        for (offset, byte) in text.bytes().enumerate().skip(open) {
+            match byte {
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(offset);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    let needle = format!("{name}(");
+    let mut at = 0;
+    while let Some(found) = emitted[at..].find(&needle) {
+        let start = at + found;
+        at = start + needle.len();
+        let preceded_by_identifier = emitted[..start]
+            .chars()
+            .next_back()
+            .is_some_and(|previous| previous.is_alphanumeric() || previous == '_');
+        if preceded_by_identifier {
+            continue;
+        }
+        let rest = &emitted[start..];
+        if let Some(close) = closing_paren(rest)
+            && rest[close + 1..].trim_start().starts_with('{')
+        {
+            return rest;
+        }
+    }
+    panic!(
+        "no definition of `{name}` in the emitted C: a forward declaration alone means the body \
+         is not emitted here:\n{emitted}"
+    );
+}

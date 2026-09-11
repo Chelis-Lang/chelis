@@ -196,8 +196,8 @@ fn hip_count_grammar_is_rejected_at_the_sealed_ownership_boundary() {
 #[test]
 fn hip_count_accepts_rank_above_the_retired_fixed_device_limit() {
     // Phase 2 removes the fixed-rank carrier. A rank-9 Count therefore emits
-    // exact dynamic-rank metadata instead of reusing chelis#1345 as a target
-    // capability rejection.
+    // exact dynamic-rank metadata instead of reusing the Metal fixed-rank cap's
+    // chelis#1844 target capability rejection.
     let dag = count_dag(
         lit_ty(&[1; 9], Prim::Bool),
         vec![8],
@@ -212,7 +212,7 @@ fn hip_count_accepts_rank_above_the_retired_fixed_device_limit() {
     );
     assert!(source.contains("chelis_device_metadata a_sh8"), "{source}");
     assert!(!source.contains("CHELIS_GPU_MAX_DIM"), "{source}");
-    assert!(!source.contains("unimplemented chelis#1345"), "{source}");
+    assert!(!source.contains("unimplemented chelis#1844"), "{source}");
 }
 
 #[test]

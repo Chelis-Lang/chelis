@@ -170,6 +170,18 @@ REQUIRED_EVAL_RECEIPTS = {
 # runtime_extent_claim_preparation independently asserts the example's declared
 # signature, exact shape/value, and the required failure with five input elements.
 # Its 40-call matrix separately exercises export, binding, and inlined roots.
+
+# chelis#1818 re-freezes parity_corpus_is_complete. Since the digest was last
+# reviewed at 22b193cf7, ten reviewed merges each appended one example name to
+# the `known` list and added the per-file parity row that exercises it:
+# source-file-names.ch (#1749), count_bool_device_entry.ch (#1307),
+# dropout_fixed_stream.ch and dropout_staged_claim.ch (#1733),
+# generic_value_roots.ch (#1758), integer_functions.ch (#1751),
+# record_input_broadcast.ch (#1792), recursive_cast_targets.ch (#1759),
+# resource_target_cpu.ch (#1793), signed_seed.ch (#1809). The diff inside the
+# definition is exactly those ten added lines: the drift comparison, the
+# missing/extra partition, and the assertion are unchanged, and every added row
+# carries its own reviewed executable evidence in the owning pull request.
 REQUIRED_TEST_DEFINITION_SHA256: dict[Path, dict[str, str]] = {
     PARITY_SOURCE: {
         "parity_checked_reshape": "3f2defb3802726dac732a24ee5a9815433c8a16679f60a8ae337268305119424",
@@ -182,7 +194,7 @@ REQUIRED_TEST_DEFINITION_SHA256: dict[Path, dict[str, str]] = {
         "parity_count_bool_axes": "66e82bb4aeedafabc5d77eefeec25cb2728085becf2fdf44c335631fde750ba9",
         "parity_checked_sparse_axes": "69b1b926e2294ef2dcf704f68d218f0c692788c943aa3f6a88ed06e331e107b0",
         "parity_checked_window_geometry": "9df8502bf07ccbbd5731c79596d328130cddedede4217f7af585063404cc64dc",
-        "parity_corpus_is_complete": "6603a110d51e7c5629d9d6e1026f2ca6ecfa4e05d565aa2df32caa91180e41ee",
+        "parity_corpus_is_complete": "299df07a2d53bdb6c4041bad7f531c60c44ad2f29e6104e313aaeed10070f961",
         "parity_explicit_normalization": "d09c17ffa744ee21214877d59476ce58441480e4f6f8a29d6eb5edf3ad1417cb",
         "parity_dict_foundation": "1bfd21bf0d78c9f36869908852a963037e0f13e36d5f9bc73b77131ff9d2970f",
         "parity_generic_explicit_shape": "72ebff1fb9ca21ef52e6622c724f90e7f24f9054c8bff0b5c582be8582007f73",
