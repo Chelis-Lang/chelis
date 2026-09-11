@@ -293,6 +293,45 @@ impl CEmitter {
         )
     }
 
+    pub(crate) fn emit_verified_evaluation_with_options(
+        dag: VerifiedDagView<'_>,
+        execution: EvaluationEmissionView<'_>,
+        func_name: &str,
+        options: crate::CodegenOptions,
+    ) -> Result<String, Unsupported> {
+        for node in dag.nodes() {
+            if matches!(
+                node.op,
+                RiscOp::FusedElem { .. } | RiscOp::BlasMatmul { .. }
+            ) {
+                return Err(unsupported_fixed_execution(
+                    "fixed-control emission requires the unfused payload",
+                ));
+            }
+        }
+        let mut plan = plan_c_storage_layout(dag).map_err(unsupported_storage_plan)?;
+        let memory_plan = MemoryPlan::from_layout(&plan);
+        let nodes = dag.nodes().iter().map(|node| node.id).collect::<Vec<_>>();
+        let mut fused_reuse = BTreeMap::new();
+        for node in nodes {
+            if let Some(token) = plan
+                .take_reuse_for(node)
+                .map_err(unsupported_storage_plan)?
+            {
+                fused_reuse.insert(node, token);
+            }
+        }
+        Self::emit_preplanned(
+            dag,
+            memory_plan,
+            fused_reuse,
+            func_name,
+            options,
+            true,
+            Some(execution),
+        )
+    }
+
     fn emit_preplanned(
         dag: VerifiedDagView<'_>,
         memory_plan: MemoryPlan,
@@ -484,6 +523,7 @@ impl CEmitter {
         e.line("}");
         e.line("/* CHELIS_UNIFORM_HELPERS_END */");
         if execution.is_some() {
+            e.line("/* CHELIS_DROPOUT_HELPERS_BEGIN */");
             e.line("static inline uint64_t chelis_dropout_mix(uint64_t value) {");
             e.line("    value += 0x9E3779B97F4A7C15ULL;");
             e.line("    value = (value ^ (value >> 30)) * 0xBF58476D1CE4E5B9ULL;");
@@ -499,6 +539,7 @@ impl CEmitter {
             e.line("static inline float chelis_dropout_unit_f32(uint64_t seed, uint64_t ordinal, uint64_t index) {");
             e.line("    return (float)chelis_dropout_unit(seed, ordinal, index);");
             e.line("}");
+            e.line("/* CHELIS_DROPOUT_HELPERS_END */");
         }
         // [05-OP-31]/[05-OP-44] make every published host tensor descriptor
         // canonical row-major storage.  The old runtime ABI exposed mutable
@@ -566,7 +607,7 @@ impl CEmitter {
         ));
         e.indent = 1;
 
-        if private_random_context {
+        if private_random_context && execution.is_none() {
             e.line("(void)__chelis_rng;");
         }
 
@@ -615,8 +656,28 @@ impl CEmitter {
 
         e.emit_input_shape_preamble(dag, &input_slots, func_name);
 
+        let inherits_random = execution.is_some_and(|execution| {
+            dag.nodes().iter().any(|node| {
+                matches!(
+                    execution.site(node.id),
+                    Some(RandomSite::Forward { scope, .. }) if scope.index() == 0
+                )
+            })
+        });
         if execution.is_some() {
-            e.line("uint64_t __chelis_fixed_seed = 0ULL, __chelis_fixed_counter = 0ULL;");
+            if private_random_context && inherits_random {
+                e.line("if (__chelis_rng == NULL || !__chelis_rng->active) {");
+                e.indent += 1;
+                e.line(&format!(
+                    "fprintf(stderr, \"{func_name_fmt}: inherited Random requires an active host RNG scope\\n\");"
+                ));
+                e.line("abort();");
+                e.indent -= 1;
+                e.line("}");
+                e.line("uint64_t __chelis_fixed_seed = __chelis_rng->seed, __chelis_fixed_counter = __chelis_rng->counter;");
+            } else {
+                e.line("uint64_t __chelis_fixed_seed = 0ULL, __chelis_fixed_counter = 0ULL;");
+            }
         }
         let ordinary_steps;
         let steps = if let Some(execution) = execution {
@@ -693,6 +754,11 @@ impl CEmitter {
             .collect::<Vec<_>>();
         for id in write_nodes {
             e.line(&format!("chelis_tensor_end_write(t{}_write_guard);", id));
+        }
+
+        if private_random_context && inherits_random {
+            e.line("__chelis_rng->seed = __chelis_fixed_seed;");
+            e.line("__chelis_rng->counter = __chelis_fixed_counter;");
         }
 
         // Transfer program-owned outputs to the caller. A bare Load is an

@@ -1,8 +1,9 @@
 # Closed fixed-control C emission
 
-Part of #1192 and LaCaDiLE's R3 compiler boundary. This is the backend entry,
-not ordinary source/API/CLI admission or completion of the multi-backend issue.
-HIP/Metal, host helper transport and #1764's public program remain excluded here.
+Part of #1192 and LaCaDiLE's R3 compiler boundary. The sealed backend entry is
+also carried through ordinary C source/API/CLI admission, including concrete
+specializations of generic host helpers such as #1764. HIP/Metal remain
+excluded and retain their typed rejection.
 
 `EvaluationPlan::verify_ownership` consumes the lowering-owned graph and source
 execution metadata. It validates the plan, requires the actual node schedule to
@@ -51,11 +52,16 @@ assertions, and removed cleanup leaves a live owner. Type-level negative tests
 reject forged ownership/metadata pairing and runtime tests reject inherited
 Random, invalid graph order and duplicate terminal actions.
 
-The tests lower checked function bodies or typed subexpressions directly. They
-do not claim that ordinary `chelis build` now admits dropout. The next transport
-slice must preserve the actual source plan through host helper cuts, invoke the
-private RNG context, retain Resource admission and cover the public API/CLI.
-No normal source guard, public ABI, wire protocol, adapter pin or shell changes
-here. Same-compilation collection, native-state/formal refinement, full numerical
-campaigns and release/School adoption remain later obligations. Exact reviewed
-heads, commands and outcomes belong to this PR's receipts, not this scope statement.
+The source path collects execution metadata in the same lowering that produces
+each concrete helper graph and keeps it in an opaque `HostExecutionPlan` until
+ownership verification. Private host helpers inherit the invocation-local RNG
+frame; inactive state is distinct from active seed zero, and forward/replay
+associations cannot be split into independent helper plans. Ordinary public
+Rust host structures and the public four-argument C entry ABI are unchanged.
+Runtime rates/seeds, unrepresentable staged controls, raw/missing plans and
+device targets remain loud. Resource target validation remains independent.
+No wire protocol, adapter pin or shell changes are part of this slice.
+Same-compilation AD observation collection, native-state/formal refinement,
+full numerical campaigns and release/School adoption remain later obligations.
+Exact reviewed heads, commands and outcomes belong to this PR's receipts, not
+this scope statement.
