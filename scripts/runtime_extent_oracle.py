@@ -843,30 +843,29 @@ def load_target_manifest(path: Path | None = None) -> tuple[Mapping[str, object]
 def target_argv(row: Mapping[str, object]) -> tuple[str, ...]:
     """The exact cargo command one manifest row selects.
 
-    Filters come before ``--`` and harness flags after it, so the selector is
-    the only thing that decides which tests run.
+    An ``exact`` row's names go AFTER ``--``, where the harness takes any
+    number of filters. Cargo itself accepts a single ``[TESTNAME]``
+    positional, so a multi-name row placed before ``--`` is rejected outright
+    with "unexpected argument" and the target never runs. A ``substring``
+    row's one value stays before ``--``, which is the form its command has
+    always had.
     """
 
     selector = row["selector"]
     mode = selector["mode"]
-    if mode == "exact":
-        filters = list(row["expected"])
-    elif mode == "substring":
-        filters = [selector["value"]]
-    else:
-        filters = []
-    if row["kind"] == "test":
-        target = Path(row["file"]).stem
-        head = ["cargo", "test", "-p", row["package"], "--test", target, *filters]
-    else:
-        head = ["cargo", "test", "-p", row["package"], "--lib", *filters]
+    target_selection = (
+        ["--test", Path(row["file"]).stem] if row["kind"] == "test" else ["--lib"]
+    )
+    head = ["cargo", "test", "-p", row["package"], *target_selection]
     if row.get("list_only"):
-        tail = ["--ignored", "--list"]
+        tail = [selector["value"], "--", "--ignored", "--list"]
     elif mode == "exact":
-        tail = ["--exact", "--nocapture"]
+        tail = ["--", "--exact", "--nocapture", *row["expected"]]
+    elif mode == "substring":
+        tail = [selector["value"], "--", "--nocapture"]
     else:
-        tail = ["--nocapture"]
-    return tuple([*head, "--", *tail])
+        tail = ["--", "--nocapture"]
+    return tuple([*head, *tail])
 
 
 def manifest_targets(
@@ -1283,11 +1282,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Runtime-extent class oracle for chelis#1277. Phase A's wire "
-            "capacity leg executes the Python binding facade, so the "
-            "interpreter it runs under needs that facade's dependencies: "
-            "uv pip install --python .venv/bin/python -r "
-            "bindings/python/pyproject.toml. Without them the leg fails with "
-            "a ModuleNotFoundError that reads like a census defect."
+            "capacity leg executes the Python binding facade through the "
+            "interpreter PYO3_PYTHON names, falling back to the checkout's "
+            ".venv, NOT through the interpreter running this script. That "
+            "interpreter needs the facade's dependencies: uv pip install "
+            "--python <that interpreter> -r bindings/python/pyproject.toml. "
+            "Without them the leg fails with a ModuleNotFoundError that "
+            "reads like a census defect."
         )
     )
     parser.add_argument("--phase", required=True, choices=PHASES)

@@ -599,6 +599,14 @@ command currently fails because `SLICE_PHASES` still requires unregistered
 passing phase or erase outstanding B rows. `--phase a` and `--phase b`
 retain their names and row-transition checks.
 
+Phase A's wire capacity leg executes the Python binding facade through the
+interpreter `PYO3_PYTHON` names, falling back to the checkout's `.venv`, and
+not through the interpreter running the oracle. Install that facade's
+dependencies into it with
+`uv pip install --python <that interpreter> -r bindings/python/pyproject.toml`;
+without them the leg reports a `ModuleNotFoundError` that reads like a census
+defect.
+
 Each phase's expected per-test receipts live in the reviewed manifest
 `scripts/runtime_extent_oracle_targets.json`, which the oracle reads to build
 its commands and which `crates/chelis-types/tests/runtime_extent_target_manifest.rs`

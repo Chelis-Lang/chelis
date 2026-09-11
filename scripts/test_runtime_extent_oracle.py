@@ -357,6 +357,9 @@ class RuntimeExtentOracleTests(unittest.TestCase):
     def test_host_actualization_owner_matrix_is_in_the_automatic_gate(self) -> None:
         targets = {target.id: target for target in ORACLE.phase_a_targets("python")}
         target = targets["host_actualization"]
+        # The names follow `--`, where the harness takes any number of
+        # filters. Cargo takes one `[TESTNAME]` positional, so this is the
+        # only placement that works for a row naming more than one test.
         self.assertEqual(
             target.argv,
             (
@@ -365,10 +368,10 @@ class RuntimeExtentOracleTests(unittest.TestCase):
                 "-p",
                 "chelis-ir",
                 "--lib",
-                "host::tests::tensor_helper_actualization_declines_input_axis_for_shrink_and_stride",
                 "--",
                 "--exact",
                 "--nocapture",
+                "host::tests::tensor_helper_actualization_declines_input_axis_for_shrink_and_stride",
             ),
         )
         self.assertEqual(
@@ -556,6 +559,32 @@ class RuntimeExtentOracleTests(unittest.TestCase):
                 self.assertEqual(target.list_only, bool(row.get("list_only", False)))
                 covered.add(key)
         self.assertEqual(covered, set(rows), "manifest rows with no target")
+
+    def test_no_generated_command_passes_cargo_more_than_one_positional(self) -> None:
+        # Regression test, measured: the eight-name `exec_c` row was
+        # generated with its filters before `--`, and cargo rejected the
+        # whole command with "unexpected argument" in 0.0s, so the target
+        # never ran and the oracle reported a failed command rather than a
+        # receipt. Cargo accepts a single `[TESTNAME]`; the harness after
+        # `--` accepts any number.
+        for phase in ("a", "b"):
+            for target in ORACLE.manifest_targets(phase):
+                argv = list(target.argv)
+                separator = argv.index("--")
+                head = argv[:separator]
+                if "--test" in head:
+                    positionals = head[head.index("--test") + 2 :]
+                else:
+                    positionals = head[head.index("--lib") + 1 :]
+                self.assertLessEqual(
+                    len(positionals),
+                    1,
+                    f"{target.id}: cargo takes one TESTNAME, got {positionals}",
+                )
+                self.assertTrue(
+                    all(not item.startswith("-") for item in positionals),
+                    f"{target.id}: {positionals}",
+                )
 
     def test_a_manifest_row_naming_a_missing_file_fails_closed(self) -> None:
         # Regression test for the rename this issue is about: a row whose
