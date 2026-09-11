@@ -13,7 +13,7 @@ use chelis_ir::ownership::{
 };
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
-use chelis_types::{ElementRef, ScalarValue};
+use chelis_types::{ElementRef, NumericTrap, ScalarValue};
 
 fn unsupported_verified_dag_action(node: NodeId, detail: &str) -> Unsupported {
     Unsupported::new(
@@ -70,19 +70,19 @@ fn hip_pairs_to_usize(bounds: &[(RtDim, RtDim)]) -> Vec<(usize, usize)> {
         .collect()
 }
 
-/// chelis#616: the HIP lane only supports Load-declared symbolic dims; an
-/// op-declared dim implies a node-valued movement bound or runtime reshape
-/// target, which `reject_unsupported_hip_ops` rejects before codegen. This
-/// panic is a defensive backstop against a seam bypass.
+/// The input tensor axis a HIP prologue declaration reads.
+///
+/// The HIP lane only supports extents the function entry supplies, and since
+/// chelis#665 that is the only thing a [`chelis_ir::dag::SymbolicDimSource`]
+/// can be: `symbolic_bindings_interface` mints an occurrence from a class
+/// member that resolves to an input tensor's axis and from nothing else. A
+/// node-valued movement bound or runtime reshape target reaches no
+/// occurrence at all, and `reject_unsupported_hip_ops` still refuses it
+/// before codegen. This function used to carry a defensive `panic!` arm for
+/// a variant that no longer exists.
 fn require_load_source(occurrence: &chelis_ir::dag::SymbolicDimOccurrence) -> (&String, usize) {
-    match &occurrence.source {
-        chelis_ir::dag::SymbolicDimSource::Load { input_label, axis } => (input_label, *axis),
-        chelis_ir::dag::SymbolicDimSource::OpDeclared { node, .. } => panic!(
-            "HIP backend reached an op-declared runtime dim `{}` (declared by node {}); \
-             reject_unsupported_hip_ops must reject it before codegen (chelis#616)",
-            occurrence.name, node.0
-        ),
-    }
+    let chelis_ir::dag::SymbolicDimSource::Load { input_label, axis } = &occurrence.source;
+    (input_label, *axis)
 }
 
 fn hip_strides_to_usize(strides: &[RtDim]) -> Vec<usize> {
@@ -231,22 +231,121 @@ impl HipEmitter {
         Ok(())
     }
 
-    fn reject_count(dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
-        if let Some(node) = dag
-            .nodes()
-            .iter()
-            .find(|node| matches!(node.op, RiscOp::Count { .. }))
-        {
-            return Err(Unsupported::new(
-                UnsupportedKind::Op("count".to_string()),
-                format!("the HIP kernel set (node {})", node.id.0),
-                Stage::Codegen("hip"),
-                chelis_types::unimplemented_rejection!(
-                    1291,
-                    "first-class count ships on eval and C-host/C-DAG in chelis#1287; \
-                     chelis#1291 owns the dedicated HIP/Metal kernels"
-                ),
-            ));
+    fn invalid_count(node: &DagNode, detail: String) -> Unsupported {
+        Unsupported::new(
+            UnsupportedKind::Op("count".to_string()),
+            format!("malformed Count at HIP DAG node {}: {detail}", node.id.0),
+            Stage::Codegen("hip"),
+            chelis_types::deliberate_rejection!(
+                "[05-OP-29]",
+                "Count accepts one bool tensor, a non-empty strictly descending in-range axis \
+                 list, and produces the complementary shape at int64"
+            ),
+        )
+    }
+
+    /// A legal Count the HIP device carrier cannot describe. The device
+    /// tensor is fixed-rank `int32` metadata (`CHELIS_GPU_MAX_DIM`, `int
+    /// size`), so this is a target capability cell under [05-UNS-5], owned by
+    /// chelis#1345, not a language rejection.
+    fn count_device_limit(node: &DagNode, detail: String) -> Unsupported {
+        Unsupported::new(
+            UnsupportedKind::Op("count".to_string()),
+            format!("Count at HIP DAG node {}: {detail}", node.id.0),
+            Stage::Codegen("hip"),
+            chelis_types::unimplemented_rejection!(
+                1345,
+                "the HIP device tensor carrier is fixed-rank int32 metadata; chelis#1345 \
+                 moves device tensors onto the dynamic-rank int64 carrier"
+            ),
+        )
+    }
+
+    /// Defend the backend's first typed boundary even when a caller builds a
+    /// DAG directly and bypasses the canonical IR verifier. Ownership
+    /// verification proves the payload's linearity, not [05-OP-29]'s operand
+    /// grammar, so the emitter re-checks the Count contract it is about to
+    /// lower, and it is the only place that knows the device carrier's rank
+    /// cap.
+    fn validate_count_nodes(dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
+        for node in dag.nodes() {
+            let RiscOp::Count { axes } = &node.op else {
+                continue;
+            };
+            if node.inputs.len() != 1 {
+                return Err(Self::invalid_count(
+                    node,
+                    format!("expected one input, found {}", node.inputs.len()),
+                ));
+            }
+            let Some(input) = dag.get(node.inputs[0]) else {
+                return Err(Self::invalid_count(
+                    node,
+                    "input node is missing".to_string(),
+                ));
+            };
+            if input.output_type.precision != Prim::Bool {
+                return Err(Self::invalid_count(
+                    node,
+                    format!(
+                        "expected bool input, found {}",
+                        input.output_type.precision.name()
+                    ),
+                ));
+            }
+            if node.output_type.precision != Prim::Int64 {
+                return Err(Self::invalid_count(
+                    node,
+                    format!(
+                        "expected int64 output, found {}",
+                        node.output_type.precision.name()
+                    ),
+                ));
+            }
+            if axes.is_empty() {
+                return Err(Self::invalid_count(
+                    node,
+                    "axis list must be non-empty".to_string(),
+                ));
+            }
+            if axes.windows(2).any(|pair| pair[0] <= pair[1]) {
+                return Err(Self::invalid_count(
+                    node,
+                    format!("axes must be unique and strictly descending, found {axes:?}"),
+                ));
+            }
+            let rank = input.output_type.dims.len();
+            if rank > kernels::MAX_DIM {
+                return Err(Self::count_device_limit(
+                    node,
+                    format!(
+                        "input rank {rank} exceeds the HIP device rank limit {}",
+                        kernels::MAX_DIM
+                    ),
+                ));
+            }
+            if axes.iter().any(|&axis| axis >= rank) {
+                return Err(Self::invalid_count(
+                    node,
+                    format!("axis is out of range for input rank {rank}: {axes:?}"),
+                ));
+            }
+            let expected: Vec<_> = input
+                .output_type
+                .dims
+                .iter()
+                .enumerate()
+                .filter_map(|(axis, dim)| (!axes.contains(&axis)).then_some(dim.clone()))
+                .collect();
+            if node.output_type.dims != expected {
+                return Err(Self::invalid_count(
+                    node,
+                    format!(
+                        "output shape {:?} does not match complementary shape {expected:?}",
+                        node.output_type.dims
+                    ),
+                ));
+            }
         }
         Ok(())
     }
@@ -258,7 +357,7 @@ impl HipEmitter {
     ) -> Result<(String, PeakDeviceBytesBreakdown), Unsupported> {
         let dag = storage_plan.emission();
         Self::reject_integer_abs(dag)?;
-        Self::reject_count(dag)?;
+        Self::validate_count_nodes(dag)?;
         // F1 (WS-A0 RT-1 fixup, tactical) — lifted by WS-A2 (HIP f32/f64)
         // and WS-A3 (HIP bf16/f16).
         //
@@ -410,6 +509,17 @@ impl HipEmitter {
             if e.reduction_inlined.contains(&node.id.0) {
                 continue;
             }
+            // chelis#1374/#1376: an `ExtentWitness` nothing reads was already
+            // discharged in the host prologue above. It has no device value,
+            // so emitting it would reach the [05-SHAPE-1] `todo!` backstop
+            // that stays below for a witness the gate should have refused.
+            // `output_specs` can name the last node when the DAG has no root,
+            // and an emitted output still needs its value.
+            if dag.witness_is_entry_obligation(node.id)
+                && !output_specs.iter().any(|output| output.id == node.id)
+            {
+                continue;
+            }
             if let RiscOp::Load { name } = &node.op {
                 let input_idx = *input_slots
                     .get(name.as_str())
@@ -559,6 +669,13 @@ impl HipEmitter {
             if self.reduction_inlined.contains(&node.id.0) {
                 continue;
             }
+            // The host prologue already discharged this section 4.7 entry
+            // obligation; see the identical skip in `emit_dag`'s walk.
+            if dag.witness_is_entry_obligation(node.id)
+                && !output_specs.iter().any(|output| output.id == node.id)
+            {
+                continue;
+            }
             if let RiscOp::Load { name } = &node.op {
                 let input_idx = *input_slots
                     .get(name.as_str())
@@ -691,7 +808,8 @@ impl HipEmitter {
     fn is_per_node_kernel_name(name: &str) -> bool {
         // FusedElem: kernel_fused_<id>
         // Fused reductions: kernel_fused_sum_<id>, kernel_fused_maxred_<id>
-        name.starts_with("kernel_fused_")
+        // Count: kernel_count_<id> (axes are embedded in the source)
+        name.starts_with("kernel_fused_") || name.starts_with("kernel_count_")
     }
 
     fn input_types(dag: VerifiedDagView<'_>) -> chelis_unord::UnordMap<String, TensorType> {
@@ -824,6 +942,81 @@ impl HipEmitter {
             self.line("chelis_numeric_trap(\"numeric trap: domain in load at int64\");");
             self.indent -= 1;
             self.line("}");
+        }
+
+        // chelis#1374/#1376: a witness nothing reads carries a section 4.7
+        // ENTRY obligation, not device work. `reject_unsupported_hip_ops` lets
+        // exactly those through ([05-SHAPE-1] still refuses any witness a
+        // device node reads), and they are discharged here, in the host
+        // prologue, in the same [04-NUM-9] rendering the C emitter produces.
+        // Claims the entry schedule already checks are omitted upstream by
+        // `witness_entry_obligations`, so no comparison is emitted twice.
+        for node in dag.nodes() {
+            if !dag.witness_is_entry_obligation(node.id) {
+                continue;
+            }
+            let Some(obligations) = dag.witness_entry_obligations(node.id) else {
+                continue;
+            };
+            for obligation in obligations {
+                let render = |record: &chelis_ir::axis_sources::ExtentRecord| match record {
+                    chelis_ir::axis_sources::ExtentRecord::Claimed(required) => Some((
+                        "claimed = %lld".to_string(),
+                        format!("(long long){required}"),
+                    )),
+                    chelis_ir::axis_sources::ExtentRecord::Read {
+                        load,
+                        axis,
+                        parameter,
+                    } => {
+                        let RiscOp::Load { name } = &dag.get(*load)?.op else {
+                            return None;
+                        };
+                        let slot = *input_slots.get(name.as_str())?;
+                        let parameter =
+                            chelis_ir::span_sanitize::sanitize_for_format_string(parameter);
+                        Some((
+                            format!("{parameter} axis {axis} = %lld"),
+                            format!("(long long)chelis_tensor_shape(inputs[{slot}], {axis})"),
+                        ))
+                    }
+                };
+                let compare = |record: &chelis_ir::axis_sources::ExtentRecord| match record {
+                    chelis_ir::axis_sources::ExtentRecord::Claimed(required) => {
+                        Some(required.to_string())
+                    }
+                    chelis_ir::axis_sources::ExtentRecord::Read { load, axis, .. } => {
+                        let RiscOp::Load { name } = &dag.get(*load)?.op else {
+                            return None;
+                        };
+                        let slot = *input_slots.get(name.as_str())?;
+                        Some(format!("chelis_tensor_shape(inputs[{slot}], {axis})"))
+                    }
+                };
+                let (Some((first_text, first_value)), Some((second_text, second_value))) =
+                    (render(&obligation.records.0), render(&obligation.records.1))
+                else {
+                    continue;
+                };
+                let (Some(left), Some(right)) = (
+                    compare(&obligation.records.0),
+                    compare(&obligation.records.1),
+                ) else {
+                    continue;
+                };
+                let label = chelis_ir::span_sanitize::sanitize_for_format_string(&obligation.label);
+                let operation = obligation.operation;
+                self.line(&format!("if ({left} != {right}) {{"));
+                self.indent += 1;
+                self.line(&format!(
+                    "fprintf(stderr, \"extent `{label}`: {first_text}, {second_text}\\n\", {first_value}, {second_value});"
+                ));
+                self.line(&format!(
+                    "chelis_numeric_trap(\"numeric trap: domain in {operation} at int64\");"
+                ));
+                self.indent -= 1;
+                self.line("}");
+            }
         }
 
         // Host allocation consumes the published runtime ABI's int64_t shape
@@ -1272,7 +1465,7 @@ impl HipEmitter {
             // emitter arms below are the backstop if a future caller
             // reaches the backend without passing a gate.
             RiscOp::CastTrunc { .. } => None,
-            RiscOp::Count { .. } => None,
+            RiscOp::Count { .. } => Some(format!("kernel_count_{}", node.id.0)),
             // `pad` / `shrink` materialize a fresh buffer via a typed
             // per-output-element kernel (see `kernels::pad_typed` /
             // `kernels::shrink_typed`); the kernel name carries the output
@@ -1567,6 +1760,18 @@ impl HipEmitter {
             RiscOp::Cast { .. } => Self::cast_kernel_source(name, node, dag)?,
             RiscOp::CastTrunc { .. } => {
                 return Err(Self::cast_trunc_unsupported(node));
+            }
+            RiscOp::Count { axes } => {
+                let input = dag
+                    .get(node.inputs[0])
+                    .expect("validated Count input must exist");
+                kernels::count(
+                    name,
+                    axes,
+                    input.output_type.dims.len(),
+                    Self::dtype_c_type(input.output_type.precision),
+                    Self::dtype_c_type(node.output_type.precision),
+                )
             }
             RiscOp::Copy => Self::cast_kernel_source(name, node, dag)?,
             RiscOp::FusedElem { ops } => {
@@ -2028,16 +2233,8 @@ impl HipEmitter {
                 &node.output_type,
             ),
             RiscOp::CastTrunc { .. } => return Err(Self::cast_trunc_unsupported(node)),
-            RiscOp::Count { .. } => {
-                return Err(Unsupported::new(
-                    UnsupportedKind::Op("count".to_string()),
-                    format!("the HIP kernel set (node {})", node.id.0),
-                    Stage::Codegen("hip"),
-                    chelis_types::unimplemented_rejection!(
-                        1291,
-                        "chelis#1291 owns the dedicated HIP/Metal count kernels"
-                    ),
-                ));
+            RiscOp::Count { axes } => {
+                self.emit_count_launch(id, axes, &node.inputs, &node.output_type, dag)
             }
             RiscOp::Store { name } => {
                 self.emit_store(id, name.as_str(), &node.inputs, &node.output_type)
@@ -3058,6 +3255,114 @@ impl HipEmitter {
         self.indent -= 1;
         self.line("}");
         Ok(())
+    }
+
+    /// Launch the dedicated [05-OP-29] Count kernel. The device reports
+    /// payload, arithmetic, and hardware-limit failures through a separate
+    /// status buffer; no host evaluation or cast-plus-sum fallback exists.
+    fn emit_count_launch(
+        &mut self,
+        id: usize,
+        axes: &[usize],
+        inputs: &[NodeId],
+        ty: &TensorType,
+        dag: VerifiedDagView<'_>,
+    ) {
+        let a = inputs[0].0;
+        let input_ty = &dag
+            .get(inputs[0])
+            .expect("validated Count input must exist")
+            .output_type;
+        debug_assert_eq!(input_ty.precision, Prim::Bool);
+        debug_assert_eq!(ty.precision, Prim::Int64);
+
+        let overflow = NumericTrap::Overflow {
+            op: "count",
+            prim: Prim::Int64,
+        }
+        .to_string();
+        let domain = NumericTrap::Domain {
+            op: "count",
+            prim: Prim::Bool,
+        }
+        .to_string();
+        let kernel_name = format!("kernel_count_{id}");
+        // The status word is device scratch outside the storage plan: one
+        // int32 per Count node, live until the launch is checked. Count it in
+        // the static peak estimate through the memory plan's width authority,
+        // once per node: the device-tensor entrypoint is a second emission of
+        // the same nodes, and the peak is per call, not summed across entries.
+        if !self.device_entrypoint_mode {
+            let status_word_bytes = crate::memory::bytes_expr(&DimExpr::Concrete(1), Prim::Int32)
+                .evaluate(&chelis_unord::UnordMap::new())
+                .expect("a concrete element count evaluates without bindings");
+            self.extra_peak_device_bytes_estimate += status_word_bytes;
+        }
+
+        self.emit_slot_wrapper(id, ty);
+        self.line("{");
+        self.indent += 1;
+        self.line(&format!("int t{id}_out_size = d_t{id}->size;"));
+        self.line(&format!("long long t{id}_count_n = 1;"));
+        for axis in axes.iter().rev() {
+            self.line(&format!(
+                "if (d_t{a}->shape[{axis}] != 0 && t{id}_count_n > INT64_MAX / d_t{a}->shape[{axis}]) {{ fprintf(stderr, {overflow:?}); fprintf(stderr, \"\\n\"); abort(); }}"
+            ));
+            self.line(&format!(
+                "t{id}_count_n *= (long long)d_t{a}->shape[{axis}];"
+            ));
+        }
+        self.line(&format!("if (t{id}_out_size > 0) {{"));
+        self.indent += 1;
+        self.emit_stride_vars(id, "a", a);
+        self.emit_shape_vars(id, "a", a);
+        self.line(&format!("int t{id}_a_ndim = d_t{a}->ndim;"));
+        self.line(&format!("int t{id}_a_size = d_t{a}->storage_size;"));
+        self.emit_shape_vars(id, "out", id);
+        self.line(&format!("int t{id}_out_ndim = d_t{id}->ndim;"));
+        self.line(&format!("int *t{id}_count_error = NULL;"));
+        self.line(&format!("int t{id}_count_error_host = 0;"));
+        self.line(&format!(
+            "CHELIS_HIP_CHECK(hipMalloc((void**)&t{id}_count_error, sizeof(int)));"
+        ));
+        self.line(&format!(
+            "CHELIS_HIP_CHECK(hipMemset(t{id}_count_error, 0, sizeof(int)));"
+        ));
+        self.line(&format!(
+            "void *args[] = {{ &d_t{a}->data, {a_stride_refs}, {a_shape_refs}, \
+             &t{id}_a_ndim, &t{id}_a_size, &d_t{id}->data, {out_shape_refs}, \
+             &t{id}_out_ndim, &t{id}_out_size, &t{id}_count_n, &t{id}_count_error }};",
+            a_stride_refs = self.stride_arg_refs(id, "a"),
+            a_shape_refs = self.shape_arg_refs(id, "a"),
+            out_shape_refs = self.shape_arg_refs(id, "out"),
+        ));
+        self.emit_kernel_launch_expr(
+            &format!("mod_{kernel_name}"),
+            &kernel_name,
+            &format!("(t{id}_out_size + 255) / 256"),
+            "256",
+            "args",
+        );
+        self.line(&format!(
+            "CHELIS_HIP_CHECK(hipMemcpy(&t{id}_count_error_host, t{id}_count_error, sizeof(int), hipMemcpyDeviceToHost));"
+        ));
+        self.line(&format!("CHELIS_HIP_CHECK(hipFree(t{id}_count_error));"));
+        self.line(&format!(
+            "if (t{id}_count_error_host == 1) {{ fprintf(stderr, {domain:?}); fprintf(stderr, \"\\n\"); abort(); }}"
+        ));
+        self.line(&format!(
+            "if (t{id}_count_error_host == 2) {{ fprintf(stderr, {overflow:?}); fprintf(stderr, \"\\n\"); abort(); }}"
+        ));
+        self.line(&format!(
+            "if (t{id}_count_error_host == 3) {{ fprintf(stderr, \"count exceeded the dedicated 64-frame HIP reduction stack\\n\"); abort(); }}"
+        ));
+        self.line(&format!(
+            "if (t{id}_count_error_host == 4) {{ fprintf(stderr, \"count produced an out-of-range HIP storage index\\n\"); abort(); }}"
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
     }
 
     // ------------------------------------------------------------------

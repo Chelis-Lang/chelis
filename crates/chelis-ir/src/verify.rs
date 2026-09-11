@@ -447,13 +447,20 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             | RiscOp::Permute { .. }
             | RiscOp::OneHot { .. }
             | RiscOp::Shape { .. }
-            | RiscOp::ExtentWitness { .. }
             | RiscOp::Cast { .. }
             | RiscOp::CastTrunc { .. } => {
                 if arity != 1 {
                     errors.push(format!(
                         "unary op at node {} has {} inputs (expected 1)",
                         node.id.0, arity
+                    ));
+                }
+            }
+            RiscOp::ExtentWitness { claims, .. } => {
+                if arity != claims.len() + 1 {
+                    errors.push(format!(
+                        "extent witness at node {} requires its observed tensor and one witness input per named claim",
+                        node.id.0
                     ));
                 }
             }
@@ -609,10 +616,39 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
         if let RiscOp::ExtentWitness {
             axis: crate::dag::RtAxis::Lit(axis),
             requirements,
+            claims,
             ..
         } = &node.op
         {
-            if arity == 1
+            // chelis#1374: a named claim's diagnostic reads the DECLARING
+            // parameter and axis off the requirement's own node, so the edge
+            // must be a witness and not merely an int64 scalar. The edge is
+            // also strictly earlier, which is what keeps the check due "at
+            // the later of its two witnesses" (spec/04 §4.7) and the topology
+            // acyclic.
+            if arity == claims.len() + 1 {
+                for edge in node.inputs.iter().skip(1) {
+                    let earlier = edge.0 < node.id.0;
+                    let witness = dag.get(*edge).is_some_and(|edge| {
+                        matches!(edge.op, RiscOp::ExtentWitness { .. })
+                            && edge.output_type.dims.is_empty()
+                            && edge.output_type.precision == Prim::Int64
+                    });
+                    if !earlier || !witness {
+                        errors.push(format!(
+                            "extent witness at node {} requires each named claim to name an earlier rank-0 int64 extent witness",
+                            node.id.0
+                        ));
+                    }
+                }
+            }
+            if claims.iter().any(|claim| claim.claim.is_empty()) {
+                errors.push(format!(
+                    "extent witness at node {} requires a nonempty binder for each named claim",
+                    node.id.0
+                ));
+            }
+            if arity >= 1
                 && let Some(input) = dag.get(node.inputs[0])
                 && usize::try_from(*axis).map_or(true, |axis| axis >= input.output_type.dims.len())
             {

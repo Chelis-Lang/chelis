@@ -56,9 +56,6 @@ obligations: computed reshape claims and broadcast unit preconditions survive
 inlining, graph rewrites and cache transport. Their bounded oracle retains
 independent declaration, value and failure assertions. Remaining failure boundaries:
 
-- #1374/#1376: lowering may drop the argument whose axis witnesses the result
-  claim. Root reachability cannot recover a signature that is no longer
-  represented, and an unread argument still owes its signature check.
 - #1397: checked function stamps now retain the declared result; movement
   execution still owes its guard and general wildcard-returning roots can
   disappear from eval and entry emission. #1378's public vmap witness remains
@@ -66,10 +63,12 @@ independent declaration, value and failure assertions. Remaining failure boundar
 - #1266/#569: the provenance walk still rejects equivalent field/pipe forms.
 - #1379: local op-computed extents need guard sites beyond the folded-axis
   and scalar-target forms B2r serves.
-- #665/#1556: declaration consumers still use legacy name recovery. #1482
-  additionally needs an actual shape source for a synthesized constant.
-- #1566: evaluator binding inference can identify separate signatures by
-  binder spelling.
+- #1482 needs an actual shape source for a synthesized constant. The
+  declaration consumers no longer use legacy name recovery: every name a lane
+  renders resolves through `ExtentOrigin`, and a name that resolves to none is
+  a typed receipt. #665's kept-axis instance and #1566's binder-spelling
+  instance are closed; #1556's published instance does not reproduce in its
+  current spelling.
 - #1512: the old deferred-expand witnesses are unreachable, but unresolved
   variables have other origins. The remaining early-return validation audit
   is open; neither the old census nor four `sum` probes closes it.
@@ -213,7 +212,11 @@ to its kernel even when the body reads none of their elements. They are shape
 inputs, not copied payloads. Inlining replaces the formal Load by the actual
 axis dependency and retains the obligation and its introducing call position.
 No guard attempts to reconstruct a dropped argument from a similarly named
-survivor. #1374/#1376's caller preservation is explicitly owned by B2b-1.
+survivor. A declared result's NAMED claim is carried by the witness that
+observed the produced extent, as a named claim against the witness that
+declares the binder, so the obligation survives every call form and reaches a
+declared-but-unread parameter, whose interface witness the claim retains
+(#1374, #1376, #1566's unread residual).
 
 The same claim/source derivation is available before any deleting rewrite
 for its liveness decision and after the last rewrite for emission. An
@@ -278,19 +281,26 @@ representation of the same obligation, not distinct trapping operations.
 B2b-1 first implements literal call claims through an explicit IR witness.
 This bounded change owns #1377's shape-derived `insert` call and its nested
 and discarded-result controls. A literal identifies its own required value;
-it does not need to identify a named binder by spelling. The remaining named
-claim migration still owns scoped binding identities, unread named witnesses,
-and #1374/#1376/#1566. Both changes retain the C2.3 distinction between a
-requirement and an independently observed extent.
+it does not need to identify a named binder by spelling. The named half
+followed and delivered scoped binding identities, unread named witnesses, and
+#1374/#1376/#1566 for TENSOR-typed parameters; a binder reached only through a
+container type mints no witness, and the two polymorphic inlined-root cells
+render the enclosing root's inferred literal restatement instead of naming both
+sources (#1782). Both changes retain the C2.3 distinction between a requirement
+and an independently observed extent.
 
-The literal transport uses `RiscOp::ExtentWitness { site, parameter, axis,
-requirements }`. Its one tensor input is the actual argument; its result is
-the observed axis extent as a rank-zero `int64`. `parameter` is diagnostic
-text, `axis: RtAxis` selects the observed axis, and
+The transport uses `RiscOp::ExtentWitness { site, parameter, axis,
+requirements, claims }`. Its FIRST input is the actual argument, followed by
+one input per named claim, each an earlier `ExtentWitness` of the same
+activation; its result is the observed axis extent as a rank-zero `int64`.
+`parameter` is diagnostic text, `axis: RtAxis` selects the observed axis,
 `requirements: Vec<ScalarValue>` retains ordered, tagged `int64` literal
-claims. Requirements are explicit fields, with no missing-field default.
-The operation reads shape metadata without copying the argument's elements.
-Its existing `span_id` records the introducing call.
+claims, and `claims` retains one entry per requirement input, each carrying the
+dimension binder and a `requirement_declares` flag saying which side declares
+it, because either side can be the later witness and the edges do not recover
+that role. Requirements and claims are explicit fields, with no missing-field
+default. The operation reads shape metadata without copying the argument's
+elements. Its existing `span_id` records the introducing call.
 
 Lowering creates these witnesses in parameter/axis order before lowering the
 callee body. A parameter shape read uses its witness through an ordinary
@@ -466,8 +476,9 @@ reshape obligation. HIP entry selection retains the checked realizability lane
 through helper extraction on both CLI and API paths. The host C artifact is
 executed independently in the oracle; genuine tensor roots still select device
 emission. HIP device execution remains with the platform owners.
-WireDag v10 carries both checked operations and integer remainder. Stdlib/library/context cache
-versions 17/13/19 require the authored signature ledger and revalidate it
+WireDag v11 carries both checked operations, integer remainder and the named
+claims an extent witness owes against another witness. Stdlib/library/context cache
+versions 18/14/20 require the authored signature ledger and revalidate it
 against fresh lowering. Missing fields and a forged ledger with a valid
 checksum and unchanged proof identity reject at admission.
 
@@ -560,13 +571,51 @@ fresh extents, including symbolic shrink; literal stride one and zero pad
 retain identity under spec/04 §4.7. Derive sources after each final rewrite,
 never retain stale node ids in a cached class list.
 
-Replace both binding and DECLARATION consumers of `symbolic_occurrences`,
-`op_declared_output_axes`, `shape_source_for_axis` and `symbolic_bindings`.
-#665 is a declaration-consumer failure and cannot close merely because an
-entry guard passes. A synthesized Const's value supplies no shape: #1482
-needs an actual axis source, not a guessed dimension or a bypass of the
-cardinality check. Recheck the current sigmoid/silu/gelu witnesses; the ReLU
-mechanism was removed by #1313.
+Both binding and DECLARATION consumers now read the derivation.
+`symbolic_occurrences`, `bind_symbol_from_any_load` and `symbolic_bindings` are
+deleted; `op_declared_output_axes`, `shape_source_for_axis` and
+`op_internal_symbolic_dims` retain five other callers and their migration is a
+separate slice. A declaration comes from `resolve_axis_extent`'s terminal
+`ExtentOrigin`: an input tensor's axis goes in the prologue, and an extent an
+operation produces is declared at that operation, which is how a kept axis
+forwards its exact input axis without renaming the claim it carries. Choosing
+among a name's candidate axes follows where a declaration can GO, not which
+answer is most certain: an input axis wins, an operation-produced extent comes
+next because it names a site, and a literal comes last because no lane declares
+an entry literal today, so preferring one over an available site would leave
+the name undeclared.
+#665 was a declaration-consumer failure and did not close because an entry
+guard passed; it closes because the kept name is declared from its source. A
+name that resolves to no origin is a typed receipt from
+`check_rendered_dim_origins`, which is an emission obligation rather than a
+lowering one, and `CEmitter::declared_dim_names` is the executable invariant
+that the two declaration loops cover the rendered set between them. A
+synthesized Const's value supplies no shape: #1482 needs an actual axis source,
+not a guessed dimension or a bypass of the cardinality check. Recheck the
+current sigmoid/silu/gelu witnesses; the ReLU mechanism was removed by #1313.
+
+Three rules bind the binding consumer, and each is here because its absence
+was measured. A binding consumer skips a class whose extent an operation
+computes only when `op_declared_dim_names` carries the name, because that is
+exactly the set `bind_symbolic_dims` leaves unbound, and the two decisions
+read one set rather than two lists that can drift. A required name that no
+class speaks for takes its value from its resolved origin, which is how an
+op-internal `Sym` carrier or a statically bound axis is reached at all; a
+class that answered, by binding or by declining, is never overruled by that
+fallback. A name the scope split finds in more than one class has no single
+pre-eval extent, so when its scopes disagree it binds to nothing and every
+axis carrying it is computed from actual values, and that tolerance stops at
+the type: a live node reading the name BY VALUE, a `Reshape` target's
+`RtDim::Sym`, still refuses. Which scopes disagree is a property of the
+supplied values rather than of the graph, so the set is the caller's to name
+and the tolerance covers exactly it; a multi-scope name whose scopes AGREE has
+one extent and an omitted binding for it is refused like any other. The
+declarations are not yet scoped the way these guards are: two scopes of one
+binder lowered into ONE emitted function still share one declaration, which
+#1788 records as residual and the per-scope rename in the claim transport
+fixes. Deleting a declaration mechanism that holds a
+loud-unsupported census site shrinks that site's baseline in the same change,
+under `spec/design/loud_unsupported.md` B1, which owns that rule.
 
 Record projection also needs an executable lowering route: the preparation
 alias fixture passes checking and C execution after #1658, but eval still
@@ -577,8 +626,10 @@ spelling variants to execute, not merely that the provenance error disappear.
 Only after these consumers and guards protect the admitted domain may B2b-2
 remove `SizeClass`, `classify_expand_size`, `classify_arith_app`,
 `sourceless_expand_size_error`, `Env::size_provenance`, and the lowerer's
-provenance rejection sites. Remove `shape_deps` once each remaining use has
-an actual typed dependency and no reader remains. Guards may land earlier;
+provenance rejection sites. `shape_deps` stays: `root_reach` traverses it, so
+removing it would silently merge scopes and reintroduce #1566, and it is a
+declared WireDag v9 transport whose removal is a schema change with its own
+numeric census obligations. That removal is residual under #1372. Guards may land earlier;
 acceptance may not widen earlier. A best-effort identity recognizer may
 remain as a refinement whose miss yields a fresh guarded extent.
 
@@ -598,6 +649,38 @@ command currently fails because `SLICE_PHASES` still requires unregistered
 `c`. B2b-3 retires that requirement and its tests; it does not add a fake
 passing phase or erase outstanding B rows. `--phase a` and `--phase b`
 retain their names and row-transition checks.
+
+`--phase a` does not reach its row report on current `main`. Its
+`symbolic_window` target runs
+`issue_368_runtime_symbolic_window_grad_is_half_everywhere`, whose `grad`
+lowering fails backward-DAG verification; chelis#1775 owns that regression and
+names chelis#1693 as its first failing commit. Every other phase-A and phase-B
+target passes with no receipt drift, so that one cell is what stands between
+the oracle and a phase-A row report. The nightly `runtime-extent-oracle` job
+requires `--phase a` to PASS and is therefore red until chelis#1775 lands,
+deliberately: the red is the signal that the row is still short.
+
+Phase A's wire capacity leg executes the Python binding facade through the
+interpreter `PYO3_PYTHON` names, falling back to the checkout's `.venv`, and
+not through the interpreter running the oracle. Install that facade's
+dependencies into it with
+`uv pip install --python <that interpreter> -r bindings/python/pyproject.toml`;
+without them the leg reports a `ModuleNotFoundError` that reads like a census
+defect.
+
+Each phase's expected per-test receipts live in the reviewed manifest
+`scripts/runtime_extent_oracle_targets.json`, which the oracle reads to build
+its commands and which `crates/chelis-types/tests/runtime_extent_target_manifest.rs`
+checks against the named sources inside `scripts/gate.py --fast`. After a
+reviewed edit to a phase's generated corpus, regenerate that phase's checked
+baseline with
+`.venv/bin/python scripts/runtime_extent_oracle.py --phase <p> --write-baseline`;
+never hand-edit the file or its digest. `--allow-shortfall` reports a
+recorded row shortfall instead of failing on it, so the nightly
+`runtime-extent-oracle` job can enforce phase B's receipts, digests and
+lattice while its remaining rows land; it ends `RUNTIME EXTENT ORACLE:
+RECEIPTS PASS, ROWS SHORT OF EXIT` rather than PASS, `--phase final` refuses
+it, and B2b-3 drops it from the workflow.
 
 The preparation suite is `crates/chelis-cli/tests/runtime_extent_claim_preparation.rs`.
 Its baseline and full pending acceptance remain separate:
@@ -747,9 +830,9 @@ All are Slice B work under #1277 unless expressly separated.
 | owner | entry | deliverable and exit |
 |---|---|---|
 | B2b-0b: remaining local guards | merged B2r/S2b and #1658's broadcast preparation repair | guard literal and resolved numeric claims from independent local size sources; op-computed local extents; exact positive/negative C/Eval rows |
-| B2b-1: claim transport | C2 contract and red fixtures; integrates B2b-0b | preserve the shipped helper-order and C2.4 checked-reshape/unit receipts (#1686/#1687); finish general scoped checked/lowered identities, explicit caller witnesses, multi-claim axes, rebuild/wire transport and migrated binding consumers; #1374/#1376/#1566, #1397's declaration-erasure half, with #1377's literal call/inlined-root exit established by the witness subset |
+| B2b-1: claim transport | C2 contract and red fixtures; integrates B2b-0b | preserve the shipped helper-order and C2.4 checked-reshape/unit receipts (#1686/#1687); finish general scoped checked/lowered identities, explicit caller witnesses, multi-claim axes, rebuild/wire transport and migrated binding consumers; #1397's declaration-erasure half, with #1377's literal call/inlined-root exit established by the witness subset. Named result claims and the unread signature witness (#1374, #1376, #1566) are delivered |
 | B2b-root: root execution | can start independently; acceptance composes B2b-1 | #1397's general wildcard-root boundary; run or diagnose every accepted root; unlock and reverify #1378's exact public value witness |
-| B2b-2: sources and acceptance | guards and claim transport for every newly admitted row | finish declaration sources (#665/#1556), supply #1482's missing shape source, remove provenance restrictions (#1266/#569/#1379), then remove unused `shape_deps` |
+| B2b-2: sources and acceptance | guards and claim transport for every newly admitted row | declaration sources are finished (#665/#1556/#1566); supply #1482's missing shape source, remove provenance restrictions (#1266/#569/#1379). `shape_deps` removal moves out of this row and is residual under #1372 |
 | B2b-3: phase exit | preceding host repairs and per-row platform dispositions | register actual passing receipts, correct measured stale baselines, retire phase c from final selection; phase b/final remain red until their named obligations pass |
 | #1512 audit | no dependency on the B2b carrier or withdrawn C | enumerate reachable non-expand unresolved producers and consumer decisions; resolved/unresolved positive and negative pairs; distinguish error cascade suppression; assign each surviving defect a repair under #1512 |
 

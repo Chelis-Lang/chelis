@@ -72,8 +72,30 @@ def assert_extended(test, pr, nightly):
     test.assertNotIn("ProfilePartitionTests", str(pr))
     test.assertIn("ProfilePartitionTests", str(full))
     test.assertEqual(pr["jobs"]["integration"]["needs"], ["changes", "ci-fast"])
+    # chelis#1742: the runtime-extent oracle runs in this workflow and
+    # nowhere else, so the nightly is the only place its receipts are
+    # enforced. Phase A must PASS. Phase B enforces the same receipts, the
+    # same digests and the same lattice while chelis#1277's remaining rows
+    # land, and `--allow-shortfall` downgrades the recorded ROW shortfall
+    # alone; nothing else about the run is excused. The B2b-3 flip pull
+    # request drops the flag and this assertion with it.
+    extents = jobs["runtime-extent-oracle"]
+    test.assertNotIn("runtime-extent-oracle", pr["jobs"])
+    test.assertNotIn("if", extents)
+    test.assertFalse(extents.get("continue-on-error", False))
+    extent_commands = [step.get("run") for step in extents["steps"]]
+    test.assertIn(
+        ".venv/bin/python scripts/runtime_extent_oracle.py --phase a", extent_commands
+    )
+    test.assertIn(
+        ".venv/bin/python scripts/runtime_extent_oracle.py --phase b --allow-shortfall",
+        extent_commands,
+    )
+    for step in extents["steps"]:
+        test.assertNotIn("if", step)
+        test.assertFalse(step.get("continue-on-error", False))
     report = jobs["report"]
-    test.assertEqual(set(report["needs"]), set(MOVED) | {"full-workspace", "script-nightly", "integration-support", "backend-sanitizers-full"})
+    test.assertEqual(set(report["needs"]), set(MOVED) | {"full-workspace", "script-nightly", "integration-support", "backend-sanitizers-full", "runtime-extent-oracle"})
     test.assertIn("always()", report["if"])
     test.assertEqual(report["steps"][0]["env"]["RESULTS"], "${{ toJSON(needs) }}")
 
@@ -101,6 +123,36 @@ class ExtendedCadenceTests(unittest.TestCase):
                         nightly["jobs"][name]["steps"] = []
                     with self.assertRaises((AssertionError, KeyError)):
                         assert_extended(self, self.pr, nightly)
+
+    def test_a_skipped_or_nonblocking_runtime_extent_oracle_is_rejected(self):
+        # Negative parity for the block above: every way the extent oracle
+        # could stop enforcing must fail this lock, including dropping it
+        # from the nightly report's needs, which is what would let it go red
+        # unnoticed.
+        for mutation in ("remove", "skip", "ignore", "steps", "needs", "shortfall"):
+            nightly = copy.deepcopy(self.nightly)
+            job = nightly["jobs"]["runtime-extent-oracle"]
+            if mutation == "remove":
+                del nightly["jobs"]["runtime-extent-oracle"]
+            elif mutation == "skip":
+                job["if"] = "false"
+            elif mutation == "ignore":
+                job["steps"][-1]["continue-on-error"] = True
+            elif mutation == "steps":
+                job["steps"] = []
+            elif mutation == "needs":
+                nightly["jobs"]["report"]["needs"] = [
+                    name
+                    for name in nightly["jobs"]["report"]["needs"]
+                    if name != "runtime-extent-oracle"
+                ]
+            else:
+                job["steps"][-1]["run"] = job["steps"][-1]["run"].replace(
+                    " --allow-shortfall", " --allow-everything"
+                )
+            with self.subTest(mutation=mutation):
+                with self.assertRaises((AssertionError, KeyError)):
+                    assert_extended(self, self.pr, nightly)
 
     def test_skipped_full_or_support_or_sanitizer_execution_is_rejected(self):
         for name in ("full-workspace", "script-nightly", "integration-support", "backend-sanitizers-full"):

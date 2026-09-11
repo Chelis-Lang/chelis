@@ -8714,11 +8714,12 @@ fn build_c_linreg_insert_singleton_bias_keeps_rank2_shape() {
 /// corresponding `int d36 = inputs[k]->shape[axis];` declaration, so
 /// the generated C failed to compile with `error: 'd36' undeclared`.
 ///
-/// The fix in `chelis_ir::dag::symbolic_occurrences` now sibling-sweeps
-/// every node's output type and ensures every `Named(_, None)` dim
-/// appears in the symbolic-occurrences list. If a non-Load node
-/// references a dim that no Load carries, the IR sweep panics loudly
-/// rather than emitting un-compilable C.
+/// Since chelis#665 the C emitter declares every such name from its
+/// resolved extent ORIGIN (`chelis_ir::axis_sources::dim_extent_origins`)
+/// rather than from a search for a `Load` carrying a matching string, and a
+/// name that resolves to no origin is a typed receipt. The earlier repair,
+/// a sibling sweep in the occurrence walk that panicked on an unrecoverable
+/// dim, went with that walk.
 #[test]
 fn build_c_polymorphic_top_level_tensor_dims_are_declared() {
     let dir = tempdir().expect("tempdir");

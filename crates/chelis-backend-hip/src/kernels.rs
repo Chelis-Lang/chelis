@@ -215,6 +215,178 @@ fn build_int_array(var_name: &str, prefix: &str, suffix: &str) -> String {
     build_array(var_name, prefix, suffix)
 }
 
+/// Dedicated [05-OP-29] Count kernel.
+///
+/// `bool_c_ty` is the backend's spelling of the exact one-byte `Bool8`
+/// carrier chelis#1308 landed (`unsigned char`, see `dtype_c_type`), so the
+/// kernel reads one byte per element and never a four-byte payload;
+/// `out_c_ty` is the same authority's spelling of the int64 result, so this
+/// template names no element type of its own (chelis#893). The
+/// runtime's `chelis_tensor_end_write` already rejects a byte outside {0, 1}
+/// at the host write boundary, so error code 1 is a backstop for a producer
+/// that bypasses the runtime, never the primary check. Each output thread
+/// enumerates its selected-axis leaves in original row-major order, then
+/// evaluates the specified adjacent-pair tree with a fixed-depth explicit
+/// stack. Error code 1 is a non-boolean payload, 2 is checked-int64 overflow,
+/// 3 is a stack hardware limit, and 4 is an invalid storage index.
+pub fn count(
+    name: &str,
+    axes: &[usize],
+    input_rank: usize,
+    bool_c_ty: &str,
+    out_c_ty: &str,
+) -> String {
+    let mut selected = [0; MAX_DIM];
+    for &axis in axes {
+        selected[axis] = 1;
+    }
+    let selected_literal = selected
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let a_strides = stride_params("a");
+    let a_shapes = shape_params("a");
+    let out_shapes = shape_params("out");
+    let build_a_strides = build_array("a_strides", "a", "s");
+    let build_a_shapes = build_array("input_shape", "a", "sh");
+    let build_out_shapes = build_array("output_shape", "out", "sh");
+
+    format!(
+        r#"#include <stdint.h>
+{DEVICE_HELPERS}
+__device__ void chelis_count_record_error(int *count_error, int code) {{
+  if (code != 0) atomicCAS(count_error, 0, code);
+}}
+extern "C" __global__ void {name}(
+    const {bool_c_ty} *a, {a_strides}, {a_shapes}, int input_ndim, int input_size,
+    {out_c_ty} *out, {out_shapes}, int output_ndim, int output_size,
+    {out_c_ty} count_n, int *count_error) {{
+  int out_flat = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+  if (out_flat >= output_size) return;
+  if (input_ndim != {input_rank} || input_ndim < 0 || input_ndim > {MAX_DIM}) {{
+    chelis_count_record_error(count_error, 4);
+    return;
+  }}
+  {build_a_strides}
+  {build_a_shapes}
+  {build_out_shapes}
+  const int __count_selected[{MAX_DIM}] = {{ {selected_literal} }};
+  int __count_output_indices[{MAX_DIM}] = {{ 0 }};
+  int __count_full_indices[{MAX_DIM}] = {{ 0 }};
+  chelis_flat_to_indices(out_flat, output_shape, output_ndim, __count_output_indices);
+  int __count_output_axis = 0;
+  for (int __count_axis = 0; __count_axis < input_ndim; ++__count_axis) {{
+    if (!__count_selected[__count_axis]) {{
+      __count_full_indices[__count_axis] = __count_output_indices[__count_output_axis++];
+    }}
+  }}
+
+  long long __count_frame_start[64];
+  long long __count_frame_len[64];
+  unsigned char __count_frame_state[64];
+  long long __count_frame_left[64];
+  int __count_sp = 0;
+  __count_frame_start[0] = 0;
+  __count_frame_len[0] = count_n;
+  __count_frame_state[0] = 0;
+  long long __count_value = 0;
+  bool __count_have_value = false;
+
+  while (__count_sp >= 0) {{
+    if (__count_have_value) {{
+      if (__count_frame_state[__count_sp] == 1) {{
+        __count_frame_left[__count_sp] = __count_value;
+        __count_frame_state[__count_sp] = 2;
+        long long __count_len = __count_frame_len[__count_sp];
+        unsigned long long __count_split = 1;
+        while ((__count_split << 1) < (unsigned long long)__count_len) __count_split <<= 1;
+        if (__count_sp == 63) {{
+          chelis_count_record_error(count_error, 3);
+          return;
+        }}
+        long long __count_start = __count_frame_start[__count_sp];
+        ++__count_sp;
+        __count_frame_start[__count_sp] = __count_start + (long long)__count_split;
+        __count_frame_len[__count_sp] = __count_len - (long long)__count_split;
+        __count_frame_state[__count_sp] = 0;
+        __count_have_value = false;
+        continue;
+      }}
+      if (__count_frame_state[__count_sp] == 2) {{
+        long long __count_right = __count_value;
+        if (__count_frame_left[__count_sp] > INT64_MAX - __count_right) {{
+          chelis_count_record_error(count_error, 2);
+          return;
+        }}
+        __count_value = __count_frame_left[__count_sp] + __count_right;
+        --__count_sp;
+        continue;
+      }}
+      chelis_count_record_error(count_error, 3);
+      return;
+    }}
+
+    long long __count_len = __count_frame_len[__count_sp];
+    if (__count_len == 0) {{
+      __count_value = 0;
+      --__count_sp;
+      __count_have_value = true;
+      continue;
+    }}
+    if (__count_len == 1) {{
+      long long __count_leaf = __count_frame_start[__count_sp];
+      long long __count_rem = __count_leaf;
+      for (int __count_axis = input_ndim - 1; __count_axis >= 0; --__count_axis) {{
+        if (__count_selected[__count_axis]) {{
+          int __count_extent = input_shape[__count_axis];
+          if (__count_extent <= 0) {{
+            chelis_count_record_error(count_error, 4);
+            return;
+          }}
+          __count_full_indices[__count_axis] = (int)(__count_rem % __count_extent);
+          __count_rem /= __count_extent;
+        }}
+      }}
+      long long __count_offset = 0;
+      for (int __count_axis = 0; __count_axis < input_ndim; ++__count_axis) {{
+        __count_offset += (long long)__count_full_indices[__count_axis] * a_strides[__count_axis];
+      }}
+      if (__count_offset < 0 || __count_offset >= input_size) {{
+        chelis_count_record_error(count_error, 4);
+        return;
+      }}
+      {bool_c_ty} __count_bit = a[__count_offset];
+      if (__count_bit != ({bool_c_ty})0 && __count_bit != ({bool_c_ty})1) {{
+        chelis_count_record_error(count_error, 1);
+        return;
+      }}
+      __count_value = (__count_bit == ({bool_c_ty})1) ? 1 : 0;
+      --__count_sp;
+      __count_have_value = true;
+      continue;
+    }}
+
+    unsigned long long __count_split = 1;
+    while ((__count_split << 1) < (unsigned long long)__count_len) __count_split <<= 1;
+    __count_frame_state[__count_sp] = 1;
+    if (__count_sp == 63) {{
+      chelis_count_record_error(count_error, 3);
+      return;
+    }}
+    long long __count_start = __count_frame_start[__count_sp];
+    ++__count_sp;
+    __count_frame_start[__count_sp] = __count_start;
+    __count_frame_len[__count_sp] = (long long)__count_split;
+    __count_frame_state[__count_sp] = 0;
+  }}
+
+  out[out_flat] = __count_value;
+}}
+"#
+    )
+}
+
 /// WS-A2 + WS-A4: dtype-parameterized binary elementwise op (add, mul).
 /// `elem_c_ty` is the C++ type spelling (e.g. `float`, `double`,
 /// `int8_t`, `int16_t`) used for both operand pointers and the result

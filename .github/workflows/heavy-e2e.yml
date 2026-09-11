@@ -384,6 +384,64 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  runtime-extent-oracle:
+    name: Runtime Extent Oracle (chelis#1277)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Ubuntu)
+        uses: ./.github/actions/free-disk-space
+
+      - name: Install C dependencies
+        run: python3 scripts/ci_apt_get.py gcc clang libopenblas-dev libasan8 libubsan1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv + wire libpython rpath
+        run: python3 scripts/ci_setup_uv_python.py
+
+      # Phase A's wire capacity leg executes the Python binding facade, so the
+      # venv needs that facade's declared dependencies. Reading them from the
+      # bindings' own pyproject.toml keeps one source of truth; pinning them
+      # here would be a second place to forget.
+      - name: Install the Python binding facade dependencies
+        run: uv pip install --python .venv/bin/python -r bindings/python/pyproject.toml
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-workspace
+          save-if: false
+
+      # Phase A must PASS. It does not on current `main`: its `symbolic_window`
+      # target runs `issue_368_runtime_symbolic_window_grad_is_half_everywhere`,
+      # whose `grad` lowering regressed in chelis#1693 and is owned by
+      # chelis#1775. This step is red until that lands, deliberately, because
+      # the row really is short. Do not add `continue-on-error`.
+      - name: Runtime extent oracle (phase A)
+        run: .venv/bin/python scripts/runtime_extent_oracle.py --phase a
+
+      # Phase B's receipts are enforced here; its ROW shortfall is not a
+      # failure yet. chelis#1277's B2b slices are still landing the 19 rows
+      # recorded short, so the run reports them and ends with
+      # `RECEIPTS PASS, ROWS SHORT OF EXIT` rather than PASS. A drifted
+      # receipt, a moved digest or a failing test still fails this step.
+      # The B2b-3 flip pull request drops `--allow-shortfall`, at which point
+      # the step demands PASS.
+      - name: Runtime extent oracle (phase B receipts and row report)
+        run: .venv/bin/python scripts/runtime_extent_oracle.py --phase b --allow-shortfall
+
   generalize-sweep-oracle-shard:
     name: Typecheck Level Generalization Oracle (shard ${{ matrix.shard }}/4)
     strategy:
@@ -612,7 +670,7 @@ jobs:
 
   report:
     name: Surface nightly status
-    needs: [script-nightly, dtype-phase3-oracle, faithful-observation-phase2-oracle, compiled-value-ownership-phase0-oracle, runtime-representation-phase0-oracle, generalize-sweep-oracle-shard, full-workspace, integration-support, backend-sanitizers-full]
+    needs: [script-nightly, dtype-phase3-oracle, faithful-observation-phase2-oracle, compiled-value-ownership-phase0-oracle, runtime-representation-phase0-oracle, runtime-extent-oracle, generalize-sweep-oracle-shard, full-workspace, integration-support, backend-sanitizers-full]
     if: always() && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

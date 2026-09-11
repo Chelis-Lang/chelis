@@ -1,0 +1,1 @@
+`chelis build --target hip` again accepts a signature that repeats a dimension binder, such as an ordinary `matmul` helper. The retained interface witness carries an entry obligation rather than a runtime shape read, so the host prologue discharges it; a shape read a device node actually consumes is still refused under [05-SHAPE-1].
