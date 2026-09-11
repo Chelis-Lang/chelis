@@ -4507,12 +4507,14 @@ fn a_record_projection_becomes_the_tensor_helper_s_own_input() {
         String::from_utf8_lossy(&build.stderr)
     );
     let emitted = fs::read_to_string(out_dir.join("record_direct_c.c")).expect("generated C");
+    // The leading index is the injective part of the name (round 1, P1-1);
+    // the path tail is there so a reader can find the field.
     assert!(
-        emitted.contains("__host_record_field_inp_q"),
+        emitted.contains("__host_record_field_0_inp_q"),
         "the projected field is bound to a host local: {emitted}"
     );
     assert!(
-        emitted.contains("input `__host_record_field_inp_q` at slot 0"),
+        emitted.contains("input `__host_record_field_0_inp_q` at slot 0"),
         "and that local is the helper's slot-0 tensor input: {emitted}"
     );
     assert!(
@@ -4727,5 +4729,136 @@ fn a_piped_shape_read_of_a_non_tensor_is_still_sourceless() {
              scope carries it"
         ),
         "the piped runtime scalar keeps the section 4.7.2 rejection: {report}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Round-1 repairs (chelis#1266). Both are about the hoist's IDENTITY and its
+// COVERAGE rather than about whether a projection is admissible at all, so
+// they sit beside the rows above rather than in them.
+// ---------------------------------------------------------------------------
+
+/// Two projection paths whose segments join to the same string. `_` separates
+/// segments and also occurs inside field names, so `inputs.features.mask` and
+/// `inputs.features_mask` are the natural collision, not a contrived one: a
+/// nested `features` record beside a sibling `features_mask` is ordinary
+/// model-input shape.
+const COLLIDING_PROJECTION_PATHS: &str = "module Repro.CollidingPaths\n\
+     type Features = | Features { mask: tensor[2, f32] }\n\
+     type ForwardInputs = | ForwardInputs { features: Features, \
+     features_mask: tensor[2, f32] }\n\
+     sig forward: ForwardInputs -> tensor[2, f32]\n\
+     def forward(inputs: ForwardInputs) = add(inputs.features.mask, inputs.features_mask)\n\
+     out = forward(ForwardInputs { features: Features { mask: to_tensor([1.0f32, 2.0f32]) }, \
+     features_mask: to_tensor([10.0f32, 20.0f32]) })\n";
+
+/// The spelling the §4.7.2 diagnostic's own suggestion text asks for: "bind
+/// that read to a `let`".
+const LET_BOUND_RECORD_SHAPE_READ: &str = "module Repro.LetBoundRecordRead\n\
+     type Inputs = | Inputs { q: tensor[batch, f32] }\n\
+     sig f: Inputs -> tensor[batch, f32]\n\
+     def f(inp: Inputs) = { a_dim = cast(shape(inp.q, cast(0, int32)), int64)\n\
+     expand(to_tensor([0.25f32]), 0i32, a_dim) }\n\
+     out = f(Inputs { q: to_tensor([1.0f32, 2.0f32, 3.0f32]) })\n";
+
+/// The same read piped, which is what `chelis lint --fix` makes of it.
+const LET_BOUND_PIPED_RECORD_SHAPE_READ: &str = "module Repro.LetBoundPipedRecordRead\n\
+     type Inputs = | Inputs { q: tensor[batch, f32] }\n\
+     sig f: Inputs -> tensor[batch, f32]\n\
+     def f(inp: Inputs) = \
+     { a_dim = inp.q |> shape(cast(0, int32)) |> cast(int64)\n\
+     expand(to_tensor([0.25f32]), 0i32, a_dim) }\n\
+     out = f(Inputs { q: to_tensor([1.0f32, 2.0f32, 3.0f32]) })\n";
+
+/// A whole `expand` inside a `let` value, whose projection sits two levels
+/// down. This is the spelling that reached the [04-TOT-2] wall the C4
+/// paragraph says the hoist exists to prevent.
+const LET_VALUE_RECORD_EXPAND: &str = "module Repro.LetValueRecordExpand\n\
+     type Inputs = | Inputs { q: tensor[batch, f32], b: tensor[1, f32] }\n\
+     sig f: Inputs -> tensor[batch, f32]\n\
+     def f(inp: Inputs) = \
+     { y = expand(inp.b, cast(0, int32), shape(inp.q, cast(0, int32)))\n\
+     y }\n\
+     out = f(Inputs { q: to_tensor([1.0f32, 2.0f32, 3.0f32]), b: to_tensor([0.5f32]) })\n";
+
+/// Round 1, P1-1. Two distinct projection paths get two distinct locals.
+///
+/// The hoist's identity is the path, never the rendered name, and the name
+/// carries a per-def index so it is injective whatever the segments spell.
+///
+/// EVIDENTIARY STATUS: regression test. Measured RED at `612199377`, where the
+/// dedup keyed on a joined string: both projections rewrote to one local, the
+/// compiled binary printed `[2.0, 4.0]` and exited 0 while eval printed
+/// `[11.0, 22.0]`. On `33cc78e84` this program is correct on C and loudly
+/// refused on eval, so the defect was a regression in both directions at once.
+#[test]
+fn two_record_paths_that_join_to_one_string_get_two_locals() {
+    assert_both_lanes_render(
+        "colliding_paths",
+        COLLIDING_PROJECTION_PATHS,
+        "shape=[2], data=[11.0, 22.0]",
+    );
+}
+
+/// Round 1, P1-2. A projection nested inside a `let` binding's value is
+/// hoisted, and the body that reads it stays whole.
+///
+/// The three spellings are one finding: the exemption skipped the whole bind
+/// VALUE slot instead of only the bare projection, so the checker admitted
+/// sizes the C lane refused.
+///
+/// EVIDENTIARY STATUS: regression test. All three measured RED at
+/// `612199377`: check clean, eval correct, and C rejecting with either
+/// "`expand` size resolves to `a_dim`, but no in-scope tensor axis supplies
+/// that extent" (the first two) or the [04-TOT-2] host-emission wall (the
+/// third). On `33cc78e84` all three were rejected at CHECK, so none of them
+/// is a pre-existing divergence.
+#[test]
+fn a_record_projection_nested_in_a_let_value_is_hoisted() {
+    assert_both_lanes_render(
+        "let_bound_record_read",
+        LET_BOUND_RECORD_SHAPE_READ,
+        "shape=[3], data=[0.25, 0.25, 0.25]",
+    );
+    assert_both_lanes_render(
+        "let_bound_piped_record_read",
+        LET_BOUND_PIPED_RECORD_SHAPE_READ,
+        "shape=[3], data=[0.25, 0.25, 0.25]",
+    );
+    assert_both_lanes_render(
+        "let_value_record_expand",
+        LET_VALUE_RECORD_EXPAND,
+        "shape=[3], data=[0.5, 0.5, 0.5]",
+    );
+}
+
+/// Negative parity for that widening: the alias spelling, whose bind value IS
+/// the bare projection, is still exempt and still emits exactly the C it
+/// emitted before this pull request.
+///
+/// EVIDENTIARY STATUS: disposition lock, and the control on P1-2's repair.
+/// Widening the exemption's inverse too far would add a second alias to a
+/// spelling that already lowers; this pins the bytes against `33cc78e84`.
+#[test]
+fn the_local_alias_spelling_emits_the_same_c_it_always_did() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out_dir = dir.path().join("alias_bytes-out");
+    let build = build_c(
+        &fixture(&dir, "alias_bytes.ch", RECORD_PROJECTION_ALIAS),
+        &out_dir,
+    );
+    assert!(
+        build.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let emitted = fs::read_to_string(out_dir.join("alias_bytes.c")).expect("generated C");
+    assert!(
+        !emitted.contains("__host_record_field_"),
+        "the alias spelling binds its own local and needs no hoisted one: {emitted}"
+    );
+    assert!(
+        emitted.contains("chelis_adt_get_field"),
+        "it still reads the field on the host lane: {emitted}"
     );
 }

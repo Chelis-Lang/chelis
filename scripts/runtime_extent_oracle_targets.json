@@ -343,6 +343,7 @@
         "a_record_field_reached_through_a_def_parameter_is_an_admissible_expand_size",
         "a_record_projection_becomes_the_tensor_helper_s_own_input",
         "a_record_projection_is_an_admissible_expand_size",
+        "a_record_projection_nested_in_a_let_value_is_hoisted",
         "a_record_projection_with_an_out_of_range_axis_is_still_rejected",
         "a_repeated_free_result_name_declares_from_its_first_site",
         "a_result_name_no_parameter_declares_is_not_stamped_as_a_claim",
@@ -393,12 +394,14 @@
         "splicing_f_of_n_n_yields_one_member_per_output_axis_on_eval",
         "the_canonical_piped_shape_read_checks_evaluates_and_builds",
         "the_guard_order_fixture_reaches_its_later_trap_when_the_claim_agrees_on_eval",
+        "the_local_alias_spelling_emits_the_same_c_it_always_did",
         "the_value_binding_form_of_a_polymorphic_binder_is_unchanged",
         "two_classes_sharing_one_node_keep_separate_guards_on_c",
         "two_classes_sharing_one_node_keep_separate_guards_on_eval",
         "two_expands_over_one_operand_axis_share_one_guard",
         "two_op_output_members_guard_against_the_canonical_member_on_c",
-        "two_op_output_members_guard_against_the_canonical_member_on_eval"
+        "two_op_output_members_guard_against_the_canonical_member_on_eval",
+        "two_record_paths_that_join_to_one_string_get_two_locals"
       ]
     },
     {
