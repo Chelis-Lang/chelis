@@ -2206,46 +2206,11 @@ pub fn lower_named_tensor_entry_execution_plan(
     program: &CheckedProgram,
     name: &str,
 ) -> Result<Option<crate::evaluation::EvaluationPlan>, crate::lower::LowerDiagnostic> {
-    let Some((body_expr, scope, result_claim, defs)) =
-        named_tensor_entry_lowering_inputs(program, name)
-    else {
-        return Ok(None);
-    };
-    let context = crate::lower::prepare_subexpr_lowering_context(
-        program.type_env(),
-        defs,
-        Arc::new(crate::lower::collect_top_level_sigs(program.exprs())),
-    );
-    let profile = context.evaluation_profile(&body_expr, &scope);
-    match profile {
-        crate::evaluation::EvaluationProfile::Legacy(
-            crate::evaluation::LegacyEvaluationReason::NoDropout,
-        ) => return Ok(None),
-        crate::evaluation::EvaluationProfile::Legacy(reason) => {
-            return Err(crate::lower::LowerDiagnostic::new(
-                format!(
-                    "tensor entry `{name}` has Dropout execution that is not fixed-control: {reason:?}"
-                ),
-                None,
-                None,
-            )
-            .fatal());
-        }
-        crate::evaluation::EvaluationProfile::FixedControl => {}
-    }
-    let planning = crate::evaluation::RandomExecutionContext::new(RandomLoweringState {
-        seed: None,
-        counter: 0,
-    });
-    crate::lower::try_lower_subexpr_evaluation_with_ordered_inputs(
-        &body_expr,
-        scope,
-        &context,
-        result_claim.as_ref(),
-        true,
-        &planning,
+    lower_named_tensor_entry_execution_with(
+        program,
+        name,
+        crate::lower::try_lower_subexpr_evaluation_with_ordered_inputs,
     )
-    .map(Some)
 }
 
 #[cfg(feature = "lowering-trace")]
@@ -2259,6 +2224,27 @@ pub fn lower_named_tensor_entry_execution_plan_with_trace(
     )>,
     crate::lower::LowerDiagnostic,
 > {
+    lower_named_tensor_entry_execution_with(
+        program,
+        name,
+        crate::lower::try_lower_subexpr_evaluation_with_ordered_inputs_and_trace,
+    )
+}
+
+// Observation must not duplicate the admission policy, source scope or initial
+// Random frame. Only the actual lowerer's optional return product differs.
+fn lower_named_tensor_entry_execution_with<T>(
+    program: &CheckedProgram,
+    name: &str,
+    lower: impl FnOnce(
+        &Expr,
+        Vec<(String, TensorType)>,
+        &crate::lower::SubexprLoweringContext,
+        Option<&TensorType>,
+        bool,
+        &crate::evaluation::RandomExecutionContext,
+    ) -> Result<T, crate::lower::LowerDiagnostic>,
+) -> Result<Option<T>, crate::lower::LowerDiagnostic> {
     let Some((body_expr, scope, result_claim, defs)) =
         named_tensor_entry_lowering_inputs(program, name)
     else {
@@ -2290,7 +2276,7 @@ pub fn lower_named_tensor_entry_execution_plan_with_trace(
         seed: None,
         counter: 0,
     });
-    crate::lower::try_lower_subexpr_evaluation_with_ordered_inputs_and_trace(
+    lower(
         &body_expr,
         scope,
         &context,

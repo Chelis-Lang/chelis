@@ -76,12 +76,11 @@ def derivative(x: tensor[4,f32]) -> tensor[4,f32] = with seed(42i64) { grad(loss
             for (helper_index, trace) in helpers.iter().enumerate() {
                 if let Some(trace) = trace {
                     let helper = function.tensor_helper(helper_index).unwrap();
+                    let captured = trace.after_dimension_rebinding.as_ref().unwrap();
                     assert_eq!(
-                        bincode::serialize(
-                            trace.after_dimension_rebinding.as_ref().unwrap().nodes()
-                        )
-                        .unwrap(),
-                        bincode::serialize(helper.dag().nodes()).unwrap()
+                        bincode::serialize(&(captured.nodes(), captured.roots())).unwrap(),
+                        bincode::serialize(&(helper.dag().nodes(), helper.dag().roots())).unwrap(),
+                        "the complete selected graph includes ordered roots, not just nodes"
                     );
                     gradients += trace.executions.len();
                     assert_eq!(trace.executions.len(), trace.applications.len());
