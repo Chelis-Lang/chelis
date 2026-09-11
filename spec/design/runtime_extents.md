@@ -589,6 +589,22 @@ synthesized Const's value supplies no shape: #1482 needs an actual axis source,
 not a guessed dimension or a bypass of the cardinality check. Recheck the
 current sigmoid/silu/gelu witnesses; the ReLU mechanism was removed by #1313.
 
+Three rules bind the binding consumer, and each is here because its absence
+was measured. A binding consumer skips a class whose extent an operation
+computes only when `op_declared_dim_names` carries the name, because that is
+exactly the set `bind_symbolic_dims` leaves unbound, and the two decisions
+read one set rather than two lists that can drift. A required name that no
+class speaks for takes its value from its resolved origin, which is how an
+op-internal `Sym` carrier or a statically bound axis is reached at all; a
+class that answered, by binding or by declining, is never overruled by that
+fallback. A name the scope split finds in more than one class has no single
+pre-eval extent, so when its scopes disagree it binds to nothing and every
+axis carrying it is computed from actual values, and that tolerance stops at
+the type: a live node reading the name BY VALUE, a `Reshape` target's
+`RtDim::Sym`, still refuses. Deleting a declaration mechanism that holds a
+loud-unsupported census site shrinks that site's baseline in the same change,
+under `spec/design/loud_unsupported.md` B1, which owns that rule.
+
 Record projection also needs an executable lowering route: the preparation
 alias fixture passes checking and C execution after #1658, but eval still
 refuses runtime record `access`. B2b-2 owns materializing the field's tensor
