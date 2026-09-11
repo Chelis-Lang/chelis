@@ -213,18 +213,18 @@ fn weakened_metadata_construction_fails_the_executable_contract() {
             "affine_metadata_checks_exact_extents_and_offsets_without_storage",
         ),
         (
-            "self.shape.as_ref() == domain",
+            "self.domain.shape.as_ref() == domain",
             "true",
             "checked_iteration_steps_preserve_exact_large_domains_without_storage",
         ),
         (
-            "if self.rank == 0 {\n            Ok(0)",
-            "if self.rank == 0 {\n            Ok(1)",
+            "if self.domain.rank == 0 {\n            Ok(0)",
+            "if self.domain.rank == 0 {\n            Ok(1)",
             "checked_iteration_steps_preserve_exact_large_domains_without_storage",
         ),
         (
-            "self.shape.as_ref() == domain {\n            Ok(1)",
-            "self.shape.as_ref() == domain {\n            Ok(0)",
+            "self.domain.shape.as_ref() == domain {\n            Ok(1)",
+            "self.domain.shape.as_ref() == domain {\n            Ok(0)",
             "checked_iteration_steps_preserve_exact_large_domains_without_storage",
         ),
         (
@@ -233,17 +233,17 @@ fn weakened_metadata_construction_fails_the_executable_contract() {
             "checked_movement_relations_reject_invalid_bijections_and_bystanders",
         ),
         (
-            "target.shape[out_axis] != self.shape[axis]",
+            "target.domain.shape[out_axis] != self.domain.shape[axis]",
             "false",
             "checked_movement_relations_reject_invalid_bijections_and_bystanders",
         ),
         (
-            "!inserted && self.shape[axis] != 1",
+            "!inserted && self.domain.shape[axis] != 1",
             "false",
             "checked_movement_relations_reject_invalid_bijections_and_bystanders",
         ),
         (
-            "extent != self.shape[input_axis]",
+            "extent != self.domain.shape[input_axis]",
             "false",
             "checked_movement_relations_reject_invalid_bijections_and_bystanders",
         ),
@@ -476,11 +476,24 @@ fn internal_callers_cannot_forge_counts_or_restore_independent_tensor_fields() {
             "E0624",
             "index_step_for_checked_shape",
         ),
+        (
+            "fn bad(m: &mut ShapeMetadata) { m.domain.elements = ElementCount::from_extents(&[99]).unwrap(); }"
+                .to_owned(),
+            "E0616",
+            "domain",
+        ),
     ];
-    for field in ["shape", "strides", "rank", "elements", "bytes", "dtype"] {
+    for (field, code) in [
+        ("shape", "E0615"),
+        ("strides", "E0616"),
+        ("rank", "E0615"),
+        ("elements", "E0615"),
+        ("bytes", "E0615"),
+        ("dtype", "E0615"),
+    ] {
         negatives.push((
             format!("fn bad(m: &mut ShapeMetadata) {{ let _ = &mut m.{field}; }}"),
-            "E0616",
+            code,
             field,
         ));
     }
@@ -502,23 +515,36 @@ fn internal_callers_cannot_forge_counts_or_restore_independent_tensor_fields() {
         );
     }
 
-    // Positive mutation control: exposing a field must make the forbidden
-    // caller compile, proving the negative above detects this weakened owner.
-    let anchor = "    elements: ElementCount,";
-    let carrier = declaration(&abi_owner, "ShapeMetadata");
+    // Positive mutation control: exposing the checked owner and its count must
+    // make the forbidden caller compile, proving the negative above detects
+    // the current nested representation rather than an obsolete direct field.
+    let domain_anchor = "    domain: CheckedDomain,";
+    let shape_carrier = declaration(&abi_owner, "ShapeMetadata");
     assert_eq!(
-        carrier.matches(anchor).count(),
+        shape_carrier.matches(domain_anchor).count(),
         1,
-        "exact ShapeMetadata count field"
+        "exact ShapeMetadata domain field"
     );
-    probe.compile_abi(&abi_owner.replacen(
-        &carrier,
-        &carrier.replacen(anchor, "    pub elements: ElementCount,", 1),
+    let checked_carrier = declaration(&abi_owner, "CheckedDomain");
+    let count_anchor = "    elements: ElementCount,";
+    assert_eq!(
+        checked_carrier.matches(count_anchor).count(),
         1,
-    ));
+        "exact CheckedDomain count field"
+    );
+    let exposed_shape = shape_carrier.replacen(domain_anchor, "    pub domain: CheckedDomain,", 1);
+    let exposed_checked = checked_carrier
+        .replacen("struct CheckedDomain {", "pub struct CheckedDomain {", 1)
+        .replacen(count_anchor, "    pub elements: ElementCount,", 1);
+    let weakened_owner = abi_owner
+        .replacen(&shape_carrier, &exposed_shape, 1)
+        .replacen(&checked_carrier, &exposed_checked, 1);
+    probe.compile_abi(&weakened_owner);
     compiled(probe.compile(
         "exposed",
-        &format!("{context}\nfn bad(m: &mut ShapeMetadata) {{ let _ = &mut m.elements; }}"),
+        &format!(
+            "{context}\nfn bad(m: &mut ShapeMetadata) {{ m.domain.elements = ElementCount::from_extents(&[99]).unwrap(); }}"
+        ),
         true,
     ));
 }
