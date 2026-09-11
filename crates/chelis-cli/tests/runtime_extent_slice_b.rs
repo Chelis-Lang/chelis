@@ -776,7 +776,7 @@ fn an_entry_obligation_witness_emits_the_legacy_hip_guard_pending_1786() {
     );
 }
 
-/// chelis#616 left the HIP prologue walking `symbolic_occurrences` and
+/// chelis#616 left the HIP prologue walking the legacy occurrence list and
 /// asserting a `Load` source for every occurrence, with a `panic!` backstop
 /// (`require_load_source`) for the op-declared case on the reasoning that
 /// `reject_unsupported_hip_ops` had already refused it. It had not:
@@ -789,9 +789,11 @@ fn an_entry_obligation_witness_emits_the_legacy_hip_guard_pending_1786() {
 /// and the backstop is unreachable rather than merely unhit. This row asserts
 /// what the user gets: the program emits.
 ///
-/// EVIDENTIARY STATUS: regression test. Measured red by restoring the HIP
-/// emitter's two call sites to `symbolic_bindings()`, which reproduces the
-/// panic on this exact program.
+/// EVIDENTIARY STATUS: regression test, measured red by restoring the HIP
+/// emitter's two call sites to the legacy name-keyed grouping, which
+/// reproduced the panic on this exact program. That reproduction is no
+/// longer performable: chelis#665 deleted the grouping and the `panic!` arm
+/// with it, so what this row pins now is that the program still emits.
 #[test]
 fn an_op_declared_witness_reaches_the_hip_prologue_without_panicking() {
     let example = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2713,5 +2715,110 @@ fn a_kept_axis_over_a_statically_bounded_shrink_keeps_its_literal_extent() {
     assert!(
         c_out.contains("shape=[6, 4]"),
         "the compiled binary keeps the same literal extent: {c_out}"
+    );
+}
+
+// ===========================================================================
+// chelis#1556: `uniform_like` over a symbolic parameter inlined into a
+// nullary kernel.
+//
+// These rows are DISPOSITION LOCKS, not regression tests, and the difference
+// is worth recording rather than glossing. The issue's program cannot be
+// written verbatim any more: it spells the rank-raising form `expand(
+// scalar_to_tensor(..), 0, 3i64)`, and since S2a a rank-0 operand makes that
+// a check-time type error naming `insert`. Measured on `3dc3f54f6` in its
+// faithful modern spelling, and in three further nullary shapes, the ICE does
+// not reproduce: every one builds, links and runs, and no synthesized
+// `d<N>`-style name reaches the emitted C. No bisect was run for which
+// earlier change closed it, and the issue's own fix hypothesis - substitute
+// the argument's static extent for the inlined parameter's dim at inlining -
+// was never needed.
+//
+// What the rows are for is the other direction. This change moves every
+// declaration onto the axis source, and a nullary kernel with no `Load` at
+// all is the shape with the least to recover a name from, so it is exactly
+// where a declaration regression would surface first.
+// ===========================================================================
+
+/// The issue's program in current Surf.
+const UNIFORM_OVER_INLINED_PARAMETER: &str = "module Repro.UniformInline\n\
+     def noise(x: tensor[n, f32]) -> tensor[n, f32] = add(x, uniform_like(x, 0.0f32, 1.0f32))\n\
+     def main() = with seed(42i64) { add(noise(insert(scalar_to_tensor(1.0f32), 0i32, 3i64)), \
+     noise(insert(scalar_to_tensor(2.0f32), 0i32, 3i64))) }\n";
+
+/// The same inlined parameter over an operand whose extent an OPERATION
+/// computes rather than a literal, still in a nullary kernel.
+const UNIFORM_OVER_INLINED_STRIDE: &str = "module Repro.UniformInlineStride\n\
+     def noise(x: tensor[n, f32]) -> tensor[n, f32] = add(x, uniform_like(x, 0.0f32, 1.0f32))\n\
+     def main() = with seed(42i64) { noise(stride(insert(scalar_to_tensor(1.0f32), 0i32, 6i64), \
+     2i64)) }\n";
+
+/// The same shape reached through an exported def and a value binding, so the
+/// kernel has a `Load` while the inlined parameter's dim still does not.
+const UNIFORM_OVER_EXPORTED_STRIDE: &str = "module Repro.UniformExportedStride\n\
+     sig g: tensor[n, f32] -> tensor[m, f32]\n\
+     def g(x) = stride(x, 2i64)\n\
+     def noise(x: tensor[k, f32]) -> tensor[k, f32] = add(x, uniform_like(x, 0.0f32, 1.0f32))\n\
+     out = with seed(42i64) { noise(g(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]))) }\n";
+
+/// Build, link, run and evaluate one nullary-kernel program, and assert that
+/// both lanes print `expected` and that no synthesized `d<N>` name survives
+/// into the emitted C.
+fn assert_nullary_kernel_lanes_agree(stem: &str, source: &str, expected: &str) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = eval_result(&dir, &format!("{stem}_eval.ch"), source);
+    assert!(ok, "the nullary kernel must evaluate: {out}");
+    assert!(out.contains(expected), "eval prints {expected}: {out}");
+    if !gcc_available() {
+        return;
+    }
+    let (c_ok, c_out, emitted) = c_run_result_with_source(&dir, stem, source);
+    assert!(c_ok, "the compiled nullary kernel must run: {c_out}");
+    assert_eq!(
+        c_out, out,
+        "the compiled binary and eval must agree byte for byte"
+    );
+    let synthesized = emitted
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .find(|token| {
+            token.len() > 1
+                && token.starts_with('d')
+                && token[1..].chars().all(|c| c.is_ascii_digit())
+        });
+    assert_eq!(
+        synthesized, None,
+        "no synthesized `d<N>` dimension name reaches the emitted C"
+    );
+}
+
+/// chelis#1556's own program, in its current spelling.
+///
+/// EVIDENTIARY STATUS: disposition lock. Measured GREEN on `3dc3f54f6`.
+#[test]
+fn issue_1556_uniform_over_an_inlined_parameter_builds_and_runs() {
+    assert_nullary_kernel_lanes_agree(
+        "uniform_inline",
+        UNIFORM_OVER_INLINED_PARAMETER,
+        "data=[4.3952804, 4.3952804, 4.5689626]",
+    );
+}
+
+/// EVIDENTIARY STATUS: disposition lock. Measured GREEN on `3dc3f54f6`.
+#[test]
+fn a_nullary_kernel_whose_inlined_parameter_is_sized_by_a_stride_builds_and_runs() {
+    assert_nullary_kernel_lanes_agree(
+        "uniform_inline_stride",
+        UNIFORM_OVER_INLINED_STRIDE,
+        "data=[1.6537157, 1.7415649, 1.849176]",
+    );
+}
+
+/// EVIDENTIARY STATUS: disposition lock. Measured GREEN on `3dc3f54f6`.
+#[test]
+fn an_exported_stride_under_an_inlined_uniform_parameter_builds_and_runs() {
+    assert_nullary_kernel_lanes_agree(
+        "uniform_exported_stride",
+        UNIFORM_OVER_EXPORTED_STRIDE,
+        "data=[1.6537157, 3.7415648, 5.849176]",
     );
 }

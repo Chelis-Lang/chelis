@@ -9,7 +9,8 @@
 //! follow from them.
 //!
 //! The defect class these lock out is recovery of a runtime extent's identity
-//! by STRING NAME. `chelis_ir::dag::symbolic_bindings` groups occurrences in a
+//! by STRING NAME. The legacy grouping these replaced, deleted in chelis#665,
+//! put occurrences in a
 //! `BTreeMap<String, _>`, so two axes that happen to share a spelling are
 //! identified with no guard between them, and two axes that are genuinely the
 //! same extent are given different synthesized spellings and guarded twice or
@@ -33,8 +34,8 @@
 //! lowering paths, so it must not be "simplified" back to name order by a
 //! reader who sees only the declared-signature branch. The closing clause
 //! also names the failure mode by hand: a `BTreeMap<String, _>` grouping is a
-//! traversal by binding name, which is exactly what `symbolic_bindings` does
-//! today. Several tests below discriminate the slot key from name order.
+//! traversal by binding name, which is exactly what the legacy grouping did.
+//! Several tests below discriminate the slot key from name order.
 
 use chelis_ir::axis_sources::{
     AxisSource, DimClaim, GuardPlacement, RuntimeDimClass, derive_runtime_dim_classes,
@@ -113,7 +114,7 @@ fn interface_members_order_by_abi_input_slot() {
 /// in the opposite order moves the canonical member with the slot, because the
 /// key is the assigned slot. Name order would report `x` both times, so a
 /// by-name implementation passes the first test and fails this one. That is
-/// exactly the `BTreeMap<String, _>` ordering `symbolic_bindings` uses today.
+/// exactly the `BTreeMap<String, _>` ordering the legacy grouping used.
 #[test]
 fn interface_canonical_follows_the_slot_and_not_the_name() {
     let mut dag = Dag::new();

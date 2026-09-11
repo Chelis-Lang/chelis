@@ -460,8 +460,14 @@ const BASELINE: &[Entry] = &[
     (
         Pat::UnwrapOrNumericLiteral,
         "crates/chelis-ir/src/dag.rs",
-        1,
-        "proven-structural at the P1 baseline (symbolic-dim bookkeeping)",
+        0,
+        "chelis#665 removed the one site (1 -> 0, per \
+         spec/design/loud_unsupported.md B1: removals only with the site's \
+         fix). It was the legacy occurrence walk's canonical-index pick, \
+         `position(..).unwrap_or(0)` over a name's grouped occurrences, and \
+         the walk itself is gone: a declaration now comes from the axis's \
+         resolved extent ORIGIN, and a name that resolves to none is a typed \
+         receipt rather than a defaulted index",
     ),
     (
         Pat::UnwrapOrNumericLiteral,

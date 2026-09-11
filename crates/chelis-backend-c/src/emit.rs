@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use chelis_ir::dag::{
     Dag, DagNode, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStep, FusedStepOp, NodeId,
-    ReduceWindowKind, RiscOp, RtAxis, RtDim, SymbolicDimSource, TensorType,
+    ReduceWindowKind, RiscOp, RtAxis, RtDim, TensorType,
 };
 use chelis_ir::ownership::{
     CStorageLane, ReusableOwnedStorage, VerifiedDagAction, VerifiedDagProgram, VerifiedDagView,
@@ -58,13 +58,14 @@ pub struct CEmitter {
     fused_reuse: BTreeMap<NodeId, ReusableOwnedStorage>,
     reused_sources: chelis_unord::UnordSet<NodeId>,
     slot_current_owner: BTreeMap<usize, usize>,
-    /// chelis#616: `(node id, output axis) -> (symbol, declares)` for every
-    /// op-declared runtime dim (see `SymbolicDimSource::OpDeclared`). The
-    /// owning movement op's emitter declares `int <symbol> = <extent>;` when
-    /// `declares` is true, or emits a runtime equality-abort guard against
-    /// the already-declared value when false (the symbol is Load-declared in
-    /// the prologue, or an earlier op already declared it).
-    runtime_dim_sites: chelis_unord::UnordMap<(usize, usize), (String, bool)>,
+    /// chelis#1277 C4.4: `(node id, output axis) -> names declared there`,
+    /// for every name whose extent SOURCE the function entry cannot supply.
+    /// The owning operation's emitter declares the first from the extent
+    /// expression it renders and each later one from the first, so two
+    /// spellings of one extent land as `int64_t b = a;` rather than as a
+    /// second read. Guard sites are a separate map: which sites GUARD is
+    /// `local_dim_guard_sites`, and declaring does not exclude guarding.
+    runtime_dim_sites: chelis_unord::UnordMap<(usize, usize), Vec<String>>,
     /// Local claims in derivation/declaration order at each operation. Grouping
     /// by axis would reorder simultaneous failures when axes are permuted.
     local_dim_guard_sites:
@@ -197,9 +198,13 @@ impl CEmitter {
         // runs here rather than in `codegen_with_options` because the host
         // program's tensor helpers reach the emitter through
         // `host_emit::append_helper`, which does not go through that entry,
-        // and because it must precede `symbolic_occurrences`, whose
-        // fallback for an unrecoverable axis is a panic (chelis#1482).
+        // and because the declaration derivation below reads those sources.
         dag.check_axis_sources(chelis_types::unsupported::Stage::Codegen("c"))?;
+        // chelis#665: and every NAME this emitter will render as a C
+        // identifier resolves to one place that assigns it. The check above
+        // is per AXIS and this one is per NAME, which is the half the
+        // occurrence walk's `panic!` covered; a receipt replaces the panic.
+        dag.check_rendered_dim_origins(chelis_types::unsupported::Stage::Codegen("c"))?;
         Self::reject_fused_integer_abs(dag)?;
         Self::validate_supported_precisions(dag);
         Self::validate_load_abi(dag);
@@ -223,25 +228,31 @@ impl CEmitter {
             .iter()
             .map(|output| output.id)
             .collect::<Vec<_>>();
-        // chelis#616: resolve each op-declared runtime dim to a declare/guard
-        // site. A Load source anywhere makes every op site a guard; otherwise
-        // the first op site (node-id order = emission order) declares and any
-        // later site for the same symbol guards.
-        let mut runtime_dim_sites = chelis_unord::UnordMap::new();
-        {
-            let occurrences = dag.symbolic_occurrences();
-            let load_declared: chelis_unord::UnordSet<&str> = occurrences
-                .iter()
-                .filter(|o| matches!(o.source, SymbolicDimSource::Load { .. }))
-                .map(|o| o.name.as_str())
-                .collect();
-            let mut declared = chelis_unord::UnordSet::new();
-            for occurrence in &occurrences {
-                if let SymbolicDimSource::OpDeclared { node, axis } = &occurrence.source {
-                    let declares = !load_declared.contains(occurrence.name.as_str())
-                        && declared.insert(occurrence.name.clone());
-                    runtime_dim_sites.insert((node.0, *axis), (occurrence.name.clone(), declares));
-                }
+        // chelis#1277 C4.4: a name is declared where its extent SOURCE is
+        // produced, not where a `Load` happens to carry a matching string.
+        // `dim_extent_origins` answers that for every name the emitter
+        // renders; an origin the entry can supply (a literal, or an input
+        // tensor's axis) is declared in the prologue instead, so what lands
+        // here is exactly the set the prologue cannot reach.
+        //
+        // Several names can land on one site, and that is the chelis#665
+        // repair rather than an accident: `insert(stride(x, 2i64), 0i32,
+        // shape(x, 0i32))` gives the stride's own axis and the insert's KEPT
+        // axis two spellings of ONE extent, so the kept name is declared from
+        // the first, `int64_t _anon_dim_2_1 = _anon_dim_1_0;`, at the stride.
+        // `spec/design/runtime_extents.md` C4 calls this "an unchanged axis
+        // forwards its exact input axis", and it is a DECLARATION rather than
+        // a rename: overwriting the kept axis's spelling with the producer's
+        // would erase a signature claim where the name is one, which is the
+        // trap recorded at `rename_anonymous_dims` below for chelis#1619.
+        let mut runtime_dim_sites: chelis_unord::UnordMap<(usize, usize), Vec<String>> =
+            chelis_unord::UnordMap::new();
+        for (name, origin) in dag.dim_extent_origins() {
+            if let Some((site, axis)) = origin.local_site() {
+                runtime_dim_sites
+                    .entry((site.0, axis))
+                    .or_default()
+                    .push(name);
             }
         }
 
@@ -532,6 +543,35 @@ impl CEmitter {
 
         e.indent = 0;
         e.line("}");
+        // chelis#665: `declared_dim_names` used to be written and never read.
+        // Make it the executable invariant it was always shaped like: every
+        // name this emitter can render as a C identifier ends the function
+        // with a declaration. The entry declarations and the per-operation
+        // ones are two separate loops over two separate origin kinds, and
+        // nothing else checked that between them they covered the set.
+        //
+        // Over-declaring is harmless (an unused `int64_t` is at worst a
+        // warning); rendering an identifier nothing declares is C that does
+        // not compile, which is the class the occurrence walk's `panic!` was
+        // guarding and the reason a receipt has to take its place rather than
+        // nothing taking it.
+        if let Some(missing) = dag
+            .rendered_dim_names()
+            .into_iter()
+            .find(|name| !e.declared_dim_names.contains(name))
+        {
+            return Err(chelis_types::unsupported::Unsupported::new(
+                chelis_types::unsupported::UnsupportedKind::Construct(format!(
+                    "extent `{missing}` is rendered but never declared"
+                )),
+                format!("emitted function `{func_name}`"),
+                chelis_types::unsupported::Stage::Codegen("c"),
+                chelis_types::unimplemented_rejection!(
+                    1277,
+                    "declare the name from its resolved extent origin; see runtime_extents.md C4.4"
+                ),
+            ));
+        }
         Ok(e.lines.join("\n"))
     }
 
@@ -1689,40 +1729,67 @@ impl CEmitter {
             }
         }
 
-        // DECLARATIONS come from the occurrence walk, and that split is a
-        // measured limit rather than a leftover.
+        // DECLARATIONS come from the axis SOURCE (chelis#1277 C4.4). An
+        // origin the entry can supply is one of two kinds, and both are
+        // declared here because both are available before any operation of
+        // the function runs: an input tensor's axis, read from shape
+        // metadata, and a compile-time literal.
         //
-        // The emitter allocates by NAME: `chelis_alloc(1, (int64_t[]){
-        // _anon_dim_1_0 })`. The lowerer stamps a fresh name on many axes
-        // whose extent is simply an input's - chelis#631's avgpool program
-        // has a `Load` typed `[2, _anon_dim_0_1]` and a `Sum` over axis 0
-        // typed `[_anon_dim_1_0]` - and C2.4 is right that the second is not
-        // a witness, because a pass-through axis neither declares nor
-        // disagrees: it IS the first. The derivation therefore reports one
-        // extent where the emitted text uses two names, and routing
-        // declarations through it left `_anon_dim_1_0` undeclared and the
-        // emitted C not compiling on eight shipped programs.
+        // The literal arm is what chelis#1556 needed. A nullary kernel has no
+        // `Load` at all, so a name the lowerer stamped on an inlined
+        // parameter's axis had nothing to recover it from and the walk
+        // panicked; resolving the axis's source answers `3` in two hops and
+        // the declaration follows.
         //
-        // The fix for that is to allocate from the axis SOURCE instead of
-        // from the stamped name, which is C4.4's remaining half and what
-        // closes chelis#665. Until then the walk keeps the declarations - its
-        // bucket-4c sweep recovers the second name from the same input axis -
-        // and the derivation keeps what it is for: which sites GUARD, against
-        // what, in what order.
-        for binding in dag.symbolic_bindings() {
-            let SymbolicDimSource::Load {
-                input_label: canonical_label,
-                axis: canonical_axis,
-            } = &binding.canonical.source
-            else {
-                continue;
-            };
-            let canonical_slot = input_slots[canonical_label];
-            self.line(&format!(
-                "int64_t {} = chelis_tensor_shape(inputs[{canonical_slot}], {canonical_axis});",
-                binding.name
-            ));
-            self.declared_dim_names.insert(binding.name.clone());
+        // `spec/04-type-system.md` section 4.7 orders entry work by "the
+        // assigned ABI input slot", so the input-axis declarations follow
+        // `input_slots` and then the axis, with the literals after them in
+        // first-reference order. Every declaration here dominates every
+        // reference, so the order is about determinism rather than about
+        // correctness.
+        struct EntryDimDeclaration {
+            /// The declaring input's assigned ABI slot and axis, absent for a
+            /// literal extent, which no input supplies.
+            slot: Option<(usize, usize)>,
+            name: String,
+            extent: String,
+        }
+        let mut entry_dim_declarations: Vec<EntryDimDeclaration> = Vec::new();
+        for (name, origin) in dag.dim_extent_origins() {
+            match origin {
+                chelis_ir::axis_sources::ExtentOrigin::ExternalAxis { load, axis } => {
+                    let Some(RiscOp::Load { name: label }) = dag.get(load).map(|node| &node.op)
+                    else {
+                        continue;
+                    };
+                    let slot = input_slots[label.as_str()];
+                    entry_dim_declarations.push(EntryDimDeclaration {
+                        slot: Some((slot, axis)),
+                        name,
+                        extent: format!("chelis_tensor_shape(inputs[{slot}], {axis})"),
+                    });
+                }
+                chelis_ir::axis_sources::ExtentOrigin::Literal(value) => {
+                    entry_dim_declarations.push(EntryDimDeclaration {
+                        slot: None,
+                        name,
+                        extent: value.to_string(),
+                    });
+                }
+                chelis_ir::axis_sources::ExtentOrigin::OpComputed { .. }
+                | chelis_ir::axis_sources::ExtentOrigin::ScalarInput { .. } => {}
+            }
+        }
+        entry_dim_declarations.sort_by(|left, right| {
+            left.slot
+                .is_none()
+                .cmp(&right.slot.is_none())
+                .then_with(|| left.slot.cmp(&right.slot))
+        });
+        for declaration in entry_dim_declarations {
+            let EntryDimDeclaration { name, extent, .. } = declaration;
+            self.line(&format!("int64_t {name} = {extent};"));
+            self.declared_dim_names.insert(name);
         }
 
         // Shared IR owns ordering and witness identity. Rendering never
@@ -5910,13 +5977,27 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         }
     }
 
-    /// Declare an op-owned runtime extent under its existing representation
-    /// owner. Guard scheduling is separate from C variable declaration.
+    /// Declare every name whose extent this operation's axis produces.
+    /// Guard scheduling is separate from C variable declaration.
+    ///
+    /// The first name reads the extent expression; each later name reads the
+    /// first. Two spellings of one extent is the ordinary case rather than a
+    /// corner: chelis#665's kept axis carries the lowerer's fresh
+    /// `_anon_dim_2_1` for the extent the `stride` before it already
+    /// declares, and `spec/design/runtime_extents.md` C4 forwards an
+    /// unchanged axis's exact input axis, which is this declaration.
     fn emit_runtime_dim_site(&mut self, id: usize, axis: usize, extent_expr: &str) {
-        if let Some((name, true)) = self.runtime_dim_sites.get(&(id, axis)) {
-            let name = name.clone();
+        let Some(names) = self.runtime_dim_sites.get(&(id, axis)).cloned() else {
+            return;
+        };
+        let mut source = extent_expr.to_string();
+        for name in names {
+            if self.declared_dim_names.contains(&name) {
+                continue;
+            }
             self.declared_dim_names.insert(name.clone());
-            self.line(&format!("int64_t {name} = {extent_expr};"));
+            self.line(&format!("int64_t {name} = {source};"));
+            source = name;
         }
     }
 

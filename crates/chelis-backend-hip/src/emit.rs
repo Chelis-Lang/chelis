@@ -70,19 +70,19 @@ fn hip_pairs_to_usize(bounds: &[(RtDim, RtDim)]) -> Vec<(usize, usize)> {
         .collect()
 }
 
-/// chelis#616: the HIP lane only supports Load-declared symbolic dims; an
-/// op-declared dim implies a node-valued movement bound or runtime reshape
-/// target, which `reject_unsupported_hip_ops` rejects before codegen. This
-/// panic is a defensive backstop against a seam bypass.
+/// The input tensor axis a HIP prologue declaration reads.
+///
+/// The HIP lane only supports extents the function entry supplies, and since
+/// chelis#665 that is the only thing a [`chelis_ir::dag::SymbolicDimSource`]
+/// can be: `symbolic_bindings_interface` mints an occurrence from a class
+/// member that resolves to an input tensor's axis and from nothing else. A
+/// node-valued movement bound or runtime reshape target reaches no
+/// occurrence at all, and `reject_unsupported_hip_ops` still refuses it
+/// before codegen. This function used to carry a defensive `panic!` arm for
+/// a variant that no longer exists.
 fn require_load_source(occurrence: &chelis_ir::dag::SymbolicDimOccurrence) -> (&String, usize) {
-    match &occurrence.source {
-        chelis_ir::dag::SymbolicDimSource::Load { input_label, axis } => (input_label, *axis),
-        chelis_ir::dag::SymbolicDimSource::OpDeclared { node, .. } => panic!(
-            "HIP backend reached an op-declared runtime dim `{}` (declared by node {}); \
-             reject_unsupported_hip_ops must reject it before codegen (chelis#616)",
-            occurrence.name, node.0
-        ),
-    }
+    let chelis_ir::dag::SymbolicDimSource::Load { input_label, axis } = &occurrence.source;
+    (input_label, *axis)
 }
 
 fn hip_strides_to_usize(strides: &[RtDim]) -> Vec<usize> {

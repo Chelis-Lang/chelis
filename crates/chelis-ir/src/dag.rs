@@ -305,22 +305,20 @@ impl fmt::Display for DimExpr {
 }
 
 /// Where a symbolic dim's runtime value comes from.
+///
+/// One variant, and deliberately so since chelis#665. An occurrence exists
+/// to say "the function entry supplies this extent from that input's axis",
+/// which is what the interface bindings the HIP prologue reads are for. A
+/// locally produced extent is not an interface value, so it has no spelling
+/// here; [`crate::axis_sources::ExtentOrigin`] is the total answer to where
+/// an extent comes from, and a lane that needs a locally produced one reads
+/// that instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SymbolicDimSource {
     /// Declared from an input tensor's shape: the C prologue emits
     /// `int name = inputs[slot]->shape[axis];` and the eval lane binds the
     /// value from the corresponding input before evaluation.
     Load { input_label: String, axis: usize },
-    /// chelis#616/#1277: declared at run time by the owning op itself — a
-    /// movement output axis whose extent is computed from a rank-0 bound
-    /// scalar or an explicit `InputAxis` metadata read. The C declaration is
-    /// emitted inline at the op (the source may be a computed tensor that
-    /// does not exist at prologue time); the eval lane resolves the extent
-    /// from actual values during evaluation and never pre-binds the symbol. When
-    /// the same symbol also has a `Load` source (or an earlier `OpDeclared`
-    /// declarer), this site is an equality-guard site: the C emitter aborts
-    /// at run time if the op's extent disagrees with the declared value.
-    OpDeclared { node: NodeId, axis: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1802,238 +1800,14 @@ impl Dag {
     }
 }
 
-pub fn symbolic_occurrences(dag: &Dag) -> Vec<SymbolicDimOccurrence> {
-    let mut occurrences = Vec::new();
-    let mut seen_inputs = UnordSet::new();
-    let mut named_dims_in_loads: UnordSet<String> = UnordSet::new();
-
-    // First pass: collect Load occurrences. These are the canonical
-    // sources for symbolic dim values (the C codegen turns each into
-    // `int <dim> = inputs[<slot>]->shape[<axis>]`).
-    for node in dag.nodes() {
-        let RiscOp::Load { name } = &node.op else {
-            continue;
-        };
-        if !seen_inputs.insert(name.as_str().to_string()) {
-            continue;
-        }
-        for (axis, dim) in node.output_type.dims.iter().enumerate() {
-            if let DimInfo::Named(symbol, None) = dim {
-                named_dims_in_loads.insert(symbol.clone());
-                occurrences.push(SymbolicDimOccurrence::load(symbol, name.as_str(), axis));
-            }
-        }
-    }
-
-    // chelis#616 pass: movement ops whose output axis extent is computed at
-    // RUN TIME by the op itself (a node-valued bound produces a fresh extent
-    // no Load traces to). Record an `OpDeclared` source so the C emitter
-    // declares (or equality-guards) the dim inline at the op and the eval
-    // lane skips pre-eval binding for it. A symbol that is also Load-carried
-    // keeps the Load as its canonical declaration; the op site then becomes
-    // a runtime equality guard rather than a redeclaration.
-    let mut op_declared: UnordSet<String> = UnordSet::new();
-    for node in dag.nodes() {
-        for (symbol, axis) in op_declared_output_axes(dag, node) {
-            if !named_dims_in_loads.contains(&symbol) {
-                let _ = bind_symbol_from_any_load(
-                    dag,
-                    &symbol,
-                    &mut occurrences,
-                    &mut named_dims_in_loads,
-                );
-            }
-            occurrences.push(SymbolicDimOccurrence {
-                name: symbol.clone(),
-                source: SymbolicDimSource::OpDeclared {
-                    node: node.id,
-                    axis,
-                },
-            });
-            op_declared.insert(symbol);
-        }
-    }
-
-    // Dominance guard (chelis#616 soundness): an op-declared symbol's C
-    // declaration is emitted at the declaring op, so every node that
-    // references the symbol (output dims or op-internal fields) must come
-    // AFTER the declarer in emission (= node id) order, or the C references
-    // an undeclared identifier. A violation is a producing-pass bug; fail
-    // loud rather than emit non-compiling (or worse, shadowed) C.
-    for symbol in op_declared.to_sorted() {
-        if named_dims_in_loads.contains(symbol) {
-            // Load-declared in the prologue; every reference is dominated.
-            continue;
-        }
-        let declarer = occurrences
-            .iter()
-            .find_map(|occurrence| match &occurrence.source {
-                SymbolicDimSource::OpDeclared { node, .. } if occurrence.name == *symbol => {
-                    Some(*node)
-                }
-                _ => None,
-            })
-            .expect("op_declared symbols always have an OpDeclared occurrence");
-        for node in dag.nodes() {
-            let references = node
-                .output_type
-                .dims
-                .iter()
-                .any(|dim| matches!(dim, DimInfo::Named(name, None) if name == symbol))
-                || op_internal_symbolic_dims(&node.op)
-                    .iter()
-                    .any(|name| name == symbol);
-            if references && node.id.0 < declarer.0 {
-                panic!(
-                    "internal compiler error: symbolic dim `{symbol}` is declared at run time \
-                     by node {} but referenced by EARLIER node {} (op {:?}); the C declaration \
-                     would not dominate the reference. Fix the producing IR pass.",
-                    declarer.0, node.id.0, node.op
-                );
-            }
-        }
-    }
-
-    // Bucket 4c sibling sweep: a polymorphic dim may be referenced by
-    // a non-Load node (e.g. `Const` synthesised by tier2 lowering or
-    // the gradient backward pass) without appearing in any Load's
-    // type. Without an entry in the occurrences list the C codegen
-    // emits `(int[]){ d36 }` against an undeclared `d36`.
-    //
-    // For each unbound name we try to find a Load whose own dims
-    // reference the same symbol (e.g. via op-internal references like
-    // `RiscOp::Reshape::new_shape` or `RiscOp::Expand::size`). If a
-    // matching Load is found we register a synthetic occurrence so
-    // the codegen can declare the dim from that input. If no matching
-    // Load exists, the dim is unrecoverable from inputs alone — that
-    // is a bug in the producing pass and we surface it loudly via
-    // `panic!` rather than silently emitting C that won't compile.
-    for node in dag.nodes() {
-        if matches!(node.op, RiscOp::Drop) {
-            continue;
-        }
-        for dim in &node.output_type.dims {
-            if let DimInfo::Named(symbol, None) = dim
-                && !named_dims_in_loads.contains(symbol)
-                && !op_declared.contains(symbol)
-                // chelis#616: a raw ANONYMOUS (wildcard) output dim is not a
-                // referenceable symbol — nothing renders it, and distinct
-                // runtime extents share it. The C backend renames every anon
-                // dim to a unique `_anon_dim_{id}_{axis}` BEFORE this pass
-                // (so a genuinely sourceless anon dim still fails loud
-                // there); the eval lane computes shapes from values and
-                // never reads a wildcard by name.
-                && !symbol.is_empty()
-                && symbol != "*"
-            {
-                // Hunt for any Load whose own type contains the same
-                // unbound dim name. We have to widen the search because
-                // a Load with a shape-mismatched annotation wouldn't
-                // necessarily appear in the first pass (its dim could
-                // be `Lit(_)` while the synthesised node carries the
-                // polymorphic name).
-                let mut bound = bind_symbol_from_any_load(
-                    dag,
-                    symbol,
-                    &mut occurrences,
-                    &mut named_dims_in_loads,
-                );
-                if !bound
-                    && let Some(axis) =
-                        node.output_type.dims.iter().position(
-                            |dim| matches!(dim, DimInfo::Named(name, None) if name == symbol),
-                        )
-                    && let Some((input_label, input_axis)) =
-                        shape_source_for_axis(dag, node.id, axis)
-                {
-                    occurrences.push(SymbolicDimOccurrence::load(
-                        symbol,
-                        &input_label,
-                        input_axis,
-                    ));
-                    named_dims_in_loads.insert(symbol.clone());
-                    bound = true;
-                }
-                if !bound {
-                    // chelis#616: a node-valued movement op computes a FRESH
-                    // runtime output extent with no Load source, and so does a
-                    // runtime-`shape()`-derived `reshape` target (the window
-                    // count `m`). The C backend can declare a movement output dim
-                    // from its bound scalars (`emit_shrink`/`emit_stride`/
-                    // `emit_pad`), but a `reshape` target has no node-valued dim
-                    // source threaded through yet, so a full runtime-symbolic
-                    // program still reaches an undeclarable dim. Until node-valued
-                    // Reshape/Const dims land (the runtime-dim-from-Shape-arith
-                    // declaration capability), this stays FAIL-CLOSED and LOUD
-                    // rather than emit a silently mis-sized allocation.
-                    panic!(
-                        "internal compiler error: symbolic dim `{symbol}` is referenced by a \
-                         non-Load node (id {}, op {:?}, inputs {:?}, type {:?}) but no Load input \
-                         declares it. The C codegen would emit an undeclared identifier; fix the \
-                         producing IR pass.",
-                        node.id.0, node.op, node.inputs, node.output_type
-                    );
-                }
-            }
-        }
-    }
-
-    // Bucket 4d sweep (chelis#345): op-internal symbolic references.
-    // A node whose output dims are fully concrete can still reference an
-    // undeclared symbolic dim through an op-internal field —
-    // `Expand::size`, `Reshape::new_shape`, or `BlasMatmul`'s
-    // `{batch_dims, m, n, k}` (the BLAS dims are rendered verbatim into
-    // C by `emit_dim_expr`, and `bind_symbolic_dims` / the IR evaluator
-    // resolve Expand sizes by name). The #345 bisect found exactly this
-    // mixed state in a grad helper DAG: `Load: Lit(2)` next to
-    // `Expand { size: Sym("dN") }`. Bucket 4c never sees those names
-    // because it scans output types only, so sweep the op fields too.
-    //
-    // No `shape_source_for_axis` fallback here: the op-internal name has
-    // no output axis to recover from (BlasMatmul's `k` is the
-    // contraction dim and appears in no output type at all). Either a
-    // Load declares the name or the producing pass is buggy.
-    for node in dag.nodes() {
-        if matches!(node.op, RiscOp::Drop) {
-            continue;
-        }
-        for symbol in op_internal_symbolic_dims(&node.op) {
-            if named_dims_in_loads.contains(&symbol) || op_declared.contains(&symbol) {
-                continue;
-            }
-            // chelis#616: a raw ANONYMOUS op-internal reference (the
-            // `lower_if` mask expansion over a wildcard-typed branch) is
-            // resolved by the evaluator from the node's shape-dep value. The
-            // C lane cannot render it — but the emitted identifier `*` fails
-            // C compilation LOUDLY if such a node ever reaches codegen
-            // (guarded `if` programs route through the host lane).
-            if symbol.is_empty() || symbol == "*" {
-                continue;
-            }
-            if !bind_symbol_from_any_load(dag, &symbol, &mut occurrences, &mut named_dims_in_loads)
-            {
-                panic!(
-                    "internal compiler error: symbolic dim `{symbol}` is referenced by a \
-                     non-Load node (id {}, op {:?}, inputs {:?}, type {:?}) through an \
-                     op-internal field but no Load input declares it. The C codegen would emit \
-                     an undeclared identifier; fix the producing IR pass.",
-                    node.id.0, node.op, node.inputs, node.output_type
-                );
-            }
-        }
-    }
-
-    occurrences
-}
-
 /// chelis#616: the output axes of `node` whose symbolic dim is sized at RUN
 /// TIME by the op itself — a movement op axis with a non-identity bound,
 /// which [`shape_source_for_axis`] deliberately refuses to trace to a Load
 /// (the extent is fresh, not the input axis's runtime dim), or a `Reshape`
 /// axis whose target is a node-valued (`RtDim::Node`) extent. Each returned
-/// `(symbol, axis)` pair becomes an [`SymbolicDimSource::OpDeclared`]
-/// occurrence: the C emitter declares (or equality-guards) the dim inline at
-/// the op and the eval lane resolves it from actual values.
+/// `(symbol, axis)` pair names an extent that exists only once its operation
+/// has run, so [`bind_symbolic_dims`] leaves it unbound and the eval lane
+/// resolves it from actual values.
 fn op_declared_output_axes(dag: &Dag, node: &DagNode) -> Vec<(String, usize)> {
     // An ANONYMOUS (wildcard) dim name is not a stable symbol: distinct
     // runtime extents share it, so binding/declaring it would falsely unify
@@ -2097,8 +1871,9 @@ fn op_declared_output_axes(dag: &Dag, node: &DagNode) -> Vec<(String, usize)> {
 /// ELIGIBILITY rather than on the current symbol. Used by the host
 /// lane's helper-root retype (`host::remap_tensor_helper_dim_symbols`):
 /// painting a declared-return symbol onto a root axis is sound only when
-/// the root op will declare that symbol's value; anywhere else the
-/// symbol would reach the `symbolic_occurrences` no-declaring-Load ICE.
+/// the root op will declare that symbol's value; anywhere else the symbol
+/// reaches an emission boundary with no extent source, which
+/// `axis_sources::check_rendered_dim_origins` refuses.
 pub(crate) fn op_declarable_axes(dag: &Dag, node: &DagNode) -> Vec<usize> {
     match &node.op {
         RiscOp::Shrink { .. } | RiscOp::Stride { .. } | RiscOp::Pad { .. } => {
@@ -2189,41 +1964,10 @@ pub fn record_runtime_dim_shape_deps(dag: &mut Dag) {
     }
 }
 
-/// Hunt for any Load whose type carries `symbol` (bound or unbound) and
-/// register a synthetic occurrence pointing at it. Returns whether a
-/// declaring Load was found. Shared by the Bucket 4c (output-dim) and
-/// Bucket 4d (op-internal) sweeps of [`symbolic_occurrences`].
-fn bind_symbol_from_any_load(
-    dag: &Dag,
-    symbol: &str,
-    occurrences: &mut Vec<SymbolicDimOccurrence>,
-    named_dims_in_loads: &mut UnordSet<String>,
-) -> bool {
-    for candidate in dag.nodes() {
-        let RiscOp::Load { name: load_name } = &candidate.op else {
-            continue;
-        };
-        for (axis, candidate_dim) in candidate.output_type.dims.iter().enumerate() {
-            if let DimInfo::Named(candidate_sym, _) = candidate_dim
-                && candidate_sym == symbol
-            {
-                occurrences.push(SymbolicDimOccurrence::load(
-                    symbol,
-                    load_name.as_str(),
-                    axis,
-                ));
-                named_dims_in_loads.insert(symbol.to_string());
-                return true;
-            }
-        }
-    }
-    false
-}
-
 /// Symbolic dim names referenced by an op's internal fields rather than
 /// its output type: `Reshape::new_shape` and
 /// `BlasMatmul::{batch_dims, m, n, k}`.
-fn op_internal_symbolic_dims(op: &RiscOp) -> Vec<String> {
+pub(crate) fn op_internal_symbolic_dims(op: &RiscOp) -> Vec<String> {
     fn collect_dim_expr(expr: &DimExpr, out: &mut Vec<String>) {
         match expr {
             DimExpr::Concrete(_) => {}
@@ -2435,11 +2179,11 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
 /// entry, and [`symbolic_params`], which reports what a caller must supply -
 /// read this.
 ///
-/// The local half, an extent an operation computes at run time, is still
-/// [`symbolic_occurrences`]' to report until Slice B's guard commit places
-/// those guards at their introducing operations. Each consumer therefore
-/// reads one derivation or the other, never a mixture: two derivations that
-/// can disagree is the defect this work removes.
+/// The local half, an extent an operation computes at run time, is reported
+/// by [`crate::axis_sources::dim_extent_origins`], which names the operation
+/// that produces it. Each consumer reads one derivation or the other, never a
+/// mixture: two derivations that can disagree is the defect this work
+/// removes.
 ///
 /// `spec/04-type-system.md` section 4.7 decides the order: "Whatever rule
 /// assigns the slots, the guard order follows the assigned slots, and never a
@@ -2481,35 +2225,6 @@ pub fn symbolic_bindings_interface(dag: &Dag) -> Vec<SymbolicDimBinding> {
         .collect()
 }
 
-pub fn symbolic_bindings(dag: &Dag) -> Vec<SymbolicDimBinding> {
-    let mut grouped = std::collections::BTreeMap::<String, Vec<SymbolicDimOccurrence>>::new();
-    for occurrence in symbolic_occurrences(dag) {
-        grouped
-            .entry(occurrence.name.clone())
-            .or_default()
-            .push(occurrence);
-    }
-
-    grouped
-        .into_iter()
-        .map(|(name, mut occurrences)| {
-            // chelis#616: a Load source, when one exists, is always the
-            // canonical declaration (the prologue declares it; op-declared
-            // sites for the same symbol become runtime equality guards).
-            let canonical_index = occurrences
-                .iter()
-                .position(|occurrence| matches!(occurrence.source, SymbolicDimSource::Load { .. }))
-                .unwrap_or(0);
-            let canonical = occurrences.remove(canonical_index);
-            SymbolicDimBinding {
-                name,
-                canonical,
-                others: occurrences,
-            }
-        })
-        .collect()
-}
-
 /// The symbolic dims a caller can (and must) supply — those bound from input
 /// shape metadata. chelis#616: op-declared dims are computed at run time by
 /// their owning op and are deliberately excluded; they are not parameters.
@@ -2528,6 +2243,27 @@ pub fn symbolic_params(dag: &Dag) -> Vec<String> {
         .collect()
 }
 
+/// Names the scoped derivation finds in more than one equality class.
+///
+/// C2.4 scopes a claim by the results it reaches, so one spelling in two
+/// independent signatures is two claims. [`bind_symbolic_dims`] reads this to
+/// tolerate such a name being unbound; see the comment at its use.
+fn multi_scope_dim_names(dag: &Dag) -> UnordSet<String> {
+    let mut seen: Vec<String> = Vec::new();
+    let mut repeated = UnordSet::new();
+    for class in crate::axis_sources::derive_dim_witnesses(dag) {
+        let crate::axis_sources::DimClaim::Name(name) = class.claim else {
+            continue;
+        };
+        if seen.contains(&name) {
+            repeated.insert(name);
+        } else {
+            seen.push(name);
+        }
+    }
+    repeated
+}
+
 pub fn bind_symbolic_dims(dag: &Dag, bindings: &UnordMap<String, usize>) -> Result<Dag, String> {
     // chelis#616: an op-declared dim (a node-valued movement output extent)
     // has no pre-eval value — the evaluator computes it from actual bound
@@ -2537,13 +2273,28 @@ pub fn bind_symbolic_dims(dag: &Dag, bindings: &UnordMap<String, usize>) -> Resu
     // referenceable symbol, and the evaluator computes the real extent from
     // values.
     let op_declared = op_declared_dim_names(dag);
+    // chelis#1566: a name that `split_by_scope` finds in MORE THAN ONE scope
+    // has no single pre-eval extent, because two independent signatures that
+    // merely spell a binder the same way are two claims rather than one. The
+    // binding map is keyed by name and cannot hold both, so the inference
+    // deliberately leaves such a name unbound when its scopes disagree, and
+    // every axis carrying it is computed from actual values instead. The
+    // tolerance stops at the TYPE: a live node that reads the name BY VALUE
+    // (a `Reshape` target's `RtDim::Sym`) still refuses below, because there
+    // is no value to give it. A per-scope rename is the structural fix and
+    // belongs to the claim transport.
+    let multi_scope = multi_scope_dim_names(dag);
     let bind_dim = |dim: &DimInfo| -> Result<DimInfo, String> {
         match dim {
             DimInfo::Lit(size) => Ok(DimInfo::Lit(*size)),
             DimInfo::Named(name, Some(size)) => Ok(DimInfo::Named(name.clone(), Some(*size))),
             DimInfo::Named(name, None) => match bindings.get(name) {
                 Some(size) => Ok(DimInfo::Named(name.clone(), Some(*size))),
-                None if op_declared.contains(name) || name.is_empty() || name == "*" => {
+                None if op_declared.contains(name)
+                    || multi_scope.contains(name)
+                    || name.is_empty()
+                    || name == "*" =>
+                {
                     Ok(dim.clone())
                 }
                 None => Err(format!("missing symbolic dimension binding `{name}`")),
@@ -2780,67 +2531,13 @@ mod tests {
         assert!(dag.is_root(id));
     }
 
-    #[test]
-    fn symbolic_occurrences_sibling_sweep_picks_up_const_dims() {
-        // Bucket 4c: a `Const` node (or any non-Load node) with a
-        // polymorphic dim must produce a synthetic occurrence so the
-        // C codegen can declare the dim from a Load that carries it.
-        let load_ty = TensorType {
-            dims: vec![DimInfo::Named("n".into(), None)],
-            precision: Prim::F32,
-        };
-        let const_ty = TensorType {
-            dims: vec![DimInfo::Named("n".into(), None)],
-            precision: Prim::F32,
-        };
-        let mut dag = Dag::new();
-        dag.add_node(RiscOp::Load { name: "x".into() }, vec![], load_ty, None);
-        dag.add_node(
-            RiscOp::synth_const(const_ty.precision, 1.0),
-            vec![],
-            const_ty,
-            None,
-        );
-
-        let occurrences = symbolic_occurrences(&dag);
-        // The Load is the canonical source. The sibling-sweep pass must
-        // not duplicate the Load occurrence for the Const (the Const's
-        // dim is already covered).
-        assert_eq!(occurrences.len(), 1);
-        assert_eq!(occurrences[0].name, "n");
-        assert_eq!(
-            occurrences[0].source,
-            SymbolicDimSource::Load {
-                input_label: "x".into(),
-                axis: 0,
-            }
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "internal compiler error: symbolic dim `n` is referenced")]
-    fn symbolic_occurrences_panics_when_dim_has_no_load_source() {
-        // Negative parity for the sibling sweep: if a non-Load node
-        // declares a polymorphic dim that no Load carries, the C
-        // codegen would emit `(int[]){ n }` against an undeclared
-        // identifier. The sweep panics rather than producing
-        // un-compilable C.
-        let const_ty = TensorType {
-            dims: vec![DimInfo::Named("n".into(), None)],
-            precision: Prim::F32,
-        };
-        let mut dag = Dag::new();
-        // Only a Const with a polymorphic dim, no Load. There is no
-        // input slot to pull the dim value from.
-        dag.add_node(
-            RiscOp::synth_const(const_ty.precision, 1.0),
-            vec![],
-            const_ty,
-            None,
-        );
-        let _ = symbolic_occurrences(&dag);
-    }
-
+    /// The interface bindings and the parameter list follow ABI input-slot
+    /// order, and the canonical member is the first slot's axis.
+    ///
+    /// This used to assert the legacy occurrence walk's own output. The walk
+    /// is gone (chelis#665): declarations come from the axis SOURCE now, so
+    /// what is left to pin here is the derived interface the HIP prologue and
+    /// `symbolic_params` read.
     #[test]
     fn symbolic_params_and_bindings_follow_input_order() {
         let ty_x = TensorType {
@@ -2856,28 +2553,10 @@ mod tests {
         dag.add_node(RiscOp::Load { name: "y".into() }, vec![], ty_y, None);
 
         assert_eq!(symbolic_params(&dag), vec!["batch"]);
-        assert_eq!(
-            symbolic_occurrences(&dag),
-            vec![
-                SymbolicDimOccurrence {
-                    name: "batch".into(),
-                    source: SymbolicDimSource::Load {
-                        input_label: "x".into(),
-                        axis: 0,
-                    },
-                },
-                SymbolicDimOccurrence {
-                    name: "batch".into(),
-                    source: SymbolicDimSource::Load {
-                        input_label: "y".into(),
-                        axis: 0,
-                    },
-                },
-            ]
-        );
 
-        let bindings = symbolic_bindings(&dag);
+        let bindings = symbolic_bindings_interface(&dag);
         assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].name, "batch");
         assert_eq!(
             bindings[0].canonical.source,
             SymbolicDimSource::Load {
@@ -2893,6 +2572,39 @@ mod tests {
                 axis: 0,
             }
         );
+    }
+
+    /// Both `Load` axes name one extent, and the declaration for it comes
+    /// from the first input slot rather than from a search for a matching
+    /// string (chelis#665).
+    #[test]
+    fn a_shared_binder_declares_from_the_first_input_slots_axis() {
+        let ty = |dims: Vec<DimInfo>| TensorType {
+            dims,
+            precision: Prim::F32,
+        };
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty(vec![DimInfo::Named("batch".into(), None), DimInfo::Lit(4)]),
+            None,
+        );
+        dag.add_node(
+            RiscOp::Load { name: "y".into() },
+            vec![],
+            ty(vec![DimInfo::Named("batch".into(), None), DimInfo::Lit(2)]),
+            None,
+        );
+
+        assert_eq!(
+            crate::axis_sources::dim_extent_origins(&dag),
+            vec![(
+                "batch".to_string(),
+                crate::axis_sources::ExtentOrigin::ExternalAxis { load: x, axis: 0 }
+            )],
+        );
+        assert!(crate::axis_sources::unresolved_dim_names(&dag).is_empty());
     }
 
     #[test]
@@ -3063,107 +2775,6 @@ mod tests {
     // panic-don't-emit contract as output dims.
 
     #[test]
-    fn symbolic_occurrences_input_axis_uses_only_its_structural_load_source() {
-        let mut dag = Dag::new();
-        let x = dag.add_node(
-            RiscOp::Load { name: "x".into() },
-            vec![],
-            TensorType {
-                dims: vec![DimInfo::Named("n".into(), None)],
-                precision: Prim::F32,
-            },
-            None,
-        );
-        let value = dag.add_node(
-            RiscOp::synth_const(Prim::F32, 1.0),
-            vec![],
-            TensorType::scalar_f32(),
-            None,
-        );
-        dag.add_node(
-            RiscOp::Expand {
-                axis: 0,
-                size: RtDim::InputAxis {
-                    tensor: 1,
-                    axis: RtAxis::Lit(0),
-                },
-            },
-            vec![value, x],
-            TensorType {
-                dims: vec![DimInfo::Named("n".into(), None)],
-                precision: Prim::F32,
-            },
-            None,
-        );
-
-        let occurrences = symbolic_occurrences(&dag);
-        assert_eq!(occurrences.len(), 1);
-        assert_eq!(occurrences[0].name, "n");
-        assert_eq!(
-            occurrences[0].source,
-            SymbolicDimSource::Load {
-                input_label: "x".into(),
-                axis: 0,
-            }
-        );
-    }
-
-    #[test]
-    fn symbolic_occurrences_input_axis_from_runtime_movement_is_op_declared() {
-        let mut dag = Dag::new();
-        let x = dag.add_node(
-            RiscOp::Load { name: "x".into() },
-            vec![],
-            TensorType {
-                dims: vec![DimInfo::Lit(4)],
-                precision: Prim::F32,
-            },
-            None,
-        );
-        let runtime_source = dag.add_node(
-            RiscOp::Shrink {
-                bounds: vec![(RtDim::Lit(1), RtDim::Lit(3))],
-            },
-            vec![x],
-            TensorType {
-                dims: vec![DimInfo::Named("m".into(), None)],
-                precision: Prim::F32,
-            },
-            None,
-        );
-        let value = dag.add_node(
-            RiscOp::synth_const(Prim::F32, 1.0),
-            vec![],
-            TensorType::scalar_f32(),
-            None,
-        );
-        let expanded = dag.add_node(
-            RiscOp::Expand {
-                axis: 0,
-                size: RtDim::InputAxis {
-                    tensor: 1,
-                    axis: RtAxis::Lit(0),
-                },
-            },
-            vec![value, runtime_source],
-            TensorType {
-                dims: vec![DimInfo::Named("k".into(), None)],
-                precision: Prim::F32,
-            },
-            None,
-        );
-
-        let occurrences = symbolic_occurrences(&dag);
-        assert!(occurrences.contains(&SymbolicDimOccurrence {
-            name: "k".into(),
-            source: SymbolicDimSource::OpDeclared {
-                node: expanded,
-                axis: 0,
-            },
-        }));
-    }
-
-    #[test]
     fn verifier_rejects_expand_size_sym_without_consulting_the_symbol_walk() {
         let mut dag = Dag::new();
         let x = dag.add_node(
@@ -3194,206 +2805,6 @@ mod tests {
                 .any(|error| error.contains("expand") && error.contains("Sym")),
             "{errors:?}"
         );
-    }
-
-    #[test]
-    #[should_panic(expected = "internal compiler error: symbolic dim `d9` is referenced")]
-    fn symbolic_occurrences_panics_on_reshape_shape_sym_without_load() {
-        // Negative: `Reshape::new_shape` carries an unbound Named dim
-        // while the node's own output dims are concrete.
-        let mut dag = Dag::new();
-        let x = dag.add_node(
-            RiscOp::Load { name: "x".into() },
-            vec![],
-            TensorType {
-                dims: vec![DimInfo::Lit(4)],
-                precision: Prim::F32,
-            },
-            None,
-        );
-        dag.add_node(
-            RiscOp::Reshape {
-                new_shape: vec![RtDim::Sym("d9".into()), RtDim::Lit(2)],
-            },
-            vec![x],
-            TensorType {
-                dims: vec![DimInfo::Lit(2), DimInfo::Lit(2)],
-                precision: Prim::F32,
-            },
-            None,
-        );
-        let _ = symbolic_occurrences(&dag);
-    }
-
-    #[test]
-    #[should_panic(expected = "internal compiler error: symbolic dim `d11` is referenced")]
-    fn symbolic_occurrences_panics_on_blas_matmul_dim_sym_without_load() {
-        // Negative: `BlasMatmul::{m,n,k}` are emitted verbatim into C
-        // (`emit_dim_expr`), so an unbound sym there is exactly the
-        // undeclared-identifier hazard the guard exists for. `k` is the
-        // contraction dim and never appears in the output type at all.
-        let mut dag = Dag::new();
-        let a = dag.add_node(
-            RiscOp::Load { name: "a".into() },
-            vec![],
-            TensorType {
-                dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
-                precision: Prim::F32,
-            },
-            None,
-        );
-        let b = dag.add_node(
-            RiscOp::Load { name: "b".into() },
-            vec![],
-            TensorType {
-                dims: vec![DimInfo::Lit(3), DimInfo::Lit(4)],
-                precision: Prim::F32,
-            },
-            None,
-        );
-        dag.add_node(
-            RiscOp::matmul_default(
-                vec![],
-                DimExpr::Concrete(2),
-                DimExpr::Concrete(4),
-                DimExpr::Sym("d11".into()),
-                Prim::F32,
-            )
-            .expect("f32 matmul"),
-            vec![a, b],
-            TensorType {
-                dims: vec![DimInfo::Lit(2), DimInfo::Lit(4)],
-                precision: Prim::F32,
-            },
-            None,
-        );
-        let _ = symbolic_occurrences(&dag);
-    }
-
-    #[test]
-    fn symbolic_occurrences_concrete_op_internals_stay_quiet() {
-        // Negative parity for the sweep itself: fully concrete
-        // op-internal fields must not invent occurrences or panic.
-        let mut dag = Dag::new();
-        let x = dag.add_node(
-            RiscOp::Load { name: "x".into() },
-            vec![],
-            TensorType {
-                dims: vec![DimInfo::Lit(2)],
-                precision: Prim::F32,
-            },
-            None,
-        );
-        dag.add_node(
-            RiscOp::Expand {
-                axis: 1,
-                size: RtDim::Lit(3),
-            },
-            vec![x],
-            TensorType {
-                dims: vec![DimInfo::Lit(2), DimInfo::Lit(3)],
-                precision: Prim::F32,
-            },
-            None,
-        );
-        assert!(symbolic_occurrences(&dag).is_empty());
-    }
-
-    #[test]
-    fn symbolic_occurrences_traces_reduction_kept_axis_to_load() {
-        // chelis#551/#340: a host-lane / grad-backward reduction whose
-        // operand is a `concat` output carries a `*`-wildcard non-concat
-        // axis. The C backend renames the operand's wildcard and the
-        // reduction's surviving wildcard to DIFFERENT `_anon_dim_*` names,
-        // so the reduction output's dim symbol does not appear in any Load.
-        // The reduction arm of `shape_source_for_axis` must map the kept
-        // output axis back through the removed reduce axis to the declaring
-        // Load rather than tripping the sourceless-symbol panic.
-        let mut dag = Dag::new();
-        // Load "c": [batch, d1] (d1 == the concat wildcard, renamed).
-        let c = dag.add_node(
-            RiscOp::Load { name: "c".into() },
-            vec![],
-            TensorType {
-                dims: vec![
-                    DimInfo::Named("batch".into(), None),
-                    DimInfo::Named("d1".into(), None),
-                ],
-                precision: Prim::F32,
-            },
-            None,
-        );
-        // Sum over axis 0 keeps axis 1, re-anonymised to a DIFFERENT symbol.
-        dag.add_node(
-            RiscOp::Sum {
-                axis: 0,
-                accumulator: Prim::F32,
-            },
-            vec![c],
-            TensorType {
-                dims: vec![DimInfo::Named("d2".into(), None)],
-                precision: Prim::F32,
-            },
-            None,
-        );
-        let occurrences = symbolic_occurrences(&dag);
-        let d2 = occurrences
-            .iter()
-            .find(|o| o.name == "d2")
-            .expect("reduction kept-axis symbol `d2` must be declared");
-        // The kept output axis 0 maps back to input axis 1 of Load "c".
-        assert_eq!(
-            d2.source,
-            SymbolicDimSource::Load {
-                input_label: "c".into(),
-                axis: 1,
-            }
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "internal compiler error: symbolic dim `d2` is referenced")]
-    fn symbolic_occurrences_reduction_arm_still_fails_loud_without_load() {
-        // Negative parity for the reduction arm (chelis#551): the arm must
-        // NOT launder a genuinely-unbound symbolic dim green. When the
-        // reduction operand traces to a non-Load with no declaring Load
-        // (here a `Const`), the kept-axis symbol is unrecoverable and the
-        // guard must still panic — do not weaken fail-loud.
-        let mut dag = Dag::new();
-        // A CONCRETE-dim Const operand (so its own dims do not trip the
-        // guard) whose reduction output nonetheless carries an unbound
-        // symbol. The reduction arm recurses into the Const and bottoms out
-        // (`Const` is not a Load and has no shape source), so the kept-axis
-        // symbol is unrecoverable and the guard must panic.
-        let src = dag.add_node(
-            RiscOp::synth_const(
-                TensorType {
-                    dims: vec![DimInfo::Lit(3), DimInfo::Lit(4)],
-                    precision: Prim::F32,
-                }
-                .precision,
-                0.0,
-            ),
-            vec![],
-            TensorType {
-                dims: vec![DimInfo::Lit(3), DimInfo::Lit(4)],
-                precision: Prim::F32,
-            },
-            None,
-        );
-        dag.add_node(
-            RiscOp::Sum {
-                axis: 0,
-                accumulator: Prim::F32,
-            },
-            vec![src],
-            TensorType {
-                dims: vec![DimInfo::Named("d2".into(), None)],
-                precision: Prim::F32,
-            },
-            None,
-        );
-        let _ = symbolic_occurrences(&dag);
     }
 
     /// One instance of every `RiscOp` variant. The
