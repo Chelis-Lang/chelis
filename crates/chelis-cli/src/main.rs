@@ -2148,7 +2148,7 @@ const EMPTY_PROGRAM_MESSAGE: &str = "empty program: no declarations found";
 /// `errors[]` array carries a single `Other`-kind entry with the
 /// supplied message; the rest of the report shape mirrors a zero-
 /// node program with score 0.
-fn synthetic_check_report_with_error(message: &str) -> Result<String, Box<dyn std::error::Error>> {
+fn synthetic_check_report_with_error(message: &str) -> String {
     synthetic_check_report_with_errors(std::slice::from_ref(&message.to_string()))
 }
 
@@ -2161,9 +2161,7 @@ fn synthetic_check_report_with_error(message: &str) -> Result<String, Box<dyn st
 /// transcript into a machine-facing field -- the shape chelis#886 exists to
 /// remove -- and would make `errors.len()` disagree with the number of
 /// problems found.
-fn synthetic_check_report_with_errors(
-    messages: &[String],
-) -> Result<String, Box<dyn std::error::Error>> {
+fn synthetic_check_report_with_errors(messages: &[String]) -> String {
     // chelis#886 [04-FIT-12]: the early-failure path is not a second
     // producer. It builds the same `CheckResult` the checker's path builds
     // and renders it through the same serializer, so a failure that
@@ -2196,9 +2194,22 @@ fn synthetic_check_report_with_errors(
         total_nodes: 0,
         unresolved_names: vec![],
     };
-    let wire = CheckResult::try_from_fitness(&report)
-        .expect("fixed synthetic report has valid numeric fields");
-    Ok(wire.to_report_json()?)
+    // Both `expect`s are the boundary of the whole design, so they are
+    // justified rather than hopeful. Every numeric field here is a literal
+    // constant -- score 0, four components 0, three counters 0, severity 0.5
+    // -- so `try_from_fitness`'s validation cannot reject them; and the
+    // serializer sees only owned `String`s and already-validated numbers, so
+    // it has no failure mode either. The messages are never inspected.
+    //
+    // If either could fail there would be nothing to emit, and inventing a
+    // fallback document here would be the second producer [04-FIT-11]
+    // forbids. Panicking is the honest response to a broken serializer;
+    // returning a `Result` would only push the same impossibility onto every
+    // caller and reopen the `?` channel this function exists to close.
+    CheckResult::try_from_fitness(&report)
+        .expect("fixed synthetic report has valid numeric fields")
+        .to_report_json()
+        .expect("a report of owned strings and validated numbers serializes")
 }
 
 /// Exit-code contract (issue #207, supersedes RT-205 F7):
@@ -2257,40 +2268,33 @@ fn cmd_check(
             println!("{{\"files\":[],\"errors\":[]}}");
             return Ok(0);
         }
-        let mut had_error = false;
         let mut any_errors_in_report = false;
         let mut entries: Vec<String> = Vec::with_capacity(files.len());
         for file in &files {
-            match cmd_check_one(file, show_inferred, allow_style_violations) {
-                Ok((json, errors_in_report)) => {
-                    if errors_in_report {
-                        any_errors_in_report = true;
-                    }
-                    let rel = file.strip_prefix(target).unwrap_or(file).display();
-                    entries.push(format!(
-                        "{{\"file\":{},\"report\":{json}}}",
-                        serde_json::to_string(&rel.to_string()).unwrap_or_default(),
-                    ));
-                }
-                Err(e) => {
-                    had_error = true;
-                    let rel = file.strip_prefix(target).unwrap_or(file).display();
-                    entries.push(format!(
-                        "{{\"file\":{},\"error\":{}}}",
-                        serde_json::to_string(&rel.to_string()).unwrap_or_default(),
-                        serde_json::to_string(&e.to_string()).unwrap_or_default(),
-                    ));
-                }
+            // The `Err` arm that used to sit here emitted
+            // `{"file":...,"error":"<display string>"}` -- a message where a
+            // report belongs. It is not handled any more because it can no
+            // longer be constructed: `cmd_check_one` is total, so every
+            // entry carries a report by type (chelis#886 [04-FIT-12]).
+            // Deleting it is the point of making the function total, not a
+            // side effect of it.
+            let (json, errors_in_report) =
+                cmd_check_one(file, show_inferred, allow_style_violations);
+            if errors_in_report {
+                any_errors_in_report = true;
             }
+            let rel = file.strip_prefix(target).unwrap_or(file).display();
+            entries.push(format!(
+                "{{\"file\":{},\"report\":{json}}}",
+                serde_json::to_string(&rel.to_string()).unwrap_or_default(),
+            ));
         }
         println!("{{\"files\":[{}]}}", entries.join(","));
-        if had_error {
-            return Err("one or more files failed to check".into());
-        }
         // Issue #207 invariant: any file with a non-empty errors array
         // in its report triggers the same exit code as the single-file
-        // path. Per-file processing failures (Err arm above) keep the
-        // legacy "tooling broken" exit-1 path through `Err`.
+        // path. There is no per-file exit-1 path any more: `cmd_check_one`
+        // is total, so a file that fails to be read, formatted or checked
+        // contributes a report with errors like any other (chelis#886).
         return Ok(if any_errors_in_report {
             CHECK_ERRORS_EXIT_CODE
         } else {
@@ -2298,7 +2302,7 @@ fn cmd_check(
         });
     }
 
-    let (json, errors_in_report) = cmd_check_one(target, show_inferred, allow_style_violations)?;
+    let (json, errors_in_report) = cmd_check_one(target, show_inferred, allow_style_violations);
     println!("{json}");
     Ok(if errors_in_report {
         CHECK_ERRORS_EXIT_CODE
@@ -2359,11 +2363,7 @@ fn discover_check_files(target: &Path) -> Result<Vec<PathBuf>, String> {
 /// `errors` array is non-empty. The flag is the source of truth for
 /// the issue #207 exit-code invariant; callers must thread it back
 /// through to the process exit status.
-fn cmd_check_one(
-    file: &Path,
-    show_inferred: bool,
-    allow_style_violations: bool,
-) -> Result<(String, bool), Box<dyn std::error::Error>> {
+fn cmd_check_one(file: &Path, show_inferred: bool, allow_style_violations: bool) -> (String, bool) {
     // WI-1 follow-up: run the WHOLE check operation on a grown native stack.
     // The chelis-types check entries grow the stack around their own recursion,
     // but the reef/deep loader, the linked-program `clone()`, the desugarer,
@@ -2382,7 +2382,7 @@ fn cmd_check_one_on_grown_stack(
     file: &Path,
     show_inferred: bool,
     allow_style_violations: bool,
-) -> Result<(String, bool), Box<dyn std::error::Error>> {
+) -> (String, bool) {
     // chelis#886 [04-FIT-12]: a failure before the checker is transported by
     // the report, not by a display string on stderr and an empty stdout.
     //
@@ -2391,18 +2391,18 @@ fn cmd_check_one_on_grown_stack(
     // the terminal message to be taken away, and `spec/01` §Style Gate makes
     // that stderr line part of the gate's own contract.
     //
-    // Exit status moves 1 -> 2 on these paths as a consequence, because the
-    // status is derived from this function's `Ok`/`Err` discriminant. §
-    // Gating pins only "`0` iff empty, non-zero otherwise", so both values
-    // conform; 2 is chosen to converge on the Deep arm below, which already
-    // reported an unreadable file this way.
+    // These paths exit 2, like every non-empty errors array: the status is a
+    // function of the report, and this function always returns one (it is
+    // total). § Gating pins only "`0` iff empty, non-zero otherwise", so
+    // exit 1 would also conform; 2 converged the Surf arm on the Deep arm,
+    // which already reported an unreadable file this way.
     let source = match fs::read_to_string(file) {
         Ok(source) => source,
         Err(error) => {
             let message = format!("failed to read {}: {error}", file.display());
             eprintln!("error: {message}");
-            let json = synthetic_check_report_with_error(&message)?;
-            return Ok((json, true));
+            let json = synthetic_check_report_with_error(&message);
+            return (json, true);
         }
     };
     if let Err(rejection) =
@@ -2423,8 +2423,8 @@ fn cmd_check_one_on_grown_stack(
         // putting it in a machine-facing `message` is the shape chelis#886
         // removes, not one to reintroduce while closing it.
         eprintln!("error: {}", rejection.report);
-        let json = synthetic_check_report_with_errors(&rejection.issues)?;
-        return Ok((json, true));
+        let json = synthetic_check_report_with_errors(&rejection.issues);
+        return (json, true);
     }
     emit_advisory_lint_warnings_for_file(file);
     // Deep (`.dp`) ingestion: a standalone `.dp` is already-lowered IR,
@@ -2449,8 +2449,8 @@ fn cmd_check_one_on_grown_stack(
     let prepared = match chelis_reef::prepare_program_for_file(file) {
         Ok(prepared) => prepared,
         Err(message) => {
-            let json = synthetic_check_report_with_error(&message)?;
-            return Ok((json, true));
+            let json = synthetic_check_report_with_error(&message);
+            return (json, true);
         }
     };
     // Wave-1 red-team M2 (#207 follow-up): inside a reef package the
@@ -2462,8 +2462,8 @@ fn cmd_check_one_on_grown_stack(
     if let Some(prepared_ref) = &prepared
         && prepared_ref.entry_decls.is_empty()
     {
-        let json = synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE)?;
-        return Ok((json, true));
+        let json = synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE);
+        return (json, true);
     }
 
     // RFC v5 (RT-1 F2 bypass): inside a reef package every decl checked
@@ -2508,8 +2508,8 @@ fn cmd_check_one_on_grown_stack(
                     // joins them with "; " for the terminal, and a joined
                     // string in one `message` makes `errors.len()` disagree
                     // with the number of problems.
-                    let json = synthetic_check_report_with_errors(&compiler_error_list(&error))?;
-                    return Ok((json, true));
+                    let json = synthetic_check_report_with_errors(&compiler_error_list(&error));
+                    return (json, true);
                 }
             }
         }
@@ -2524,8 +2524,9 @@ fn cmd_check_one_on_grown_stack(
                     fitness,
                     typed_program,
                 } => {
+                    let mut fitness = fitness;
                     let inferred = if show_inferred {
-                        Some(inferred_signatures_value(&typed_program)?)
+                        inferred_signatures_or_diagnostic(&typed_program, &mut fitness)
                     } else {
                         None
                     };
@@ -2536,8 +2537,9 @@ fn cmd_check_one_on_grown_stack(
                     effect_errors,
                     typed_program,
                 } => {
+                    let mut fitness = fitness;
                     let inferred = if show_inferred {
-                        Some(inferred_signatures_value(&typed_program)?)
+                        inferred_signatures_or_diagnostic(&typed_program, &mut fitness)
                     } else {
                         None
                     };
@@ -2548,8 +2550,9 @@ fn cmd_check_one_on_grown_stack(
                     linearity_errors,
                     typed_program,
                 } => {
+                    let mut fitness = fitness;
                     let inferred = if show_inferred {
-                        Some(inferred_signatures_value(&typed_program)?)
+                        inferred_signatures_or_diagnostic(&typed_program, &mut fitness)
                     } else {
                         None
                     };
@@ -2576,8 +2579,8 @@ fn cmd_check_one_on_grown_stack(
                     match chelis_surf::parser::parse_str(&source) {
                         Ok(decls) => decls,
                         Err(err) => {
-                            let json = synthetic_check_report_with_error(&err.to_string())?;
-                            return Ok((json, true));
+                            let json = synthetic_check_report_with_error(&err.to_string());
+                            return (json, true);
                         }
                     }
                 }
@@ -2588,8 +2591,8 @@ fn cmd_check_one_on_grown_stack(
             // `chelis check` and `chelis build` now reject it with the
             // same canonical message so the two surfaces agree.
             if decls.is_empty() {
-                let json = synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE)?;
-                return Ok((json, true));
+                let json = synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE);
+                return (json, true);
             }
             // [04-FIT-12]: "any preparation failure occurring before type
             // checking begins" is the atom's own wording, so this is
@@ -2602,16 +2605,15 @@ fn cmd_check_one_on_grown_stack(
                     // reads in a terminal rather than parses out of JSON.
                     let message = error.to_string();
                     eprintln!("error: {message}");
-                    let json = synthetic_check_report_with_error(&message)?;
-                    return Ok((json, true));
+                    let json = synthetic_check_report_with_error(&message);
+                    return (json, true);
                 }
             };
-            // The `?` here is chelis#1664's, not this change's:
-            // `check_prepared_for_cli` became fallible when inferred
-            // signatures gained a typed carrier. It is a [04-FIT-12] bypass
-            // that arrived on `main` during this PR's review, so this change
-            // does not claim to have closed it -- see the PR body.
-            check_prepared_for_cli(prepared, show_inferred)?
+            // chelis#1664 made this call fallible when inferred signatures
+            // gained a typed carrier, and for a while it was a [04-FIT-12]
+            // bypass with a `?`. It is total now: a failure to build the
+            // rows becomes a diagnostic inside `check_prepared_for_cli`.
+            check_prepared_for_cli(prepared, show_inferred)
         };
     assemble_check_json(
         report,
@@ -2631,39 +2633,37 @@ type PreparedCliReport = (
 fn check_prepared_for_cli(
     prepared: chelis_compiler_api::pipeline::PreparedProgram,
     show_inferred: bool,
-) -> Result<PreparedCliReport, Box<dyn std::error::Error>> {
+) -> PreparedCliReport {
     let analysis = match chelis_compiler_api::pipeline::analyze_prepared(prepared) {
         chelis_compiler_api::pipeline::PreparedTypeAnalysisOutcome::Rejected { fitness } => {
-            return Ok((
+            return (
                 fitness,
                 Vec::new(),
                 Vec::new(),
                 show_inferred.then(Vec::new),
-            ));
+            );
         }
         chelis_compiler_api::pipeline::PreparedTypeAnalysisOutcome::Accepted(analysis) => *analysis,
     };
 
-    let fitness = analysis.fitness().clone();
+    let mut fitness = analysis.fitness().clone();
     let inferred = if show_inferred {
-        Some(inferred_signatures_value(analysis.program())?)
+        inferred_signatures_or_diagnostic(analysis.program(), &mut fitness)
     } else {
         None
     };
-    Ok(
-        match chelis_compiler_api::pipeline::complete_checks(
-            analysis,
-            chelis_compiler_api::pipeline::SemanticContext::Isolated,
-        ) {
-            Ok(_) => (fitness, Vec::new(), Vec::new(), inferred),
-            Err(chelis_compiler_api::pipeline::SemanticRejection::Effects { errors }) => {
-                (fitness, errors, Vec::new(), inferred)
-            }
-            Err(chelis_compiler_api::pipeline::SemanticRejection::Linearity { errors }) => {
-                (fitness, Vec::new(), errors, inferred)
-            }
-        },
-    )
+    match chelis_compiler_api::pipeline::complete_checks(
+        analysis,
+        chelis_compiler_api::pipeline::SemanticContext::Isolated,
+    ) {
+        Ok(_) => (fitness, Vec::new(), Vec::new(), inferred),
+        Err(chelis_compiler_api::pipeline::SemanticRejection::Effects { errors }) => {
+            (fitness, errors, Vec::new(), inferred)
+        }
+        Err(chelis_compiler_api::pipeline::SemanticRejection::Linearity { errors }) => {
+            (fitness, Vec::new(), errors, inferred)
+        }
+    }
 }
 
 /// Assemble the typed `chelis check` JSON report and the issue
@@ -2680,22 +2680,58 @@ fn check_prepared_for_cli(
 /// Returns `(json, errors_in_report)`; the caller maps a non-empty
 /// errors array to [`CHECK_ERRORS_EXIT_CODE`].
 fn assemble_check_json(
+    report: chelis_types::FitnessReport,
+    effect_errors: &[chelis_effects::EffectError],
+    linearity_errors: &[chelis_types::errors::CheckError],
+    inferred_signatures: Option<Vec<chelis_compiler_api::schema::WireInferredSignature>>,
+) -> (String, bool) {
+    // Infallible by construction (chelis#886 [04-FIT-12]). A validation
+    // failure below means the CHECKER measured something outside its own
+    // declared domain -- a NaN score, a severity outside [0, 1]. That is a
+    // real defect, and the atom is explicit that it must still reach the
+    // report: "a consumer cannot distinguish 'no diagnostics' from 'the
+    // diagnostics were not transported'". Propagating it would produce
+    // exactly the empty stdout the atom forbids.
+    //
+    // So the fallback re-enters the SAME producer with a different input.
+    // It is not a second producer: `synthetic_check_report_with_errors` is
+    // the one this file already uses for every pre-checker failure.
+    match assemble_validated_check_json(
+        report,
+        effect_errors,
+        linearity_errors,
+        inferred_signatures,
+    ) {
+        Ok(result) => result,
+        Err(message) => (
+            synthetic_check_report_with_errors(&[format!(
+                "the checker produced a report outside its declared numeric domain: {message}"
+            )]),
+            true,
+        ),
+    }
+}
+
+/// The fallible half of [`assemble_check_json`], kept separate so the caller
+/// above can be total. Its `Err` is a message, not a `Box<dyn Error>`,
+/// because the only consumer turns it into a diagnostic.
+fn assemble_validated_check_json(
     mut report: chelis_types::FitnessReport,
     effect_errors: &[chelis_effects::EffectError],
     linearity_errors: &[chelis_types::errors::CheckError],
     inferred_signatures: Option<Vec<chelis_compiler_api::schema::WireInferredSignature>>,
-) -> Result<(String, bool), Box<dyn std::error::Error>> {
+) -> Result<(String, bool), String> {
     use chelis_compiler_api::schema::numbers::UnitInterval;
     // Validate the measured report before applying the specified penalties;
     // otherwise max(0) could turn an invalid NaN score into a plausible zero.
-    let mut wire = CheckResult::try_from_fitness(&report).map_err(boxed_string_error)?;
+    let mut wire = CheckResult::try_from_fitness(&report)?;
     if !effect_errors.is_empty() {
         report.score = (report.score - 0.2 * effect_errors.len() as f64).max(0.0);
     }
     if !linearity_errors.is_empty() {
         report.score = (report.score - 0.2 * linearity_errors.len() as f64).max(0.0);
     }
-    wire.score = UnitInterval::new(report.score).map_err(boxed_string_error)?;
+    wire.score = UnitInterval::new(report.score)?;
     wire.errors.extend(effect_errors.iter().map(|error| {
         Diagnostic::from_effect_error(
             error,
@@ -2706,12 +2742,18 @@ fn assemble_check_json(
         linearity_errors
             .iter()
             .map(Diagnostic::try_from_check_error)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(boxed_string_error)?,
+            .collect::<Result<Vec<_>, _>>()?,
     );
     wire.inferred_signatures = inferred_signatures;
     let errors_in_report = !wire.errors.is_empty();
-    Ok((wire.to_report_json()?, errors_in_report))
+    // Same justification as the synthetic producer's: the value is owned
+    // strings and already-validated numbers, so the serializer has no
+    // failure mode left to report.
+    Ok((
+        wire.to_report_json()
+            .expect("a validated report serializes"),
+        errors_in_report,
+    ))
 }
 
 /// `chelis check` ingestion for a standalone Deep (`.dp`) file.
@@ -2732,28 +2774,25 @@ fn assemble_check_json(
 /// caught and routed through `synthetic_check_report_with_error` so a
 /// malformed `.dp` produces the same JSON-report-plus-exit-2 shape the
 /// `.ch` parse-error path produces, never a propagated boxed `Err`.
-fn cmd_check_one_deep(
-    source: &str,
-    show_inferred: bool,
-) -> Result<(String, bool), Box<dyn std::error::Error>> {
+fn cmd_check_one_deep(source: &str, show_inferred: bool) -> (String, bool) {
     let deep_source = style_gate::strip_deep_lint_directive_lines(source);
     let deep_exprs = match chelis_deep::parse_and_stamp_file(&deep_source) {
         Ok(deep_exprs) => deep_exprs,
         Err(err) => {
-            let json = synthetic_check_report_with_error(&err.to_string())?;
-            return Ok((json, true));
+            let json = synthetic_check_report_with_error(&err.to_string());
+            return (json, true);
         }
     };
     // Parity with the `.ch` empty-file path (a parse-clean file with
     // zero top-level exprs): reject with the same canonical message so
     // the `.dp` and `.ch` surfaces agree.
     if deep_exprs.is_empty() {
-        let json = synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE)?;
-        return Ok((json, true));
+        let json = synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE);
+        return (json, true);
     }
     let prepared = chelis_compiler_api::pipeline::prepare_deep(deep_exprs, None);
     let (report, effect_errors, linearity_errors, inferred) =
-        check_prepared_for_cli(prepared, show_inferred)?;
+        check_prepared_for_cli(prepared, show_inferred);
     assemble_check_json(report, &effect_errors, &linearity_errors, inferred)
 }
 
@@ -2818,6 +2857,144 @@ fn emit_advisory_lint_warnings_for_file(file: &Path) {
 }
 
 #[cfg(test)]
+mod check_path_totality_tests {
+    //! chelis#886 [04-FIT-12]: the per-file check path cannot fail.
+    //!
+    //! These are type tests first and value tests second. Each one binds a
+    //! return value at its concrete type, so if any of these functions
+    //! regains a `Result` the module stops COMPILING -- which is the whole
+    //! point. A `?` cannot be reintroduced on this path without first
+    //! widening a signature, and widening a signature breaks this file.
+    //!
+    //! That is deliberately stronger than the guard this replaced. An
+    //! earlier attempt was a source scan for `?`, and a red-team pass got a
+    //! second producer past its sibling scan twice -- once with a raw string
+    //! literal, once with `concat!`. A grep can always be spelled around; a
+    //! type cannot.
+
+    use super::{
+        EMPTY_PROGRAM_MESSAGE, assemble_check_json, check_prepared_for_cli, cmd_check_one,
+        cmd_check_one_deep, cmd_check_one_on_grown_stack, synthetic_check_report_with_error,
+        synthetic_check_report_with_errors,
+    };
+    use std::path::Path;
+
+    /// `assemble_check_json`'s signature, spelled out so the pin stays
+    /// readable.
+    type AssembleCheckJson = fn(
+        chelis_types::FitnessReport,
+        &[chelis_effects::EffectError],
+        &[chelis_types::errors::CheckError],
+        Option<Vec<chelis_compiler_api::schema::WireInferredSignature>>,
+    ) -> (String, bool);
+
+    /// `check_prepared_for_cli`'s signature, with its return tuple spelled
+    /// out HERE rather than through the production alias
+    /// `PreparedCliReport`.
+    ///
+    /// Naming the production alias made the pin dodgeable: a red-team
+    /// mutant redefined `PreparedCliReport` itself as a `Result`, restored
+    /// the original `?` inside the function, and built with every pin
+    /// present, because the pin and the function changed together. A pin
+    /// has to name the shape independently of the code it constrains.
+    type CheckPreparedForCli = fn(
+        chelis_compiler_api::pipeline::PreparedProgram,
+        bool,
+    ) -> (
+        chelis_types::FitnessReport,
+        Vec<chelis_effects::EffectError>,
+        Vec<chelis_types::errors::CheckError>,
+        Option<Vec<chelis_compiler_api::schema::WireInferredSignature>>,
+    );
+
+    /// Every function on the per-file check path, pinned at its signature.
+    ///
+    /// This is the test that actually carries the guarantee. A function
+    /// pointer of an explicit type only accepts a function of exactly that
+    /// type, so if any of these six regains a `Result`, THIS BINDING stops
+    /// compiling -- whether or not anything calls it with `?` yet. Every
+    /// type here is spelled out locally; none is borrowed from production,
+    /// where it could be widened along with the function it describes.
+    ///
+    /// An earlier revision of this module bound only the report producer. A
+    /// red-team mutation re-widened `cmd_check_one`,
+    /// `cmd_check_one_on_grown_stack` and `cmd_check_one_deep` back to
+    /// `Result`, put the original `?` back on the layered arms, and the
+    /// module stayed green: the five functions that had held all 21 `?`
+    /// sites were not pinned at all. The type system enforces nothing about a
+    /// signature that no binding names.
+    #[test]
+    fn every_check_path_signature_is_total() {
+        let _: fn(&Path, bool, bool) -> (String, bool) = cmd_check_one;
+        let _: fn(&Path, bool, bool) -> (String, bool) = cmd_check_one_on_grown_stack;
+        let _: fn(&str, bool) -> (String, bool) = cmd_check_one_deep;
+        let _: CheckPreparedForCli = check_prepared_for_cli;
+        let _: AssembleCheckJson = assemble_check_json;
+        let _: fn(&[String]) -> String = synthetic_check_report_with_errors;
+        let _: fn(&str) -> String = synthetic_check_report_with_error;
+    }
+
+    /// The keystone. If this binding ever needs `?` or `.unwrap()`, the
+    /// report producer has regained a failure mode and every caller can
+    /// propagate again.
+    #[test]
+    fn the_report_producer_is_total() {
+        let json: String = synthetic_check_report_with_errors(&["probe".to_string()]);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("the producer emits JSON");
+        assert_eq!(parsed["errors"].as_array().map(Vec::len), Some(1));
+    }
+
+    /// The singular wrapper is total too, and agrees with the plural form.
+    #[test]
+    fn the_singular_wrapper_is_total_and_agrees() {
+        let one: String = synthetic_check_report_with_error(EMPTY_PROGRAM_MESSAGE);
+        let plural: String =
+            synthetic_check_report_with_errors(&[EMPTY_PROGRAM_MESSAGE.to_string()]);
+        assert_eq!(one, plural, "the wrapper is the plural form at n = 1");
+    }
+
+    /// One diagnostic per message, at several counts. The count is the
+    /// property a joined string would break, and it is what makes
+    /// `errors.len()` mean "how many problems".
+    #[test]
+    fn every_message_becomes_its_own_diagnostic() {
+        for count in [0usize, 1, 2, 17] {
+            let messages: Vec<String> = (0..count).map(|i| format!("issue {i}")).collect();
+            let json = synthetic_check_report_with_errors(&messages);
+            let parsed: serde_json::Value = serde_json::from_str(&json).expect("JSON");
+            assert_eq!(
+                parsed["errors"].as_array().map(Vec::len),
+                Some(count),
+                "{count} messages must be {count} diagnostics; got {json}"
+            );
+        }
+    }
+
+    /// The producer never inspects a message, so no message can make it
+    /// fail. A red-team round confirmed this empirically against emoji, RTL
+    /// overrides, WTF-8 surrogates and a 6000-character name; this pins the
+    /// cheap end of that range so a future `expect` cannot start panicking
+    /// on content.
+    #[test]
+    fn no_message_content_can_break_the_producer() {
+        let messages = vec![
+            String::new(),
+            "\u{202e}rtl override".to_string(),
+            "emoji \u{1f600}".to_string(),
+            "x".repeat(6000),
+            "quote \" backslash \\ brace }".to_string(),
+        ];
+        let json = synthetic_check_report_with_errors(&messages);
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("JSON");
+        assert_eq!(
+            parsed["errors"].as_array().map(Vec::len),
+            Some(messages.len())
+        );
+    }
+}
+
+#[cfg(test)]
 mod advisory_lint_scope_tests {
     use super::advisory_lint_scope;
     use std::path::Path;
@@ -2827,6 +3004,42 @@ mod advisory_lint_scope_tests {
         let file = Path::new("/tmp/oracle_fixture.dp");
         assert_eq!(advisory_lint_scope(file), file);
         assert_ne!(advisory_lint_scope(file), file.parent().unwrap());
+    }
+}
+
+/// The inferred-signature rows, with a failure transported as a diagnostic
+/// on the report instead of propagated (chelis#886 [04-FIT-12]).
+///
+/// The check itself succeeded here; it is the REPORTING of inferred
+/// signatures that failed. Propagating would discard a complete, valid
+/// report over an optional member the caller merely asked to see -- and
+/// would emit nothing at all, which is the shape the atom forbids. The
+/// member is omitted and the reason is carried where a consumer can read it.
+fn inferred_signatures_or_diagnostic(
+    checked: &chelis_types::CheckedProgram,
+    fitness: &mut chelis_types::FitnessReport,
+) -> Option<Vec<chelis_compiler_api::schema::WireInferredSignature>> {
+    match inferred_signatures_value(checked) {
+        Ok(rows) => Some(rows),
+        Err(error) => {
+            let message = format!("inferred signatures unavailable: {error}");
+            // stderr keeps a line, as on every other path this series
+            // transports: the atom asks for the failure to REACH the report,
+            // not for the terminal line to be taken away. When this failure
+            // propagated, `main`'s error arm printed it; now nothing would.
+            eprintln!("error: {message}");
+            fitness.errors.push(chelis_types::errors::CheckError {
+                kind: chelis_types::errors::CheckErrorKind::Other,
+                message,
+                severity: 0.5,
+                expected: None,
+                got: None,
+                span_offset: None,
+                span_id: None,
+                suggestions: Vec::new(),
+            });
+            None
+        }
     }
 }
 
@@ -3460,13 +3673,19 @@ fn cmd_build(
                 && let Some(host_program) = compiled_program.host.as_mut()
             {
                 let selected = std::mem::take(host_program);
+                // The helper manifest is read before C payload selection so a
+                // Count-bearing helper reaches the HIP backend as its source
+                // DAG and is lowered exactly like a HIP tensor entry.
+                let (helpers, selected) =
+                    chelis_backend_c::host_tensor_helper_codegen(selected, func_name)?;
                 let verified = verified_host_codegen_program(
                     checked,
                     &root_manifest,
                     BuildTarget::Hip,
                     selected,
                 )?;
-                let result = chelis_backend_c::codegen_host_program(&verified, func_name)?;
+                let result =
+                    chelis_backend_hip::codegen_hip_host_program(&verified, func_name, helpers)?;
                 cmd_build_hip_host(result, func_name, output, requires_main)
             } else {
                 let mut hip_dag = if let Some(entry_dag) = preferred_entry_dag {
@@ -3533,14 +3752,20 @@ fn cmd_build(
                 .and_then(|name| chelis_ir::host::lower_named_tensor_entry_dag(checked, name));
             let validated_host = if host_requires_host_backend {
                 if let Some(selected) = compiled_program.host.take() {
+                    // The helper manifest is read before C payload selection
+                    // so a Count-bearing helper reaches the Metal backend as
+                    // its source DAG and is lowered exactly like a Metal
+                    // tensor entry.
+                    let (helpers, selected) =
+                        chelis_backend_c::host_tensor_helper_codegen(selected, func_name)?;
                     let verified = verified_host_codegen_program(
                         checked,
                         &root_manifest,
                         BuildTarget::Metal,
                         selected,
                     )?;
-                    Some(chelis_backend_c::codegen_host_program(
-                        &verified, func_name,
+                    Some(chelis_backend_metal::codegen_metal_host_program(
+                        &verified, func_name, helpers,
                     )?)
                 } else {
                     None
@@ -3553,10 +3778,7 @@ fn cmd_build(
                 && host_requires_host_backend
                 && let Some(result) = validated_host
             {
-                // Host-only programs fall through to the C backend, exactly
-                // like the HIP path. The metal path doesn't have a separate
-                // host wrapper today; reuse cmd_build_hip_host for parity.
-                cmd_build_hip_host(result, func_name, output, requires_main)
+                cmd_build_metal_host(result, func_name, output, requires_main)
             } else {
                 let mut metal_dag = if let Some(entry_dag) = preferred_entry_dag {
                     entry_dag
@@ -3799,13 +4021,19 @@ fn cmd_build_deep(
                 && let Some(host_program) = compiled_program.host.as_mut()
             {
                 let selected = std::mem::take(host_program);
+                // The helper manifest is read before C payload selection so a
+                // Count-bearing helper reaches the HIP backend as its source
+                // DAG and is lowered exactly like a HIP tensor entry.
+                let (helpers, selected) =
+                    chelis_backend_c::host_tensor_helper_codegen(selected, func_name)?;
                 let verified = verified_host_codegen_program(
                     checked,
                     &root_manifest,
                     BuildTarget::Hip,
                     selected,
                 )?;
-                let result = chelis_backend_c::codegen_host_program(&verified, func_name)?;
+                let result =
+                    chelis_backend_hip::codegen_hip_host_program(&verified, func_name, helpers)?;
                 cmd_build_hip_host(result, func_name, output, requires_main)
             } else {
                 let mut hip_dag = if let Some(entry_dag) = preferred_entry_dag {
@@ -3867,14 +4095,20 @@ fn cmd_build_deep(
                 .and_then(|name| chelis_ir::host::lower_named_tensor_entry_dag(checked, name));
             let validated_host = if host_requires_host_backend {
                 if let Some(selected) = compiled_program.host.take() {
+                    // The helper manifest is read before C payload selection
+                    // so a Count-bearing helper reaches the Metal backend as
+                    // its source DAG and is lowered exactly like a Metal
+                    // tensor entry.
+                    let (helpers, selected) =
+                        chelis_backend_c::host_tensor_helper_codegen(selected, func_name)?;
                     let verified = verified_host_codegen_program(
                         checked,
                         &root_manifest,
                         BuildTarget::Metal,
                         selected,
                     )?;
-                    Some(chelis_backend_c::codegen_host_program(
-                        &verified, func_name,
+                    Some(chelis_backend_metal::codegen_metal_host_program(
+                        &verified, func_name, helpers,
                     )?)
                 } else {
                     None
@@ -3887,7 +4121,7 @@ fn cmd_build_deep(
                 && host_requires_host_backend
                 && let Some(result) = validated_host
             {
-                cmd_build_hip_host(result, func_name, output, requires_main)
+                cmd_build_metal_host(result, func_name, output, requires_main)
             } else {
                 let mut metal_dag = if let Some(entry_dag) = preferred_entry_dag {
                     entry_dag
@@ -9561,7 +9795,7 @@ fn cmd_build_c_result(
 }
 
 fn cmd_build_hip_host(
-    result: chelis_backend_c::CodegenResult,
+    result: chelis_backend_hip::HipHostProgramCodegenResult,
     func_name: &str,
     output: Option<&std::path::Path>,
     requires_main: bool,
@@ -9582,10 +9816,16 @@ fn cmd_build_hip_host(
         fs::create_dir_all(parent)?;
     }
 
-    fs::write(&c_path, &result.c_source)?;
-    fs::write(&h_path, &result.h_header)?;
+    fs::write(&c_path, &result.host.c_source)?;
+    fs::write(&h_path, &result.host.h_header)?;
 
     let runtime_dir = c_path.parent().unwrap_or(std::path::Path::new("."));
+    let mut helper_paths = Vec::with_capacity(result.device_helpers.len());
+    for helper in &result.device_helpers {
+        let helper_path = runtime_dir.join(format!("{}_hip.cpp", helper.name));
+        fs::write(&helper_path, &helper.result.c_source)?;
+        helper_paths.push(helper_path);
+    }
     copy_runtime_artifacts(
         runtime_dir,
         ExtraRuntimeArtifacts {
@@ -9595,6 +9835,9 @@ fn cmd_build_hip_host(
     )?;
 
     println!("Wrote {} and {}", c_path.display(), h_path.display());
+    for helper_path in &helper_paths {
+        println!("Wrote device helper {}", helper_path.display());
+    }
     println!(
         "Wrote runtime: {}, {}, {}, {}",
         runtime_dir.join("chelis_runtime.h").display(),
@@ -9603,35 +9846,148 @@ fn cmd_build_hip_host(
         runtime_dir.join("chelis_hip_runtime.h").display()
     );
 
-    let cpu_toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.requirements);
-    let mut compile_flags = cpu_toolchain
-        .compile_flags
+    let cpu_toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.host.requirements);
+    let mut compile_flags = cpu_toolchain.compile_flags;
+    compile_flags.retain(|flag| flag != "-fopenmp");
+    let mut link_flags = cpu_toolchain.link_flags;
+    link_flags.retain(|flag| flag != "-fopenmp");
+    for helper in &result.device_helpers {
+        for flag in &helper.result.compile_flags {
+            if !compile_flags.contains(flag) {
+                compile_flags.push(flag.clone());
+            }
+        }
+        for flag in &helper.result.link_flags {
+            if !link_flags.contains(flag) {
+                link_flags.push(flag.clone());
+            }
+        }
+    }
+    let mut support_sources = helper_paths
         .iter()
-        .map(String::as_str)
+        .map(|path| path.display().to_string())
         .collect::<Vec<_>>();
-    compile_flags.retain(|flag| *flag != "-fopenmp");
-    let mut link_flags = cpu_toolchain
-        .link_flags
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    link_flags.retain(|flag| *flag != "-fopenmp");
+    support_sources.push(
+        runtime_dir
+            .join("chelis_device_owner.cpp")
+            .display()
+            .to_string(),
+    );
+    let support_sources = support_sources.join(" ");
     if requires_main {
         println!(
             "Compile: hipcc {} {} {} -L{} -lchelis_runtime -lpthread -ldl {} -o {}",
             compile_flags.join(" "),
             c_path.display(),
-            runtime_dir.join("chelis_device_owner.cpp").display(),
+            support_sources,
             runtime_dir.display(),
             link_flags.join(" "),
             c_path.with_extension("").display()
         );
     } else {
         println!(
-            "Compile object: hipcc {} -c {} {}",
+            "Compile objects: hipcc {} -c {} {}",
             compile_flags.join(" "),
             c_path.display(),
-            runtime_dir.join("chelis_device_owner.cpp").display()
+            support_sources
+        );
+    }
+    Ok(())
+}
+
+fn cmd_build_metal_host(
+    result: chelis_backend_metal::MetalHostProgramCodegenResult,
+    func_name: &str,
+    output: Option<&std::path::Path>,
+    requires_main: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let out_dir = output
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let mm_path = if matches!(
+        out_dir.extension().and_then(|e| e.to_str()),
+        Some("mm") | Some("cpp") | Some("cxx") | Some("cc")
+    ) {
+        out_dir.clone()
+    } else {
+        out_dir.join(format!("{func_name}_metal.mm"))
+    };
+    let h_path = mm_path.with_extension("h");
+    if let Some(parent) = mm_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&mm_path, &result.host.c_source)?;
+    fs::write(&h_path, &result.host.h_header)?;
+
+    let runtime_dir = mm_path.parent().unwrap_or(std::path::Path::new("."));
+    let mut helper_paths = Vec::with_capacity(result.device_helpers.len());
+    for helper in &result.device_helpers {
+        let helper_path = runtime_dir.join(format!("{}_metal.mm", helper.name));
+        fs::write(&helper_path, &helper.result.mm_source)?;
+        helper_paths.push(helper_path);
+    }
+    copy_runtime_artifacts(
+        runtime_dir,
+        ExtraRuntimeArtifacts {
+            hip: false,
+            metal: true,
+        },
+    )?;
+
+    println!("Wrote {} and {}", mm_path.display(), h_path.display());
+    for helper_path in &helper_paths {
+        println!("Wrote device helper {}", helper_path.display());
+    }
+    println!(
+        "Wrote runtime: {}, {}, {}",
+        runtime_dir.join("chelis_runtime.h").display(),
+        runtime_dir.join("libchelis_runtime.a").display(),
+        runtime_dir.join("chelis_metal_runtime.h").display()
+    );
+
+    let cpu_toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.host.requirements);
+    let mut compile_flags = cpu_toolchain.compile_flags;
+    compile_flags.retain(|flag| flag != "-fopenmp");
+    let mut link_flags = cpu_toolchain.link_flags;
+    link_flags.retain(|flag| flag != "-fopenmp");
+    for helper in &result.device_helpers {
+        for flag in &helper.result.compile_flags {
+            if !compile_flags.contains(flag) {
+                compile_flags.push(flag.clone());
+            }
+        }
+        // `-framework NAME` pairs must keep their order; append each
+        // helper's pair list once rather than deduplicating single tokens.
+        if helper
+            .result
+            .link_flags
+            .iter()
+            .any(|flag| !link_flags.contains(flag))
+        {
+            link_flags.extend(helper.result.link_flags.iter().cloned());
+        }
+    }
+    let helper_sources = helper_paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if requires_main {
+        println!(
+            "Compile: clang++ {} -O2 {} {} -L{} -lchelis_runtime {} -o {}",
+            compile_flags.join(" "),
+            mm_path.display(),
+            helper_sources,
+            runtime_dir.display(),
+            link_flags.join(" "),
+            mm_path.with_extension("").display()
+        );
+    } else {
+        println!(
+            "Compile objects: clang++ {} -O2 -c {} {}",
+            compile_flags.join(" "),
+            mm_path.display(),
+            helper_sources
         );
     }
     Ok(())

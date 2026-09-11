@@ -129,6 +129,26 @@ impl TestInput {
         }
     }
 
+    /// chelis#1291: exact `Bool8` input. The carrier `data` holds 0.0/1.0
+    /// for the evaluator; the driver writes one `uint8_t` per element
+    /// into a `CHELIS_DTYPE_BOOL` allocation, which is what the Count
+    /// kernel reads.
+    #[allow(
+        dead_code,
+        reason = "chelis#1291 manual HIP gate; constructed by Count tests"
+    )]
+    fn bool8(name: &str, shape: &[usize], data: &[bool]) -> Self {
+        Self {
+            name: name.to_string(),
+            shape: shape.to_vec(),
+            data: data
+                .iter()
+                .map(|value| f32::from(u8::from(*value)))
+                .collect(),
+            dtype: Prim::Bool,
+        }
+    }
+
     fn evaluator_value(&self) -> TensorValue {
         TensorValue::from_vec(
             self.shape.clone(),
@@ -332,6 +352,7 @@ fn append_case_lines(
                     Prim::Int16 => "CHELIS_DTYPE_I16",
                     Prim::Int32 => "CHELIS_DTYPE_I32",
                     Prim::Int64 => "CHELIS_DTYPE_I64",
+                    Prim::Bool => "CHELIS_DTYPE_BOOL",
                     other => panic!("unsupported manual HIP test dtype {}", other.name()),
                 }
             ));
@@ -368,6 +389,11 @@ fn append_case_lines(
                     Prim::Int64 => lines.push(format!(
                         "    ((int64_t*){prefix}_input_view_{slot}.data)[{idx}] = {}LL;",
                         *value as i64
+                    )),
+                    // chelis#1308's `Repr::Bool8`: exactly one byte holding 0 or 1.
+                    Prim::Bool => lines.push(format!(
+                        "    ((uint8_t*){prefix}_input_view_{slot}.data)[{idx}] = {};",
+                        u8::from(*value != 0.0)
                     )),
                     other => panic!("unsupported manual HIP test dtype {}", other.name()),
                 }
@@ -4213,5 +4239,239 @@ fn g16_pad_then_shrink_roundtrip_matches_eval() {
         &dag,
         "g16_pad_shrink_roundtrip",
         &[TestInput::new("x", &[4], &[3.5, -1.0, 2.25, 8.0])],
+    );
+}
+
+// ===========================================================================
+// chelis#1291: dedicated [05-OP-29] Count kernel, GPU == evaluator exactly.
+//
+// The C lane's agreement with the evaluator is #1287's core receipt
+// (`scripts/dtype_count_oracle.py`), so exact agreement with the evaluator
+// here is exact agreement with compiled C as well. Every test is part of the
+// manual hardware gate:
+//
+//     scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness count_ -- --ignored --test-threads=1
+// ===========================================================================
+
+fn count_dag(input: TensorType, axes: Vec<usize>, output: TensorType) -> Dag {
+    let mut dag = Dag::new();
+    let mask = dag.add_node(
+        RiscOp::Load {
+            name: "mask".into(),
+        },
+        vec![],
+        input,
+        None,
+    );
+    let count = dag.add_node(RiscOp::Count { axes }, vec![mask], output, None);
+    dag.add_root(count);
+    dag
+}
+
+fn bool_tensor(dims: &[usize]) -> TensorType {
+    TensorType {
+        dims: dims.iter().copied().map(DimInfo::Lit).collect(),
+        precision: Prim::Bool,
+    }
+}
+
+fn i64_tensor(dims: &[usize]) -> TensorType {
+    TensorType {
+        dims: dims.iter().copied().map(DimInfo::Lit).collect(),
+        precision: Prim::Int64,
+    }
+}
+
+/// Deterministic mask: element `i` is true when `(i * 7 + 3) % 5 < 2`.
+fn count_mask(len: usize) -> Vec<bool> {
+    (0..len).map(|i| (i * 7 + 3) % 5 < 2).collect()
+}
+
+fn assert_count_gpu_matches_eval_exactly(dag: &Dag, func_name: &str, mask: TestInput) {
+    let actual = compile_and_run_single_output_typed_i64(
+        dag,
+        func_name,
+        std::slice::from_ref(&mask),
+        "int64_t",
+        "%lld",
+    );
+    let expected = expected_single_output(dag, std::slice::from_ref(&mask))
+        .into_iter()
+        .map(|value| value as i64)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual, expected,
+        "{func_name}: GPU Count must equal the evaluator exactly"
+    );
+}
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn count_positional_multi_axis_gpu_matches_eval() {
+    let dag = count_dag(bool_tensor(&[2, 3, 5]), vec![2, 0], i64_tensor(&[3]));
+    let mask = count_mask(30);
+    assert_count_gpu_matches_eval_exactly(
+        &dag,
+        "count_positional_multi_axis",
+        TestInput::bool8("mask", &[2, 3, 5], &mask),
+    );
+}
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn count_named_fixed_axes_gpu_matches_eval() {
+    let dag = count_dag(
+        TensorType {
+            dims: vec![
+                DimInfo::Named("batch".into(), Some(2)),
+                DimInfo::Named("seq".into(), Some(4)),
+                DimInfo::Named("feature".into(), Some(3)),
+            ],
+            precision: Prim::Bool,
+        },
+        vec![1],
+        TensorType {
+            dims: vec![
+                DimInfo::Named("batch".into(), Some(2)),
+                DimInfo::Named("feature".into(), Some(3)),
+            ],
+            precision: Prim::Int64,
+        },
+    );
+    let mask = count_mask(24);
+    assert_count_gpu_matches_eval_exactly(
+        &dag,
+        "count_named_fixed_axes",
+        TestInput::bool8("mask", &[2, 4, 3], &mask),
+    );
+}
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn count_empty_selected_extent_gpu_is_zero() {
+    let dag = count_dag(bool_tensor(&[2, 0, 5]), vec![1], i64_tensor(&[2, 5]));
+    let actual = compile_and_run_single_output_typed_i64(
+        &dag,
+        "count_empty_selected_extent",
+        &[TestInput::bool8("mask", &[2, 0, 5], &[])],
+        "int64_t",
+        "%lld",
+    );
+    assert_eq!(actual, vec![0; 10]);
+}
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn count_odd_leaf_count_gpu_matches_eval() {
+    let dag = count_dag(bool_tensor(&[3, 7]), vec![1], i64_tensor(&[3]));
+    let mask = count_mask(21);
+    assert_count_gpu_matches_eval_exactly(
+        &dag,
+        "count_odd_leaf_count",
+        TestInput::bool8("mask", &[3, 7], &mask),
+    );
+}
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn count_large_leaf_count_gpu_matches_eval() {
+    // 4097 leaves per output element: an odd count deeper than any
+    // power-of-two split, so the explicit balanced-tree stack is exercised
+    // well past its first frames.
+    let dag = count_dag(bool_tensor(&[2, 4097]), vec![1], i64_tensor(&[2]));
+    let mask = count_mask(2 * 4097);
+    assert_count_gpu_matches_eval_exactly(
+        &dag,
+        "count_large_leaf_count",
+        TestInput::bool8("mask", &[2, 4097], &mask),
+    );
+}
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn count_input_with_a_non_bool_payload_traps_at_the_runtime_write_boundary() {
+    // A `Bool8` byte outside {0, 1} is not a member of the dtype. The
+    // runtime's `chelis_tensor_end_write` rejects it with a loud domain
+    // trap before the entry is ever called, which is why the kernel's own
+    // status-code-1 check is a backstop rather than the primary guard: no
+    // runtime-produced tensor can reach the kernel with such a byte.
+    require_hipcc();
+    let dag = count_dag(bool_tensor(&[4]), vec![0], i64_tensor(&[]));
+    let func_name = "count_non_bool_payload";
+    let result = codegen_hip(&dag, func_name).unwrap();
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let hip_rt = hip_runtime_src_dir();
+    write_temp_file(
+        tmp.path(),
+        "chelis_hip_runtime.h",
+        &fs::read_to_string(hip_rt.join("chelis_hip_runtime.h")).expect("hip runtime header"),
+    );
+    copy_runtime_artifacts(tmp.path());
+    write_temp_file(tmp.path(), "model.cpp", &result.c_source);
+    write_temp_file(
+        tmp.path(),
+        "main.cpp",
+        &format!(
+            r#"#include "chelis_runtime.h"
+#include <stdint.h>
+extern "C" void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
+
+int main(void) {{
+    int64_t shape[1] = {{ 4 }};
+    chelis_tensor *input_storage[1] = {{ chelis_alloc(1, shape, CHELIS_DTYPE_BOOL) }};
+    chelis_tensor_write *guard = chelis_tensor_begin_write(input_storage[0]);
+    chelis_write_view view = chelis_tensor_write_view(guard);
+    ((uint8_t*)view.data)[0] = 1;
+    ((uint8_t*)view.data)[1] = 0;
+    ((uint8_t*)view.data)[2] = 2;
+    ((uint8_t*)view.data)[3] = 1;
+    chelis_tensor_end_write(guard);
+    chelis_tensor *outputs[1] = {{0}};
+    {func_name}(input_storage, 1, outputs, 1);
+    printf("count returned\n");
+    return 0;
+}}
+"#
+        ),
+    );
+
+    let bin_path = tmp.path().join("count_non_bool_payload_bin");
+    let mut compile_cmd = Command::new("hipcc");
+    compile_cmd.arg("-O2");
+    compile_cmd.args(&result.compile_flags);
+    compile_cmd.arg(tmp.path().join("main.cpp"));
+    compile_cmd.arg(tmp.path().join("model.cpp"));
+    compile_cmd.arg(format!("-L{}", tmp.path().display()));
+    compile_cmd.arg("-lchelis_runtime");
+    compile_cmd.arg("-lpthread");
+    compile_cmd.arg("-ldl");
+    compile_cmd.args(&result.link_flags);
+    compile_cmd.arg("-o");
+    compile_cmd.arg(&bin_path);
+    let compile = compile_cmd.output().expect("run hipcc");
+    assert!(
+        compile.status.success(),
+        "hipcc failed:
+stderr: {}
+source:
+{}",
+        String::from_utf8_lossy(&compile.stderr),
+        result.c_source
+    );
+
+    let run = Command::new(&bin_path).output().expect("run gpu binary");
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        !run.status.success(),
+        "a non-bool payload must abort, but the binary exited cleanly:
+stdout: {stdout}
+stderr: {stderr}"
+    );
+    assert!(!stdout.contains("count returned"), "{stdout}");
+    assert!(
+        stderr.contains("Domain") && stderr.contains("noncanonical byte 2"),
+        "expected the runtime Bool8 domain trap in stderr:\n{stderr}"
     );
 }

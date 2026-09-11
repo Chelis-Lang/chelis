@@ -47,6 +47,19 @@ pub struct CodegenResult {
     pub symbolic_dims: Vec<String>,
 }
 
+/// A tensor-helper DAG and the symbol a peer translation unit must define.
+/// The generated host calls it through a private context adapter.
+///
+/// The manifest is read off the concrete host program before payload
+/// selection and ownership lowering, so a device backend can lower a selected
+/// helper through its own preparation pipeline while the C wrapper declares
+/// that helper as an external symbol instead of embedding a C body.
+#[derive(Debug, Clone)]
+pub struct HostTensorHelperCodegen {
+    pub name: String,
+    pub dag: chelis_ir::dag::Dag,
+}
+
 /// Which vectorized math library is available for SIMD emission (Level 3b).
 ///
 /// Detected at build time via `build.rs`; stored on [`CEmitter`] and threaded through
@@ -131,11 +144,47 @@ pub fn codegen_host_program(
     program: &chelis_ir::ownership::VerifiedHostProgram,
     func_name: &str,
 ) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
+    codegen_host_program_with_external_tensor_helpers(program, func_name, &[])
+}
+
+/// Compile a sealed, verified host payload while leaving the named tensor
+/// helpers to peer translation units.
+///
+/// Every name in `external_helpers` must be an exact member of the wrapper's
+/// helper manifest ([`host_tensor_helper_codegen`]); the wrapper then emits an
+/// `extern` prototype for it instead of a `static` C body. An unknown name is
+/// a typed rejection rather than a silent missing-definition link error.
+pub fn codegen_host_program_with_external_tensor_helpers(
+    program: &chelis_ir::ownership::VerifiedHostProgram,
+    func_name: &str,
+    external_helpers: &[String],
+) -> Result<CodegenResult, chelis_types::unsupported::Unsupported> {
     // Resolve the backend capability boundary once.  All emission below is
     // over the private, fully-resolved ABI vocabulary; neither source nor
     // header generation can re-interpret logical types independently.
     let abi_program = host_abi::project_program(program.emission())?;
-    let c_source = host_emit::emit_host_abi_program(&abi_program, func_name)?;
+    let known_helpers = host_emit::tensor_helper_names(abi_program.program(), func_name)?;
+    if let Some(unknown) = external_helpers
+        .iter()
+        .find(|name| !known_helpers.iter().any(|known| known == *name))
+    {
+        return Err(chelis_types::unsupported::Unsupported::new(
+            chelis_types::unsupported::UnsupportedKind::Construct(format!(
+                "unknown external host tensor helper `{unknown}`"
+            )),
+            "C host tensor-helper composition",
+            chelis_types::unsupported::Stage::Codegen("c"),
+            chelis_types::deliberate_rejection!(
+                "[04-TOT-2]",
+                "an external helper selection must name an exact manifest member; no missing-definition fallback is permitted"
+            ),
+        ));
+    }
+    let external_helpers = external_helpers
+        .iter()
+        .cloned()
+        .collect::<chelis_unord::UnordSet<_>>();
+    let c_source = host_emit::emit_host_abi_program(&abi_program, func_name, &external_helpers)?;
     let h_header = host_emit::emit_host_abi_header(&abi_program, func_name)?;
     let needs_blas = c_source.contains("#include \"chelis_blas.h\"")
         || c_source.contains("cblas_sgemm(")
@@ -152,6 +201,32 @@ pub fn codegen_host_program(
         output_labels: Vec::new(),
         symbolic_dims: Vec::new(),
     })
+}
+
+/// Return the exact helper symbols and source DAGs a host-program wrapper
+/// will call, in wrapper emission order, handing the program back unchanged.
+///
+/// This is a by-value pre-verification step like
+/// [`prepare_host_program_for_codegen`], never a borrowed emission edge: it
+/// reads the concrete program before C payload selection and ownership
+/// lowering, so a device backend that externalizes a helper lowers the
+/// returned source DAG through its own preparation pipeline, exactly as it
+/// would a tensor entry, rather than reusing the C lane's selected payload.
+pub fn host_tensor_helper_codegen(
+    program: chelis_ir::host::ConcreteHostProgram,
+    func_name: &str,
+) -> Result<
+    (
+        Vec<HostTensorHelperCodegen>,
+        chelis_ir::host::ConcreteHostProgram,
+    ),
+    chelis_types::unsupported::Unsupported,
+> {
+    let helpers = host_emit::concrete_tensor_helper_codegen(&program, func_name)?
+        .into_iter()
+        .map(|(name, dag)| HostTensorHelperCodegen { name, dag })
+        .collect();
+    Ok((helpers, program))
 }
 
 /// Generate C source code from a RISC DAG with explicit backend options.
@@ -689,9 +764,9 @@ mod tests {
         let src = &result.c_source;
 
         // The tensor helper must be static (internal to the TU).
-        // `emit_host_program` names the helper as `{emitted_fn_name}__tensor_{index}`.
+        // The context-carrying helper is private to this translation unit.
         assert!(
-            src.contains("static void my_fn__tensor_0("),
+            src.contains("static void my_fn__tensor_0__with_rng("),
             "tensor helper must carry static linkage to avoid PLT export;\ngenerated source:\n{}",
             src
         );
@@ -3729,7 +3804,7 @@ int main(void) {{
 
         // Tensor helper must be `static void` (never static inline — it uses the DAG kernel sig)
         assert!(
-            src.contains("static void my_func__tensor_0("),
+            src.contains("static void my_func__tensor_0__with_rng("),
             "tensor helper must be `static void` even in globals mode;\ngenerated source:\n{src}"
         );
         // The published header declares this authored function external, so

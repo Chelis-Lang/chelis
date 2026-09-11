@@ -1365,6 +1365,34 @@ unregistered-source, unregistered-subdirectory, direct-data-access and
 normalized-key-arithmetic mutations continue to reject new debt; the rename
 adds no exception or detector admission rule.
 
+The fixed-control dropout plan additionally registers `chelis-ir/src/evaluation.rs`
+in the Phase 0 source universe. Numeric dropout preparation and sampling belong
+to the existing typed semantics owner, while the plan carries only source order,
+raw keys and replay provenance. The shared legacy evaluator retains its actual
+`eval_tensor_internal` arithmetic owner; planned UniformLike keys use that same
+legacy seed fold. Combining the staged and dropout sources gives 75 registered
+sources. This source-list-only freeze move retains the checked-extent baseline's
+358 foundation rows, 290 active-debt rows (including its exact owner renames),
+classifier rules and mutation implementations. The existing
+`unregistered-inventory-source` mutation covers the additional source; no
+numbered representation semantics change.
+
+The typed static-rate profile registers `chelis-ir/src/lower/static_controls.rs`
+in the Phase 0 source universe (70 Rust sources and seven headers). It consumes
+checked dtype facts and existing typed scalar carriers without inspecting
+tensor payloads or adding a representation seam. This source-list-only freeze
+move changes the source count and integrity digest; all 358 foundation rows,
+290 active-debt rows, classifier rules and mutation implementations remain
+unchanged. The existing `unregistered-inventory-source` and subdirectory
+closure witnesses cover the added source. No numbered representation semantics
+change.
+
+The staged fixed-control evaluator composes those existing owners without a
+new numeric carrier. Its opaque companion retains exact partition mappings
+and one invocation's Random keys/counters; host sources and checked numeric
+segments execute in their original order. The companion is not serialized,
+and does not change the public legacy stage, kernel, or wire structures.
+
 ## B2. Invariants at every phase boundary
 
 1. The public C ABI remains [05-OP-31]/[05-OP-44]-exact and

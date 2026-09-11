@@ -5,6 +5,137 @@
 
 use super::*;
 
+/// The declared extent at one axis of an application's result, read from the
+/// two ingresses a declaration can reach a builtin call through.
+///
+/// The `def`/`sig` route hands the declared return type down as
+/// `expected_result`. A block-scoped ascription (`y: tensor[9, f32] = ...`)
+/// does not: `infer_let` infers the right-hand side with no expectation and
+/// unifies afterwards, so the ascription arrives as `"type"` metadata on this
+/// very application node (`crates/chelis-surf/src/desugar.rs`'s
+/// `inject_type_metadata`). Resolving it here costs one speculative
+/// `resolve_deep_type`, whose diagnostics are rolled back because `infer_let`
+/// owns reporting for that same annotation and would otherwise report twice.
+/// Going through the resolver rather than reading the metadata shape directly
+/// is what makes a declared type alias (`type Row = tensor[9, f32]`) carry the
+/// same verdict as its expansion.
+#[allow(clippy::too_many_arguments)]
+fn declared_result_literal(
+    result_axis: usize,
+    result_rank: usize,
+    expected_result: Option<&Type>,
+    list: &deep::List,
+    env: &Env,
+    vg: &mut VarGen,
+    adt_reg: &AdtRegistry,
+    subst: &Subst,
+    errors: &mut DiagnosticSink<'_>,
+) -> Option<i64> {
+    // The rank-equality precondition matters as much as the literal does. A
+    // declaration whose RANK disagrees is already a signature mismatch, and the
+    // checker reports it with the two full tensor types. Reading an axis out of
+    // it anyway turns `tensor[n, 4, 5] -> tensor[7]` into "the result extent is
+    // at most 4", which names a repair that would not fix the program, and the
+    // `Type::Error` this path returns then suppresses the accurate diagnostic
+    // (round 1 P2). Rank belongs to unification; the bound stands down.
+    let literal_at = |ty: &Type| -> Option<i64> {
+        let Type::Tensor(dims, _) = ty else {
+            return None;
+        };
+        if dims.len() != result_rank {
+            return None;
+        }
+        match dims.get(result_axis)? {
+            Dim::Lit(value) => Some(*value),
+            Dim::Name(_) | Dim::Var(_) | Dim::Wildcard | Dim::Rank(_) => None,
+        }
+    };
+
+    if let Some(found) = expected_result
+        .map(|expected| subst.apply(expected))
+        .as_ref()
+        .and_then(&literal_at)
+    {
+        return Some(found);
+    }
+
+    let owner = deep::Expr::List(list.clone(), zero_span());
+    let (_, meta, _) = stamped_parts(&owner)?;
+    let declared = meta.ty().map(|value| value.expression())?;
+    let checkpoint = errors.checkpoint();
+    let resolved = resolve_deep_type(
+        declared,
+        vg,
+        adt_reg,
+        TypeUseSite::Annotation,
+        annotation_binder_mode(env),
+        errors,
+    );
+    errors.retain_since(checkpoint, |_| false);
+    literal_at(&resolved.ok()?)
+}
+
+/// chelis#1739. `[05-OP-33]` replaces the retained axis extent with the smaller
+/// selected extent, so a literal selected axis bounds the result from above for
+/// every runtime value of the other axis. A declared extent strictly greater
+/// than that bound is unreachable and is a `DimensionMismatch`; at or below it
+/// is satisfiable and the runtime guard owns the verdict.
+///
+/// Returns the error type when it rejects, so the caller propagates it instead
+/// of the inferred result. `Type::Error` unifies with anything, which is what
+/// keeps the enclosing signature or ascription from reporting a second time.
+#[allow(clippy::too_many_arguments)]
+fn reject_unreachable_diagonal_extent(
+    operand: &Type,
+    inferred: &Type,
+    axis1: usize,
+    axis2: usize,
+    list: &deep::List,
+    env: &Env,
+    vg: &mut VarGen,
+    adt_reg: &AdtRegistry,
+    subst: &Subst,
+    errors: &mut DiagnosticSink<'_>,
+    expected_result: Option<&Type>,
+) -> Option<Type> {
+    let (result_axis, source_axis, bound) = diagonal_result_bound(operand, axis1, axis2)?;
+    let Type::Tensor(inferred_dims, _) = inferred else {
+        return None;
+    };
+    let declared = declared_result_literal(
+        result_axis,
+        inferred_dims.len(),
+        expected_result,
+        list,
+        env,
+        vg,
+        adt_reg,
+        subst,
+        errors,
+    )?;
+    if declared <= bound {
+        return None;
+    }
+    Some(report(
+        errors,
+        CheckError::new(
+            CheckErrorKind::DimensionMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!(
+                    "diagonal declares the smaller selected extent ([05-OP-33]): \
+                     axis {source_axis} is literal {bound}, so the result extent is \
+                     at most {bound}, but the declared result extent is {declared}"
+                ),
+            ),
+            vec![format!(
+                "Declare an extent at or below {bound}, or select an axis pair \
+                 whose literal extent is at least {declared}"
+            )],
+        ),
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn finish_unified_app(
     list: &deep::List,
@@ -15,6 +146,7 @@ pub(super) fn finish_unified_app(
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
+    adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
     expected_result: Option<&Type>,
@@ -367,6 +499,7 @@ pub(super) fn finish_unified_app(
     }
 
     if let Some(ref fname) = func_name {
+        let site = UnresolvedOperandSite::new(list, kids, fname.as_str(), env);
         match fname.as_str() {
             "print" => {
                 return Type::Unit;
@@ -374,8 +507,16 @@ pub(super) fn finish_unified_app(
             "fail" => {
                 if let Some(first_arg) = arg_tys.first() {
                     match subst.apply(first_arg) {
-                        Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {
+                        Type::Prim(Prim::String) | Type::Error(_) => {
                             return Type::Var(vg.fresh_tvar());
+                        }
+                        Type::Var(_) => {
+                            return site.defer(
+                                &arg_tys,
+                                &result_ty,
+                                product,
+                                Type::Var(vg.fresh_tvar()),
+                            );
                         }
                         other => {
                             return report(
@@ -398,189 +539,33 @@ pub(super) fn finish_unified_app(
                     return subst.apply(first_arg);
                 }
             }
-            "string_len" => {
-                if let Some(first_arg) = arg_tys.first() {
-                    match subst.apply(first_arg) {
-                        Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {
-                            return Type::Prim(Prim::Int64);
-                        }
-                        other => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("string_len expects string input, got {other}"),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                    }
-                }
-            }
-            "string_concat" => {
-                for arg_ty in &arg_tys {
-                    match subst.apply(arg_ty) {
-                        Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {}
-                        other => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "string_concat expects string arguments, got {other}"
-                                        ),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                    }
-                }
-                return Type::Prim(Prim::String);
-            }
-            "string_slice" => {
-                if let Some(first_arg) = arg_tys.first() {
-                    match subst.apply(first_arg) {
-                        Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {}
-                        other => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("string_slice expects string input, got {other}"),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                    }
-                }
-                for (index, arg_ty) in arg_tys.iter().enumerate().skip(1) {
-                    match subst.apply(arg_ty) {
-                        Type::Prim(precision) if precision.is_integer() => {}
-                        Type::Var(_) | Type::Error(_) => {}
-                        other => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!(
-                                            "string_slice expects integer index arguments; arg {} was {other}",
-                                            index + 1
-                                        ),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                    }
-                }
-                return Type::Prim(Prim::String);
-            }
-            "string_contains" | "string_starts_with" | "string_ends_with" => {
-                for arg_ty in &arg_tys {
-                    match subst.apply(arg_ty) {
-                        Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {}
-                        other => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("{} expects string arguments, got {other}", fname),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                    }
-                }
-                return Type::Prim(Prim::Bool);
-            }
-            "string_trim" => {
-                if let Some(first_arg) = arg_tys.first() {
-                    match subst.apply(first_arg) {
-                        Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {
-                            return Type::Prim(Prim::String);
-                        }
-                        other => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("string_trim expects string input, got {other}"),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                    }
+            name if string_route_owns(name) => {
+                // chelis#1512: the string-operand group lives in `app_string.rs`.
+                // `None` means it decided nothing, which for a name it owns
+                // happens only on an empty argument list, so the generic path
+                // below runs exactly as it did before the move.
+                if let Some(result) = string_route_result(
+                    name, list, &arg_tys, &result_ty, &site, product, subst, errors,
+                ) {
+                    return result;
                 }
             }
             "to_string" => {
                 return Type::Prim(Prim::String);
             }
-            "to_int" => {
-                if let Some(first_arg) = arg_tys.first() {
-                    match subst.apply(first_arg) {
-                        Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {
-                            return Type::Adt("Option".to_string(), vec![Type::Prim(Prim::Int64)]);
-                        }
-                        other => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("to_int expects string input, got {other}"),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                    }
-                }
-            }
-            "to_float" => {
-                if let Some(first_arg) = arg_tys.first() {
-                    match subst.apply(first_arg) {
-                        Type::Prim(Prim::String) | Type::Var(_) | Type::Error(_) => {
-                            return Type::Adt("Option".to_string(), vec![Type::Prim(Prim::F64)]);
-                        }
-                        other => {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        format!("to_float expects string input, got {other}"),
-                                    ),
-                                    vec![],
-                                ),
-                            );
-                        }
-                    }
-                }
-            }
             "rank" => {
                 if let Some(first_arg) = arg_tys.first() {
                     match type_for_readonly_check(first_arg, subst) {
-                        Type::Tensor(_, _) | Type::Var(_) | Type::Error(_) => {
+                        Type::Tensor(_, _) | Type::Error(_) => {
                             return Type::Prim(Prim::Int32);
+                        }
+                        Type::Var(_) => {
+                            return site.defer(
+                                &arg_tys,
+                                &result_ty,
+                                product,
+                                Type::Prim(Prim::Int32),
+                            );
                         }
                         other => {
                             return report(
@@ -606,7 +591,10 @@ pub(super) fn finish_unified_app(
                     // validation.
                     match type_for_readonly_check(first_arg, subst) {
                         Type::Tensor(dims, _) => Some(dims),
-                        Type::Var(_) | Type::Error(_) => None,
+                        Type::Error(_) => None,
+                        Type::Var(_) => {
+                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                        }
                         other => {
                             return report(
                                 errors,
@@ -668,8 +656,16 @@ pub(super) fn finish_unified_app(
                     match subst.apply(axis_arg) {
                         // [05-DIM-2]: extent-domain out (int64), axis-domain
                         // in (int32).
-                        Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_) => {
+                        Type::Prim(Prim::Int32) | Type::Error(_) => {
                             return Type::Prim(Prim::Int64);
+                        }
+                        Type::Var(_) => {
+                            return site.defer(
+                                &arg_tys,
+                                &result_ty,
+                                product,
+                                Type::Prim(Prim::Int64),
+                            );
                         }
                         other => {
                             return report(
@@ -690,8 +686,16 @@ pub(super) fn finish_unified_app(
             "numel" => {
                 if let Some(first_arg) = arg_tys.first() {
                     match type_for_readonly_check(first_arg, subst) {
-                        Type::Tensor(_, _) | Type::Var(_) | Type::Error(_) => {
+                        Type::Tensor(_, _) | Type::Error(_) => {
                             return Type::Prim(Prim::Int64);
+                        }
+                        Type::Var(_) => {
+                            return site.defer(
+                                &arg_tys,
+                                &result_ty,
+                                product,
+                                Type::Prim(Prim::Int64),
+                            );
                         }
                         other => {
                             return report(
@@ -733,7 +737,10 @@ pub(super) fn finish_unified_app(
                                 TensorPrec::Var(p) => Type::Var(p),
                             };
                         }
-                        Type::Var(_) | Type::Error(_) => return result_ty,
+                        Type::Error(_) => return result_ty,
+                        Type::Var(_) => {
+                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                        }
                         other => {
                             return report(
                                 errors,
@@ -761,7 +768,10 @@ pub(super) fn finish_unified_app(
                         Type::Var(p) if subst.tvar_restriction(p).is_some() => {
                             return Type::Tensor(vec![], TensorPrec::Var(p));
                         }
-                        Type::Var(_) | Type::Error(_) => return result_ty,
+                        Type::Error(_) => return result_ty,
+                        Type::Var(_) => {
+                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                        }
                         other => {
                             return report(
                                 errors,
@@ -880,12 +890,15 @@ pub(super) fn finish_unified_app(
                         }
                         return Type::Tensor(then_dims.clone(), then_prec.clone());
                     }
-                    (Type::Var(_), _, _)
-                    | (_, Type::Var(_), _)
-                    | (_, _, Type::Var(_))
-                    | (Type::Error(_), _, _)
-                    | (_, Type::Error(_), _)
-                    | (_, _, Type::Error(_)) => return result_ty,
+                    // chelis#1512: an upstream failure keeps the early
+                    // return, so the cascade still suppresses. Order matters:
+                    // a triple carrying both must suppress, not suspend.
+                    (Type::Error(_), _, _) | (_, Type::Error(_), _) | (_, _, Type::Error(_)) => {
+                        return result_ty;
+                    }
+                    (Type::Var(_), _, _) | (_, Type::Var(_), _) | (_, _, Type::Var(_)) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                    }
                     _ => {
                         return report(
                             errors,
@@ -923,7 +936,10 @@ pub(super) fn finish_unified_app(
                     Type::Tensor(dims, precision) => {
                         return Type::Tensor(dims, precision);
                     }
-                    Type::Var(_) | Type::Error(_) => return result_ty,
+                    Type::Error(_) => return result_ty,
+                    Type::Var(_) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                    }
                     other => {
                         return report(
                             errors,
@@ -969,7 +985,31 @@ pub(super) fn finish_unified_app(
                     Err(err) => return err,
                 };
                 match infer_diagonal_result_type(&diagonal_operand, axis1, axis2) {
-                    Ok(ty) => return ty,
+                    Ok(ty) => {
+                        // chelis#1739: the result dim stays a wildcard for a
+                        // mixed (symbolic, literal) pair, and a wildcard
+                        // unifies with every declared extent. The literal is
+                        // still an upper bound on the minimum, so compare the
+                        // declared extent against it here, at the one place
+                        // that knows both the operand's axes and the
+                        // declaration.
+                        if let Some(rejection) = reject_unreachable_diagonal_extent(
+                            &diagonal_operand,
+                            &ty,
+                            axis1,
+                            axis2,
+                            list,
+                            env,
+                            vg,
+                            adt_reg,
+                            subst,
+                            errors,
+                            expected_result,
+                        ) {
+                            return rejection;
+                        }
+                        return ty;
+                    }
                     Err(message) => {
                         return report(
                             errors,
@@ -1063,12 +1103,15 @@ pub(super) fn finish_unified_app(
                             ),
                         );
                     }
-                    (Type::Var(_), _, _)
-                    | (_, Type::Var(_), _)
-                    | (_, _, Type::Var(_))
-                    | (Type::Error(_), _, _)
-                    | (_, Type::Error(_), _)
-                    | (_, _, Type::Error(_)) => return result_ty,
+                    // chelis#1512: an upstream failure keeps the early
+                    // return, so the cascade still suppresses. Order matters:
+                    // a triple carrying both must suppress, not suspend.
+                    (Type::Error(_), _, _) | (_, Type::Error(_), _) | (_, _, Type::Error(_)) => {
+                        return result_ty;
+                    }
+                    (Type::Var(_), _, _) | (_, Type::Var(_), _) | (_, _, Type::Var(_)) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                    }
                     _ => {
                         return report(
                             errors,
@@ -1109,7 +1152,10 @@ pub(super) fn finish_unified_app(
                             Type::Tensor(dims, TensorPrec::Concrete(Prim::Int64)),
                         ]);
                     }
-                    Type::Var(_) | Type::Error(_) => return result_ty,
+                    Type::Error(_) => return result_ty,
+                    Type::Var(_) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                    }
                     other => {
                         return report(
                             errors,
@@ -1236,7 +1282,15 @@ pub(super) fn finish_unified_app(
                         Type::Adt(name, _) if name == "List" || name == "Dict" => {
                             return Type::Prim(Prim::Int64);
                         }
-                        Type::Var(_) | Type::Error(_) => return Type::Prim(Prim::Int64),
+                        Type::Error(_) => return Type::Prim(Prim::Int64),
+                        Type::Var(_) => {
+                            return site.defer(
+                                &arg_tys,
+                                &result_ty,
+                                product,
+                                Type::Prim(Prim::Int64),
+                            );
+                        }
                         Type::Ref(inner) if matches!(&*inner, Type::Adt(name, _) if name == "List" || name == "Dict") =>
                         {
                             return report(
@@ -1276,26 +1330,35 @@ pub(super) fn finish_unified_app(
                 }
                 let list_arg = subst.apply(&arg_tys[0]);
                 let index_arg = subst.apply(&arg_tys[1]);
-                if !matches!(index_arg, Type::Prim(prec) if prec.is_integer())
-                    && !matches!(index_arg, Type::Var(_) | Type::Error(_))
-                {
-                    return report(
-                        errors,
-                        CheckError::new(
-                            CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
-                                format!("index expects integer index, got {index_arg}"),
+                match &index_arg {
+                    Type::Prim(prec) if prec.is_integer() => {}
+                    // chelis#1512: not an integer YET. Suspending the call
+                    // re-enters this route once the operand binds, so this
+                    // same guard decides against a settled type.
+                    Type::Var(_) => site.register(&arg_tys, &result_ty, product),
+                    Type::Error(_) => {}
+                    other => {
+                        return report(
+                            errors,
+                            CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    format!("index expects integer index, got {other}"),
+                                ),
+                                vec![],
                             ),
-                            vec![],
-                        ),
-                    );
+                        );
+                    }
                 }
                 match list_arg {
                     Type::Adt(name, mut args) if name == "List" && args.len() == 1 => {
                         return args.remove(0);
                     }
-                    Type::Var(_) | Type::Error(_) => return result_ty,
+                    Type::Error(_) => return result_ty,
+                    Type::Var(_) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                    }
                     Type::Ref(inner) if matches!(&*inner, Type::Adt(name, _) if name == "List") => {
                         return report(
                             errors,
@@ -1340,7 +1403,10 @@ pub(super) fn finish_unified_app(
                         }
                         return Type::Adt("List".to_string(), vec![subst.apply(&args[0])]);
                     }
-                    Type::Var(_) | Type::Error(_) => return result_ty,
+                    Type::Error(_) => return result_ty,
+                    Type::Var(_) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                    }
                     other => {
                         return report(
                             errors,
@@ -1428,11 +1494,14 @@ pub(super) fn finish_unified_app(
                         }
                         return Type::Adt("List".to_string(), vec![subst.apply(&lhs_args[0])]);
                     }
-                    (Type::Var(_), _)
-                    | (_, Type::Var(_))
-                    | (Type::Error(_), _)
-                    | (_, Type::Error(_)) => {
+                    // chelis#1512: an upstream failure keeps the early
+                    // return, so the cascade still suppresses. Order matters:
+                    // an (Error, Var) pair must suppress, not suspend.
+                    (Type::Error(_), _) | (_, Type::Error(_)) => {
                         return result_ty;
+                    }
+                    (Type::Var(_), _) | (_, Type::Var(_)) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
                     }
                     (lhs, rhs) => {
                         return report(
@@ -1468,20 +1537,26 @@ pub(super) fn finish_unified_app(
                     (Type::Tensor(dims, precision), Type::Adt(name, args))
                         if name == "List" && args.len() == 1 =>
                     {
-                        if !matches!(&args[0], Type::Prim(prec) if prec.is_integer())
-                            && !matches!(&args[0], Type::Var(_) | Type::Error(_))
-                        {
-                            return report(
-                                errors,
-                                CheckError::new(
-                                    CheckErrorKind::TypeMismatch,
-                                    with_macro_provenance(
-                                        &deep::Expr::List(list.clone(), zero_span()),
-                                        "split expects List[int] sizes".to_string(),
+                        match &args[0] {
+                            Type::Prim(prec) if prec.is_integer() => {}
+                            // chelis#1512: not an integer YET. Suspending the
+                            // call re-enters this route once the element type
+                            // binds, so this same guard decides against it.
+                            Type::Var(_) => site.register(&arg_tys, &result_ty, product),
+                            Type::Error(_) => {}
+                            _ => {
+                                return report(
+                                    errors,
+                                    CheckError::new(
+                                        CheckErrorKind::TypeMismatch,
+                                        with_macro_provenance(
+                                            &deep::Expr::List(list.clone(), zero_span()),
+                                            "split expects List[int] sizes".to_string(),
+                                        ),
+                                        vec![],
                                     ),
-                                    vec![],
-                                ),
-                            );
+                                );
+                            }
                         }
                         // Negative axes index from the end.
                         // Issue #216: cast-aware so a
@@ -1517,11 +1592,14 @@ pub(super) fn finish_unified_app(
                             vec![Type::Tensor(piece_dims, precision)],
                         );
                     }
-                    (Type::Var(_), _)
-                    | (_, Type::Var(_))
-                    | (Type::Error(_), _)
-                    | (_, Type::Error(_)) => {
+                    // chelis#1512: an upstream failure keeps the early
+                    // return, so the cascade still suppresses. Order matters:
+                    // an (Error, Var) pair must suppress, not suspend.
+                    (Type::Error(_), _) | (_, Type::Error(_)) => {
                         return result_ty;
+                    }
+                    (Type::Var(_), _) | (_, Type::Var(_)) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
                     }
                     (tensor_ty, sizes_ty) => {
                         return report(
@@ -1547,26 +1625,35 @@ pub(super) fn finish_unified_app(
                 let op_name = func_name.as_deref().unwrap_or("collection helper");
                 let list_arg = subst.apply(&arg_tys[0]);
                 let count_arg = subst.apply(&arg_tys[1]);
-                if !matches!(count_arg, Type::Prim(prec) if prec.is_integer())
-                    && !matches!(count_arg, Type::Var(_) | Type::Error(_))
-                {
-                    return report(
-                        errors,
-                        CheckError::new(
-                            CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
-                                format!("{op_name} expects integer count, got {count_arg}"),
+                match &count_arg {
+                    Type::Prim(prec) if prec.is_integer() => {}
+                    // chelis#1512: not an integer YET. Suspending the call
+                    // re-enters this route once the operand binds, so this
+                    // same guard decides against a settled type.
+                    Type::Var(_) => site.register(&arg_tys, &result_ty, product),
+                    Type::Error(_) => {}
+                    other => {
+                        return report(
+                            errors,
+                            CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    format!("{op_name} expects integer count, got {other}"),
+                                ),
+                                vec![],
                             ),
-                            vec![],
-                        ),
-                    );
+                        );
+                    }
                 }
                 match list_arg {
                     Type::Adt(name, args) if name == "List" && args.len() == 1 => {
                         return Type::Adt("List".to_string(), vec![args[0].clone()]);
                     }
-                    Type::Var(_) | Type::Error(_) => return result_ty,
+                    Type::Error(_) => return result_ty,
+                    Type::Var(_) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                    }
                     other => {
                         return report(
                             errors,
@@ -1588,20 +1675,26 @@ pub(super) fn finish_unified_app(
                 }
                 let list_arg = subst.apply(&arg_tys[0]);
                 let count_arg = subst.apply(&arg_tys[1]);
-                if !matches!(count_arg, Type::Prim(prec) if prec.is_integer())
-                    && !matches!(count_arg, Type::Var(_) | Type::Error(_))
-                {
-                    return report(
-                        errors,
-                        CheckError::new(
-                            CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
-                                format!("chunk expects integer size, got {count_arg}"),
+                match &count_arg {
+                    Type::Prim(prec) if prec.is_integer() => {}
+                    // chelis#1512: not an integer YET. Suspending the call
+                    // re-enters this route once the operand binds, so this
+                    // same guard decides against a settled type.
+                    Type::Var(_) => site.register(&arg_tys, &result_ty, product),
+                    Type::Error(_) => {}
+                    other => {
+                        return report(
+                            errors,
+                            CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    format!("chunk expects integer size, got {other}"),
+                                ),
+                                vec![],
                             ),
-                            vec![],
-                        ),
-                    );
+                        );
+                    }
                 }
                 match list_arg {
                     Type::Adt(name, args) if name == "List" && args.len() == 1 => {
@@ -1610,7 +1703,10 @@ pub(super) fn finish_unified_app(
                             vec![Type::Adt("List".to_string(), vec![args[0].clone()])],
                         );
                     }
-                    Type::Var(_) | Type::Error(_) => return result_ty,
+                    Type::Error(_) => return result_ty,
+                    Type::Var(_) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                    }
                     other => {
                         return report(
                             errors,
@@ -1633,7 +1729,8 @@ pub(super) fn finish_unified_app(
                 for arg_ty in &arg_tys {
                     match subst.apply(arg_ty) {
                         Type::Prim(prec) if prec.is_integer() => {}
-                        Type::Var(_) | Type::Error(_) => {}
+                        Type::Error(_) => {}
+                        Type::Var(_) => site.register(&arg_tys, &result_ty, product),
                         other => {
                             return report(
                                 errors,
@@ -1958,7 +2055,15 @@ pub(super) fn finish_unified_app(
                                         vec![inner_args[0].clone()],
                                     );
                                 }
-                                Type::Var(_) | Type::Error(_) => return result_ty,
+                                Type::Error(_) => return result_ty,
+                                Type::Var(_) => {
+                                    return site.defer(
+                                        &arg_tys,
+                                        &result_ty,
+                                        product,
+                                        result_ty.clone(),
+                                    );
+                                }
                                 other => {
                                     return report(
                                         errors,
@@ -1976,7 +2081,10 @@ pub(super) fn finish_unified_app(
                                 }
                             }
                         }
-                        Type::Var(_) | Type::Error(_) => return result_ty,
+                        Type::Error(_) => return result_ty,
+                        Type::Var(_) => {
+                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                        }
                         other => {
                             return report(
                                 errors,
@@ -2011,11 +2119,14 @@ pub(super) fn finish_unified_app(
                             vec![Type::Tuple(vec![lhs_args[0].clone(), rhs_args[0].clone()])],
                         );
                     }
-                    (Type::Var(_), _)
-                    | (_, Type::Var(_))
-                    | (Type::Error(_), _)
-                    | (_, Type::Error(_)) => {
+                    // chelis#1512: an upstream failure keeps the early
+                    // return, so the cascade still suppresses. Order matters:
+                    // an (Error, Var) pair must suppress, not suspend.
+                    (Type::Error(_), _) | (_, Type::Error(_)) => {
                         return result_ty;
+                    }
+                    (Type::Var(_), _) | (_, Type::Var(_)) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
                     }
                     (lhs, rhs) => {
                         return report(
@@ -2041,7 +2152,10 @@ pub(super) fn finish_unified_app(
                                 vec![Type::Tuple(vec![Type::Prim(Prim::Int64), args[0].clone()])],
                             );
                         }
-                        Type::Var(_) | Type::Error(_) => return result_ty,
+                        Type::Error(_) => return result_ty,
+                        Type::Var(_) => {
+                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                        }
                         other => {
                             return report(
                                 errors,
@@ -2066,7 +2180,15 @@ pub(super) fn finish_unified_app(
                                 Type::Tuple(items) if items.len() == 2 => {
                                     match &items[0] {
                                         Type::Prim(Prim::Int64) | Type::Prim(Prim::String) => {}
-                                        Type::Var(_) | Type::Error(_) => return result_ty,
+                                        Type::Error(_) => return result_ty,
+                                        Type::Var(_) => {
+                                            return site.defer(
+                                                &arg_tys,
+                                                &result_ty,
+                                                product,
+                                                result_ty.clone(),
+                                            );
+                                        }
                                         other => {
                                             return report(
                                                 errors,
@@ -2091,7 +2213,15 @@ pub(super) fn finish_unified_app(
                                         vec![items[0].clone(), items[1].clone()],
                                     );
                                 }
-                                Type::Var(_) | Type::Error(_) => return result_ty,
+                                Type::Error(_) => return result_ty,
+                                Type::Var(_) => {
+                                    return site.defer(
+                                        &arg_tys,
+                                        &result_ty,
+                                        product,
+                                        result_ty.clone(),
+                                    );
+                                }
                                 other => {
                                     return report(
                                         errors,
@@ -2109,7 +2239,10 @@ pub(super) fn finish_unified_app(
                                 }
                             }
                         }
-                        Type::Var(_) | Type::Error(_) => return result_ty,
+                        Type::Error(_) => return result_ty,
+                        Type::Var(_) => {
+                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                        }
                         other => {
                             return report(
                                 errors,
@@ -2301,11 +2434,14 @@ pub(super) fn finish_unified_app(
                             vec![subst.apply(&lhs_args[0]), subst.apply(&lhs_args[1])],
                         );
                     }
-                    (Type::Var(_), _)
-                    | (_, Type::Var(_))
-                    | (Type::Error(_), _)
-                    | (_, Type::Error(_)) => {
+                    // chelis#1512: an upstream failure keeps the early
+                    // return, so the cascade still suppresses. Order matters:
+                    // an (Error, Var) pair must suppress, not suspend.
+                    (Type::Error(_), _) | (_, Type::Error(_)) => {
                         return result_ty;
+                    }
+                    (Type::Var(_), _) | (_, Type::Var(_)) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
                     }
                     (lhs_ty, rhs_ty) => {
                         return report(
@@ -2330,7 +2466,10 @@ pub(super) fn finish_unified_app(
                         Type::Adt(name, args) if name == "Dict" && args.len() == 2 => {
                             return Type::Adt("List".to_string(), vec![args[0].clone()]);
                         }
-                        Type::Var(_) | Type::Error(_) => return result_ty,
+                        Type::Error(_) => return result_ty,
+                        Type::Var(_) => {
+                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                        }
                         other => {
                             return report(
                                 errors,
@@ -2353,7 +2492,10 @@ pub(super) fn finish_unified_app(
                         Type::Adt(name, args) if name == "Dict" && args.len() == 2 => {
                             return Type::Adt("List".to_string(), vec![args[1].clone()]);
                         }
-                        Type::Var(_) | Type::Error(_) => return result_ty,
+                        Type::Error(_) => return result_ty,
+                        Type::Var(_) => {
+                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                        }
                         other => {
                             return report(
                                 errors,
@@ -2379,7 +2521,10 @@ pub(super) fn finish_unified_app(
                                 vec![Type::Tuple(vec![args[0].clone(), args[1].clone()])],
                             );
                         }
-                        Type::Var(_) | Type::Error(_) => return result_ty,
+                        Type::Error(_) => return result_ty,
+                        Type::Var(_) => {
+                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                        }
                         other => {
                             return report(
                                 errors,
@@ -2417,8 +2562,11 @@ pub(super) fn finish_unified_app(
                     // the to_tensor app's `type:` metadata) sees a
                     // sound shape instead of `Dim::Wildcard`.
                     let resolved = subst.apply(first_arg);
-                    if matches!(resolved, Type::Var(_) | Type::Error(_)) {
+                    if matches!(resolved, Type::Error(_)) {
                         return result_ty;
+                    }
+                    if matches!(resolved, Type::Var(_)) {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
                     }
                     match peel_to_tensor_argument(&resolved) {
                         ToTensorPeel::Ok { rank, precision } => {
@@ -2531,7 +2679,10 @@ pub(super) fn finish_unified_app(
                             }
                             return Type::Adt("List".to_string(), vec![Type::Prim(precision)]);
                         }
-                        Type::Var(_) | Type::Error(_) => return result_ty,
+                        Type::Error(_) => return result_ty,
+                        Type::Var(_) => {
+                            return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                        }
                         other => {
                             return report(
                                 errors,
@@ -2572,7 +2723,15 @@ pub(super) fn finish_unified_app(
                                             TensorPrec::Concrete(precision),
                                         );
                                     }
-                                    Type::Var(_) | Type::Error(_) => return result_ty,
+                                    Type::Error(_) => return result_ty,
+                                    Type::Var(_) => {
+                                        return site.defer(
+                                            &arg_tys,
+                                            &result_ty,
+                                            product,
+                                            result_ty.clone(),
+                                        );
+                                    }
                                     other => {
                                         return report(
                                             errors,
@@ -2607,7 +2766,10 @@ pub(super) fn finish_unified_app(
                             }
                         }
                     }
-                    Type::Var(_) | Type::Error(_) => return result_ty,
+                    Type::Error(_) => return result_ty,
+                    Type::Var(_) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                    }
                     other => {
                         return report(
                             errors,
@@ -2667,7 +2829,15 @@ pub(super) fn finish_unified_app(
                                             TensorPrec::Concrete(precision),
                                         );
                                     }
-                                    Type::Var(_) | Type::Error(_) => return result_ty,
+                                    Type::Error(_) => return result_ty,
+                                    Type::Var(_) => {
+                                        return site.defer(
+                                            &arg_tys,
+                                            &result_ty,
+                                            product,
+                                            result_ty.clone(),
+                                        );
+                                    }
                                     other => {
                                         return report(
                                             errors,
@@ -2702,7 +2872,10 @@ pub(super) fn finish_unified_app(
                             }
                         }
                     }
-                    Type::Var(_) | Type::Error(_) => return result_ty,
+                    Type::Error(_) => return result_ty,
+                    Type::Var(_) => {
+                        return site.defer(&arg_tys, &result_ty, product, result_ty.clone());
+                    }
                     other => {
                         return report(
                             errors,
@@ -2769,6 +2942,6 @@ pub(super) fn finish_unified_app(
         );
     }
 
-    product.replay_ready_shape_checks(vg, subst, errors);
+    product.replay_ready_shape_checks(vg, subst, adt_reg, errors);
     subst.apply(&result_ty)
 }

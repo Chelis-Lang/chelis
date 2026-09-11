@@ -626,7 +626,9 @@ FAST_TRIPWIRE_NEXTEST: list[str] = [
     "--test", "asset_drift_tripwire",
     "--test", "skill_set_uniformity",
     "-p", "chelis-compiler-api", "--test", "phase3_gate_inventory",
-    "-p", "chelis-types", "--test", "stack_guard_coverage",
+    "-p", "chelis-types",
+    "--test", "stack_guard_coverage",
+    "--test", "runtime_extent_target_manifest",
 ]
 FAST_STATIC_COMMANDS: list[list[str]] = [
     REGEN_TIER0_WRITE,

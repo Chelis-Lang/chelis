@@ -103,7 +103,7 @@ use std::collections::BTreeMap;
 
 use chelis_types::manifest::{ManifestedProgram, RootManifest};
 
-use crate::dag::{Dag, DagNode, NodeId, RiscOp, SymbolicDimBinding, SymbolicDimOccurrence};
+use crate::dag::{Dag, DagNode, NodeId, RiscOp, SymbolicDimBinding};
 use crate::host::{
     ConcreteHostBinding, ConcreteHostExpr, ConcreteHostFunction, ConcreteHostParam,
     ConcreteHostProgram, HostFunctionOrigin, HostFunctionSpecialization, HostTensorHelper,
@@ -170,8 +170,25 @@ impl<'a> VerifiedDagView<'a> {
         self.dag.topological_order()
     }
 
-    pub fn symbolic_bindings(self) -> Vec<SymbolicDimBinding> {
-        crate::dag::symbolic_bindings(self.dag)
+    /// Every name this graph renders as a C identifier, paired with the
+    /// origin that produces its value (chelis#665, C4.4). A declaration
+    /// consumer reads this instead of searching for a `Load` whose type
+    /// carries a matching string.
+    pub fn dim_extent_origins(self) -> Vec<(String, crate::axis_sources::ExtentOrigin)> {
+        crate::axis_sources::dim_extent_origins(self.dag)
+    }
+
+    /// The names this graph renders that resolve to no origin. A lane turns
+    /// each into a typed receipt; the legacy walk panicked instead.
+    pub fn unresolved_dim_names(self) -> Vec<String> {
+        crate::axis_sources::unresolved_dim_names(self.dag)
+    }
+
+    /// Every name this graph can render as an identifier, whether or not the
+    /// entry supplies its extent. An emitter checks its own declarations
+    /// against this set.
+    pub fn rendered_dim_names(self) -> Vec<String> {
+        crate::axis_sources::rendered_dim_names(self.dag)
     }
 
     /// The INTERFACE bindings: the declaration and entry-guard set, derived
@@ -246,6 +263,33 @@ impl<'a> VerifiedDagView<'a> {
         crate::axis_sources::entry_extent_guards(self.dag)
     }
 
+    /// The named witness claims the entry schedule above already compares, so
+    /// an emitter checks each such pair once (`spec/04-type-system.md` §4.7).
+    /// The view answers this for the same reason it answers placement: the
+    /// question needs the class derivation, not the graph.
+    pub fn entry_covered_witness_claims(self) -> Vec<(NodeId, usize)> {
+        crate::axis_sources::entry_covered_witness_claims(self.dag)
+    }
+
+    /// Is this witness retained purely as a section 4.7 entry obligation, with
+    /// nothing reading its value?
+    ///
+    /// A target whose device lane excludes runtime shape reads asks this to
+    /// tell an obligation it can discharge in its host prologue from a read it
+    /// must refuse.
+    pub fn witness_is_entry_obligation(self, id: NodeId) -> bool {
+        crate::axis_sources::witness_is_entry_obligation(self.dag, id)
+    }
+
+    /// The obligations that witness owes, reduced to input reads, or `None`
+    /// when one of them cannot be rendered from the interface alone.
+    pub fn witness_entry_obligations(
+        self,
+        id: NodeId,
+    ) -> Option<Vec<crate::axis_sources::WitnessEntryObligation>> {
+        crate::axis_sources::witness_entry_obligations(self.dag, id)
+    }
+
     /// The unit-extent claims whose guard section 4.7 places at entry.
     ///
     /// The sibling of [`Self::entry_dim_classes`], filtered by the same
@@ -274,10 +318,6 @@ impl<'a> VerifiedDagView<'a> {
             .collect()
     }
 
-    pub fn symbolic_occurrences(self) -> Vec<SymbolicDimOccurrence> {
-        crate::dag::symbolic_occurrences(self.dag)
-    }
-
     pub fn symbolic_params(self) -> Vec<String> {
         crate::dag::symbolic_params(self.dag)
     }
@@ -299,6 +339,16 @@ impl<'a> VerifiedDagView<'a> {
         stage: chelis_types::unsupported::Stage,
     ) -> Result<(), chelis_types::unsupported::Unsupported> {
         crate::axis_sources::check_axis_sources(self.dag, stage)
+    }
+
+    /// Every name a lane renders as an identifier resolves to one origin
+    /// (chelis#665). An emission boundary calls this; lowering, capacity
+    /// planning and evaluation do not, for the reason the derivation records.
+    pub fn check_rendered_dim_origins(
+        self,
+        stage: chelis_types::unsupported::Stage,
+    ) -> Result<(), chelis_types::unsupported::Unsupported> {
+        crate::axis_sources::check_rendered_dim_origins(self.dag, stage)
     }
 
     /// The checked extent source for each output axis of `node`.

@@ -24,6 +24,46 @@ def main(a: tensor[2, f32], b: tensor[2, f32]) -> tensor[2, f32] = add(helper(a)
 "#;
 
 #[test]
+fn rejected_resource_region_produces_no_emission_observation() {
+    for (target, device, allowed) in [
+        (CompileTarget::C, "cpu", true),
+        (CompileTarget::C, "gpu:0", false),
+        (CompileTarget::Hip, "gpu:0", true),
+        (CompileTarget::Hip, "cpu", false),
+    ] {
+        let source = format!(
+            "def main(x: tensor[2, f32]) -> tensor[2, f32] = \
+             with device(\"{device}\") {{ mul(x, x) }}"
+        );
+        let mut observations = 0;
+        let result = compile_for_execution_with_observer(
+            request(&source, target, Some("main")),
+            &mut |_| observations += 1,
+        );
+        if allowed {
+            result.unwrap();
+            assert_eq!(observations, 1);
+        } else {
+            let error = result.map(|_| ()).unwrap_err();
+            assert!(
+                error
+                    .errors
+                    .iter()
+                    .all(|d| d.kind() == chelis_vocab::DiagnosticKind::BuildTargetMismatch)
+            );
+            assert!(
+                error
+                    .errors
+                    .iter()
+                    .any(|d| d.message.contains("cannot satisfy resource region")),
+                "{error:?}"
+            );
+            assert_eq!(observations, 0);
+        }
+    }
+}
+
+#[test]
 fn observes_selected_entry_and_preserves_complete_c_artifact() {
     let ordinary = compile_for_execution(request(SOURCE, CompileTarget::C, Some("main"))).unwrap();
     let mut count = 0;

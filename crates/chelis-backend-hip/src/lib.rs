@@ -52,6 +52,18 @@ pub struct HipCodegenResult {
     peak_device_bytes_static_extra: usize,
 }
 
+/// One device translation unit used by a host-program wrapper.
+pub struct HipHostTensorHelperCodegen {
+    pub name: String,
+    pub result: HipCodegenResult,
+}
+
+/// A scalar/container host wrapper plus every Count-bearing HIP helper it calls.
+pub struct HipHostProgramCodegenResult {
+    pub host: chelis_backend_c::CodegenResult,
+    pub device_helpers: Vec<HipHostTensorHelperCodegen>,
+}
+
 impl HipCodegenResult {
     pub fn peak_device_bytes_at(
         &self,
@@ -205,6 +217,84 @@ pub fn prepare_dag_for_codegen(dag: chelis_ir::dag::Dag) -> chelis_ir::dag::Dag 
         out.add_root(remap[root]);
     }
     out
+}
+
+/// Compile a verified host program whose Count-bearing tensor helpers run
+/// on the device.
+///
+/// `helpers` is the wrapper's helper manifest, read off the concrete program
+/// by [`chelis_backend_c::host_tensor_helper_codegen`] before payload
+/// selection and ownership lowering. Every helper whose DAG contains `Count`
+/// becomes its own HIP translation unit: the C wrapper declares it as an
+/// external symbol, and this function lowers the helper's source DAG through
+/// the same preparation, ownership lowering, and verification a tensor entry
+/// receives before emitting it with [`codegen_hip`]. Other tensor helpers
+/// keep their C-host disposition. There is no C fallback for a Count helper:
+/// the selection predicate below is the only place that decides.
+pub fn codegen_hip_host_program(
+    program: &chelis_ir::ownership::VerifiedHostProgram,
+    func_name: &str,
+    helpers: Vec<chelis_backend_c::HostTensorHelperCodegen>,
+) -> Result<HipHostProgramCodegenResult, chelis_types::unsupported::Unsupported> {
+    let count_helpers = helpers
+        .into_iter()
+        .filter(|helper| {
+            helper
+                .dag
+                .nodes()
+                .iter()
+                .any(|node| matches!(node.op, chelis_ir::dag::RiscOp::Count { .. }))
+        })
+        .collect::<Vec<_>>();
+    let external_names = count_helpers
+        .iter()
+        .map(|helper| helper.name.clone())
+        .collect::<Vec<_>>();
+    let host = chelis_backend_c::codegen_host_program_with_external_tensor_helpers(
+        program,
+        func_name,
+        &external_names,
+    )?;
+    let device_helpers = count_helpers
+        .into_iter()
+        .map(|helper| {
+            let verified = verified_host_helper_dag(&helper.name, helper.dag)?;
+            Ok(HipHostTensorHelperCodegen {
+                result: codegen_hip(verified, &helper.name)?,
+                name: helper.name,
+            })
+        })
+        .collect::<Result<Vec<_>, chelis_types::unsupported::Unsupported>>()?;
+    Ok(HipHostProgramCodegenResult {
+        host,
+        device_helpers,
+    })
+}
+
+/// Lower one externalized helper DAG exactly as a HIP tensor entry is
+/// lowered: HIP payload selection, ownership lowering, then verification.
+fn verified_host_helper_dag(
+    helper_name: &str,
+    dag: chelis_ir::dag::Dag,
+) -> Result<chelis_ir::ownership::VerifiedDagProgram, chelis_types::unsupported::Unsupported> {
+    let selected = prepare_dag_for_codegen(dag);
+    let unsupported = |error: chelis_ir::ownership::OwnershipError| {
+        chelis_types::unsupported::Unsupported::new(
+            chelis_types::unsupported::UnsupportedKind::Construct(format!(
+                "HIP device helper `{helper_name}` ownership lowering"
+            )),
+            error.to_string(),
+            chelis_types::unsupported::Stage::Codegen("hip"),
+            chelis_types::deliberate_rejection!(
+                "[04-SHAPE-1]",
+                "a device-emitted host tensor helper requires the same verified ownership plan as a tensor entry"
+            ),
+        )
+    };
+    chelis_ir::ownership::verify_ownership(
+        chelis_ir::ownership::lower_dag_ownership(selected).map_err(unsupported)?,
+    )
+    .map_err(unsupported)
 }
 
 #[cfg(test)]

@@ -96,9 +96,9 @@
   "foreign.binding.mismatch": {
     "c": {
       "stage": "execute",
-      "stderr": "",
-      "stdout": "out = tensor(shape=[2, 2], data=[1.0, 1.0, 2.0, 2.0])",
-      "success": true
+      "stderr": "extent `cols`: y axis 0 = 3, x axis 0 = 2\nnumeric trap: domain in load at int64",
+      "stdout": "",
+      "success": false
     },
     "check": {
       "errors": [],
@@ -110,9 +110,9 @@
     },
     "eval": {
       "stage": "execute",
-      "stderr": "",
-      "stdout": "out = tensor(shape=[2, 2], data=[1.0, 1.0, 2.0, 2.0])",
-      "success": true
+      "stderr": "error: extent `cols`: y axis 0 = 3, x axis 0 = 2\nnumeric trap: domain in load at int64",
+      "stdout": "",
+      "success": false
     },
     "issue": 1376
   },
@@ -142,9 +142,9 @@
   "foreign.export.mismatch": {
     "c": {
       "stage": "execute",
-      "stderr": "",
-      "stdout": "out = tensor(shape=[2, 2], data=[1, 1, 2, 2])",
-      "success": true
+      "stderr": "extent `cols`: y axis 0 = 3, x axis 0 = 2\nnumeric trap: domain in load at int64",
+      "stdout": "",
+      "success": false
     },
     "check": {
       "errors": [],
@@ -178,9 +178,9 @@
   "foreign.root.mismatch": {
     "c": {
       "stage": "execute",
-      "stderr": "",
-      "stdout": "main = tensor(shape=[2, 2], data=[1.0, 1.0, 2.0, 2.0])",
-      "success": true
+      "stderr": "extent `cols`: y axis 0 = 3, x axis 0 = 2\nnumeric trap: domain in load at int64",
+      "stdout": "",
+      "success": false
     },
     "check": {
       "errors": [],
@@ -193,9 +193,9 @@
     },
     "eval": {
       "stage": "execute",
-      "stderr": "",
-      "stdout": "main = tensor(shape=[2, 2], data=[1.0, 1.0, 2.0, 2.0])",
-      "success": true
+      "stderr": "error: extent `cols`: y axis 0 = 3, x axis 0 = 2\nnumeric trap: domain in load at int64",
+      "stdout": "",
+      "success": false
     },
     "issue": 1376
   },
@@ -356,9 +356,9 @@
   "named.binding.mismatch": {
     "c": {
       "stage": "execute",
-      "stderr": "",
-      "stdout": "out = tensor(shape=[3], data=[7.0, 7.0, 7.0])",
-      "success": true
+      "stderr": "extent `rows`: x axis 0 = 2, y axis 0 = 3\nnumeric trap: domain in load at int64",
+      "stdout": "",
+      "success": false
     },
     "check": {
       "errors": [],
@@ -370,9 +370,9 @@
     },
     "eval": {
       "stage": "execute",
-      "stderr": "",
-      "stdout": "out = tensor(shape=[3], data=[7.0, 7.0, 7.0])",
-      "success": true
+      "stderr": "error: extent `rows`: x axis 0 = 2, y axis 0 = 3\nnumeric trap: domain in load at int64",
+      "stdout": "",
+      "success": false
     },
     "issue": 1374
   },
@@ -402,9 +402,9 @@
   "named.export.mismatch": {
     "c": {
       "stage": "execute",
-      "stderr": "",
-      "stdout": "out = tensor(shape=[3], data=[7, 7, 7])",
-      "success": true
+      "stderr": "extent `rows`: x axis 0 = 2, y axis 0 = 3\nnumeric trap: domain in load at int64",
+      "stdout": "",
+      "success": false
     },
     "check": {
       "errors": [],
@@ -438,9 +438,9 @@
   "named.root.mismatch": {
     "c": {
       "stage": "execute",
-      "stderr": "",
-      "stdout": "main = tensor(shape=[3], data=[7.0, 7.0, 7.0])",
-      "success": true
+      "stderr": "extent `rows`: x axis 0 = 2, y axis 0 = 3\nnumeric trap: domain in load at int64",
+      "stdout": "",
+      "success": false
     },
     "check": {
       "errors": [],
@@ -453,9 +453,9 @@
     },
     "eval": {
       "stage": "execute",
-      "stderr": "",
-      "stdout": "main = tensor(shape=[3], data=[7.0, 7.0, 7.0])",
-      "success": true
+      "stderr": "error: extent `rows`: x axis 0 = 2, y axis 0 = 3\nnumeric trap: domain in load at int64",
+      "stdout": "",
+      "success": false
     },
     "issue": 1374
   },
@@ -486,9 +486,9 @@
   "polymorphic.foreign.binding.mismatch": {
     "c": {
       "stage": "execute",
-      "stderr": "",
-      "stdout": "out = tensor(shape=[2, 2], data=[1.0, 1.0, 2.0, 2.0])",
-      "success": true
+      "stderr": "extent `m`: y axis 0 = 3, x axis 0 = 2\nnumeric trap: domain in load at int64",
+      "stdout": "",
+      "success": false
     },
     "check": {
       "errors": [],
@@ -500,9 +500,9 @@
     },
     "eval": {
       "stage": "execute",
-      "stderr": "",
-      "stdout": "out = tensor(shape=[2, 2], data=[1.0, 1.0, 2.0, 2.0])",
-      "success": true
+      "stderr": "error: extent `m`: y axis 0 = 3, x axis 0 = 2\nnumeric trap: domain in load at int64",
+      "stdout": "",
+      "success": false
     },
     "issue": 1376
   },
@@ -532,9 +532,9 @@
   "polymorphic.foreign.export.mismatch": {
     "c": {
       "stage": "execute",
-      "stderr": "",
-      "stdout": "out = tensor(shape=[2, 2], data=[1, 1, 2, 2])",
-      "success": true
+      "stderr": "extent `m`: y axis 0 = 3, x axis 0 = 2\nnumeric trap: domain in load at int64",
+      "stdout": "",
+      "success": false
     },
     "check": {
       "errors": [],
@@ -568,7 +568,7 @@
   "polymorphic.foreign.root.mismatch": {
     "c": {
       "stage": "execute",
-      "stderr": "extent `3`: claimed = 3, node 2 axis 1 = 2\nnumeric trap: domain in insert at int64",
+      "stderr": "extent `3`: claimed = 3, x axis 0 = 2\nnumeric trap: domain in load at int64",
       "stdout": "",
       "success": false
     },
@@ -583,7 +583,7 @@
     },
     "eval": {
       "stage": "execute",
-      "stderr": "error: extent `3`: claimed = 3, node 2 axis 1 = 2\nnumeric trap: domain in insert at int64",
+      "stderr": "error: extent `3`: claimed = 3, x axis 0 = 2\nnumeric trap: domain in load at int64",
       "stdout": "",
       "success": false
     },
@@ -616,9 +616,9 @@
   "polymorphic.named.binding.mismatch": {
     "c": {
       "stage": "execute",
-      "stderr": "",
-      "stdout": "out = tensor(shape=[3], data=[7.0, 7.0, 7.0])",
-      "success": true
+      "stderr": "extent `n`: x axis 0 = 2, y axis 0 = 3\nnumeric trap: domain in load at int64",
+      "stdout": "",
+      "success": false
     },
     "check": {
       "errors": [],
@@ -630,9 +630,9 @@
     },
     "eval": {
       "stage": "execute",
-      "stderr": "",
-      "stdout": "out = tensor(shape=[3], data=[7.0, 7.0, 7.0])",
-      "success": true
+      "stderr": "error: extent `n`: x axis 0 = 2, y axis 0 = 3\nnumeric trap: domain in load at int64",
+      "stdout": "",
+      "success": false
     },
     "issue": 1374
   },
@@ -662,9 +662,9 @@
   "polymorphic.named.export.mismatch": {
     "c": {
       "stage": "execute",
-      "stderr": "",
-      "stdout": "out = tensor(shape=[3], data=[7, 7, 7])",
-      "success": true
+      "stderr": "extent `n`: x axis 0 = 2, y axis 0 = 3\nnumeric trap: domain in load at int64",
+      "stdout": "",
+      "success": false
     },
     "check": {
       "errors": [],
@@ -698,7 +698,7 @@
   "polymorphic.named.root.mismatch": {
     "c": {
       "stage": "execute",
-      "stderr": "extent `2`: claimed = 2, node 3 axis 0 = 3\nnumeric trap: domain in insert at int64",
+      "stderr": "extent `2`: claimed = 2, y axis 0 = 3\nnumeric trap: domain in load at int64",
       "stdout": "",
       "success": false
     },
@@ -713,7 +713,7 @@
     },
     "eval": {
       "stage": "execute",
-      "stderr": "error: extent `2`: claimed = 2, node 3 axis 0 = 3\nnumeric trap: domain in insert at int64",
+      "stderr": "error: extent `2`: claimed = 2, y axis 0 = 3\nnumeric trap: domain in load at int64",
       "stdout": "",
       "success": false
     },
@@ -877,9 +877,9 @@
   "scope.unread.mismatch": {
     "c": {
       "stage": "execute",
-      "stderr": "",
-      "stdout": "out = 3.0",
-      "success": true
+      "stderr": "extent `extent`: x axis 0 = 2, p axis 0 = 3\nnumeric trap: domain in load at int64",
+      "stdout": "",
+      "success": false
     },
     "check": {
       "errors": [],
@@ -891,9 +891,9 @@
     },
     "eval": {
       "stage": "execute",
-      "stderr": "",
-      "stdout": "out = 3.0",
-      "success": true
+      "stderr": "error: extent `extent`: x axis 0 = 2, p axis 0 = 3\nnumeric trap: domain in load at int64",
+      "stdout": "",
+      "success": false
     },
     "issue": 1374
   },
@@ -923,9 +923,9 @@
   "shrink.binding.mismatch": {
     "c": {
       "stage": "execute",
-      "stderr": "",
-      "stdout": "out = tensor(shape=[3], data=[2.0, 3.0, 4.0])",
-      "success": true
+      "stderr": "extent `2`: claimed = 2, shrink axis 0 = 3\nnumeric trap: domain in shrink at int64",
+      "stdout": "",
+      "success": false
     },
     "check": {
       "errors": [],
@@ -937,9 +937,9 @@
     },
     "eval": {
       "stage": "execute",
-      "stderr": "",
-      "stdout": "out = tensor(shape=[3], data=[2.0, 3.0, 4.0])",
-      "success": true
+      "stderr": "error: extent `2`: claimed = 2, shrink axis 0 = 3\nnumeric trap: domain in shrink at int64",
+      "stdout": "",
+      "success": false
     },
     "issue": 1397
   },
@@ -969,9 +969,9 @@
   "shrink.export.mismatch": {
     "c": {
       "stage": "execute",
-      "stderr": "",
-      "stdout": "out = tensor(shape=[3], data=[2, 3, 4])",
-      "success": true
+      "stderr": "extent `2`: claimed = 2, shrink axis 0 = 3\nnumeric trap: domain in shrink at int64",
+      "stdout": "",
+      "success": false
     },
     "check": {
       "errors": [],
@@ -1005,7 +1005,7 @@
   "shrink.root.mismatch": {
     "c": {
       "stage": "execute",
-      "stderr": "Domain: movement target shape mismatch\nnumeric trap: domain in shrink at int64",
+      "stderr": "extent `2`: claimed = 2, shrink axis 0 = 3\nnumeric trap: domain in shrink at int64",
       "stdout": "",
       "success": false
     },
@@ -1020,9 +1020,9 @@
     },
     "eval": {
       "stage": "execute",
-      "stderr": "",
-      "stdout": "main = tensor(shape=[3], data=[2.0, 3.0, 4.0])",
-      "success": true
+      "stderr": "error: extent `2`: claimed = 2, shrink axis 0 = 3\nnumeric trap: domain in shrink at int64",
+      "stdout": "",
+      "success": false
     },
     "issue": 1397
   },

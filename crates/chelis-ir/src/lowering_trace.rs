@@ -121,6 +121,29 @@ pub struct LoweringTrace {
     pub normalization: Normalization,
 }
 
+/// Execution-bearing snapshots at an actual AD invocation. `gradient` indexes
+/// the ordinary trace, whose output/wrt, splice and application maps apply to
+/// these same graphs. This is not a certificate or a separately rerun lowering.
+#[derive(Debug, Clone)]
+pub struct ExecutionGradient {
+    pub gradient: usize,
+    pub forward: crate::evaluation::EvaluationPlan,
+    pub backward: crate::evaluation::EvaluationPlan,
+}
+
+/// Additive opt-in trace; existing `LoweringTrace` and wire structs are unchanged.
+#[derive(Debug, Clone)]
+pub struct EvaluationLoweringTrace {
+    pub lowering: LoweringTrace,
+    pub executions: Vec<ExecutionGradient>,
+}
+
+pub fn try_lower_program_to_evaluation_library_with_trace(
+    program: &CheckedProgram,
+) -> Result<(crate::lower::EvaluationLibrary, EvaluationLoweringTrace), LowerDiagnostic> {
+    crate::lower::try_lower_program_to_evaluation_library_with_trace(program)
+}
+
 /// Run the ordinary library lowering with explicit snapshot collection.
 /// Failure returns the ordinary diagnostic, never a partial successful trace.
 pub fn try_lower_program_to_library_with_trace(
@@ -135,6 +158,8 @@ struct State {
     gradients: Vec<Gradient>,
     boundaries: Vec<Boundary>,
     normalization: Option<Normalization>,
+    capture_execution: bool,
+    executions: Vec<ExecutionGradient>,
 }
 
 /// Explicitly inherited by child contexts; never global or thread-local.
@@ -164,6 +189,45 @@ impl Collector {
         Self {
             state: Rc::new(RefCell::new(state)),
             context: ContextId(0),
+        }
+    }
+
+    pub(crate) fn new_execution() -> Self {
+        let collector = Self::new();
+        collector.state.borrow_mut().capture_execution = true;
+        collector
+    }
+
+    pub(crate) fn execution_before_ad(
+        &self,
+        dag: &Dag,
+        execution: &crate::evaluation::ExecutionMetadata,
+    ) -> Option<crate::evaluation::EvaluationPlan> {
+        self.state
+            .borrow()
+            .capture_execution
+            .then(|| crate::evaluation::EvaluationPlan::snapshot(dag, execution))
+    }
+
+    pub(crate) fn execution_after_ad(
+        &self,
+        gradient: usize,
+        forward: crate::evaluation::EvaluationPlan,
+        dag: &Dag,
+        execution: &crate::evaluation::ExecutionMetadata,
+    ) {
+        self.state.borrow_mut().executions.push(ExecutionGradient {
+            gradient,
+            forward,
+            backward: crate::evaluation::EvaluationPlan::snapshot(dag, execution),
+        });
+    }
+
+    pub(crate) fn finish_execution(self) -> EvaluationLoweringTrace {
+        let executions = std::mem::take(&mut self.state.borrow_mut().executions);
+        EvaluationLoweringTrace {
+            lowering: self.finish(),
+            executions,
         }
     }
 

@@ -69,6 +69,12 @@ Current design points:
 
 This backend is the correctness oracle for future GPU and interoperability backends.
 
+Generated host Random state belongs to one public entry invocation. Internal calls
+inherit that invocation's active handler, and leaving a nested seed handler restores
+the enclosing seed and ordinal. Reentrant and concurrent public invocations do not
+share mutable Random state. Private context transport does not change authored public
+function declarations or the four-argument public tensor ABI.
+
 ## 3. Phase 1: HIP Backend
 
 The GPU plan is Futhark-style source-to-source compilation:

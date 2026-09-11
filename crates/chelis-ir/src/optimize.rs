@@ -183,6 +183,35 @@ pub fn dead_code_eliminate(dag: &Dag) -> Dag {
 /// remapping. Phase F (`lower_program_with_context`) needs the remap to
 /// rewrite the library's name → NodeId symbol table after DCE renumbering.
 pub fn dead_code_eliminate_with_remap(dag: &Dag) -> (Dag, UnordMap<NodeId, NodeId>) {
+    dead_code_eliminate_with_retained(dag, &[])
+}
+
+/// Extra execution roots belong to an evaluator plan, not to the public
+/// value-root interface. Keep their dependencies without publishing outputs.
+pub(crate) fn dead_code_eliminate_with_retained(
+    dag: &Dag,
+    retained: &[NodeId],
+) -> (Dag, UnordMap<NodeId, NodeId>) {
+    dead_code_eliminate_impl(dag, retained, true)
+}
+
+/// A selected execution slice has its own explicit roots/retention set.
+/// Unrelated Stores and interface loads are not implicit observations here.
+pub(crate) fn project_execution_slice(
+    dag: &Dag,
+    retained: &[NodeId],
+    roots: &[NodeId],
+) -> (Dag, UnordMap<NodeId, NodeId>) {
+    let mut selected = dag.clone();
+    selected.set_roots(roots.to_vec());
+    dead_code_eliminate_impl(&selected, retained, false)
+}
+
+fn dead_code_eliminate_impl(
+    dag: &Dag,
+    retained: &[NodeId],
+    implicit_observations: bool,
+) -> (Dag, UnordMap<NodeId, NodeId>) {
     let n = dag.len();
     if n == 0 {
         return (Dag::new(), UnordMap::new());
@@ -190,7 +219,10 @@ pub fn dead_code_eliminate_with_remap(dag: &Dag) -> (Dag, UnordMap<NodeId, NodeI
 
     // Mark live nodes: DAG roots + all Store nodes.
     let mut live = vec![false; n];
-    if dag.roots().is_empty() {
+    for id in retained {
+        live[id.0] = true;
+    }
+    if dag.roots().is_empty() && implicit_observations {
         live[n - 1] = true;
     } else {
         for &root in dag.roots() {
@@ -198,7 +230,7 @@ pub fn dead_code_eliminate_with_remap(dag: &Dag) -> (Dag, UnordMap<NodeId, NodeI
         }
     }
     for node in dag.nodes() {
-        if matches!(node.op, RiscOp::Store { .. }) {
+        if implicit_observations && matches!(node.op, RiscOp::Store { .. }) {
             live[node.id.0] = true;
         }
     }
@@ -241,7 +273,10 @@ pub fn dead_code_eliminate_with_remap(dag: &Dag) -> (Dag, UnordMap<NodeId, NodeI
     // the dense product path specialization had just replaced with a
     // `BlasMatmul`.
     let mut extra = Vec::new();
-    for class in crate::axis_sources::derive_runtime_dim_classes(dag) {
+    for class in crate::axis_sources::derive_runtime_dim_classes(dag)
+        .into_iter()
+        .filter(|_| implicit_observations)
+    {
         for member in &class.members {
             if let crate::axis_sources::AxisSource::ExternalAxis { load, .. } = member.source
                 && !live[load.0]

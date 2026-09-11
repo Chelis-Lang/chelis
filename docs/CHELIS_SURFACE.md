@@ -132,7 +132,8 @@ float upcast (their default `divide`); use a `cast` first for that.
 - `count` requires one or more unique axes. Concrete-rank calls may use several
   positional axes in any order; rank-polymorphic calls use named axes only. It lowers
   to one dedicated `Count` node whose normalized original positions are stored in
-  descending order. Eval and C implement it; HIP/Metal reject pending chelis#1291.
+  descending order. Eval, C, HIP, and Metal implement it with dedicated kernels;
+  the HIP hardware gate is still pending under chelis#1291.
 - **`accumulator` (sum only)** controls running-sum precision and result dtype.
   Defaults (no implicit promotion): bf16/f16→f32, f32→f32, f64→f64, int8/int16→int32,
   int32→int32, int64→int64. Full table: `spec/04` §5.7.1.
@@ -174,12 +175,22 @@ broadcast axis). The named-axis and four-argument anchored forms belong to `inse
 |---|---|---|
 | `const` | `(value, shape...) -> tensor[shape,p]` | zero gradient |
 | `load` | `(source, shape...) -> tensor[shape,p]` | zero gradient |
-| `dropout` | `(&tensor[D,f32], rate: f32) -> tensor[D,f32]` | differentiable (mask fixed wrt seed); introduces `Random`. **Eval-only — not codegen'd by C/HIP/Metal build yet.** |
+| `dropout` | `(&tensor[D,p_float], rate: p_float) -> tensor[D,p_float]` | all active float dtypes; fixed-control input AD replays its forward mask; introduces `Random`. **Eval-only — not codegen'd by C/HIP/Metal build yet.** |
 | `uniform_like` | `(&tensor[D,p], lo: f32, hi: f32) -> tensor[D,p]` | active float `p`; zero gradient; introduces `Random`; seeded via `with seed(Ni64) { }` |
 
 Internal-only `RiscOp`s not directly callable from Surf: `Store`, `Copy`, `Drop`,
 `Realize`, `Cast`, `FusedElem`, `OneHot`, `BlasMatmul` (the `matmul` specialization
 target), `Gather`/`ScatterAdd`/`Scatter` (the sparse nodes below).
+
+Fixed-control source evaluation carries a non-serialized execution plan through
+ordinary, prepared, contextual, helper, and input-AD paths. Dropout validates its
+same-dtype rate before drawing; accepted empty/zero-rate and dead-value calls
+still consume an ordinal. Nested handlers restore their parent on errors, and
+backward keyed replay consumes no new ordinal. Runtime-rate/rate AD, higher-order
+AD, random vmap, resource scopes, dynamic control, and general UniformLike arithmetic remain
+outside this repair. Legacy bare-Dag Rust evaluators and baked-seed wire/cache
+projections are unchanged; cloning a plan's inspection DAG loses execution
+metadata and is not a supported conversion back to the repaired source path.
 
 ### 1.7 Sparse tensor-lane nodes — `spec/05` §3.5
 
@@ -520,6 +531,14 @@ build also rejects runtime-symbolic windowed axes and bf16/f16 (cast to f32 firs
 
 Effects are inferred and checked after types, before lowering. The style gate and
 `chelis check` report effect rows per function.
+
+The C/HIP compiler APIs check Resource regions against their selected target
+before emitting an artifact or invoking an emission observer. Entry-scoped C
+compilation checks the selected source dependency closure, with lexical locals
+excluded from helper resolution; whole-program emission checks all definitions.
+Contextual compilation retains its existing callable-lane limitations:
+region-bearing imported helpers can decline before a tensor entry is selected.
+That decline is not evidence of successful Resource validation or support.
 
 ---
 

@@ -2830,6 +2830,18 @@ struct SemanticRegistration {
 /// them their own complete enumerator. Discovered rows use the exact shared
 /// final-authority registry above instead.
 const SEMANTIC_REGISTRATIONS: &[SemanticRegistration] = &[
+    SemanticRegistration {
+        callable: "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedDropout::new(input: &TensorStorage, rate: ScalarValue) -> Result<PreparedDropout, NumericKernelError>",
+        atom: "[05-OP-37]",
+    },
+    SemanticRegistration {
+        callable: "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedDropout::apply(&self, seed: u64, ordinal: u64) -> Result<TensorStorage, NumericKernelError>",
+        atom: "[05-OP-37]",
+    },
+    SemanticRegistration {
+        callable: "[compiler-builtin-numeric] dropout(input: &tensor[D, p_float], rate: p_float) -> tensor[D, p_float]",
+        atom: "[05-OP-37]",
+    },
     // chelis#759's float-to-integer ladder rung. `cast_trunc` is a
     // compiler-owned numeric callable, so it lands on no enumerated leg
     // (it is neither a C export, an exported stdlib `def`, nor a prelude
@@ -6530,6 +6542,42 @@ fn cast_trunc_is_registered_against_its_authority_atom() {
         "the `cast_trunc` registration must satisfy the same atom-existence \
          contract as every other registered callable"
     );
+}
+
+#[test]
+fn fixed_control_dropout_is_registered_against_its_exact_authority_atom() {
+    let callable = "[compiler-builtin-numeric] dropout(input: &tensor[D, p_float], rate: p_float) -> tensor[D, p_float]";
+    let registration = SEMANTIC_REGISTRATIONS
+        .iter()
+        .find(|row| row.callable == callable)
+        .expect("the active-float dropout signature requires an exact semantic registration");
+    assert_eq!(registration.atom, "[05-OP-37]");
+    let spec = fs::read_to_string(repo_root().join(CONTROLLING_SPEC_REL)).unwrap();
+    assert!(registration_problem(*registration, &spec).is_none());
+}
+
+#[test]
+fn prepared_dropout_kernel_boundaries_have_exact_semantic_authority() {
+    let spec = fs::read_to_string(repo_root().join(CONTROLLING_SPEC_REL)).unwrap();
+    for callable in [
+        "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedDropout::new(input: &TensorStorage, rate: ScalarValue) -> Result<PreparedDropout, NumericKernelError>",
+        "[compiler-kernel-numeric] chelis_types::dtype_semantics::PreparedDropout::apply(&self, seed: u64, ordinal: u64) -> Result<TensorStorage, NumericKernelError>",
+    ] {
+        let rows = SEMANTIC_REGISTRATIONS
+            .iter()
+            .filter(|row| row.callable == callable)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows.len(),
+            1,
+            "missing or duplicate kernel boundary: {callable}"
+        );
+        assert_eq!(
+            rows[0].atom, "[05-OP-37]",
+            "wrong kernel authority: {callable}"
+        );
+        assert!(registration_problem(*rows[0], &spec).is_none());
+    }
 }
 
 #[test]

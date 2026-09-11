@@ -590,19 +590,33 @@ fn infer_app_inner(
     let expected_fn = Type::Fn(unify_arg_tys, Box::new(ret_tv.clone()));
 
     match unify(&func_ty, &expected_fn, subst) {
-        Ok(()) => finish_unified_app(
-            list,
-            kids,
-            func_name,
-            arg_tys,
-            ret_tv,
-            env,
-            vg,
-            subst,
-            errors,
-            product,
-            expected_result,
-        ),
+        Ok(()) => {
+            // chelis#1512: watch whether the eager pass rejects this call. A
+            // route can suspend on one operand and then reject on another in
+            // the same pass, and the replay re-enters the whole route, so the
+            // rejection would be reported a second time. A call that has
+            // already failed has nothing left to decide, so its suspension is
+            // cancelled here.
+            let checkpoint = errors.checkpoint();
+            let applied = finish_unified_app(
+                list,
+                kids,
+                func_name,
+                arg_tys,
+                ret_tv,
+                env,
+                vg,
+                subst,
+                adt_reg,
+                errors,
+                product,
+                expected_result,
+            );
+            if errors.iter_since(checkpoint).next().is_some() {
+                product.cancel_post_app_check_for(list);
+            }
+            applied
+        }
         Err(te) => {
             let mut e: CheckError = te.into();
             if let Some(id) = list_span_id(list) {

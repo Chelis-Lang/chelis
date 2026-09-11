@@ -150,6 +150,24 @@ pub fn grad_dag_checked(
     output: NodeId,
     wrt: &[NodeId],
 ) -> Result<GradResult, AdError> {
+    grad_dag_checked_impl(forward, output, wrt, None)
+}
+
+pub(crate) fn grad_dag_checked_with_execution(
+    forward: &Dag,
+    output: NodeId,
+    wrt: &[NodeId],
+    execution: &mut crate::evaluation::ExecutionMetadata,
+) -> Result<GradResult, AdError> {
+    grad_dag_checked_impl(forward, output, wrt, Some(execution))
+}
+
+fn grad_dag_checked_impl(
+    forward: &Dag,
+    output: NodeId,
+    wrt: &[NodeId],
+    execution: Option<&mut crate::evaluation::ExecutionMetadata>,
+) -> Result<GradResult, AdError> {
     if forward.is_empty() {
         return Err(AdError::NotSupported {
             op: "<empty>",
@@ -327,7 +345,7 @@ pub fn grad_dag_checked(
         }
     }
 
-    grad_dag_result(forward, output, wrt).map_err(|why| AdError::NotSupported {
+    grad_dag_result(forward, output, wrt, execution).map_err(|why| AdError::NotSupported {
         op: "<unknown>",
         reason: AdRejectionReason::Other(format!("failed to construct backward DAG ({why})")),
     })
@@ -443,7 +461,7 @@ fn stamp_grad_marker(dag: &mut Dag, dag_size_before: usize, forward_node: &DagNo
 ///
 /// Returns `None` if the forward DAG is empty or the output node doesn't exist.
 pub fn grad_dag(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Option<GradResult> {
-    grad_dag_result(forward, output, wrt).ok()
+    grad_dag_result(forward, output, wrt, None).ok()
 }
 
 /// Like [`grad_dag`] but returns a structured failure string instead of
@@ -453,7 +471,12 @@ pub fn grad_dag(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Option<GradRes
 /// (`grad_dag_checked` and its user-facing lowering error) can report
 /// *why* the backward DAG could not be built rather than the legacy
 /// opaque "unsupported op or verification failure".
-fn grad_dag_result(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Result<GradResult, String> {
+fn grad_dag_result(
+    forward: &Dag,
+    output: NodeId,
+    wrt: &[NodeId],
+    mut execution: Option<&mut crate::evaluation::ExecutionMetadata>,
+) -> Result<GradResult, String> {
     if forward.is_empty() {
         return Err("grad: forward DAG is empty".to_string());
     }
@@ -522,13 +545,14 @@ fn grad_dag_result(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Result<Grad
         let node = forward.get(node_id).unwrap().clone();
         let dag_size_before = dag.len();
         let input_grads =
-            compute_adjoints(&node, grad_out, forward, &mut dag).ok_or_else(|| {
-                format!(
-                    "grad: no reverse-mode adjoint is defined for `{}` (node {})",
-                    risc_op_name(&node.op),
-                    node.id.0
-                )
-            })?;
+            compute_adjoints(&node, grad_out, forward, &mut dag, execution.as_deref_mut())
+                .ok_or_else(|| {
+                    format!(
+                        "grad: no reverse-mode adjoint is defined for `{}` (node {})",
+                        risc_op_name(&node.op),
+                        node.id.0
+                    )
+                })?;
         // Every node added inside compute_adjoints is a backward
         // (adjoint) node for `node`. Stamp the grad marker + the
         // forward span onto each.
@@ -569,9 +593,50 @@ fn grad_dag_result(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Result<Grad
     // the pruning below keeps each declarer and its bound-scalar chain.
     crate::dag::record_runtime_dim_shape_deps(&mut dag);
 
-    let (dag, output_node, grad_nodes) = prune_to_requested_outputs(&dag, output, &grad_nodes);
+    let retained = if execution.is_some() {
+        forward
+            .nodes()
+            .iter()
+            .filter(|node| !matches!(node.op, RiscOp::Load { .. }))
+            .map(|node| node.id)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let (dag, output_node, grad_nodes, remap) =
+        prune_to_requested_outputs(&dag, output, &grad_nodes, &retained);
 
-    let verify_errors = crate::verify::verify(&dag);
+    if let Some(execution) = execution {
+        // An unrequested backward cotangent may disappear. Forward entry
+        // sites and source-order obligations may not. Only this AD pruning
+        // boundary is allowed to remove a generated, unused replay.
+        execution.sites = execution
+            .sites
+            .to_sorted()
+            .into_iter()
+            .filter(|(node, site)| {
+                !matches!(site, crate::evaluation::RandomSite::Replay { .. })
+                    || remap.contains_key(node)
+            })
+            .map(|(node, site)| (*node, *site))
+            .collect();
+        execution.remap(&remap)?;
+        execution.complete(&dag)?;
+    }
+
+    // Retained source computations are execution roots, not returned values.
+    // Verify exactly those additional roots without weakening any structural
+    // check or changing the public GradResult's value-root interface.
+    let mut verification_dag = dag.clone();
+    for node in retained {
+        let mapped = remap[&node];
+        // A source Drop remains in the retained graph and is verified as
+        // a terminal instruction, never as an additional value root.
+        if !matches!(verification_dag.get(mapped).unwrap().op, RiscOp::Drop) {
+            verification_dag.add_root(mapped);
+        }
+    }
+    let verify_errors = crate::verify::verify(&verification_dag);
     if !verify_errors.is_empty() {
         return Err(format!(
             "grad: constructed backward DAG failed verification: {}",
@@ -636,12 +701,21 @@ fn prune_to_requested_outputs(
     dag: &Dag,
     output: NodeId,
     grad_nodes: &UnordMap<NodeId, NodeId>,
-) -> (Dag, NodeId, UnordMap<NodeId, NodeId>) {
+    retained: &[NodeId],
+) -> (
+    Dag,
+    NodeId,
+    UnordMap<NodeId, NodeId>,
+    UnordMap<NodeId, NodeId>,
+) {
     if dag.is_empty() {
-        return (Dag::new(), NodeId(0), UnordMap::new());
+        return (Dag::new(), NodeId(0), UnordMap::new(), UnordMap::new());
     }
 
     let mut live = vec![false; dag.len()];
+    for id in retained {
+        live[id.0] = true;
+    }
     for &root in dag.roots() {
         live[root.0] = true;
     }
@@ -725,7 +799,12 @@ fn prune_to_requested_outputs(
         .get(&output.0)
         .unwrap_or_else(|| panic!("output node {output:?} missing after grad pruning"));
 
-    (new_dag, new_output, new_grad_nodes)
+    let remap = id_map
+        .into_sorted()
+        .into_iter()
+        .map(|(old, new)| (NodeId(old), new))
+        .collect();
+    (new_dag, new_output, new_grad_nodes, remap)
 }
 
 /// Compute adjoint contributions for each input of the given node.
@@ -735,6 +814,7 @@ fn compute_adjoints(
     g: NodeId,
     forward: &Dag,
     dag: &mut Dag,
+    execution: Option<&mut crate::evaluation::ExecutionMetadata>,
 ) -> Option<Vec<(NodeId, NodeId)>> {
     match &node.op {
         // --- Binary elementwise ---
@@ -1024,7 +1104,11 @@ fn compute_adjoints(
         }
         RiscOp::Dropout { rate, seed } => {
             let x = node.inputs[0];
-            let ty = forward.get(x).unwrap().output_type.clone();
+            // Replay owns the forward mask's exact layout. A checked reshape
+            // can retain a computed input axis while dropout's result carries
+            // its proven literal claim; substituting that input type here
+            // would change the replay contract despite identical shapes.
+            let ty = node.output_type.clone();
             let dx = dag.add_node(
                 RiscOp::Dropout {
                     rate: *rate,
@@ -1034,6 +1118,16 @@ fn compute_adjoints(
                 ty,
                 None,
             );
+            if let Some(execution) = execution {
+                let crate::evaluation::RandomSite::Forward { draw, .. } =
+                    *execution.sites.get(&node.id)?
+                else {
+                    return None;
+                };
+                execution
+                    .sites
+                    .insert(dx, crate::evaluation::RandomSite::Replay { draw });
+            }
             Some(vec![(x, dx)])
         }
 

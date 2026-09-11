@@ -549,12 +549,12 @@ mod tests {
 
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes() {
-        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 17);
+        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 18);
     }
 
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes_and_nominal_kinds() {
-        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 17);
+        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 18);
     }
 
     #[test]

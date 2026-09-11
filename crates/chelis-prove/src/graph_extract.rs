@@ -511,7 +511,12 @@ const _: () = {
     // stored-bit codec and admits fixed-width references and dimensions.
     // Version 10 adds discrete checked-extent carriers, outside this
     // float-envelope extraction and classified explicitly above.
-    assert!(WIRE_DAG_SCHEMA_VERSION == 10);
+    // Version 11 (chelis#1374/#1376) gives `ExtentWitness` named claims: one
+    // binder string and one boolean role per requirement edge, plus the edges
+    // themselves. Every added field is discrete and the edges name other
+    // witnesses, so the box/range float-bound extraction contract is
+    // unchanged; the version moves because the witness payload shape did.
+    assert!(WIRE_DAG_SCHEMA_VERSION == 11);
 };
 
 #[cfg(test)]

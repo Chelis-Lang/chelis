@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "freeze_sha256": "7b1025076575d63f5c386088d897a0cdfca24574a72ecae9a8f332cc14240a9d",
+  "freeze_sha256": "59db154426c58985dbd25703fca66d07ca46f4b6100d0e7ef54701fdbb297d33",
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -1638,7 +1638,7 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_expr_at_site",
-      "sample": "{}chelis_rng_current.seed = (uint64_t){seed_var};"
+      "sample": "{}chelis_rng_state {seeded_var} = {{(uint64_t){seed_var}, 0ULL, 1}};"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_filter",
@@ -2418,7 +2418,7 @@
       "artifact": "the frozen INVENTORY_SOURCES file list",
       "enumerator": "chelis-repr-inventory: syn for Rust; clang's front end under fixed target lanes, a committed stub SDK, and a scrubbed environment for C and Objective-C headers, classified with the capacity census's closed type-word lists",
       "universe": {
-        "registered_sources": 80,
+        "registered_sources": 83,
         "roots": [
           "crates/chelis-runtime/src/**/*.rs",
           "crates/chelis-runtime/include/**/*.h",

@@ -1,7 +1,10 @@
 //! Slice B executable contract for chelis#1277: one checked source per
 //! realized output axis (`spec/design/runtime_extents.md` C4).
 
-use chelis_ir::axis_sources::{AxisSource, check_axis_sources, output_axis_sources};
+use chelis_ir::axis_sources::{
+    AxisSource, ExtentOrigin, check_axis_sources, dim_extent_origins, output_axis_sources,
+    resolve_axis_extent, unresolved_dim_names,
+};
 use chelis_ir::dag::{
     Dag, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStep, FusedStepOp, NodeId,
     ReduceWindowKind, RiscOp, RtAxis, RtDim, TensorType,
@@ -995,6 +998,7 @@ fn every_risc_op_yields_exactly_one_source_per_output_axis() {
             parameter: "f".into(),
             axis: RtAxis::Lit(0),
             requirements: vec![chelis_types::scalar_from_i64("load", Prim::Int64, 2).unwrap()],
+            claims: Vec::new(),
         },
         vec![f],
         scalar(Prim::Int64),
@@ -1026,6 +1030,7 @@ fn every_risc_op_yields_exactly_one_source_per_output_axis() {
             parameter: "unit".into(),
             axis: RtAxis::Lit(0),
             requirements: vec![chelis_types::scalar_from_i64("load", Prim::Int64, 1).unwrap()],
+            claims: Vec::new(),
         },
         vec![operand],
         scalar(Prim::Int64),
@@ -1247,15 +1252,203 @@ fn binding_a_to_end_bound_rejects_a_start_that_is_not_literal_zero() {
     let mut bindings = chelis_unord::UnordMap::new();
     bindings.insert("n".to_string(), 4usize);
 
-    let resolved = chelis_ir::dag::bind_symbolic_dims(&bound(RtDim::Lit(0)), &bindings)
-        .expect("the identity slice binds");
+    let resolved = chelis_ir::dag::bind_symbolic_dims(
+        &bound(RtDim::Lit(0)),
+        &bindings,
+        &chelis_unord::UnordSet::new(),
+    )
+    .expect("the identity slice binds");
     assert!(matches!(
         &resolved.get(NodeId(1)).expect("shrink").op,
         RiscOp::Shrink { bounds }
             if bounds == &vec![(RtDim::Lit(0), RtDim::Lit(4))]
     ));
 
-    let error = chelis_ir::dag::bind_symbolic_dims(&bound(RtDim::Lit(1)), &bindings)
-        .expect_err("a nonzero start is a malformed bound, not a slice");
+    let error = chelis_ir::dag::bind_symbolic_dims(
+        &bound(RtDim::Lit(1)),
+        &bindings,
+        &chelis_unord::UnordSet::new(),
+    )
+    .expect_err("a nonzero start is a malformed bound, not a slice");
     assert!(error.contains("requires a literal zero start"), "{error}");
+}
+
+// ===========================================================================
+// C4.4's declaration half: `resolve_axis_extent` and `dim_extent_origins`.
+//
+// `output_axis_sources` answers one hop. A declaration consumer needs the
+// terminal answer, because the emitted C allocates by NAME and every name it
+// renders needs one place that assigns it. These rows pin what that
+// resolution answers for the shapes chelis#665 and chelis#1556 report.
+// ===========================================================================
+
+/// chelis#665 with the two spellings the lowerer actually produces: the
+/// `Stride`'s own axis is `m`, and the kept axis of the rank-raising `Expand`
+/// carries the lowerer's fresh `_anon_dim_2_1`. The name-keyed walk cannot
+/// declare the second, because no `Load` carries that string. The resolution
+/// answers in one hop, and it answers with the STRIDE, not with `x`.
+///
+/// EVIDENTIARY STATUS: regression test for the derivation. There was no
+/// resolution to answer before this change, and the consumer it feeds ICEd.
+#[test]
+fn a_kept_axis_under_a_second_spelling_resolves_to_the_operation_that_computes_it() {
+    let mut dag = Dag::new();
+    let source = load(&mut dag, "x", vec![named("n")]);
+    let strided = dag.add_node(
+        RiscOp::Stride {
+            strides: vec![RtDim::Lit(2)],
+        },
+        vec![source],
+        ty(vec![named("m")], Prim::F32),
+        None,
+    );
+    let expanded = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::Lit(3),
+        },
+        vec![strided],
+        ty(vec![DimInfo::Lit(3), named("_anon_dim_2_1")], Prim::F32),
+        None,
+    );
+    dag.add_root(expanded);
+
+    assert_eq!(
+        resolve_axis_extent(&dag, expanded, 1),
+        Some(ExtentOrigin::OpComputed {
+            op: strided,
+            axis: 0
+        }),
+        "the kept axis's extent is produced by the stride, whatever it is spelled",
+    );
+    assert_eq!(
+        resolve_axis_extent(&dag, strided, 0),
+        Some(ExtentOrigin::OpComputed {
+            op: strided,
+            axis: 0
+        }),
+    );
+    // The operand's own name still resolves to the input it is declared by,
+    // which is what the prologue declares it from.
+    assert_eq!(
+        resolve_axis_extent(&dag, source, 0),
+        Some(ExtentOrigin::ExternalAxis {
+            load: source,
+            axis: 0
+        }),
+    );
+    assert_eq!(
+        dim_extent_origins(&dag),
+        vec![
+            (
+                "n".to_string(),
+                ExtentOrigin::ExternalAxis {
+                    load: source,
+                    axis: 0
+                }
+            ),
+            (
+                "m".to_string(),
+                ExtentOrigin::OpComputed {
+                    op: strided,
+                    axis: 0
+                }
+            ),
+            (
+                "_anon_dim_2_1".to_string(),
+                ExtentOrigin::OpComputed {
+                    op: strided,
+                    axis: 0
+                }
+            ),
+        ],
+        "every rendered name has one origin, in node-id (= emission) order",
+    );
+    assert!(unresolved_dim_names(&dag).is_empty());
+}
+
+/// chelis#1556's shape: a shape-preserving operation over an operand whose
+/// axis is a literal resolves in two hops to that literal. The consumer then
+/// declares `int64_t d43 = 3;` instead of raising a missing-binding error
+/// against a kernel that has no `Load` at all.
+///
+/// EVIDENTIARY STATUS: regression test for the derivation.
+#[test]
+fn a_shape_preserving_axis_over_a_literal_operand_resolves_to_the_literal() {
+    let mut dag = Dag::new();
+    // The real program's `scalar_to_tensor(1.0f32)`; a rank-0 operand is all
+    // the insertion needs, and its own kind is not what this row measures.
+    let seed = dag.add_node(
+        RiscOp::Load { name: "s".into() },
+        vec![],
+        scalar(Prim::F32),
+        None,
+    );
+    let filled = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::Lit(3),
+        },
+        vec![seed],
+        ty(vec![DimInfo::Lit(3)], Prim::F32),
+        None,
+    );
+    let noised = dag.add_node(
+        RiscOp::UniformLike {
+            low: 0.0,
+            high: 1.0,
+            seed: 42,
+        },
+        vec![filled],
+        ty(vec![named("d43")], Prim::F32),
+        None,
+    );
+    dag.add_root(noised);
+
+    assert_eq!(
+        resolve_axis_extent(&dag, noised, 0),
+        Some(ExtentOrigin::Literal(3)),
+        "two hops: the uniform preserves its operand's shape, which is a literal",
+    );
+    assert_eq!(
+        dim_extent_origins(&dag),
+        vec![("d43".to_string(), ExtentOrigin::Literal(3))],
+    );
+    assert!(unresolved_dim_names(&dag).is_empty());
+}
+
+/// The negative twin: a name whose axis has NO source resolves to no origin
+/// and is reported, so a consumer can turn it into a typed receipt instead of
+/// panicking or guessing. This is chelis#1482's shape, which
+/// `check_axis_sources` already refuses first; the report exists so a
+/// consumer that reaches a name the refusal did not cover still fails closed.
+///
+/// EVIDENTIARY STATUS: regression test for the derivation.
+#[test]
+fn a_named_axis_with_no_source_resolves_to_no_origin_and_is_reported() {
+    let mut dag = Dag::new();
+    // A `Const` fill whose only positive-rank axis is ANONYMOUS has no
+    // literal, no operand, no class and no shape dependency to size it.
+    let orphan = dag.add_node(
+        RiscOp::Const {
+            value: chelis_types::scalar_from_f64("test", Prim::F32, 0.0).expect("zero fill"),
+        },
+        vec![],
+        ty(vec![named("")], Prim::F32),
+        None,
+    );
+    let renamed = dag.add_node(
+        RiscOp::Neg,
+        vec![orphan],
+        ty(vec![named("_anon_dim_1_0")], Prim::F32),
+        None,
+    );
+    dag.add_root(renamed);
+
+    assert_eq!(resolve_axis_extent(&dag, renamed, 0), None);
+    assert_eq!(dim_extent_origins(&dag), vec![]);
+    assert_eq!(
+        unresolved_dim_names(&dag),
+        vec!["_anon_dim_1_0".to_string()],
+    );
 }

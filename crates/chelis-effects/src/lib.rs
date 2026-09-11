@@ -236,8 +236,21 @@ pub fn validate_build_target(
     program: &CheckedProgram,
     target: &str,
 ) -> Result<(), Vec<EffectError>> {
+    validate_build_target_expressions(program.annotated_exprs(), target)
+}
+
+/// Check Resource regions in an emission scope selected from checked source.
+///
+/// This shares the whole-program validator's target classification. Callers
+/// selecting an entry must include its transitive source dependencies before
+/// lowering erases the handlers. This validation does not establish that an
+/// arbitrary expression slice is well typed or is the correct emission scope.
+pub fn validate_build_target_expressions(
+    expressions: &[Expr],
+    target: &str,
+) -> Result<(), Vec<EffectError>> {
     let mut errors = Vec::new();
-    for expr in program.annotated_exprs() {
+    for expr in expressions {
         validate_build_target_expr(expr, target, &mut errors);
     }
     if errors.is_empty() {

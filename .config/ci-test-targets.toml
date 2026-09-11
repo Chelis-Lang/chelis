@@ -4,6 +4,18 @@ version = 1
 
 [[target]]
 package = "chelis-compiler-api"
+name = "invocation_local_random"
+
+[[target]]
+package = "chelis-cli"
+name = "issue_771_seed_width_parity"
+
+[[target]]
+package = "chelis-compiler-api"
+name = "resource_target_admission"
+
+[[target]]
+package = "chelis-compiler-api"
 name = "issue_1738_transcript_capture"
 
 [[target]]
@@ -49,6 +61,18 @@ name = "diagnostic_kind_pipeline"
 [[target]]
 package = "chelis-compiler-api"
 name = "fragment_parity"
+
+[[target]]
+package = "chelis-ir"
+name = "dropout_fixed_stream_ir"
+
+[[target]]
+package = "chelis-compiler-api"
+name = "dropout_fixed_stream_api"
+
+[[target]]
+package = "chelis-cli"
+name = "dropout_fixed_stream_cli"
 
 [[target]]
 package = "chelis-cli"
@@ -105,3 +129,43 @@ name = "issue_1418_recursive_cast_targets"
 [[target]]
 package = "chelis-cli"
 name = "issue_1640_value_root_actualization"
+
+[[target]]
+package = "chelis-backend-hip"
+name = "hip_count_codegen"
+
+[[target]]
+package = "chelis-backend-metal"
+name = "metal_count_codegen"
+
+[[target]]
+package = "chelis-compiler-api"
+name = "issue_1291_count_device_helpers_api"
+
+[[target]]
+package = "chelis-cli"
+name = "issue_1291_count_device_helpers_cli"
+
+[[target]]
+package = "chelis-cli"
+name = "issue_1291_count_device_entry"
+
+[[target]]
+package = "chelis-cli"
+name = "issue_368_grad_concat_windows"
+
+[[target]]
+package = "chelis-ir"
+name = "issue_1775_runtime_extent_producer_identity"
+
+[[target]]
+# chelis#1374/#1376: this change's two regression receipts. Both are
+# milliseconds, and without a row here they would run only in the unfiltered
+# nightly, which is not where a regression this pull request introduced should
+# first be caught.
+package = "chelis-compiler-api"
+name = "runtime_extent_authored_claims"
+
+[[target]]
+package = "chelis-compiler-api"
+name = "hip_entry_obligation_witness"

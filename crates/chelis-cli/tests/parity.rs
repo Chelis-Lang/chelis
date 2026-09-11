@@ -15,6 +15,11 @@
 //!     Then assert the eval lane and the C lane agree: every line
 //!     byte-equal, tensor lines included.
 //!
+//! The explicitly evaluator-only dropout examples have bounded
+//! per-file exceptions: clean check, exact executable eval output, and the
+//! current typed C rejection are all tested. It makes no compiled parity
+//! claim; the ordinary three-lane driver remains unchanged for other files.
+//!
 //! There is deliberately NO tolerant fallback for tensor lines. The old
 //! mismatch path (re-parse both lines as `Vec<f64>`, compare under 1e-6)
 //! was removed by chelis#729 Phase 0: it silently converted integer
@@ -437,6 +442,69 @@ fn parity_dict_foundation() {
 }
 
 #[test]
+fn parity_dropout_fixed_stream_eval_and_c_rejection() {
+    check_dropout_eval_and_c_rejection(
+        "dropout_fixed_stream.ch",
+        b"main.0 = tensor(shape=[4], data=[0.0, 2.0, 0.0, 0.0])\nmain.1 = tensor(shape=[4], data=[2.0, 0.0, 0.0, 0.0])\n",
+    );
+}
+
+#[test]
+fn parity_dropout_staged_claim_eval_and_c_rejection() {
+    check_dropout_eval_and_c_rejection(
+        "dropout_staged_claim.ch",
+        b"main = tensor(shape=[2, 2], data=[2.0, 0.0, 0.0, 0.0])\n",
+    );
+}
+
+fn check_dropout_eval_and_c_rejection(file: &str, expected: &[u8]) {
+    use chelis_compiler_api::{
+        compiler::compile,
+        schema::{CompileRequest, CompileTarget, SourceKind},
+    };
+    let path = examples_root().join(file);
+    assert_check_clean(&path);
+    assert_eq!(run_eval(&path), expected);
+    let error = compile(CompileRequest {
+        source_kind: SourceKind::Surf,
+        source: fs::read_to_string(&path).unwrap(),
+        target: CompileTarget::C,
+        entry_name: Some("main".into()),
+    })
+    .expect_err("the example's C lane remains explicitly unsupported");
+    assert_eq!(error.errors.len(), 1, "{error:?}");
+    assert_eq!(error.errors[0].kind().as_str(), "unsupported_feature");
+    assert!(
+        error.errors[0]
+            .message
+            .contains("unimplemented chelis#1192")
+    );
+    let directory = tempdir().unwrap();
+    let output = Command::cargo_bin("chelis")
+        .unwrap()
+        .args(["build", path.to_str().unwrap(), "--target", "c", "--output"])
+        .arg(directory.path().join("out"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "C dropout remains unsupported");
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        diagnostic.starts_with("error: unsupported: compiled `dropout` op at lowered node "),
+        "{diagnostic}"
+    );
+    assert!(diagnostic.contains("(codegen:c)"), "{diagnostic}");
+    assert!(
+        diagnostic
+            .contains("unimplemented chelis#1192: compiled `dropout` kernels are not implemented"),
+        "{diagnostic}"
+    );
+}
+
+#[test]
 fn parity_checked_window_geometry() {
     drive_parity(&examples_root().join("checked_window_geometry.ch"), true);
 }
@@ -459,6 +527,11 @@ fn parity_explicit_normalization() {
 #[test]
 fn parity_generic_explicit_shape() {
     drive_parity(&examples_root().join("generic_explicit_shape.ch"), true);
+}
+
+#[test]
+fn parity_count_bool_device_entry_library_only() {
+    drive_parity(&examples_root().join("count_bool_device_entry.ch"), false);
 }
 
 #[test]
@@ -598,6 +671,13 @@ fn parity_rank_poly_borrow_library_only() {
     drive_parity(&examples_root().join("rank_poly_borrow.ch"), false);
 }
 
+// A callable tensor entry: check/evaluate the declaration and compile its C
+// object. This is target admission coverage, not a claim of GPU execution.
+#[test]
+fn parity_resource_target_cpu_library_only() {
+    drive_parity(&examples_root().join("resource_target_cpu.ch"), false);
+}
+
 // -----------------------------------------------------------------------------
 // Corpus completeness guard
 // -----------------------------------------------------------------------------
@@ -614,7 +694,10 @@ fn parity_corpus_is_complete() {
         "checked_window_geometry.ch",
         "constraint_directed_risk_guards.ch",
         "count_bool_axes.ch",
+        "count_bool_device_entry.ch",
         "dict_foundation.ch",
+        "dropout_fixed_stream.ch",
+        "dropout_staged_claim.ch",
         "explicit_normalization.ch",
         "generic_explicit_shape.ch",
         "generic_value_roots.ch",
@@ -635,6 +718,7 @@ fn parity_corpus_is_complete() {
         "rank_poly_borrow.ch",
         "recursive_cast_targets.ch",
         "recursive_generic.ch",
+        "resource_target_cpu.ch",
         "scalar_string_foundation.ch",
         "tensor_structural_ops.ch",
         "transformer_block.ch",

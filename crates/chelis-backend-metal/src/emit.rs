@@ -7,7 +7,7 @@
 
 use chelis_ir::dag::{DagNode, DimInfo, NodeId, RiscOp, RtDim, TensorType};
 use chelis_ir::ownership::{VerifiedDagAction, VerifiedDagView};
-use chelis_types::ScalarValue;
+use chelis_types::{NumericTrap, ScalarValue};
 
 /// chelis#616: the Metal lane requires compile-time movement bounds (it rejects
 /// symbolic movement shapes via `require_movement_shape`). This converter
@@ -249,7 +249,8 @@ pub(crate) fn allocation_nodes(dag: VerifiedDagView<'_>) -> Vec<NodeId> {
                 | RiscOp::MaxReduce { axis: 0 }
                 | RiscOp::MinReduce { axis: 0 }
                 | RiscOp::Pad { .. }
-                | RiscOp::Shrink { .. } => true,
+                | RiscOp::Shrink { .. }
+                | RiscOp::Count { .. } => true,
                 RiscOp::Sum { axis: 1, .. } => matmul_heads.contains(&node.id.0),
                 _ => false,
             };
@@ -278,6 +279,7 @@ pub(crate) fn emit_verified_dag(
     reject_f64(dag)?;
     dag.check_axis_sources(Stage::Codegen("metal"))?;
     reject_integer_abs(dag)?;
+    validate_count_nodes(dag)?;
     let mut e = Emitter::new(func_name, plan);
     e.emit(dag).map_err(metal_emission_unsupported)?;
     let peak_device_bytes = e.peak_device_bytes();
@@ -302,6 +304,152 @@ fn reject_f64(dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
                 "Apple Silicon has no FP64 ALUs; use `--target c` or `--target hip`"
             ),
         ));
+    }
+    Ok(())
+}
+
+fn invalid_count(node: &DagNode, detail: String) -> Unsupported {
+    Unsupported::new(
+        UnsupportedKind::Op("count".to_string()),
+        format!("malformed Count at Metal DAG node {}: {detail}", node.id.0),
+        Stage::Codegen("metal"),
+        chelis_types::deliberate_rejection!(
+            "[05-OP-29]",
+            "Count accepts one bool tensor, a non-empty strictly descending in-range axis \
+             list, and produces the complementary shape at int64"
+        ),
+    )
+}
+
+/// A legal Count the Metal device carrier cannot describe. The launch
+/// geometry and the kernel's `ChelisCountDims` index in `uint` and the rank
+/// cap mirrors HIP's fixed-rank device metadata, so this is a target
+/// capability cell under [05-UNS-5], owned by chelis#1345, not a language
+/// rejection.
+fn count_device_limit(node: &DagNode, detail: String) -> Unsupported {
+    Unsupported::new(
+        UnsupportedKind::Op("count".to_string()),
+        format!("Count at Metal DAG node {}: {detail}", node.id.0),
+        Stage::Codegen("metal"),
+        chelis_types::unimplemented_rejection!(
+            1345,
+            "the Metal Count kernel indexes its device tensors in uint under a fixed rank \
+             cap; chelis#1345 moves device tensors onto the dynamic-rank int64 carrier"
+        ),
+    )
+}
+
+/// Element count of a fixed shape, or `None` when it overflows `usize`.
+fn fixed_element_count(dims: &[DimInfo]) -> Option<usize> {
+    dims.iter().try_fold(1usize, |product, dim| match dim {
+        DimInfo::Lit(extent) | DimInfo::Named(_, Some(extent)) => product.checked_mul(*extent),
+        DimInfo::Named(_, None) => Some(product),
+    })
+}
+
+/// Defend the backend's first typed boundary for callers that construct DAGs
+/// directly without running the canonical IR verifier. Ownership
+/// verification proves the payload's linearity, not [05-OP-29]'s operand
+/// grammar, so the emitter re-checks the Count contract it is about to lower,
+/// and it is the only place that knows the device carrier's rank cap and
+/// `uint` indexing limit.
+fn validate_count_nodes(dag: VerifiedDagView<'_>) -> Result<(), Unsupported> {
+    for node in dag.nodes() {
+        let RiscOp::Count { axes } = &node.op else {
+            continue;
+        };
+        if node.inputs.len() != 1 {
+            return Err(invalid_count(
+                node,
+                format!("expected one input, found {}", node.inputs.len()),
+            ));
+        }
+        let Some(input) = dag.get(node.inputs[0]) else {
+            return Err(invalid_count(node, "input node is missing".to_string()));
+        };
+        if input.output_type.precision != Prim::Bool {
+            return Err(invalid_count(
+                node,
+                format!(
+                    "expected bool input, found {}",
+                    input.output_type.precision.name()
+                ),
+            ));
+        }
+        if node.output_type.precision != Prim::Int64 {
+            return Err(invalid_count(
+                node,
+                format!(
+                    "expected int64 output, found {}",
+                    node.output_type.precision.name()
+                ),
+            ));
+        }
+        if axes.is_empty() {
+            return Err(invalid_count(
+                node,
+                "axis list must be non-empty".to_string(),
+            ));
+        }
+        if axes.windows(2).any(|pair| pair[0] <= pair[1]) {
+            return Err(invalid_count(
+                node,
+                format!("axes must be unique and strictly descending, found {axes:?}"),
+            ));
+        }
+        let rank = input.output_type.dims.len();
+        if rank > kernels::MOVEMENT_MAX_DIM {
+            return Err(count_device_limit(
+                node,
+                format!(
+                    "input rank {rank} exceeds the Metal device rank limit {}",
+                    kernels::MOVEMENT_MAX_DIM
+                ),
+            ));
+        }
+        let fits_u32 = |value: Option<usize>| value.is_some_and(|value| value <= u32::MAX as usize);
+        let fixed_extents_fit = |dims: &[DimInfo]| {
+            dims.iter().all(|dim| match dim {
+                DimInfo::Lit(extent) | DimInfo::Named(_, Some(extent)) => {
+                    *extent <= u32::MAX as usize
+                }
+                DimInfo::Named(_, None) => true,
+            })
+        };
+        if !fits_u32(fixed_element_count(&input.output_type.dims))
+            || !fits_u32(fixed_element_count(&node.output_type.dims))
+            || !fixed_extents_fit(&input.output_type.dims)
+            || !fixed_extents_fit(&node.output_type.dims)
+        {
+            return Err(count_device_limit(
+                node,
+                "a fixed input or output extent or element count exceeds the uint32 device \
+                 indexing limit"
+                    .to_string(),
+            ));
+        }
+        if axes.iter().any(|&axis| axis >= rank) {
+            return Err(invalid_count(
+                node,
+                format!("axis is out of range for input rank {rank}: {axes:?}"),
+            ));
+        }
+        let expected: Vec<_> = input
+            .output_type
+            .dims
+            .iter()
+            .enumerate()
+            .filter_map(|(axis, dim)| (!axes.contains(&axis)).then_some(dim.clone()))
+            .collect();
+        if node.output_type.dims != expected {
+            return Err(invalid_count(
+                node,
+                format!(
+                    "output shape {:?} does not match complementary shape {expected:?}",
+                    node.output_type.dims
+                ),
+            ));
+        }
     }
     Ok(())
 }
@@ -386,6 +534,12 @@ struct Emitter<'plan> {
     /// Sum-node-id → MatmulInfo. emit_node looks up the MatmulInfo here
     /// when reaching the Sum and emits a matmul kernel + dispatch.
     matmuls: UnordMap<usize, blas::MatmulInfo>,
+    /// Bytes of non-tensor device scratch that stays live until the
+    /// entrypoint returns. Count contributes one four-byte status word per
+    /// node; these are not `chelis_metal_alloc` tensor buffers, so they are
+    /// outside the no-reuse allocation bijection but inside the peak-bytes
+    /// formula.
+    extra_peak_device_bytes: usize,
 }
 
 impl<'plan> Emitter<'plan> {
@@ -399,6 +553,7 @@ impl<'plan> Emitter<'plan> {
             plans: Vec::new(),
             matmul_consumed: UnordSet::new(),
             matmuls: UnordMap::new(),
+            extra_peak_device_bytes: 0,
         }
     }
 
@@ -779,6 +934,8 @@ impl<'plan> Emitter<'plan> {
             }
             RiscOp::Shrink { bounds } => self.emit_shrink(node, &metal_pairs_to_usize(bounds)?),
 
+            RiscOp::Count { axes } => self.emit_count(node, axes),
+
             other => Err(format!(
                 "Metal M4 emit: node {id} op {other:?} not yet supported \
                  (axis>0 reductions, fused-elem-into-reduction, matmul, \
@@ -834,9 +991,10 @@ impl<'plan> Emitter<'plan> {
         Ok((n, ty.precision))
     }
 
-    /// Accept rank-1 OR rank-2 with literal extents and any active Metal
-    /// precision (per spec/04-type-system.md §1.1.3). Used for ops that
-    /// work on both ranks (Load, Store, matmul operands, matmul output).
+    /// Accept a fixed shape up to the device metadata rank limit and any
+    /// active Metal precision (per spec/04-type-system.md §1.1.3). A fixed
+    /// named dimension has the same compile-time extent as a literal one.
+    /// Individual consumers retain their own narrower rank checks.
     /// Returns `(total_n, shape, prec)`.
     fn require_static_shape(
         &self,
@@ -849,32 +1007,38 @@ impl<'plan> Emitter<'plan> {
                 "Metal emit ({ctx}): rank-0 not supported via this path; use scalar Const/reduce instead"
             ));
         }
-        if ty.dims.len() > 2 {
+        if ty.dims.len() > kernels::MOVEMENT_MAX_DIM {
             return Err(format!(
-                "Metal emit ({ctx}): rank {} not yet supported; rank-1 or rank-2 only in this phase",
-                ty.dims.len()
+                "Metal emit ({ctx}): rank {} exceeds device metadata limit {}",
+                ty.dims.len(),
+                kernels::MOVEMENT_MAX_DIM
             ));
         }
         let mut shape = Vec::with_capacity(ty.dims.len());
         for d in &ty.dims {
             match d {
-                DimInfo::Lit(n) => shape.push(*n),
+                DimInfo::Lit(n) | DimInfo::Named(_, Some(n)) => shape.push(*n),
                 other => {
                     return Err(format!(
-                        "Metal emit ({ctx}): symbolic dim {other:?} not yet supported"
+                        "Metal emit ({ctx}): unsized symbolic dim {other:?} not yet supported"
                     ));
                 }
             }
         }
-        let n: usize = shape.iter().product();
+        let n = shape.iter().try_fold(1usize, |product, &extent| {
+            product.checked_mul(extent).ok_or_else(|| {
+                format!("Metal emit ({ctx}): fixed shape element count exceeds usize")
+            })
+        })?;
         Ok((n, shape, ty.precision))
     }
 
     fn emit_load(&mut self, node: &DagNode, name: &str, inputs: &[String]) -> Result<(), String> {
-        // Loads are the boundary at which rank-2 enters. Use the rank-1-or-2
-        // helper so a rank-2 input materializes its plan correctly; downstream
-        // ops that don't yet handle rank-2 (unary/binary elementwise without
-        // matching shape) will reject via require_static_rank1.
+        // Loads are the boundary at which higher ranks enter. Use the fixed-shape
+        // helper (any rank up to `MOVEMENT_MAX_DIM`) so a rank-2 or rank-3 input
+        // materializes its plan correctly; downstream ops that don't handle a
+        // rank (unary/binary elementwise without matching shape, axis-0
+        // reductions) reject via their own rank checks.
         let (n, shape, prec) = self.require_static_shape(&node.output_type, "Load")?;
         let idx = inputs
             .iter()
@@ -1266,6 +1430,203 @@ impl<'plan> Emitter<'plan> {
         Ok(())
     }
 
+    /// Emit the dedicated [05-OP-29] multi-axis Count kernel. The kernel
+    /// evaluates the canonical adjacent-pair tree directly and reports
+    /// payload, arithmetic, and hardware-limit failures through an explicit
+    /// shared status buffer.
+    fn emit_count(&mut self, node: &DagNode, axes: &[usize]) -> Result<(), String> {
+        let in_id = node.inputs[0];
+        let in_plan = self
+            .plan_of(in_id)
+            .ok_or_else(|| {
+                format!(
+                    "Count node {} input {} not materialized",
+                    node.id.0, in_id.0
+                )
+            })?
+            .clone();
+        if in_plan.prec != Prim::Bool {
+            return Err(invalid_count(
+                node,
+                format!("expected bool input plan, found {}", in_plan.prec.name()),
+            )
+            .to_string());
+        }
+
+        let mut out_shape = Vec::with_capacity(node.output_type.dims.len());
+        for dim in &node.output_type.dims {
+            match dim {
+                DimInfo::Lit(extent) | DimInfo::Named(_, Some(extent)) => out_shape.push(*extent),
+                other => {
+                    return Err(format!(
+                        "Metal Count node {} requires fixed output extents, found {other:?}",
+                        node.id.0
+                    ));
+                }
+            }
+        }
+        let out_n = out_shape.iter().try_fold(1usize, |product, &extent| {
+            product.checked_mul(extent).ok_or_else(|| {
+                format!(
+                    "Metal Count node {} output element count exceeds usize",
+                    node.id.0
+                )
+            })
+        })?;
+
+        let mut input_strides = vec![0usize; in_plan.shape.len()];
+        let mut stride = 1usize;
+        for axis in (0..in_plan.shape.len()).rev() {
+            input_strides[axis] = stride;
+            stride = stride.checked_mul(in_plan.shape[axis]).ok_or_else(|| {
+                format!("Metal Count node {} input stride exceeds usize", node.id.0)
+            })?;
+        }
+        if stride != in_plan.n {
+            return Err(format!(
+                "Metal Count node {} input plan size {} does not match shape product {stride}",
+                node.id.0, in_plan.n
+            ));
+        }
+
+        let mut count_n = 1u64;
+        for &axis in axes.iter().rev() {
+            count_n = count_n
+                .checked_mul(in_plan.shape[axis] as u64)
+                .ok_or_else(|| {
+                    NumericTrap::Overflow {
+                        op: "count",
+                        prim: Prim::Int64,
+                    }
+                    .to_string()
+                })?;
+        }
+        if count_n > i64::MAX as u64 {
+            return Err(NumericTrap::Overflow {
+                op: "count",
+                prim: Prim::Int64,
+            }
+            .to_string());
+        }
+        let fits_u32 = |value: usize| value <= u32::MAX as usize;
+        if !fits_u32(in_plan.n)
+            || !fits_u32(out_n)
+            || in_plan.shape.iter().any(|&extent| !fits_u32(extent))
+            || input_strides.iter().any(|&value| !fits_u32(value))
+            || out_shape.iter().any(|&extent| !fits_u32(extent))
+        {
+            return Err(format!(
+                "Metal Count node {} exceeds the uint32 device indexing limit",
+                node.id.0
+            ));
+        }
+
+        let kernel_name = format!("k_count_{}", node.id.0);
+        let pso_var = format!("pso_{}", node.id.0);
+        let src = kernels::count_kernel(&kernel_name, axes, in_plan.shape.len(), in_plan.prec);
+        let src = Self::prepend_span_comments_to_kernel_source(node, src);
+        self.kernels
+            .push((pso_var.clone(), kernel_name.clone(), src));
+
+        let pad_u32 = |values: &[usize]| -> String {
+            let mut padded = [0usize; kernels::MOVEMENT_MAX_DIM];
+            padded[..values.len()].copy_from_slice(values);
+            padded
+                .into_iter()
+                .map(|value| format!("{value}u"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let out_buf = format!("buf_{}", node.id.0);
+        let allocation = self.claim_allocation(node.id)?;
+        let status_buf = format!("count_status_buf_{}", node.id.0);
+        let grid = out_n.max(1);
+        let overflow = NumericTrap::Overflow {
+            op: "count",
+            prim: Prim::Int64,
+        }
+        .to_string();
+        let domain = NumericTrap::Domain {
+            op: "count",
+            prim: Prim::Bool,
+        }
+        .to_string();
+
+        self.push_span_comments(node);
+        self.body
+            .push(format!("// node {} = Count axes {axes:?}", node.id.0));
+        self.body.push(format!(
+            "id<MTLBuffer> {out_buf} = chelis_metal_alloc({out_n}u * {});",
+            dtype::host_sizeof_expr(Prim::Int64)
+        ));
+        // The status word is device scratch, not a tensor buffer: it comes
+        // from the runtime's zeroed status-word allocator rather than
+        // `chelis_metal_alloc`, so the no-reuse plan's tensor-allocation
+        // bijection stays exact while the peak-bytes formula still counts it.
+        self.body.push(format!(
+            "id<MTLBuffer> {status_buf} = chelis_metal_alloc_status_word({});",
+            dtype::host_sizeof_expr(Prim::Int32)
+        ));
+        self.extra_peak_device_bytes = self
+            .extra_peak_device_bytes
+            .checked_add(dtype::metal_elem_size(Prim::Int32))
+            .expect("Count status-byte accounting overflow");
+        self.body.push(format!(
+            "id<MTLComputePipelineState> {pso_var} = chelis_metal_get_pipeline({pso_var}_src, @\"{kernel_name}\");"
+        ));
+        self.body.push(format!(
+            "struct {{ uint input_shape[{max_dim}]; uint input_strides[{max_dim}]; \
+             uint output_shape[{max_dim}]; uint input_ndim; uint input_size; \
+             uint output_ndim; uint output_size; unsigned long long count_n; }} count_dims_{id} = \
+             {{ {{ {input_shape} }}, {{ {input_strides} }}, {{ {output_shape} }}, \
+             {input_ndim}u, {input_size}u, {output_ndim}u, {output_size}u, {count_n}ULL }};",
+            max_dim = kernels::MOVEMENT_MAX_DIM,
+            id = node.id.0,
+            input_shape = pad_u32(&in_plan.shape),
+            input_strides = pad_u32(&input_strides),
+            output_shape = pad_u32(&out_shape),
+            input_ndim = in_plan.shape.len(),
+            input_size = in_plan.n,
+            output_ndim = out_shape.len(),
+            output_size = out_n,
+        ));
+        self.body.push(format!(
+            "{{ __unsafe_unretained id<MTLBuffer> bufs[3] = {{ {}, {out_buf}, {status_buf} }}; \
+             chelis_metal_launch({pso_var}, {grid}u, MIN((NSUInteger){grid}u, 256u), bufs, 3, \
+             &count_dims_{}, sizeof(count_dims_{})); }}",
+            in_plan.buf, node.id.0, node.id.0
+        ));
+        self.body.push(format!(
+            "int count_status_{} = *((int*)[{status_buf} contents]);",
+            node.id.0
+        ));
+        self.body.push(format!(
+            "if (count_status_{id} == 1) {{ fprintf(stderr, \"%s\\n\", {domain:?}); abort(); }}",
+            id = node.id.0
+        ));
+        self.body.push(format!(
+            "if (count_status_{id} == 2) {{ fprintf(stderr, \"%s\\n\", {overflow:?}); abort(); }}",
+            id = node.id.0
+        ));
+        self.body.push(format!(
+            "if (count_status_{id} == 3) {{ fprintf(stderr, \"count exceeded the dedicated 64-frame Metal reduction stack\\n\"); abort(); }}",
+            id = node.id.0
+        ));
+        self.body.push(format!(
+            "if (count_status_{id} == 4) {{ fprintf(stderr, \"count produced an out-of-range Metal storage index\\n\"); abort(); }}",
+            id = node.id.0
+        ));
+
+        self.plans[node.id.0] = Some(TensorPlan {
+            buf: out_buf,
+            prec: Prim::Int64,
+            n: out_n,
+            shape: out_shape,
+            allocation,
+        });
+        Ok(())
+    }
+
     fn emit_matmul(&mut self, node: &DagNode, info: &blas::MatmulInfo) -> Result<(), String> {
         // Operands must already be materialized (their Load/Const/etc.
         // emitted earlier in the topological walk; the Expand intermediates
@@ -1430,8 +1791,8 @@ impl<'plan> Emitter<'plan> {
 
     /// Resolve a tensor type to `(shape, prec)` for the movement-op path,
     /// admitting any rank up to `MOVEMENT_MAX_DIM` with literal extents.
-    /// Wider than `require_static_shape` (which caps at rank 2) because
-    /// pad/shrink kernels iterate per-axis at runtime.
+    /// Narrower than `require_static_shape` in one way (literal extents only,
+    /// no fixed named dims) because pad/shrink bounds are literal too.
     fn require_movement_shape(
         &self,
         ty: &TensorType,
@@ -1810,7 +2171,9 @@ impl<'plan> Emitter<'plan> {
                 // consistent with the formula contract.
                 p.n * p.elem_size()
             })
-            .sum()
+            .sum::<usize>()
+            .checked_add(self.extra_peak_device_bytes)
+            .expect("Metal peak device-byte accounting overflow")
     }
 
     fn plan_of(&self, id: NodeId) -> Option<&TensorPlan> {

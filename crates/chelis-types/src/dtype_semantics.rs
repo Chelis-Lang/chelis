@@ -3123,6 +3123,96 @@ pub fn integer_is_exactly_representable(value: i64, prim: Prim) -> bool {
         || magnitude.trailing_zeros() >= significant_bits.saturating_sub(precision)
 }
 
+/// Validated, borrowed input to the pure `[05-OP-37]` dropout value kernel.
+///
+/// Preparation performs every dtype/rate guard without drawing or allocating.
+/// The caller enters its source-owned forward/replay site only after `new`
+/// succeeds, then supplies that site's raw seed and ordinal to `apply`.
+/// This kernel owns no ambient random state and grants no replay provenance.
+///
+/// ```compile_fail
+/// use chelis_types::dtype_semantics::PreparedDropout;
+/// fn bypass<'a>(input: &'a chelis_types::TensorStorage, rate: chelis_types::ScalarValue)
+///     -> PreparedDropout<'a> {
+///     PreparedDropout { input, rate }
+/// }
+/// ```
+#[derive(Debug)]
+pub struct PreparedDropout<'a> {
+    input: &'a TensorStorage,
+    rate: ScalarValue,
+}
+
+impl<'a> PreparedDropout<'a> {
+    pub fn new(input: &'a TensorStorage, rate: ScalarValue) -> Result<Self, NumericKernelError> {
+        let prim = input.prim();
+        if !prim.is_float() {
+            return Err(NumericKernelError::WrongFamily {
+                op: "dropout",
+                expected: NumericFamily::Float,
+                actual: prim,
+            });
+        }
+        if rate.prim() != prim {
+            return Err(NumericKernelError::DtypeMismatch {
+                op: "dropout",
+                lhs: prim,
+                rhs: rate.prim(),
+            });
+        }
+        let wide_rate = rate.as_f64_lossy();
+        if !wide_rate.is_finite() || !(0.0..1.0).contains(&wide_rate) {
+            return Err(NumericTrap::Domain {
+                op: "dropout",
+                prim,
+            }
+            .into());
+        }
+        Ok(Self { input, rate })
+    }
+
+    /// Evaluate the finalized sub/div graph with a pure keyed mask. A second
+    /// application with the same key is suitable for pathwise input replay;
+    /// the source execution plan, not this numerical function, authorizes it.
+    pub fn apply(&self, seed: u64, ordinal: u64) -> Result<TensorStorage, NumericKernelError> {
+        let prim = self.input.prim();
+        let wide_rate = self.rate.as_f64_lossy();
+        let one = cast_raw("dropout", RawScalar::Int(1), prim)?;
+        let zero = cast_raw("dropout", RawScalar::Int(0), prim)?;
+        let denominator = float_binop(FloatBinOp::Sub, one, self.rate)?;
+        let mut output = Vec::with_capacity(self.input.len());
+        for index in 0..self.input.len() {
+            let exact_unit = dropout_random_unit(seed, ordinal, index as u64);
+            let arithmetic_unit = if prim == Prim::F64 {
+                exact_unit
+            } else {
+                f64::from(exact_unit as f32)
+            };
+            output.push(if arithmetic_unit < wide_rate {
+                zero
+            } else {
+                float_binop(FloatBinOp::Div, self.input.scalar_at(index), denominator)?
+            });
+        }
+        Ok(tensor_from_scalars(prim, &output))
+    }
+}
+
+fn dropout_splitmix64(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+fn dropout_random_unit(seed: u64, ordinal: u64, index: u64) -> f64 {
+    let word = dropout_splitmix64(
+        seed ^ dropout_splitmix64(ordinal).rotate_left(17)
+            ^ dropout_splitmix64(index).rotate_left(41),
+    );
+    ((word >> 11) as f64) / ((1u64 << 53) as f64)
+}
+
 /// Deterministic `[05-OP-8]` sample at the requested float width.
 ///
 /// The bounds already carry their required f32 dtype. f64 computes the
@@ -3630,6 +3720,109 @@ mod tests {
         assert!(!integer_is_exactly_representable(1, Prim::Bool));
         assert!(!integer_is_exactly_representable(1, Prim::String));
         assert!(!integer_is_exactly_representable(1, Prim::F8e4m3));
+    }
+
+    #[test]
+    fn prepared_dropout_rejects_invalid_ingress_even_when_empty() {
+        let integer = finalize_tensor("test", Prim::Int32, RawTensor::Int(vec![])).unwrap();
+        let half = scalar_from_f64("test", Prim::F32, 0.5).unwrap();
+        assert!(matches!(
+            PreparedDropout::new(&integer, half),
+            Err(NumericKernelError::WrongFamily { .. })
+        ));
+        for prim in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+            for count in [0, 2] {
+                let input =
+                    finalize_tensor("test", prim, RawTensor::Float(vec![1.0; count])).unwrap();
+                let other = if prim == Prim::F64 {
+                    Prim::F32
+                } else {
+                    Prim::F64
+                };
+                let wrong = scalar_from_f64("test", other, 0.5).unwrap();
+                assert!(matches!(
+                    PreparedDropout::new(&input, wrong),
+                    Err(NumericKernelError::DtypeMismatch { .. })
+                ));
+                for value in [-0.5, 1.0, 2.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                    let rate = scalar_from_f64("test", prim, value).unwrap();
+                    let error = PreparedDropout::new(&input, rate).unwrap_err();
+                    assert_eq!(
+                        error,
+                        NumericKernelError::Trap(NumericTrap::Domain {
+                            op: "dropout",
+                            prim
+                        })
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn prepared_dropout_rounds_the_unit_before_comparing_and_finalizes_division() {
+        let rate = f32::from_bits(0x3e1c_aae7);
+        assert_eq!(
+            dropout_splitmix64(
+                42 ^ dropout_splitmix64(0).rotate_left(17) ^ dropout_splitmix64(0).rotate_left(41)
+            ),
+            0x272a_b9a7_3115_2a2c
+        );
+        let unit = dropout_random_unit(42, 0, 0);
+        assert_eq!((unit as f32).to_bits(), rate.to_bits());
+        assert!(
+            unit < f64::from(rate),
+            "ideal-rational comparison would drop"
+        );
+        let input = finalize_tensor("test", Prim::F32, RawTensor::Float(vec![1.0])).unwrap();
+        let prepared = PreparedDropout::new(
+            &input,
+            scalar_from_f64("test", Prim::F32, f64::from(rate)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            prepared.apply(42, 0).unwrap().scalar_at(0).as_f64_lossy(),
+            f64::from(1.0f32 / (1.0f32 - rate))
+        );
+        let input = finalize_tensor(
+            "test",
+            Prim::F32,
+            RawTensor::Float(vec![f64::from(f32::from_bits(0x3f80_0005))]),
+        )
+        .unwrap();
+        let prepared =
+            PreparedDropout::new(&input, scalar_from_f64("test", Prim::F32, 0.1).unwrap()).unwrap();
+        let result = prepared.apply(42, 0).unwrap().scalar_at(0).as_f64_lossy() as f32;
+        assert_eq!(result.to_bits(), 0x3f8e_38e9);
+        assert_ne!(result.to_bits(), 0x3f8e_38ea, "reciprocal-multiply mutant");
+    }
+
+    #[test]
+    fn prepared_dropout_is_pure_keyed_and_preserves_stored_zero_signs() {
+        for prim in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+            let rate = scalar_from_f64("test", prim, 0.5).unwrap();
+            let input = finalize_tensor("test", prim, RawTensor::Float(vec![-0.0; 2])).unwrap();
+            let prepared = PreparedDropout::new(&input, rate).unwrap();
+            let first = prepared.apply(42, 0).unwrap();
+            assert_eq!(first, prepared.apply(42, 0).unwrap());
+            assert_eq!(first.scalar_at(0).as_f64_lossy().to_bits(), 0);
+            assert_eq!(
+                first.scalar_at(1).as_f64_lossy().to_bits(),
+                (-0.0f64).to_bits()
+            );
+            assert_eq!(
+                input.scalar_at(0).as_f64_lossy().to_bits(),
+                (-0.0f64).to_bits()
+            );
+            let empty = finalize_tensor("test", prim, RawTensor::Float(vec![])).unwrap();
+            assert!(
+                PreparedDropout::new(&empty, rate)
+                    .unwrap()
+                    .apply(u64::MAX, u64::MAX)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
     }
 
     #[test]

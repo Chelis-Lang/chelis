@@ -135,14 +135,21 @@ def main() -> None:
                 old_bytes = old_path.read_bytes()
                 if args.fixture_dir and family == "reshape" and not good:
                     args.fixture_dir.mkdir(parents=True, exist_ok=True)
-                    (args.fixture_dir / "context-v18.ctx").write_bytes(old_bytes)
+                    # Name the file after the magic the producer actually
+                    # wrote. A fixed name outlives the format it holds, and a
+                    # `context-v18.ctx` carrying V20 bytes is a fixture that
+                    # lies about what it proves.
+                    magic = old_bytes.split(b"\n", 1)[0].decode()
+                    (args.fixture_dir / f"{magic.lower().replace('_', '-')}.ctx").write_bytes(
+                        old_bytes
+                    )
                     (args.fixture_dir / "producer.json").write_text(
                         json.dumps(
                             {
                                 "producer_head": args.previous_head,
                                 "producer_binary_sha256": old_hash,
                                 "context_sha256": hashlib.sha256(old_bytes).hexdigest(),
-                                "magic": old_bytes.split(b"\n", 1)[0].decode(),
+                                "magic": magic,
                                 "source": (root / "src/main.ch").read_text(),
                                 "dependency": (
                                     root / "mylib/src/claims.ch"

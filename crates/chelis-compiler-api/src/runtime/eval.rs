@@ -6,7 +6,8 @@ use chelis_deep::ast::{Atom, Expr, List};
 use chelis_deep::{Span, decode_effect_kind};
 use chelis_ir::dag::{DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::TensorValue as IrTensorValue;
-use chelis_ir::host::{HostDefKernel, RandomLoweringState, host_def_kernel};
+use chelis_ir::evaluation::RandomExecutionContext;
+use chelis_ir::host::{HostDefKernel, RandomLoweringState, host_def_evaluation_plan};
 use chelis_ir::tier2;
 use chelis_types::{
     CompareOp, ElementRef, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, StorageView, types::Prim,
@@ -18,6 +19,78 @@ use super::host_ops::*;
 use super::named_axis::*;
 use super::transforms::*;
 use super::*;
+
+/// The canonical builtin name a host function's return expression applies, when
+/// the return expression IS a direct builtin application.
+///
+/// `[04-NUM-9]`'s `<op>` slot takes the canonical name of the operation that
+/// introduces the guarded extent. A body that returns a block, a user call, or
+/// a variable has no such name, so the return-boundary guard does not fire for
+/// it (chelis#1771, locked on both lanes by
+/// `crates/chelis-cli/tests/issue_1739_diagonal_runtime_bound.rs`).
+fn direct_builtin_head(body: &Expr) -> Option<&str> {
+    let Some((DeepTag::App, kids)) = tagged_expr_children(body) else {
+        return None;
+    };
+    builtin_name(kids.first()?)
+}
+
+/// chelis#1739. Compare a host function's declared literal result extents
+/// against the tensor it produced, and render the `[04-NUM-9]` `Domain` trap on
+/// disagreement.
+///
+/// `diagonal` and the rest of `HOST_ONLY_BUILTINS` never become a `RiscOp`, so
+/// `expr_is_dag_lowerable` is false for a def that calls one and the DAG lane's
+/// literal-result claim (`lower.rs`'s `preserve_literal_result`) cannot reach
+/// them. Without this, `def d(x: tensor[n, 4, f32]) -> tensor[3, f32] =
+/// diagonal(x, 0, 1)` applied at `n = 2` returned a two-element tensor under a
+/// three-element declaration, on both lanes and with no diagnostic.
+///
+/// A rank disagreement is NOT this guard's business: the checker owns rank, and
+/// reporting it here would duplicate a verdict with a worse message.
+///
+/// `declared` is the CHECKED result type where one exists, not the syntactic
+/// annotation, so an aliased declaration carries the same verdict as its
+/// expansion and agrees with the C emitter, which reads the resolved ABI type.
+fn declared_result_extent_trap(
+    declared: Option<&Expr>,
+    body: &Expr,
+    produced: &RuntimeValue,
+) -> Option<String> {
+    let RuntimeValue::Tensor(tensor) = produced else {
+        return None;
+    };
+    let op = direct_builtin_head(body)?;
+    let stripped = strip_type_wrappers(declared?);
+    let list = as_list(stripped)?;
+    if tag(list) != Some(DeepTag::TTensor) {
+        return None;
+    }
+    let kids = children(list);
+    let (_, dim_exprs) = kids.split_last()?;
+    if dim_exprs.len() != tensor.value.shape.len() {
+        return None;
+    }
+    for (axis, (dim_expr, observed)) in dim_exprs.iter().zip(tensor.value.shape.iter()).enumerate()
+    {
+        let Some(dim_list) = as_list(dim_expr) else {
+            continue;
+        };
+        if tag(dim_list) != Some(DeepTag::DLit) {
+            continue;
+        }
+        let Some(required) = children(dim_list).first().and_then(int_value) else {
+            continue;
+        };
+        if required < 0 || required as usize != *observed {
+            return Some(format!(
+                "extent `{required}`: claimed = {required}, {op} axis {axis} = {observed}\n\
+                 numeric trap: domain in {op} at int64"
+            ));
+        }
+    }
+    None
+}
 
 /// [05-HOST-4]: choose the first invalid host name in the declared order.
 /// Complete validation precedes construction of language/runtime list values.
@@ -241,6 +314,35 @@ fn render_shape(shape: &[usize]) -> String {
 }
 
 impl<'a> EvalContext<'a> {
+    pub(super) fn execution_profile(
+        &self,
+        expr: &Expr,
+        defs: &UnordMap<String, Expr>,
+    ) -> chelis_ir::evaluation::EvaluationProfile {
+        self.execution_exclusion.map_or_else(
+            || chelis_ir::lower::evaluation_profile(expr, defs),
+            chelis_ir::evaluation::EvaluationProfile::Legacy,
+        )
+    }
+
+    fn admit_execution_profile(&mut self, expr: &Expr, bound: &[String]) {
+        use chelis_ir::evaluation::{EvaluationProfile, LegacyEvaluationReason};
+        let defs = self
+            .top_level_defs
+            .to_sorted()
+            .into_iter()
+            .filter(|(name, _)| !bound.contains(name))
+            .map(|(name, expr)| (name.clone(), expr.clone()))
+            .collect();
+        if let EvaluationProfile::Legacy(reason) = self.execution_profile(expr, &defs)
+            && !matches!(
+                reason,
+                LegacyEvaluationReason::NoDropout | LegacyEvaluationReason::LegacyApi
+            )
+        {
+            self.execution_exclusion = Some(reason);
+        }
+    }
     /// Resolve a builtin only when ordinary lexical lookup did not select a
     /// runtime binding of the same name (spec/04-type-system.md §8.6,
     /// chelis#1076). Every evaluator builtin fast path goes through this
@@ -269,6 +371,8 @@ impl<'a> EvalContext<'a> {
             return Err(format!("cyclic top-level runtime definition `{name}`"));
         }
         self.resolving_top_levels.push(resolved_name.clone());
+        let saved_exclusion = self.execution_exclusion;
+        self.admit_execution_profile(&expr, &[]);
         // A checked function alias carries the callable, including a nullary
         // one. Evaluating its bare var as a value thunk would replace that
         // callable with its result before the alias is ever invoked.
@@ -282,6 +386,7 @@ impl<'a> EvalContext<'a> {
         } else {
             self.eval_expr(&expr)
         };
+        self.execution_exclusion = saved_exclusion;
         self.resolving_top_levels.pop();
         let value = stamp_def_closure(value?, &resolved_name, &expr);
         self.bindings.insert(resolved_name.clone(), value.clone());
@@ -294,14 +399,38 @@ impl<'a> EvalContext<'a> {
     /// chelis#1277 B2h: the kernel the C lane emits for def `name`, or `None`
     /// for the host lane. The decision is `chelis_ir::host::host_def_kernel`,
     /// the function `lower_host_function` itself uses, so the two lanes cannot
-    /// disagree about which defs are kernels. A kernel whose DAG draws no
-    /// Random is cached per def; one that draws is re-lowered on every
-    /// application so its ordinals start at the current stream position, as
-    /// the transforms re-lower per application. A kernel decision whose
+    /// disagree about which defs are kernels. A context-bound evaluation plan
+    /// or a kernel whose DAG draws Random is re-lowered on every application
+    /// so its inherited seed and ordinals start at the current stream position,
+    /// as the transforms re-lower per application. A kernel decision whose
     /// lowering fails is the evaluation's error, never a fall-through to the
     /// interpreter (the C lane's fall-through is chelis#1515 and is not
     /// inherited here).
-    pub(super) fn def_kernel(&mut self, name: &str) -> Result<Option<Arc<HostDefKernel>>, String> {
+    pub(super) fn def_kernel(
+        &mut self,
+        name: &str,
+    ) -> Result<Option<Arc<DefEvaluationKernel>>, String> {
+        if self.execution_exclusion.is_some() {
+            return self
+                .program
+                .map(|program| {
+                    chelis_ir::host::host_def_kernel(
+                        program,
+                        name,
+                        Some(RandomLoweringState {
+                            seed: self.random_seed,
+                            counter: self.random_counter,
+                        }),
+                    )
+                })
+                .transpose()
+                .map(|kernel| {
+                    kernel
+                        .flatten()
+                        .map(|kernel| Arc::new(DefEvaluationKernel::Legacy(kernel)))
+                })
+                .map_err(|diagnostic| diagnostic.to_string());
+        }
         if let Some(cached) = self.def_kernels.get(name) {
             return Ok(cached.clone());
         }
@@ -312,12 +441,16 @@ impl<'a> EvalContext<'a> {
             seed: self.random_seed,
             counter: self.random_counter,
         };
-        let kernel = host_def_kernel(program, name, Some(random))
+        let kernel = host_def_evaluation_plan(program, name, &RandomExecutionContext::new(random))
             .map_err(|diagnostic| diagnostic.to_string())?
-            .map(Arc::new);
-        if !kernel
+            .map(|plan| Arc::new(DefEvaluationKernel::Planned(plan)));
+        let context_bound = kernel
             .as_ref()
-            .is_some_and(|kernel| kernel_draws_random(kernel))
+            .is_some_and(|kernel| kernel.plan().is_some() || kernel.staged_plan().is_some());
+        if !context_bound
+            && !kernel
+                .as_ref()
+                .is_some_and(|kernel| kernel_draws_random(kernel.kernel_for_inspection()))
         {
             self.def_kernels.insert(name.to_string(), kernel.clone());
         }
@@ -334,12 +467,15 @@ impl<'a> EvalContext<'a> {
     fn apply_def_kernel(
         &mut self,
         name: &str,
-        kernel: &HostDefKernel,
+        kernel: &DefEvaluationKernel,
         params: &[String],
         args: Vec<RuntimeValue>,
     ) -> Result<RuntimeValue, String> {
+        let execution_plan = kernel.plan();
+        let staged_execution = kernel.staged_plan();
+        let kernel = kernel.kernel_for_inspection();
         if let Some(plan) = &kernel.staged {
-            return self.apply_staged_host_plan(name, plan, params, args);
+            return self.apply_staged_host_plan(name, plan, staged_execution, params, args);
         }
         if params.len() != args.len() {
             return Err(format!(
@@ -403,6 +539,25 @@ impl<'a> EvalContext<'a> {
         let starting_counter = self.random_counter;
         let tensor_bindings = self.tensor_bindings;
         let host_bindings = &self.bindings;
+        if let Some(plan) = execution_plan {
+            let mut context = RandomExecutionContext::new(RandomLoweringState {
+                seed: self.random_seed,
+                counter: self.random_counter,
+            });
+            let result =
+                chelis_ir::eval::eval_tensor_plan_with_strict(plan, &mut context, |load| {
+                    staged
+                        .get(load)
+                        .cloned()
+                        .or_else(|| tensor_bindings.get(load).map(|t| t.value.clone()))
+                        .or_else(|| match host_bindings.get(load) {
+                            Some(RuntimeValue::Tensor(t)) => Some(t.value.clone()),
+                            _ => None,
+                        })
+                });
+            self.random_counter = context.state().counter;
+            return pack_dag_roots(&kernel.dag, &roots, &result?, name);
+        }
         let (values, executed_counter) =
             chelis_ir::eval::eval_tensor_roots_with_strict_random_progress(
                 &kernel.dag,
@@ -433,6 +588,7 @@ impl<'a> EvalContext<'a> {
         &mut self,
         name: &str,
         plan: &chelis_ir::host::staged::HostStagedPlan,
+        execution: Option<&chelis_ir::evaluation::StagedEvaluationPlan>,
         params: &[String],
         args: Vec<RuntimeValue>,
     ) -> Result<RuntimeValue, String> {
@@ -442,6 +598,11 @@ impl<'a> EvalContext<'a> {
             return Err(format!("staged kernel `{name}` argument arity mismatch"));
         }
         let mut values: UnordMap<String, RuntimeValue> = params.iter().cloned().zip(args).collect();
+        let mut context = RandomExecutionContext::new(RandomLoweringState {
+            seed: self.random_seed,
+            counter: self.random_counter,
+        });
+        let mut execution = execution.map(|plan| plan.frame(&mut context)).transpose()?;
         for stage in plan.stages() {
             match stage {
                 HostStage::Source {
@@ -451,6 +612,7 @@ impl<'a> EvalContext<'a> {
                     ty,
                 } => {
                     let saved = std::mem::take(&mut self.bindings);
+                    let saved_types = std::mem::take(&mut self.binding_types);
                     for capture in captures {
                         let value = values
                             .get(&capture.value)
@@ -462,10 +624,33 @@ impl<'a> EvalContext<'a> {
                             }
                             (_, value) => value,
                         };
+                        // A staged tensor capture retains the checked type
+                        // needed by host primitive/transform routing. An
+                        // untyped capture masks any same-named outer type.
+                        let declared = match &capture.ty {
+                            HostTypeTerm::Tensor(ty) => self.static_type_expr_of(
+                                &make_var_with_type(&capture.binding, ty, expression.span()),
+                            ),
+                            _ => None,
+                        };
+                        self.binding_types.insert(capture.binding.clone(), declared);
                         self.bindings.insert(capture.binding.clone(), value);
                     }
-                    let result = self.eval_expr(expression);
+                    let result = if let Some(frame) = &mut execution {
+                        frame.with_context(|context| {
+                            self.random_counter = context.state().counter;
+                            let result = self.eval_expr(expression);
+                            *context = RandomExecutionContext::new(RandomLoweringState {
+                                seed: self.random_seed,
+                                counter: self.random_counter,
+                            });
+                            result
+                        })
+                    } else {
+                        self.eval_expr(expression)
+                    };
                     self.bindings = saved;
+                    self.binding_types = saved_types;
                     let value = result?;
                     if matches!(
                         ty,
@@ -497,14 +682,29 @@ impl<'a> EvalContext<'a> {
                             );
                         }
                     }
-                    let (computed, counter) =
-                        chelis_ir::eval::eval_tensor_roots_with_strict_random_progress(
-                            dag,
-                            dag.roots(),
-                            self.random_counter,
-                            |input| inputs.get(input).cloned(),
-                        )?;
-                    self.random_counter = counter;
+                    let computed = if let Some(frame) = &mut execution {
+                        // Resolving a captured top-level input can itself
+                        // advance the host stream before this kernel starts.
+                        frame.with_context(|context| {
+                            *context = RandomExecutionContext::new(RandomLoweringState {
+                                seed: self.random_seed,
+                                counter: self.random_counter,
+                            });
+                        });
+                        let result = frame.eval_next_kernel(|input| inputs.get(input).cloned());
+                        frame.with_context(|context| self.random_counter = context.state().counter);
+                        result?
+                    } else {
+                        let (computed, counter) =
+                            chelis_ir::eval::eval_tensor_roots_with_strict_random_progress(
+                                dag,
+                                dag.roots(),
+                                self.random_counter,
+                                |input| inputs.get(input).cloned(),
+                            )?;
+                        self.random_counter = counter;
+                        computed
+                    };
                     for (output, root) in outputs.iter().zip(dag.roots()) {
                         let value = computed
                             .get(root)
@@ -1017,6 +1217,21 @@ impl<'a> EvalContext<'a> {
             .first()
             .ok_or_else(|| "app missing function".to_string())?;
 
+        // Fixed-rate dropout is not in the legacy host builtin table. Admit
+        // only its named fixed-control source profile, stage the operand once,
+        // and use the same lowering/plan core as named-axis primitives. An
+        // excluded runtime-rate call keeps its previous dispatch unchanged.
+        if var_name(func) == Some("dropout")
+            && self.active_builtin_symbol("dropout")
+            && self.execution_exclusion.is_none()
+            && chelis_ir::lower::evaluation_profile(
+                &Expr::List(list.clone(), Span::new(0, 0)),
+                &self.top_level_defs,
+            ) == chelis_ir::evaluation::EvaluationProfile::FixedControl
+        {
+            return self.eval_named_axis_reduction_app("dropout", kids);
+        }
+
         // chelis#338 site A: a reduction whose axis argument is a bare
         // `(var name)` names a *dimension* of the operand, not a runtime
         // value (spec/04-type-system.md SS4.5.3); the checker admits only
@@ -1415,6 +1630,27 @@ impl<'a> EvalContext<'a> {
         arg_type_exprs: &[Option<Expr>],
         result_type_expr: Option<&Expr>,
     ) -> Result<RuntimeValue, String> {
+        let saved_exclusion = self.execution_exclusion;
+        if let RuntimeValue::Closure { body, params, .. } = &callable {
+            self.admit_execution_profile(body, params);
+        }
+        let result = self.apply_resolved_callable_with_arg_types_impl(
+            callable,
+            args,
+            arg_type_exprs,
+            result_type_expr,
+        );
+        self.execution_exclusion = saved_exclusion;
+        result
+    }
+
+    fn apply_resolved_callable_with_arg_types_impl(
+        &mut self,
+        callable: RuntimeValue,
+        args: Vec<RuntimeValue>,
+        arg_type_exprs: &[Option<Expr>],
+        result_type_expr: Option<&Expr>,
+    ) -> Result<RuntimeValue, String> {
         match callable {
             RuntimeValue::Closure {
                 params,
@@ -1430,7 +1666,7 @@ impl<'a> EvalContext<'a> {
                 // applied through that kernel, so eval runs the DAG C emits
                 // for it and the runtime-extent classes and guards derived
                 // from that DAG fire on both lanes ([05-MOV-1],
-                // runtime_extents.md C2.7). The host-lane decision for the
+                // runtime_extents.md C2.5). The host-lane decision for the
                 // same def interprets the body below, exactly as before.
                 if let Some(name) = def_name.as_deref()
                     && let Some(kernel) = self.def_kernel(name)?
@@ -1573,7 +1809,29 @@ impl<'a> EvalContext<'a> {
                 self.bindings = saved;
                 self.binding_types = saved_types;
                 self.precision_bindings = saved_precisions;
-                value
+                let produced = value?;
+                // chelis#1739: the host lane's return boundary is where a
+                // declared literal extent meets the value that has to satisfy
+                // it. See `declared_result_extent_trap`.
+                //
+                // The CHECKED signature's result wins over the syntactic
+                // annotation, because the two spell the same declaration
+                // differently: `-> Row` for `type Row = tensor[3, f32]` reaches
+                // `return_type` as a bare name and reaches the checked
+                // signature as the resolved `t-tensor`. The C emitter reads the
+                // resolved `HostAbiType::Tensor`, so reading the syntax here
+                // made the two lanes disagree on exactly the alias spelling
+                // (round 1 P1). `return_type` remains the fallback for a
+                // closure the checker recorded no signature for.
+                let declared_result = checked_signature
+                    .as_ref()
+                    .and_then(checked_function_children)
+                    .and_then(<[Expr]>::last)
+                    .or(return_type.as_ref());
+                if let Some(trap) = declared_result_extent_trap(declared_result, &body, &produced) {
+                    return Err(trap);
+                }
+                Ok(produced)
             }
             RuntimeValue::Transform {
                 kind,

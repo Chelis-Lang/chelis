@@ -31,6 +31,8 @@ pub mod axis_sources;
 pub mod capacity_key;
 pub mod dag;
 pub mod eval;
+pub mod evaluation;
+pub mod execution_spine;
 pub mod fuse;
 pub mod grad;
 pub mod host;

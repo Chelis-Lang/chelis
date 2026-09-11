@@ -562,6 +562,18 @@ behavior and is exactly what the atom forbids.
 | C emitted helpers (print, dtype switches) | GENERATED from `format_element` / exhaustive matches | [#716], [#723], [#728] |
 | Metal / HIP | capability table only (already honestly typed / cleanly rejecting) | - |
 
+The fixed-control dropout evaluator uses the sealed
+`dtype_semantics::PreparedDropout` boundary. `new(&TensorStorage, ScalarValue)`
+checks the input family, same-dtype rate and [05-OP-37] domain without allocating
+or consuming Random. After actual source-plan forward/replay entry,
+`apply(seed: u64, ordinal: u64)` computes [05-RNG-1]'s unit, arithmetic-width
+comparison, positive dropped zero, and finalized sub/div into `TensorStorage`.
+The numerical owner has no ambient stream or replay authority. Its private
+fields prevent bypassing preparation; the execution plan retains invocation
+keys, source order and failure-prefix accounting. Both exact compiler-kernel
+callables are registered to [05-OP-37] in C6's off-leg semantic registry, with
+presence/authority controls; that stopgap is not a complete Rust API census.
+
 **Performance contract:** finalize is per-buffer monomorphized loops (or
 direct element-type compute once storage is per-dtype), never per-element
 dyn dispatch; `cargo test --workspace` stays inside the ~60s inner-loop
@@ -1755,6 +1767,36 @@ the generated tensor and Python/DLPack wrapper implementation. A wire
 registration proves none of those runtime exits. The respective non-regression
 oracles remain required whenever their boundary is touched.
 
+**Bounded dropout evaluator adoption.** Fixed-control source evaluation and
+first-order input AD now carry an opaque, non-serialized execution plan through
+lowering, normalization, AD replay, selected declarations, host helpers, and
+ordinary/prepared/contextual evaluation. [05-OP-37] uses arithmetic-width unit
+rounding and finalized sub/div at every active float dtype. The selected source
+spine retains dead draws and preceding local failures independently of value
+liveness. Scope identities distinguish equal-seed handlers; invocation-local
+forward keys authorize backward replay without another ambient draw. The host
+counter remains wrapping u64, not an unbounded proof event count.
+
+Checked tensor helpers with host-produced reshape sizes construct the complete
+checked logical graph before partitioning. The evaluator retains an opaque
+companion with the partitioner's exact local-node mappings; imported values
+become Loads and never duplicate their producers' Random sites. One invocation
+frame carries realized forward keys and scope counters through every numeric
+segment, while host sources execute at their original cuts and synchronize the
+inherited stream. This preserves a preceding accepted draw when a later local
+extent guard fails, and preserves replay keys across cuts. Host-source bindings
+retain their checked tensor types for primitive and transform routing. The public legacy
+`HostDefKernel`, `HostStagedPlan`, and wire layouts do not change. Existing
+Random-handler host boundaries still dispatch through host control.
+
+This is not completion of #1295 or #1297. Explicitly excluded runtime rates,
+rate cotangents, higher-order AD, random vmap, resource scopes, dynamic/recursive control, and
+general UniformLike numerics keep their compatibility boundary. Legacy Dag-only
+Rust entrypoints and serialized lowered libraries do not carry this plan; their
+baked-seed projection remains an adoption dependency. No new mask tensor owner,
+public wire field, compiled-dropout support, or native effect certificate is
+implied by the evaluator's private key table.
+
 ---
 
 # Part II - process rules that hold at every phase boundary
@@ -1778,6 +1820,14 @@ oracles remain required whenever their boundary is touched.
 behavior. If your phase needs a frozen contract to change, stop, update
 this document and [#729] first, and say so in the PR - that is the
 protocol, not a failure.
+
+The fixed-control dropout owner consolidation amends C5's kernel boundary with
+the sealed `PreparedDropout::new` / `PreparedDropout::apply` split described
+above. It moves the existing pure numerical implementation into the semantics
+owner without changing numeric bits, source guards, draw timing, public wire
+formats or existing Rust signatures. The exact new kernel registrations and
+their tests accompany this amendment; [05-OP-37] and [05-RNG-1] already govern
+the behavior, so no new numbered atom or capability completion is asserted.
 
 [#1294] adds exact builtin identity incorporation to the existing governing
 operation atoms and authors [05-OP-46..64] for the remaining builtin families.
@@ -2729,9 +2779,36 @@ The [#1287] child command is
 `.venv/bin/python scripts/dtype_count_oracle.py`; success ends with
 `DTYPE COUNT ORACLE: PASS`. It owns the checker grammar, dedicated non-alias
 `Count` IR, evaluator/C execution, exact WireDag v6 boundary, registered wire
-capacity, loud [#1291] device receipts, semantic registration, and executable
-example parity. [#1291] later replaces those device receipts with its hardware
-execution oracle; it does not weaken or bypass the [#1287] core receipt.
+capacity, semantic registration, and executable example parity. Its device leg
+delegates to `.venv/bin/python scripts/dtype_count_device_oracle.py`; success
+ends with `DTYPE COUNT DEVICE STRUCTURAL ORACLE: PASS`. That child runs the
+HIP/Metal kernel, compiler-API, CLI, host-helper, direct-entry, and example
+source tests, then proves by controlled mutations that a Count-to-Sum dispatch
+alias or restoration of C-host helper emission makes the focused tests fail.
+Each mutation refuses a dirty owner and restores the original bytes.
+
+The structural child is not [#1291]'s numerical completion receipt. It proves
+that both device lanes route a canonical `Count` node to a dedicated kernel
+over the exact `Bool8` carrier that [#1289] landed, that a Count-bearing
+host-program helper is emitted as its own device translation unit rather than
+C, and that no Sum alias, cast-plus-Sum composition, C-host helper fallback,
+or Metal abort stub survives a controlled mutation. Numerical acceptance is
+owned by the named ignored `count_` tests in both backends' `gpu_correctness.rs`
+suites, which cover positional and named multi-axis Count, empty selected
+extents, odd and large leaf counts, and the runtime's `Bool8` write-boundary
+domain trap. The kernels' overflow and stack-limit status codes are
+unreachable for any representable tensor (fewer than 2^63 leaves cannot
+overflow `int64`, and 64 frames bound every such leaf count), so no hardware
+test claims them; the device carrier limits are locked structurally in the
+codegen suites. The two authoritative manual gates are
+`scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness count_ --
+--ignored --test-threads=1` on real HIP hardware and
+`cargo test -p chelis-backend-metal --test gpu_correctness count_ --
+--ignored --test-threads=1` on an Apple Silicon Metal device. Both must match
+the evaluator and compiled C lane exactly and exit 0. [#1291] stays open, and
+its HIP and Metal capability cells keep citing it, until both gates have
+recorded passes; a recorded Metal pass alone closes neither. This extends, and
+never weakens or bypasses, [#1287]'s core receipt.
 
 **Pre-4C framework delivery.** `scripts/dtype_pre_phase4c_oracle.py` now owns
 the prerequisite command manifest and rejects missing owners before executing

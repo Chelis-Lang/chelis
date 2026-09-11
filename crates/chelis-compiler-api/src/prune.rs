@@ -58,6 +58,23 @@ const STAMPED_MODULE_DECL_OFFSET: usize = 1;
 /// unknown entry surfaces downstream as the same "unbound"/unknown-output
 /// path it would without pruning, rather than silently emptying the program).
 pub fn prune_to_entry(exprs: Vec<DeepExpr>, entry: &str) -> Vec<DeepExpr> {
+    prune_entry(exprs, entry, ReferenceScope::Syntactic)
+}
+
+/// Resource admission concerns executed definitions, not same-spelled locals
+/// or references in type metadata. Reuse the checker's capture/binding analysis
+/// for this scope, leaving the broader authoring/build pruner unchanged.
+pub(crate) fn prune_checked_runtime_to_entry(exprs: Vec<DeepExpr>, entry: &str) -> Vec<DeepExpr> {
+    prune_entry(exprs, entry, ReferenceScope::LexicalRuntime)
+}
+
+#[derive(Clone, Copy)]
+enum ReferenceScope {
+    Syntactic,
+    LexicalRuntime,
+}
+
+fn prune_entry(exprs: Vec<DeepExpr>, entry: &str, scope: ReferenceScope) -> Vec<DeepExpr> {
     // chelis#1125 PP7 / spec/04-type-system.md §10 [04-TOT-5]: the descent
     // reads BOTH admitted carriers of a module wrapper. A `.dp` file reaches
     // this pruner through `parse_and_stamp_file`, which produces `Expr::Node`;
@@ -83,7 +100,7 @@ pub fn prune_to_entry(exprs: Vec<DeepExpr>, entry: &str) -> Vec<DeepExpr> {
             // decls) is a no-op.
             let split = MODULE_DECL_OFFSET.min(elements.len());
             let decls = elements.split_off(split);
-            elements.extend(prune_top_level_to_reachable_defs(decls, entry));
+            elements.extend(prune_top_level_entry(decls, entry, scope));
             vec![DeepExpr::List(chelis_deep::List { elements }, span)]
         }
         [DeepExpr::Node(node, _)] if node.tag() == DeepTag::Module => {
@@ -96,13 +113,13 @@ pub fn prune_to_entry(exprs: Vec<DeepExpr>, entry: &str) -> Vec<DeepExpr> {
             let mut children = module.children_slice().to_vec();
             let split = STAMPED_MODULE_DECL_OFFSET.min(children.len());
             let decls = children.split_off(split);
-            children.extend(prune_top_level_to_reachable_defs(decls, entry));
+            children.extend(prune_top_level_entry(decls, entry, scope));
             module
                 .try_replace_children(children)
                 .expect("pruning a module drops whole declarations, never its name binder");
             vec![DeepExpr::Node(module, span)]
         }
-        _ => prune_top_level_to_reachable_defs(exprs, entry),
+        _ => prune_top_level_entry(exprs, entry, scope),
     }
 }
 
@@ -116,11 +133,19 @@ pub fn prune_to_entry(exprs: Vec<DeepExpr>, entry: &str) -> Vec<DeepExpr> {
 /// without pruning. This is the WI-3 single-entry contract; the build path
 /// uses [`prune_to_reachable_seeds`] directly with its multi-name seed set.
 pub fn prune_top_level_to_reachable_defs(exprs: Vec<DeepExpr>, entry: &str) -> Vec<DeepExpr> {
+    prune_top_level_entry(exprs, entry, ReferenceScope::Syntactic)
+}
+
+fn prune_top_level_entry(
+    exprs: Vec<DeepExpr>,
+    entry: &str,
+    scope: ReferenceScope,
+) -> Vec<DeepExpr> {
     let is_local_def = exprs.iter().any(|expr| deep_def_name(expr) == Some(entry));
     if !is_local_def {
         return exprs;
     }
-    prune_to_reachable_seeds(exprs, std::iter::once(entry.to_string()))
+    prune_reachable(exprs, std::iter::once(entry.to_string()), scope)
 }
 
 /// Prune a flat list of top-level Deep declarations to those reachable from
@@ -138,6 +163,14 @@ pub fn prune_to_reachable_seeds(
     exprs: Vec<DeepExpr>,
     seeds: impl IntoIterator<Item = String>,
 ) -> Vec<DeepExpr> {
+    prune_reachable(exprs, seeds, ReferenceScope::Syntactic)
+}
+
+fn prune_reachable(
+    exprs: Vec<DeepExpr>,
+    seeds: impl IntoIterator<Item = String>,
+    scope: ReferenceScope,
+) -> Vec<DeepExpr> {
     let def_map = exprs
         .iter()
         .filter_map(|expr| deep_def_name(expr).map(|name| (name.to_string(), expr)))
@@ -150,7 +183,15 @@ pub fn prune_to_reachable_seeds(
             continue;
         }
         if let Some(expr) = def_map.get(&name) {
-            for reference in deep_referenced_vars(expr) {
+            let lexical_references;
+            let references = match scope {
+                ReferenceScope::Syntactic => deep_referenced_vars(expr),
+                ReferenceScope::LexicalRuntime => {
+                    lexical_references = chelis_types::linearity::free_runtime_variables(expr);
+                    lexical_references.iter().map(String::as_str).collect()
+                }
+            };
+            for reference in references {
                 if def_map.contains_key(reference) && !reachable.contains(reference) {
                     queue.push_back(reference.to_string());
                 }

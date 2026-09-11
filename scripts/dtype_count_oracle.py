@@ -2,7 +2,7 @@
 """Authoritative chelis#1287 first-class Count acceptance oracle.
 
 The oracle covers the complete checker grammar, dedicated IR and evaluator,
-exact current WireDag boundary, compiled C execution, loud HIP/Metal receipts,
+exact WireDag v6 boundary, compiled C execution, HIP/Metal structural routing,
 semantic/capacity registration, and the executable example corpus entry.
 
 Usage:
@@ -87,18 +87,8 @@ def oracle_legs(python: str) -> tuple[OracleLeg, ...]:
             ),
         ),
         OracleLeg(
-            "loud HIP and Metal issue receipts",
-            (
-                "cargo",
-                "nextest",
-                "run",
-                "-p",
-                "chelis-compiler-api",
-                "-p",
-                "chelis-cli",
-                "-E",
-                "test(count_with_issue_1291_receipt) | binary(issue_1287_count_device_reject)",
-            ),
+            "device Count structural child oracle",
+            (python, "scripts/dtype_count_device_oracle.py"),
         ),
         OracleLeg(
             "semantic registration and executable example parity",

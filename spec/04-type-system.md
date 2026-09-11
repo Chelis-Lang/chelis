@@ -2513,6 +2513,12 @@ Resource regions are also enforced at the handler and build boundary. Effect
 annotations are optional in Surf and Deep; when present, the inferred set must
 fit the declared upper bound.
 
+Build APIs enforce Resource compatibility before exposing an emitted artifact.
+An entry-scoped build includes the entry's reachable source helpers, including
+imported helpers; unused library definitions do not constrain that entry's
+target. A whole-program build checks the whole emitted program. Target checking
+does not change the authored input or output ABI.
+
 ### 7.3 Metadata Contract
 
 The `eff` metadata key on `t-fn` nodes carries a declared effect upper bound;

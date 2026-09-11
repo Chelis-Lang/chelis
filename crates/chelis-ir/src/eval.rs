@@ -20,8 +20,7 @@ use std::borrow::Cow;
 
 use crate::dag::{
     Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStepOp, NodeId,
-    ReduceWindowKind, RiscOp, RtDim, SHRINK_TO_END, SymbolicDimSource, TensorType,
-    bind_symbolic_dims, symbolic_bindings,
+    ReduceWindowKind, RiscOp, RtDim, SHRINK_TO_END, TensorType, bind_symbolic_dims,
 };
 use chelis_types::dtype_semantics::{
     ArgReduceOp, CheckedCastPlan, CompareOp, ExtremaOperand as KernelExtremaOperand, FloatBinOp,
@@ -1613,6 +1612,15 @@ fn validate_shape_against_type(
 /// on live nodes only: the full structural `verify` would reject the dead
 /// symbolic-dim-source Loads that root-scoped eval keeps alive.
 fn verify_bound_movement_bounds(dag: &Dag, live: Option<&[bool]>) -> Result<(), String> {
+    for node in dag.nodes() {
+        if live.is_none_or(|mask| mask.get(node.id.0).copied().unwrap_or(false)) {
+            verify_bound_movement_node(dag, node)?;
+        }
+    }
+    Ok(())
+}
+
+fn verify_bound_movement_node(dag: &Dag, node: &DagNode) -> Result<(), String> {
     fn known_size(dim: &DimInfo) -> Option<usize> {
         match dim {
             DimInfo::Lit(n) => Some(*n),
@@ -1620,67 +1628,87 @@ fn verify_bound_movement_bounds(dag: &Dag, live: Option<&[bool]>) -> Result<(), 
             DimInfo::Named(_, None) => None,
         }
     }
-    for node in dag.nodes() {
-        if let Some(mask) = live
-            && !mask.get(node.id.0).copied().unwrap_or(false)
-        {
-            continue;
-        }
-        let input_dims = match node.inputs.first().and_then(|id| dag.get(*id)) {
-            Some(input) => &input.output_type.dims,
-            None => continue,
-        };
-        match &node.op {
-            RiscOp::Shrink { bounds } => {
-                for (axis, (start, end)) in bounds.iter().enumerate() {
-                    // chelis#616: a `ToEnd` sentinel is resolved to the axis
-                    // extent by `bind_symbolic_dims`, and a runtime `Node` bound
-                    // is validated by the evaluator (it needs the input values).
-                    // Only compile-time `(Lit, Lit)` bounds are statically
-                    // checkable here.
-                    let (Some(start), Some(end)) = (start.as_lit(), end.as_lit()) else {
-                        continue;
-                    };
-                    if start > end {
-                        return Err(format!(
-                            "post-bind shrink at node {} axis {axis}: start {start} > end {end} \
+    let input_dims = match node.inputs.first().and_then(|id| dag.get(*id)) {
+        Some(input) => &input.output_type.dims,
+        None => return Ok(()),
+    };
+    match &node.op {
+        RiscOp::Shrink { bounds } => {
+            for (axis, (start, end)) in bounds.iter().enumerate() {
+                // chelis#616: a `ToEnd` sentinel is resolved to the axis
+                // extent by `bind_symbolic_dims`, and a runtime `Node` bound
+                // is validated by the evaluator (it needs the input values).
+                // Only compile-time `(Lit, Lit)` bounds are statically
+                // checkable here.
+                let (Some(start), Some(end)) = (start.as_lit(), end.as_lit()) else {
+                    continue;
+                };
+                if start > end {
+                    return Err(format!(
+                        "post-bind shrink at node {} axis {axis}: start {start} > end {end} \
                              (chelis#523)",
-                            node.id.0
-                        ));
-                    }
-                    if let Some(in_size) = input_dims.get(axis).and_then(known_size)
-                        && end > in_size
-                    {
-                        return Err(format!(
-                            "post-bind shrink at node {} axis {axis}: end {end} > input extent \
+                        node.id.0
+                    ));
+                }
+                if let Some(in_size) = input_dims.get(axis).and_then(known_size)
+                    && end > in_size
+                {
+                    return Err(format!(
+                        "post-bind shrink at node {} axis {axis}: end {end} > input extent \
                              {in_size} (chelis#523)",
-                            node.id.0
-                        ));
-                    }
+                        node.id.0
+                    ));
                 }
             }
-            RiscOp::Stride { strides } => {
-                for (axis, step) in strides.iter().enumerate() {
-                    if step.as_lit() == Some(0) {
-                        return Err(format!(
-                            "post-bind stride at node {} axis {axis}: step 0 (chelis#523)",
-                            node.id.0
-                        ));
-                    }
-                }
-            }
-            _ => {}
         }
+        RiscOp::Stride { strides } => {
+            for (axis, step) in strides.iter().enumerate() {
+                if step.as_lit() == Some(0) {
+                    return Err(format!(
+                        "post-bind stride at node {} axis {axis}: step 0 (chelis#523)",
+                        node.id.0
+                    ));
+                }
+            }
+        }
+        _ => {}
     }
     Ok(())
 }
 
+/// The pre-eval bindings for every runtime extent a caller supplies.
+///
+/// chelis#1566: this reads the scoped derivation
+/// ([`crate::axis_sources::derive_dim_witnesses`]), which is the same
+/// derivation the C and HIP prologues declare and guard from, so the three
+/// lanes cannot disagree about which axes are one extent. The legacy
+/// name-keyed grouping it replaces put two independent signatures that merely
+/// SPELL a binder `seq` into one group and rejected a correct merged kernel;
+/// `split_by_scope` separates them by the results they reach.
+///
+/// **One structural limit, stated rather than papered over.** The map
+/// [`crate::dag::bind_symbolic_dims`] consumes is keyed by NAME, so two
+/// scopes of one name that resolve to DIFFERENT extents cannot both be
+/// represented. The honest rule is therefore: bind the name once when the
+/// scopes agree, and bind nothing for it when they disagree. Nothing is lost
+/// silently - an unbound multi-scope name leaves every axis carrying it to be
+/// computed from actual values, and a live node that reads the name BY VALUE
+/// (a `Reshape` target's `RtDim::Sym`) still refuses in `bind_symbolic_dims`.
+/// The structural fix is a per-scope rename and belongs to the claim
+/// transport, not here.
+///
+/// The second return value is exactly that set: the names this function
+/// DELIBERATELY left out because their scopes disagreed. It is returned
+/// rather than re-derived because disagreement is a property of the supplied
+/// values and not of the graph, so nothing downstream can recover it; keying
+/// the tolerance on multi-scope membership instead would excuse an agreeing
+/// name a caller simply omitted, which is an omitted binding like any other.
 fn infer_symbolic_bindings_from_inputs(
     dag: &Dag,
     inputs: &UnordMap<String, TensorValue>,
     required_symbols: &UnordSet<String>,
     live: Option<&[bool]>,
-) -> Result<UnordMap<String, usize>, String> {
+) -> Result<(UnordMap<String, usize>, UnordSet<String>), String> {
     let mut bindings = UnordMap::new();
     let mut load_types = UnordMap::<String, TensorType>::new();
 
@@ -1708,36 +1736,68 @@ fn infer_symbolic_bindings_from_inputs(
         })
         .collect::<UnordSet<_>>();
 
-    for binding in symbolic_bindings(dag)
-        .into_iter()
-        .filter(|binding| required_symbols.contains(&binding.name))
-    {
-        let mut occurrences = std::iter::once(&binding.canonical)
-            .chain(binding.others.iter())
-            .collect::<Vec<_>>();
-        let has_live_op_declaration = occurrences.iter().any(|occurrence| {
-            matches!(
-                occurrence.source,
-                SymbolicDimSource::OpDeclared { node, .. }
-                    if live.is_none_or(|mask| mask[node.0])
-            )
-        });
-        let live_load_occurrences = occurrences
+    let read_axis = |label: &str, axis: usize, claim: &str| -> Result<usize, String> {
+        let value = inputs.get(label).ok_or_else(|| {
+            format!("missing required input `{label}` for symbolic dimension `{claim}`")
+        })?;
+        value.shape.get(axis).copied().ok_or_else(|| {
+            format!("input `{label}` is missing axis {axis} for symbolic dimension `{claim}`")
+        })
+    };
+
+    // One entry per SCOPE, folded into one entry per name afterwards.
+    let mut per_scope: Vec<(String, usize)> = Vec::new();
+    // Every required name some class ANSWERED for, whether by binding it or
+    // by deliberately declining to. The source fallback below must not
+    // overrule an answer; it exists for names no class spoke for at all.
+    let mut claimed: Vec<String> = Vec::new();
+    // The names `bind_symbolic_dims` tolerates unbound because the evaluator
+    // computes them from actual values (chelis#616). Declining to bind one is
+    // an answer; declining to bind anything else would just be a hole, so the
+    // two decisions stay keyed on the same set.
+    let op_declared = crate::dag::op_declared_dim_names(dag);
+    for class in crate::axis_sources::derive_dim_witnesses(dag) {
+        let crate::axis_sources::DimClaim::Name(name) = class.claim else {
+            continue;
+        };
+        if !required_symbols.contains(&name) {
+            continue;
+        }
+
+        // "An input tensor's axis" has two spellings in the DAG, and
+        // `member_load_axis` accepts both: a `Load`'s own output axis and a
+        // folded `shape(t, k)` read of that same tensor.
+        let mut witnesses = class
+            .members
             .iter()
-            .copied()
-            .filter(|occurrence| {
-                matches!(
-                    &occurrence.source,
-                    SymbolicDimSource::Load { input_label, .. }
-                        if live_loads.contains(input_label.as_str())
-                )
+            .filter_map(|member| {
+                let (load, axis) = crate::axis_sources::member_load_axis(dag, member)?;
+                let RiscOp::Load { name: label } = &dag.get(load)?.op else {
+                    return None;
+                };
+                Some((label.as_str(), axis))
             })
             .collect::<Vec<_>>();
-        if !live_load_occurrences.is_empty() {
-            occurrences = live_load_occurrences;
-        } else if has_live_op_declaration {
-            // chelis#616: a live op-declared dim has no external input;
-            // the evaluator resolves it from the owning op's actual values.
+        // chelis#616: a locally computed extent has no external input; the
+        // evaluator resolves it from the owning operation's actual values.
+        let has_live_local_source = class.members.iter().any(|member| {
+            matches!(
+                member.source,
+                crate::axis_sources::AxisSource::OpComputed { .. }
+                    | crate::axis_sources::AxisSource::ScalarInput { .. }
+            ) && live.is_none_or(|mask| mask[member.node.0])
+        });
+        let live_witnesses = witnesses
+            .iter()
+            .copied()
+            .filter(|(label, _)| live_loads.contains(label))
+            .collect::<Vec<_>>();
+        if !live_witnesses.is_empty() {
+            witnesses = live_witnesses;
+        } else if has_live_local_source && op_declared.contains(&name) {
+            if !claimed.contains(&name) {
+                claimed.push(name);
+            }
             continue;
         } else {
             // chelis#351: a shape-only dependency Load can be outside the
@@ -1747,76 +1807,102 @@ fn infer_symbolic_bindings_from_inputs(
             // happens to be supplied lets an unrelated declaration satisfy a
             // live shape obligation (chelis#991). Fail closed on that
             // ambiguity instead of guessing from caller inputs.
-            let mut dead_loads = occurrences
+            let mut dead_loads = witnesses
                 .iter()
-                .filter_map(|occurrence| match &occurrence.source {
-                    SymbolicDimSource::Load { input_label, .. } => Some(input_label.as_str()),
-                    SymbolicDimSource::OpDeclared { .. } => None,
-                })
+                .map(|(label, _)| *label)
                 .collect::<Vec<_>>();
             dead_loads.sort_unstable();
             dead_loads.dedup();
             if dead_loads.len() > 1 {
                 return Err(format!(
-                    "ambiguous dead-load sources {:?} for live symbolic dimension `{}`",
-                    dead_loads, binding.name
+                    "ambiguous dead-load sources {dead_loads:?} for live symbolic dimension `{name}`"
                 ));
             }
         }
 
-        let Some((canonical_label, canonical_axis)) =
-            occurrences
-                .iter()
-                .find_map(|occurrence| match &occurrence.source {
-                    SymbolicDimSource::Load { input_label, axis } => Some((input_label, axis)),
-                    SymbolicDimSource::OpDeclared { .. } => None,
-                })
-        else {
+        let Some((canonical_label, canonical_axis)) = witnesses.first().copied() else {
             continue;
         };
-        let canonical_value = inputs.get(canonical_label).ok_or_else(|| {
-            format!(
-                "missing required input `{canonical_label}` for symbolic dimension `{}`",
-                binding.name
-            )
-        })?;
-        let value = *canonical_value.shape.get(*canonical_axis).ok_or_else(|| {
-            format!(
-                "input `{canonical_label}` is missing axis {canonical_axis} for symbolic \
-                 dimension `{}`",
-                binding.name
-            )
-        })?;
-        bindings.insert(binding.name.clone(), value);
-
-        for occurrence in occurrences.into_iter().skip(1) {
-            // Op-declared guard sites are checked at run time by the C
-            // backend and from actual values by the evaluator, not here.
-            let SymbolicDimSource::Load { input_label, axis } = &occurrence.source else {
-                continue;
-            };
-            let other_value = inputs.get(input_label).ok_or_else(|| {
-                format!(
-                    "missing required input `{input_label}` for symbolic dimension `{}`",
-                    binding.name
-                )
-            })?;
-            let other = *other_value.shape.get(*axis).ok_or_else(|| {
-                format!(
-                    "input `{input_label}` is missing axis {axis} for symbolic dimension `{}`",
-                    binding.name
-                )
-            })?;
+        let value = read_axis(canonical_label, canonical_axis, &name)?;
+        for (label, axis) in witnesses.iter().skip(1) {
+            let other = read_axis(label, *axis, &name)?;
             if other != value {
                 return Err(format!(
-                    "symbolic dimension `{}` mismatch: canonical {canonical_label}[{canonical_axis}] = {value}, but {input_label}[{axis}] = {other}",
-                    binding.name,
+                    "symbolic dimension `{name}` mismatch: canonical {canonical_label}[{canonical_axis}] = {value}, but {label}[{axis}] = {other}",
                 ));
+            }
+        }
+        if !claimed.contains(&name) {
+            claimed.push(name.clone());
+        }
+        per_scope.push((name, value));
+    }
+
+    let mut folded: Vec<(String, Option<usize>)> = Vec::new();
+    for (name, value) in per_scope {
+        match folded.iter_mut().find(|(existing, _)| *existing == name) {
+            Some((_, resolved)) => {
+                if *resolved != Some(value) {
+                    *resolved = None;
+                }
+            }
+            None => folded.push((name, Some(value))),
+        }
+    }
+    let mut deliberately_unbound = UnordSet::new();
+    for (name, value) in folded {
+        match value {
+            Some(value) => {
+                bindings.insert(name, value);
+            }
+            None => {
+                deliberately_unbound.insert(name);
             }
         }
     }
 
-    Ok(bindings)
+    // A required symbol the classes did not cover still needs its value, and
+    // the axis SOURCE supplies it. Two kinds reach here and neither is a
+    // witness of anything: a name carried only by an op-INTERNAL field (a
+    // `Reshape` target's `RtDim::Sym`, one of `BlasMatmul`'s dimension
+    // expressions) has no output axis to form a class from, and a name whose
+    // every output axis is statically bound (`Named(name, Some(4))`) carries
+    // no runtime claim for a class to group. The legacy walk reached both
+    // through `bind_symbol_from_any_load`, which searched every `Load` for a
+    // matching string; resolving the origin names the exact declaring input
+    // instead.
+    for (name, origin) in crate::axis_sources::dim_extent_origins(dag) {
+        if !required_symbols.contains(&name)
+            || bindings.contains_key(&name)
+            || claimed.contains(&name)
+        {
+            continue;
+        }
+        match origin {
+            crate::axis_sources::ExtentOrigin::ExternalAxis { load, axis } => {
+                let Some(RiscOp::Load { name: label }) = dag.get(load).map(|node| &node.op) else {
+                    continue;
+                };
+                // Absence is not an error here: the name may belong to a dead
+                // scope the caller supplied nothing for, and a live one that
+                // genuinely needs it fails loudly in `bind_symbolic_dims`.
+                if let Some(value) = inputs.get(label.as_str())
+                    && let Some(extent) = value.shape.get(axis)
+                {
+                    bindings.insert(name, *extent);
+                }
+            }
+            crate::axis_sources::ExtentOrigin::Literal(extent) => {
+                if let Ok(extent) = usize::try_from(extent) {
+                    bindings.insert(name, extent);
+                }
+            }
+            crate::axis_sources::ExtentOrigin::OpComputed { .. }
+            | crate::axis_sources::ExtentOrigin::ScalarInput { .. } => {}
+        }
+    }
+
+    Ok((bindings, deliberately_unbound))
 }
 
 fn collect_dim_expr_symbols(expr: &DimExpr, symbols: &mut UnordSet<String>) {
@@ -1941,6 +2027,7 @@ fn eval_tensor_internal<F>(
     live: Option<&[bool]>,
     strict_loads: bool,
     random_counter: u64,
+    mut execution: Option<&mut crate::evaluation::ExecutionFrame<'_>>,
     mut load_input: F,
 ) -> Result<(UnordMap<NodeId, TensorValue>, u64), String>
 where
@@ -1975,7 +2062,7 @@ where
                 if bounds.iter().any(|(_, end)| matches!(end, RtDim::ToEnd)))
         });
     // chelis#351: symbolic-dim inference reads shapes from the Loads
-    // that `symbolic_occurrences` nominates as each dim's declaring
+    // the derivation nominates as each dim's declaring
     // inputs — and such a Load can be DEAD under the roots' live mask
     // while the dim itself is live (e.g. `vmap(grad(f))` where the
     // gradient is constant in `x`: the backward DAG never consumes the
@@ -2018,6 +2105,11 @@ where
     // schedule before symbolic inference or dependent operations. Missing
     // inputs belonging only to an unrelated root remain optional (#991).
     let entry_guards = crate::axis_sources::entry_extent_guards(dag);
+    // chelis#1374: a named witness claim whose pair the entry schedule above
+    // already compares is checked there, once (spec/04 §4.7). The claim stays
+    // in the graph because it is also what retains a declared-but-unread
+    // parameter's interface witness.
+    let entry_covered = crate::axis_sources::entry_covered_witness_claims(dag);
     // Rank and literal ABI checks remain the complement of the claim schedule.
     for node in dag.nodes() {
         let RiscOp::Load { name } = &node.op else {
@@ -2103,21 +2195,21 @@ where
 
     let mut prebound_dims: UnordMap<String, usize> = UnordMap::new();
     let bound_dag = if needs_symbolic_binding {
-        let mut bindings =
+        let (mut bindings, deliberately_unbound) =
             infer_symbolic_bindings_from_inputs(dag, &resolved_inputs, &required_symbols, live)?;
         // `bind_symbolic_dims` rebuilds the complete DAG to preserve node ids.
         // Dead named dimensions therefore need a harmless placeholder even
         // though their nodes cannot execute under this root mask. Live names
         // are never defaulted: they were inferred above or failed loudly.
         if live.is_some() {
-            for binding in symbolic_bindings(dag) {
-                if !required_symbols.contains(&binding.name) {
-                    bindings.entry(binding.name).or_insert(1);
+            for name in crate::axis_sources::rendered_dim_names(dag) {
+                if !required_symbols.contains(&name) {
+                    bindings.entry(name).or_insert(1);
                 }
             }
         }
         prebound_dims = bindings.clone();
-        let bound = bind_symbolic_dims(dag, &bindings)?;
+        let bound = bind_symbolic_dims(dag, &bindings, &deliberately_unbound)?;
         // chelis#523: `verify` (grad.rs, before eval) runs BEFORE binding, so
         // its C10 shrink/stride bound checks are SKIPPED on symbolic axes
         // (extent unknown). Once `bind_symbolic_dims` makes those extents
@@ -2131,7 +2223,9 @@ where
         // bounds on LIVE nodes only — the full `verify` would flag the dead
         // symbolic-dim-source Loads that root-scoped eval deliberately keeps
         // alive ("node N is dangling"), over-rejecting legitimate programs.
-        verify_bound_movement_bounds(&bound, live)?;
+        if execution.is_none() {
+            verify_bound_movement_bounds(&bound, live)?;
+        }
         bound
     } else {
         dag.clone()
@@ -2146,7 +2240,7 @@ where
     // mirror of the C backend's runtime equality-abort guard).
     let op_declared_axes = crate::dag::op_declared_axes_by_node(&bound_dag);
     // chelis#1277 C1.3: the eval lane's LOCAL guards, from the same
-    // `local_dim_guard_sites` the C emitter reads (C2.7). Derived from `dag`
+    // `local_dim_guard_sites` the C emitter reads (C2.5). Derived from `dag`
     // and not from `bound_dag` for the same reason the entry guards are:
     // binding rewrites a resolved `Named(n, None)` to `Named(n, Some(4))`, and
     // the derivation reads a member's own dim to decide whether the checker
@@ -2173,7 +2267,28 @@ where
     // load behind an `Option` test.
     let cancel = chelis_types::current_cancel_token();
 
-    for node in bound_dag.nodes() {
+    let order = match execution.as_ref() {
+        Some(frame) => frame.steps().to_vec(),
+        None => bound_dag
+            .nodes()
+            .iter()
+            .map(|node| crate::execution_spine::Step::Node(node.id))
+            .collect(),
+    };
+    for step in order {
+        let id = match step {
+            crate::execution_spine::Step::Node(id) => id,
+            crate::execution_spine::Step::Control { control, .. } => {
+                execution
+                    .as_deref_mut()
+                    .expect("only source plans have controls")
+                    .control(control)?;
+                continue;
+            }
+        };
+        let node = bound_dag
+            .get(id)
+            .ok_or("evaluation schedule references a missing node")?;
         if let Some(cancel) = &cancel
             && cancel.is_cancelled()
         {
@@ -2183,6 +2298,9 @@ where
             && !mask[node.id.0]
         {
             continue;
+        }
+        if execution.is_some() {
+            verify_bound_movement_node(&bound_dag, node)?;
         }
 
         // `spec/04-type-system.md` section 4.7: a guard comparing a locally
@@ -2209,12 +2327,49 @@ where
         // existed.
         if let Some(sites) = local_guard_sites.get(&node.id) {
             for (axis, claim) in sites {
-                let crate::axis_sources::LocalGuardObservation::Carrier(carrier) = &claim.observed
-                else {
-                    continue;
+                // Exhaustive on purpose: a future observation kind has to say
+                // here whether it is readable before the node runs, rather
+                // than falling through a wildcard and disappearing from this
+                // lane while the C lane keeps emitting it.
+                let observed = match &claim.observed {
+                    crate::axis_sources::LocalGuardObservation::Carrier(carrier) => {
+                        resolve_eval_bound(carrier, node, &values, 0)?
+                    }
+                    crate::axis_sources::LocalGuardObservation::ComputedExtent(computed) => {
+                        match computed_axis_extent_value(computed, node, &values)? {
+                            Some(extent) => extent,
+                            // A span that selects nothing computes no extent
+                            // to compare, so the guard yields rather than
+                            // comparing a fabricated number.
+                            //
+                            // An earlier version of this comment justified the
+                            // decline by saying the C runtime's movement plan
+                            // rejects such a span before the site is reached.
+                            // That was checkable and false:
+                            // `ShapeMetadata::shrunk` rejects only
+                            // `end < start`, so `start == end` builds a plan of
+                            // extent 0 and C's guard runs and reports the claim.
+                            //
+                            // C is the conforming lane there.
+                            // `spec/05-risc-primitives.md` section 2.4.1's
+                            // closed list of runtime-bound errors does not
+                            // include an empty span, and section 4.7.2 makes
+                            // only a NEGATIVE size an error, so an extent-0
+                            // result under a declared `tensor[2, f32]` is a
+                            // claim mismatch. This lane instead rejects the
+                            // span itself under an operation-level admission
+                            // rule the numbered spec does not require; the
+                            // divergence is pre-existing, is tracked by
+                            // chelis#1795, and is pinned rather than repaired
+                            // here.
+                            None => continue,
+                        }
+                    }
+                    // Read only after the node has produced its value; taken
+                    // by the loop at the foot of the body.
+                    crate::axis_sources::LocalGuardObservation::RealizedExtent => continue,
                 };
-                let observed = resolve_eval_bound(carrier, node, &values, 0)?;
-                local_guard_verdict(node.id.0, *axis, claim, observed, &runtime_dims)?;
+                local_guard_verdict(*axis, claim, observed, &mut runtime_dims)?;
             }
         }
 
@@ -2275,6 +2430,7 @@ where
                 parameter,
                 axis,
                 requirements,
+                claims,
             } => {
                 let operation = match site {
                     crate::dag::ExtentWitnessSite::Caller => "load",
@@ -2301,6 +2457,46 @@ where
                             "extent `{required}`: claimed = {required}, {parameter} axis {axis} = {observed}\nnumeric trap: domain in {operation} at int64"
                         ));
                     }
+                }
+                // chelis#1374/#1376: §4.7.2's named half. Each requirement
+                // edge is another witness of the same activation, so both
+                // records read a fact the graph states. The declaring side
+                // leads, as `entry_extent_guards` renders the `Load`-witnessed
+                // form of the same contract.
+                for (index, (claim, edge)) in
+                    claims.iter().zip(node.inputs.iter().skip(1)).enumerate()
+                {
+                    if entry_covered.contains(&(node.id, index)) {
+                        continue;
+                    }
+                    let (required_parameter, required_axis) =
+                        match &dag.get(*edge).ok_or("missing extent claim edge")?.op {
+                            RiscOp::ExtentWitness {
+                                parameter,
+                                axis: crate::dag::RtAxis::Lit(axis),
+                                ..
+                            } => (parameter.clone(), *axis),
+                            _ => return Err("extent claim requires a witness edge".into()),
+                        };
+                    let required = values[edge]
+                        .storage()
+                        .scalar_at(0)
+                        .as_i64_exact()
+                        .ok_or("extent claim requires int64")?;
+                    if i64::try_from(observed).ok() == Some(required) {
+                        continue;
+                    }
+                    let here = format!("{parameter} axis {axis} = {observed}");
+                    let there = format!("{required_parameter} axis {required_axis} = {required}");
+                    let (first, second) = if claim.requirement_declares {
+                        (there, here)
+                    } else {
+                        (here, there)
+                    };
+                    return Err(format!(
+                        "extent `{}`: {first}, {second}\nnumeric trap: domain in {operation} at int64",
+                        claim.claim
+                    ));
                 }
                 finalize_wide_int(
                     "shape",
@@ -2414,7 +2610,20 @@ where
             // `f64::round`, which rounds half away from zero.
             RiscOp::Round => unary_elementwise(ElementwiseUnOp::Round, &values[&node.inputs[0]])?,
             RiscOp::UniformLike { low, high, seed } => {
-                let effective_seed = if let Some(activation) = node.inputs.get(1) {
+                let key = if let Some(frame) = execution.as_deref_mut() {
+                    let active = match node.inputs.get(1) {
+                        Some(activation) => match values[activation].storage().to_raw() {
+                            RawTensor::Int(values) if values.len() == 1 => values[0] != 0,
+                            _ => {
+                                return Err(
+                                    "uniform_like path activation is not a scalar Bool".into()
+                                );
+                            }
+                        },
+                        None => true,
+                    };
+                    frame.uniform_key(node.id, *seed, active)?
+                } else if let Some(activation) = node.inputs.get(1) {
                     let active = match values[activation].storage().to_raw() {
                         RawTensor::Int(values) if values.len() == 1 => values[0] != 0,
                         _ => {
@@ -2425,16 +2634,22 @@ where
                         }
                     };
                     if active {
-                        let effective =
-                            *seed ^ path_random_counter.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-                        path_random_counter = path_random_counter.saturating_add(1);
-                        effective
+                        Some((*seed, path_random_counter))
                     } else {
-                        *seed
+                        None
                     }
                 } else {
-                    *seed
+                    None
                 };
+                // One legacy value-kernel seed fold for both planned keys
+                // and activation-gated legacy execution. No canonical
+                // UniformLike numeric claim is made by plan admission.
+                let effective_seed = key.map_or(*seed, |(raw_seed, path_random_counter)| {
+                    raw_seed ^ path_random_counter.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                });
+                if execution.is_none() && key.is_some() {
+                    path_random_counter = path_random_counter.saturating_add(1);
+                }
                 uniform_like(
                     &values[&node.inputs[0]].shape.clone(),
                     *low,
@@ -2443,9 +2658,10 @@ where
                     out_prim,
                 )?
             }
-            RiscOp::Dropout { rate, seed } => {
-                dropout(&values[&node.inputs[0]], *rate, *seed, out_prim)?
-            }
+            RiscOp::Dropout { rate, seed } => match execution.as_deref_mut() {
+                Some(frame) => frame.dropout(node.id, &values[&node.inputs[0]], *rate, *seed)?,
+                None => dropout(&values[&node.inputs[0]], *rate, *seed, out_prim)?,
+            },
             RiscOp::MaxElem => binary_elementwise(
                 ElementwiseBinOp::Max,
                 &values[&node.inputs[0]],
@@ -2881,7 +3097,7 @@ where
                 let Some(&observed) = value.shape.get(*axis) else {
                     continue;
                 };
-                local_guard_verdict(node.id.0, *axis, claim, observed, &runtime_dims)?;
+                local_guard_verdict(*axis, claim, observed, &mut runtime_dims)?;
             }
         }
         values.insert(node.id, value);
@@ -2898,52 +3114,145 @@ where
 /// section 4.7's context on its own preceding line, in the C lane's wording:
 /// the two lanes report one guard.
 ///
-/// A binder this lane has not bound supplies no value, so the site is skipped
-/// rather than compared against an invented number.
+/// A binder this lane has not bound yet is BOUND from the first site that
+/// observes it, and every later site is compared against that value. That is
+/// C2.4's rule for a class whose canonical value no literal resolves: the
+/// first member is canonical and the rest guard against it.
 ///
-/// The C lane does NOT match that skip, and saying so is the point. Once
+/// This mirrors the C lane case for case rather than describing it. Once
 /// control reaches `emit_runtime_dim_site`'s GUARD branch it consults no
 /// binding table and emits its comparison against the binder unconditionally,
-/// so where this lane skips, C would emit an identifier its prologue may never
-/// declare. What keeps that from being a live divergence is not the absence of
-/// such a class - one is easy to build, with a `Load` whose only axis is a
-/// literal and two op-declared members - but the branch above it.
-/// `runtime_dim_sites` (`chelis-backend-c/src/emit.rs`) makes the FIRST
-/// op-declared occurrence of a symbol no `Load` declares a DECLARE site, so
-/// `emit_runtime_dim_site` returns before the guard branch for exactly the
-/// symbols this lane has not bound; a later site for that symbol compares
-/// against a variable by then declared. The eval mirror is the `runtime_dims`
-/// insert in the same loop, which binds the same symbol when the same node
-/// evaluates. The lanes line up case by case.
+/// so a lane that SKIPPED an unbound binder would leave C comparing against an
+/// identifier and this lane comparing against nothing. `runtime_dim_sites`
+/// (`chelis-backend-c/src/emit.rs`) makes the FIRST op-declared occurrence of a
+/// symbol no `Load` declares a DECLARE site, emitting `int64_t m = <extent>;`
+/// before its guard; the `runtime_dims` insert below is that declaration on
+/// this lane, at the same site and from the same observed value.
 ///
-/// The residual window is a derivation site that the legacy
-/// `symbolic_occurrences` walk records nowhere, for a symbol nothing declares.
-/// Neither this author nor a reviewer could construct one. It stays a latent
-/// asymmetry in one derivation's two consumers, recorded rather than papered
-/// over, and closing it means giving the derivation the answer rather than
-/// adding a second test in either lane.
+/// The residual this replaces was a derivation site for a symbol nothing
+/// declares, recorded rather than closed because no reviewer could construct a
+/// reaching class. Admitting op-computed members makes one buildable - two axes
+/// of one `shrink` under a result name no parameter declares - so the asymmetry
+/// between the two consumers is removed here instead of being re-recorded.
 fn local_guard_verdict(
-    node_id: usize,
     axis: usize,
     claim: &crate::axis_sources::LocalGuardClaim,
     observed: usize,
-    runtime_dims: &UnordMap<String, usize>,
+    runtime_dims: &mut UnordMap<String, usize>,
 ) -> Result<(), String> {
     let claimed = match &claim.canonical {
         crate::axis_sources::CanonicalExtent::Resolved(value) => *value,
         crate::axis_sources::CanonicalExtent::Binder(name) => match runtime_dims.get(name) {
             Some(value) => *value,
-            None => return Ok(()),
+            None => {
+                runtime_dims.insert(name.clone(), observed);
+                observed
+            }
         },
     };
     if observed != claimed {
         return Err(format!(
-            "extent `{}`: claimed = {claimed}, node {node_id} axis {axis} = {observed}\n\
+            "extent `{}`: claimed = {claimed}, {} axis {axis} = {observed}\n\
              numeric trap: domain in {} at int64",
-            claim.claim, claim.op,
+            claim.claim, claim.op, claim.op,
         ));
     }
     Ok(())
+}
+
+/// Evaluate a source-owned plan. The context records the executed prefix on
+/// both success and failure; legacy Dag-only entrypoints remain unchanged.
+pub fn eval_tensor_plan_with_strict<F>(
+    plan: &crate::evaluation::EvaluationPlan,
+    context: &mut crate::evaluation::RandomExecutionContext,
+    load_input: F,
+) -> Result<UnordMap<NodeId, TensorValue>, String>
+where
+    F: FnMut(&str) -> Option<TensorValue>,
+{
+    let dag = plan.dag_for_inspection();
+    let starting_counter = context.state().counter;
+    let mut frame = plan.frame(context)?;
+    // Plan validation requires the complete selected graph, including dead
+    // executed nodes. Value liveness must not prune this execution slice.
+    let live = vec![true; dag.len()];
+    eval_tensor_internal(
+        dag,
+        Some(&live),
+        true,
+        starting_counter,
+        Some(&mut frame),
+        load_input,
+    )
+    .map(|(values, _)| values)
+}
+
+pub(crate) fn eval_tensor_segment_with_strict<F>(
+    dag: &Dag,
+    frame: &mut crate::evaluation::ExecutionFrame<'_>,
+    load_input: F,
+) -> Result<UnordMap<NodeId, TensorValue>, String>
+where
+    F: FnMut(&str) -> Option<TensorValue>,
+{
+    eval_tensor_internal(dag, None, true, 0, Some(frame), load_input).map(|(values, _)| values)
+}
+
+/// The extent an op-computed axis is about to produce, read from the site
+/// node's own bounds before that node runs.
+///
+/// `None` means the operation computes no extent here: a `shrink` span whose
+/// start is not below its end selects nothing, so there is nothing to compare
+/// and the guard yields. THIS lane then reports the span itself. The C lane
+/// does not: `spec/05-risc-primitives.md` section 2.4.1's closed list of
+/// runtime-bound errors does not include an empty span, so an extent-0 result
+/// under a declared literal is a claim mismatch there and C reports the claim.
+/// That divergence is chelis#1795's, not this function's; the inline comment
+/// at the call site carries the full argument.
+///
+/// A span whose END exceeds the operand's extent is NOT declined, and that is
+/// a deliberate limit rather than an oversight. It is out of domain too, and
+/// section 2.4.1 makes "a shrink range overshoot" an error every execution
+/// mode reports with matching language. But this lane answers such a span with
+/// the `assert!` in `shrink`, which PANICS rather than returning a typed
+/// error, so declining here would trade a guard reporting the wrong reason for
+/// a panic. The claim this slice makes is therefore bounded to IN-DOMAIN
+/// spans, the two out-of-domain dispositions are pinned by receipts, and
+/// closing the divergence belongs to chelis#1797.
+fn computed_axis_extent_value(
+    computed: &crate::axis_sources::ComputedAxisExtent,
+    node: &DagNode,
+    values: &UnordMap<NodeId, TensorValue>,
+) -> Result<Option<usize>, String> {
+    match computed {
+        crate::axis_sources::ComputedAxisExtent::ShrinkSpan {
+            start,
+            end,
+            operand_axis,
+        } => {
+            // `RtDim::ToEnd` resolves to the OPERAND's realized extent, which
+            // is readable here because the operand is one of this node's
+            // producers. `resolve_eval_pairs` resolves the same two bounds
+            // against the same shape when the operation itself runs.
+            //
+            // An absent operand or axis is a malformed graph that `verify`
+            // rejects, and the guard declines rather than substituting a
+            // number for it: a fabricated extent would compare a claim
+            // against a value nothing produced, and the operation's own
+            // failure is the one that names the defect.
+            let Some(extent) = node
+                .inputs
+                .first()
+                .and_then(|id| values.get(id))
+                .and_then(|operand| operand.shape.get(*operand_axis).copied())
+            else {
+                return Ok(None);
+            };
+            let start = resolve_eval_bound(start, node, values, extent)?;
+            let end = resolve_eval_bound(end, node, values, extent)?;
+            Ok(end.checked_sub(start).filter(|span| *span > 0))
+        }
+    }
 }
 
 pub fn eval_tensor_with<F>(
@@ -2953,8 +3262,15 @@ pub fn eval_tensor_with<F>(
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
-    eval_tensor_internal(dag, None, false, INITIAL_RANDOM_STREAM_ORDINAL, load_input)
-        .map(|(values, _)| values)
+    eval_tensor_internal(
+        dag,
+        None,
+        false,
+        INITIAL_RANDOM_STREAM_ORDINAL,
+        None,
+        load_input,
+    )
+    .map(|(values, _)| values)
 }
 
 pub fn eval_tensor_with_strict<F>(
@@ -2964,8 +3280,15 @@ pub fn eval_tensor_with_strict<F>(
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
-    eval_tensor_internal(dag, None, true, INITIAL_RANDOM_STREAM_ORDINAL, load_input)
-        .map(|(values, _)| values)
+    eval_tensor_internal(
+        dag,
+        None,
+        true,
+        INITIAL_RANDOM_STREAM_ORDINAL,
+        None,
+        load_input,
+    )
+    .map(|(values, _)| values)
 }
 
 pub fn eval_tensor_roots_with<F>(
@@ -2977,8 +3300,15 @@ where
     F: FnMut(&str) -> Option<TensorValue>,
 {
     if roots.is_empty() {
-        return eval_tensor_internal(dag, None, false, INITIAL_RANDOM_STREAM_ORDINAL, load_input)
-            .map(|(values, _)| values);
+        return eval_tensor_internal(
+            dag,
+            None,
+            false,
+            INITIAL_RANDOM_STREAM_ORDINAL,
+            None,
+            load_input,
+        )
+        .map(|(values, _)| values);
     }
     reject_drop_roots(dag, roots)?;
     let live = live_mask_for_roots(dag, roots);
@@ -2987,6 +3317,7 @@ where
         Some(&live),
         false,
         INITIAL_RANDOM_STREAM_ORDINAL,
+        None,
         load_input,
     )
     .map(|(values, _)| values)
@@ -3001,8 +3332,15 @@ where
     F: FnMut(&str) -> Option<TensorValue>,
 {
     if roots.is_empty() {
-        return eval_tensor_internal(dag, None, true, INITIAL_RANDOM_STREAM_ORDINAL, load_input)
-            .map(|(values, _)| values);
+        return eval_tensor_internal(
+            dag,
+            None,
+            true,
+            INITIAL_RANDOM_STREAM_ORDINAL,
+            None,
+            load_input,
+        )
+        .map(|(values, _)| values);
     }
     reject_drop_roots(dag, roots)?;
     let live = live_mask_for_roots(dag, roots);
@@ -3011,6 +3349,7 @@ where
         Some(&live),
         true,
         INITIAL_RANDOM_STREAM_ORDINAL,
+        None,
         load_input,
     )
     .map(|(values, _)| values)
@@ -3029,11 +3368,11 @@ where
     F: FnMut(&str) -> Option<TensorValue>,
 {
     if roots.is_empty() {
-        return eval_tensor_internal(dag, None, true, random_counter, load_input);
+        return eval_tensor_internal(dag, None, true, random_counter, None, load_input);
     }
     reject_drop_roots(dag, roots)?;
     let live = live_mask_for_roots(dag, roots);
-    eval_tensor_internal(dag, Some(&live), true, random_counter, load_input)
+    eval_tensor_internal(dag, Some(&live), true, random_counter, None, load_input)
 }
 
 fn reject_drop_roots(dag: &Dag, roots: &[NodeId]) -> Result<(), String> {
@@ -3156,6 +3495,19 @@ mod tests {
         let expected = uniform_like(&[2], 0.0, 1.0, expected_seed, Prim::F32).unwrap();
         assert_eq!(values[&executed], expected);
         let skipped_expected = uniform_like(&[2], 0.0, 1.0, 17, Prim::F32).unwrap();
+        assert_eq!(values[&skipped], skipped_expected);
+
+        let (values, next) =
+            eval_tensor_roots_with_strict_random_progress(&dag, &roots, u64::MAX, |name| {
+                (name == "template").then(|| TensorValue::from_vec(vec![2], vec![0.0; 2]))
+            })
+            .expect("legacy Random progress retains its saturation boundary");
+        assert_eq!(next, u64::MAX);
+        let expected_seed = 17 ^ u64::MAX.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        assert_eq!(
+            values[&executed],
+            uniform_like(&[2], 0.0, 1.0, expected_seed, Prim::F32).unwrap()
+        );
         assert_eq!(values[&skipped], skipped_expected);
     }
 

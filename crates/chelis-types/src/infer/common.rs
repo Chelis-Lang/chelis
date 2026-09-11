@@ -631,6 +631,98 @@ pub(super) fn infer_trace_result_type(
     Ok(Type::Tensor(out_dims, precision.clone()))
 }
 
+/// One selected axis of a `diagonal` pair, identified by its position in the
+/// pair rather than by its index in the operand, so the decision function does
+/// not have to carry the operand's axis numbering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct DiagonalBound {
+    /// `0` for the first selected axis, `1` for the second.
+    pub(super) selected: usize,
+    /// The literal extent on that axis. `min` can never exceed it.
+    pub(super) extent: i64,
+}
+
+/// What `[05-OP-33]`'s "smaller selected extent" is, plus the upper bound a
+/// literal selected axis imposes when the minimum itself is not statically
+/// known.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct DiagonalExtent {
+    /// The dimension the retained axis carries in the result type.
+    pub(super) dim: Dim,
+    /// Present only when exactly one selected axis is literal. `min(x, k) <= k`
+    /// for every runtime `x`, so a declared extent strictly greater than `k` is
+    /// unreachable even though `dim` stays a wildcard (chelis#1739).
+    pub(super) bound: Option<DiagonalBound>,
+}
+
+/// The single decision function for a `diagonal` axis pair.
+///
+/// `dim` is unchanged from chelis#1355: two literals declare their minimum,
+/// two occurrences of one named extent declare that name, and everything else
+/// keeps the wildcard, because `Dim` (`crates/chelis-types/src/types.rs`) has
+/// no bounded variant and `min(n, 4)` cannot be spelled.
+///
+/// `bound` is what chelis#1739 adds. A literal beside a non-literal extent is
+/// an upper bound on the result: whatever `n` is at run time, `min(n, 4) <= 4`.
+/// The checker rejects a declared extent strictly greater than the bound and
+/// accepts at or below it, where only the runtime can decide which side of the
+/// minimum wins. A rank spread is deliberately excluded: it stands for a run of
+/// dimensions rather than one extent, so no minimum relation holds.
+///
+/// Callers that need the bound read it through [`diagonal_result_bound`], which
+/// maps the pair position back onto the operand's axes. Both readers go through
+/// this one function so the eager and deferred shape routes cannot drift.
+pub(super) fn select_diagonal_extent(a: &Dim, b: &Dim) -> DiagonalExtent {
+    fn bounded_by_a_literal(dim: &Dim) -> bool {
+        match dim {
+            Dim::Name(_) | Dim::Var(_) | Dim::Wildcard => true,
+            Dim::Lit(_) | Dim::Rank(_) => false,
+        }
+    }
+
+    let dim = match (a, b) {
+        (Dim::Lit(lhs), Dim::Lit(rhs)) => Dim::Lit(*lhs.min(rhs)),
+        (Dim::Name(lhs), Dim::Name(rhs)) if lhs == rhs => Dim::Name(lhs.clone()),
+        _ => Dim::Wildcard,
+    };
+    let bound = match (a, b) {
+        (Dim::Lit(extent), other) if bounded_by_a_literal(other) => Some(DiagonalBound {
+            selected: 0,
+            extent: *extent,
+        }),
+        (other, Dim::Lit(extent)) if bounded_by_a_literal(other) => Some(DiagonalBound {
+            selected: 1,
+            extent: *extent,
+        }),
+        _ => None,
+    };
+    DiagonalExtent { dim, bound }
+}
+
+/// The upper bound a `diagonal` call imposes on its declared result, expressed
+/// in the coordinates a caller can compare against a declared type.
+///
+/// Returns the result-type axis the bound applies to, the operand axis the
+/// literal came from (for the diagnostic), and the bound itself. The result
+/// axis is not the source axis: `diagonal` removes `axis2`, so a retained
+/// `axis1` after it shifts down by one.
+pub(super) fn diagonal_result_bound(
+    tensor_ty: &Type,
+    axis1: usize,
+    axis2: usize,
+) -> Option<(usize, usize, i64)> {
+    let Type::Tensor(dims, _) = tensor_ty else {
+        return None;
+    };
+    if axis1 >= dims.len() || axis2 >= dims.len() || axis1 == axis2 {
+        return None;
+    }
+    let bound = select_diagonal_extent(&dims[axis1], &dims[axis2]).bound?;
+    let source_axis = if bound.selected == 0 { axis1 } else { axis2 };
+    let result_axis = if axis1 < axis2 { axis1 } else { axis1 - 1 };
+    Some((result_axis, source_axis, bound.extent))
+}
+
 pub(super) fn infer_diagonal_result_type(
     tensor_ty: &Type,
     axis1: usize,
@@ -662,11 +754,7 @@ pub(super) fn infer_diagonal_result_type(
     // Everything else keeps the wildcard - distinct names, a mixed
     // literal/symbolic pair, a dimension variable, a rank spread - because there
     // the minimum genuinely is not known at check time.
-    let diag_dim = match (&dims[axis1], &dims[axis2]) {
-        (Dim::Lit(lhs), Dim::Lit(rhs)) => Dim::Lit(*lhs.min(rhs)),
-        (Dim::Name(lhs), Dim::Name(rhs)) if lhs == rhs => Dim::Name(lhs.clone()),
-        _ => Dim::Wildcard,
-    };
+    let diag_dim = select_diagonal_extent(&dims[axis1], &dims[axis2]).dim;
     let mut out_dims = Vec::with_capacity(dims.len() - 1);
     for (index, dim) in dims.iter().enumerate() {
         if index == axis1 {

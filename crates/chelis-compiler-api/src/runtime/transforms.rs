@@ -5,6 +5,8 @@ use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, Metadata};
 use chelis_ir::dag::{DimInfo, TensorType};
 use chelis_ir::eval::TensorValue as IrTensorValue;
+use chelis_ir::evaluation::{EvaluationProfile, RandomExecutionContext};
+use chelis_ir::host::RandomLoweringState;
 use chelis_ir::lower::try_lower_subexpr_program_with_random_state_progress;
 use chelis_types::types::{NominalArg, Prim, TensorPrec, Type, TypeVar};
 
@@ -172,8 +174,8 @@ impl<'a> EvalContext<'a> {
         // rank-poly named reduce's surviving `hidden`), and vmap's rank
         // shift (batched actual = formal rank + 1) defeats the same-rank
         // formal/actual remap at the transform boundary — so the name
-        // stays unbound, no Load declares it, and
-        // `dag::symbolic_occurrences` ICEs. Type the placeholder from
+        // stays unbound and no input declares it, so the C lane has no
+        // extent source for it. Type the placeholder from
         // the callee's declared formals instead (the chelis#338/#346
         // pattern for plain def calls): the vmap axis stays `Lit`, the
         // mapped axes carry the formal's names with runtime sizes, and
@@ -362,14 +364,35 @@ impl<'a> EvalContext<'a> {
             ));
         }
 
-        let lower_result = try_lower_subexpr_program_with_random_state_progress(
-            &app_expr,
-            scoped_types,
-            self.type_env.clone(),
-            program_defs,
-            self.random_seed,
-            self.random_counter,
-        );
+        let profile = self.execution_profile(&app_expr, &program_defs);
+        let mut execution_plan = None;
+        let lower_result = if profile == EvaluationProfile::FixedControl {
+            let context = RandomExecutionContext::new(RandomLoweringState {
+                seed: self.random_seed,
+                counter: self.random_counter,
+            });
+            chelis_ir::lower::try_lower_subexpr_evaluation_plan(
+                &app_expr,
+                scoped_types,
+                self.type_env.clone(),
+                program_defs,
+                &context,
+            )
+            .map(|plan| {
+                let dag = plan.dag_for_inspection().clone();
+                execution_plan = Some(plan);
+                (dag, self.random_counter)
+            })
+        } else {
+            try_lower_subexpr_program_with_random_state_progress(
+                &app_expr,
+                scoped_types,
+                self.type_env.clone(),
+                program_defs,
+                self.random_seed,
+                self.random_counter,
+            )
+        };
         let (dag, next_random_counter) = match lower_result {
             Ok(result) => result,
             Err(diagnostic) => {
@@ -387,7 +410,7 @@ impl<'a> EvalContext<'a> {
         let path_sensitive_random = dag.nodes().iter().any(|node| {
             matches!(node.op, chelis_ir::dag::RiscOp::UniformLike { .. }) && node.inputs.len() == 2
         });
-        if !path_sensitive_random {
+        if execution_plan.is_none() && !path_sensitive_random {
             // The ordinary baked-seed lane computes progression statically.
             self.random_counter = next_random_counter;
         }
@@ -398,6 +421,7 @@ impl<'a> EvalContext<'a> {
         // captured by the inner fn body).
         let tensor_bindings = self.tensor_bindings;
         let roots: Vec<chelis_ir::dag::NodeId> = dag.roots().to_vec();
+        let mut empty_packed = None;
         if roots.is_empty() {
             if matches!(kind, TransformKind::Grad)
                 && !arg_repacks.is_empty()
@@ -412,19 +436,23 @@ impl<'a> EvalContext<'a> {
                         unreachable!("guarded by empty List repack check")
                     }
                 });
-                return Ok(if arg_repacks.len() == 1 {
+                let packed = if arg_repacks.len() == 1 {
                     empty_slots.next().expect("one empty List slot")?
                 } else {
                     RuntimeValue::Tuple(empty_slots.collect::<Result<_, _>>()?)
-                });
+                };
+                if execution_plan.is_none() { return Ok(packed); }
+                empty_packed = Some(packed);
             }
-            let kind_label = match kind {
-                TransformKind::Grad => "grad",
-                TransformKind::Vmap => "vmap",
-            };
-            return Err(format!(
-                "host runtime: `{kind_label}(...)` lowering produced no roots"
-            ));
+            if empty_packed.is_none() {
+                let kind_label = match kind {
+                    TransformKind::Grad => "grad",
+                    TransformKind::Vmap => "vmap",
+                };
+                return Err(format!(
+                    "host runtime: `{kind_label}(...)` lowering produced no roots"
+                ));
+            }
         }
         // chelis#377: a transform target may capture a top-level tensor
         // binding (`w = to_tensor([...]); def f(x) = sum(mul(x, w), 0);
@@ -504,28 +532,44 @@ impl<'a> EvalContext<'a> {
                 ));
             }
         }
-        let (values, executed_random_counter) =
+        let load = |name: &str| {
+            placeholder_tensors
+                .get(name)
+                .cloned()
+                .or_else(|| tensor_bindings.get(name).map(|t| t.value.clone()))
+                .or_else(|| captured_tensors.get(name).cloned())
+        };
+        let result = if let Some(plan) = &execution_plan {
+            let mut context = RandomExecutionContext::new(RandomLoweringState {
+                seed: self.random_seed,
+                counter: self.random_counter,
+            });
+            let result = chelis_ir::eval::eval_tensor_plan_with_strict(plan, &mut context, load);
+            self.random_counter = context.state().counter;
+            result.map(|values| (values, self.random_counter))
+        } else {
             chelis_ir::eval::eval_tensor_roots_with_strict_random_progress(
                 &dag,
                 &roots,
                 starting_random_counter,
-                |name| {
-                    placeholder_tensors
-                        .get(name)
-                        .cloned()
-                        .or_else(|| tensor_bindings.get(name).map(|t| t.value.clone()))
-                        .or_else(|| captured_tensors.get(name).cloned())
-                },
+                load,
             )
-            .map_err(|err| {
-                let kind_label = match kind {
-                    TransformKind::Grad => "grad",
-                    TransformKind::Vmap => "vmap",
-                };
-                format!("host runtime `{kind_label}` evaluation failed: {err}")
-            })?;
-        if path_sensitive_random {
+        };
+        let (values, executed_random_counter) = result.map_err(|err| {
+            if execution_plan.is_some() {
+                return err;
+            }
+            let kind_label = match kind {
+                TransformKind::Grad => "grad",
+                TransformKind::Vmap => "vmap",
+            };
+            format!("host runtime `{kind_label}` evaluation failed: {err}")
+        })?;
+        if execution_plan.is_none() && path_sensitive_random {
             self.random_counter = executed_random_counter;
+        }
+        if let Some(packed) = empty_packed {
+            return Ok(packed);
         }
 
         // Pack roots back into a RuntimeValue.
