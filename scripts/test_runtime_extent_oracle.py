@@ -38,8 +38,25 @@ SPEC.loader.exec_module(ORACLE)
 # it was put there to protect.
 #
 # Was 29a3bf773f1637a70ec533b1d24ecfac7d0f7ce637af98a117f612abafa044e1.
+#
+# Moved a second time, deliberately, for chelis#1397. The row
+# `vmap.shared_shape_bound.concrete_c_emit` sat in `PHASE_A_DEFERRED` because
+# the guard it waited on was Slice B's, so its exit state repeated its start
+# state and the row proved nothing. chelis#1397's wildcard-root repair is that
+# guard: the program the row names now emits a C entry and both lanes render
+# `main = tensor(shape=[2, 2], data=[2.0, 3.0, 5.0, 6.0])`, so the row is lifted
+# out of the deferral map and its exit state becomes `EXECUTES`.
+#
+# Measured rather than asserted, the same way the first move was: canonicalizing
+# both corpora and comparing row by row gives 32 rows before and after, ONE row
+# differing, and that row differing only in its `phase_a` exit state
+# (`silent_unguarded` -> `executes_exactly`). No row id, no receipt and no other
+# row's baseline changed, so the freeze still holds over everything it was put
+# there to protect.
+#
+# Was cb8401a05a009c97450cb0eaf00b94e2686725a37304ec44d63ceba8e1b64320.
 FROZEN_PHASE_A_DIGEST = (
-    "cb8401a05a009c97450cb0eaf00b94e2686725a37304ec44d63ceba8e1b64320"
+    "c9496cb2770dded72379d0e77aa0f2a4937f2e42fc78a34385cb7ddafc942e42"
 )
 
 
@@ -88,9 +105,14 @@ class RuntimeExtentOracleTests(unittest.TestCase):
             by_id["vmap.element_derived_extent"].receipt,
             "cli.vmap_rejects_element_derived_extent_at_public_checker",
         )
+        # chelis#1397 lifted this row out of `PHASE_A_DEFERRED`. Its exit state
+        # repeated its start state only because the guard it waited on had not
+        # landed; the wildcard-root repair is that guard, so the row now exits at
+        # `EXECUTES` and proves something. See `FROZEN_PHASE_A_DIGEST` above for
+        # the measured corpus delta.
         self.assertEqual(
             by_id["vmap.shared_shape_bound.concrete_c_emit"].exit_state,
-            "silent_unguarded",
+            ORACLE.EXECUTES,
         )
         self.assertEqual(
             by_id["reshape.negative.runtime_eval_c"].exit_state,
