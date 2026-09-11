@@ -1498,7 +1498,12 @@ fn entry_lane_decision<'a>(
     {
         return Ok(Decline(EntryLaneDecline::HasGlobals));
     }
-    let Some(entry) = resolve_execution_entry(entry_name, host_program, host_only, strictness)?
+    // A newly admitted fixed-control callable must not inherit the legacy
+    // host default of silently choosing the last tensor def.
+    let legacy_host_selection =
+        host_only && !(allow_execution && strictness == EntryStrictness::Strict);
+    let Some(entry) =
+        resolve_execution_entry(entry_name, host_program, legacy_host_selection, strictness)?
     else {
         return Ok(Decline(EntryLaneDecline::NoEntryResolved));
     };
