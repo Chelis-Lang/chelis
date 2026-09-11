@@ -627,7 +627,7 @@ fn collect_var_names(expr: &Expr, vars: &mut Vec<String>) {
 }
 
 /// Strip `t-ref` wrappers (and MetaExpr shells) off a Deep type expr.
-fn strip_type_wrappers(ty_expr: &Expr) -> &Expr {
+pub(super) fn strip_type_wrappers(ty_expr: &Expr) -> &Expr {
     match ty_expr {
         Expr::List(list, _) if tag(list) == Some(DeepTag::TRef) => children(list)
             .first()

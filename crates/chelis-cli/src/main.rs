@@ -3434,13 +3434,19 @@ fn cmd_build(
                 && let Some(host_program) = compiled_program.host.as_mut()
             {
                 let selected = std::mem::take(host_program);
+                // The helper manifest is read before C payload selection so a
+                // Count-bearing helper reaches the HIP backend as its source
+                // DAG and is lowered exactly like a HIP tensor entry.
+                let (helpers, selected) =
+                    chelis_backend_c::host_tensor_helper_codegen(selected, func_name)?;
                 let verified = verified_host_codegen_program(
                     checked,
                     &root_manifest,
                     BuildTarget::Hip,
                     selected,
                 )?;
-                let result = chelis_backend_c::codegen_host_program(&verified, func_name)?;
+                let result =
+                    chelis_backend_hip::codegen_hip_host_program(&verified, func_name, helpers)?;
                 cmd_build_hip_host(result, func_name, output, requires_main)
             } else {
                 let mut hip_dag = if let Some(entry_dag) = preferred_entry_dag {
@@ -3507,14 +3513,20 @@ fn cmd_build(
                 .and_then(|name| chelis_ir::host::lower_named_tensor_entry_dag(checked, name));
             let validated_host = if host_requires_host_backend {
                 if let Some(selected) = compiled_program.host.take() {
+                    // The helper manifest is read before C payload selection
+                    // so a Count-bearing helper reaches the Metal backend as
+                    // its source DAG and is lowered exactly like a Metal
+                    // tensor entry.
+                    let (helpers, selected) =
+                        chelis_backend_c::host_tensor_helper_codegen(selected, func_name)?;
                     let verified = verified_host_codegen_program(
                         checked,
                         &root_manifest,
                         BuildTarget::Metal,
                         selected,
                     )?;
-                    Some(chelis_backend_c::codegen_host_program(
-                        &verified, func_name,
+                    Some(chelis_backend_metal::codegen_metal_host_program(
+                        &verified, func_name, helpers,
                     )?)
                 } else {
                     None
@@ -3527,10 +3539,7 @@ fn cmd_build(
                 && host_requires_host_backend
                 && let Some(result) = validated_host
             {
-                // Host-only programs fall through to the C backend, exactly
-                // like the HIP path. The metal path doesn't have a separate
-                // host wrapper today; reuse cmd_build_hip_host for parity.
-                cmd_build_hip_host(result, func_name, output, requires_main)
+                cmd_build_metal_host(result, func_name, output, requires_main)
             } else {
                 let mut metal_dag = if let Some(entry_dag) = preferred_entry_dag {
                     entry_dag
@@ -3773,13 +3782,19 @@ fn cmd_build_deep(
                 && let Some(host_program) = compiled_program.host.as_mut()
             {
                 let selected = std::mem::take(host_program);
+                // The helper manifest is read before C payload selection so a
+                // Count-bearing helper reaches the HIP backend as its source
+                // DAG and is lowered exactly like a HIP tensor entry.
+                let (helpers, selected) =
+                    chelis_backend_c::host_tensor_helper_codegen(selected, func_name)?;
                 let verified = verified_host_codegen_program(
                     checked,
                     &root_manifest,
                     BuildTarget::Hip,
                     selected,
                 )?;
-                let result = chelis_backend_c::codegen_host_program(&verified, func_name)?;
+                let result =
+                    chelis_backend_hip::codegen_hip_host_program(&verified, func_name, helpers)?;
                 cmd_build_hip_host(result, func_name, output, requires_main)
             } else {
                 let mut hip_dag = if let Some(entry_dag) = preferred_entry_dag {
@@ -3841,14 +3856,20 @@ fn cmd_build_deep(
                 .and_then(|name| chelis_ir::host::lower_named_tensor_entry_dag(checked, name));
             let validated_host = if host_requires_host_backend {
                 if let Some(selected) = compiled_program.host.take() {
+                    // The helper manifest is read before C payload selection
+                    // so a Count-bearing helper reaches the Metal backend as
+                    // its source DAG and is lowered exactly like a Metal
+                    // tensor entry.
+                    let (helpers, selected) =
+                        chelis_backend_c::host_tensor_helper_codegen(selected, func_name)?;
                     let verified = verified_host_codegen_program(
                         checked,
                         &root_manifest,
                         BuildTarget::Metal,
                         selected,
                     )?;
-                    Some(chelis_backend_c::codegen_host_program(
-                        &verified, func_name,
+                    Some(chelis_backend_metal::codegen_metal_host_program(
+                        &verified, func_name, helpers,
                     )?)
                 } else {
                     None
@@ -3861,7 +3882,7 @@ fn cmd_build_deep(
                 && host_requires_host_backend
                 && let Some(result) = validated_host
             {
-                cmd_build_hip_host(result, func_name, output, requires_main)
+                cmd_build_metal_host(result, func_name, output, requires_main)
             } else {
                 let mut metal_dag = if let Some(entry_dag) = preferred_entry_dag {
                     entry_dag
@@ -9535,7 +9556,7 @@ fn cmd_build_c_result(
 }
 
 fn cmd_build_hip_host(
-    result: chelis_backend_c::CodegenResult,
+    result: chelis_backend_hip::HipHostProgramCodegenResult,
     func_name: &str,
     output: Option<&std::path::Path>,
     requires_main: bool,
@@ -9556,10 +9577,16 @@ fn cmd_build_hip_host(
         fs::create_dir_all(parent)?;
     }
 
-    fs::write(&c_path, &result.c_source)?;
-    fs::write(&h_path, &result.h_header)?;
+    fs::write(&c_path, &result.host.c_source)?;
+    fs::write(&h_path, &result.host.h_header)?;
 
     let runtime_dir = c_path.parent().unwrap_or(std::path::Path::new("."));
+    let mut helper_paths = Vec::with_capacity(result.device_helpers.len());
+    for helper in &result.device_helpers {
+        let helper_path = runtime_dir.join(format!("{}_hip.cpp", helper.name));
+        fs::write(&helper_path, &helper.result.c_source)?;
+        helper_paths.push(helper_path);
+    }
     copy_runtime_artifacts(
         runtime_dir,
         ExtraRuntimeArtifacts {
@@ -9569,6 +9596,9 @@ fn cmd_build_hip_host(
     )?;
 
     println!("Wrote {} and {}", c_path.display(), h_path.display());
+    for helper_path in &helper_paths {
+        println!("Wrote device helper {}", helper_path.display());
+    }
     println!(
         "Wrote runtime: {}, {}, {}, {}",
         runtime_dir.join("chelis_runtime.h").display(),
@@ -9577,33 +9607,142 @@ fn cmd_build_hip_host(
         runtime_dir.join("chelis_hip_runtime.h").display()
     );
 
-    let cpu_toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.requirements);
-    let mut compile_flags = cpu_toolchain
-        .compile_flags
+    let cpu_toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.host.requirements);
+    let mut compile_flags = cpu_toolchain.compile_flags;
+    compile_flags.retain(|flag| flag != "-fopenmp");
+    let mut link_flags = cpu_toolchain.link_flags;
+    link_flags.retain(|flag| flag != "-fopenmp");
+    for helper in &result.device_helpers {
+        for flag in &helper.result.compile_flags {
+            if !compile_flags.contains(flag) {
+                compile_flags.push(flag.clone());
+            }
+        }
+        for flag in &helper.result.link_flags {
+            if !link_flags.contains(flag) {
+                link_flags.push(flag.clone());
+            }
+        }
+    }
+    let helper_sources = helper_paths
         .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    compile_flags.retain(|flag| *flag != "-fopenmp");
-    let mut link_flags = cpu_toolchain
-        .link_flags
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    link_flags.retain(|flag| *flag != "-fopenmp");
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
     if requires_main {
         println!(
-            "Compile: hipcc {} {} -L{} -lchelis_runtime -lpthread -ldl {} -o {}",
+            "Compile: hipcc {} {} {} -L{} -lchelis_runtime -lpthread -ldl {} -o {}",
             compile_flags.join(" "),
             c_path.display(),
+            helper_sources,
             runtime_dir.display(),
             link_flags.join(" "),
             c_path.with_extension("").display()
         );
     } else {
         println!(
-            "Compile object: hipcc {} -c {}",
+            "Compile objects: hipcc {} -c {} {}",
             compile_flags.join(" "),
-            c_path.display()
+            c_path.display(),
+            helper_sources
+        );
+    }
+    Ok(())
+}
+
+fn cmd_build_metal_host(
+    result: chelis_backend_metal::MetalHostProgramCodegenResult,
+    func_name: &str,
+    output: Option<&std::path::Path>,
+    requires_main: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let out_dir = output
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let mm_path = if matches!(
+        out_dir.extension().and_then(|e| e.to_str()),
+        Some("mm") | Some("cpp") | Some("cxx") | Some("cc")
+    ) {
+        out_dir.clone()
+    } else {
+        out_dir.join(format!("{func_name}_metal.mm"))
+    };
+    let h_path = mm_path.with_extension("h");
+    if let Some(parent) = mm_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&mm_path, &result.host.c_source)?;
+    fs::write(&h_path, &result.host.h_header)?;
+
+    let runtime_dir = mm_path.parent().unwrap_or(std::path::Path::new("."));
+    let mut helper_paths = Vec::with_capacity(result.device_helpers.len());
+    for helper in &result.device_helpers {
+        let helper_path = runtime_dir.join(format!("{}_metal.mm", helper.name));
+        fs::write(&helper_path, &helper.result.mm_source)?;
+        helper_paths.push(helper_path);
+    }
+    copy_runtime_artifacts(
+        runtime_dir,
+        ExtraRuntimeArtifacts {
+            hip: false,
+            metal: true,
+        },
+    )?;
+
+    println!("Wrote {} and {}", mm_path.display(), h_path.display());
+    for helper_path in &helper_paths {
+        println!("Wrote device helper {}", helper_path.display());
+    }
+    println!(
+        "Wrote runtime: {}, {}, {}",
+        runtime_dir.join("chelis_runtime.h").display(),
+        runtime_dir.join("libchelis_runtime.a").display(),
+        runtime_dir.join("chelis_metal_runtime.h").display()
+    );
+
+    let cpu_toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.host.requirements);
+    let mut compile_flags = cpu_toolchain.compile_flags;
+    compile_flags.retain(|flag| flag != "-fopenmp");
+    let mut link_flags = cpu_toolchain.link_flags;
+    link_flags.retain(|flag| flag != "-fopenmp");
+    for helper in &result.device_helpers {
+        for flag in &helper.result.compile_flags {
+            if !compile_flags.contains(flag) {
+                compile_flags.push(flag.clone());
+            }
+        }
+        // `-framework NAME` pairs must keep their order; append each
+        // helper's pair list once rather than deduplicating single tokens.
+        if helper
+            .result
+            .link_flags
+            .iter()
+            .any(|flag| !link_flags.contains(flag))
+        {
+            link_flags.extend(helper.result.link_flags.iter().cloned());
+        }
+    }
+    let helper_sources = helper_paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if requires_main {
+        println!(
+            "Compile: clang++ {} -O2 {} {} -L{} -lchelis_runtime {} -o {}",
+            compile_flags.join(" "),
+            mm_path.display(),
+            helper_sources,
+            runtime_dir.display(),
+            link_flags.join(" "),
+            mm_path.with_extension("").display()
+        );
+    } else {
+        println!(
+            "Compile objects: clang++ {} -O2 -c {} {}",
+            compile_flags.join(" "),
+            mm_path.display(),
+            helper_sources
         );
     }
     Ok(())

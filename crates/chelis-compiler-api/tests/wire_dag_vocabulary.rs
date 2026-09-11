@@ -27,7 +27,7 @@ impl serde::de::Error for VocabularyError {
 }
 
 #[test]
-fn wire_dag_operation_vocabulary_is_pinned_to_version_9() {
+fn wire_dag_operation_vocabulary_is_pinned_to_its_schema_version() {
     let decoder = serde::de::value::MapDeserializer::<_, VocabularyError>::new(
         [("kind", "__unknown_operation__")].into_iter(),
     );
@@ -93,14 +93,19 @@ fn wire_dag_operation_vocabulary_is_pinned_to_version_9() {
         "scatter_add",
         "scatter",
         "scatter_elements",
+        // Version 10 (chelis#1747): checked reshape scalars, checked unit-axis
+        // refinements, and the explicit integer remainder operation.
+        "checked_reshape_extent",
+        "checked_unit_axis",
+        "mod",
     ];
     actual.sort();
     expected.sort();
     assert_eq!(
-        WIRE_DAG_SCHEMA_VERSION, 9,
+        WIRE_DAG_SCHEMA_VERSION, 11,
         "review vocabulary and migration history with every version change"
     );
-    assert_eq!(actual.len(), 60);
+    assert_eq!(actual.len(), 63);
     assert_eq!(
         actual, expected,
         "operation changes require a schema-version and migration-history review"

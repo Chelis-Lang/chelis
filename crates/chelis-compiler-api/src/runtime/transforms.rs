@@ -174,8 +174,8 @@ impl<'a> EvalContext<'a> {
         // rank-poly named reduce's surviving `hidden`), and vmap's rank
         // shift (batched actual = formal rank + 1) defeats the same-rank
         // formal/actual remap at the transform boundary — so the name
-        // stays unbound, no Load declares it, and
-        // `dag::symbolic_occurrences` ICEs. Type the placeholder from
+        // stays unbound and no input declares it, so the C lane has no
+        // extent source for it. Type the placeholder from
         // the callee's declared formals instead (the chelis#338/#346
         // pattern for plain def calls): the vmap axis stays `Lit`, the
         // mapped axes carry the formal's names with runtime sizes, and

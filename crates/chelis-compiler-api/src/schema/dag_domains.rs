@@ -112,11 +112,14 @@ pub(super) fn validate(dag: &WireDag) -> Result<()> {
             WireRiscOp::ExtentWitness {
                 axis: WireRtAxis::Lit { value },
                 requirements,
+                claims,
                 ..
             } => {
-                if node.inputs.len() != 1 {
+                // wire v11: `inputs[0]` is the observed tensor; each named
+                // claim adds one requirement edge naming an earlier witness.
+                if node.inputs.len() != claims.len() + 1 {
                     return Err(reject(
-                        "extent witness requires exactly one earlier tensor input",
+                        "extent witness requires one earlier tensor input and one earlier witness input per named claim",
                     ));
                 }
                 axis(dag, node, *value)?;
@@ -127,6 +130,28 @@ pub(super) fn validate(dag: &WireDag) -> Result<()> {
                 }
                 for requirement in requirements {
                     extent(requirement.get())?;
+                }
+                for (claim, edge) in claims.iter().zip(node.inputs.iter().skip(1)) {
+                    if claim.claim.is_empty() {
+                        return Err(reject(
+                            "an extent witness named claim requires a nonempty dimension binder",
+                        ));
+                    }
+                    let required = usize::try_from(*edge)
+                        .ok()
+                        .and_then(|edge| dag.nodes.get(edge))
+                        .filter(|required| required.id == *edge)
+                        .ok_or_else(|| {
+                            reject("an extent witness named claim requires an earlier node")
+                        })?;
+                    let witness = matches!(required.op, WireRiscOp::ExtentWitness { .. })
+                        && required.output_type.dims.is_empty()
+                        && required.output_type.precision == "int64";
+                    if *edge >= node.id || !witness {
+                        return Err(reject(
+                            "an extent witness named claim requires an earlier rank-0 int64 extent witness",
+                        ));
+                    }
                 }
             }
             WireRiscOp::Expand { axis: a, size } => {

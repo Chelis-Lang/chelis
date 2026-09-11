@@ -6,8 +6,9 @@
 //! Element 0 of that outer `(app ...)` is the literal tag symbol
 //! `"app"`, so the broken walker emitted
 //! `DimInfo::Named("app", None)` from the tag symbol — synthesizing a
-//! bogus symbolic dim that downstream passes (e.g. `symbolic_occurrences`)
-//! would treat as a real dim variable.
+//! bogus symbolic dim that downstream passes (the declaration derivation in
+//! `chelis-ir/src/axis_sources.rs`, among others) would treat as a real dim
+//! variable.
 //!
 //! Reachability on current `main`: this defect is unreachable from
 //! Surf because `expr_requires_host_runtime` flags any expression

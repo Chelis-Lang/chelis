@@ -164,18 +164,60 @@ class RuntimeExtentOracleTests(unittest.TestCase):
             by_id["shrink.elementwise_const.build"].exit_state,
             "typed_unsupported(#1482)",
         )
-        # chelis#665 and the class/guard rows stay at their main baseline
-        # until Slice B's second half. Both lanes carry the same baseline:
-        # the row is split because its guard lands per lane, not because the
-        # lanes start anywhere different.
-        for lane in ("c", "eval"):
-            row = by_id[f"expand.kept_axis.op_declared_source.{lane}"]
-            self.assertEqual(row.baseline, "ice")
-            self.assertEqual(row.exit_state, "ice")
+        # chelis#665's pair reaches exit in B2b-2, and the two lanes carry
+        # DIFFERENT baselines, which is the point of the row rather than an
+        # asymmetry to tidy away. The C lane aborted; the eval lane did not,
+        # and its recorded `ice` baseline was corrected with the measurement
+        # (`chelis eval --file` prints the program's shape and exits zero on
+        # `3dc3f54f6`). The eval receipt is therefore a disposition lock and
+        # the C receipt asserts byte-for-byte parity against it.
+        c_row = by_id["expand.kept_axis.op_declared_source.c"]
+        self.assertEqual(c_row.baseline, "ice")
+        self.assertEqual(c_row.exit_state, ORACLE.EXECUTES)
+        eval_row = by_id["expand.kept_axis.op_declared_source.eval"]
+        self.assertEqual(eval_row.baseline, ORACLE.EXECUTES)
+        self.assertEqual(eval_row.exit_state, ORACLE.EXECUTES)
         # The HIP prologue row is new in Slice B's second half and starts at
         # the same `require_load_source` panic, on the one lane that has it.
         hip = by_id["expand.op_declared_source.hip_prologue"]
         self.assertEqual(hip.baseline, "ice")
+        # chelis#1742's labelling correction. Three C-lane receipts named the
+        # wrong defect: #1374 IS the cross-tensor read under a NAMED claim and
+        # #1376 IS the foreign claim over a same-tensor read, so the
+        # `issue_1374_` receipt sat on the literal-control row and the
+        # `issue_1376_` one on #1374's row. Every row now names the test its
+        # own id describes, and each lane pair is a `_on_c`/`_on_eval` twin.
+        # Disposition lock rather than a regression test: none of these rows
+        # is at an exit state, so `validate_receipt_coverage` does not enforce
+        # their receipts yet. What this pins is that the corrected binding
+        # cannot silently swap back before the tests exist.
+        for row_id, receipt in (
+            (
+                "expand.literal_claim.cross_tensor_read.c",
+                "cli_slice_b.a_literal_claim_over_a_cross_tensor_read_traps_on_c",
+            ),
+            (
+                "expand.literal_claim.cross_tensor_read.eval",
+                "cli_slice_b.a_literal_claim_over_a_cross_tensor_read_traps_on_eval",
+            ),
+            (
+                "expand.named_claim.cross_tensor_read.c",
+                "cli_slice_b.issue_1374_cross_tensor_read_under_a_named_claim_is_guarded_on_c",
+            ),
+            (
+                "expand.named_claim.cross_tensor_read.eval",
+                "cli_slice_b.a_cross_tensor_read_under_a_named_claim_is_guarded_on_eval",
+            ),
+            (
+                "expand.foreign_claim.same_tensor_set_axis.c",
+                "cli_slice_b.issue_1376_same_tensor_read_under_a_foreign_claim_is_guarded_on_c",
+            ),
+            (
+                "expand.foreign_claim.same_tensor_set_axis.eval",
+                "cli_slice_b.a_same_tensor_read_under_a_foreign_claim_is_guarded_on_eval",
+            ),
+        ):
+            self.assertEqual(by_id[row_id].receipt, receipt)
 
     def test_phase_a_bytes_and_digest_are_unchanged_by_multi_phase_plumbing(self) -> None:
         rows = ORACLE.generated_phase_a_corpus()
@@ -320,6 +362,9 @@ class RuntimeExtentOracleTests(unittest.TestCase):
     def test_host_actualization_owner_matrix_is_in_the_automatic_gate(self) -> None:
         targets = {target.id: target for target in ORACLE.phase_a_targets("python")}
         target = targets["host_actualization"]
+        # The names follow `--`, where the harness takes any number of
+        # filters. Cargo takes one `[TESTNAME]` positional, so this is the
+        # only placement that works for a row naming more than one test.
         self.assertEqual(
             target.argv,
             (
@@ -328,10 +373,10 @@ class RuntimeExtentOracleTests(unittest.TestCase):
                 "-p",
                 "chelis-ir",
                 "--lib",
-                "host::tests::tensor_helper_actualization_declines_input_axis_for_shrink_and_stride",
                 "--",
                 "--exact",
                 "--nocapture",
+                "host::tests::tensor_helper_actualization_declines_input_axis_for_shrink_and_stride",
             ),
         )
         self.assertEqual(
@@ -470,13 +515,19 @@ class RuntimeExtentOracleTests(unittest.TestCase):
             )
 
     def test_phase_b_is_registered_but_not_yet_at_exit(self) -> None:
-        # PR B1 records two moves and leaves the rest of Slice B's rows at
-        # their main baseline, so `--phase b` must fail honestly.
+        # Slice B's rows reach exit one owning change at a time, so
+        # `--phase b` must keep failing honestly while any remains short.
         shortfall = ORACLE.exit_shortfall(ORACLE.PHASE_REGISTRY["b"])
         self.assertNotIn("ir.axis_source.cardinality", shortfall)
         self.assertNotIn("shrink.elementwise_const.build", shortfall)
-        self.assertIn("expand.kept_axis.op_declared_source.c", shortfall)
-        self.assertIn("expand.kept_axis.op_declared_source.eval", shortfall)
+        # B2b-2's own pair left the shortfall with chelis#665's fix.
+        self.assertNotIn("expand.kept_axis.op_declared_source.c", shortfall)
+        self.assertNotIn("expand.kept_axis.op_declared_source.eval", shortfall)
+        # A row whose owning slice has not started, named so this assertion
+        # does not go stale every time a sibling change moves a row: #1266's
+        # record projection is the provenance work B2b-2 explicitly defers.
+        self.assertIn("expand.record_projection.size", shortfall)
+        self.assertNotEqual(shortfall, ())
         self.assertEqual(ORACLE.exit_shortfall(ORACLE.PHASE_REGISTRY["a"]), ())
 
     def test_authoritative_run_rejects_dirty_worktree(self) -> None:
@@ -490,6 +541,213 @@ class RuntimeExtentOracleTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ORACLE.OracleFailure, "clean exact-head"):
             ORACLE.exact_head_receipt(runner, require_clean=True)
+
+    # --- chelis#1742: the manifest is the single home of every expectation ---
+
+    def test_every_cargo_target_is_backed_by_a_manifest_row_and_no_row_is_orphaned(
+        self,
+    ) -> None:
+        # Disposition lock, not a regression test: before chelis#1742 the
+        # expectations were Python tuples and there was no manifest to
+        # reconcile against. What this pins is that the manifest stays the
+        # only home for them, so a target cannot regrow a private tuple and a
+        # row cannot linger after its target is retired.
+        manifest = ORACLE.load_target_manifest()
+        rows = {(row["phase"], row["id"]): row for row in manifest}
+        covered: set[tuple[str, str]] = set()
+        for phase in ("a", "b"):
+            for target in ORACLE.PHASE_REGISTRY[phase].targets():
+                if not target.expected_tests:
+                    # The oracle's own unit suite is the one target with no
+                    # per-test expectation, so it has nothing to drift.
+                    self.assertEqual(target.id, "self_tests")
+                    continue
+                key = (phase, target.id)
+                self.assertIn(key, rows, f"{target.id} has no manifest row")
+                row = rows[key]
+                self.assertEqual(target.expected_tests, tuple(row["expected"]))
+                self.assertEqual(target.argv, ORACLE.target_argv(row))
+                self.assertEqual(target.list_only, bool(row.get("list_only", False)))
+                covered.add(key)
+        self.assertEqual(covered, set(rows), "manifest rows with no target")
+
+    def test_no_generated_command_passes_cargo_more_than_one_positional(self) -> None:
+        # Regression test, measured: the eight-name `exec_c` row was
+        # generated with its filters before `--`, and cargo rejected the
+        # whole command with "unexpected argument" in 0.0s, so the target
+        # never ran and the oracle reported a failed command rather than a
+        # receipt. Cargo accepts a single `[TESTNAME]`; the harness after
+        # `--` accepts any number.
+        for phase in ("a", "b"):
+            for target in ORACLE.manifest_targets(phase):
+                argv = list(target.argv)
+                separator = argv.index("--")
+                head = argv[:separator]
+                if "--test" in head:
+                    positionals = head[head.index("--test") + 2 :]
+                else:
+                    positionals = head[head.index("--lib") + 1 :]
+                self.assertLessEqual(
+                    len(positionals),
+                    1,
+                    f"{target.id}: cargo takes one TESTNAME, got {positionals}",
+                )
+                self.assertTrue(
+                    all(not item.startswith("-") for item in positionals),
+                    f"{target.id}: {positionals}",
+                )
+
+    def test_a_manifest_row_naming_a_missing_file_fails_closed(self) -> None:
+        # Regression test for the rename this issue is about: a row whose
+        # source moved must stop the oracle rather than silently describe a
+        # file that is not there.
+        payload = json.loads(ORACLE.TARGETS_PATH.read_text())
+        payload["targets"][0]["file"] = (
+            f"crates/{payload['targets'][0]['package']}/tests/no_such_target.rs"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "targets.json"
+            path.write_text(json.dumps(payload))
+            with self.assertRaisesRegex(ORACLE.OracleFailure, "missing source file"):
+                ORACLE.load_target_manifest(path)
+
+    def test_a_manifest_row_with_the_wrong_shape_fails_closed(self) -> None:
+        # Negative parity for the case above: every structural defect the
+        # loader can see is fatal, not a skipped row.
+        base = json.loads(ORACLE.TARGETS_PATH.read_text())
+
+        def reject(mutate, pattern: str) -> None:
+            payload = json.loads(json.dumps(base))
+            mutate(payload)
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "targets.json"
+                path.write_text(json.dumps(payload))
+                with self.assertRaisesRegex(ORACLE.OracleFailure, pattern):
+                    ORACLE.load_target_manifest(path)
+
+        reject(lambda p: p["targets"][0].pop("expected"), "wrong fields")
+        reject(lambda p: p["targets"][0].update(surprise=1), "wrong fields")
+        reject(
+            lambda p: p["targets"][0].update(selector={"mode": "prefix", "value": "x"}),
+            "unknown selector",
+        )
+        reject(lambda p: p["targets"][0].update(expected=[]), "at least one expected")
+        reject(
+            lambda p: p["targets"][0].update(expected=["b", "a"]),
+            "sorted and unique",
+        )
+        reject(lambda p: p["targets"].append(p["targets"][0]), "repeats target")
+        reject(
+            lambda p: p["targets"][0].update(
+                list_only=True, selector={"mode": "all"}
+            ),
+            "listed, which needs a substring selector",
+        )
+        reject(lambda p: p.update(schema_version=2), "unsupported target manifest")
+        reject(lambda p: p.update(targets=[]), "non-empty targets list")
+
+    def test_the_checked_baselines_are_byte_identical_to_their_rendering(self) -> None:
+        # Disposition lock: both baselines are derived data, so a hand edit
+        # that happens to keep a consistent digest is still a defect. The
+        # writer that produces these bytes is `--write-baseline`.
+        for phase in ("a", "b"):
+            with self.subTest(phase=phase):
+                spec = ORACLE.PHASE_REGISTRY[phase]
+                self.assertEqual(
+                    ORACLE.render_baseline(spec), spec.baseline_path.read_text()
+                )
+
+    def test_allow_shortfall_reports_rows_without_claiming_success(self) -> None:
+        # Regression test for the nightly wiring: phase B's 19 recorded short
+        # rows are the tracker's published state, not a drift, so a job must
+        # be able to enforce every receipt while they land. What must never
+        # happen is that the run then claims PASS.
+        rows = (
+            ORACLE.CorpusRow("done.row", "ice", "executes_exactly", "t.done"),
+            ORACLE.CorpusRow("short.row", "ice", "ice", "t.short"),
+        )
+        target = ORACLE.TestTarget("t", ("true",), ("done", "short"))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "baseline.json"
+            spec = _spec("a", rows, baseline_path=path, targets=(target,))
+            path.write_text(ORACLE.render_baseline(spec))
+            registry = {"a": spec}
+
+            def runner(argv, **_kwargs):
+                command = tuple(argv)
+                if command == ("git", "rev-parse", "HEAD"):
+                    return subprocess.CompletedProcess(command, 0, "c" * 40 + "\n", "")
+                if command == ("git", "status", "--porcelain"):
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                return subprocess.CompletedProcess(
+                    command, 0, "test done ... ok\ntest short ... ok\n", ""
+                )
+
+            with self.assertRaisesRegex(ORACLE.OracleFailure, "short of an exit state"):
+                ORACLE.validate("a", runner=runner, registry=registry)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                ORACLE.validate(
+                    "a", runner=runner, registry=registry, allow_shortfall=True
+                )
+            printed = output.getvalue().splitlines()
+            self.assertEqual(printed[-1], ORACLE.SHORT_MARKER)
+            self.assertNotIn(ORACLE.PASS_MARKER, printed)
+            self.assertIn("runtime_extent_rows_short=1", printed)
+            self.assertIn("runtime_extent_rows_short_list=a:short.row", printed)
+
+    def test_the_final_completion_oracle_refuses_to_allow_a_shortfall(self) -> None:
+        # Regression test: `--phase final` is chelis#1277's completion
+        # command, so the flag that lets the nightly hold a still-landing
+        # phase must be refused there rather than silently accepted. The
+        # refusal precedes the unregistered-phase check, so it is the reason
+        # reported rather than the missing phase `c`.
+        with self.assertRaisesRegex(
+            ORACLE.OracleFailure, "completion oracle and cannot allow a row shortfall"
+        ):
+            ORACLE.validate("final", allow_shortfall=True)
+        self.assertEqual(ORACLE.main(["--phase", "final", "--allow-shortfall"]), 1)
+        # Negative parity: a slice phase still accepts the flag, so the
+        # refusal is about `final` and not about the flag existing.
+        self.assertNotIn("final", ORACLE.SLICE_PHASES)
+
+    def test_allow_shortfall_does_not_excuse_a_failing_receipt(self) -> None:
+        # Negative parity: the flag downgrades the row shortfall and nothing
+        # else. A drifted receipt under it must still fail the run, which is
+        # the whole reason the nightly job can hold phase B at all.
+        rows = (ORACLE.CorpusRow("done.row", "ice", "executes_exactly", "t.done"),)
+        target = ORACLE.TestTarget("t", ("true",), ("done",))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "baseline.json"
+            spec = _spec("a", rows, baseline_path=path, targets=(target,))
+            path.write_text(ORACLE.render_baseline(spec))
+
+            def runner(argv, **_kwargs):
+                command = tuple(argv)
+                if command == ("git", "rev-parse", "HEAD"):
+                    return subprocess.CompletedProcess(command, 0, "c" * 40 + "\n", "")
+                if command == ("git", "status", "--porcelain"):
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                return subprocess.CompletedProcess(
+                    command, 0, "test renamed ... ok\n", ""
+                )
+
+            with self.assertRaisesRegex(ORACLE.OracleFailure, "test receipt drift"):
+                ORACLE.validate(
+                    "a",
+                    runner=runner,
+                    registry={"a": spec},
+                    allow_shortfall=True,
+                )
+
+    def test_writing_a_baseline_cannot_move_the_frozen_phase_a_digest(self) -> None:
+        # The writer regenerates derived data; it is not an escape hatch from
+        # the freeze. Rendering phase A and re-reading it must still produce
+        # the digest this file pins.
+        spec = ORACLE.PHASE_REGISTRY["a"]
+        rendered = json.loads(ORACLE.render_baseline(spec))
+        self.assertEqual(rendered["corpus_sha256"], FROZEN_PHASE_A_DIGEST)
 
 
 if __name__ == "__main__":

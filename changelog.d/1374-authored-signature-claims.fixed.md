@@ -1,0 +1,1 @@
+A named extent check is now derived only from a signature someone wrote. A kernel the compiler synthesizes over several top-level bindings takes its parameters from those bindings, and two of them naming an axis the same way is a coincidence; reading it as an assertion made a correct program trap `Domain` at run time.

@@ -30,10 +30,12 @@
 //!     grad cases) a self-contained central-difference finite-difference
 //!     gradient computed in C from the emitted forward `loss`.
 //!
-//! Negative parity lives in the `chelis-ir` unit tests
-//! (`symbolic_occurrences_reduction_arm_still_fails_loud_without_load`): a
-//! reduction whose kept-axis symbol has NO declaring Load must still panic.
-//! The reduction arm must not launder an unbound symbolic dim green.
+//! Negative parity lives in `crates/chelis-ir/src/axis_sources.rs`: a
+//! reduction whose kept-axis symbol resolves to no extent origin must still
+//! be refused rather than laundered green. The `chelis-ir` unit test that
+//! used to hold this, over the occurrence walk's own reduction arm, went with
+//! the walk in chelis#665; the refusal is now a typed receipt from
+//! `check_rendered_dim_origins` instead of a panic.
 
 use std::fs;
 use std::path::Path;

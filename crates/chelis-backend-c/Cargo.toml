@@ -23,6 +23,7 @@ half = { workspace = true }
 pkg-config = "0.3"
 
 [dev-dependencies]
+chelis-deep.workspace = true
 chelis-effects.workspace = true
 chelis-runtime.workspace = true
 chelis-surf.workspace = true

@@ -1776,6 +1776,8 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
         result_claim.as_ref(),
         None,
         0,
+        // `scope` is this def's own declared parameter list.
+        true,
     ) {
         Ok((dag, _)) => Some(dag),
         Err(diagnostic) if diagnostic.fatal => {
@@ -3050,7 +3052,7 @@ pub struct RandomLoweringState {
 /// chelis#1277 B2h: the eval interpreter applies a host-lane def through this
 /// kernel, so eval executes exactly the DAG C emits for the def ([05-MOV-1])
 /// and the runtime-extent classes and guards derived from that DAG fire on
-/// both lanes (runtime_extents.md C2.7). The decision is made once, here,
+/// both lanes (runtime_extents.md C2.5). The decision is made once, here,
 /// before any lowering: `Ok(None)` is the host lane, `Ok(Some)` the kernel,
 /// and `Err` a kernel decision whose lowering failed.
 #[derive(Debug, Clone)]
@@ -4033,6 +4035,7 @@ fn lower_kernel_dag(
                 declaring_params.is_some().then_some(expected),
                 None,
                 0,
+                declaring_params.is_some(),
             )?
             .0,
             None,
@@ -4045,6 +4048,7 @@ fn lower_kernel_dag(
                 declaring_params.is_some().then_some(expected),
                 state.seed,
                 state.counter,
+                declaring_params.is_some(),
             )?;
             (dag, Some(counter))
         }
@@ -11394,8 +11398,8 @@ fn remap_tensor_helper_dim_symbols(
     // declared return still owns the ROOT's shape: retype the root
     // POSITIONALLY, anon axis by anon axis — but ONLY on axes the root
     // op itself can declare at run time (`dag::op_declarable_axes`). A
-    // symbol painted anywhere else has no declaring Load or op and trips
-    // the `symbolic_occurrences` ICE; those axes stay anon and size
+    // symbol painted anywhere else has no declaring Load or op and resolves
+    // to no extent origin at emission; those axes stay anon and size
     // themselves per node.
     if let (Some(root_id), Some(actual_output)) =
         (dag.roots().first().copied(), actual_inputs.last())
@@ -12049,8 +12053,8 @@ fn actualize_tensor_helper_types(
     // OUTPUT types only, leaving op-internal fields (`Expand::size`,
     // `Reshape::new_shape`, `BlasMatmul` dims) holding the stale minted
     // names — the mixed state (`type: [Named("n")]` next to
-    // `size: Sym("d47")`) that `dag::symbolic_occurrences`' Bucket 4d
-    // sweep rejects because no Load declares the alias. Apply the
+    // `size: Sym("d47")`) the declaration derivation rejects because
+    // nothing declares the alias. Apply the
     // collected renames to every dim reference so the helper DAG stays
     // internally consistent. Non-synthetic (user-facing) names are
     // never in the map and pass through untouched.

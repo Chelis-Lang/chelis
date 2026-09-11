@@ -7939,3 +7939,351 @@ int main(void) {
         "{invalid:?}"
     );
 }
+
+/// A one-parameter host function `the_fn(a) = diagonal(a, 0, 1)` whose declared
+/// result carries `declared` on its single axis (chelis#1739).
+fn host_diagonal_program(operand: Vec<usize>, declared: usize) -> HostProgram {
+    let operand_ty = host_tensor(operand);
+    let result_ty = TensorType {
+        dims: vec![DimInfo::Lit(declared)],
+        precision: Prim::F32,
+    };
+    let axis = |value: i64| HostExpr::new(HostExprKind::Int(value));
+    let body = HostExpr::new(HostExprKind::Builtin {
+        name: "diagonal".to_string(),
+        args: vec![
+            HostExpr::new(HostExprKind::Var(
+                "a".to_string(),
+                HostType::Tensor(operand_ty.clone()),
+            )),
+            axis(0),
+            axis(1),
+        ],
+        ty: HostType::Tensor(result_ty.clone()),
+    });
+    HostProgram {
+        globals: Vec::new(),
+        global_tensor_helpers: Vec::new(),
+        functions: vec![HostFunction {
+            name: "the_fn".to_string(),
+            params: vec![HostParam {
+                name: "a".to_string(),
+                ty: HostType::Tensor(operand_ty),
+            }],
+            ret_ty: HostType::Tensor(result_ty),
+            body,
+            tensor_helpers: Vec::new(),
+            origin: HostFunctionOrigin::Authored,
+            specialization: None,
+            summary_rejections: Vec::new(),
+        }],
+        summary_rejections: Vec::new(),
+    }
+}
+
+/// chelis#1739, driven under the sanitizers. A host-lane function whose declared
+/// result extent the body cannot produce aborts at its return boundary with the
+/// `[04-NUM-9]` `Domain` rendering, and the same function with an agreeing
+/// declaration returns its exact result.
+///
+/// The host lane has no `ExtentWitness`, so this guard is the only thing between
+/// a wrong declaration and a silent wrong answer. Driven here rather than only
+/// through the CLI so the added shape read and `fprintf` run under
+/// `-fsanitize=address,undefined`.
+#[test]
+fn host_declared_result_extent_guard_traps_and_executes_under_sanitizers() {
+    for (rows, declared, expect_trap) in [(2usize, 3usize, true), (3, 3, false), (5, 4, false)] {
+        let source = emit_host_program(
+            &host_diagonal_program(vec![rows, 4], declared),
+            "host_result_extent",
+        )
+        .unwrap();
+        let harness = format!(
+            r#"
+#include <stdio.h>
+#include "chelis_runtime.h"
+chelis_tensor *the_fn(chelis_tensor *);
+int main(void) {{
+    int64_t dims[2] = {{{rows}, 4}};
+    chelis_tensor *a = chelis_alloc(2, dims, CHELIS_DTYPE_F32);
+    chelis_tensor_write *guard = chelis_tensor_begin_write(a);
+    float *data = (float *)chelis_tensor_write_view(guard).data;
+    for (int i = 0; i < {rows} * 4; ++i) data[i] = (float)(i + 1);
+    chelis_tensor_end_write(guard);
+    chelis_tensor *out = the_fn(a);
+    chelis_read_view view = chelis_tensor_read_view(out);
+    printf("RETURNED %lld\n", (long long)view.count);
+    chelis_tensor_release(out);
+    chelis_tensor_release(a);
+    return 0;
+}}
+"#
+        );
+        let run = checked_indexing_run(&source, &harness);
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        let stdout = String::from_utf8_lossy(&run.stdout);
+        if expect_trap {
+            assert!(
+                !run.status.success(),
+                "a declared {declared} over min({rows}, 4) must abort: {stdout}{stderr}"
+            );
+            assert!(
+                stderr.contains("numeric trap: domain in diagonal at int64"),
+                "the frozen [04-NUM-9] line: {stderr}"
+            );
+            assert!(
+                stderr.contains(&format!(
+                    "extent `{declared}`: claimed = {declared}, diagonal axis 0 = {}",
+                    rows.min(4)
+                )),
+                "the accompanying context line: {stderr}"
+            );
+            assert!(
+                !stdout.contains("RETURNED"),
+                "the guard runs BEFORE the result reaches the caller: {stdout}"
+            );
+        } else {
+            assert!(
+                run.status.success(),
+                "an agreeing declaration must execute: {stdout}{stderr}"
+            );
+            assert_eq!(
+                stdout,
+                format!("RETURNED {}\n", rows.min(4)),
+                "and return its exact result: {stderr}"
+            );
+        }
+    }
+}
+
+/// chelis#1775 C-lane receipt: a runtime extent shared by two reshapes is
+/// declared ONCE in the emitted C and re-checked at the second carrier.
+///
+/// The PR that keyed a computed reshape extent by its producing scalar rests a
+/// safety argument on this: two reshapes sized from one scalar now carry the
+/// same dim symbol, and the emitter must declare that symbol at the first site
+/// and emit a runtime equality abort at the later one rather than redeclaring
+/// it. Nothing else in that change set reaches the C lane, so this is the
+/// fixture that proves the argument instead of asserting it.
+///
+/// REGRESSION TEST for the shared-name build (it cannot even be constructed
+/// before the repair: the two rows disagree, `concat` falls to its rank-0 host
+/// placeholder and there is no `Pad` cascade to emit).
+/// DISPOSITION LOCK for the mutation arm: the later carrier's guard is live on
+/// both sides of the repair, and this pins that it aborts rather than reading
+/// a second, silently different extent.
+#[test]
+fn shared_runtime_extent_declares_once_and_rechecks_the_later_carrier() {
+    use chelis_unord::UnordMap;
+
+    // `let m = cast(shape(x, 0), int64) in concat([reshape(x, [1, m]),
+    //  reshape(x, [1, m])], 0)` - the minimal shape of the #368 window stack.
+    let row = "(app {} (var {} reshape) (var {} x) \
+       (app {} (var {} Cons) (cast {} (lit {} 1) (t-prim {} int64)) \
+         (app {} (var {} Cons) (var {} m) (var {} Nil))))";
+    let src = format!(
+        "(let {{}} (bind {{}} m (cast {{}} (app {{}} (var {{}} shape) (var {{}} x) \
+           (cast {{}} (lit {{}} 0) (t-prim {{}} int32))) (t-prim {{}} int64))) \
+         (app {{}} (var {{}} concat) \
+           (app {{}} (var {{}} Cons) {row} (app {{}} (var {{}} Cons) {row} (var {{}} Nil))) \
+           (cast {{}} (lit {{}} 0) (t-prim {{}} int32))))"
+    );
+    let mut exprs = chelis_deep::parser::parse_str(&src).expect("deep parse");
+    assert_eq!(exprs.len(), 1);
+    let expr = exprs.pop().unwrap();
+    let mut scoped = UnordMap::new();
+    scoped.insert(
+        "x".to_string(),
+        TensorType {
+            dims: vec![DimInfo::Named("n".into(), None)],
+            precision: Prim::F32,
+        },
+    );
+    let dag =
+        chelis_ir::lower::lower_subexpr_program(&expr, scoped, UnordMap::new(), UnordMap::new());
+
+    // The premise: one shared symbol across both rows, and the differentiable
+    // Pad+Add cascade rather than the rank-0 host `concat` placeholder.
+    let axis_names: Vec<String> = dag
+        .nodes()
+        .iter()
+        .filter(|node| matches!(node.op, RiscOp::Reshape { .. }))
+        .map(|node| match &node.output_type.dims[1] {
+            DimInfo::Named(name, None) => name.clone(),
+            other => panic!("expected a generated runtime dim, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(axis_names.len(), 2, "two rows: {dag:?}");
+    assert_eq!(axis_names[0], axis_names[1], "one extent, one symbol");
+    assert_eq!(
+        dag.nodes()
+            .iter()
+            .filter(|node| matches!(node.op, RiscOp::Pad { .. }))
+            .count(),
+        2,
+        "the concat must be the Pad cascade: {dag:?}"
+    );
+
+    let generated = codegen(&dag, "shared_extent").expect("shared-extent DAG must emit C");
+
+    // The symbol is declared once. Every later mention is a use or a guard.
+    let declarations = generated
+        .c_source
+        .lines()
+        .filter(|line| line.contains(&format!("int64_t {};", axis_names[0])))
+        .count()
+        + generated
+            .c_source
+            .lines()
+            .filter(|line| line.contains(&format!("int64_t {} =", axis_names[0])))
+            .count();
+    assert_eq!(
+        declarations, 1,
+        "the shared runtime extent is declared exactly once:\n{}",
+        generated.c_source
+    );
+
+    // 1.0f as its exact IEEE-754 binary32 image; the runtime takes scalar
+    // bits, never an untagged double ([04-NUM-11]).
+    let harness = r#"
+#include "chelis_runtime.h"
+void shared_extent(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {
+    int64_t shape[] = {4};
+    chelis_tensor *x = chelis_alloc(1, shape, CHELIS_DTYPE_F32);
+    chelis_tensor_write *guard = chelis_tensor_begin_write(x);
+    chelis_fill_scalar(guard, chelis_scalar_from_bits(CHELIS_DTYPE_F32, UINT64_C(0x3F800000)));
+    chelis_tensor_end_write(guard);
+    chelis_tensor *inputs[] = {x}, *outputs[] = {NULL};
+    shared_extent(inputs, 1, outputs, 1);
+    if (chelis_tensor_rank(outputs[0]) != 2) return 4;
+    if (chelis_tensor_shape(outputs[0], 0) != 2) return 5;
+    if (chelis_tensor_shape(outputs[0], 1) != 4) return 6;
+    chelis_read_view out = chelis_tensor_read_view(outputs[0]);
+    if (out.count != 8) return 7;
+    for (int64_t i = 0; i < out.count; ++i)
+        if (((const float *)out.data)[i] != 1.0f) return 8;
+    chelis_tensor_release(outputs[0]); chelis_tensor_release(x);
+    puts("SHARED EXTENT PASS"); return 0;
+}
+"#;
+
+    let (ok, text) =
+        compile_and_run_kernel_capturing("shared_runtime_extent", &generated.c_source, harness);
+    assert!(ok, "shared-extent kernel must build, link and run: {text}");
+    assert!(
+        text.contains("SHARED EXTENT PASS"),
+        "the stack must materialize as [2, 4]: {text}"
+    );
+
+    // The later carrier's guard is LIVE, not decorative. Make the second
+    // reshape read a different extent than the declared symbol and the binary
+    // must trap instead of sizing an axis from a second, unequal value. The
+    // guard's own `fprintf` names the node, so find its read by that line and
+    // perturb the read the comparison performs.
+    let guard_line = generated
+        .c_source
+        .lines()
+        .filter(|line| line.contains(&format!("extent `{}`: claimed", axis_names[0])))
+        .nth(1)
+        .expect("the later carrier carries its own equality guard")
+        .to_owned();
+    let carrier = guard_line
+        .split("(long long)(")
+        .nth(2)
+        .and_then(|rest| rest.strip_suffix("));"))
+        .expect("the guard prints the carrier read it compared")
+        .to_owned();
+    assert!(
+        carrier.contains("_data)[0]"),
+        "expected a carrier read, got {carrier}"
+    );
+    let comparison = format!("if (({carrier}) != {})", axis_names[0]);
+    assert!(
+        generated.c_source.contains(&comparison),
+        "the later guard compares the carrier against the declared symbol:\n{}",
+        generated.c_source
+    );
+    let mutated = generated.c_source.replacen(
+        &comparison,
+        &format!("if ((({carrier}) + 1) != {})", axis_names[0]),
+        1,
+    );
+    let (ok, text) =
+        compile_and_run_kernel_capturing("shared_runtime_extent_trap", &mutated, harness);
+    assert!(!ok, "a disagreeing later carrier must abort: {text}");
+    assert!(
+        text.contains("numeric trap: domain in reshape at int64"),
+        "the abort must be the typed reshape domain trap: {text}"
+    );
+}
+
+/// chelis#1788: two scopes of one binder, lowered into ONE emitted function,
+/// share one declaration.
+///
+/// chelis#1536 scoped a claim's identity so no entry guard pairs axes from
+/// different scopes, and chelis#665 moved declarations onto axis sources. The
+/// declarations are still keyed by NAME across the whole graph, so when both
+/// scopes land in one emitted function the second reads the first's
+/// declaration and no guard compares them. Reaching this needs the codegen
+/// API: `chelis build` gives each root its own function, where `seq` is then
+/// declared per function from the right input.
+///
+/// EVIDENTIARY STATUS: **behaviour lock, and a pass here is NOT a correctness
+/// claim.** What it asserts is exactly what the C lane does today, so that a
+/// later change to declaration scoping has to come past it deliberately
+/// rather than by accident. The correct behaviour is two declarations, which
+/// needs the two scopes to carry distinct names in the emitted text: that is
+/// the per-scope rename chelis#1277's claim transport owns, and doing it here
+/// would emit two `int64_t seq` into one function. The failure this locks is
+/// loud rather than silent, a run-time trap in the runtime's elementwise index
+/// step, which is why chelis#1788 is residual rather than a merge blocker.
+#[test]
+fn issue_1788_two_scopes_in_one_function_share_one_declaration() {
+    use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+    let ty = |dims: Vec<DimInfo>| TensorType {
+        dims,
+        precision: Prim::F32,
+    };
+    let named = |name: &str| DimInfo::Named(name.into(), None);
+
+    let mut dag = Dag::new();
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty(vec![named("seq")]),
+        None,
+    );
+    let y = dag.add_node(
+        RiscOp::Load { name: "y".into() },
+        vec![],
+        ty(vec![named("batch"), named("seq")]),
+        None,
+    );
+    let from_x = dag.add_node(RiscOp::Neg, vec![x], ty(vec![named("seq")]), None);
+    let from_y = dag.add_node(
+        RiscOp::Neg,
+        vec![y],
+        ty(vec![named("batch"), named("seq")]),
+        None,
+    );
+    dag.add_root(from_x);
+    dag.add_root(from_y);
+
+    let emitted = codegen(&dag, "two_scopes")
+        .expect("a merged two-scope kernel still emits")
+        .c_source;
+    assert_eq!(
+        emitted.matches("int64_t seq = ").count(),
+        1,
+        "today the two scopes share one declaration; chelis#1788: {emitted}"
+    );
+    assert!(
+        emitted.contains("int64_t seq = chelis_tensor_shape(inputs[0], 0);"),
+        "the one declaration is taken from the first input slot: {emitted}"
+    );
+    assert!(
+        !emitted.contains("numeric trap: domain in load at int64"),
+        "and no entry guard compares the two scopes' axes, which is the defect: {emitted}"
+    );
+}
