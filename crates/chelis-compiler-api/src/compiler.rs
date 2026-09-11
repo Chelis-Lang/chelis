@@ -2016,6 +2016,44 @@ fn execution_artifact_from_compiled_observed(
                         None
                     }
                 }
+            } else if !chelis_ir::host::program_has_top_level_value_bindings(compiled.checked())
+                && compiled
+                    .dag
+                    .nodes()
+                    .iter()
+                    .any(|node| matches!(node.op, RiscOp::Dropout { .. }))
+                && !(strictness == EntryStrictness::Legacy
+                    && (entry_name.is_some_and(|name| {
+                        !compiled
+                            .tensor_root_names
+                            .iter()
+                            .any(|root| root.as_str() == name)
+                    }) || (entry_name.is_none()
+                        && compiled.tensor_root_names.as_slice().len() > 1
+                        && !compiled
+                            .tensor_root_names
+                            .iter()
+                            .any(|root| root.as_str() == "main"))))
+            {
+                // A tensor-only def can be absent from the host program. Its
+                // raw value DAG cannot carry the execution seal: resolve the
+                // exact source entry, then lower its source-owned plan. Keep
+                // legacy file-stem/whole-program selection out of this lane.
+                match resolve_in_context_entry(&compiled, entry_name)? {
+                    Some((entry, ordinary)) => {
+                        let execution = chelis_ir::host::lower_named_tensor_entry_execution_plan(
+                            compiled.checked(),
+                            entry,
+                        )
+                        .map_err(lower_error)?;
+                        let dag = execution
+                            .as_ref()
+                            .map(|plan| plan.dag_for_inspection().clone())
+                            .unwrap_or(ordinary);
+                        Some((entry, dag, execution))
+                    }
+                    None => None,
+                }
             } else {
                 None
             };
