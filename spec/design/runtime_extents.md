@@ -724,24 +724,26 @@ The class completion command remains:
 
 Automatic success is exit zero ending `RUNTIME EXTENT ORACLE: PASS`, with
 applicable HIP and Metal hardware receipts at the same head/corpus digest.
-The recorded phase-B corpus has 57 rows, 2 of them short of exit:
-`expand.piped_shape_read.lint_fix` and `expand.record_projection.size`, both
-#1266/#569's and both owned by B2b-2. This is baseline metadata, not a fresh
-execution receipt; `--phase b --allow-shortfall` prints the same pair as
-`runtime_extent_rows_short` and `runtime_extent_rows_short_list`, which is the
-count to quote. A hand count of the JSON's `phase_b` column reaches 5 instead,
-because that column holds 52 `executes_exactly` and five other values, only two
-of which are shortfalls. `expand.positional.replacement.non_unit_source_static`
-and `shrink.to_end.nonzero_start` are `rejects_exactly`, which is an exit state:
-those programs are SUPPOSED to be rejected and a row that stopped rejecting them
-would be the defect. `shrink.elementwise_const.build` is a registered
-`typed_unsupported(#1482)`, an owned receipt rather than an unexplained gap. Only
-`expand.piped_shape_read.lint_fix` and `expand.record_projection.size`, the two
-`nonconforming_rejection` rows, are short. The op-computed local guards moved seven rows
+The recorded phase-B corpus has 57 rows and NONE of them is short of exit.
+`--phase b` reads `RUNTIME EXTENT ORACLE: PASS` rather than `RECEIPTS PASS,
+ROWS SHORT OF EXIT`, and `--allow-shortfall` prints no
+`runtime_extent_rows_short` line at all, because there is no shortfall to
+report. That reading, not a hand count, is what to quote. A hand count of the
+JSON's `phase_b` column reaches 3 instead, because the column holds 54
+`executes_exactly` and three other values, none of which is a shortfall:
+`expand.positional.replacement.non_unit_source_static` and
+`shrink.to_end.nonzero_start` are `rejects_exactly`, an exit state, since those
+programs are SUPPOSED to be rejected and a row that stopped rejecting them would
+be the defect, and `shrink.elementwise_const.build` is a registered
+`typed_unsupported(#1482)`, an owned receipt rather than an unexplained gap.
+Phase b's ROWS being at exit is not the same question as `--phase final`, which
+still refuses because `SLICE_PHASES` requires an unregistered `c`; B2b-3 owns
+that. The op-computed local guards moved seven rows
 (`expand.shape_derived.declared_result_survives.{c,eval}`,
 `class.load_op_output.eval`, `class.op_output_op_output.{c,eval}` and
 `class.splice_f_of_n_n.{c,eval}`) and the six `shrink.*` preparation cells, and
-#1379's acceptance moved `expand.arith_size.named_claim.{c,eval}`. The final
+#1379's acceptance moved `expand.arith_size.named_claim.{c,eval}`, which were
+the last two. The final
 command currently fails because `SLICE_PHASES` still requires unregistered
 `c`. B2b-3 retires that requirement and its tests; it does not add a fake
 passing phase or erase outstanding B rows. `--phase a` and `--phase b`
@@ -827,15 +829,19 @@ root restatement then met, and `record.direct.{check,eval,c}` with
 `shrink.*` declaration cells are met.
 
 chelis#1266/#569 move the four record cells: `record.direct` on check, Eval
-and C, and `record.alias` on Eval. All four now execute `[0.25, 0.25]`, taking
-the unmet count from eight to four. Measured with the ignored acceptance
-runner rather than counted by hand:
-`cargo nextest run -p chelis-cli --test runtime_extent_claim_preparation
---run-ignored all -E 'test(claimed_extent_contract)'` reports
-`55 cases, 4 unmet contract cells`. The four are
+and C, and `record.alias` on Eval. All four now execute `[0.25, 0.25]`. The
+runner reports `55 cases, 0 unmet contract cells` and passes: the whole
+preparation matrix is met.
+
+The sentence this replaces said four cells remained,
 `polymorphic.named.root.mismatch.{eval,c}` (#1374) and
-`polymorphic.foreign.root.mismatch.{eval,c}` (#1376), each trapping with a
-claimed-versus-observed extent where the contract expects execution.
+`polymorphic.foreign.root.mismatch.{eval,c}` (#1376). Those left with #1811's
+deferral of a root's restated literal claim to the callee's named guard, which
+landed between that sentence being written and its change merging. Measured
+rather than counted by hand, and measured on both sides: reverting
+`crates/chelis-ir/src` and `crates/chelis-types/src` to `ccd684643` and
+rerunning gives `0 unmet` as well, so #1379's acceptance moves none of these
+cells and the count was already zero before it.
 
 The merged B2b-0b numeric kernel repair compares literal and resolved named
 claims against independent nonnegative runtime sizes at live `Expand` and
