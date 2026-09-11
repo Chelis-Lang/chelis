@@ -6290,6 +6290,7 @@ fn wire_op(op: &RiscOp, precision: Prim) -> WireResult<WireRiscOp> {
             parameter,
             axis: chelis_ir::dag::RtAxis::Lit(axis),
             requirements,
+            claims,
         } => WireRiscOp::ExtentWitness {
             site: match site {
                 chelis_ir::dag::ExtentWitnessSite::Caller => WireExtentWitnessSite::Caller,
@@ -6304,6 +6305,13 @@ fn wire_op(op: &RiscOp, precision: Prim) -> WireResult<WireRiscOp> {
                 .copied()
                 .map(NonnegativeExtent::try_from)
                 .collect::<WireResult<_>>()?,
+            claims: claims
+                .iter()
+                .map(|claim| crate::schema::WireExtentClaim {
+                    claim: claim.claim.clone(),
+                    requirement_declares: claim.requirement_declares,
+                })
+                .collect(),
         },
         RiscOp::CheckedReshapeExtent {
             claims,
@@ -6445,6 +6453,7 @@ mod tests {
                 parameter: "x".into(),
                 axis: RtAxis::Lit(0),
                 requirements,
+                claims: Vec::new(),
             },
             vec![input],
             TensorType {

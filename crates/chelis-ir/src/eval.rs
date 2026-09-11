@@ -2018,6 +2018,11 @@ where
     // schedule before symbolic inference or dependent operations. Missing
     // inputs belonging only to an unrelated root remain optional (#991).
     let entry_guards = crate::axis_sources::entry_extent_guards(dag);
+    // chelis#1374: a named witness claim whose pair the entry schedule above
+    // already compares is checked there, once (spec/04 §4.7). The claim stays
+    // in the graph because it is also what retains a declared-but-unread
+    // parameter's interface witness.
+    let entry_covered = crate::axis_sources::entry_covered_witness_claims(dag);
     // Rank and literal ABI checks remain the complement of the claim schedule.
     for node in dag.nodes() {
         let RiscOp::Load { name } = &node.op else {
@@ -2275,6 +2280,7 @@ where
                 parameter,
                 axis,
                 requirements,
+                claims,
             } => {
                 let operation = match site {
                     crate::dag::ExtentWitnessSite::Caller => "load",
@@ -2301,6 +2307,46 @@ where
                             "extent `{required}`: claimed = {required}, {parameter} axis {axis} = {observed}\nnumeric trap: domain in {operation} at int64"
                         ));
                     }
+                }
+                // chelis#1374/#1376: §4.7.2's named half. Each requirement
+                // edge is another witness of the same activation, so both
+                // records read a fact the graph states. The declaring side
+                // leads, as `entry_extent_guards` renders the `Load`-witnessed
+                // form of the same contract.
+                for (index, (claim, edge)) in
+                    claims.iter().zip(node.inputs.iter().skip(1)).enumerate()
+                {
+                    if entry_covered.contains(&(node.id, index)) {
+                        continue;
+                    }
+                    let (required_parameter, required_axis) =
+                        match &dag.get(*edge).ok_or("missing extent claim edge")?.op {
+                            RiscOp::ExtentWitness {
+                                parameter,
+                                axis: crate::dag::RtAxis::Lit(axis),
+                                ..
+                            } => (parameter.clone(), *axis),
+                            _ => return Err("extent claim requires a witness edge".into()),
+                        };
+                    let required = values[edge]
+                        .storage()
+                        .scalar_at(0)
+                        .as_i64_exact()
+                        .ok_or("extent claim requires int64")?;
+                    if i64::try_from(observed).ok() == Some(required) {
+                        continue;
+                    }
+                    let here = format!("{parameter} axis {axis} = {observed}");
+                    let there = format!("{required_parameter} axis {required_axis} = {required}");
+                    let (first, second) = if claim.requirement_declares {
+                        (there, here)
+                    } else {
+                        (here, there)
+                    };
+                    return Err(format!(
+                        "extent `{}`: {first}, {second}\nnumeric trap: domain in {operation} at int64",
+                        claim.claim
+                    ));
                 }
                 finalize_wide_int(
                     "shape",

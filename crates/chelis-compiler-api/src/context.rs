@@ -763,7 +763,11 @@ const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V19\n";
 /// V15: that ledger carried a `DeferredShapeObligation` enum rather than a
 /// bare expand constraint, so a comparison result could mirror its operand's
 /// open choice.
-const CACHE_FORMAT_VERSION: u32 = 19;
+///
+/// V20 (chelis#1374/#1376): section 4.7.2's named half is now checked at
+/// execution, so a V19 entry can only describe a program compiled before the
+/// guard existed.
+const CACHE_FORMAT_VERSION: u32 = 20;
 
 /// On-disk envelope for the Phase I cache. The full file layout is:
 ///

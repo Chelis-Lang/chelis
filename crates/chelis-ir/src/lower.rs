@@ -1492,6 +1492,7 @@ pub(crate) fn try_lower_staged_host_region(
         ctx.prepare_parameter_witnesses(&names, &types, None);
         ctx.binding_witnesses.clear();
         let result = ctx.lower_expr_with_claim(expr, Some(result_claim));
+        ctx.preserve_declared_result(&result, result_claim);
         let result = ctx.retain_invocation_witnesses(result, 0);
         if ctx.host_sources.is_empty() {
             return None;
@@ -1558,6 +1559,12 @@ fn lower_subexpr_program_inner_impl(
     // those reads intact; explicit checked claims still use signature witnesses.
     ctx.binding_witnesses.clear();
     let value = ctx.lower_expr_with_claim(expr, result_claim);
+    // chelis#1374/#1376: an exported kernel carries its own declared result
+    // claim. Without this the obligation existed only on the inlining paths,
+    // so `out = f(...)` and a compiled `def f` ran unguarded.
+    if let Some(claim) = result_claim {
+        ctx.preserve_declared_result(&value, claim);
+    }
     let value = ctx.retain_invocation_witnesses(value, 0);
     // Each leaf of the result pytree must be a DISTINCT root node.
     // `Dag::add_root` deduplicates by node id, so when the same node feeds
@@ -5329,6 +5336,16 @@ struct LowerCtx<'program> {
     /// Binder lookup exists only in the current signature activation. Once
     /// selected, ordinary node edges carry the declaring witness's identity.
     signature_witnesses: Vec<(String, NodeId)>,
+    /// Every parameter witness minted by the CURRENT activation's
+    /// [`LowerCtx::prepare_parameter_witnesses`], in parameter order.
+    ///
+    /// A declared result's named claim relates two parameter axes of ONE
+    /// signature. Resolving the produced side walks the graph, which can leave
+    /// the activation and reach an enclosing function's witness - a desugared
+    /// pipe lambda inside `f` reaches `f`'s own parameter that way. Those two
+    /// are the same extent by construction, not a claim the signature makes,
+    /// so relating them states an obligation no signature authored.
+    activation_witnesses: Vec<NodeId>,
     local_unit_refinements: BTreeMap<(NodeId, usize), NodeId>,
     /// Unique scalar carriers for computed reshape targets. They are Copy
     /// until a returned axis acquires a claim, then checked in place before
@@ -5472,6 +5489,7 @@ impl<'program> LowerCtx<'program> {
             static_size_bindings: UnordMap::new(),
             binding_witnesses: UnordMap::new(),
             signature_witnesses: Vec::new(),
+            activation_witnesses: Vec::new(),
             reshape_targets: BTreeMap::new(),
             local_unit_refinements: BTreeMap::new(),
             invocation_witnesses: Vec::new(),
@@ -6908,6 +6926,7 @@ impl<'program> LowerCtx<'program> {
         let saved_witnesses = self.binding_witnesses.clone();
         let saved_unit_refinements = self.local_unit_refinements.clone();
         let saved_signature_witnesses = self.signature_witnesses.clone();
+        let saved_activation_witnesses = self.activation_witnesses.clone();
         let saved_list_bindings = self.list_bindings.clone();
         let saved_shape_bindings = self.shape_bindings.clone();
         let saved_static_size_bindings = self.static_size_bindings.clone();
@@ -7005,6 +7024,7 @@ impl<'program> LowerCtx<'program> {
         self.binding_witnesses = saved_witnesses;
         self.local_unit_refinements = saved_unit_refinements;
         self.signature_witnesses = saved_signature_witnesses;
+        self.activation_witnesses = saved_activation_witnesses;
         self.list_bindings = saved_list_bindings;
         self.shape_bindings = saved_shape_bindings;
         self.static_size_bindings = saved_static_size_bindings;
@@ -8246,6 +8266,7 @@ impl<'program> LowerCtx<'program> {
         let saved_witnesses = self.binding_witnesses.clone();
         let saved_unit_refinements = self.local_unit_refinements.clone();
         let saved_signature_witnesses = self.signature_witnesses.clone();
+        let saved_activation_witnesses = self.activation_witnesses.clone();
         let call_span = self.current_span_id.clone();
         let saved_list_bindings = self.list_bindings.clone();
         let saved_shape_bindings = self.shape_bindings.clone();
@@ -8473,11 +8494,12 @@ impl<'program> LowerCtx<'program> {
             // the inlined body ends in an untyped default node.
             self.repair_output_type_if_default(&result, expected_return_ty);
         }
-        self.preserve_literal_result(&result, &declared_result);
+        self.preserve_declared_result(&result, &declared_result);
         let result = self.retain_invocation_witnesses(result, witness_start);
         self.binding_witnesses = saved_witnesses;
         self.local_unit_refinements = saved_unit_refinements;
         self.signature_witnesses = saved_signature_witnesses;
+        self.activation_witnesses = saved_activation_witnesses;
         self.inlining_active -= 1;
         if let Some(name) = &inlining_name
             && let Some(depth) = self.inlining_depths.get_mut(name)
@@ -8511,6 +8533,7 @@ impl<'program> LowerCtx<'program> {
         let saved_witnesses = self.binding_witnesses.clone();
         let saved_unit_refinements = self.local_unit_refinements.clone();
         let saved_signature = self.signature_witnesses.clone();
+        let saved_activation = self.activation_witnesses.clone();
         let start = self.invocation_witnesses.len();
         let formal_types = params
             .iter()
@@ -8544,12 +8567,13 @@ impl<'program> LowerCtx<'program> {
         });
         let result = self.lower_expr_with_claim(body, claim.as_ref());
         if let Some(claim) = &claim {
-            self.preserve_literal_result(&result, claim);
+            self.preserve_declared_result(&result, claim);
         }
         let result = self.retain_invocation_witnesses(result, start);
         self.binding_witnesses = saved_witnesses;
         self.local_unit_refinements = saved_unit_refinements;
         self.signature_witnesses = saved_signature;
+        self.activation_witnesses = saved_activation;
         result
     }
 
@@ -12694,6 +12718,7 @@ impl<'program> LowerCtx<'program> {
     ) {
         self.binding_witnesses.clear();
         self.signature_witnesses.clear();
+        self.activation_witnesses.clear();
         self.local_unit_refinements.clear();
         for (name, formal_type) in params.iter().zip(formal_types) {
             let Some(input) = self
@@ -12718,6 +12743,7 @@ impl<'program> LowerCtx<'program> {
                         parameter: name.clone(),
                         axis: RtAxis::Lit(i32::try_from(axis).expect("parameter rank fits int32")),
                         requirements: Vec::new(),
+                        claims: Vec::new(),
                     },
                     vec![input],
                     TensorType {
@@ -12729,14 +12755,29 @@ impl<'program> LowerCtx<'program> {
                 if let Some(DimInfo::Named(binder, _)) = formal_type.dims.get(axis)
                     && !binder.is_empty()
                     && binder != "*"
-                    && !self
+                {
+                    match self
                         .signature_witnesses
                         .iter()
-                        .any(|(name, _)| name == binder)
-                {
-                    self.signature_witnesses.push((binder.clone(), witness));
+                        .find_map(|(name, declared)| (name == binder).then_some(*declared))
+                    {
+                        // chelis#1374/#1566: a binder repeated across parameters
+                        // is an equality the signature asserts, and
+                        // `spec/04-type-system.md` §4.7 owes the check
+                        // "regardless of data use". Every declared parameter
+                        // axis has a witness here because this loop runs over
+                        // DECLARATIONS, not over reads, so the obligation
+                        // exists even when the body never reads this
+                        // parameter. The check becomes due at this, the later,
+                        // witness, and its requirement names the earlier one.
+                        Some(declared) => {
+                            self.add_named_extent_claim(witness, declared, binder.clone(), true)
+                        }
+                        None => self.signature_witnesses.push((binder.clone(), witness)),
+                    }
                 }
                 witnesses.push(witness);
+                self.activation_witnesses.push(witness);
                 self.invocation_witnesses.push(witness);
             }
             self.binding_witnesses
@@ -12793,6 +12834,7 @@ impl<'program> LowerCtx<'program> {
                         },
                         axis: rt_axis,
                         requirements: Vec::new(),
+                        claims: Vec::new(),
                     },
                     vec![input],
                     TensorType {
@@ -12825,6 +12867,61 @@ impl<'program> LowerCtx<'program> {
             self.local_unit_refinements.insert((input, axis), checked);
         }
         checked
+    }
+
+    /// Record one named equality obligation on `owner`, an `ExtentWitness`,
+    /// against `requirement`, another `ExtentWitness` created earlier in the
+    /// same activation.
+    ///
+    /// The obligation lives on a witness rather than in its own node because
+    /// `spec/04-type-system.md` §4.7 places a guard whose operands are all
+    /// interface values at function entry, "in declared signature order,
+    /// before any other operation of the function runs". Parameter witnesses
+    /// are minted at entry, in that order, so scheduling follows from where
+    /// the obligation is attached and needs no second representation. It is
+    /// attached to the LATER witness because §4.7 makes the check due "at the
+    /// later of its two witnesses", which also keeps the requirement edge
+    /// backward and the topology acyclic.
+    ///
+    /// Duplicate obligations are recorded once: an activation can reach the
+    /// same (claim, pair) through a repeated binder and through a declared
+    /// result, and §4.7 evaluates each guard "exactly once".
+    fn add_named_extent_claim(
+        &mut self,
+        owner: NodeId,
+        requirement: NodeId,
+        claim: String,
+        requirement_declares: bool,
+    ) {
+        if owner == requirement || requirement.0 >= owner.0 {
+            return;
+        }
+        let node = self.dag.node_mut(owner).expect("extent witness");
+        let RiscOp::ExtentWitness { claims, .. } = &mut node.op else {
+            return;
+        };
+        let already = claims
+            .iter()
+            .zip(node.inputs.iter().skip(1))
+            .any(|(recorded, edge)| recorded.claim == claim && *edge == requirement);
+        if !already {
+            claims.push(crate::dag::ExtentClaim {
+                claim,
+                requirement_declares,
+            });
+            node.inputs.push(requirement);
+        }
+        self.invocation_witnesses.push(owner);
+    }
+
+    /// The witness that DECLARES `binder` in this activation, if any.
+    /// `required_extent_for_claim` answers the same question for a literal by
+    /// materializing a constant; a named claim needs the node itself, because
+    /// its diagnostic reads the declaring parameter and axis off it.
+    fn signature_witness(&self, binder: &str) -> Option<NodeId> {
+        self.signature_witnesses
+            .iter()
+            .find_map(|(name, witness)| (name == binder).then_some(*witness))
     }
 
     fn required_extent_for_claim(&mut self, dim: &DimInfo) -> Option<NodeId> {
@@ -12950,31 +13047,143 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
-    fn preserve_literal_result(&mut self, result: &LoweredValue, declared: &TensorType) {
+    /// Carry a declared result dimension's claim onto the witness that
+    /// observed the extent the body actually produced.
+    ///
+    /// `spec/04-type-system.md` §4.7.2: "When a declared or inferred result
+    /// dimension claims a literal or named extent that is not statically
+    /// proven equal to `size`, execution checks equality and traps `Domain`
+    /// on mismatch." A LITERAL claim becomes a tagged requirement on that
+    /// witness. A NAMED claim (chelis#1374, chelis#1376) becomes an equality
+    /// against the witness that declares the binder, which is the other
+    /// parameter axis the signature relates the result to; §4.7.3 states the
+    /// same rule for `reshape`, "a surrounding signature may give that extent
+    /// a literal or name only by imposing an execution-time equality guard".
+    ///
+    /// A named claim whose declaring witness IS the observed one is proven
+    /// equal by the graph and records nothing: that is the ordinary
+    /// pass-through `-> tensor[rows, f32]` over a read of the same axis.
+    fn preserve_declared_result(&mut self, result: &LoweredValue, declared: &TensorType) {
         let Some(id) = result.as_single_node() else {
             return;
         };
         for (axis, dim) in declared.dims.iter().enumerate() {
-            let DimInfo::Lit(required) = dim else {
-                continue;
+            let resolved = match dim {
+                DimInfo::Lit(required) => self.preserve_literal_result_axis(id, axis, *required),
+                DimInfo::Named(binder, _) if !binder.is_empty() && binder != "*" => {
+                    self.preserve_named_result_axis(id, axis, binder)
+                }
+                _ => false,
             };
-            let Some(witness) = self.axis_literal_witness(id, axis) else {
-                continue;
-            };
-            let required_value = chelis_types::scalar_from_i64(
-                "load",
-                Prim::Int64,
-                i64::try_from(*required).expect("checked extent fits int64"),
-            )
-            .expect("int64 extent literal");
-            if let RiscOp::ExtentWitness { requirements, .. } =
-                &mut self.dag.node_mut(witness).expect("witness").op
-                && !requirements.contains(&required_value)
-            {
-                requirements.push(required_value);
+            if resolved {
+                self.dag.node_mut(id).expect("result").output_type.dims[axis] = dim.clone();
             }
-            self.dag.node_mut(id).expect("result").output_type.dims[axis] = dim.clone();
         }
+    }
+
+    /// chelis#1377's half: a literal claim becomes a tagged requirement on the
+    /// witness that observed the produced extent. Returns whether that witness
+    /// resolved, which is also when the declared dim is stamped on the result.
+    fn preserve_literal_result_axis(&mut self, id: NodeId, axis: usize, required: usize) -> bool {
+        let Some(witness) = self.axis_literal_witness(id, axis) else {
+            return false;
+        };
+        let required = chelis_types::scalar_from_i64(
+            "load",
+            Prim::Int64,
+            i64::try_from(required).expect("checked extent fits int64"),
+        )
+        .expect("int64 extent literal");
+        if let RiscOp::ExtentWitness { requirements, .. } =
+            &mut self.dag.node_mut(witness).expect("witness").op
+            && !requirements.contains(&required)
+        {
+            requirements.push(required);
+        }
+        true
+    }
+
+    /// chelis#1374/#1376's half: a NAMED claim becomes an equality between the
+    /// witness that observed the produced extent and the witness that declares
+    /// the binder. Nothing in the graph relates them, which is exactly why
+    /// §4.7.2 makes it an execution-time check rather than a type error.
+    ///
+    /// A claim whose declaring witness IS the observed one is proven equal by
+    /// the graph and records nothing: that is the ordinary pass-through
+    /// `-> tensor[rows, f32]` over a read of `rows`'s own parameter.
+    fn preserve_named_result_axis(&mut self, id: NodeId, axis: usize, binder: &str) -> bool {
+        let Some(declaring) = self.signature_witness(binder) else {
+            return false;
+        };
+        let Some(produced) = self.axis_interface_witness(id, axis) else {
+            return false;
+        };
+        if !self.activation_witnesses.contains(&produced) {
+            return false;
+        }
+        if produced != declaring {
+            // The check is due at the later witness, so the requirement edge
+            // stays backward; `requirement_declares` records which side the
+            // binder is declared on, because either can be the later one.
+            let (owner, requirement, requirement_declares) = if produced.0 > declaring.0 {
+                (produced, declaring, true)
+            } else {
+                (declaring, produced, false)
+            };
+            self.add_named_extent_claim(
+                owner,
+                requirement,
+                binder.to_owned(),
+                requirement_declares,
+            );
+        }
+        true
+    }
+
+    /// The parameter witness observing the same interface axis this result
+    /// axis is read from.
+    ///
+    /// [`Self::axis_literal_witness`] answers this for an extent that reached
+    /// the result through a scalar carrier. An `expand`/`insert` size spelled
+    /// `shape(y, 0i32)` in an exported kernel does not use one: `spec/05`
+    /// §2.4.1's folded `InputAxis` form reads the extent from the tensor's own
+    /// shape metadata, so the axis source names the `Load` rather than a
+    /// scalar node. Both spellings observe the same quantity and owe the same
+    /// check, so both resolve to the witness that reads that `Load` axis.
+    fn axis_interface_witness(&self, id: NodeId, axis: usize) -> Option<NodeId> {
+        use crate::axis_sources::AxisSource;
+        if let Some(witness) = self.axis_literal_witness(id, axis) {
+            return Some(witness);
+        }
+        let node = self.dag.get(id)?;
+        match crate::axis_sources::output_axis_sources(&self.dag, id).get(axis)? {
+            AxisSource::ExternalAxis { load, axis } => self.caller_witness_for(*load, *axis),
+            AxisSource::InputAxis {
+                input,
+                axis: RtAxis::Lit(read),
+            } => {
+                let target = *node.inputs.get(*input)?;
+                self.axis_interface_witness(target, usize::try_from(*read).ok()?)
+            }
+            _ => None,
+        }
+    }
+
+    /// The `Caller` witness reading `tensor`'s `axis`, if this activation
+    /// minted one. Parameter witnesses are unique per tensor and axis.
+    fn caller_witness_for(&self, tensor: NodeId, axis: usize) -> Option<NodeId> {
+        self.dag.nodes().iter().find_map(|node| {
+            let RiscOp::ExtentWitness {
+                site: crate::dag::ExtentWitnessSite::Caller,
+                axis: RtAxis::Lit(observed),
+                ..
+            } = &node.op
+            else {
+                return None;
+            };
+            (usize::try_from(*observed).ok() == Some(axis) && node.inputs.first() == Some(&tensor))
+                .then_some(node.id)
+        })
     }
 
     fn retain_invocation_witnesses(&mut self, result: LoweredValue, start: usize) -> LoweredValue {
@@ -12989,7 +13198,8 @@ impl<'program> LowerCtx<'program> {
                     &self.dag.get(*witness).expect("witness").op,
                     RiscOp::CheckedReshapeExtent { .. }
                 ) || matches!(&self.dag.get(*witness).expect("witness").op,
-                RiscOp::ExtentWitness { requirements, .. } if !requirements.is_empty())
+                RiscOp::ExtentWitness { requirements, claims, .. }
+                    if !requirements.is_empty() || !claims.is_empty())
             })
             .collect::<Vec<_>>();
         if required.is_empty() {
@@ -13820,6 +14030,7 @@ impl<'program> LowerCtx<'program> {
         let saved_witnesses = self.binding_witnesses.clone();
         let saved_unit_refinements = self.local_unit_refinements.clone();
         let saved_signature_witnesses = self.signature_witnesses.clone();
+        let saved_activation_witnesses = self.activation_witnesses.clone();
         let call_span = self.current_span_id.clone();
         let saved_list_bindings = self.list_bindings.clone();
         let saved_shape_bindings = self.shape_bindings.clone();
@@ -13912,12 +14123,13 @@ impl<'program> LowerCtx<'program> {
         self.prepare_parameter_witnesses(&params, &formal_types, call_span);
         let result = self.lower_expr_with_claim(&elems[3], declared_result.as_ref());
         if let Some(ty) = &declared_result {
-            self.preserve_literal_result(&result, ty);
+            self.preserve_declared_result(&result, ty);
         }
         let result = self.retain_invocation_witnesses(result, witness_start);
         self.binding_witnesses = saved_witnesses;
         self.local_unit_refinements = saved_unit_refinements;
         self.signature_witnesses = saved_signature_witnesses;
+        self.activation_witnesses = saved_activation_witnesses;
         self.bindings = saved; // Restore scope
         self.list_bindings = saved_list_bindings;
         self.shape_bindings = saved_shape_bindings;

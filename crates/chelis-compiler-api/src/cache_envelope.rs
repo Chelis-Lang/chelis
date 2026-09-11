@@ -74,12 +74,16 @@ pub(crate) trait CachePayload:
 }
 
 impl CachePayload for crate::LibraryContext {
-    const FORMAT_VERSION: u32 = 13;
+    // V14 (chelis#1374/#1376): a cached typecheck feeds lowering, which now
+    // mints extent witnesses carrying named claims. A V13 entry predates that
+    // obligation and would silently serve an unguarded program.
+    const FORMAT_VERSION: u32 = 14;
     const KEY_DOMAIN: &'static [u8] = b"chelis_library_typecheck_v";
 }
 
 impl CachePayload for crate::StdLibContext {
-    const FORMAT_VERSION: u32 = 17;
+    // V18: the V14 reason above, for the bundled standard library.
+    const FORMAT_VERSION: u32 = 18;
     const KEY_DOMAIN: &'static [u8] = b"chelis_std_typecheck_v";
 }
 

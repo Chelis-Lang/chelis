@@ -246,6 +246,14 @@ impl<'a> VerifiedDagView<'a> {
         crate::axis_sources::entry_extent_guards(self.dag)
     }
 
+    /// The named witness claims the entry schedule above already compares, so
+    /// an emitter checks each such pair once (`spec/04-type-system.md` §4.7).
+    /// The view answers this for the same reason it answers placement: the
+    /// question needs the class derivation, not the graph.
+    pub fn entry_covered_witness_claims(self) -> Vec<(NodeId, usize)> {
+        crate::axis_sources::entry_covered_witness_claims(self.dag)
+    }
+
     /// The unit-extent claims whose guard section 4.7 places at entry.
     ///
     /// The sibling of [`Self::entry_dim_classes`], filtered by the same

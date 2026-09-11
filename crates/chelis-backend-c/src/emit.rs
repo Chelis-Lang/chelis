@@ -44,6 +44,10 @@ fn unsupported_storage_plan(error: chelis_ir::ownership::OwnershipError) -> Unsu
 pub struct CEmitter {
     lines: Vec<String>,
     indent: usize,
+    /// chelis#1374: `(witness node, claim index)` pairs the entry-guard
+    /// prologue already compares, so the witness does not emit a second
+    /// comparison of the same two axes (spec/04 §4.7, "exactly once").
+    entry_covered_claims: Vec<(NodeId, usize)>,
     use_blas: bool,
     /// Which vectorized math library to target for fused-elem SIMD emission (Level 3b).
     math_lib: crate::MathLib,
@@ -294,6 +298,7 @@ impl CEmitter {
         let mut e = CEmitter {
             lines: Vec::new(),
             indent: 0,
+            entry_covered_claims: dag.entry_covered_witness_claims(),
             use_blas: dag
                 .nodes()
                 .iter()
@@ -798,6 +803,7 @@ impl CEmitter {
                 parameter,
                 axis: RtAxis::Lit(axis),
                 requirements,
+                claims,
             } => {
                 let operation = match site {
                     chelis_ir::dag::ExtentWitnessSite::Caller => "load",
@@ -817,6 +823,56 @@ impl CEmitter {
                     ));
                     self.indent += 1;
                     self.line(&format!("fprintf(stderr, \"extent `{required}`: claimed = %lld, {parameter} axis {axis} = %lld\\n\", (long long){required}, (long long)chelis_tensor_shape(t{input}, {axis}));"));
+                    self.line(&format!(
+                        "chelis_numeric_trap(\"numeric trap: domain in {operation} at int64\");"
+                    ));
+                    self.indent -= 1;
+                    self.line("}");
+                }
+                // chelis#1374/#1376: §4.7.2's named half. The requirement is
+                // another witness of this activation, so both records read a
+                // tensor's own shape metadata rather than a compile-time
+                // number, and the declaring side leads as it does in the
+                // `Load`-witnessed entry guards.
+                for (index, (claim, edge)) in
+                    claims.iter().zip(node.inputs.iter().skip(1)).enumerate()
+                {
+                    if self.entry_covered_claims.contains(&(node.id, index)) {
+                        continue;
+                    }
+                    let required = dag.get(*edge).expect("verified extent claim edge");
+                    let RiscOp::ExtentWitness {
+                        parameter: required_parameter,
+                        axis: RtAxis::Lit(required_axis),
+                        ..
+                    } = &required.op
+                    else {
+                        unreachable!("the verifier requires a witness edge per named claim")
+                    };
+                    let required_input = required.inputs[0].0;
+                    let required_parameter =
+                        chelis_ir::span_sanitize::sanitize_for_format_string(required_parameter)
+                            .to_string();
+                    let label = chelis_ir::span_sanitize::sanitize_for_format_string(&claim.claim)
+                        .to_string();
+                    let here = format!("{parameter} axis {axis} = %lld");
+                    let there = format!("{required_parameter} axis {required_axis} = %lld");
+                    let here_value = format!("(long long)chelis_tensor_shape(t{input}, {axis})");
+                    let there_value = format!(
+                        "(long long)chelis_tensor_shape(t{required_input}, {required_axis})"
+                    );
+                    let (first, first_value, second, second_value) = if claim.requirement_declares {
+                        (there, there_value, here, here_value)
+                    } else {
+                        (here, here_value, there, there_value)
+                    };
+                    self.line(&format!(
+                        "if (chelis_tensor_shape(t{input}, {axis}) != chelis_tensor_shape(t{required_input}, {required_axis})) {{"
+                    ));
+                    self.indent += 1;
+                    self.line(&format!(
+                        "fprintf(stderr, \"extent `{label}`: {first}, {second}\\n\", {first_value}, {second_value});"
+                    ));
                     self.line(&format!(
                         "chelis_numeric_trap(\"numeric trap: domain in {operation} at int64\");"
                     ));

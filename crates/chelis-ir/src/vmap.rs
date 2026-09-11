@@ -91,11 +91,15 @@ pub fn vectorize_axis0(dag: &Dag, batch_dim: DimInfo) -> Result<Dag, String> {
                 parameter,
                 axis: RtAxis::Lit(axis),
                 requirements,
+                claims,
             } => RiscOp::ExtentWitness {
                 site: *site,
                 parameter: parameter.clone(),
                 axis: RtAxis::Lit(axis.checked_add(1).expect("vmap axis fits int32")),
                 requirements: requirements.clone(),
+                // A named claim relates two witnesses, and both shift by the
+                // same prepended batch axis, so the obligation is unchanged.
+                claims: claims.clone(),
             },
             RiscOp::CheckedReshapeExtent {
                 claims,

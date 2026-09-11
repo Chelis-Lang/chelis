@@ -2008,7 +2008,7 @@ pub struct WireRecordPatternField {
 /// - `10`: checked reshape scalars and checked unit-axis refinements retain
 ///   independent actual/required values through graph transport; integer remainder
 ///   targets use the explicit `Mod` operation.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 10;
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 11;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
@@ -2244,7 +2244,11 @@ impl WireDag {
                         };
                         if input.id != *input_id
                             || witness.id != *witness_id
-                            || witness.inputs.as_slice() != [*input_id]
+                            // wire v11: `inputs[0]` is the observed tensor and
+                            // `inputs[1..]` are the witness's named-claim
+                            // requirement edges, so the refinement ties to the
+                            // FIRST input rather than to a sole input.
+                            || witness.inputs.first() != Some(input_id)
                             || observed_axis != axis
                             || !requirements.iter().any(|value| value.get() == 1)
                         {
@@ -2880,6 +2884,18 @@ pub enum WireExtentWitnessSite {
     LocalExpand,
 }
 
+/// One named equality a witness owes against another witness (wire v11).
+///
+/// `claim` is the dimension binder; `requirement_declares` says which of the
+/// two witnesses declares it, so a consumer renders the declaring side first
+/// without re-deriving the signature. Both fields are mandatory: a payload
+/// missing either is a decoding error, and no default is supplied.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireExtentClaim {
+    pub claim: String,
+    pub requirement_declares: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WireRiscOp {
@@ -3007,6 +3023,7 @@ pub enum WireRiscOp {
         parameter: String,
         axis: WireRtAxis,
         requirements: Vec<NonnegativeExtent>,
+        claims: Vec<WireExtentClaim>,
     },
     CheckedReshapeExtent {
         claims: Vec<String>,
@@ -3136,6 +3153,10 @@ mod tests {
             parameter: "x".into(),
             axis: WireRtAxis::Lit { value: 0 },
             requirements: vec![NonnegativeExtent::new(4).unwrap()],
+            claims: vec![WireExtentClaim {
+                claim: "rows".into(),
+                requirement_declares: true,
+            }],
         };
         let json = serde_json::to_value(&witness).unwrap();
         let back: WireRiscOp = serde_json::from_value(json.clone()).unwrap();

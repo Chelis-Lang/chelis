@@ -1561,6 +1561,58 @@ pub enum EntryExtentGuard {
     },
 }
 
+/// The named witness claims an entry guard already checks, as
+/// `(witness node, claim index)`.
+///
+/// chelis#1374 gave `ExtentWitness` named claims so a declared result's named
+/// extent and a binder repeated across parameters are checked in every form:
+/// an inlined root has no `Load` for [`entry_extent_guards`] to group, and a
+/// declared-but-unread parameter has no class member until its witness is
+/// retained. Where both witnesses DO read `Load`s, the class derivation
+/// reaches the same pair and the entry schedule is the better owner: it runs
+/// ahead of the evaluator's symbolic-dim binding, in assigned ABI-slot order.
+/// `spec/04-type-system.md` §4.7 evaluates each guard "exactly once", so the
+/// witness yields there and its claim is left carrying only the retention
+/// that keeps the interface witness, and its ABI slot, alive.
+pub fn entry_covered_witness_claims(dag: &Dag) -> Vec<(NodeId, usize)> {
+    let observed_pair = |node: &crate::dag::DagNode| {
+        let RiscOp::ExtentWitness {
+            axis: RtAxis::Lit(axis),
+            ..
+        } = node.op
+        else {
+            return None;
+        };
+        let load = load_through_casts(dag, node.id, 0).or_else(|| node.inputs.first().copied())?;
+        Some((load, usize::try_from(axis).ok()?))
+    };
+    let guards = entry_extent_guards(dag);
+    let mut covered = Vec::new();
+    for node in dag.nodes() {
+        let RiscOp::ExtentWitness { claims, .. } = &node.op else {
+            continue;
+        };
+        let Some(here) = observed_pair(node) else {
+            continue;
+        };
+        for (index, (recorded, edge)) in claims.iter().zip(node.inputs.iter().skip(1)).enumerate() {
+            let Some(there) = dag.get(*edge).and_then(observed_pair) else {
+                continue;
+            };
+            if guards.iter().any(|guard| {
+                matches!(guard,
+                    EntryExtentGuard::Named { claim, canonical, observed }
+                        if claim == &recorded.claim
+                            && ((*canonical == here && *observed == there)
+                                || (*canonical == there && *observed == here)))
+            }) {
+                covered.push((node.id, index));
+            }
+        }
+    }
+    covered
+}
+
 /// Section 4.7's individual entry checks in assigned input-slot/axis order.
 /// A named check becomes due at the later of its two witnesses; its canonical
 /// witness remains the declaring one even when that declaration is later.
