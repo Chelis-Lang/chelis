@@ -8,21 +8,22 @@
 //! success, while checking that same file directly exited 2. A type error
 //! disappeared by being behind a link.
 //!
-//! Following links introduces three failure modes the unfollowed walk never
-//! saw -- a loop, a dangling link to a source, a dangling link to anything
-//! else -- and each of them surfaces as a walk ERROR, which aborts the whole
-//! run. The tests below pin that each is handled rather than fatal, so the
-//! fix does not trade one silent skip for three hard failures.
+//! Following links introduces failure modes the unfollowed walk never saw,
+//! and `walkdir` surfaces each as a walk ERROR, which aborts the whole run.
+//! The tests below pin the three this change handles: a loop, a dangling
+//! link to a source, and a dangling link to anything else.
 //!
-//! Deliberately NOT pinned: what happens when a link points at a directory
-//! that cannot be read. That is the same failure as an unreadable
-//! subdirectory, and how directory mode reports it is an open decision on
-//! chelis#1678. Asserting today's behaviour would pin it.
+//! Deliberately NOT pinned: every other link that fails to resolve -- a link
+//! to a directory that cannot be read, a self-referencing link (`ELOOP`), a
+//! link through a file (`ENOTDIR`). Those still abort the run, whatever the
+//! link is named, because `walkdir` resolves a followed link before its entry
+//! filter sees the name. Directory-level failures are the next chelis#1678
+//! change's surface, and asserting today's abort would pin it.
 
 #![cfg(unix)]
 
 use std::fs;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::symlink;
 use std::path::Path;
 
 use assert_cmd::Command;
@@ -241,11 +242,6 @@ fn a_dangling_hidden_link_is_still_filtered() {
     assert_eq!(code, Some(0));
 }
 
-#[allow(dead_code)]
-fn make_unreadable(path: &Path) {
-    fs::set_permissions(path, fs::Permissions::from_mode(0o000)).expect("chmod");
-}
-
 // ---------------------------------------------------------------------------
 // `chelis test` walks for test files with the same helper, and had the same
 // defect: a symlinked test file was never run, so a failing test behind a
@@ -302,8 +298,6 @@ fn chelis_test_runs_a_symlinked_test_file() {
         "module Probe.Tests.Real\n\ndef test_real_passes() -> unit = test_assert(true, \"real\")\n",
     )
     .expect("write");
-    // The module name matches the path the walk takes -- the link --
-    // because that is the path the test file is compiled under.
     fs::write(
         pkg.join("elsewhere/linked_target.ch"),
         "module Probe.Tests.Linked\n\ndef test_linked_fails() -> unit = test_assert(false, \"the linked test ran\")\n",

@@ -2342,10 +2342,14 @@ fn discover_check_files(target: &Path) -> Result<Vec<PathBuf>, String> {
 ///   rather than skipping it silently.
 /// - **a dangling link to anything else**: skipped, like any non-source.
 ///
-/// Every other error -- a directory that cannot be read, reached directly or
-/// through a link -- propagates unchanged. How directory mode should report
-/// those is an open decision on chelis#1678 and is not this helper's to
-/// make.
+/// Every other error propagates and aborts the walk: a directory that cannot
+/// be read, and any link that fails to resolve for a reason other than
+/// `NotFound` (a link to an unreadable directory, a self-referencing link, a
+/// link through a file). That holds whatever the link is named, including a
+/// dot-name `keep` would have pruned: `walkdir` resolves a followed link
+/// before `keep` sees it, and the error from its loop check carries no path,
+/// so the entry cannot always be identified here. Reporting directory-level
+/// failures without aborting is the next chelis#1678 change.
 ///
 /// `keep` is the caller's own entry filter and `is_source` its own suffix
 /// rule. The two walks genuinely differ in both, and this deliberately
