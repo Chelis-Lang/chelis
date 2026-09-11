@@ -4,9 +4,9 @@ use chelis_deep::DeepTag;
 use chelis_unord::{UnordMap, UnordSet};
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
-use std::marker::PhantomData;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
