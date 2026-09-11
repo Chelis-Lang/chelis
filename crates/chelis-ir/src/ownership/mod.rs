@@ -1411,7 +1411,7 @@ pub fn lower_host_execution_ownership(
 fn lower_host_ownership_with_execution(
     manifested: &ManifestedProgram,
     mut host: ConcreteHostProgram,
-    execution: Option<crate::host::HostExecutionMetadata>,
+    execution: Option<crate::host::HostExecutionAssociations>,
 ) -> Result<HostOwnershipProgram, OwnershipError> {
     let root_bindings = lower::materialize_manifest_roots(&mut host, manifested.manifest())?;
     let mut sites = ir::HostSiteBuilder::default();
@@ -1640,7 +1640,7 @@ fn host_payload<P: EmissionPayload>(
 
 fn lower_nested_dags(
     host: &ConcreteHostProgram,
-    execution: Option<crate::host::HostExecutionMetadata>,
+    execution: Option<crate::host::HostExecutionAssociations>,
 ) -> Result<Vec<NestedDagProof>, OwnershipError> {
     let (global_execution, function_execution) = execution.unwrap_or_else(|| {
         (

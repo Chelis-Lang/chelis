@@ -395,11 +395,11 @@ pub struct HostExecutionPlan {
 }
 
 pub(crate) type HelperExecutionMetadata = Option<crate::evaluation::ExecutionMetadata>;
-pub(crate) type HostExecutionMetadata = (
+pub(crate) type HostExecutionAssociations = (
     Vec<HelperExecutionMetadata>,
     Vec<Vec<HelperExecutionMetadata>>,
 );
-type HostExecutionParts = (ConcreteHostProgram, HostExecutionMetadata);
+type HostExecutionParts = (ConcreteHostProgram, HostExecutionAssociations);
 
 impl HostExecutionPlan {
     pub fn program(&self) -> &ConcreteHostProgram {
