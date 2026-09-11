@@ -1613,6 +1613,146 @@ pub fn entry_covered_witness_claims(dag: &Dag) -> Vec<(NodeId, usize)> {
     covered
 }
 
+/// Is this `ExtentWitness` retained purely as an ENTRY OBLIGATION - that is,
+/// does no node ever read its VALUE?
+///
+/// `LowerCtx::retain_invocation_witnesses` keeps a claim-bearing witness alive
+/// by listing it in a `Copy` carrier's `shape_deps`, never by feeding it to
+/// anything, so a witness minted for a declared-but-unread parameter or for a
+/// binder repeated across parameters carries an obligation without carrying a
+/// number anyone computes with. Section 4.7 discharges such an obligation at
+/// function entry, which is host work on every target.
+///
+/// The one data edge that does NOT count is a claim requirement: a witness's
+/// inputs after the first are the earlier witnesses its named claims compare
+/// against, and reading the requirement is part of discharging the same entry
+/// obligation rather than a device computation.
+///
+/// A witness that IS read - the runtime `shape` value read of
+/// `insert(b, 0, shape(y, 0))` - is not an entry obligation, and the HIP
+/// target still refuses it under [05-SHAPE-1].
+pub fn witness_is_entry_obligation(dag: &Dag, id: NodeId) -> bool {
+    if !matches!(
+        dag.get(id).map(|node| &node.op),
+        Some(RiscOp::ExtentWitness { .. })
+    ) {
+        return false;
+    }
+    if dag.roots().contains(&id) {
+        return false;
+    }
+    dag.nodes().iter().all(|node| {
+        node.inputs.iter().enumerate().all(|(index, input)| {
+            *input != id
+                || (index > 0 && matches!(node.op, RiscOp::ExtentWitness { .. }))
+        })
+    })
+}
+
+/// One record inside a [04-NUM-9] extent diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExtentRecord {
+    /// `claimed = N`, the compile-time side of a literal requirement.
+    Claimed(i64),
+    /// `<parameter> axis <axis> = <runtime shape>`, read off an input tensor.
+    Read {
+        load: NodeId,
+        axis: usize,
+        parameter: String,
+    },
+}
+
+/// One section 4.7 obligation carried by an entry-obligation `ExtentWitness`,
+/// reduced to input reads so a host prologue can render it from ABI slots
+/// alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WitnessEntryObligation {
+    /// The label between backticks: a binder for a named claim, the decimal
+    /// extent for a literal requirement.
+    pub label: String,
+    /// The two records in [04-NUM-9] order, declaring side first.
+    pub records: (ExtentRecord, ExtentRecord),
+    /// The operation the `Domain` trap names: `load` or `expand`.
+    pub operation: &'static str,
+}
+
+/// Every obligation an entry-obligation witness owes, or `None` when one of
+/// them cannot be rendered from input reads.
+///
+/// `None` is the fail-closed answer. A target whose device lane cannot host a
+/// witness ([05-SHAPE-1] on HIP) may discharge the witness in its host
+/// prologue only when every obligation reduces to input tensors; otherwise it
+/// refuses, exactly as it did before the witness carried claims.
+///
+/// Claims that [`entry_covered_witness_claims`] already names are omitted:
+/// the entry schedule owns them on every lane, and section 4.7 evaluates each
+/// guard exactly once.
+pub fn witness_entry_obligations(
+    dag: &Dag,
+    witness: NodeId,
+) -> Option<Vec<WitnessEntryObligation>> {
+    let node = dag.get(witness)?;
+    let RiscOp::ExtentWitness {
+        site,
+        requirements,
+        claims,
+        ..
+    } = &node.op
+    else {
+        return None;
+    };
+    let operation = match site {
+        crate::dag::ExtentWitnessSite::Caller => "load",
+        crate::dag::ExtentWitnessSite::LocalExpand => "expand",
+    };
+    let read_for = |id: NodeId| -> Option<ExtentRecord> {
+        let observed = dag.get(id)?;
+        let RiscOp::ExtentWitness {
+            parameter,
+            axis: RtAxis::Lit(axis),
+            ..
+        } = &observed.op
+        else {
+            return None;
+        };
+        let load = load_through_casts(dag, id, 0)?;
+        abi_input_slot(dag, load)?;
+        Some(ExtentRecord::Read {
+            load,
+            axis: usize::try_from(*axis).ok()?,
+            parameter: parameter.clone(),
+        })
+    };
+    let here = read_for(witness)?;
+    let covered = entry_covered_witness_claims(dag);
+    let mut obligations = Vec::new();
+    for required in requirements {
+        let required = required.as_i64_exact()?;
+        obligations.push(WitnessEntryObligation {
+            label: required.to_string(),
+            records: (ExtentRecord::Claimed(required), here.clone()),
+            operation,
+        });
+    }
+    for (index, (claim, edge)) in claims.iter().zip(node.inputs.iter().skip(1)).enumerate() {
+        if covered.contains(&(witness, index)) {
+            continue;
+        }
+        let there = read_for(*edge)?;
+        let records = if claim.requirement_declares {
+            (there, here.clone())
+        } else {
+            (here.clone(), there)
+        };
+        obligations.push(WitnessEntryObligation {
+            label: claim.claim.clone(),
+            records,
+            operation,
+        });
+    }
+    Some(obligations)
+}
+
 /// Section 4.7's individual entry checks in assigned input-slot/axis order.
 /// A named check becomes due at the later of its two witnesses; its canonical
 /// witness remains the declaring one even when that declaration is later.

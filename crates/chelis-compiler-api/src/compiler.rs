@@ -4976,6 +4976,17 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                     ),
                 ));
             }
+            // chelis#1374/#1376: a witness nothing READS is not a device
+            // computation. It carries a `spec/04-type-system.md` section 4.7
+            // entry obligation that `retain_invocation_witnesses` kept alive
+            // through a `shape_deps` edge, and the HIP host prologue
+            // discharges it beside the other entry guards. [05-SHAPE-1] still
+            // refuses every witness a device node reads, and refuses this one
+            // too when an obligation does not reduce to input reads.
+            RiscOp::ExtentWitness { .. }
+                if chelis_ir::axis_sources::witness_is_entry_obligation(dag, node.id)
+                    && chelis_ir::axis_sources::witness_entry_obligations(dag, node.id)
+                        .is_some() => {}
             RiscOp::Shape { .. }
             | RiscOp::ExtentWitness { .. }
             | RiscOp::CheckedReshapeExtent { .. }

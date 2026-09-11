@@ -515,6 +515,69 @@ fn c_independent_trap_after_a_mismatch_loses() {
 // HIP prologue.
 // ---------------------------------------------------------------------------
 
+/// An `ExtentWitness` retained ONLY as a section 4.7 entry obligation reaches
+/// the HIP device lane and the program emits.
+///
+/// chelis#1374's repeated-binder claim keeps a declared-but-unread parameter's
+/// interface witness alive, and every ordinary signature that repeats a binder
+/// - `def f(a: tensor[batch, in_dim], b: tensor[in_dim, out_dim])` among them -
+/// acquires one. Before the entry-obligation split the HIP gate read that
+/// witness as the runtime `shape` value read [05-SHAPE-1] excludes and refused
+/// the whole build, which would have made this PR a breaking change to the HIP
+/// target for most programs.
+///
+/// This is an EMITTED-SOURCE receipt. HIP hardware execution is blocked on this
+/// workstation (`docs/local_hip_environment.md` covers the manual gates that
+/// are runnable; running a compiled kernel is not among what this row can do),
+/// so the assertion is on the text `chelis build --target hip` writes.
+///
+/// EVIDENTIARY STATUS: regression test. Measured red at `01c6e33a1`, where the
+/// build failed with "`chelis build --target hip` does not support the runtime
+/// `shape` value read; lowered node 2 requires it."
+#[test]
+fn an_entry_obligation_witness_emits_on_the_hip_target() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = fixture(
+        &dir,
+        "unread_hip.ch",
+        "def f(x: tensor[extent, f32], p: tensor[extent, f32]) -> tensor[f32] = sum(x, 0i32)\n",
+    );
+    let out_dir = dir.path().join("unread-hip-out");
+    let build = Command::cargo_bin("chelis")
+        .expect("chelis")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            "--allow-style-violations",
+            path.to_str().unwrap(),
+            "--target",
+            "hip",
+            "-o",
+            out_dir.to_str().unwrap(),
+        ])
+        .output()
+        .expect("hip build");
+    assert!(
+        build.status.success(),
+        "the retained witness is an entry obligation, not a device shape read: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let emitted =
+        fs::read_to_string(out_dir.join("unread_hip_hip.cpp")).expect("HIP source is written");
+    assert!(
+        emitted.contains("input `p` at slot 1"),
+        "the declared-but-unread parameter keeps its ABI slot:\n{emitted}"
+    );
+    assert!(
+        emitted.contains("symbolic dim `extent` mismatch"),
+        "and its equality is checked at entry, in this lane's rendering:\n{emitted}"
+    );
+    assert!(
+        !emitted.contains("chelis_gpu_tensor *d_t2 ="),
+        "the witness itself emits no device value:\n{emitted}"
+    );
+}
+
 /// chelis#616 left the HIP prologue walking `symbolic_occurrences` and
 /// asserting a `Load` source for every occurrence, with a `panic!` backstop
 /// (`require_load_source`) for the op-declared case on the reasoning that
