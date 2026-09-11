@@ -279,19 +279,26 @@ representation of the same obligation, not distinct trapping operations.
 B2b-1 first implements literal call claims through an explicit IR witness.
 This bounded change owns #1377's shape-derived `insert` call and its nested
 and discarded-result controls. A literal identifies its own required value;
-it does not need to identify a named binder by spelling. The remaining named
-claim migration still owns scoped binding identities, unread named witnesses,
-and #1374/#1376/#1566. Both changes retain the C2.3 distinction between a
-requirement and an independently observed extent.
+it does not need to identify a named binder by spelling. The named half
+followed and delivered scoped binding identities, unread named witnesses, and
+#1374/#1376/#1566 for TENSOR-typed parameters; a binder reached only through a
+container type mints no witness, and the two polymorphic inlined-root cells
+render the enclosing root's inferred literal restatement instead of naming both
+sources (#1782). Both changes retain the C2.3 distinction between a requirement
+and an independently observed extent.
 
-The literal transport uses `RiscOp::ExtentWitness { site, parameter, axis,
-requirements }`. Its one tensor input is the actual argument; its result is
-the observed axis extent as a rank-zero `int64`. `parameter` is diagnostic
-text, `axis: RtAxis` selects the observed axis, and
+The transport uses `RiscOp::ExtentWitness { site, parameter, axis,
+requirements, claims }`. Its FIRST input is the actual argument, followed by
+one input per named claim, each an earlier `ExtentWitness` of the same
+activation; its result is the observed axis extent as a rank-zero `int64`.
+`parameter` is diagnostic text, `axis: RtAxis` selects the observed axis,
 `requirements: Vec<ScalarValue>` retains ordered, tagged `int64` literal
-claims. Requirements are explicit fields, with no missing-field default.
-The operation reads shape metadata without copying the argument's elements.
-Its existing `span_id` records the introducing call.
+claims, and `claims` retains one entry per requirement input, each carrying the
+dimension binder and a `requirement_declares` flag saying which side declares
+it, because either side can be the later witness and the edges do not recover
+that role. Requirements and claims are explicit fields, with no missing-field
+default. The operation reads shape metadata without copying the argument's
+elements. Its existing `span_id` records the introducing call.
 
 Lowering creates these witnesses in parameter/axis order before lowering the
 callee body. A parameter shape read uses its witness through an ordinary

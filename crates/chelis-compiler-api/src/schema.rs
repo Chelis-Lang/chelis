@@ -2008,6 +2008,12 @@ pub struct WireRecordPatternField {
 /// - `10`: checked reshape scalars and checked unit-axis refinements retain
 ///   independent actual/required values through graph transport; integer remainder
 ///   targets use the explicit `Mod` operation.
+/// - `11`: chelis#1374/#1376 - `WireRiscOp::ExtentWitness` gained a mandatory
+///   `claims` vector and one earlier-witness input per entry, so a declared
+///   result's NAMED extent and a binder repeated across parameters transport as
+///   obligations rather than being reconstructed. A consumer migrating from 10
+///   must read the vector, the extra inputs, and each entry's
+///   `requirement_declares` role, which the edges alone do not recover.
 pub const WIRE_DAG_SCHEMA_VERSION: u32 = 11;
 
 /// A typed failure from validating a serialized [`WireDag`] against the

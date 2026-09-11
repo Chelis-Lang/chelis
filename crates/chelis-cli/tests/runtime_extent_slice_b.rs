@@ -515,6 +515,121 @@ fn c_independent_trap_after_a_mismatch_loses() {
 // HIP prologue.
 // ---------------------------------------------------------------------------
 
+/// No environment variable turns the section 4.7.2 guard off.
+///
+/// Two conditions on `std::env::var_os` once gated the two claim-minting sites,
+/// live in a release binary, named nowhere else in the repository. With
+/// `CHELIS_NO_KERNEL_CLAIM=1` this exact fixture printed
+/// `out = tensor(shape=[3], data=[7.0, 7.0, 7.0])`, which is verbatim the
+/// silent wrong shape chelis#1374 exists to remove, and the emitted C guard
+/// count went from one to zero.
+///
+/// The names are gone. This row keeps them gone: it sets both, plus the
+/// spelling a rename would reach for, and requires the trap anyway. A test seam
+/// for this obligation belongs behind `#[cfg(test)]`, never behind an
+/// environment read a user can make.
+///
+/// EVIDENTIARY STATUS: regression test. Measured red at `34d3037dc` with either
+/// variable set; the red-team round that found it recorded the same output.
+#[test]
+fn no_environment_variable_disables_the_named_claim_guard() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = fixture(&dir, "no_switch.ch", &named_claim_cross_tensor_source(2, 3));
+    for name in [
+        "CHELIS_NO_KERNEL_CLAIM",
+        "CHELIS_NO_STAGED_CLAIM",
+        "CHELIS_TEST_NO_KERNEL_CLAIM",
+        "CHELIS_TEST_NO_STAGED_CLAIM",
+    ] {
+        let eval = Command::cargo_bin("chelis")
+            .expect("chelis")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .env(name, "1")
+            .args(["eval", "--allow-style-violations", "--file", path.to_str().unwrap()])
+            .output()
+            .expect("eval");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&eval.stdout),
+            String::from_utf8_lossy(&eval.stderr)
+        );
+        assert!(
+            text.contains("extent `rows`: x axis 0 = 2, y axis 0 = 3"),
+            "`{name}` must not silence the guard: {text}"
+        );
+        assert!(
+            text.contains(&domain_trap_line("load")),
+            "`{name}` must not silence the trap: {text}"
+        );
+        assert!(
+            !text.contains("out = tensor(shape=[3]"),
+            "`{name}` must not restore the wrong shape: {text}"
+        );
+    }
+
+    let out_dir = dir.path().join("no-switch-out");
+    let build = Command::cargo_bin("chelis")
+        .expect("chelis")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_NO_KERNEL_CLAIM", "1")
+        .env("CHELIS_NO_STAGED_CLAIM", "1")
+        .args([
+            "build",
+            "--allow-style-violations",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "-o",
+            out_dir.to_str().unwrap(),
+        ])
+        .output()
+        .expect("build");
+    assert!(
+        build.status.success(),
+        "build: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let emitted = fs::read_to_string(out_dir.join("no_switch.c")).expect("C source");
+    assert_eq!(
+        emitted.matches("extent `rows`").count(),
+        1,
+        "the emitted guard count stays at one with both variables set:\n{emitted}"
+    );
+}
+
+/// A repeated binder is checked when BOTH occurrences are tensor parameters.
+/// One inside a container type is not, and this row measures that rather than
+/// leaving it implied.
+///
+/// `prepare_parameter_witnesses` walks `&[TensorType]`, so a binder reached
+/// only through `List[tensor[extent, f32]]` mints no witness and nothing
+/// compares it. The claim sentence in this pull request is qualified to
+/// tensor-typed parameters for that reason. Extending the walk into container
+/// types is a mechanism this change does not carry; chelis#1266 owns the
+/// record-projection half of the same shape.
+///
+/// EVIDENTIARY STATUS: disposition lock naming a gap, NOT a regression test.
+/// The `_pending` suffix says the recorded behaviour is the one to change.
+#[test]
+fn a_container_nested_binder_is_unchecked_pending_the_container_walk() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, output) = c_run_result(
+        &dir,
+        "container_binder",
+        "def f(xs: List[tensor[extent, f32]], p: tensor[extent, f32]) -> tensor[f32] = sum(&p, 0i32)\n\
+         out = f([to_tensor([1.0f32, 2.0f32])], to_tensor([1.0f32, 2.0f32, 3.0f32]))\n",
+    );
+    assert!(ok, "the program runs to completion today: {output}");
+    assert!(
+        !output.contains("extent `extent`"),
+        "and nothing compares the list element's extent with `p`'s: {output}"
+    );
+    assert!(
+        output.contains("out = 6"),
+        "the sum of `p` is what it returns: {output}"
+    );
+}
+
 /// A synthesized multi-root kernel takes its parameters from captured root
 /// bindings, and two of them spelling the same binder is a coincidence, not a
 /// claim.
@@ -596,11 +711,22 @@ fn a_synthesized_kernel_parameter_collision_emits_no_guard() {
 /// are runnable; running a compiled kernel is not among what this row can do),
 /// so the assertion is on the text `chelis build --target hip` writes.
 ///
-/// EVIDENTIARY STATUS: regression test. Measured red at `01c6e33a1`, where the
-/// build failed with "`chelis build --target hip` does not support the runtime
-/// `shape` value read; lowered node 2 requires it."
+/// The guard text this row asserts is the LEGACY one. `witness_entry_obligations`
+/// omits a claim the entry schedule already owns, and on the HIP lane that
+/// schedule is `symbolic_bindings_interface`, which renders
+/// ``symbolic dim `x` mismatch`` and `abort()` rather than [04-NUM-9] and
+/// `chelis_numeric_trap`. Both lanes derive the comparison from the same
+/// `derive_dim_witnesses` classes, so the equality is checked either way and no
+/// program runs unguarded; only the spelling diverges. Exact HIP rendering is
+/// chelis#1112's, and this row locks the legacy form until that lands rather
+/// than asserting the [04-NUM-9] form it does not yet produce.
+///
+/// EVIDENTIARY STATUS: regression test for the BUILD, disposition lock for the
+/// spelling. Measured red at `01c6e33a1`, where the build failed with
+/// "`chelis build --target hip` does not support the runtime `shape` value
+/// read; lowered node 2 requires it."
 #[test]
-fn an_entry_obligation_witness_emits_on_the_hip_target() {
+fn an_entry_obligation_witness_emits_the_legacy_hip_guard_pending_1112() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = fixture(
         &dir,
