@@ -163,6 +163,7 @@ impl CEmitter {
             fused_reuse,
             func_name,
             options,
+            false,
         )
     }
 
@@ -183,7 +184,7 @@ impl CEmitter {
                 fused_reuse.insert(node, token);
             }
         }
-        Self::emit_preplanned(dag, memory_plan, fused_reuse, func_name, options)
+        Self::emit_preplanned(dag, memory_plan, fused_reuse, func_name, options, true)
     }
 
     fn emit_preplanned(
@@ -192,6 +193,7 @@ impl CEmitter {
         fused_reuse: BTreeMap<NodeId, ReusableOwnedStorage>,
         func_name: &str,
         options: crate::CodegenOptions,
+        private_random_context: bool,
     ) -> Result<String, Unsupported> {
         // chelis#1277 C4.1/C4.3: before anything reads a shape, every
         // realized output axis must have one checked extent source. This
@@ -428,10 +430,21 @@ impl CEmitter {
         // contains non-identifier bytes the emitted C will fail to compile,
         // which is the desired outcome (loud failure, not silent injection).
         let func_name_fmt = chelis_ir::span_sanitize::sanitize_for_format_string(func_name);
+        // Only host-owned tensor helpers receive the invocation context.
+        // Standalone/public kernels keep the four-argument tensor ABI.
+        let random_param = if private_random_context {
+            ", chelis_rng_state *__chelis_rng"
+        } else {
+            ""
+        };
         e.line(&format!(
-            "{linkage}void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out) {{"
+            "{linkage}void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out{random_param}) {{"
         ));
         e.indent = 1;
+
+        if private_random_context {
+            e.line("(void)__chelis_rng;");
+        }
 
         let input_labels = Self::input_labels(dag);
         let input_slots = Self::input_slots(&input_labels);

@@ -257,7 +257,7 @@ pub(crate) fn emit_host_abi_program(
             internal_names
                 .get(&function.name)
                 .expect("authored function has owned-body name"),
-            params
+            private_random_params(&params)
         ));
     }
     if program
@@ -695,18 +695,21 @@ fn append_uniform_sample_helper(out: &mut Vec<String>) {
         "typedef struct { uint64_t seed; uint64_t counter; int active; } chelis_rng_state;"
             .to_string(),
     );
-    out.push("static chelis_rng_state chelis_rng_current = {0ULL, 0ULL, 0};".to_string());
     out.push(
-        "static inline uint64_t chelis_effective_uniform_seed(uint64_t baked_seed) {".to_string(),
+        "static inline uint64_t chelis_effective_uniform_seed(chelis_rng_state *state, uint64_t baked_seed) {".to_string(),
     );
-    out.push("    if (!chelis_rng_current.active) {".to_string());
+    // Advance a frame value and commit it as a whole. The private pointer
+    // transports invocation state; it is not an element-storage view.
+    out.push("    chelis_rng_state current = *state;".to_string());
+    out.push("    if (!current.active) {".to_string());
     out.push("        return baked_seed;".to_string());
     out.push("    }".to_string());
-    out.push("    uint64_t counter = chelis_rng_current.counter++;".to_string());
-    out.push("    return chelis_rng_current.seed ^ (counter * 0x9E3779B97F4A7C15ULL);".to_string());
+    out.push("    uint64_t counter = current.counter++;".to_string());
+    out.push("    *state = current;".to_string());
+    out.push("    return current.seed ^ (counter * 0x9E3779B97F4A7C15ULL);".to_string());
     out.push("}".to_string());
     out.push(
-        "#define CHELIS_EFFECTIVE_UNIFORM_SEED(seed) chelis_effective_uniform_seed(seed)"
+        "#define CHELIS_EFFECTIVE_UNIFORM_SEED(seed) chelis_effective_uniform_seed(__chelis_rng, seed)"
             .to_string(),
     );
 }
@@ -1558,6 +1561,11 @@ fn emit_host_declarations(
                 .collect::<Result<Vec<_>, _>>()?
                 .join(", ");
             let emitted_name = emitted_function_name(program_name, &function.name);
+            let params = if function.is_monomorphized_specialization() {
+                private_random_params(&params)
+            } else {
+                params
+            };
             Ok(format!(
                 "{prefix}{} {}({});",
                 c_type(&function.ret_ty)?,
@@ -1591,13 +1599,15 @@ fn append_helper(
     verified: VerifiedHostTensorHelperView<'_>,
     helper_name: &str,
 ) -> Result<HelperRequirements, Unsupported> {
+    let helper_name = random_helper_name(helper_name);
     if let Some((_input_name, _input_ty)) = verified_identity_helper_input(helper, verified.dag()) {
         out.push(format!(
-            "static void {}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out) {{",
+            "static void {}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out, chelis_rng_state *__chelis_rng) {{",
             helper_name,
         ));
         out.push("    (void)n_in;".to_string());
         out.push("    (void)n_out;".to_string());
+        out.push("    (void)__chelis_rng;".to_string());
         out.push("    outputs[0] = inputs[0];".to_string());
         out.push("}".to_string());
         out.push(String::new());
@@ -1615,7 +1625,7 @@ fn append_helper(
         .any(|node| matches!(node.op, RiscOp::BlasMatmul { .. }));
     let helper_src = CEmitter::emit_verified_dag_with_options(
         dag,
-        helper_name,
+        &helper_name,
         crate::CodegenOptions {
             use_blas: uses_blas,
             static_entry: true,
@@ -1670,7 +1680,33 @@ fn append_external_helper_declaration(out: &mut Vec<String>, helper_name: &str) 
     out.push(format!(
         "void {helper_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"
     ));
+    // Peer translation units keep their established ABI and baked-seed
+    // behavior. The private adapter does not export Random state to a device.
+    out.push(format!(
+        "static void {}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out, chelis_rng_state *__chelis_rng) {{",
+        random_helper_name(helper_name)
+    ));
+    out.push("    (void)__chelis_rng;".to_string());
+    out.push(format!("    {helper_name}(inputs, n_in, outputs, n_out);"));
+    out.push("}".to_string());
     out.push(String::new());
+}
+
+fn random_helper_name(name: &str) -> String {
+    format!("{name}__with_rng")
+}
+
+fn private_random_params(params: &str) -> String {
+    if params.is_empty() {
+        "chelis_rng_state *__chelis_rng".to_string()
+    } else {
+        format!("{params}, chelis_rng_state *__chelis_rng")
+    }
+}
+
+fn append_invocation_random_context(out: &mut Vec<String>) {
+    out.push("    chelis_rng_state __chelis_rng_local = {0ULL, 0ULL, 0};".to_string());
+    out.push("    chelis_rng_state *__chelis_rng = &__chelis_rng_local;".to_string());
 }
 
 fn verified_identity_helper_input(
@@ -1715,6 +1751,11 @@ fn append_unreachable_fn_abort_stub(
         "static inline "
     } else {
         ""
+    };
+    let params = if function.is_monomorphized_specialization() {
+        private_random_params(&params)
+    } else {
+        params
     };
     out.push(format!(
         "{prefix}{} {}({}) {{",
@@ -1806,8 +1847,9 @@ fn emit_function(
         "{prefix}{} {}({}) {{",
         c_type(&function.ret_ty)?,
         body_name,
-        params
+        private_random_params(&params)
     ));
+    out.push("    (void)__chelis_rng;".to_string());
     let mut emitter = HostEmitter::new(
         "    ".to_string(),
         emitted_name,
@@ -1886,6 +1928,7 @@ fn emit_function(
             emitted_name,
             wrapper_params
         ));
+        append_invocation_random_context(out);
         let mut args = Vec::with_capacity(function.params.len());
         for (index, (param, use_)) in function.params.iter().zip(entry_uses).enumerate() {
             if use_ == VerifiedOwnershipUse::Move && retain_call(&param.name, &param.ty).is_some() {
@@ -1904,6 +1947,7 @@ fn emit_function(
                 args.push(c_ident(&param.name).into_owned());
             }
         }
+        args.push("__chelis_rng".to_string());
         out.push(format!(
             "    {} __result = {}({});",
             c_type(&function.ret_ty)?,
@@ -1967,6 +2011,7 @@ fn emit_main(
     helper_output_counts: &[usize],
 ) -> Result<(), Unsupported> {
     out.push("int main(void) {".to_string());
+    append_invocation_random_context(out);
     // chelis#840: the globals emitter needs the same original-to-emitted
     // function-name map as function bodies, or a global calling a def
     // whose name was mangled (`double`) or renamed (`main`) emits the raw
@@ -3692,21 +3737,22 @@ impl<'a> HostEmitter<'a> {
                 let seed_var = self.next_temp("seed");
                 self.emit_expr_to_var(seed, &seed_var, &HostType::Int64)?;
                 let saved_var = self.next_temp("rng_saved");
+                let seeded_var = self.next_temp("rng_seeded");
                 self.lines.push(format!(
-                    "{}chelis_rng_state {saved_var} = chelis_rng_current;",
+                    "{}chelis_rng_state {saved_var} = *__chelis_rng;",
                     self.indent
                 ));
+                // Install the complete handler frame, just as exit restores
+                // the complete saved frame, before evaluating its body.
                 self.lines.push(format!(
-                    "{}chelis_rng_current.seed = (uint64_t){seed_var};",
+                    "{}chelis_rng_state {seeded_var} = {{(uint64_t){seed_var}, 0ULL, 1}};",
                     self.indent
                 ));
                 self.lines
-                    .push(format!("{}chelis_rng_current.counter = 0ULL;", self.indent));
-                self.lines
-                    .push(format!("{}chelis_rng_current.active = 1;", self.indent));
+                    .push(format!("{}*__chelis_rng = {seeded_var};", self.indent));
                 self.assign_expr(target, body, ty)?;
                 self.lines
-                    .push(format!("{}chelis_rng_current = {saved_var};", self.indent));
+                    .push(format!("{}*__chelis_rng = {saved_var};", self.indent));
             }
             HostExprKind::TensorCall { helper, args, ty } => {
                 self.assign_tensor_call(target, *helper, args, ty)?;
@@ -5688,7 +5734,7 @@ impl<'a> HostEmitter<'a> {
             }
         }
 
-        let helper_name = format!("{}__tensor_{helper}", self.helper_prefix);
+        let helper_name = random_helper_name(&format!("{}__tensor_{helper}", self.helper_prefix));
         let mut tensor_args: Vec<(String, Option<String>)> = Vec::with_capacity(args.len());
         for (index, arg) in args.iter().enumerate() {
             let inferred_ty = host_type(arg);
@@ -5759,7 +5805,7 @@ impl<'a> HostEmitter<'a> {
             self.indent, outputs_name, root_count
         ));
         self.lines.push(format!(
-            "{}{}({}, {}, {}, {});",
+            "{}{}({}, {}, {}, {}, __chelis_rng);",
             self.indent,
             helper_name,
             inputs_arg,
@@ -6332,6 +6378,11 @@ impl<'a> HostEmitter<'a> {
             ));
         }
         self.emit_pre_call_actions(site)?;
+        // Calls to declared functions use private bodies and inherit this
+        // invocation. Callback parameters retain their authored C signature.
+        if self.emitted_names.contains_key(function) {
+            arg_vars.push("__chelis_rng".to_string());
+        }
         self.lines.push(format!(
             "{}{target} = {}({});",
             self.indent,
@@ -7176,6 +7227,10 @@ impl<'a> HostEmitter<'a> {
     ) -> Result<(), Unsupported> {
         match &callback.kind {
             HostCallbackKind::Named { function, .. } => {
+                let mut arg_vars = arg_vars.to_vec();
+                if self.emitted_names.contains_key(function) {
+                    arg_vars.push("__chelis_rng".to_string());
+                }
                 self.lines.push(format!(
                     "{}{target} = {}({});",
                     self.indent,

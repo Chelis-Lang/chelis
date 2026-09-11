@@ -103,6 +103,10 @@ pub fn emit_selected(source: &str, entry: &str) -> String {
 }
 
 pub fn run(source: &str, driver: &str) -> Value {
+    run_with_peers(source, &[], driver)
+}
+
+pub fn run_with_peers(source: &str, peers: &[String], driver: &str) -> Value {
     let dir = tempfile::tempdir().unwrap();
     let c = dir.path().join("probe.c");
     fs::write(&c, format!("{source}\n{PRELUDE}\n{driver}")).unwrap();
@@ -114,6 +118,11 @@ pub fn run(source: &str, driver: &str) -> Value {
         .arg(root().join("crates/chelis-runtime/include"))
         .arg(runtime())
         .args(["-lm", "-lpthread"]);
+    for (index, source) in peers.iter().enumerate() {
+        let peer = dir.path().join(format!("peer_{index}.c"));
+        fs::write(&peer, source).unwrap();
+        cc.arg(peer);
+    }
     if cfg!(target_os = "macos") {
         cc.args([
             "-framework",
