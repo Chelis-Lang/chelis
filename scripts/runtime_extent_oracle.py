@@ -429,13 +429,13 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "expand.foreign_claim.same_tensor_set_axis.c",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.issue_1376_same_tensor_read_under_a_foreign_claim_is_guarded_on_c",
         ),
         _row(
             "expand.foreign_claim.same_tensor_set_axis.eval",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.a_same_tensor_read_under_a_foreign_claim_is_guarded_on_eval",
         ),
         _row(
@@ -453,13 +453,13 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "expand.literal_claim.cross_tensor_read.c",
             "lane_divergent",
-            "lane_divergent",
+            EXECUTES,
             "cli_slice_b.a_literal_claim_over_a_cross_tensor_read_traps_on_c",
         ),
         _row(
             "expand.literal_claim.cross_tensor_read.eval",
             "lane_divergent",
-            "lane_divergent",
+            EXECUTES,
             "cli_slice_b.a_literal_claim_over_a_cross_tensor_read_traps_on_eval",
         ),
         _row(
@@ -493,13 +493,13 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
         _row(
             "expand.named_claim.cross_tensor_read.c",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.issue_1374_cross_tensor_read_under_a_named_claim_is_guarded_on_c",
         ),
         _row(
             "expand.named_claim.cross_tensor_read.eval",
             "silent_unguarded",
-            "silent_unguarded",
+            EXECUTES,
             "cli_slice_b.a_cross_tensor_read_under_a_named_claim_is_guarded_on_eval",
         ),
         _row(

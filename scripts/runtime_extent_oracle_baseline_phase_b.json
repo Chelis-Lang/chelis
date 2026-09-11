@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "bd935d024f4b324c1fde0d49fcff2c63f17efdec31710a99b44fc2d10b2d2ba7",
+  "corpus_sha256": "aaa3922990b2193cb370bf2f1072983e918039a6711e69615e9c1276df8e8c49",
   "rows": [
     {
       "id": "claim.literal.nested_and_unused.eval_c",
@@ -101,13 +101,13 @@
     {
       "id": "expand.foreign_claim.same_tensor_set_axis.c",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.issue_1376_same_tensor_read_under_a_foreign_claim_is_guarded_on_c"
     },
     {
       "id": "expand.foreign_claim.same_tensor_set_axis.eval",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_same_tensor_read_under_a_foreign_claim_is_guarded_on_eval"
     },
     {
@@ -125,13 +125,13 @@
     {
       "id": "expand.literal_claim.cross_tensor_read.c",
       "baseline": "lane_divergent",
-      "phase_b": "lane_divergent",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_literal_claim_over_a_cross_tensor_read_traps_on_c"
     },
     {
       "id": "expand.literal_claim.cross_tensor_read.eval",
       "baseline": "lane_divergent",
-      "phase_b": "lane_divergent",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_literal_claim_over_a_cross_tensor_read_traps_on_eval"
     },
     {
@@ -161,13 +161,13 @@
     {
       "id": "expand.named_claim.cross_tensor_read.c",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.issue_1374_cross_tensor_read_under_a_named_claim_is_guarded_on_c"
     },
     {
       "id": "expand.named_claim.cross_tensor_read.eval",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_cross_tensor_read_under_a_named_claim_is_guarded_on_eval"
     },
     {
