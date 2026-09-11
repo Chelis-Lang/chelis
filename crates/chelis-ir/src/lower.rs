@@ -13842,6 +13842,12 @@ impl<'program> LowerCtx<'program> {
         let Some(witness) = self.axis_literal_witness(id, axis) else {
             return false;
         };
+        // chelis#1782: the declared dimension is still stamped on the result,
+        // but a literal whose comparison a named claim already makes records
+        // no second requirement.
+        if self.literal_result_claim_is_entailed(witness, required) {
+            return true;
+        }
         let required = chelis_types::scalar_from_i64(
             "load",
             Prim::Int64,
@@ -13855,6 +13861,99 @@ impl<'program> LowerCtx<'program> {
             requirements.push(required);
         }
         true
+    }
+
+    /// Does a named claim already in the graph make this literal's comparison?
+    ///
+    /// A named claim (chelis#1374/#1376) asserts that two witnesses of one
+    /// activation observe the SAME extent. When the other witness of such a
+    /// claim observes an axis whose extent the lowered graph itself fixes, and
+    /// that fixed extent is the literal this result claims, the two
+    /// obligations are one comparison: `produced == declaring` together with a
+    /// graph-fixed `declaring == required` gives `produced == required`, and a
+    /// produced extent that disagrees with the literal must disagree with the
+    /// declaring witness too. The named guard therefore fires on exactly the
+    /// inputs the literal guard would have, and `spec/04-type-system.md` §4.7
+    /// evaluates each guard once.
+    ///
+    /// chelis#1782 is why that matters. At `def main() = f(...)` the checker
+    /// infers the root's result dimension by instantiating the callee's
+    /// binder against the argument it was bound from, so the root RESTATES the
+    /// callee's named obligation as a literal. Recorded as well, it rendered
+    /// ``extent `2`: claimed = 2, y axis 0 = 3`` ahead of the named guard, and
+    /// the user saw one source and a number where §4.7's [04-NUM-9] asks for
+    /// the two disagreeing sources. Suppressing the restatement keeps the
+    /// check and hands the user the informative half.
+    ///
+    /// The retained guard is not a REORDERING of the two. Section 4.7 does not
+    /// rank independent obligations on one witness, so a blind reorder would
+    /// also move a literal claim nothing else covers; this declines a claim
+    /// only where another guard provably makes the same comparison, which is
+    /// the rule [`Self::entry_covered_witness_claims`] already applies to a
+    /// witness claim `entry_extent_guards` derives.
+    ///
+    /// The extent has to be one the GRAPH fixes rather than one an external
+    /// input promises. A `Load` axis spelled `tensor[2, f32]` is an interface
+    /// obligation the entry guard checks, not a fact of this graph, so a
+    /// witness reading one is never an entailing partner. An inlined root's
+    /// arguments are constructed in the graph, which is the form chelis#1782
+    /// reports; the exported-kernel and value-binding forms read `Load`s and
+    /// keep every literal claim they had.
+    fn literal_result_claim_is_entailed(&self, witness: NodeId, required: usize) -> bool {
+        self.named_claim_partners(witness)
+            .into_iter()
+            .any(|partner| self.graph_fixed_witness_extent(partner) == Some(required))
+    }
+
+    /// Every witness a named claim relates `witness` to, in either direction.
+    ///
+    /// The obligation is attached to the LATER of the two witnesses with a
+    /// backward requirement edge to the earlier, so `witness` can be either
+    /// end; [`Self::add_named_extent_claim`] pushes one claim and one edge
+    /// together, which is the pairing read back here.
+    fn named_claim_partners(&self, witness: NodeId) -> Vec<NodeId> {
+        let mut partners = Vec::new();
+        for node in self.dag.nodes() {
+            let RiscOp::ExtentWitness { claims, .. } = &node.op else {
+                continue;
+            };
+            for (_, requirement) in claims.iter().zip(node.inputs.iter().skip(1)) {
+                if node.id == witness {
+                    partners.push(*requirement);
+                } else if *requirement == witness {
+                    partners.push(node.id);
+                }
+            }
+        }
+        partners
+    }
+
+    /// The extent this witness observes, when the lowered graph fixes it.
+    ///
+    /// `None` for an axis whose extent is symbolic, and for one an external
+    /// input merely declares: see [`Self::literal_result_claim_is_entailed`]
+    /// for why a `Load` is excluded.
+    fn graph_fixed_witness_extent(&self, witness: NodeId) -> Option<usize> {
+        let node = self.dag.get(witness)?;
+        let RiscOp::ExtentWitness {
+            axis: RtAxis::Lit(axis),
+            ..
+        } = &node.op
+        else {
+            return None;
+        };
+        let observed = self.dag.get(*node.inputs.first()?)?;
+        if matches!(observed.op, RiscOp::Load { .. }) {
+            return None;
+        }
+        match observed
+            .output_type
+            .dims
+            .get(usize::try_from(*axis).ok()?)?
+        {
+            DimInfo::Lit(extent) => Some(*extent),
+            DimInfo::Named(..) => None,
+        }
     }
 
     /// chelis#1374/#1376's half: a NAMED claim becomes an equality between the
