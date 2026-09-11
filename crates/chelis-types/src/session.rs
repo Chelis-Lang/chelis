@@ -291,6 +291,29 @@ mod result_boundary_tests {
     }
 }
 
+/// Run `body` against a fresh sink and hand back its value together with the
+/// diagnostics it pushed.
+///
+/// The sink's storage stays private: `body` never sees the vector, and the
+/// vector is only returned once `body` has finished, so the "no early
+/// extraction or replacement" property above is unchanged. This exists so an
+/// in-crate unit test can drive one checker function directly instead of
+/// reaching it through a whole program, which is the only way to observe what
+/// a function RETURNS on a branch that also reports.
+#[cfg(test)]
+pub(crate) fn with_test_sink<R>(
+    body: impl FnOnce(&mut DiagnosticSink<'_>) -> R,
+) -> (R, Vec<CheckError>) {
+    let mut errors = Vec::new();
+    let value = {
+        let mut sink = DiagnosticSink {
+            errors: &mut errors,
+        };
+        body(&mut sink)
+    };
+    (value, errors)
+}
+
 fn run_result<T>(
     run: impl FnOnce(&mut DiagnosticSink<'_>) -> Result<T, InferStats>,
 ) -> Result<T, InferResult> {

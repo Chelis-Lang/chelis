@@ -293,6 +293,11 @@ pub(super) struct InferenceProduct {
     /// instance so the two policies cannot drift or repeat the lexical walk.
     pub(super) top_level_references: TopLevelReferenceGraph,
     shape_lambda_tvars: UnordSet<TypeVar>,
+    /// chelis#1512: true while `replay_ready_shape_checks` is running. The
+    /// `PostApp` replay re-enters `finish_unified_app`, whose own tail calls
+    /// this function again; without the flag that recursion is unbounded.
+    /// The outer pass runs to a fixpoint, so a nested call has nothing to add.
+    replaying_shape_checks: bool,
     deferred_type_derivations: Vec<DeferredTypeDerivation>,
     next_deferred_shape_id: u64,
     deferred_shape_checks: Vec<DeferredShapeCheck>,
@@ -318,6 +323,29 @@ pub(super) enum DeferredShapeRule {
     Conv,
     ScatterElements {
         list: deep::List,
+    },
+    /// chelis#1512: any other checked route that returned early on an
+    /// unresolved operand. The replay re-enters `finish_unified_app` itself
+    /// rather than a per-route decision function, so the deferred path is the
+    /// eager path: there is no second implementation of any route's
+    /// validation to disagree with the first.
+    /// chelis#1512: an `app_shape` route suspended on an unresolved operand.
+    /// The rule, not the inference entry point, is what replays.
+    ShapeRoute {
+        route: ShapeRouteKind,
+        list: deep::List,
+        kids: Vec<deep::Expr>,
+    },
+    PostApp {
+        /// Address of the `deep::List` this call was registered from, the
+        /// same identity `expr_key` uses for owner stamps. The rule owns a
+        /// CLONE of that node, so the address has to be recorded rather than
+        /// read back off the copy.
+        site: usize,
+        list: deep::List,
+        kids: Vec<deep::Expr>,
+        func_name: String,
+        env: Box<Env>,
     },
 }
 
@@ -503,6 +531,17 @@ impl InferenceProduct {
             .any(|check| check.id >= checkpoint)
     }
 
+    /// chelis#1512: is this call already suspended? Identity is the address
+    /// of the `deep::List` node, the same identity `expr_key` uses for owner
+    /// stamps, and it is valid for exactly as long as the Deep tree the
+    /// traversal is walking.
+    pub(super) fn has_post_app_check_for(&self, list: &deep::List) -> bool {
+        let key = std::ptr::from_ref(list).addr();
+        self.deferred_shape_checks.iter().any(
+            |check| matches!(&check.rule, DeferredShapeRule::PostApp { site, .. } if *site == key),
+        )
+    }
+
     pub(super) fn defer_shape_check(
         &mut self,
         rule: DeferredShapeRule,
@@ -525,6 +564,30 @@ impl InferenceProduct {
     /// bound by an application. The same checker functions own both the
     /// immediate and deferred paths, so their semantics cannot drift.
     pub(super) fn replay_ready_shape_checks(
+        &mut self,
+        vg: &mut VarGen,
+        subst: &mut Subst,
+        errors: &mut DiagnosticSink<'_>,
+    ) {
+        if self.replaying_shape_checks {
+            return;
+        }
+        self.replaying_shape_checks = true;
+        // A `PostApp` replay can bind the operand another suspended check was
+        // waiting on, and the pass has an order. Repeat until a pass settles
+        // nothing new, so a check that became ready mid-pass is not carried
+        // to `finish_deferred_shape_checks` and reported as never bound.
+        loop {
+            let before = self.deferred_shape_checks.len();
+            self.replay_ready_shape_checks_once(vg, subst, errors);
+            if self.deferred_shape_checks.len() >= before {
+                break;
+            }
+        }
+        self.replaying_shape_checks = false;
+    }
+
+    fn replay_ready_shape_checks_once(
         &mut self,
         vg: &mut VarGen,
         subst: &mut Subst,
@@ -592,6 +655,44 @@ impl InferenceProduct {
                         errors,
                     )
                 }
+                DeferredShapeRule::ShapeRoute { route, list, kids } => {
+                    let settled: Vec<Type> =
+                        check.arg_tys.iter().map(|ty| subst.apply(ty)).collect();
+                    let produced =
+                        check_shape_route_signature(route, list, kids, &settled, vg, subst, errors);
+                    reconcile_replayed_result(
+                        &route.builtin(),
+                        &check.result_ty,
+                        produced,
+                        subst,
+                        errors,
+                    )
+                }
+                DeferredShapeRule::PostApp {
+                    list,
+                    kids,
+                    func_name,
+                    env,
+                    ..
+                } => {
+                    let settled: Vec<Type> =
+                        check.arg_tys.iter().map(|ty| subst.apply(ty)).collect();
+                    let mut replay_env = (**env).clone();
+                    let replayed = finish_unified_app(
+                        list,
+                        kids,
+                        Some(func_name.clone()),
+                        settled,
+                        check.result_ty.clone(),
+                        &mut replay_env,
+                        vg,
+                        subst,
+                        errors,
+                        self,
+                        None,
+                    );
+                    reconcile_replayed_result(func_name, &check.result_ty, replayed, subst, errors)
+                }
             };
             let _ = resolved;
         }
@@ -615,6 +716,8 @@ impl InferenceProduct {
                 DeferredShapeRule::LayerNorm => "layer_norm".to_string(),
                 DeferredShapeRule::Conv => "conv".to_string(),
                 DeferredShapeRule::ScatterElements { .. } => "scatter_elements".to_string(),
+                DeferredShapeRule::ShapeRoute { route, .. } => route.builtin(),
+                DeferredShapeRule::PostApp { func_name, .. } => func_name,
             };
             errors.push(CheckError::new(
                 CheckErrorKind::TypeMismatch,
@@ -883,6 +986,45 @@ impl InferenceProduct {
 /// variables. It must wait only while an operand's *type constructor* is still
 /// unknown; treating every free variable as pending would reject legitimate
 /// rank/dtype-polymorphic signatures at their declaration boundary.
+/// chelis#1512: bind a replayed route's own answer to the type the suspended
+/// call already published to its consumer.
+///
+/// A route that builds its result out of band rather than through unification
+/// (chelis#1265's class) hands its answer back without ever meeting the
+/// declaration the call was accepted against. That is the wrong-answer
+/// witness this issue was filed on, so the reconciliation is here, once, for
+/// every replayed route rather than per route.
+///
+/// A replay that REJECTED returns `Type::Error`, which unifies with anything,
+/// so a rejected call reports once and not twice.
+/// Unify a replayed route's answer with the type the suspended call
+/// published, and report loudly when they disagree.
+///
+/// `pub(super)` so `infer::tests` can drive it directly: the disagreement
+/// branch is the one place where a relocated decision could quietly overwrite
+/// a published type, and a test that can only reach it through a whole
+/// program cannot show that the returned value is the PRODUCED one.
+pub(super) fn reconcile_replayed_result(
+    operation: &str,
+    published: &Type,
+    produced: Type,
+    subst: &mut Subst,
+    errors: &mut DiagnosticSink<'_>,
+) -> Type {
+    if unify(published, &produced, subst).is_err() {
+        let expected = subst.apply(published);
+        errors.push(CheckError::new(
+            CheckErrorKind::TypeMismatch,
+            format!(
+                "`{operation}` result does not match the type this call produces once its \
+                 operand is known: expected {expected}, got {produced}"
+            ),
+            vec![],
+        ));
+    }
+    produced
+}
+
 pub(super) fn shape_operand_awaits_binding(ty: &Type, subst: &Subst) -> bool {
     match subst.apply(ty) {
         Type::Var(_) => true,
