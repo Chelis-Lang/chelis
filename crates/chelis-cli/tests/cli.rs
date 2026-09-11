@@ -8215,11 +8215,9 @@ fn eval_vmap_does_not_regress_to_host_runtime_unsupported() {
 //
 // The closure removes the rejection gate and preserves the handled seed
 // either as a direct DAG seed or as generated C host RNG state when the
-// random op lives behind a host-function call. The xorshift-splitmix
-// algorithm in `chelis_uniform_sample_f32` (C runtime) matches the IR
-// evaluator's `dropout_sample` (see `chelis_ir::eval`), giving
-// deterministic-on-seed output that agrees with `chelis eval` to f32
-// precision. The four tests below pin:
+// random op lives in a host helper. These are seed-plumbing controls, not
+// an oracle for [05-RNG-1]'s exact stream (tracked under chelis#1295).
+// The tests below pin:
 //
 //   1. `with seed(...)` builds, runs, and produces deterministic output.
 //   2. Same seed → same bytes across runs (determinism).
@@ -8262,18 +8260,33 @@ fn build_c_with_seed_uniform_like_succeeds() {
         .success()
         .stderr(predicate::str::contains("does not yet plumb").not());
 
-    // Generated C must route the source seed into the random op through the
-    // effective-seed wrapper, never a silently-defaulted literal zero (the
-    // #703 class). With the int64-suffixed seed (chelis#731 requires the `i64`
-    // suffix; chelis#771 reads it at full width), the direct `uniform_like`
-    // bakes the resolved seed 7 into the wrapper argument
-    // `CHELIS_EFFECTIVE_UNIFORM_SEED(7ULL)`; the handler-scope runtime threading
-    // (`chelis_rng_current.active`) is exercised by the cross-function seed test
-    // instead, where the seed cannot be baked at the random op site.
+    // spec/08 permits either a baked DAG seed or an active host handler.
+    // A helper's baked zero is not its effective seed when that handler is
+    // active. Require the actual seed-7 frame and its installation, not just
+    // the presence of unused RNG support. Native controls below discriminate
+    // same/different handler seeds without claiming exact stream conformance.
     let c_src = fs::read_to_string(out_dir.join("seeded.c")).expect("read seeded.c");
+    let installs_seed_seven = c_src.lines().any(|line| {
+        let Some(declaration) = line.trim().strip_prefix("chelis_rng_state ") else {
+            return false;
+        };
+        let Some((frame, initializer)) = declaration.split_once(" = {(uint64_t)") else {
+            return false;
+        };
+        let Some(seed) = initializer.strip_suffix(", 0ULL, 1};") else {
+            return false;
+        };
+        c_src.contains(&format!("{seed} = 7;"))
+            && c_src.contains(&format!("*__chelis_rng = {frame};"))
+    });
+    let active_host_seed = installs_seed_seven
+        && c_src.contains(
+            "#define CHELIS_EFFECTIVE_UNIFORM_SEED(seed) chelis_effective_uniform_seed(__chelis_rng, seed)",
+        )
+        && c_src.contains("CHELIS_EFFECTIVE_UNIFORM_SEED(0ULL");
     assert!(
-        c_src.contains("CHELIS_EFFECTIVE_UNIFORM_SEED(7ULL"),
-        "expected generated C to route the source seed 7 through the effective seed wrapper; got:\n{c_src}"
+        c_src.contains("CHELIS_EFFECTIVE_UNIFORM_SEED(7ULL") || active_host_seed,
+        "expected baked seed 7 or an installed seed-7 host handler at the effective seed wrapper; got:\n{c_src}"
     );
     assert!(
         !c_src.contains("chelis_uniform_sample_f32(0ULL"),
@@ -8309,7 +8322,12 @@ fn build_c_with_seed_is_deterministic_across_runs() {
             .output()
             .expect("compiled binary must run");
         assert!(output.status.success(), "seeded binary exited non-zero");
-        String::from_utf8(output.stdout).expect("utf-8 stdout")
+        let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+        stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("sampled = "))
+            .expect("sampled output line")
+            .to_string()
     };
     let first = run();
     let second = run();
@@ -8343,11 +8361,15 @@ fn build_c_with_seed_is_deterministic_across_runs() {
         .success();
     let other_gcc = gcc_link_generated(&other_out, "seeded_other.c", "seeded_other");
     assert!(other_gcc.success(), "gcc compile of seed=42 binary failed");
-    let other_stdout = StdCommand::new(other_out.join("seeded_other"))
+    let other_run = StdCommand::new(other_out.join("seeded_other"))
         .output()
-        .expect("compiled binary must run")
-        .stdout;
-    let other = String::from_utf8(other_stdout).expect("utf-8 stdout");
+        .expect("compiled binary must run");
+    assert!(other_run.status.success(), "seed=42 binary exited non-zero");
+    let other_stdout = String::from_utf8(other_run.stdout).expect("utf-8 stdout");
+    let other = other_stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("sampled = "))
+        .expect("seed=42 sampled output line");
     assert_ne!(
         first, other,
         "with seed(7) and with seed(42) must produce different bytes"
@@ -8422,6 +8444,7 @@ fn cross_function_seed_local_wrapper_uses_handler_seed_in_c_backend() {
 def sample(t: tensor[4, f32]) -> tensor[4, f32] ! { Random } =
   uniform_like(copy(t), 0.0, 1.0)
 seven = with seed(7i64) { sample(copy(template)) }
+seven_again = with seed(7i64) { sample(copy(template)) }
 forty_two = with seed(42i64) { sample(copy(template)) }
 "#,
     );
@@ -8460,12 +8483,20 @@ forty_two = with seed(42i64) { sample(copy(template)) }
     let stdout = String::from_utf8(run.stdout).expect("utf-8 stdout");
     let seven = stdout
         .lines()
-        .find(|line| line.starts_with("seven = "))
+        .find_map(|line| line.strip_prefix("seven = "))
         .expect("seven output line");
+    let seven_again = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("seven_again = "))
+        .expect("seven_again output line");
     let forty_two = stdout
         .lines()
-        .find(|line| line.starts_with("forty_two = "))
+        .find_map(|line| line.strip_prefix("forty_two = "))
         .expect("forty_two output line");
+    assert_eq!(
+        seven, seven_again,
+        "repeated with-seed handlers around a wrapper call must restart the same stream"
+    );
     assert_ne!(
         seven, forty_two,
         "different with-seed handlers around a wrapper call must produce distinct samples"
