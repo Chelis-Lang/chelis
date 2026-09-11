@@ -1,0 +1,646 @@
+//! The registered compiled call admits inputs and adopts outputs through this
+//! private owner. Raw packets and Python request values cannot mint its types.
+
+use super::*;
+use chelis_abi::metadata::{ElementCount, ShapeMetadata};
+
+enum AdmittedLane {
+    Host {
+        entry: HostEntry,
+        api: HostRuntimeApi,
+        inputs: Vec<CpuInputTensor>,
+    },
+    Device {
+        entry: DeviceEntry,
+        inputs: Vec<GpuInputTensor>,
+        api: DeviceRuntimeApi,
+    },
+}
+
+// Extent equality is invocation-scoped. A wildcard is never a map key.
+// Only admitted manifest literals and already checked input views populate it.
+struct ShapeBindings {
+    values: std::collections::BTreeMap<String, i64>,
+}
+impl ShapeBindings {
+    fn admit(manifest: &ArtifactManifest, lane: &AdmittedLane) -> PyResult<Self> {
+        let mut bindings = Self {
+            values: std::collections::BTreeMap::new(),
+        };
+        for spec in manifest.inputs.iter().chain(&manifest.outputs) {
+            for dim in &spec.dims {
+                if dim.name.as_deref() == Some("") || (dim.name.is_none() && dim.size.is_none()) {
+                    return Err(PyValueError::new_err(
+                        "malformed unspecified manifest dimension",
+                    ));
+                }
+                if let (Some(name), Some(size)) = (&dim.name, dim.size) {
+                    bindings.bind(name, size.get())?;
+                }
+            }
+        }
+        match lane {
+            AdmittedLane::Host { inputs, .. } => {
+                for (spec, input) in manifest.inputs.iter().zip(inputs) {
+                    bindings.observe(spec, input._metadata.shape())?;
+                }
+            }
+            AdmittedLane::Device { inputs, .. } => {
+                for (spec, input) in manifest.inputs.iter().zip(inputs) {
+                    // The imported owner retains the shared checked immutable
+                    // plan. Preflight its observation before borrowing the array.
+                    let raw = unsafe { (input.handle.api.view)(input.handle.ptr.as_ptr()) };
+                    if raw.is_null()
+                        || !raw
+                            .addr()
+                            .is_multiple_of(std::mem::align_of::<ChelisGpuTensor>())
+                    {
+                        return Err(PyValueError::new_err(
+                            "invalid imported device metadata view",
+                        ));
+                    }
+                    let view = unsafe { &*raw };
+                    let rank = usize::try_from(view.rank)
+                        .map_err(|_| PyValueError::new_err("negative imported rank"))?;
+                    if rank != spec.dims.len() {
+                        return Err(PyValueError::new_err(
+                            "imported device rank disagrees with manifest",
+                        ));
+                    }
+                    ElementCount::scratch_entries(rank, 0)
+                        .and_then(|count| count.scratch_len::<i64>())
+                        .map_err(metadata_error)?;
+                    let shape = if rank == 0 {
+                        &[]
+                    } else {
+                        if view.shape.is_null()
+                            || !view
+                                .shape
+                                .addr()
+                                .is_multiple_of(std::mem::align_of::<i64>())
+                        {
+                            return Err(PyValueError::new_err(
+                                "invalid imported device shape pointer",
+                            ));
+                        }
+                        unsafe { std::slice::from_raw_parts(view.shape, rank) }
+                    };
+                    bindings.observe(spec, shape)?;
+                }
+            }
+        }
+        for spec in &manifest.outputs {
+            for dim in &spec.dims {
+                if let Some(name) = &dim.name
+                    && name != "*"
+                    && !bindings.values.contains_key(name)
+                {
+                    return Err(PyValueError::new_err(format!(
+                        "output dimension `{name}` has no admitted extent binding"
+                    )));
+                }
+            }
+        }
+        Ok(bindings)
+    }
+    fn bind(&mut self, name: &str, extent: i64) -> PyResult<()> {
+        if name == "*" {
+            return Ok(());
+        }
+        if self
+            .values
+            .get(name)
+            .is_some_and(|previous| *previous != extent)
+        {
+            return Err(PyValueError::new_err(format!(
+                "named dimension `{name}` has inconsistent extents"
+            )));
+        }
+        self.values.insert(name.to_owned(), extent);
+        Ok(())
+    }
+    fn observe(&mut self, spec: &ExecutionTensorSpec, shape: &[i64]) -> PyResult<()> {
+        for (dim, &extent) in spec.dims.iter().zip(shape) {
+            if dim.size.is_some_and(|size| size.get() != extent) {
+                return Err(PyValueError::new_err(
+                    "input extent disagrees with its manifest",
+                ));
+            }
+            if let Some(name) = &dim.name {
+                self.bind(name, extent)?;
+            }
+        }
+        Ok(())
+    }
+    fn require(&self, spec: &ExecutionTensorSpec, shape: &[i64]) -> PyResult<()> {
+        for (dim, &extent) in spec.dims.iter().zip(shape) {
+            if let Some(name) = &dim.name
+                && name != "*"
+                && self.values.get(name) != Some(&extent)
+            {
+                return Err(PyValueError::new_err(format!(
+                    "returned dimension `{name}` disagrees with its admitted extent"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(super) struct CompiledInputs {
+    lane: AdmittedLane,
+    bindings: Arc<ShapeBindings>,
+    output_count: usize,
+    library: Arc<Library>,
+}
+
+pub(super) struct RawOutputs {
+    // Collect every returned owner before inspecting any descriptor. An error
+    // in the first output must also release all later outputs.
+    owners: Vec<Option<TensorOwner>>,
+    input_owners: Arc<Vec<Py<PyAny>>>,
+    bindings: Arc<ShapeBindings>,
+}
+
+pub(super) struct CompiledTensorResults {
+    tensors: Vec<(String, ValidatedTensor)>,
+}
+
+#[derive(Clone)]
+pub(super) struct ValidatedTensor {
+    inner: Arc<ValidatedTensorInner>,
+}
+
+struct ValidatedTensorInner {
+    // Release the descriptor before the Python allocations it may borrow.
+    _owner: TensorOwner,
+    metadata: ShapeMetadata,
+    _input_owners: Arc<Vec<Py<PyAny>>>,
+    data: ForeignDataPointer,
+    device: (i32, i32),
+}
+
+// An opaque address has no dereference operation. The containing checked owner
+// binds its lifetime and device; sharing it never manufactures a Rust reference.
+struct ForeignDataPointer(*mut c_void);
+unsafe impl Send for ForeignDataPointer {}
+unsafe impl Sync for ForeignDataPointer {}
+
+impl CompiledInputs {
+    pub(super) fn admit(
+        py: Python<'_>,
+        loaded: &LoadedArtifact,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        let manifest = &loaded.manifest;
+        i32::try_from(manifest.inputs.len())
+            .map_err(|_| PyValueError::new_err("compiled input count exceeds the callable ABI"))?;
+        i32::try_from(manifest.outputs.len())
+            .map_err(|_| PyValueError::new_err("compiled output count exceeds the callable ABI"))?;
+        let values = resolve_call_inputs(&manifest.inputs, args, kwargs)?;
+        let kinds = values
+            .iter()
+            .map(|value| device_kind(value.bind(py)))
+            .collect::<PyResult<Vec<_>>>()?;
+        let gpu = kinds.contains(&DeviceKind::Gpu);
+        if gpu && kinds.contains(&DeviceKind::Cpu) {
+            return Err(PyValueError::new_err(
+                "mixed CPU/GPU inputs are not supported in compiled execution",
+            ));
+        }
+        let lane = if gpu {
+            if manifest.target != CompileTarget::Hip {
+                return Err(PyValueError::new_err(
+                    "GPU tensors require a HIP-compiled Chelis artifact",
+                ));
+            }
+            let symbol = manifest.device_entry_name.as_ref().ok_or_else(|| {
+                PyValueError::new_err("artifact does not expose a HIP device ABI")
+            })?;
+            let entry = unsafe {
+                loaded
+                    .library
+                    .get::<DeviceEntry>(nul_terminated(symbol).as_bytes())
+            }
+            .map(|symbol| *symbol)
+            .map_err(|error| ChelisError::new_err(format!("load symbol failed: {error}")))?;
+            let api = unsafe { load_device_runtime_api(&loaded.library)? };
+            let inputs = manifest
+                .inputs
+                .iter()
+                .zip(values)
+                .map(|(spec, value)| {
+                    gpu_input_tensor(py, value.bind(py), spec, api, &loaded.library)
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            AdmittedLane::Device { entry, inputs, api }
+        } else {
+            let api = unsafe { load_host_runtime_api(&loaded.library)? };
+            let entry = unsafe {
+                loaded
+                    .library
+                    .get::<HostEntry>(nul_terminated(&manifest.host_entry_name).as_bytes())
+            }
+            .map(|symbol| *symbol)
+            .map_err(|error| ChelisError::new_err(format!("load symbol failed: {error}")))?;
+            let inputs = manifest
+                .inputs
+                .iter()
+                .zip(values)
+                .map(|(spec, value)| cpu_input_tensor(py, value.bind(py), spec, api))
+                .collect::<PyResult<Vec<_>>>()?;
+            AdmittedLane::Host { entry, api, inputs }
+        };
+        let bindings = Arc::new(ShapeBindings::admit(manifest, &lane)?);
+        Ok(Self {
+            lane,
+            bindings,
+            output_count: manifest.outputs.len(),
+            library: Arc::clone(&loaded.library),
+        })
+    }
+}
+
+pub(super) fn execute_checked(py: Python<'_>, admitted: &CompiledInputs) -> RawOutputs {
+    let input_owners = Arc::new(match &admitted.lane {
+        AdmittedLane::Host { inputs, .. } => inputs
+            .iter()
+            .map(|input| input._owner.clone_ref(py))
+            .collect(),
+        AdmittedLane::Device { inputs, .. } => inputs
+            .iter()
+            .map(|input| input._owner.clone_ref(py))
+            .collect(),
+    });
+    let owners = match &admitted.lane {
+        AdmittedLane::Host { entry, api, inputs } => {
+            let execution = HostExecution {
+                entry: *entry,
+                input_ptrs: inputs.iter().map(|input| input.ptr.as_ptr()).collect(),
+                output_ptrs: vec![std::ptr::null_mut(); admitted.output_count],
+            };
+            let pointers = py.allow_threads(move || execution.run()).0;
+            let mut owners = Vec::with_capacity(pointers.len());
+            for pointer in pointers {
+                let Some(ptr) = NonNull::new(pointer) else {
+                    owners.push(None);
+                    continue;
+                };
+                owners.push(Some(TensorOwner::Cpu(Arc::new(CpuTensorHandle {
+                    ptr,
+                    api: *api,
+                    _library: Arc::clone(&admitted.library),
+                }))));
+            }
+            owners
+        }
+        AdmittedLane::Device { entry, inputs, api } => {
+            use std::collections::{BTreeMap, btree_map::Entry};
+
+            let execution = DeviceExecution {
+                entry: *entry,
+                // The device entry borrows caller packets and never mutates
+                // their metadata, as required by the compiled ownership ABI.
+                input_ptrs: inputs
+                    .iter()
+                    .map(|input| input.handle.ptr.as_ptr().cast_const())
+                    .collect(),
+                output_ptrs: vec![std::ptr::null_mut(); admitted.output_count],
+            };
+            // Device owners are unique, unlike retainable host handles. Intern
+            // foreign pointers once, including existing input borrows, so an
+            // invalid repeated/input output can be rejected without double free.
+            let mut handles = BTreeMap::new();
+            for input in inputs {
+                handles.insert(input.handle.ptr.as_ptr().addr(), Arc::clone(&input.handle));
+            }
+            let pointers = py.allow_threads(move || execution.run()).0;
+            let mut owners = Vec::with_capacity(pointers.len());
+            for pointer in pointers {
+                let owner = match NonNull::new(pointer) {
+                    Some(ptr) => {
+                        let handle = match handles.entry(ptr.as_ptr().addr()) {
+                            Entry::Occupied(entry) => entry.into_mut(),
+                            Entry::Vacant(entry) => entry.insert(Arc::new(GpuTensorHandle {
+                                ptr,
+                                api: *api,
+                                _library: Arc::clone(&admitted.library),
+                            })),
+                        };
+                        Some(TensorOwner::Gpu(Arc::clone(handle)))
+                    }
+                    None => None,
+                };
+                owners.push(owner);
+            }
+            owners
+        }
+    };
+    RawOutputs {
+        owners,
+        input_owners,
+        bindings: Arc::clone(&admitted.bindings),
+    }
+}
+
+impl CompiledTensorResults {
+    pub(super) fn adopt_outputs(
+        manifest: &ArtifactManifest,
+        outputs: RawOutputs,
+    ) -> PyResult<Self> {
+        if outputs.owners.len() != manifest.outputs.len() {
+            return Err(PyRuntimeError::new_err(
+                "compiled output count disagrees with its manifest",
+            ));
+        }
+        let mut device_owners = std::collections::BTreeSet::new();
+        for owner in outputs.owners.iter().flatten() {
+            if let TensorOwner::Gpu(handle) = owner
+                && !device_owners.insert(handle.ptr.as_ptr().addr())
+            {
+                return Err(PyValueError::new_err(
+                    "device outputs repeat a unique owner handle",
+                ));
+            }
+        }
+        let tensors = manifest
+            .outputs
+            .iter()
+            .zip(outputs.owners)
+            .map(|(spec, owner)| {
+                let owner = owner.ok_or_else(|| {
+                    PyRuntimeError::new_err("compiled execution returned a NULL output tensor")
+                })?;
+                Ok((
+                    spec.name.clone(),
+                    ValidatedTensor::adopt(
+                        owner,
+                        spec,
+                        Arc::clone(&outputs.input_owners),
+                        &outputs.bindings,
+                    )?,
+                ))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(Self { tensors })
+    }
+}
+
+impl<'py> IntoPyObject<'py> for CompiledTensorResults {
+    type Target = PyAny;
+    type Output = Bound<'py, PyAny>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> PyResult<Self::Output> {
+        if self.tensors.len() == 1 {
+            let (_, tensor) = self
+                .tensors
+                .into_iter()
+                .next()
+                .expect("one validated output");
+            return Ok(Py::new(py, NativeTensor { tensor })?
+                .into_bound(py)
+                .into_any());
+        }
+        let result = PyDict::new(py);
+        for (name, tensor) in self.tensors {
+            result.set_item(name, Py::new(py, NativeTensor { tensor })?)?;
+        }
+        Ok(result.into_any())
+    }
+}
+
+impl ValidatedTensor {
+    fn adopt(
+        owner: TensorOwner,
+        spec: &ExecutionTensorSpec,
+        input_owners: Arc<Vec<Py<PyAny>>>,
+        bindings: &ShapeBindings,
+    ) -> PyResult<Self> {
+        let (shape, dtype, count, capacity, data, device, strides) = match &owner {
+            TensorOwner::Cpu(handle) => unsafe {
+                let rank = (handle.api.rank)(handle.ptr.as_ptr());
+                let rank = usize::try_from(rank)
+                    .map_err(|_| PyValueError::new_err("negative output rank"))?;
+                if rank != spec.dims.len() {
+                    return Err(PyValueError::new_err(
+                        "compiled output rank disagrees with its manifest",
+                    ));
+                }
+                ElementCount::scratch_entries(rank, 0)
+                    .and_then(|n| n.scratch_len::<i64>())
+                    .map_err(metadata_error)?;
+                let shape = (0..rank)
+                    .map(|axis| (handle.api.shape)(handle.ptr.as_ptr(), axis as i32))
+                    .collect::<Vec<_>>();
+                let view = (handle.api.read_view)(handle.ptr.as_ptr());
+                if view.reserved != [0; 7] {
+                    return Err(PyValueError::new_err("nonzero reserved output view bytes"));
+                }
+                (
+                    shape,
+                    i32::from(view.dtype),
+                    view.count,
+                    None,
+                    view.data.cast_mut(),
+                    (DLPACK_CPU_DEVICE_TYPE, 0),
+                    None,
+                )
+            },
+            TensorOwner::Gpu(handle) => unsafe {
+                let device = (handle.api.device)(handle.ptr.as_ptr());
+                if device < 0 || device != handle.api.current()? {
+                    return Err(PyValueError::new_err(
+                        "output owner device disagrees with actual HIP current device",
+                    ));
+                }
+                let packet = (handle.api.view)(handle.ptr.as_ptr());
+                if packet.is_null()
+                    || !packet
+                        .addr()
+                        .is_multiple_of(std::mem::align_of::<ChelisGpuTensor>())
+                {
+                    return Err(PyValueError::new_err(
+                        "null or misaligned device output packet",
+                    ));
+                }
+                let packet = &*packet;
+                let rank = usize::try_from(packet.rank)
+                    .map_err(|_| PyValueError::new_err("negative device output rank"))?;
+                if rank != spec.dims.len() || packet.ownership != 1 || packet.reserved != [0; 2] {
+                    return Err(PyValueError::new_err(
+                        "invalid device output rank, ownership, or reserved bytes",
+                    ));
+                }
+                ElementCount::scratch_entries(rank, 0)
+                    .and_then(|n| n.scratch_len::<i64>())
+                    .map_err(metadata_error)?;
+                let mut shape = Vec::with_capacity(rank);
+                let mut strides = Vec::with_capacity(rank);
+                if rank != 0 {
+                    if packet.shape.is_null()
+                        || packet.strides.is_null()
+                        || !packet
+                            .shape
+                            .addr()
+                            .is_multiple_of(std::mem::align_of::<i64>())
+                        || !packet
+                            .strides
+                            .addr()
+                            .is_multiple_of(std::mem::align_of::<i64>())
+                    {
+                        return Err(PyValueError::new_err(
+                            "null or misaligned device output shape/strides",
+                        ));
+                    }
+                    shape.extend_from_slice(std::slice::from_raw_parts(packet.shape, rank));
+                    strides.extend_from_slice(std::slice::from_raw_parts(packet.strides, rank));
+                }
+                (
+                    shape,
+                    i32::from(packet.dtype),
+                    packet.count,
+                    Some(packet.byte_capacity),
+                    packet.data,
+                    (DLPACK_ROCM_DEVICE_TYPE, device),
+                    Some(strides),
+                )
+            },
+        };
+        let dtype = decode_runtime_dtype(dtype)?;
+        let metadata = ShapeMetadata::contiguous(&shape, dtype).map_err(metadata_error)?;
+        metadata.bytes().allocation().map_err(metadata_error)?;
+        validate_manifest_metadata(spec, &metadata)?;
+        bindings.require(spec, metadata.shape())?;
+        if count != metadata.elements().get() {
+            return Err(PyValueError::new_err(
+                "compiled output element count disagrees with its shape",
+            ));
+        }
+        if let Some(capacity) = capacity {
+            let capacity =
+                chelis_abi::metadata::ByteCount::from_declared(capacity).map_err(metadata_error)?;
+            metadata
+                .require_capacity(capacity)
+                .map_err(metadata_error)?;
+        }
+        if strides
+            .as_deref()
+            .is_some_and(|strides| strides != metadata.strides())
+        {
+            return Err(PyValueError::new_err(
+                "compiled device output is not contiguous row-major",
+            ));
+        }
+        if metadata.elements().get() != 0
+            && (data.is_null() || data.addr() % dtype.byte_width() != 0)
+        {
+            return Err(PyValueError::new_err(
+                "nonempty compiled output has null or misaligned storage",
+            ));
+        }
+        let data = if metadata.elements().get() == 0 {
+            std::ptr::null_mut()
+        } else {
+            data
+        };
+        Ok(Self {
+            inner: Arc::new(ValidatedTensorInner {
+                _owner: owner,
+                metadata,
+                _input_owners: input_owners,
+                data: ForeignDataPointer(data),
+                device,
+            }),
+        })
+    }
+
+    pub(super) fn shape(&self) -> Vec<i64> {
+        self.inner.metadata.shape().to_vec()
+    }
+    pub(super) fn dtype(&self) -> RuntimeDType {
+        self.inner.metadata.dtype()
+    }
+    pub(super) fn metadata(&self) -> &ShapeMetadata {
+        &self.inner.metadata
+    }
+    pub(super) fn data(&self) -> *mut c_void {
+        self.inner.data.0
+    }
+    pub(super) fn device_pair(&self) -> (i32, i32) {
+        self.inner.device
+    }
+
+    pub(super) fn same_owner(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    pub(super) fn export(&self, request: DLPackRequest) -> PyResult<DLPackCapsule> {
+        DLPackCapsule::from_validated(self, request)
+    }
+
+    pub(super) fn synchronize_device(&self) -> PyResult<()> {
+        let TensorOwner::Gpu(handle) = &self.inner._owner else {
+            return Err(pyo3::exceptions::PyBufferError::new_err(
+                "tensor has no HIP storage owner",
+            ));
+        };
+        let current = handle
+            .api
+            .current()
+            .map_err(|error| pyo3::exceptions::PyBufferError::new_err(error.to_string()))?;
+        if current != self.inner.device.1 {
+            return Err(pyo3::exceptions::PyBufferError::new_err(
+                "HIP DLPack export requires the validated owner's current device",
+            ));
+        }
+        // A full-device barrier meets every supported consumer-stream ordering
+        // obligation without treating the untrusted stream request as an owner.
+        if unsafe { (handle.api.synchronize)() } != 0 {
+            return Err(pyo3::exceptions::PyBufferError::new_err(
+                "HIP DLPack synchronization failed",
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub(super) fn metadata_error(error: chelis_abi::metadata::MetadataError) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+pub(super) fn validate_manifest_metadata(
+    spec: &ExecutionTensorSpec,
+    metadata: &ShapeMetadata,
+) -> PyResult<()> {
+    let (_, expected_dtype) = spec_dtype_mapping(&spec.dtype)?;
+    if metadata.dtype().id() != expected_dtype || metadata.shape().len() != spec.dims.len() {
+        return Err(PyValueError::new_err(format!(
+            "tensor `{}` dtype/rank disagrees with its manifest",
+            spec.name
+        )));
+    }
+    for (axis, (actual, expected)) in metadata.shape().iter().zip(&spec.dims).enumerate() {
+        if expected.size.is_some_and(|size| *actual != size.get()) {
+            return Err(PyValueError::new_err(format!(
+                "tensor `{}` axis {axis} disagrees with its manifest",
+                spec.name
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validated_owner_supports_foreign_consumer_threads() {
+        fn send_sync<T: Send + Sync>() {}
+        send_sync::<ValidatedTensor>();
+        send_sync::<TensorOwner>();
+        send_sync::<Arc<Vec<Py<PyAny>>>>();
+    }
+}

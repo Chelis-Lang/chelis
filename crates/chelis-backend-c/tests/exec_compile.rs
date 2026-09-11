@@ -2057,6 +2057,7 @@ fn compile_and_run_kernel_capturing(
     let include_dir = runtime_include_dir();
     for hdr in &[
         "chelis_runtime.h",
+        "chelis_runtime_views.h",
         "chelis_runtime_dtype.h",
         "chelis_blas.h",
         "chelis_simd.h",
@@ -2107,6 +2108,7 @@ fn compile_and_run_kernel(test_name: &str, c_source: &str, harness: &str) -> Opt
     let include_dir = runtime_include_dir();
     for hdr in &[
         "chelis_runtime.h",
+        "chelis_runtime_views.h",
         "chelis_runtime_dtype.h",
         "chelis_blas.h",
         "chelis_simd.h",
@@ -3184,6 +3186,7 @@ fn compile_and_capture_run(test_name: &str, c_source: &str, harness: &str) -> st
     let include_dir = runtime_include_dir();
     for hdr in &[
         "chelis_runtime.h",
+        "chelis_runtime_views.h",
         "chelis_runtime_dtype.h",
         "chelis_blas.h",
         "chelis_simd.h",
@@ -3454,6 +3457,7 @@ fn exec_simd_nan_propagation_inconsistency_probe() {
 
     for hdr in &[
         "chelis_runtime.h",
+        "chelis_runtime_views.h",
         "chelis_runtime_dtype.h",
         "chelis_blas.h",
         "chelis_simd.h",
@@ -3698,6 +3702,7 @@ fn compile_and_run_kernel_with_blas(
     let include_dir = runtime_include_dir();
     for hdr in &[
         "chelis_runtime.h",
+        "chelis_runtime_views.h",
         "chelis_runtime_dtype.h",
         "chelis_blas.h",
         "chelis_simd.h",

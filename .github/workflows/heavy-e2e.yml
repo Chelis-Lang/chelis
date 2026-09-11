@@ -133,6 +133,8 @@ jobs:
           path: |
             target/agents/wire-codec-rustdoc
             target/agents/native-bindings-driver
+            target/agents/native-execution-integration
+            target/agents/native-owner-integration
             target/graph-fixture-target
           key: ${{ runner.os }}-${{ runner.arch }}-script-execution-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
           restore-keys: ${{ runner.os }}-${{ runner.arch }}-script-execution-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
@@ -147,6 +149,8 @@ jobs:
           path: |
             target/agents/wire-codec-rustdoc
             target/agents/native-bindings-driver
+            target/agents/native-execution-integration
+            target/agents/native-owner-integration
             target/graph-fixture-target
           key: ${{ runner.os }}-${{ runner.arch }}-script-execution-v1-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
 
@@ -345,7 +349,7 @@ jobs:
         run: .venv/bin/python scripts/compiled_value_ownership_oracle.py --phase launch
 
   runtime-representation-phase0-oracle:
-    name: Runtime Representation Phase 1 Oracle
+    name: Runtime Representation Phase 2 Oracle
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -387,8 +391,10 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: runtime-representation-phase1-receipts
-          path: target/runtime-representation-phase1/
+          name: runtime-representation-phase2-receipts
+          path: |
+            target/runtime-representation-phase1/
+            target/runtime-representation-phase2/
           if-no-files-found: error
           retention-days: 14
 
@@ -432,23 +438,12 @@ jobs:
           shared-key: linux-workspace
           save-if: false
 
-      # Phase A must PASS. It does not on current `main`: its `symbolic_window`
-      # target runs `issue_368_runtime_symbolic_window_grad_is_half_everywhere`,
-      # whose `grad` lowering regressed in chelis#1693 and is owned by
-      # chelis#1775. This step is red until that lands, deliberately, because
-      # the row really is short. Do not add `continue-on-error`.
-      - name: Runtime extent oracle (phase A)
-        run: .venv/bin/python scripts/runtime_extent_oracle.py --phase a
-
-      # Phase B's receipts are enforced here; its ROW shortfall is not a
-      # failure yet. chelis#1277's B2b slices are still landing the 19 rows
-      # recorded short, so the run reports them and ends with
-      # `RECEIPTS PASS, ROWS SHORT OF EXIT` rather than PASS. A drifted
-      # receipt, a moved digest or a failing test still fails this step.
-      # The B2b-3 flip pull request drops `--allow-shortfall`, at which point
-      # the step demands PASS.
-      - name: Runtime extent oracle (phase B receipts and row report)
-        run: .venv/bin/python scripts/runtime_extent_oracle.py --phase b --allow-shortfall
+      # One step, because `--phase final` is chelis#1277's completion oracle:
+      # it runs both registered phases' deduplicated targets, refuses
+      # `--allow-shortfall` outright, and prints each phase's corpus digest
+      # beside the combined one.
+      - name: Runtime extent oracle (completion)
+        run: .venv/bin/python scripts/runtime_extent_oracle.py --phase final
 
   generalize-sweep-oracle-shard:
     name: Typecheck Level Generalization Oracle (shard ${{ matrix.shard }}/4)

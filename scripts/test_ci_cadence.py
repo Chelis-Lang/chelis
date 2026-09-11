@@ -47,7 +47,7 @@ def assert_extended(test, pr, nightly):
         test.assertFalse(job.get("continue-on-error", False))
         test.assertEqual(job["timeout-minutes"], 60 if name.startswith(("generalize", "dtype")) else 45)
         if name == "runtime-representation-phase0-oracle":
-            test.assertEqual(job["name"], "Runtime Representation Phase 1 Oracle")
+            test.assertEqual(job["name"], "Runtime Representation Phase 2 Oracle")
             artifacts = [
                 step
                 for step in job["steps"]
@@ -57,7 +57,10 @@ def assert_extended(test, pr, nightly):
             test.assertEqual(len(artifacts), 1)
             test.assertEqual(
                 artifacts[0]["with"]["path"],
-                "target/runtime-representation-phase1/",
+                (
+                    "target/runtime-representation-phase1/\n"
+                    "target/runtime-representation-phase2/\n"
+                ),
             )
         steps = [s for s in job["steps"] if s.get("run", "").startswith(command)]
         test.assertEqual(len(steps), 1, command)
@@ -103,6 +106,19 @@ def assert_extended(test, pr, nightly):
     test.assertIn(workspace_suite, commands)
     assert_complete_hash_partition(test, full, workspace_suite)
     test.assertIn(".venv/bin/python scripts/ci_script_tests.py nightly", [s.get("run") for s in jobs["script-nightly"]["steps"]])
+    script_cache_steps = [
+        step
+        for step in jobs["script-nightly"]["steps"]
+        if step.get("name") in {
+            "Restore script compiler builds",
+            "Save script compiler builds",
+        }
+    ]
+    test.assertEqual(len(script_cache_steps), 2)
+    for step in script_cache_steps:
+        cached_paths = step["with"]["path"].splitlines()
+        test.assertIn("target/agents/native-execution-integration", cached_paths)
+        test.assertIn("target/agents/native-owner-integration", cached_paths)
     test.assertIn("cargo test -p chelis-cli --test chelis_std_self_test_corpus -- --ignored --nocapture", commands)
     test.assertIn("cargo test -p chelis-backend-c", [s.get("run") for s in jobs["backend-sanitizers-full"]["steps"]])
     support = jobs["integration-support"]
@@ -114,22 +130,33 @@ def assert_extended(test, pr, nightly):
     test.assertEqual(pr["jobs"]["integration"]["needs"], ["changes", "ci-fast"])
     # chelis#1742: the runtime-extent oracle runs in this workflow and
     # nowhere else, so the nightly is the only place its receipts are
-    # enforced. Phase A must PASS. Phase B enforces the same receipts, the
-    # same digests and the same lattice while chelis#1277's remaining rows
-    # land, and `--allow-shortfall` downgrades the recorded ROW shortfall
-    # alone; nothing else about the run is excused. The B2b-3 flip pull
-    # request drops the flag and this assertion with it.
+    # enforced. Since the B2b-3 flip that is ONE command, `--phase final`,
+    # chelis#1277's completion oracle: it runs both registered phases'
+    # deduplicated targets, checks the same receipts, digests and lattice,
+    # and refuses `--allow-shortfall` outright. The equality is the point.
+    # A second step that named a phase which CAN be excused would let the
+    # job report a shortfall again, and that is what this rejects.
     extents = jobs["runtime-extent-oracle"]
     test.assertNotIn("runtime-extent-oracle", pr["jobs"])
     test.assertNotIn("if", extents)
     test.assertFalse(extents.get("continue-on-error", False))
-    extent_commands = [step.get("run") for step in extents["steps"]]
-    test.assertIn(
-        ".venv/bin/python scripts/runtime_extent_oracle.py --phase a", extent_commands
+    extent_commands = [step.get("run") or "" for step in extents["steps"]]
+    test.assertEqual(
+        [
+            command
+            for command in extent_commands
+            if "runtime_extent_oracle.py" in command
+        ],
+        [".venv/bin/python scripts/runtime_extent_oracle.py --phase final"],
     )
-    test.assertIn(
-        ".venv/bin/python scripts/runtime_extent_oracle.py --phase b --allow-shortfall",
-        extent_commands,
+    # The equality already rejects every spelling that names the oracle
+    # script, appended flag included, and the negative twin below measures
+    # both. This says the narrower thing the equality cannot: no step of this
+    # job mentions the flag at all, so a wrapper or an interpolated argument
+    # that reached it without naming the script is refused too.
+    test.assertFalse(
+        any("--allow-shortfall" in command for command in extent_commands),
+        "the nightly extent oracle may not excuse a row shortfall",
     )
     for step in extents["steps"]:
         test.assertNotIn("if", step)
@@ -169,7 +196,15 @@ class ExtendedCadenceTests(unittest.TestCase):
         # could stop enforcing must fail this lock, including dropping it
         # from the nightly report's needs, which is what would let it go red
         # unnoticed.
-        for mutation in ("remove", "skip", "ignore", "steps", "needs", "shortfall"):
+        for mutation in (
+            "remove",
+            "skip",
+            "ignore",
+            "steps",
+            "needs",
+            "downgrade",
+            "shortfall",
+        ):
             nightly = copy.deepcopy(self.nightly)
             job = nightly["jobs"]["runtime-extent-oracle"]
             if mutation == "remove":
@@ -186,10 +221,21 @@ class ExtendedCadenceTests(unittest.TestCase):
                     for name in nightly["jobs"]["report"]["needs"]
                     if name != "runtime-extent-oracle"
                 ]
-            else:
+            elif mutation == "downgrade":
+                # The completion oracle swapped for a phase whose row
+                # shortfall can be excused: the job would still be green,
+                # still be named, and no longer enforce the exit.
                 job["steps"][-1]["run"] = job["steps"][-1]["run"].replace(
-                    " --allow-shortfall", " --allow-everything"
+                    "--phase final", "--phase b --allow-shortfall"
                 )
+            else:
+                # The subtler half: the command the equality accepts, with
+                # the flag appended. `--phase final` refuses the flag at run
+                # time, so this one would fail the nightly loudly rather than
+                # excuse anything, but a guard that let it through would also
+                # let through the phase spelling that does excuse a
+                # shortfall. Rejecting it here keeps both out.
+                job["steps"][-1]["run"] += " --allow-shortfall"
             with self.subTest(mutation=mutation):
                 with self.assertRaises((AssertionError, KeyError)):
                     assert_extended(self, self.pr, nightly)

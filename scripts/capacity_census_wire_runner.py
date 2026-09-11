@@ -12,7 +12,9 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import sysconfig
 import tempfile
+import tomllib
 import unittest
 
 from capacity_census_graph import GraphError
@@ -197,6 +199,28 @@ def _unique_fields(pairs):
     return result
 
 
+def _managed_python_environment():
+    """Bind native builds and embedded Python to this interpreter's packages.
+
+    PYO3_PYTHON selects libpython at build time, but a Rust executable does
+    not discover a Python venv from VIRTUAL_ENV when it initializes Python.
+    Supply that venv's site directories explicitly and exclude ambient ones.
+    """
+    environment = dict(os.environ)
+    environment.pop("PYTHONHOME", None)
+    environment.pop("PYTHONUSERBASE", None)
+    environment.update({
+        "PYO3_PYTHON": sys.executable,
+        "VIRTUAL_ENV": sys.prefix,
+        "PYTHONPATH": os.pathsep.join(dict.fromkeys(
+            sysconfig.get_path(key) for key in ("purelib", "platlib")
+        )),
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONSAFEPATH": "1",
+    })
+    return environment
+
+
 def run_libtest(root: Path, binary: Path, selected, *, log_prefix=None) -> TestExecution:
     selected = _selection(selected)
     binary = binary.resolve()
@@ -213,10 +237,8 @@ def run_libtest(root: Path, binary: Path, selected, *, log_prefix=None) -> TestE
         command,
         cwd=root,
         env={
-            **os.environ,
+            **_managed_python_environment(),
             "RUSTC_BOOTSTRAP": "1",
-            "PYO3_PYTHON": sys.executable,
-            "VIRTUAL_ENV": sys.prefix,
         },
         capture_output=True,
         check=False,
@@ -246,12 +268,28 @@ def run_libtest(root: Path, binary: Path, selected, *, log_prefix=None) -> TestE
 def select_test_binary(target: Path, source: Path, name: str, artifacts, *, kind="test") -> Path:
     if kind not in {"test", "lib"}:
         raise GraphError("unsupported Rust test artifact kind")
+    expected_kinds = [kind]
+    if kind == "lib":
+        try:
+            manifest = tomllib.loads((source.parent.parent / "Cargo.toml").read_text())
+            library = manifest.get("lib", {})
+            if not isinstance(library, dict):
+                raise ValueError("library declaration is not a table")
+            expected_kinds = library.get("crate-type", ["lib"])
+            if (not isinstance(expected_kinds, list) or not expected_kinds
+                    or any(not isinstance(value, str) or value not in {
+                        "lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro",
+                    } for value in expected_kinds)
+                    or len(set(expected_kinds)) != len(expected_kinds)):
+                raise ValueError("library crate-type is not a concrete supported declaration")
+        except (OSError, UnicodeError, ValueError) as error:
+            raise GraphError("invalid current library manifest for test artifact selection") from error
     matches = [
         Path(item["executable"]).resolve()
         for item in artifacts
         if item.get("reason") == "compiler-artifact"
         and item.get("target", {}).get("name") == name
-        and item["target"].get("kind") == [kind]
+        and item["target"].get("kind") == expected_kinds
         and item["target"].get("src_path") == str(source.resolve())
         and item.get("profile", {}).get("test") is True
         and item.get("executable")
@@ -300,13 +338,11 @@ def build_and_run_rust_test(
         *selection,
     )
     environment = {
-        **os.environ,
+        **_managed_python_environment(),
         "CARGO_TARGET_DIR": str(target),
         "CARGO_BUILD_JOBS": "1",
         "CARGO_HUSKY_DONT_INSTALL_HOOKS": "1",
         "RUSTC_BOOTSTRAP": "1",
-        "PYO3_PYTHON": sys.executable,
-        "VIRTUAL_ENV": sys.prefix,
     }
     result = subprocess.run(
         command, cwd=root, env=environment, capture_output=True, text=True, check=False

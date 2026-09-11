@@ -128,12 +128,12 @@ GROUPS = (
         (
             "binding_census_has_zero_legacy_rows",
             "registered_pyfunctions_match_the_reviewed_rustdoc_signatures",
-            "retired_binding_rows_cannot_regain_legacy_admission",
+            "final_binding_rows_cannot_regain_legacy_admission",
             "copied_missing_and_duplicate_binding_registrations_fail",
             "final_bindings_require_successful_current_exposure",
         ),
         ("binding_census_has_zero_legacy_rows",),
-        ("retired_binding_rows_cannot_regain_legacy_admission",),
+        ("final_binding_rows_cannot_regain_legacy_admission",),
         (
             "copied_missing_and_duplicate_binding_registrations_fail",
             "final_bindings_require_successful_current_exposure",

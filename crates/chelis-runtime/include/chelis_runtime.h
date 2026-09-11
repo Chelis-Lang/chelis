@@ -29,8 +29,7 @@ typedef uint8_t chelis_value_tag;
 enum { CHELIS_VALUE_UNIT = 0, CHELIS_VALUE_SCALAR = 1, CHELIS_VALUE_STRING = 2, CHELIS_VALUE_TENSOR = 3, CHELIS_VALUE_LIST = 4, CHELIS_VALUE_TUPLE = 5, CHELIS_VALUE_DICT = 6, CHELIS_VALUE_ADT = 7, CHELIS_VALUE_OPTION = 8, CHELIS_VALUE_MAPPED_FILE = 9 };
 typedef union { chelis_scalar scalar; void *handle; } chelis_value_payload;
 typedef struct { chelis_value_tag tag; uint8_t reserved[7]; chelis_value_payload payload; } chelis_value;
-typedef struct { const void *data; int64_t count; chelis_dtype dtype; uint8_t reserved[7]; } chelis_read_view;
-typedef struct { void *data; int64_t count; chelis_dtype dtype; uint8_t reserved[7]; } chelis_write_view;
+#include "chelis_runtime_views.h"
 typedef struct { chelis_value key; chelis_value value; } chelis_dict_entry;
 
 #ifdef __cplusplus
@@ -343,6 +342,20 @@ void chelis_tensor_pad_shape(const chelis_tensor *tensor, chelis_scalar rank, co
 void chelis_tensor_shrink_shape(const chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *start, const chelis_scalar *end, chelis_scalar *shape);
 void chelis_tensor_stride_shape(const chelis_tensor *tensor, chelis_scalar rank, const chelis_scalar *steps, chelis_scalar *shape);
 int64_t chelis_tensor_affine_index(const chelis_tensor *tensor, const chelis_scalar *coordinates, const chelis_scalar *offsets, const chelis_scalar *steps);
+
+/* OP33 checked metadata only: no tensor payload allocation or ownership. */
+typedef struct chelis_metadata_plan chelis_metadata_plan;
+chelis_metadata_plan *chelis_metadata_plan_new(chelis_scalar rank, const chelis_scalar *shape, chelis_scalar exemplar);
+chelis_metadata_plan *chelis_metadata_plan_view(chelis_scalar rank, const chelis_scalar *shape, const chelis_scalar *strides, chelis_scalar exemplar, chelis_scalar byte_capacity);
+int32_t chelis_metadata_plan_rank(const chelis_metadata_plan *plan);
+const int64_t *chelis_metadata_plan_shape(const chelis_metadata_plan *plan);
+const int64_t *chelis_metadata_plan_strides(const chelis_metadata_plan *plan);
+int64_t chelis_metadata_plan_count(const chelis_metadata_plan *plan);
+int64_t chelis_metadata_plan_byte_count(const chelis_metadata_plan *plan);
+int64_t chelis_metadata_plan_byte_offset(const chelis_metadata_plan *plan, chelis_scalar linear_index);
+chelis_dtype chelis_metadata_plan_dtype(const chelis_metadata_plan *plan);
+void chelis_metadata_plan_check_capacity(const chelis_metadata_plan *plan, chelis_scalar byte_capacity);
+void chelis_metadata_plan_release(chelis_metadata_plan *plan);
 
 typedef enum {
     CHELIS_REDUCE_SUM = 0, CHELIS_REDUCE_COUNT = 1, CHELIS_REDUCE_MAX = 2,

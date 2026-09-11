@@ -1,0 +1,5 @@
+Generate exact host views and dynamic device descriptors from the shared ABI schema. Validate native tensor boundaries through checked metadata owners and reject compiled artifact ABI 1 before metadata or library loading. HIP artifacts carry a separate device-owner implementation with checked strided copies, device-bound lifetime, and matching source/header staging. Native calls preserve named dimension equality while keeping wildcard axes independent, and DLPack exports validate actual device synchronization before capsule construction.
+
+Construct native output owners directly in execution loops, preserving each returned host reference and interning device handles through explicit map entries. Rejected output batches release both previously adopted tensors and remaining raw owners.
+
+Retain current execution evidence for the 37 native boundary cases, including exact test lifecycles, the Cargo-built runtime archive, and snapshots of all generated and foreign fixture artifacts. Snapshotting preserves the original model-owned temporary directory lifetimes. Device fixtures remain simulated SDK and foreign ABI evidence.

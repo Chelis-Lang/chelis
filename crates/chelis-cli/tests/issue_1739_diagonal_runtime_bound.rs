@@ -44,6 +44,22 @@ use std::fs;
 use std::process::Command as StdCommand;
 use tempfile::{TempDir, tempdir};
 
+/// Examples the C backend refuses at its early capability gate, with the
+/// diagnostic that refusal must carry. The census asserts the refusal rather
+/// than skipping the file: a bare skip stops measuring quietly, and deleting
+/// the assertion would make the census's claim smaller than its name.
+///
+/// The staged Dropout example still reaches chelis#1192 before any C exists.
+/// Fixed-control Dropout is compiled and joins the ordinary guard census.
+/// When the staged build succeeds, this row fails and that example must join
+/// the censused set too.
+const REFUSED_BY_A_CAPABILITY_GATE: &[(&str, &str)] = &[
+    (
+        "dropout_staged_claim.ch",
+        "unimplemented chelis#1192: compiled `dropout` kernels are not implemented",
+    ),
+];
+
 /// A two-row operand: `min(2, 4) = 2`.
 const TWO_BY_FOUR: &str = "[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]]";
 /// A three-row operand: `min(3, 4) = 3`.
@@ -452,8 +468,23 @@ fn emitted_guards(c_source: &str) -> Vec<(String, String, String)> {
     found
 }
 
-fn emit_c(path: &str, out_subdir: &std::path::Path) -> String {
-    let build = Command::cargo_bin("chelis")
+/// Every executable Phase 0 example, sorted: the `.ch` files directly under
+/// `examples/`, which the repository's example-corpus policy defines as the
+/// executable set. `examples/illustrative/` is a subdirectory and is therefore
+/// not reached, which is the policy's intent.
+fn executable_examples() -> Vec<std::path::PathBuf> {
+    let mut paths: Vec<std::path::PathBuf> = fs::read_dir("../../examples")
+        .expect("read examples")
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.is_file())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "ch"))
+        .collect();
+    paths.sort();
+    paths
+}
+
+fn build_c(path: &str, out_subdir: &std::path::Path) -> std::process::Output {
+    Command::cargo_bin("chelis")
         .expect("chelis binary")
         .args([
             "build",
@@ -464,7 +495,11 @@ fn emit_c(path: &str, out_subdir: &std::path::Path) -> String {
             out_subdir.to_str().expect("UTF-8 path"),
         ])
         .output()
-        .expect("run chelis build");
+        .expect("run chelis build")
+}
+
+fn emit_c(path: &str, out_subdir: &std::path::Path) -> String {
+    let build = build_c(path, out_subdir);
     assert!(
         build.status.success(),
         "chelis build failed for {path}: {}",
@@ -516,50 +551,76 @@ fn the_census_reader_finds_a_guard_that_is_there() {
 /// If a future example gains a guard this test goes red with its name, which is
 /// the point. Add the row here after checking, on both lanes, that the
 /// declaration the guard now enforces is the one the body really produces.
+///
+/// # Coverage
+///
+/// It censuses whatever `executable_examples()` finds, with no count written
+/// here. chelis#1787 is what the hand-written count cost: it was pinned at 31,
+/// an unrelated merge added a 32nd example without touching this line, and
+/// `main` went red on a number rather than on a finding. A count derived from
+/// the same `read_dir` would be worse, since it agrees with a reader that has
+/// stopped enumerating.
+///
+/// Whether the directory still holds the corpus the project decided to ship is
+/// a different question with an owner: `parity.rs`'s `parity_corpus_is_complete`
+/// holds the roster and fails naming the drift in either direction. It runs per
+/// pull request, and `faithful_observation_phase3_oracle.py` freezes its
+/// definition digest, deleting a line from that very definition in four
+/// mutation controls, so the roster cannot be edited quietly. This census does
+/// not repeat that comparison, and it must not restate the roster here: a
+/// roster compared against the directory it was read from measures nothing.
+///
+/// What stands in for that comparison is the ENUMERATION WITNESS below. Every
+/// entry of `REFUSED_BY_A_CAPABILITY_GATE` must be reached, so an enumeration
+/// that returned nothing, or that stopped seeing files it used to see, fails
+/// here naming the example it lost. That is an independent fact about the
+/// directory, which a count derived from the same `read_dir` would not be.
 #[test]
 fn no_shipped_example_gains_a_return_boundary_guard() {
     let dir = tempdir().expect("tempdir");
-    let mut examples: Vec<std::path::PathBuf> = fs::read_dir("../../examples")
-        .expect("read examples")
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.extension().is_some_and(|ext| ext == "ch"))
-        .collect();
-    examples.sort();
-    // The EXACT count, not a floor (round 1 P3). A floor lets the corpus shrink
-    // by a third while the census keeps reporting nothing, which is the same
-    // failure shape as a reader that stops finding guards. There is no example
-    // manifest to read this from, so the number is pinned here: change it in
-    // the same commit that adds or removes an executable example, and read the
-    // census result before you do.
-    // chelis#1787: nothing derives this number, so it drifts, and it drifted
-    // again between this branch's two rebases. It reads 31 on `main` against a
-    // corpus of 36 there; `record_input_broadcast.ch` makes 37. The pin's own
-    // instruction is to change it in the commit that adds an example, so this
-    // one sets the true count. The cause chelis#1787 tracks is unchanged, and
-    // a textual merge cannot see this conflict: the line does not conflict,
-    // so whichever side is replayed last silently wins.
-    const EXECUTABLE_PHASE_0_EXAMPLES: usize = 37;
-    assert_eq!(
-        examples.len(),
-        EXECUTABLE_PHASE_0_EXAMPLES,
-        "the census must cover every executable Phase 0 example; found {:?}",
-        examples
-            .iter()
-            .filter_map(|path| path.file_name())
-            .collect::<Vec<_>>()
-    );
+    let examples = executable_examples();
 
     let mut census: Vec<String> = Vec::new();
+    let mut refused: Vec<String> = Vec::new();
     for example in &examples {
         let stem = example.file_stem().expect("stem").to_str().expect("UTF-8");
-        let source = emit_c(
-            example.to_str().expect("UTF-8 path"),
-            &dir.path().join(stem),
-        );
+        let name = example.file_name().expect("name").to_str().expect("UTF-8");
+        let path = example.to_str().expect("UTF-8 path");
+        let out = dir.path().join(stem);
+        if let Some((_, diagnostic)) = REFUSED_BY_A_CAPABILITY_GATE
+            .iter()
+            .find(|(refused_name, _)| *refused_name == name)
+        {
+            let build = build_c(path, &out);
+            let stderr = String::from_utf8_lossy(&build.stderr).to_string();
+            assert!(
+                !build.status.success() && stderr.contains(diagnostic),
+                "{name} is recorded as refused by a capability gate, but the build \
+                 succeeded or failed for another reason: {stderr}"
+            );
+            refused.push(name.to_string());
+            continue;
+        }
+        let source = emit_c(path, &out);
         for (function, axis, required) in emitted_guards(&source) {
             census.push(format!("{stem}: {function} axis {axis} claims {required}"));
         }
     }
+
+    // THE ENUMERATION WITNESS. Both sides are sorted, so this asks whether
+    // every recorded refusal was reached and nothing else was; the order the
+    // constant happens to be declared in is not part of the contract.
+    let mut expected_refusals: Vec<String> = REFUSED_BY_A_CAPABILITY_GATE
+        .iter()
+        .map(|(name, _)| (*name).to_string())
+        .collect();
+    expected_refusals.sort();
+    refused.sort();
+    assert_eq!(
+        refused, expected_refusals,
+        "every recorded refusal must be reached: a name that no longer matches an \
+         example, or an enumeration that returned nothing, silently shrinks the census"
+    );
 
     assert_eq!(
         census,

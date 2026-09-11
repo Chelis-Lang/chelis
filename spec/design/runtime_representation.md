@@ -403,20 +403,48 @@ only deleted active debt is removed and current samples are refreshed.
 
 ### C2.2 Runtime metadata types
 
-All host and device allocation/view paths consume privately constructed values:
+`chelis-abi` is the shared owner of checked descriptor metadata. The runtime's
+existing descriptor/count/byte/stride validation moves into that owner; it is
+not copied into a second implementation. Runtime and binding consumers use the
+same checked types. All host and device allocation/view paths consume values
+whose fields are private to this owner and whose public constructors validate:
 
 ```rust
-pub struct ShapeMetadata { /* rank, extents, strides, count */ }
+struct CheckedDomain { /* rank, extents, dtype, count, logical bytes */ }
+pub struct ShapeMetadata { /* one domain, canonical strides */ }
+pub struct StridedMetadata { /* one domain, supplied strides, reachable span */ }
 pub struct ElementCount(i64);
 pub struct ByteCount(i64);
 pub struct AllocationBytes(usize);
 ```
 
-`ShapeMetadata` checks rank/domain agreement, non-negative extents, and checked
-product. Owned contiguous allocation derives checked row-major strides; a view
-retains supplied strides only after proving its reachable maximum byte offset is
-within `byte_capacity`. Rank zero has one element. Any zero extent has zero
-elements. `ByteCount` is checked multiplication of an `ElementCount` and a
+The crate depends only on the standard library and `chelis-vocab`. Metadata
+construction may own shape and stride vectors, but it never owns or allocates
+tensor storage, frees tensor bytes, or performs arithmetic on tensor payloads.
+Runtime-specific execution and iteration consumers may remain in the runtime;
+they consume the shared checked authority instead of deriving another product,
+byte count, stride, or descriptor validity decision. Python does not link the C
+runtime merely to obtain this validation.
+
+One private `CheckedDomain` constructor checks rank/domain agreement,
+non-negative extents, dtype, element product and logical bytes. Existing
+`ShapeMetadata` owns one such domain and derives canonical row-major strides;
+its contiguous runtime indexing and iteration contracts remain unchanged.
+`StridedMetadata` owns one domain, immutable supplied strides and a checked
+reachable span. It does not contain or reconstruct a second `ShapeMetadata`.
+Both layouts reuse `ElementCount` and `ByteCount`; no consumer duplicates their
+product or representation-width validation.
+
+The zero-offset device view API admits nonnegative int64 strides, including
+broadcast stride zero. Negative strides need an explicit base/offset and minimum
+bound model and are rejected by this API; this is not a language restriction.
+All supplied domains are checked before an empty shortcut. Any zero extent has
+zero reachable bytes without computing unused canonical suffix products; rank
+zero has exactly one element. A nonempty view checks the largest reachable
+element offset, its representation bytes and target projection against the
+storage owner's actual byte capacity. Logical count/bytes remain distinct from
+reachable span, so a broadcast view need not own logical-count-many elements.
+`ByteCount` is checked multiplication of an `ElementCount` and a
 `Repr` width. `AllocationBytes` is a checked target-sized projection performed
 only at allocation/copy submission.
 
@@ -439,6 +467,11 @@ immutable after checked construction; repurpose replaces it atomically after
 the existing uniqueness, provenance, and exact-storage-capacity checks.
 Storage capacity is a validated `ByteCount`. This is metadata privacy, not the
 later descriptor/element-pointer ownership seal.
+
+That module is the source of the Phase 2 extraction into `chelis-abi`, not a
+permanent second owner. The extraction preserves the checked types' behavior
+and error classes. It does not flatten the host tensor's owner graph or change
+its public C ABI.
 
 `ElementCount` owns zero-aware extent products. `ShapeMetadata` additionally
 derives every canonical suffix stride using checked arithmetic: an empty
@@ -858,29 +891,109 @@ The Phase 1 composite below includes this shape observation contract.
 
 ## C3. One generated host/device descriptor schema
 
-A new leaf crate, `chelis-abi`, depends only on `chelis-vocab` outside the
-standard library. It owns a declarative field schema and renderers; it does not
-allocate, free, or interpret tensor values. The schema generates:
+A leaf crate, `chelis-abi`, depends only on `chelis-vocab` outside the
+standard library. It owns C2.2's checked descriptor metadata, a declarative
+field schema, and renderers. It never owns tensor storage, frees tensor bytes,
+or interprets tensor payloads. The schema generates:
 
-1. the Rust raw host descriptor used by the runtime owner module;
-2. the private host descriptor behind [05-OP-44]'s opaque `chelis_tensor`
-   handle and [05-OP-31]'s exact read/write view layouts;
-3. a Rust raw device descriptor used by Python's private device-entry module;
+1. [05-OP-31]'s exact Rust and C read/write view layouts;
+2. a Rust raw device descriptor used by Python's private device-entry module;
    and
-4. the corresponding internal C/HIP device declaration.
+3. the corresponding internal C/HIP device declaration.
 
-The host and device descriptors share these schema field classes: opaque data
-pointer, dynamic shape/stride pointers, `int64` element count and byte capacity,
-`int32` rank, exact dtype tag, ownership, and reserved bytes. Device ownership
-and address-space behavior remain distinct, so the two descriptors may be
-different named types; their numeric metadata cannot diverge.
+The host tensor retains its private `HeapHeader`, `TensorStorage`, one
+`ShapeMetadata`, access state, and embedded write-guard composition. There is
+no generated flat host record containing independently writable copies of its
+rank, shape, strides, count, or capacity. The opaque [05-OP-44] handle exposes
+no layout, so a C mirror of this private owner graph is neither needed nor
+permitted. Public read/write views are validated projections with the exact
+layout and lifetime from [05-OP-31], not another metadata authority.
+
+Host metadata and the raw device descriptor use the same checked field
+domains: opaque data pointer, dynamic shape/stride pointers, `int64` element
+count and byte capacity, `int32` rank, exact dtype tag, ownership, and reserved
+bytes. A raw device packet is a projection of validated metadata with a live
+owner; it cannot create checked authority. Device ownership and address-space
+behavior remain distinct from the host owner graph. Sharing field domains
+does not require identical internal objects.
 
 The schema macro/renderers expand inside each owning private module. Generated
-Rust fields are private to that module; ordinary consumers receive opaque
-handles or typed views. The checked-in C fragments are generated artifacts with
-byte-for-byte freshness tests. Every published header remains reachable from
-`chelis_runtime.h`; the public-header census sees the same canonical declarations
+raw device descriptor fields and checked metadata/storage-owner fields are
+private to their owning modules; ordinary consumers receive opaque handles or
+typed views. The exact public OP31 read/write transport views retain their
+existing public Rust fields; a view is not a validated owner and cannot mint
+descriptor authority. The checked-in C fragments are generated artifacts with
+byte-for-byte freshness tests. Every published host runtime header remains reachable from
+`chelis_runtime.h`; backend headers remain reachable from their declared HIP or
+Metal support root. The public-header census sees the same canonical declarations
 in every preprocessing context.
+
+`cargo run -p chelis-abi --example generate_headers -- --write` regenerates the
+fragments; without `--write` it checks freshness. The host-view fragment lives
+under `crates/chelis-abi/generated/` and is embedded into the marked generated
+region of `chelis_runtime.h`, so existing standalone header staging stays valid.
+The private device declaration is generated beside the HIP support header.
+Neither artifact may contain a second handwritten field list.
+
+The HIP support root requires the official `hipblas/hipblas.h` from the same
+supported SDK as the linked hipBLAS library. It does not redeclare SDK types or
+functions when that header is missing. Generated helpers use that SDK's actual
+API: a library symbol's spelling does not establish its argument types. The
+header census preprocesses the complete support root with explicit committed
+SDK fixtures, while hardware acceptance separately records the installed header,
+library, and executed numeric behavior. The environment contract and its
+outstanding evidence live in `docs/local_hip_environment.md`.
+
+The opaque [05-OP-33] `chelis_metadata_plan` C adapter owns a closed contiguous
+or strided metadata variant from `chelis-abi`. Tagged rank/extent/stride and
+exemplar inputs follow the existing shape-reduction-plan ingress convention.
+Its immutable projections supply the generated device packet; packet helpers
+never compute a second product or repair strides after construction. The device
+owner retains the plan and proves the supplied allocation capacity. Its caller
+retains the library until that library's finalizer has released the metadata and
+owned device storage.
+The metadata plan allocates no tensor payload and cannot prove a foreign
+allocation's physical bounds merely from its declared capacity.
+
+The device owner is defined only in the separately compiled
+`crates/chelis-backend-hip/runtime/chelis_device_owner.cpp`; the published
+`chelis_device_owner.h` declares its opaque handle and [05-OP-33]'s eight exact
+operations. The support root includes that header and the generated packet
+fragment. No implementation source is included into a published header, and the
+header census receives no C++ privacy exemption. The opaque handle directly
+owns its plan and contains the packet it observes; a packet pointer is never
+cast back to an owner. Python retains the loaded library through owner release. The private owner also
+records actual HIP device identity; its exact observation is the ninth device
+operation. Nonempty pointer attributes and current context must agree, and the
+finalizer selects/restores the owner device. Python never assigns output device
+identity from input zero. Explicit completion of device copies protects source
+owners and host guards even when an SDK transfer can complete asynchronously.
+
+Storage-slot lifetime remains the proof for temporary views: each view owns its
+metadata while borrowing an input or slot retained until its last use. Cleanup
+releases views before slots. Every escaping output calls the independent clone
+operation, which creates a contiguous plan and materializes logical order before
+any source release. This design adds no shared-storage refcount. The checked
+`byte_offset` projection keeps coordinate/stride/width arithmetic in the shared
+metadata authority; companion copying derives a nonempty element width from
+checked logical bytes/count and never introduces a dtype-width table. Empty
+transfers do not divide by count or access data.
+
+Both HIP artifact paths stage `chelis_device_owner.cpp`, its public header and
+the generated descriptor alongside existing runtime headers. The companion is a
+separate compiler input, linked with the same artifact's metadata-plan runtime
+archive. Python's all-C/C++ artifact build includes it exactly once. CLI builds,
+test staging, installed packages, source closure, runtime representation inventory
+and compiler input/cache identity include its bytes and generated dependencies.
+Missing companion/header/runtime symbols are prerequisite failures. ABI2 admission
+rejects ABI1 before these files or a library are consumed; DLPack and unrelated
+wire/cache versions keep their own format contracts. Tests separately exercise
+CPU SDK-fixture copy/lifetime behavior, whole-root HIP and Metal header discovery,
+actual materialization/compile/link, and the unresolved real HIP hardware gate.
+Metal retains its host tensor ABI and private Objective-C buffer ownership rather
+than adopting a ROCm pointer packet. Its support root and complete local include
+closure remain mandatory census inputs, with the generated OP31 host views
+coming from the same runtime header and authority as HIP host transfers.
 
 Python deletes `CHELIS_MAX_DIM`, `[i32; 8]`, int32 `size`/`storage_size`, and
 `*mut f32` from its device carrier. The HIP support header deletes its matching
@@ -888,9 +1001,33 @@ fixed arrays, `int` products, scalar special case that rewrites zero count to
 one, and `float *` view parameter. Rank, shape, count, and capacity cross both
 boundaries at the numbered-spec domains.
 
-This consolidation creates no new public numeric channel. If implementation
-requires a new public callable or field, that is a scope change: author its
-[05-OP-N] rule and capacity registration before modifying this plan.
+The public metadata-callable additions are exactly the eleven
+`chelis_metadata_plan` identities in [05-OP-33]'s normative registry. Their
+executable capacity registrations and positive/negative controls are required
+in the same cutover; neither the generated packet nor this plan grants numeric
+authority. Any further public callable or field requires its owning [05-OP-N]
+rule and exact registration before implementation.
+
+This delivery moves the Phase 0 coverage freeze without changing its immutable
+358-row foundation. The source universe grows from 74 to 80 files: the generated
+device packet, opaque owner header and C++ companion, Python DLPack and native
+owner modules, and the standalone generated host-view header. The C/C++ scanner
+uses one fixed C++17 lane with the committed HIP/hipBLAS and standard-library
+fixtures; adding a `.cpp` under a backend runtime root is covered by the existing
+unregistered-source mutation.
+
+Exactly 35 new scanner rows are final forms rather than transition debt: the 13
+field/carrier observations of the generated packet, nine private opaque-owner
+operations, four immutable metadata-plan shape/stride projections, six validated
+Python ingress/owner observations, and three HIP emitter projections that consume
+the closed dtype contract. The freeze names every path, kind, and owner; a rename,
+new owner, or additional row remains unclassified. A typed cast of an existing
+descriptor `data` access keeps that access's frozen identity and records the cast
+in its sample instead of manufacturing a second debt class. Forty-six retired
+fixed-rank, narrow, handwritten descriptor and raw-owner identities are deleted
+from the active ledger, leaving 244 active Phase 3/4 rows. Generated-layout
+freshness, metadata/device execution, binding execution, and the backend-header
+capacity census are the executable authority for these final forms.
 
 ## C4. Validated typed tensor access
 
@@ -962,6 +1099,24 @@ Every public C entry validates every observable property before access:
 Python host and DLPack paths use a private validated wrapper. DLPack export may
 release an opaque pointer only together with the exact dtype, shape, stride,
 byte offset, device, and deleter metadata derived from that wrapper.
+
+The native entry's private `CompiledInputs` retains the admitted lane and an
+immutable `Arc<ShapeBindings>`; `execute_checked` carries that same owner into
+`RawOutputs` alongside all output owners and retained Python inputs. Only
+`ShapeBindings::admit` constructs its private name-to-int64 map from explicit
+manifest literals and already checked input metadata. Spec/11 §1.2 and spec/04
+§4.1 govern the equalities: wildcard `*` axes never enter the map. Output
+adoption checks the actual descriptor against those bindings before constructing
+`ValidatedTensor`. No name parser, symbolic-expression evaluator, or guessed
+bijection against the code generator's interface-witness list participates.
+
+The private device handle retains its artifact `Library` through the exact
+opaque-owner finalizer. Input admission proves pointer offset and remaining
+capacity against retained framework storage before importing its checked raw
+packet. Each output's device comes from its own opaque owner and agrees with
+the actual HIP current device. DLPack's validated synchronization request uses
+the retained library's successful device barrier before capsule construction;
+the protocol's explicit no-synchronization request remains distinct.
 
 Delivery is split without weakening this contract. Phase 2 owns the
 Python/device/DLPack wrappers because they depend on the generated device
@@ -1226,7 +1381,8 @@ The fixed-control host transport extends that same Phase 0 freeze with three
 closed, scanner-visible owners: the single shared C dropout sampler prelude,
 its private host-helper execution witness, and the inherited RNG load/store in
 `CEmitter::emit_preplanned`. The immutable foundation moves from 358 to 361
-rows and active debt from 290 to 293; no classifier, source-universe rule, or
+rows and active debt from 244 to 247 after the generated-ABI consolidation;
+no classifier, source-universe rule, or
 deletion phase is weakened. The digest binds those exact identities. The
 existing backend-element-spelling and load-store-template controlled mutations
 remain the closed-world negative witnesses: an additional spelling or state
@@ -1431,10 +1587,18 @@ close #893 or Phases 2–5.
 **Requires:** Phase 1.
 
 **Delivers:** C3 completely and the binding/device portion of C4: `chelis-abi`,
-generated host/device descriptors, freshness and layout probes, dynamic-rank
+the moved shared metadata authority, generated host views/device descriptors,
+freshness and layout probes, dynamic-rank
 exact metadata plus private validated Python/DLPack wrappers, and the deletion
 of every handwritten mirror. The current [#1289] public ABI and [#1347]
 zero-extent behavior are positive receipts.
+
+Shared extraction and spec-derived tests may be prepared against existing
+checked code while the remaining Phase 1 consumers are in flight. This does
+not satisfy the prerequisite: Phase 2 adoption and landing require the landed
+Phase 1 base and its complete execution/mutation oracle. The callable device
+layout cutover and spec/11's ABI version 2 producer/consumer admission ship
+together; version 1 must fail before metadata interpretation or library loading.
 
 **Issue exit:** [#1345] closes after Python host-to-device, device entry,
 device-to-host, and DLPack paths pass rank 0, 1, 8, and greater-than-8 cases,
@@ -1459,6 +1623,20 @@ uv run --managed-python --python 3.11 --no-project python \
 ```
 
 Final line: `RUNTIME REPRESENTATION PHASE 2: PASS`.
+
+The implementation is `scripts/runtime_representation_phase2.py`.
+`runtime_representation_phase2_tests.json` freezes six Python contract cases
+and 237 current Rust selections: 33 shared-ABI tests, six metadata-plan C API
+tests, 79 HIP descriptor/owner tests, 109 platform-invariant Python binding
+tests, and ten backend-header census tests. The Python leg names its integration
+binaries and relevant internal ownership tests explicitly rather than freezing
+platform-only package tests. The command first obtains a complete fresh Phase 1
+receipt, then lists and executes each Phase 2 cohort with zero retries and
+verifies unchanged test artifacts and source identity. The only recorded
+non-execution is the exact HIP hardware command above; CPU SDK-fixture execution
+does not relabel it as hardware evidence. Hosted CI advances the stable
+`runtime-representation-phase0-oracle` job identity to this command and uploads
+both Phase 1 and Phase 2 receipts.
 
 ## Phase 3 — typed host runtime access and the field seal
 

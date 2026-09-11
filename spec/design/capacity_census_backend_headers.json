@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "rows": [
+    {
+      "kind": "header-export",
+      "id": "chelis_device_owner.h: chelis_device_tensor_owner * chelis_device_tensor_alloc ( chelis_metadata_plan * plan ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_device_owner.h: chelis_device_tensor_owner * chelis_device_tensor_borrow ( chelis_metadata_plan * plan , void * data , chelis_scalar byte_capacity ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_device_owner.h: chelis_device_tensor_owner * chelis_device_tensor_clone ( const chelis_device_tensor_owner * source ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_device_owner.h: chelis_device_tensor_owner * chelis_device_tensor_import ( const chelis_gpu_tensor * packet ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_device_owner.h: const chelis_gpu_tensor * chelis_device_tensor_view ( const chelis_device_tensor_owner * owner ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_device_owner.h: int32_t chelis_device_tensor_device ( const chelis_device_tensor_owner * owner ) ;",
+      "flags": [
+        "numeric-op"
+      ]
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_device_owner.h: void chelis_device_tensor_copy_from_host ( chelis_device_tensor_owner * destination , const chelis_tensor * source ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_device_owner.h: void chelis_device_tensor_copy_to_host ( chelis_tensor_write * destination , const chelis_device_tensor_owner * source ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_device_owner.h: void chelis_device_tensor_release ( chelis_device_tensor_owner * owner ) ;",
+      "flags": []
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_device_descriptor.h: typedef struct { void * data ; const int64_t * shape ; const int64_t * strides ; int64_t count ; int64_t byte_capacity ; int32_t rank ; chelis_dtype dtype ; uint8_t ownership ; uint8_t reserved [ 2 ] ; } chelis_gpu_tensor",
+      "flags": [
+        "numeric-op"
+      ]
+    }
+  ]
+}

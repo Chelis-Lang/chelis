@@ -18,6 +18,20 @@ pub fn verified_dag(dag: &Dag) -> chelis_ir::ownership::VerifiedDagProgram {
     .expect("backend test DAG must satisfy ownership verification")
 }
 
+/// Stage the actual owner implementation separately from the support header.
+/// A header-only mock or legacy helper cannot satisfy this dependency closure.
+pub fn stage_device_runtime(destination: &std::path::Path) {
+    let runtime = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime");
+    for name in [
+        "chelis_device_owner.h",
+        "chelis_device_owner.cpp",
+        "chelis_device_descriptor.h",
+    ] {
+        std::fs::copy(runtime.join(name), destination.join(name))
+            .unwrap_or_else(|error| panic!("stage device runtime {name}: {error}"));
+    }
+}
+
 /// Lower Surf source through the front end exactly as the build drivers do,
 /// returning the wrapper's helper manifest (read before C payload selection)
 /// beside the verified host program.

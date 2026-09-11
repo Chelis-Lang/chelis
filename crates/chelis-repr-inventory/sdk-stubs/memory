@@ -1,0 +1,39 @@
+#ifndef CHELIS_STUB_MEMORY
+#define CHELIS_STUB_MEMORY
+namespace std {
+template<class T> struct default_delete {
+    void operator()(T *pointer) const { delete pointer; }
+};
+
+template<class T, class D = default_delete<T>> class unique_ptr {
+public:
+    using pointer = T *;
+    constexpr unique_ptr() noexcept : pointer_(nullptr), deleter_() {}
+    explicit unique_ptr(pointer value) noexcept : pointer_(value), deleter_() {}
+    unique_ptr(pointer value, const D &deleter) noexcept
+        : pointer_(value), deleter_(deleter) {}
+    unique_ptr(pointer value, D &&deleter) noexcept
+        : pointer_(value), deleter_(static_cast<D &&>(deleter)) {}
+    unique_ptr(unique_ptr &&other) noexcept
+        : pointer_(other.release()), deleter_(static_cast<D &&>(other.deleter_)) {}
+    unique_ptr &operator=(unique_ptr &&other) noexcept {
+        if (pointer_) deleter_(pointer_);
+        pointer_ = other.release();
+        deleter_ = static_cast<D &&>(other.deleter_);
+        return *this;
+    }
+    ~unique_ptr() { if (pointer_) deleter_(pointer_); }
+    pointer get() const noexcept { return pointer_; }
+    pointer release() noexcept {
+        pointer value = pointer_;
+        pointer_ = nullptr;
+        return value;
+    }
+    pointer operator->() const noexcept { return pointer_; }
+    explicit operator bool() const noexcept { return pointer_ != nullptr; }
+private:
+    pointer pointer_;
+    D deleter_;
+};
+}
+#endif

@@ -44,6 +44,21 @@ fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+fn published_header_sources() -> String {
+    [
+        "chelis_runtime.h",
+        "chelis_runtime_dtype.h",
+        "chelis_runtime_views.h",
+    ]
+    .into_iter()
+    .map(|name| {
+        fs::read_to_string(include_dir().join(name))
+            .unwrap_or_else(|error| panic!("read published header {name}: {error}"))
+    })
+    .collect::<Vec<_>>()
+    .join("\n")
+}
+
 #[test]
 fn concurrent_probe_directories_have_distinct_live_paths() {
     let handles = (0..4)
@@ -68,11 +83,10 @@ fn concurrent_probe_directories_have_distinct_live_paths() {
 
 #[test]
 fn header_has_only_the_exact_tagged_dynamic_rank_abi() {
-    let mut header = fs::read_to_string(include_dir().join("chelis_runtime.h")).expect("header");
-    header.push_str(
-        &fs::read_to_string(include_dir().join("chelis_runtime_dtype.h"))
-            .expect("generated dtype header"),
-    );
+    let header = published_header_sources()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     for required in [
         "typedef uint8_t chelis_dtype;",
         "typedef struct { chelis_dtype dtype; uint8_t reserved[7]; uint64_t bits; } chelis_scalar;",

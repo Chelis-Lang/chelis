@@ -21,6 +21,7 @@ EXPECTED_PACKAGES = ["chelis", "chelis-runtime", "chelisup", "default"]
 EXPECTED_APPS = ["chelis", "chelisup", "default"]
 EXPECTED_HEADERS = [
     "chelis_runtime.h",
+    "chelis_runtime_views.h",
     "chelis_runtime_dtype.h",
     "chelis_blas.h",
     "chelis_simd.h",

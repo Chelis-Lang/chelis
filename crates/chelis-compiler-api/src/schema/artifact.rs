@@ -8,16 +8,16 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(try_from = "u32", into = "u32")]
 pub enum ArtifactAbiVersion {
-    V1,
+    V2,
 }
 
 impl TryFrom<u32> for ArtifactAbiVersion {
     type Error = String;
     fn try_from(value: u32) -> Result<Self, Self::Error> {
         match value {
-            1 => Ok(Self::V1),
+            2 => Ok(Self::V2),
             _ => Err(format!(
-                "unsupported artifact ABI version {value}; expected 1"
+                "unsupported artifact ABI version {value}; expected 2"
             )),
         }
     }
@@ -26,7 +26,7 @@ impl TryFrom<u32> for ArtifactAbiVersion {
 impl From<ArtifactAbiVersion> for u32 {
     fn from(version: ArtifactAbiVersion) -> Self {
         match version {
-            ArtifactAbiVersion::V1 => 1,
+            ArtifactAbiVersion::V2 => 2,
         }
     }
 }
@@ -69,7 +69,7 @@ impl<'de> Deserialize<'de> for CompiledArtifactManifest {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = Box::<serde_json::value::RawValue>::deserialize(deserializer)?;
         let ArtifactAbiHeader {
-            abi_version: ArtifactAbiVersion::V1,
+            abi_version: ArtifactAbiVersion::V2,
         } = serde_json::from_str(raw.get()).map_err(|error| {
             serde::de::Error::custom(format!("invalid artifact ABI version: {error}"))
         })?;
@@ -98,13 +98,13 @@ mod tests {
     fn artifact_manifest_shared_codec_preserves_version_and_exact_extents() {
         for size in [0, 1, 9_007_199_254_740_993, i64::MAX] {
             let expected = json!({
-                "abi_version": 1, "target": "c", "host_entry_name": "chelis_main",
+                "abi_version": 2, "target": "c", "host_entry_name": "chelis_main",
                 "inputs": [{"name": "x", "dtype": "float32", "dims": [{"name": "n", "size": size}]}],
                 "outputs": [], "source_path": "model.chelis", "source_hash": "digest"
             });
             let manifest: CompiledArtifactManifest =
                 serde_json::from_value(expected.clone()).unwrap();
-            assert!(matches!(manifest.abi_version, ArtifactAbiVersion::V1));
+            assert!(matches!(manifest.abi_version, ArtifactAbiVersion::V2));
             assert_eq!(manifest.inputs[0].dims[0].size.unwrap().get(), size);
             assert_eq!(serde_json::to_value(manifest).unwrap(), expected);
         }
@@ -115,13 +115,14 @@ mod tests {
         for header in [
             "",
             ",\"abi_version\":0",
-            ",\"abi_version\":2",
+            ",\"abi_version\":1",
+            ",\"abi_version\":3",
             ",\"abi_version\":4294967295",
             ",\"abi_version\":-1",
-            ",\"abi_version\":1.0",
+            ",\"abi_version\":2.0",
             ",\"abi_version\":true",
-            ",\"abi_version\":\"1\"",
-            ",\"abi_version\":1,\"abi_version\":1",
+            ",\"abi_version\":\"2\"",
+            ",\"abi_version\":2,\"abi_version\":2",
         ] {
             let error = serde_json::from_str::<CompiledArtifactManifest>(&format!(
                 "{{\"inputs\":\"invalid\"{header}}}"
@@ -133,7 +134,7 @@ mod tests {
             );
         }
         let error = serde_json::from_str::<CompiledArtifactManifest>(
-            r#"{"abi_version":1,"target":"c","host_entry_name":"main","inputs":[{"name":"x","dtype":"float32","dims":[{"name":"n","size":-1}]}],"outputs":[],"source_path":"","source_hash":""}"#
+            r#"{"abi_version":2,"target":"c","host_entry_name":"main","inputs":[{"name":"x","dtype":"float32","dims":[{"name":"n","size":-1}]}],"outputs":[],"source_path":"","source_hash":""}"#
         ).unwrap_err();
         assert!(error.to_string().contains("nonnegative"), "{error}");
     }

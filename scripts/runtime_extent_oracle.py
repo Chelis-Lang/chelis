@@ -41,8 +41,16 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 BASELINE_PATH = REPO_ROOT / "scripts/runtime_extent_oracle_baseline.json"
 BASELINE_PATH_PHASE_B = REPO_ROOT / "scripts/runtime_extent_oracle_baseline_phase_b.json"
 TARGETS_PATH = REPO_ROOT / "scripts/runtime_extent_oracle_targets.json"
+# `c` remains a nameable phase and is deliberately absent from SLICE_PHASES.
+# Slice C was withdrawn rather than deferred: `expand` broadcasts a singleton
+# axis and `insert` raises rank, so neither primitive produces a deferred
+# shape and no phase-C corpus will ever be written. `final` selects
+# SLICE_PHASES, so while `c` sat there the completion oracle refused on a
+# corpus nobody owed. Naming the retired phase still reaches this oracle's
+# own refusal, which says the phase has no registered corpus and names the
+# ones that do; an argparse choice error would say nothing about why.
 PHASES = ("a", "b", "c", "final")
-SLICE_PHASES = ("a", "b", "c")
+SLICE_PHASES = ("a", "b")
 PASS_MARKER = "RUNTIME EXTENT ORACLE: PASS"
 SHORT_MARKER = "RUNTIME EXTENT ORACLE: RECEIPTS PASS, ROWS SHORT OF EXIT"
 HIP_HARDWARE_COMMAND = (
@@ -1224,6 +1232,13 @@ def validate(
     the same red, which is the confusion chelis#1742 is about. Phase
     ``final`` refuses the flag: the completion oracle may not excuse its
     own short rows.
+
+    No registered phase records a shortfall today, so the nightly job passes
+    the flag nowhere and demands ``PASS`` from both phases. The flag stays
+    because the next phase to register a corpus starts with rows short of
+    exit, and because retiring it would retire the only difference between
+    a landing row and a drifted receipt; its behaviour is held by the
+    self-tests' synthetic short rows rather than by a live phase.
     """
 
     if phase not in PHASES:

@@ -145,7 +145,7 @@ def validate_binding_baseline(payload: object) -> None:
                     or kind != "binding-pymethod" or row["citation"] not in LEGACY_TRANSITION_DISPOSITIONS_BY_FAMILY["bindings"]):
                 raise ValueError("BINDING BASELINE only unchanged native rows may retain legacy shape")
             continue
-        keys = base | {"authority", "graph_identity"}
+        keys = base | {"authority"}
         if row.get("authority") == "TaggedTransport":
             owner = name.split("(", 1)[0]
             if (row.keys() != keys | {"contract"} or owner not in compiler_json
@@ -154,8 +154,6 @@ def validate_binding_baseline(payload: object) -> None:
                 raise ValueError("BINDING BASELINE invalid CompilerJson comparison row")
         elif row.keys() != keys or row.get("authority") != "nonnumeric" or flags:
             raise ValueError("BINDING BASELINE invalid structural comparison row")
-        if not isinstance(row["graph_identity"], str) or not re.fullmatch(r"[0-9a-f]{64}", row["graph_identity"]):
-            raise ValueError("BINDING BASELINE missing graph identity")
 
 
 def census_family(census_rel: Path) -> str:

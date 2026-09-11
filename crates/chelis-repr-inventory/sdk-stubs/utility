@@ -1,0 +1,8 @@
+#ifndef CHELIS_STUB_UTILITY
+#define CHELIS_STUB_UTILITY
+namespace std {
+template<class T> constexpr T &&move(T &value) noexcept {
+    return static_cast<T &&>(value);
+}
+}
+#endif

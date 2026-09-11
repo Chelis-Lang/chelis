@@ -4,6 +4,7 @@ members = [
     "crates/chelis-unord",
     "crates/chelis-repr-inventory",
     "crates/chelis-vocab",
+    "crates/chelis-abi",
     "crates/chelis-prove",
     "crates/chelis-runtime",
     "crates/chelis-compiler-api",
@@ -55,6 +56,7 @@ unexpected_cfgs = "deny"
 [workspace.dependencies]
 chelis-unord = { path = "crates/chelis-unord" }
 chelis-vocab = { path = "crates/chelis-vocab" }
+chelis-abi = { path = "crates/chelis-abi" }
 chelis-image-id = { path = "crates/chelis-image-id" }
 chelis-deep = { path = "crates/chelis-deep" }
 chelis-pred = { path = "crates/chelis-pred" }
