@@ -628,8 +628,8 @@ brace-delimited block body.
 
 The handler argument rules are:
 
-- `with seed(...)` requires an explicit integer literal seed carrying the `i64`
-  suffix (`with seed(42i64) { ... }`); the seed is semantically int64 and an
+- `with seed(...)` requires an explicit signed integer literal seed carrying the `i64`
+  suffix (`with seed(42i64) { ... }` or `with seed(-1i64) { ... }`); the seed is semantically int64 and an
   unsuffixed literal is a type error naming the suffix (§P10a)
 - `with device(...)` requires an explicit string literal device name
 - only `seed` and `device` are valid handler names

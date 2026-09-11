@@ -252,7 +252,7 @@ Normative, for every node the checker visits:
    disposition.
 5. **`handle-effect` gets a real case** (the instance fix): check the
    handler expression against its effect kind's signature (`random`: an
-   int64-SUFFIXED integer literal seed - `42i64` per spec/02 §P10a; an
+   int64-SUFFIXED signed integer literal seed - `42i64` or `-1i64` per spec/02 §P5/§P10a; an
    unsuffixed literal is a type error naming the required suffix -
    explicit over implicit, the width is visible in the source;
    `resource`: a string-LITERAL device, literal-ness checked, name
@@ -268,6 +268,18 @@ Normative, for every node the checker visits:
    type, never a silent `Type::Error`. T-Handle governs the typing
    shape; the literal-form rules above are ours (LaCaDiLE does not model
    seed values).
+   Signed seed admission follows [05-RNG-1]'s two's-complement bits,
+   including `int64::MIN`. Surf's single unary-minus literal encoding and
+   equivalent Deep literals use the same typed static evaluator as lowering.
+   The source form check still rejects casts, nested arithmetic, runtime
+   variables, and a lexically shadowed `neg` callable. The executable regression
+   is `cargo nextest run -p chelis-cli --test issue_1803_constant_signed_seed`:
+   formatted Surf/Deep checks, exact first/next uniform draw bits in eval and
+   compiled C, and rejection controls. This is source admission, not expanded
+   native Dropout or runtime-seed support. Uniform retains its legacy source-word
+   algorithm; its exact-bit controls prove seed transport, not adoption of the
+   full [05-RNG-1] algorithm. The same suite checks canonical Dropout evaluator
+   masks and the next draw for signed seeds.
    The three executed escalations become impossible: an int64 body in an
    `-> f32` def is a type error; the tensor variant is a type error; both
    are caught before any backend sees them.
@@ -3709,7 +3721,7 @@ is closed.
 
 | # | question | decided in | recorded where |
 |---|---|---|---|
-| 1 | `handle-effect`'s checked signature details | DECIDED 2026-07-17 (revised same day, explicit over implicit: this code is agent-written, so there is no ergonomic case for contextual binding). Phase 1 checks FORM, [#735] authors meaning. Seed = an EXPLICITLY int64-suffixed integer literal (`42i64`, spec/02 §P10a); an unsuffixed literal is a type error whose diagnostic names the requirement and the suffix spelling; non-literal seed expressions are rejected, diagnostic citing §P5's shipped constraint and [#735]. Device = a string literal; the checker validates literal-ness only, never the device-name vocabulary (target knowledge, [#735]'s territory). No spec/02 §P10 change needed - the width is visible in the source itself. Existing `with seed(n)` fixtures/examples migrate to the suffixed form in P1's change set (Public-Surface Change Rule) | §C1.5 + spec/04 effect section |
+| 1 | `handle-effect`'s checked signature details | DECIDED 2026-07-17 (revised same day, explicit over implicit: this code is agent-written, so there is no ergonomic case for contextual binding). Phase 1 checks FORM, [#735] authors meaning. Seed = an EXPLICITLY int64-suffixed signed integer literal (`42i64` or `-1i64`, spec/02 §P5/§P10a); [05-RNG-1] governs its signed seed bits; an unsuffixed literal is a type error whose diagnostic names the requirement and the suffix spelling; non-literal seed expressions are rejected, diagnostic citing §P5's shipped constraint and [#735]. Device = a string literal; the checker validates literal-ness only, never the device-name vocabulary (target knowledge, [#735]'s territory). No spec/02 §P10 change needed - the width is visible in the source itself. Existing `with seed(n)` fixtures/examples migrate to the suffixed form in P1's change set (Public-Surface Change Rule) | §C1.5 + spec/04 effect section |
 | 2 | typecheck-cache deserialization as a witness mint (accepted, or cache entries re-validated?) | Phase 2 | §C3 note + the cache module doc |
 | 3 | whether printers/desugar also migrate to `DeepTag` (nice-to-have; they are not chokepoints) | DECIDED 2026-07-23: deferred; REVERSED 2026-07-24 by the decode-once rework directive - printers, desugar, and every other producer/consumer migrated; no string-keyed tag idiom survives outside the parse/serialize boundary | this doc |
 | 4 | score semantics for `UnknownForm`/`MalformedForm` | DECIDED 2026-07-17: severity parity with `TypeMismatch` (the existing 0.5-class precedent), no new weight class. The invariant that matters - any pushed error forces score < 1.0 - is locked by §C4.4's corpus independently of the weights, so calibration can move later without touching it | scoring code + this doc |

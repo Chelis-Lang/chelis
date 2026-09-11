@@ -706,9 +706,10 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
 ///   an integer LITERAL must carry the `i64` suffix; an unsuffixed literal is a
 ///   `TypeMismatch` naming the suffix (this is the reject-diagnostic half left
 ///   to chelis#731 Phase 1 by chelis#771, unblocking the parked cross-lane RNG
-///   atom on chelis#735). Non-literal seed expressions stay the shared
+///   atom on chelis#735). Signed literals include Surf's unary-minus encoding.
+///   Other seed expressions stay the shared
 ///   front-end effects gate's responsibility (`chelis-effects`
-///   `validate_handler_expr`: "requires an int literal seed", spec/02 §P5), so
+///   `validate_handler_expr`, spec/02 §P5), so
 ///   they are not re-reported here.
 /// * `resource` (`with device`): the device is a string literal, checked by the
 ///   same effects gate; the device-name vocabulary is not validated here
@@ -741,15 +742,10 @@ pub(super) fn infer_handle_effect(
     let handler = &kids[0];
     let body = &kids[1];
 
-    // The handler's LITERAL-ness (an int literal seed, a string literal device)
-    // is enforced by the shared front-end effects gate (`chelis-effects`
-    // `validate_handler_expr`, spec/02 §P5), which runs in check, build, and
-    // eval. The checker does not type-infer the handler expression here: doing
-    // so would surface handler-internal diagnostics (e.g. an out-of-range inner
-    // literal in `with seed(-2147483649)`) that preempt the effects gate's
-    // "requires an int literal seed" message, and the effects gate already
-    // rejects every non-literal form loudly and identically across lanes. The
-    // checker's only handler-side addition is the int64-suffix rule below.
+    // The effects gate owns literal admission, using the same typed seed
+    // evaluator as lowering. Do not infer arbitrary handler expressions here:
+    // their internal diagnostics would preempt the owning handler rejection.
+    // Preserve the suffix diagnostic and lexical builtin identity below.
     //
     // chelis#730 Phase 2 (section C4.4; the pinned §I1 interlock): the kind
     // is parsed once into the closed [`EffectKind`] set - the same enum the
@@ -759,16 +755,23 @@ pub(super) fn infer_handle_effect(
     // missing/malformed/unknown distinction from the shared Deep adapter.
     match decode_effect_kind(list) {
         Ok(EffectKind::Random) => {
-            // Open question 1 (decided 2026-07-17): the seed is semantically
-            // int64, and a seed written as an integer LITERAL must carry the
-            // `i64` suffix (the reject-diagnostic half chelis#771 left to Phase
-            // 1). A negative int64 literal is additionally rejected. That is a
-            // deliberate narrowing of the accepted FRONT-END surface, held until
-            // chelis#735 authors the `with seed` contract, and not a lane
-            // limitation: both the DAG lowering (`extract_u64_value`,
-            // chelis#794) and the evaluator reinterpret a signed int64 seed as
-            // its uint64 two's-complement bits per [05-RNG-1] (chelis#731 red
-            // team F2).
+            // Preserve the literal suffix diagnostic and its priority. The
+            // effects gate owns signed literal admission, evaluated with
+            // lowering. Only this scope-aware stage can exclude a shadowed
+            // `neg`: recognizing that callable as a primitive would substitute
+            // a guessed seed for a runtime expression.
+            if env.is_lexically_bound("neg")
+                && crate::static_seed::literal_seed(handler, true).is_some()
+                && crate::static_seed::literal_seed(handler, false).is_none()
+            {
+                errors.push(CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    "`with seed(...)` requires a signed int64 literal seed; \
+                     a shadowed `neg` is a runtime callable"
+                        .to_string(),
+                    vec![],
+                ));
+            }
             match seed_literal_form(handler) {
                 SeedLiteralForm::Unsuffixed => {
                     errors.push(CheckError::new(
@@ -779,23 +782,6 @@ pub(super) fn infer_handle_effect(
                             .to_string(),
                         vec![
                             "Add the `i64` suffix to the seed literal, e.g. \
-                             `with seed(42i64) { ... }`"
-                                .to_string(),
-                        ],
-                    ));
-                }
-                SeedLiteralForm::NegativeInt64 => {
-                    errors.push(CheckError::new(
-                        CheckErrorKind::TypeMismatch,
-                        "`with seed(...)` requires a non-negative seed literal. This \
-                         is a deliberate narrowing of the accepted front-end surface, \
-                         held until chelis#735 authors the `with seed` contract, not a \
-                         lane limitation: the DAG and eval lowerings both reinterpret a \
-                         signed int64 seed as its uint64 two's-complement bits per \
-                         [05-RNG-1] (spec/design/checker_totality.md §C1.5)"
-                            .to_string(),
-                        vec![
-                            "Use a non-negative int64-suffixed seed, e.g. \
                              `with seed(42i64) { ... }`"
                                 .to_string(),
                         ],
@@ -834,8 +820,7 @@ pub(super) fn infer_handle_effect(
 }
 
 /// Classification of a `random`-effect seed handler for the checker's
-/// seed-form rules (chelis#731 §C1.5; the negative case is the chelis#731 red
-/// team's F2 finding).
+/// literal-width diagnostic (chelis#731 §C1.5).
 pub(super) enum SeedLiteralForm {
     /// Not an integer literal (a computed expression, a string, ...). This is
     /// the shared effects gate's territory (`chelis-effects`
@@ -845,17 +830,7 @@ pub(super) enum SeedLiteralForm {
     /// An unsuffixed integer literal (a bare `Atom::Int`, or `(lit {type:
     /// int32} N)`). The seed is semantically int64, so this is a type error.
     Unsuffixed,
-    /// An int64-suffixed but NEGATIVE literal (`(lit {type: int64} -N)`).
-    /// [05-RNG-1] already fixes its meaning: reinterpret the signed int64 seed
-    /// as its uint64 two's-complement bits. The DAG lane does that in
-    /// `extract_u64_value` (chelis#794, which replaced the old
-    /// `extract_usize_value` fold to seed 0) and the evaluator already did.
-    /// The rejection here is therefore a deliberate narrowing of the
-    /// accepted front-end surface, held until chelis#735 authors the
-    /// `with seed` contract, not a lane limitation.
-    NegativeInt64,
-    /// A valid non-negative int64-suffixed literal (`Ni64` desugars to
-    /// `(lit {type: (t-prim {} int64)} N)`, N >= 0). Accepted.
+    /// A signed int64-suffixed literal. [05-RNG-1] admits negative values.
     ValidInt64,
 }
 
@@ -889,7 +864,6 @@ pub(super) fn seed_literal_form(expr: &deep::Expr) -> SeedLiteralForm {
     match int_lit {
         None => SeedLiteralForm::NotIntLiteral,
         Some((false, _)) => SeedLiteralForm::Unsuffixed,
-        Some((true, value)) if value < 0 => SeedLiteralForm::NegativeInt64,
         Some((true, _)) => SeedLiteralForm::ValidInt64,
     }
 }

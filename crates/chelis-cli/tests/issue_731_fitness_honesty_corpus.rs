@@ -322,12 +322,11 @@ fn malformed_dp_forms_score_below_one() {
             ),
             ".dp",
         ),
-        // chelis#731 red team F2: a negative int64-literal seed (the RNG lanes
-        // fold it to seed 0, breaking [05-RNG-1]).
+        // A wrong-dtype signed seed remains rejected; negative int64 is valid.
         (
-            "dp_negative_int64_seed",
+            "dp_negative_int32_seed",
             wrap(
-                "(handle-effect {effect: random} (lit {type: (t-prim {} int64)} -1) \
+                "(handle-effect {effect: random} (lit {type: (t-prim {} int32)} -1) \
                  (lit {type: (t-prim {} f32)} 2.5))",
             ),
             ".dp",

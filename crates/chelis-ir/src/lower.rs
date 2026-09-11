@@ -5348,20 +5348,6 @@ fn extract_numeric_leaf(expr: &Expr) -> Option<StagedScalar> {
     }
 }
 
-/// Read an optional scalar type stamp without treating malformed type
-/// metadata as absence. The outer `Option` is recognition success; the inner
-/// one distinguishes an unstamped expression from a stamped scalar.
-fn optional_scalar_prim(expr: &Expr) -> Option<Option<Prim>> {
-    let metadata = match expr {
-        Expr::Node(_, _) | Expr::List(_, _) => Some(stamped_parts(expr)?.1),
-        _ => None,
-    };
-    match metadata.and_then(|meta| meta.ty()) {
-        Some(ty) => Some(Some(LowerCtx::try_extract_prim(ty.expression())?)),
-        None => Some(None),
-    }
-}
-
 /// A binder-adopted decimal specialized to an integer keeps its f32 source
 /// default; all other polarities finalize at the substituted target.
 fn binder_float_literal_source_default(
@@ -5380,120 +5366,6 @@ fn binder_float_literal_source_default(
         .flatten()
         .filter(Prim::is_integer)
         .map(|_| Prim::F32)
-}
-
-/// Decode one canonical numeric `lit` under [04-LIT-1].
-///
-/// This is the fold's only literal ingress. It jointly validates the value
-/// atom, declared primitive, and the optional provenance marker. The sole
-/// cross-family form is an exact integer atom with one
-/// `literal_source: integer` marker at a float dtype; `scalar_from_i64`
-/// performs its one required target-width finalization without an f64 hop.
-fn extract_type_checked_literal(expr: &Expr) -> Option<chelis_types::ScalarValue> {
-    use chelis_types::{scalar_from_f64, scalar_from_i64};
-
-    let (DeepTag::Lit, metadata, kids) = stamped_parts(expr)? else {
-        return None;
-    };
-    let [Expr::Atom(atom, _)] = kids else {
-        return None;
-    };
-    let declared = optional_scalar_prim(expr)??;
-    let literal_source = metadata.literal_source();
-    let integer_source = literal_source.is_some();
-
-    match (atom, declared, literal_source) {
-        (Atom::Int(value), prim, None) if prim.is_integer() => {
-            scalar_from_i64("lit", prim, *value).ok()
-        }
-        (Atom::Int(value), prim, Some(_)) if prim.is_float() && integer_source => {
-            scalar_from_i64("lit", prim, *value).ok()
-        }
-        (Atom::Float(value), prim, None) if prim.is_float() => {
-            scalar_from_f64("lit", prim, *value).ok()
-        }
-        (Atom::Bool(value), Prim::Bool, None) => {
-            scalar_from_i64("lit", Prim::Bool, i64::from(*value)).ok()
-        }
-        (Atom::Str(_) | Atom::Name(_) | Atom::Tag(_), _, _)
-        | (Atom::Int(_) | Atom::Float(_) | Atom::Bool(_), _, _) => None,
-    }
-}
-
-/// Evaluate the closed static scalar grammar while preserving a checked dtype
-/// at every edge.
-///
-/// This is stricter than `extract_numeric_leaf`, whose `RawScalar` form is
-/// intentionally useful for general literal folding but cannot distinguish
-/// `true` from integer `1`. A seed needs that distinction: literal payload and
-/// type metadata must agree before a wrapper can consume the value, while a
-/// successful explicit cast establishes its target dtype per [04-NUM-14].
-fn extract_type_checked_scalar(expr: &Expr) -> Option<chelis_types::ScalarValue> {
-    match expr {
-        // A BARE atom carries no type metadata, so there is nothing for the
-        // payload to agree with and this fold declines it. Stamping one here
-        // would invent a dtype the source never wrote, in two ways that both
-        // matter. It would widen the fold's accept set past the checker's,
-        // which classifies a bare integer atom as an UNSUFFIXED seed literal
-        // and rejects it (`chelis_types::infer::expr::seed_literal_form`); and
-        // any stamp it picked would contradict spec/04-type-system.md §5.3,
-        // where an integer literal defaults to `int32` and a float literal to
-        // `f32` rather than to the int64/f64 a seed wants. So
-        // `extract_type_checked_literal` stays the fold's ONLY literal
-        // ingress, as its doc says, and a bare atom reaches the caller's loud
-        // rejection instead of a guessed value (chelis#794).
-        Expr::Atom(_, _) => None,
-        Expr::List(_, _) | Expr::Node(_, _) => {
-            let (tag, _, kids) = stamped_parts(expr)?;
-            match tag {
-                DeepTag::Lit => extract_type_checked_literal(expr),
-                DeepTag::Cast => {
-                    let inner = extract_type_checked_scalar(kids.first()?)?;
-                    let target = LowerCtx::try_extract_prim(kids.get(1)?)?;
-                    if optional_scalar_prim(expr)?.is_some_and(|declared| declared != target) {
-                        return None;
-                    }
-                    match chelis_deep::cast_mode_of(kids).ok()? {
-                        chelis_deep::CastMode::Checked => {
-                            chelis_types::CheckedCastPlan::new(inner.prim(), target)
-                                .ok()?
-                                .cast_scalar("cast", inner)
-                                .ok()
-                        }
-                        chelis_deep::CastMode::Trunc => {
-                            if !inner.prim().is_float() || !target.is_integer() {
-                                return None;
-                            }
-                            chelis_types::cast_trunc_scalar("cast_trunc", inner, target).ok()
-                        }
-                    }
-                }
-                DeepTag::App => {
-                    if kids.len() != 2 || !expr_is_var_named(&kids[0], "neg") {
-                        return None;
-                    }
-                    let inner = extract_type_checked_scalar(&kids[1])?;
-                    let negated = if inner.prim().is_float() {
-                        chelis_types::float_unop(chelis_types::FloatUnOp::Neg, inner).ok()?
-                    } else if inner.prim().is_integer() {
-                        chelis_types::int_unop(chelis_types::IntUnOp::Neg, inner).ok()?
-                    } else {
-                        return None;
-                    };
-                    if optional_scalar_prim(expr)?
-                        .is_some_and(|declared| declared != negated.prim())
-                    {
-                        return None;
-                    }
-                    Some(negated)
-                }
-                _ => None,
-            }
-        }
-        Expr::Map(_, _) | Expr::MetaExpr(_, _) | Expr::BareList(_, _) | Expr::UnknownForm(_) => {
-            None
-        }
-    }
 }
 
 /// Return true iff any element of `dims` is a wildcard placeholder
@@ -14392,21 +14264,12 @@ impl<'program> LowerCtx<'program> {
         // `extract_int_for_dim` would also accept a float-typed `(lit ... 7)`
         // by looking only at its payload. Reinterpret the accepted signed
         // value as two's-complement bits; negative seeds are conforming.
-        let declared = expr_type_metadata(expr)
-            .and_then(Self::try_extract_prim)
-            .or_else(|| {
-                let (DeepTag::Cast, _, kids) = stamped_parts(expr)? else {
-                    return None;
-                };
-                Self::try_extract_prim(kids.get(1)?)
-            });
-        if declared != Some(Prim::Int64) {
-            return None;
-        }
-        let value = extract_type_checked_scalar(expr)?;
-        if value.prim() != Prim::Int64 {
-            return None;
-        }
+        let value = chelis_types::static_seed::constant_seed(
+            expr,
+            !self.bindings.contains_key("neg")
+                && !self.local_callables.contains_key("neg")
+                && !self.program_defs.contains_key("neg"),
+        )?;
         let signed = value.as_i64_exact()?;
         Some(signed as u64)
     }
