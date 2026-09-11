@@ -646,7 +646,11 @@ remove `SizeClass`, `classify_expand_size`, `classify_arith_app`,
 provenance rejection sites. `shape_deps` stays: `root_reach` traverses it, so
 removing it would silently merge scopes and reintroduce #1566, and it is a
 declared WireDag v9 transport whose removal is a schema change with its own
-numeric census obligations. That removal is residual under #1372. Guards may land earlier;
+numeric census obligations. It carries a third obligation since B2b-0b: a named
+claim over an op-computed result axis records its declaring parameter there, so
+an unread declaring parameter survives elimination and reaches the kernel. That
+dependency is what makes the claim comparable at all, and #1372's removal must
+migrate it rather than drop it. That removal is residual under #1372. Guards may land earlier;
 acceptance may not widen earlier. A best-effort identity recognizer may
 remain as a refinement whose miss yields a fresh guarded extent.
 
@@ -853,7 +857,7 @@ All are Slice B work under #1277 unless expressly separated.
 | B2b-0b: remaining local guards | merged B2r/S2b and #1658's broadcast preparation repair | guard literal and resolved numeric claims from independent local size sources; op-computed local extents; exact positive/negative C/Eval rows. The op-computed admission and #1397's declaration half are delivered for `shrink`; `pad` and `stride` remain unadmitted owners |
 | B2b-1: claim transport | C2 contract and red fixtures; integrates B2b-0b | preserve the shipped helper-order and C2.4 checked-reshape/unit receipts (#1686/#1687); finish general scoped checked/lowered identities, explicit caller witnesses, multi-claim axes, rebuild/wire transport and migrated binding consumers; #1397's declaration-erasure half, with #1377's literal call/inlined-root exit established by the witness subset. Named result claims and the unread signature witness (#1374, #1376, #1566) are delivered |
 | B2b-root: root execution | can start independently; acceptance composes B2b-1 | #1397's general wildcard-root boundary; run or diagnose every accepted root; unlock and reverify #1378's exact public value witness |
-| B2b-2: sources and acceptance | guards and claim transport for every newly admitted row | declaration sources are finished (#665/#1556/#1566); supply #1482's missing shape source, remove provenance restrictions (#1266/#569/#1379). `shape_deps` removal moves out of this row and is residual under #1372 |
+| B2b-2: sources and acceptance | guards and claim transport for every newly admitted row | declaration sources are finished (#665/#1556/#1566); supply #1482's missing shape source, remove provenance restrictions (#1266/#569/#1379). `shape_deps` removal moves out of this row and is residual under #1372, which must now also migrate B2b-0b's declaring-parameter dependency rather than drop it |
 | B2b-3: phase exit | preceding host repairs and per-row platform dispositions | register actual passing receipts, correct measured stale baselines, retire phase c from final selection; phase b/final remain red until their named obligations pass |
 | #1512 audit | no dependency on the B2b carrier or withdrawn C | enumerate reachable non-expand unresolved producers and consumer decisions; resolved/unresolved positive and negative pairs; distinguish error cascade suppression; assign each surviving defect a repair under #1512 |
 

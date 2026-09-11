@@ -3189,18 +3189,23 @@ where
 /// node's own bounds before that node runs.
 ///
 /// `None` means the operation computes no extent here: a `shrink` span whose
-/// start is not below its end selects nothing, and the operation's own domain
-/// rejection owns that failure on both lanes.
+/// start is not below its end selects nothing, so there is nothing to compare
+/// and the guard yields. THIS lane then reports the span itself. The C lane
+/// does not: `spec/05-risc-primitives.md` section 2.4.1's closed list of
+/// runtime-bound errors does not include an empty span, so an extent-0 result
+/// under a declared literal is a claim mismatch there and C reports the claim.
+/// That divergence is chelis#1795's, not this function's; the inline comment
+/// at the call site carries the full argument.
 ///
 /// A span whose END exceeds the operand's extent is NOT declined, and that is
 /// a deliberate limit rather than an oversight. It is out of domain too, and
-/// `spec/05-risc-primitives.md` section 2.4.2 makes "a shrink range overshoot"
-/// an error every execution mode reports with matching language. But this lane
-/// answers such a span with the `assert!` in `shrink` (chelis#523), so
-/// declining here would trade a guard reporting the wrong reason for a panic,
-/// which is worse. The claim this slice makes is therefore bounded to
-/// IN-DOMAIN spans, the two out-of-domain dispositions are pinned by receipts,
-/// and closing the divergence belongs to chelis#523.
+/// section 2.4.1 makes "a shrink range overshoot" an error every execution
+/// mode reports with matching language. But this lane answers such a span with
+/// the `assert!` in `shrink`, which PANICS rather than returning a typed
+/// error, so declining here would trade a guard reporting the wrong reason for
+/// a panic. The claim this slice makes is therefore bounded to IN-DOMAIN
+/// spans, the two out-of-domain dispositions are pinned by receipts, and
+/// closing the divergence belongs to chelis#1797.
 fn computed_axis_extent_value(
     computed: &crate::axis_sources::ComputedAxisExtent,
     node: &DagNode,

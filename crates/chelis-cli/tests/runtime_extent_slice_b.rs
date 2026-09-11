@@ -3227,14 +3227,16 @@ fn unbound_binder_class_source(rows: usize, cols: usize) -> String {
 /// This row was written for a different property. Before the claim recorded
 /// its declaring parameter as a dependency, `x` was eliminated, `n` was bound
 /// by nothing, and the class's first site declared the binder from its own
-/// extent while the second guarded against it. That case is no longer
-/// reachable from source: the retention makes `n` the caller's value. The
-/// declare-from-the-first-site rule in `local_guard_verdict` stays, because a
-/// graph built by `grad`, `vmap` or a splice can still present a class whose
-/// binder no input declares, and because it is what keeps this lane matching
-/// the C emitter's declare-then-guard split; it is simply no longer something
-/// a Surf program reaches, and saying so here is more useful than a receipt
-/// that silently stops exercising it.
+/// extent while the second guarded against it. The retention makes `n` the
+/// caller's value HERE, so this spelling no longer reaches that rule.
+///
+/// It is still reachable, by a REPEATED FREE result name: `-> tensor[n, n]`
+/// where no parameter declares `n`. The checker keeps such a name because it
+/// appears twice (a name appearing once is published as `*`), no parameter
+/// witness exists to retain, and the two op-computed axes form the class
+/// alone. `a_repeated_free_result_name_declares_from_its_first_site` is that
+/// row; an earlier version of this comment claimed the rule had become
+/// unreachable, which was wrong and would have left it untested.
 ///
 /// EVIDENTIARY STATUS: regression test for the mismatch assertions. On
 /// `33cc78e84` both lanes printed `out = tensor(shape=[2, 3], ...)` and exited
@@ -3270,6 +3272,79 @@ fn an_op_computed_class_with_an_unbound_binder_agrees_across_lanes() {
     assert!(!eval_ok, "a 3x4 actual shrinks to 2x3: {eval_out}");
     assert!(!c_ok, "a 3x4 actual shrinks to 2x3: {c_out}");
     let context = "extent `n`: claimed = 2, shrink axis 1 = 3";
+    for (lane, out) in [("eval", &eval_out), ("c", &c_out)] {
+        assert!(
+            out.contains(&domain_trap_line("shrink")),
+            "{lane}: [04-NUM-9]'s line: {out}"
+        );
+        assert!(out.contains(context), "{lane}: expected {context}: {out}");
+    }
+}
+
+/// A result name declared by no parameter and repeated across two result axes.
+fn repeated_free_result_name_source(rows: usize, cols: usize) -> String {
+    let values = (0..rows)
+        .map(|r| {
+            let row = (0..cols)
+                .map(|c| format!("{}.0f32", r * cols + c + 1))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[{row}]")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "def f(x: tensor[r, c, f32]) -> tensor[n, n, f32] = \
+         shrink(x, [[1i64, shape(x, 0i32)], [1i64, shape(x, 1i32)]])\n\
+         out = f(to_tensor([{values}]))\n"
+    )
+}
+
+/// A class whose binder NO input declares: the first site in derivation order
+/// declares it from its own observed extent and every later site guards
+/// against that value, identically on both lanes.
+///
+/// This is C2.4's canonical-member rule reaching the local sites, and it is
+/// the rule the C emitter already applied through `runtime_dim_sites`'
+/// declare-then-guard split. It is reachable from source only through a
+/// repeated FREE result name: a name appearing once in the result is published
+/// as `*` by the checker and forms no class, and a name a parameter declares is
+/// retained and supplies the caller's value instead. Two axes of one result
+/// naming the same undeclared binder is what is left, and it asserts exactly
+/// what `tensor[n, n]` says: that the two axes agree with each other.
+///
+/// EVIDENTIARY STATUS: regression test for the mismatch assertions. On
+/// `33cc78e84` both lanes printed `out = tensor(shape=[3, 2], ...)` and exited
+/// zero under the declared `tensor[n, n, f32]`. The satisfied row is the
+/// non-vacuity control. Round 1 of chelis#1397 found this spelling untested
+/// after a sibling receipt was retargeted onto the retained-parameter case.
+#[test]
+fn a_repeated_free_result_name_declares_from_its_first_site() {
+    assert!(
+        gcc_available(),
+        "this row compares two executed lanes; neither may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let square = repeated_free_result_name_source(3, 3);
+    let (eval_ok, eval_out) = eval_result(&dir, "free_name_ok.ch", &square);
+    let (c_ok, c_out) = c_run_result(&dir, "free_name_ok_c", &square);
+    assert!(eval_ok, "a 2x2 span agrees with itself: {eval_out}");
+    assert!(c_ok, "a 2x2 span agrees with itself: {c_out}");
+    for (lane, out) in [("eval", &eval_out), ("c", &c_out)] {
+        assert!(
+            out.contains("shape=[2, 2]") && out.contains("data=[5.0, 6.0, 8.0, 9.0]"),
+            "{lane}: and produces the square the binder asserts: {out}"
+        );
+    }
+
+    // Axis 0 declares `n` as 3 from its own extent; axis 1 produces 2 and is
+    // guarded against it. No parameter supplies the 3.
+    let oblong = repeated_free_result_name_source(4, 3);
+    let (eval_ok, eval_out) = eval_result(&dir, "free_name_bad.ch", &oblong);
+    let (c_ok, c_out) = c_run_result(&dir, "free_name_bad_c", &oblong);
+    assert!(!eval_ok, "a 4x3 actual shrinks to 3x2: {eval_out}");
+    assert!(!c_ok, "a 4x3 actual shrinks to 3x2: {c_out}");
+    let context = "extent `n`: claimed = 3, shrink axis 1 = 2";
     for (lane, out) in [("eval", &eval_out), ("c", &c_out)] {
         assert!(
             out.contains(&domain_trap_line("shrink")),
@@ -3591,20 +3666,23 @@ fn end_beyond_operand_source(len: usize) -> String {
 
 /// The limit of this slice's cross-lane claim, pinned rather than implied.
 ///
-/// `spec/05-risc-primitives.md` section 2.4.2 makes "a shrink range overshoot"
+/// `spec/05-risc-primitives.md` section 2.4.1 makes "a shrink range overshoot"
 /// an error every execution mode reports with matching language, and the two
 /// lanes do not match here: C's movement plan rejects the span before the guard
 /// site, while the evaluator's guard runs first and reports the claim. The
 /// evaluator cannot simply decline, because its own answer to an overshooting
-/// span is the `assert!` in `eval::shrink` (chelis#523), so declining would
-/// trade a guard naming the wrong reason for a panic.
+/// span is the `assert!` in `eval::shrink`, which PANICS rather than returning
+/// a typed error, so declining the guard would trade a diagnostic naming the
+/// wrong reason for a panic.
 ///
 /// This slice therefore bounds its cross-lane claim to IN-DOMAIN spans and
-/// pins both dispositions here. Closing the divergence belongs to chelis#523.
+/// pins both dispositions here. Closing the divergence belongs to chelis#1797.
+/// chelis#523, which the assertion's own message cites, is CLOSED and is that
+/// issue's predecessor, not its owner.
 ///
 /// EVIDENTIARY STATUS: disposition lock for both lanes, not a regression test.
 /// Neither assertion describes an improvement; both describe a limit, and the
-/// test exists so that fixing chelis#523 has to update it.
+/// test exists so that fixing chelis#1797 has to update it.
 #[test]
 fn an_overshooting_shrink_span_is_outside_this_slices_cross_lane_claim() {
     assert!(
@@ -3622,7 +3700,7 @@ fn an_overshooting_shrink_span_is_outside_this_slices_cross_lane_claim() {
     assert!(!c_ok, "an overshoot does not produce a value: {c_out}");
     assert!(
         eval_out.contains("extent `2`: claimed = 2, shrink axis 0 = 6"),
-        "eval's guard runs first and names the claim (chelis#523): {eval_out}"
+        "eval's guard runs first and names the claim (chelis#1797): {eval_out}"
     );
     assert!(
         c_out.contains("shrink bounds outside input extent"),
