@@ -126,10 +126,9 @@ int main(void) {
         "{}",
         String::from_utf8_lossy(&compile.stderr)
     );
-    let output = Command::new(&binary)
+    Command::new(&binary)
         .output()
-        .expect("execute layout probe");
-    output
+        .expect("execute layout probe")
 }
 
 #[test]
