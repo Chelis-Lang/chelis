@@ -146,6 +146,44 @@ fn ordinary_compilation_keeps_its_lane_and_explicitly_missing_capture() {
 }
 
 #[test]
+fn tracing_preserves_forward_failure_in_ordinary_host_control() {
+    for source in [
+        "def main(x: tensor[4,f32], flag: bool) -> tensor[4,f32] = if flag then fail(\"stop\") else x",
+        "def bad(x: tensor[4,f32]) -> tensor[4,f32] = fail(\"stop\")\ndef main(x: tensor[4,f32], flag: bool) -> tensor[4,f32] = if flag then bad(x) else x",
+    ] {
+        let ordinary = compile_for_execution(request(source, "main")).unwrap();
+        let traced = compile_for_execution_with_trace(request(source, "main"), |_| ()).unwrap();
+        let c = |artifact: &chelis_compiler_api::compiler::CompiledExecutionArtifact| {
+            artifact
+                .compile_result
+                .files
+                .iter()
+                .find(|file| file.path == "chelis_main.c")
+                .unwrap()
+                .contents
+                .clone()
+        };
+        assert!(c(&ordinary).contains("chelis_fail("));
+        assert!(c(traced.artifact()).contains("chelis_fail("));
+        assert_eq!(
+            serde_json::to_value(ordinary).unwrap(),
+            serde_json::to_value(traced.artifact()).unwrap()
+        );
+    }
+}
+
+#[test]
+fn tracing_preserves_forward_failure_beside_planned_dropout() {
+    let source = "def bad(x: tensor[4,f32]) -> tensor[4,f32] = if tensor_to_scalar(sum(x,0)) > 0.0f32 then fail(\"stop\") else x\ndef random(x: tensor[4,f32]) -> tensor[4,f32] = with seed(42i64) { dropout(x,0.5f32) }\ndef main(x: tensor[4,f32], flag: bool) -> (tensor[4,f32],bool) = (bad(random(x)),flag)";
+    let ordinary = compile_for_execution(request(source, "main")).unwrap();
+    let traced = compile_for_execution_with_trace(request(source, "main"), |_| ()).unwrap();
+    assert_eq!(
+        serde_json::to_value(ordinary).unwrap(),
+        serde_json::to_value(traced.artifact()).unwrap()
+    );
+}
+
+#[test]
 fn later_compiler_failure_never_returns_an_earlier_projection() {
     let source = "def process(x: tensor[4,f32]) -> tensor[4,f32] = relu(x)\ndef batch_process(xs: tensor[8,4,f32]) -> tensor[8,4,f32] = xs |> vmap(process)";
     let ordinary = compile_for_execution(request(source, "batch_process")).unwrap_err();

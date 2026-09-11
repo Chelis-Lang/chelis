@@ -5474,12 +5474,13 @@ fn record_projection_path(expr: &Expr) -> Option<Vec<String>> {
     Some(path)
 }
 
-fn lower_tensor_helper_dag(
+// Observation changes the returned product, never helper admission or failure
+// policy. Keep this guard outside both concrete lowering implementations.
+fn lower_tensor_helper_with<T>(
     expr: &Expr,
     program: &CheckedProgram,
-    scope: &UnordMap<String, HostTypeTerm>,
-    expected: &TensorType,
-) -> Option<crate::Dag> {
+    lower: impl FnOnce() -> Result<T, crate::lower::LowerDiagnostic>,
+) -> Option<T> {
     let defs = cached_program_defs(program);
     // chelis#631: never swallow a fail-reaching FORWARD body into a
     // tensor helper. The DAG lane lowers `fail` to a mask-selected zero
@@ -5502,8 +5503,8 @@ fn lower_tensor_helper_dag(
     // helper sub-lowering instead of swallowing it; the host
     // fallback would otherwise emit an undefined-symbol call to
     // the rejected grad function.
-    match lower_kernel_dag(expr, program, scope, None, expected, None) {
-        Ok((dag, _)) => Some(dag),
+    match lower() {
+        Ok(product) => Some(product),
         Err(diagnostic) if diagnostic.fatal => {
             crate::lower::raise_fatal_lowering_diagnostic(diagnostic)
         }
@@ -5512,6 +5513,17 @@ fn lower_tensor_helper_dag(
             None
         }
     }
+}
+
+fn lower_tensor_helper_dag(
+    expr: &Expr,
+    program: &CheckedProgram,
+    scope: &UnordMap<String, HostTypeTerm>,
+    expected: &TensorType,
+) -> Option<crate::Dag> {
+    lower_tensor_helper_with(expr, program, || {
+        lower_kernel_dag(expr, program, scope, None, expected, None).map(|(dag, _)| dag)
+    })
 }
 
 struct LoweredTensorHelper {
@@ -5604,25 +5616,21 @@ fn lower_tensor_helper_product(
     }
     #[cfg(feature = "lowering-trace")]
     if collect_trace {
-        let context = cached_subexpr_lowering_context(program);
-        let scoped = collect_tensor_scope(scope).into_sorted();
-        let (dag, _, trace) =
-            match crate::lower::try_lower_subexpr_program_with_ordered_inputs_and_trace(
-                expr, scoped, &context, None, None, 0, false,
-            ) {
-                Ok(lowered) => lowered,
-                Err(diagnostic) if diagnostic.fatal => {
-                    crate::lower::raise_fatal_lowering_diagnostic(diagnostic)
-                }
-                Err(_) => return None,
-            };
-        let dag = remap_tensor_helper_dim_symbols(&dag, scope, expected);
-        let mut trace = trace;
-        trace.record_dimension_rebinding(&dag);
-        return Some(LoweredTensorHelper {
-            dag,
-            execution: None,
-            trace: Some(trace),
+        return lower_tensor_helper_with(expr, program, || {
+            let context = cached_subexpr_lowering_context(program);
+            let scoped = collect_tensor_scope(scope).into_sorted();
+            let (dag, _, trace) =
+                crate::lower::try_lower_subexpr_program_with_ordered_inputs_and_trace(
+                    expr, scoped, &context, None, None, 0, false,
+                )?;
+            let dag = remap_tensor_helper_dim_symbols(&dag, scope, expected);
+            let mut trace = trace;
+            trace.record_dimension_rebinding(&dag);
+            Ok(LoweredTensorHelper {
+                dag,
+                execution: None,
+                trace: Some(trace),
+            })
         });
     }
     lower_tensor_helper_dag(expr, program, scope, expected).map(|dag| LoweredTensorHelper {
