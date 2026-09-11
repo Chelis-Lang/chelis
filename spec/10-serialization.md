@@ -29,10 +29,13 @@ versions 1 through 9, and every future version are decode errors before any IR
 node is consumed. There is no versionless default, legacy migration, additive-
 variant tolerance, or best-effort compatibility path.
 
-`WireRiscOp::ExtentWitness { site, parameter, axis, requirements }` preserves a
-call's shape observation and its literal requirements separately. It has one
-tensor input and a rank-zero `int64` output. The normalized `int32` axis must
-be within that input's rank. Every requirement uses the exact
+`WireRiscOp::ExtentWitness { site, parameter, axis, requirements, claims }`
+preserves a
+call's shape observation, its literal requirements and its named requirements
+separately. It has one
+tensor input followed by one earlier `ExtentWitness` input per named claim, and a
+rank-zero `int64` output. The normalized `int32` axis must
+be within the tensor input's rank. Every requirement uses the exact
 `NonnegativeExtent` adapter over a nonnegative `int64`; an absent vector,
 non-integer or negative requirement,
 invalid axis, arity, or output type is an encoding and decoding error.
@@ -42,7 +45,14 @@ local broadcast (`expand`, with the observed input node context); missing or
 unknown sites are decoding errors. `parameter` is diagnostic text, not dimension identity. The node's source
 provenance and invocation dependencies survive transport as ordinary node
 fields and edges. Requirement order and duplicates are preserved; an empty
-requirements vector is valid. `WireDagNode.shape_deps` contains exact u64 node
+requirements vector is valid. `claims` is mandatory and its entries correspond
+one-to-one, in order, with the inputs after the tensor. Each entry carries a
+nonempty dimension binder and a boolean saying whether its requirement input is
+the binder's declaring observation; that role is not recoverable from the edges,
+because either observation can be the later one. An absent `claims` vector, an
+entry with an empty binder, a missing or extra requirement input, and a
+requirement input that is not an earlier rank-zero `int64` `ExtentWitness` are
+each encoding and decoding errors. `WireDagNode.shape_deps` contains exact u64 node
 references to strictly earlier nodes. It does not carry shape numbers.
 `shape_deps`, `span_id` (explicitly null when absent), and `merged_spans` are
 mandatory fields, including when their lists are empty.

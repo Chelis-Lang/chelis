@@ -626,7 +626,7 @@ fn verify_with_dangling_policy(dag: &Dag, reject_dangling: bool) -> Vec<String> 
             // also strictly earlier, which is what keeps the check due "at
             // the later of its two witnesses" (spec/04 §4.7) and the topology
             // acyclic.
-            if claims.len() == arity.saturating_sub(1) {
+            if arity == claims.len() + 1 {
                 for edge in node.inputs.iter().skip(1) {
                     let earlier = edge.0 < node.id.0;
                     let witness = dag.get(*edge).is_some_and(|edge| {
