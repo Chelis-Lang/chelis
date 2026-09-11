@@ -419,11 +419,8 @@ impl Spine {
         remap: &UnordMap<NodeId, NodeId>,
         occurrences: &BTreeSet<OccurrenceId>,
     ) -> Result<Self, String> {
-        if self.full.is_some() {
-            let full = self
-                .full
-                .as_ref()
-                .expect("Resource spine sidecar")
+        if let Some(spine) = &self.full {
+            let full = spine
                 .source
                 .iter()
                 .filter_map(|event| match event.kind {
