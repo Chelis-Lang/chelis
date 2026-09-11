@@ -84,14 +84,23 @@ def assert_extended(test, pr, nightly):
     test.assertNotIn("runtime-extent-oracle", pr["jobs"])
     test.assertNotIn("if", extents)
     test.assertFalse(extents.get("continue-on-error", False))
-    extent_commands = [step.get("run") for step in extents["steps"]]
+    extent_commands = [step.get("run") or "" for step in extents["steps"]]
     test.assertEqual(
         [
             command
             for command in extent_commands
-            if command and "runtime_extent_oracle.py" in command
+            if "runtime_extent_oracle.py" in command
         ],
         [".venv/bin/python scripts/runtime_extent_oracle.py --phase final"],
+    )
+    # The equality already rejects every spelling that names the oracle
+    # script, appended flag included, and the negative twin below measures
+    # both. This says the narrower thing the equality cannot: no step of this
+    # job mentions the flag at all, so a wrapper or an interpolated argument
+    # that reached it without naming the script is refused too.
+    test.assertFalse(
+        any("--allow-shortfall" in command for command in extent_commands),
+        "the nightly extent oracle may not excuse a row shortfall",
     )
     for step in extents["steps"]:
         test.assertNotIn("if", step)
@@ -131,7 +140,15 @@ class ExtendedCadenceTests(unittest.TestCase):
         # could stop enforcing must fail this lock, including dropping it
         # from the nightly report's needs, which is what would let it go red
         # unnoticed.
-        for mutation in ("remove", "skip", "ignore", "steps", "needs", "downgrade"):
+        for mutation in (
+            "remove",
+            "skip",
+            "ignore",
+            "steps",
+            "needs",
+            "downgrade",
+            "shortfall",
+        ):
             nightly = copy.deepcopy(self.nightly)
             job = nightly["jobs"]["runtime-extent-oracle"]
             if mutation == "remove":
@@ -148,13 +165,21 @@ class ExtendedCadenceTests(unittest.TestCase):
                     for name in nightly["jobs"]["report"]["needs"]
                     if name != "runtime-extent-oracle"
                 ]
-            else:
+            elif mutation == "downgrade":
                 # The completion oracle swapped for a phase whose row
                 # shortfall can be excused: the job would still be green,
                 # still be named, and no longer enforce the exit.
                 job["steps"][-1]["run"] = job["steps"][-1]["run"].replace(
                     "--phase final", "--phase b --allow-shortfall"
                 )
+            else:
+                # The subtler half: the command the equality accepts, with
+                # the flag appended. `--phase final` refuses the flag at run
+                # time, so this one would fail the nightly loudly rather than
+                # excuse anything, but a guard that let it through would also
+                # let through the phase spelling that does excuse a
+                # shortfall. Rejecting it here keeps both out.
+                job["steps"][-1]["run"] += " --allow-shortfall"
             with self.subTest(mutation=mutation):
                 with self.assertRaises((AssertionError, KeyError)):
                     assert_extended(self, self.pr, nightly)

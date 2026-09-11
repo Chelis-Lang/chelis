@@ -569,9 +569,16 @@ fn the_census_reader_finds_a_guard_that_is_there() {
 /// a different question with an owner: `parity.rs`'s `parity_corpus_is_complete`
 /// holds the roster and fails naming the drift in either direction. It runs per
 /// pull request, and `faithful_observation_phase3_oracle.py` freezes its
-/// definition digest, so the roster cannot be edited quietly. This census does
-/// not repeat that comparison; what keeps it from measuring an empty directory
-/// is the refusal list below, whose entries must all be reached.
+/// definition digest, deleting a line from that very definition in four
+/// mutation controls, so the roster cannot be edited quietly. This census does
+/// not repeat that comparison, and it must not restate the roster here: a
+/// roster compared against the directory it was read from measures nothing.
+///
+/// What stands in for that comparison is the ENUMERATION WITNESS below. Every
+/// entry of `REFUSED_BY_A_CAPABILITY_GATE` must be reached, so an enumeration
+/// that returned nothing, or that stopped seeing files it used to see, fails
+/// here naming the example it lost. That is an independent fact about the
+/// directory, which a count derived from the same `read_dir` would not be.
 #[test]
 fn no_shipped_example_gains_a_return_boundary_guard() {
     let dir = tempdir().expect("tempdir");
@@ -604,12 +611,17 @@ fn no_shipped_example_gains_a_return_boundary_guard() {
         }
     }
 
+    // THE ENUMERATION WITNESS. Both sides are sorted, so this asks whether
+    // every recorded refusal was reached and nothing else was; the order the
+    // constant happens to be declared in is not part of the contract.
+    let mut expected_refusals: Vec<String> = REFUSED_BY_A_CAPABILITY_GATE
+        .iter()
+        .map(|(name, _)| (*name).to_string())
+        .collect();
+    expected_refusals.sort();
+    refused.sort();
     assert_eq!(
-        refused,
-        REFUSED_BY_A_CAPABILITY_GATE
-            .iter()
-            .map(|(name, _)| (*name).to_string())
-            .collect::<Vec<_>>(),
+        refused, expected_refusals,
         "every recorded refusal must be reached: a name that no longer matches an \
          example, or an enumeration that returned nothing, silently shrinks the census"
     );

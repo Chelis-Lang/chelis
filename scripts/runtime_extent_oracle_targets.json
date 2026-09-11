@@ -305,6 +305,20 @@
     },
     {
       "phase": "b",
+      "id": "cli_claim_contract",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/runtime_extent_claim_preparation.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "claimed_extent_contract"
+      ],
+      "note": "The acceptance runner over all 55 preparation cells, registered when B2b-3 took its `#[ignore]` off. The file's other two rows select `literal_` and `singleton_broadcast_contract` exactly, so neither reaches this test: without this row the contract would run only in the nightly full-workspace job, which does not finish inside its timeout (chelis#1819), and on a schedule it would run nowhere. Named with `--exact` rather than run whole for the reason `exec_c` gives: the receipt check requires the observed test set to EQUAL the expected one, and this file holds twenty-eight tests this phase does not own."
+    },
+    {
+      "phase": "b",
       "id": "cli_slice_b",
       "package": "chelis-cli",
       "kind": "test",
