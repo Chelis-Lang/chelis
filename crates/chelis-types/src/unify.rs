@@ -21,7 +21,7 @@
 //! `nn/embedding.ch`. See the gdb backtrace recorded in this commit's
 //! body for the canonical reproducer.
 
-use chelis_unord::UnordMap;
+use chelis_unord::{UnordMap, UnordSet};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -256,6 +256,18 @@ pub enum DeferredOperandGate {
 }
 
 impl DeferredOperandGate {
+    /// The result the suspended call handed its consumer, if it handed one.
+    ///
+    /// `copy` and `cast` return a fresh variable that discharge unifies with the
+    /// decided type; a host slot returns its builtin's own fixed result type and
+    /// carries none.
+    fn result(&self) -> Option<&Type> {
+        match self {
+            Self::Copy { result } | Self::Cast { result, .. } => Some(result.as_ref()),
+            Self::HostSlot { .. } => None,
+        }
+    }
+
     /// Settle this constraint against the type its operand was just bound to
     /// (chelis#1489).
     ///
@@ -830,6 +842,42 @@ impl Subst {
             .lock()
             .expect("subst.deferred_tensor_operands poisoned")
             .push((v, gate));
+    }
+
+    /// Every variable that still occurs in a PENDING gate's result (chelis#1489).
+    ///
+    /// Consulted by `Env::generalize`, which must not quantify any of them. A
+    /// suspended `copy`/`cast` hands its consumer a fresh result variable and
+    /// ties it to the operand only through this ledger -- invisibly to levels.
+    /// When an unannotated `let` generalized that variable, every use of the
+    /// bound name got its own unconstrained instance, and discharge later bound
+    /// only the original: a declared result was never checked against what the
+    /// call produces, and a false signature checked and ran.
+    ///
+    /// ALL free variables of the applied result are returned, not just a
+    /// top-level type variable. A pending result can be partly unified before it
+    /// discharges -- `g` meeting a `tensor[?d, 3, f32]` expectation makes it
+    /// `tensor[?d, 3, f32]` -- and quantifying `?d` reopens the same hole.
+    pub(crate) fn pending_gate_result_vars(
+        &self,
+    ) -> (UnordSet<TypeVar>, UnordSet<DimVar>, UnordSet<RankVar>) {
+        let ledger = self
+            .deferred_tensor_operands
+            .lock()
+            .expect("subst.deferred_tensor_operands poisoned");
+        let mut tvars = UnordSet::default();
+        let mut dvars = UnordSet::default();
+        let mut rvars = UnordSet::default();
+        for (_, gate) in ledger.iter() {
+            let Some(result) = gate.result() else {
+                continue;
+            };
+            let result = self.apply(result);
+            tvars.extend(crate::env::free_tvars(&result));
+            dvars.extend(crate::env::free_dvars(&result));
+            rvars.extend(crate::env::free_rvars(&result));
+        }
+        (tvars, dvars, rvars)
     }
 
     /// Record a discharge failure for the per-def reporting pass

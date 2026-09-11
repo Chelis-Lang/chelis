@@ -773,6 +773,11 @@ impl Env {
         let ty_dvars = free_dvars(&ty);
         let ty_rvars = free_rvars(&ty);
         let level = subst.current_level();
+        // chelis#1489: a variable still tied to a pending operand gate stays
+        // monomorphic until the gate discharges; see
+        // `Subst::pending_gate_result_vars`. Levels cannot see that tie -- it
+        // lives in the gate ledger, not in any unification.
+        let (pending_t, pending_d, pending_r) = subst.pending_gate_result_vars();
         let tvars = ty_tvars
             .into_iter()
             .filter(|v| {
@@ -782,6 +787,7 @@ impl Env {
                         // group is inferred, so a let-bound alias of a group
                         // member cannot smuggle in polymorphic recursion.
                         && !crate::infer::recursion::tvar_pinned(*v)
+                        && !pending_t.contains(v)
             })
             .collect::<Vec<_>>();
         let tvar_restrictions = tvars
@@ -797,11 +803,11 @@ impl Env {
             tvar_restrictions,
             dvars: ty_dvars
                 .into_iter()
-                .filter(|v| subst.level_of_dvar(*v) > level)
+                .filter(|v| subst.level_of_dvar(*v) > level && !pending_d.contains(v))
                 .collect(),
             rvars: ty_rvars
                 .into_iter()
-                .filter(|v| subst.level_of_rvar(*v) > level)
+                .filter(|v| subst.level_of_rvar(*v) > level && !pending_r.contains(v))
                 .collect(),
             body: ty,
         }
@@ -815,9 +821,16 @@ impl Env {
         let env_tvars = self.free_tvars(subst);
         let env_dvars = self.free_dvars(subst);
         let env_rvars = self.free_rvars(subst);
+        // chelis#1489: the same exclusion as `generalize_by_levels`, so the
+        // parity assertion in `generalize` keeps comparing like with like.
+        let (pending_t, pending_d, pending_r) = subst.pending_gate_result_vars();
         let tvars = free_tvars(&ty)
             .into_iter()
-            .filter(|v| !env_tvars.contains(v) && !crate::infer::recursion::tvar_pinned(*v))
+            .filter(|v| {
+                !env_tvars.contains(v)
+                    && !crate::infer::recursion::tvar_pinned(*v)
+                    && !pending_t.contains(v)
+            })
             .collect::<Vec<_>>();
         let tvar_restrictions = tvars
             .iter()
@@ -832,11 +845,11 @@ impl Env {
             tvar_restrictions,
             dvars: free_dvars(&ty)
                 .into_iter()
-                .filter(|v| !env_dvars.contains(v))
+                .filter(|v| !env_dvars.contains(v) && !pending_d.contains(v))
                 .collect(),
             rvars: free_rvars(&ty)
                 .into_iter()
-                .filter(|v| !env_rvars.contains(v))
+                .filter(|v| !env_rvars.contains(v) && !pending_r.contains(v))
                 .collect(),
             body: ty,
         }
