@@ -9,6 +9,8 @@ repository.workspace = true
 [features]
 # Native immutable views at the actual code-generation boundary; default off.
 emission-observer = []
+# Same-compilation helper captures and a final-success-bound projection; default off.
+compilation-trace = ["emission-observer", "chelis-ir/lowering-trace", "chelis-pipeline-core/lowering-trace"]
 
 [dependencies]
 chelis-unord.workspace = true
