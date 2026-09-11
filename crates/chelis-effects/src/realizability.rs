@@ -1085,7 +1085,6 @@ fn type_expr_has_unresolved_observation_parameter(expr: &Expr) -> bool {
     };
     match tag {
         DeepTag::TVar | DeepTag::DVar | DeepTag::DRank => true,
-        DeepTag::DName => children.first().and_then(symbol_name) == Some("*"),
         _ => children
             .iter()
             .any(type_expr_has_unresolved_observation_parameter),
@@ -1826,6 +1825,87 @@ mod tests {
             manifest.entries.is_empty(),
             "a generic nullary has no standalone value until a concrete call instantiates it"
         );
+    }
+
+    /// chelis#1397 regression test. A nullary root whose result extent is a
+    /// runtime extent (`tensor[*, f32]`, spec/04 §4.7: a value with a claim,
+    /// not an unknown rank) is an owed root. Before this change the wildcard
+    /// arm of `type_expr_has_unresolved_observation_parameter` dropped it and
+    /// both lanes fell silent. Reverting `realizability.rs` to the base sha
+    /// makes this assertion fail with an empty manifest.
+    #[test]
+    fn compute_root_manifest_keeps_a_runtime_extent_nullary_root() {
+        let checked = check_program_from_source(
+            "def g(x: tensor[n, f32]) -> tensor[m, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
+             def main() = g(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n",
+        );
+        let realizability = infer_realizability(&checked, C_PRIMS);
+        let manifest = compute_root_manifest(&checked, &realizability);
+        assert!(
+            manifest.entries.iter().any(|entry| entry.name == "main"),
+            "a nullary root with a runtime result extent is observable: {:?}",
+            manifest
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// chelis#1397 regression test at the predicate. The `*` extent no longer
+    /// counts as an unresolved observation parameter. Red on the base sha,
+    /// where the removed `DeepTag::DName` arm returned true for `*`.
+    #[test]
+    fn a_runtime_extent_is_not_an_unresolved_observation_parameter() {
+        for (label, source) in [
+            ("rank one", "(t-tensor {} (d-name {} *) (t-prim {} f32))"),
+            (
+                "beside a concrete axis",
+                "(t-tensor {} (d-lit {} 2) (d-name {} *) (t-prim {} f32))",
+            ),
+            (
+                "under a nullary function result",
+                "(t-fn {} (t-tensor {} (d-name {} *) (t-prim {} f32)))",
+            ),
+        ] {
+            let expr = chelis_deep::parser::parse_and_stamp_type(source)
+                .unwrap_or_else(|error| panic!("{label}: {error:?}"));
+            assert!(
+                !type_expr_has_unresolved_observation_parameter(&expr),
+                "{label} must be a resolved runtime extent"
+            );
+        }
+    }
+
+    /// Negative parity for the test above, and a disposition lock rather than
+    /// a regression test: every one of these already returned true on the base
+    /// sha and must keep doing so. An unknown rank or an uninstantiated type or
+    /// dim variable has no ABI, so such a nullary declaration stays unobserved;
+    /// only the unknown *extent* was reclassified.
+    #[test]
+    fn type_dim_and_rank_variables_remain_unresolved_observation_parameters() {
+        for (label, source) in [
+            (
+                "rank variable",
+                "(t-tensor {} (d-rank {} r) (t-prim {} f32))",
+            ),
+            (
+                "dim variable",
+                "(t-tensor {} (d-var {} d0) (t-prim {} f32))",
+            ),
+            ("type variable", "(t-tensor {} (d-lit {} 2) (t-var {} p))"),
+            (
+                "nested under a function result",
+                "(t-fn {} (t-tensor {} (d-rank {} r) (t-prim {} f32)))",
+            ),
+        ] {
+            let expr = chelis_deep::parser::parse_and_stamp_type(source)
+                .unwrap_or_else(|error| panic!("{label}: {error:?}"));
+            assert!(
+                type_expr_has_unresolved_observation_parameter(&expr),
+                "{label} must stay an unresolved observation parameter"
+            );
+        }
     }
 
     #[test]

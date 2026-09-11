@@ -1211,10 +1211,10 @@
   },
   "vmap.shape": {
     "c": {
-      "stage": "no_entry",
-      "stderr": "accepted root has no C entry",
-      "stdout": "",
-      "success": false
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "main = tensor(shape=[2, 2], data=[2.0, 3.0, 5.0, 6.0])",
+      "success": true
     },
     "check": {
       "errors": [],
@@ -1227,18 +1227,18 @@
     },
     "eval": {
       "stage": "execute",
-      "stderr": "warning: input contains only def declarations; nothing to evaluate",
-      "stdout": "",
+      "stderr": "",
+      "stdout": "main = tensor(shape=[2, 2], data=[2.0, 3.0, 5.0, 6.0])",
       "success": true
     },
     "issue": 1378
   },
   "wildcard.root": {
     "c": {
-      "stage": "no_entry",
-      "stderr": "accepted root has no C entry",
-      "stdout": "",
-      "success": false
+      "stage": "execute",
+      "stderr": "",
+      "stdout": "main = tensor(shape=[2], data=[2.0, 3.0])",
+      "success": true
     },
     "check": {
       "errors": [],
@@ -1251,8 +1251,8 @@
     },
     "eval": {
       "stage": "execute",
-      "stderr": "warning: input contains only def declarations; nothing to evaluate",
-      "stdout": "",
+      "stderr": "",
+      "stdout": "main = tensor(shape=[2], data=[2.0, 3.0])",
       "success": true
     },
     "issue": 1397
