@@ -145,9 +145,9 @@ const ALLOWED: &[(&str, usize, usize, &str)] = &[
     ),
     (
         "crates/chelis-ir/src/axis_sources.rs",
-        2,
+        3,
         1,
-        "ExpansionKind renders both source primitives for local guards. The extra expand is UnitExtentClaim::trap_op, which guards the pre-existing unit axis; insert makes no such claim",
+        "ExpansionKind renders both source primitives for local guards. The second expand is UnitExtentClaim::trap_op, which guards the pre-existing unit axis; insert makes no such claim. The third is chelis#1773's `ExtentWitnessSite::LocalExpand` arm in `witness_entry_obligations`, which renders the same [04-NUM-9] `<op>` slot for the witness-entry form of that claim. `ExtentWitnessSite` has exactly two variants, `Caller` and `LocalExpand`, and both arms are written here, so the match is already exhaustive: there is no insert site to name, for the same reason trap_op has no insert arm",
     ),
     (
         "crates/chelis-ir/src/dag.rs",
@@ -176,9 +176,9 @@ const ALLOWED: &[(&str, usize, usize, &str)] = &[
     ),
     (
         "crates/chelis-ir/src/lower.rs",
-        18,
         19,
-        "the dispatch preserves both spellings; nine embedded rank-raising fixtures now use insert, and the five new expand literals name only checked singleton-broadcast construction and diagnostics. The new witnesses have no insert counterpart because insert does not require a singleton operand",
+        19,
+        "the dispatch preserves both spellings; nine embedded rank-raising fixtures now use insert, and the five expand literals added with the singleton-broadcast witnesses name only checked construction and diagnostics, which have no insert counterpart because insert does not require a singleton operand. Equal, but not fully paired: chelis#1804's nineteenth expand literal is the `\"expand size\"` context string handed to `lower_one_bound` inside the `callee @ (\"expand\" | \"insert\")` arm, so an `insert` program whose size argument is not a tensor reads `expand size requires a tensor`. The sibling site four lines up interpolates both spellings as `\"expand/insert input\"`. That is the vmap_extent.rs shape this inventory exists to catch and it is recorded here rather than repaired: chelis#1789 scopes the count, and the repair is a callee-derived label, not a second literal",
     ),
     (
         "crates/chelis-ir/src/tier2.rs",

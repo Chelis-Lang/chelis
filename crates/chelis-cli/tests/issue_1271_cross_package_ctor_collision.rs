@@ -39,6 +39,8 @@
 // introduced. Their mangled names share a terminal exactly as two
 // packages' do, so the same defect reached lowering by a second route.
 
+mod common;
+
 use assert_cmd::Command;
 use chelis_compiler_api::COMPILER_VERSION;
 use std::fs;
@@ -285,17 +287,18 @@ fn build_app(
 fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
     // The public symbol is now the [04-LIN-7] borrowing adapter. Constructor
     // layout and projection are emitted in the consuming implementation body.
-    let (prefix, params) = signature
+    let (prefix, _params) = signature
         .split_once('(')
         .expect("test signature contains parameter list");
-    let signature = format!("{prefix}__chelis_owned_body({params}");
-    let start = source
-        .find(&format!("{signature} {{"))
-        .unwrap_or_else(|| panic!("emitted C has no `{signature}` definition:\n{source}"));
-    let rest = &source[start..];
+    // chelis#1820: located by NAME, not by the full signature. chelis#1799
+    // added a `chelis_rng_state` parameter to every host body, and the old
+    // full-signature needle then missed the definition and failed before this
+    // row read anything. The parameter list is not what the row asserts.
+    let name = format!("{prefix}__chelis_owned_body");
+    let rest = common::host_body_definition(source, &name);
     let end = rest
         .find("\n}\n")
-        .unwrap_or_else(|| panic!("`{signature}` definition is unterminated:\n{rest}"));
+        .unwrap_or_else(|| panic!("`{name}` definition is unterminated:\n{rest}"));
     &rest[..end]
 }
 
