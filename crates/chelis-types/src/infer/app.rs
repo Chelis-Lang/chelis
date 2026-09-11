@@ -599,6 +599,7 @@ fn infer_app_inner(
             env,
             vg,
             subst,
+            adt_reg,
             errors,
             product,
             expected_result,

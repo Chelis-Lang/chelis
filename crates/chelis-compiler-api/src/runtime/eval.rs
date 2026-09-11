@@ -19,6 +19,78 @@ use super::named_axis::*;
 use super::transforms::*;
 use super::*;
 
+/// The canonical builtin name a host function's return expression applies, when
+/// the return expression IS a direct builtin application.
+///
+/// `[04-NUM-9]`'s `<op>` slot takes the canonical name of the operation that
+/// introduces the guarded extent. A body that returns a block, a user call, or
+/// a variable has no such name, so the return-boundary guard does not fire for
+/// it (chelis#1771, locked on both lanes by
+/// `crates/chelis-cli/tests/issue_1739_diagonal_runtime_bound.rs`).
+fn direct_builtin_head(body: &Expr) -> Option<&str> {
+    let Some((DeepTag::App, kids)) = tagged_expr_children(body) else {
+        return None;
+    };
+    builtin_name(kids.first()?)
+}
+
+/// chelis#1739. Compare a host function's declared literal result extents
+/// against the tensor it produced, and render the `[04-NUM-9]` `Domain` trap on
+/// disagreement.
+///
+/// `diagonal` and the rest of `HOST_ONLY_BUILTINS` never become a `RiscOp`, so
+/// `expr_is_dag_lowerable` is false for a def that calls one and the DAG lane's
+/// literal-result claim (`lower.rs`'s `preserve_literal_result`) cannot reach
+/// them. Without this, `def d(x: tensor[n, 4, f32]) -> tensor[3, f32] =
+/// diagonal(x, 0, 1)` applied at `n = 2` returned a two-element tensor under a
+/// three-element declaration, on both lanes and with no diagnostic.
+///
+/// A rank disagreement is NOT this guard's business: the checker owns rank, and
+/// reporting it here would duplicate a verdict with a worse message.
+///
+/// `declared` is the CHECKED result type where one exists, not the syntactic
+/// annotation, so an aliased declaration carries the same verdict as its
+/// expansion and agrees with the C emitter, which reads the resolved ABI type.
+fn declared_result_extent_trap(
+    declared: Option<&Expr>,
+    body: &Expr,
+    produced: &RuntimeValue,
+) -> Option<String> {
+    let RuntimeValue::Tensor(tensor) = produced else {
+        return None;
+    };
+    let op = direct_builtin_head(body)?;
+    let stripped = strip_type_wrappers(declared?);
+    let list = as_list(stripped)?;
+    if tag(list) != Some(DeepTag::TTensor) {
+        return None;
+    }
+    let kids = children(list);
+    let (_, dim_exprs) = kids.split_last()?;
+    if dim_exprs.len() != tensor.value.shape.len() {
+        return None;
+    }
+    for (axis, (dim_expr, observed)) in dim_exprs.iter().zip(tensor.value.shape.iter()).enumerate()
+    {
+        let Some(dim_list) = as_list(dim_expr) else {
+            continue;
+        };
+        if tag(dim_list) != Some(DeepTag::DLit) {
+            continue;
+        }
+        let Some(required) = children(dim_list).first().and_then(int_value) else {
+            continue;
+        };
+        if required < 0 || required as usize != *observed {
+            return Some(format!(
+                "extent `{required}`: claimed = {required}, {op} axis {axis} = {observed}\n\
+                 numeric trap: domain in {op} at int64"
+            ));
+        }
+    }
+    None
+}
+
 /// [05-HOST-4]: choose the first invalid host name in the declared order.
 /// Complete validation precedes construction of language/runtime list values.
 fn list_dir_names_to_strings(
@@ -1573,7 +1645,29 @@ impl<'a> EvalContext<'a> {
                 self.bindings = saved;
                 self.binding_types = saved_types;
                 self.precision_bindings = saved_precisions;
-                value
+                let produced = value?;
+                // chelis#1739: the host lane's return boundary is where a
+                // declared literal extent meets the value that has to satisfy
+                // it. See `declared_result_extent_trap`.
+                //
+                // The CHECKED signature's result wins over the syntactic
+                // annotation, because the two spell the same declaration
+                // differently: `-> Row` for `type Row = tensor[3, f32]` reaches
+                // `return_type` as a bare name and reaches the checked
+                // signature as the resolved `t-tensor`. The C emitter reads the
+                // resolved `HostAbiType::Tensor`, so reading the syntax here
+                // made the two lanes disagree on exactly the alias spelling
+                // (round 1 P1). `return_type` remains the fallback for a
+                // closure the checker recorded no signature for.
+                let declared_result = checked_signature
+                    .as_ref()
+                    .and_then(checked_function_children)
+                    .and_then(<[Expr]>::last)
+                    .or(return_type.as_ref());
+                if let Some(trap) = declared_result_extent_trap(declared_result, &body, &produced) {
+                    return Err(trap);
+                }
+                Ok(produced)
             }
             RuntimeValue::Transform {
                 kind,
