@@ -6224,9 +6224,9 @@ _Static_assert(_Generic(&cblas_dgemm, chelis_dgemm_signature: 1, default: 0), "C
         // section 4.7.2 makes only a NEGATIVE size an error. So an extent-0
         // result under a declared `tensor[2, f32]` is a CLAIM mismatch and the
         // guard reporting it is the conforming diagnostic; this rejection is
-        // chelis#616's operation-level admission rule, which the numbered spec
-        // does not require, and the evaluator's matching rejection is what
-        // diverges from it. Round 1 of chelis#1397 read the order the other way
+        // an operation-level admission rule the numbered spec does not require,
+        // and the evaluator's matching rejection is what diverges from it
+        // (chelis#1795). Round 1 of chelis#1397 read the order the other way
         // round and this comment records why that reading was wrong, so the
         // next reader does not re-derive it.
         for (axis, (start, end)) in bounds.iter().enumerate() {

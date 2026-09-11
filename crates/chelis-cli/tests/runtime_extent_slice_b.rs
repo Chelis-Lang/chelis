@@ -3498,6 +3498,9 @@ fn an_unread_declaring_parameter_still_guards_its_named_result_claim() {
         !c_ok,
         "a shrink that produces 3 under `n` = 2 traps: {c_out}"
     );
+    // `claimed = 2` rather than `w axis 0 = 2`: the canonical side of every
+    // local guard renders that way, and naming the declaring source is a
+    // `LocalGuardClaim` representation change tracked by chelis#1794.
     let context = "extent `n`: claimed = 2, shrink axis 0 = 3";
     for (lane, out) in [("eval", &eval_out), ("c", &c_out)] {
         assert!(
@@ -3536,11 +3539,13 @@ fn empty_span_source(len: usize) -> String {
 /// admission rule, which the numbered spec does not require.
 ///
 /// Round 1 read this the other way round and asked for C to be reordered
-/// behind the evaluator. I made that change, then checked the atom, and took
-/// it out: it would have moved the conforming lane onto the non-conforming
-/// one. The divergence is chelis#616's admission rule against section 2.4.1's
-/// closed list, it predates this slice, and mere discovery during review does
-/// not bring it into scope.
+/// behind the evaluator. That change was made, then the atom was checked, and
+/// it was taken out: it would have moved the conforming lane onto the
+/// non-conforming one. The divergence is an operation-level admission rule
+/// against section 2.4.1's closed list; it predates this slice, and mere
+/// discovery during review does not bring it into scope. Tracked by
+/// chelis#1795, and chelis#1481 asks for the opposite direction on a premise
+/// chelis#1795 questions.
 ///
 /// EVIDENTIARY STATUS: disposition lock on both lanes, not a regression test.
 /// Both assertions describe the behaviour on the reviewed head `cab086ef4` and

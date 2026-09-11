@@ -2343,10 +2343,10 @@ where
                             // only a NEGATIVE size an error, so an extent-0
                             // result under a declared `tensor[2, f32]` is a
                             // claim mismatch. This lane instead rejects the
-                            // span itself under chelis#616's operation-level
-                            // admission rule, which the numbered spec does not
-                            // require; the divergence is that rule's, is
-                            // pre-existing, and is pinned rather than repaired
+                            // span itself under an operation-level admission
+                            // rule the numbered spec does not require; the
+                            // divergence is pre-existing, is tracked by
+                            // chelis#1795, and is pinned rather than repaired
                             // here.
                             None => continue,
                         }
