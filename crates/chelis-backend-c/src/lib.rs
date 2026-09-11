@@ -47,7 +47,8 @@ pub struct CodegenResult {
     pub symbolic_dims: Vec<String>,
 }
 
-/// A tensor-helper DAG and the exact symbol the generated host wrapper calls.
+/// A tensor-helper DAG and the symbol a peer translation unit must define.
+/// The generated host calls it through a private context adapter.
 ///
 /// The manifest is read off the concrete host program before payload
 /// selection and ownership lowering, so a device backend can lower a selected
@@ -756,9 +757,9 @@ mod tests {
         let src = &result.c_source;
 
         // The tensor helper must be static (internal to the TU).
-        // `emit_host_program` names the helper as `{emitted_fn_name}__tensor_{index}`.
+        // The context-carrying helper is private to this translation unit.
         assert!(
-            src.contains("static void my_fn__tensor_0("),
+            src.contains("static void my_fn__tensor_0__with_rng("),
             "tensor helper must carry static linkage to avoid PLT export;\ngenerated source:\n{}",
             src
         );
@@ -3796,7 +3797,7 @@ int main(void) {{
 
         // Tensor helper must be `static void` (never static inline — it uses the DAG kernel sig)
         assert!(
-            src.contains("static void my_func__tensor_0("),
+            src.contains("static void my_func__tensor_0__with_rng("),
             "tensor helper must be `static void` even in globals mode;\ngenerated source:\n{src}"
         );
         // The published header declares this authored function external, so
