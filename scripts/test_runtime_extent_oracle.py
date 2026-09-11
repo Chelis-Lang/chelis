@@ -523,7 +523,9 @@ class RuntimeExtentOracleTests(unittest.TestCase):
         # B2b-2's own pair left the shortfall with chelis#665's fix.
         self.assertNotIn("expand.kept_axis.op_declared_source.c", shortfall)
         self.assertNotIn("expand.kept_axis.op_declared_source.eval", shortfall)
-        self.assertIn("expand.named_claim.cross_tensor_read.c", shortfall)
+        # A row whose owning slice has not started, named so this assertion
+        # does not go stale every time a sibling change moves a row: #1266's
+        # record projection is the provenance work B2b-2 explicitly defers.
         self.assertIn("expand.record_projection.size", shortfall)
         self.assertNotEqual(shortfall, ())
         self.assertEqual(ORACLE.exit_shortfall(ORACLE.PHASE_REGISTRY["a"]), ())

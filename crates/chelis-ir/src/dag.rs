@@ -2736,7 +2736,7 @@ mod tests {
             &UnordMap::from([("m".to_string(), 3usize)]),
             &UnordSet::new(),
         )
-            .expect("bindings should apply");
+        .expect("bindings should apply");
         let node = rebound.get(shrunk).unwrap();
         // The concrete axis-0 bound is untouched; the sentinel axis-1 bound
         // resolves to `(0, 0 + 3)` = the full bound extent.

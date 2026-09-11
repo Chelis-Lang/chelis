@@ -1257,7 +1257,7 @@ fn binding_a_to_end_bound_rejects_a_start_that_is_not_literal_zero() {
         &bindings,
         &chelis_unord::UnordSet::new(),
     )
-        .expect("the identity slice binds");
+    .expect("the identity slice binds");
     assert!(matches!(
         &resolved.get(NodeId(1)).expect("shrink").op,
         RiscOp::Shrink { bounds }
@@ -1269,7 +1269,7 @@ fn binding_a_to_end_bound_rejects_a_start_that_is_not_literal_zero() {
         &bindings,
         &chelis_unord::UnordSet::new(),
     )
-        .expect_err("a nonzero start is a malformed bound, not a slice");
+    .expect_err("a nonzero start is a malformed bound, not a slice");
     assert!(error.contains("requires a literal zero start"), "{error}");
 }
 

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "aaa3922990b2193cb370bf2f1072983e918039a6711e69615e9c1276df8e8c49",
+  "corpus_sha256": "1f4930c7cddf79e657ff4f3eccf9169695a3bb6960043fdea59982427b7dc50e",
   "rows": [
     {
       "id": "claim.literal.nested_and_unused.eval_c",
@@ -113,13 +113,13 @@
     {
       "id": "expand.kept_axis.op_declared_source.c",
       "baseline": "ice",
-      "phase_b": "ice",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.issue_665_expand_over_stride_builds_and_runs"
     },
     {
       "id": "expand.kept_axis.op_declared_source.eval",
-      "baseline": "ice",
-      "phase_b": "ice",
+      "baseline": "executes_exactly",
+      "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.an_op_declared_axis_on_an_expand_input_flows_through_the_kept_output_axis_on_eval"
     },
     {
