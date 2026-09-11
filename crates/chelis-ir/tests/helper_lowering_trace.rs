@@ -195,11 +195,11 @@ def derivative(x: tensor[3, f32], y: tensor[3, f32])
 fn named_axis_helper_records_dimension_rebinding_without_rewriting_pass_snapshots() {
     let program = manifested(
         r#"
+def named_twice[n](x: tensor[n, f32]) -> tensor[n, f32] = add(x, x)
 def selected(
-  x: tensor[batch, inner, f32],
-  w: tensor[inner, output, f32],
+  x: tensor[3, f32],
   flag: bool
-) -> (tensor[batch, output, f32], bool) = (matmul(x, w), flag)
+) -> (tensor[3, f32], bool) = (named_twice(x), flag)
 "#,
     );
     let (_, plan) = try_lower_manifested_execution_program_with_trace(&program).unwrap();
@@ -235,7 +235,10 @@ fn helper_packing_keeps_duplicate_cotangent_slots_as_distinct_ordered_roots() {
     let program = manifested(
         r#"
 def duplicated(x: tensor[3, f32], flag: bool)
-  -> (tensor[3, f32], tensor[3, f32], bool) = (x, x, flag)
+  -> (tensor[3, f32], tensor[3, f32], bool) = {
+  y = add(x, x)
+  (y, y, flag)
+}
 "#,
     );
     let (_, plan) = try_lower_manifested_execution_program_with_trace(&program).unwrap();
