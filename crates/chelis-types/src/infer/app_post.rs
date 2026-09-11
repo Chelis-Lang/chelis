@@ -5,6 +5,120 @@
 
 use super::*;
 
+/// The declared extent at one axis of an application's result, read from the
+/// two ingresses a declaration can reach a builtin call through.
+///
+/// The `def`/`sig` route hands the declared return type down as
+/// `expected_result`. A block-scoped ascription (`y: tensor[9, f32] = ...`)
+/// does not: `infer_let` infers the right-hand side with no expectation and
+/// unifies afterwards, so the ascription arrives as `"type"` metadata on this
+/// very application node (`crates/chelis-surf/src/desugar.rs`'s
+/// `inject_type_metadata`). Resolving it here costs one speculative
+/// `resolve_deep_type`, whose diagnostics are rolled back because `infer_let`
+/// owns reporting for that same annotation and would otherwise report twice.
+/// Going through the resolver rather than reading the metadata shape directly
+/// is what makes a declared type alias (`type Row = tensor[9, f32]`) carry the
+/// same verdict as its expansion.
+#[allow(clippy::too_many_arguments)]
+fn declared_result_literal(
+    result_axis: usize,
+    expected_result: Option<&Type>,
+    list: &deep::List,
+    env: &Env,
+    vg: &mut VarGen,
+    adt_reg: &AdtRegistry,
+    subst: &Subst,
+    errors: &mut DiagnosticSink<'_>,
+) -> Option<i64> {
+    fn literal_at(ty: &Type, axis: usize) -> Option<i64> {
+        let Type::Tensor(dims, _) = ty else {
+            return None;
+        };
+        match dims.get(axis)? {
+            Dim::Lit(value) => Some(*value),
+            Dim::Name(_) | Dim::Var(_) | Dim::Wildcard | Dim::Rank(_) => None,
+        }
+    }
+
+    if let Some(found) = expected_result
+        .map(|expected| subst.apply(expected))
+        .and_then(|expected| literal_at(&expected, result_axis))
+    {
+        return Some(found);
+    }
+
+    let owner = deep::Expr::List(list.clone(), zero_span());
+    let (_, meta, _) = stamped_parts(&owner)?;
+    let declared = meta.ty().map(|value| value.expression())?;
+    let checkpoint = errors.checkpoint();
+    let resolved = resolve_deep_type(
+        declared,
+        vg,
+        adt_reg,
+        TypeUseSite::Annotation,
+        annotation_binder_mode(env),
+        errors,
+    );
+    errors.retain_since(checkpoint, |_| false);
+    literal_at(&resolved.ok()?, result_axis)
+}
+
+/// chelis#1739. `[05-OP-33]` replaces the retained axis extent with the smaller
+/// selected extent, so a literal selected axis bounds the result from above for
+/// every runtime value of the other axis. A declared extent strictly greater
+/// than that bound is unreachable and is a `DimensionMismatch`; at or below it
+/// is satisfiable and the runtime guard owns the verdict.
+///
+/// Returns the error type when it rejects, so the caller propagates it instead
+/// of the inferred result. `Type::Error` unifies with anything, which is what
+/// keeps the enclosing signature or ascription from reporting a second time.
+#[allow(clippy::too_many_arguments)]
+fn reject_unreachable_diagonal_extent(
+    operand: &Type,
+    axis1: usize,
+    axis2: usize,
+    list: &deep::List,
+    env: &Env,
+    vg: &mut VarGen,
+    adt_reg: &AdtRegistry,
+    subst: &Subst,
+    errors: &mut DiagnosticSink<'_>,
+    expected_result: Option<&Type>,
+) -> Option<Type> {
+    let (result_axis, source_axis, bound) = diagonal_result_bound(operand, axis1, axis2)?;
+    let declared = declared_result_literal(
+        result_axis,
+        expected_result,
+        list,
+        env,
+        vg,
+        adt_reg,
+        subst,
+        errors,
+    )?;
+    if declared <= bound {
+        return None;
+    }
+    Some(report(
+        errors,
+        CheckError::new(
+            CheckErrorKind::DimensionMismatch,
+            with_macro_provenance(
+                &deep::Expr::List(list.clone(), zero_span()),
+                format!(
+                    "diagonal declares the smaller selected extent ([05-OP-33]): \
+                     axis {source_axis} is literal {bound}, so the result extent is \
+                     at most {bound}, but the declared result extent is {declared}"
+                ),
+            ),
+            vec![format!(
+                "Declare an extent at or below {bound}, or select an axis pair \
+                 whose literal extent is at least {declared}"
+            )],
+        ),
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn finish_unified_app(
     list: &deep::List,
@@ -15,6 +129,7 @@ pub(super) fn finish_unified_app(
     env: &mut Env,
     vg: &mut VarGen,
     subst: &mut Subst,
+    adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
     expected_result: Option<&Type>,
@@ -969,7 +1084,30 @@ pub(super) fn finish_unified_app(
                     Err(err) => return err,
                 };
                 match infer_diagonal_result_type(&diagonal_operand, axis1, axis2) {
-                    Ok(ty) => return ty,
+                    Ok(ty) => {
+                        // chelis#1739: the result dim stays a wildcard for a
+                        // mixed (symbolic, literal) pair, and a wildcard
+                        // unifies with every declared extent. The literal is
+                        // still an upper bound on the minimum, so compare the
+                        // declared extent against it here, at the one place
+                        // that knows both the operand's axes and the
+                        // declaration.
+                        if let Some(rejection) = reject_unreachable_diagonal_extent(
+                            &diagonal_operand,
+                            axis1,
+                            axis2,
+                            list,
+                            env,
+                            vg,
+                            adt_reg,
+                            subst,
+                            errors,
+                            expected_result,
+                        ) {
+                            return rejection;
+                        }
+                        return ty;
+                    }
                     Err(message) => {
                         return report(
                             errors,
