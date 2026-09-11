@@ -32,6 +32,8 @@ pub(crate) enum StageValue {
 #[derive(Debug, Clone)]
 pub(crate) struct HostSource {
     pub before: usize,
+    /// Independently recorded source occurrence cut, before this host action.
+    pub occurrences_before: Option<usize>,
     pub value: StageValue,
     pub ty: HostTypeTerm,
     pub expression: Expr,
@@ -175,7 +177,7 @@ pub(crate) fn partition(
         if source.before < start || source.before > logical.nodes().len() {
             return Err("a staged source requires one ordered producer".into());
         }
-        partition.append_kernel(start, source.before)?;
+        partition.append_kernel(start, source.before, source.occurrences_before)?;
         let captures = source
             .captures
             .iter()
@@ -218,7 +220,8 @@ pub(crate) fn partition(
         partition.available.insert(source.value);
         start = source.before + usize::from(matches!(source.value, StageValue::Tensor(_)));
     }
-    partition.append_kernel(start, logical.nodes().len())?;
+    let final_occurrence = partition.evaluation.as_ref().map(|plan| plan.source_len());
+    partition.append_kernel(start, logical.nodes().len(), final_occurrence)?;
     if !partition.available.contains(&StageValue::Tensor(*root)) {
         return Err("a staged tensor result has no executed producer".into());
     }
@@ -239,8 +242,22 @@ struct Partition<'a> {
 }
 
 impl Partition<'_> {
-    fn append_kernel(&mut self, start: usize, end: usize) -> Result<(), String> {
-        if start == end {
+    fn append_kernel(
+        &mut self,
+        start: usize,
+        end: usize,
+        source_end: Option<usize>,
+    ) -> Result<(), String> {
+        let source_end = match (&self.evaluation, source_end) {
+            (Some(_), Some(end)) => Some(end),
+            (Some(_), None) => return Err("staged source lost its execution occurrence cut".into()),
+            (None, _) => None,
+        };
+        let has_controls = self
+            .evaluation
+            .as_ref()
+            .is_some_and(|plan| source_end != Some(plan.source_position()));
+        if start == end && !has_controls {
             return Ok(());
         }
         // Only values read after this cut cross the ABI. In particular, an
@@ -339,7 +356,11 @@ impl Partition<'_> {
                 .into_iter()
                 .filter(|(node, _)| (start..end).contains(&node.0))
                 .collect();
-            evaluation.append_segment(dag.clone(), &local);
+            evaluation.append_segment(
+                dag.clone(),
+                &local,
+                source_end.expect("checked source cut"),
+            )?;
         }
         self.stages.push(HostStage::Kernel { dag, outputs });
         Ok(())
@@ -556,6 +577,7 @@ mod tests {
         dag.add_root(result);
         let sources = vec![HostSource {
             before: actual.0,
+            occurrences_before: None,
             value: StageValue::Tensor(actual),
             ty: HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64)),
             expression: chelis_deep::parser::parse_str("(lit {type: (t-prim {} int64)} 2)")

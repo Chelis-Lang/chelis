@@ -289,6 +289,58 @@ fn request(source: &str) -> EvalRequest {
     }
 }
 
+#[test]
+fn staged_ad_local_seed_controls_restore_before_the_following_host_cut() {
+    let source = "def loss(x: tensor[a, b, f32]) -> tensor[f32] = with seed(42i64) {\n identity = with seed(42i64) { x }\n sum(sum(dropout(identity, 0.5f32), 0i32), 0i32)\n}\ndef checked(source: tensor[m, f32], x: tensor[n, f32]) -> tensor[2, 2, f32] = {\n first = dropout(source, 0.0f32)\n shaped = reshape(x, [numel(first), 2i64])\n gradient = grad(loss)(shaped)\n dropout(reshape(gradient, [len(to_list(source)), 2i64]), 0.5f32)\n}\ndef sample() = with seed(42i64) {\n source = to_tensor(SOURCE)\n x = to_tensor(VALUES)\n result = checked(source, copy(x))\n (result, dropout(x, 0.5f32))\n}";
+    for count in [2, 3, 2] {
+        let values = |n| {
+            format!(
+                "[{}]",
+                std::iter::repeat_n("1.0f32", n)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        let source = source
+            .replace("SOURCE", &values(count))
+            .replace("VALUES", &values(count * 2));
+        let request = EvalRequest {
+            source_kind: SourceKind::Surf,
+            source,
+            bindings: BTreeMap::new(),
+        };
+        let prepared = prepare_eval(request.clone()).unwrap();
+        for result in [
+            eval_selected(request, &["sample".into()]),
+            prepared.eval_root(BTreeMap::new(), "sample"),
+        ] {
+            if count == 3 {
+                let error = result.unwrap_err();
+                assert!(
+                    error
+                        .errors
+                        .iter()
+                        .any(|error| error.message.contains("claimed = 2")
+                            && error.message.contains("reshape axis 0 = 3")),
+                    "{error:?}"
+                );
+            } else {
+                let result = result.unwrap();
+                assert_eq!(
+                    tensor(&result, "sample.0"),
+                    mask(0)
+                        .iter()
+                        .zip(mask(1))
+                        .take(4)
+                        .map(|(a, b)| a * b)
+                        .collect::<Vec<_>>()
+                );
+                assert_eq!(tensor(&result, "sample.1"), mask(2)[..4]);
+            }
+        }
+    }
+}
+
 fn tensor(result: &EvalResult, name: &str) -> Vec<f64> {
     let root = result
         .roots

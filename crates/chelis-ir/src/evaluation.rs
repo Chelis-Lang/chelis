@@ -10,6 +10,7 @@ use chelis_unord::UnordMap;
 
 use crate::dag::{Dag, NodeId, RiscOp};
 use crate::eval::TensorValue;
+use crate::execution_spine::{Control, OccurrenceId, SourceKind, Spine, Step};
 use crate::host::RandomLoweringState;
 
 /// Source admission is decided before evaluation. Legacy selection is never
@@ -55,10 +56,22 @@ impl RandomExecutionContext {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ScopeId(pub(crate) usize);
+pub struct ScopeId(pub(crate) usize);
+
+impl ScopeId {
+    pub fn index(self) -> usize {
+        self.0
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct DrawId(pub(crate) usize);
+pub struct DrawId(pub(crate) usize);
+
+impl DrawId {
+    pub fn index(self) -> usize {
+        self.0
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct Scope {
@@ -77,7 +90,7 @@ pub(crate) struct ExecutionMetadata {
     pub(crate) scopes: Vec<Scope>,
     pub(crate) sites: UnordMap<NodeId, RandomSite>,
     pub(crate) draws: usize,
-    pub(crate) order: Vec<NodeId>,
+    pub(crate) spine: Spine,
 }
 
 impl ExecutionMetadata {
@@ -86,13 +99,14 @@ impl ExecutionMetadata {
             scopes: vec![Scope { seed }],
             sites: UnordMap::new(),
             draws: 0,
-            order: Vec::new(),
+            spine: Spine::default(),
         }
     }
 
     pub(crate) fn forward(&mut self, node: NodeId, scope: ScopeId) {
         let draw = DrawId(self.draws);
         self.draws += 1;
+        self.spine.forward(node, draw, scope);
         assert!(
             self.sites
                 .insert(node, RandomSite::Forward { draw, scope })
@@ -101,6 +115,7 @@ impl ExecutionMetadata {
     }
 
     pub(crate) fn remap(&mut self, remap: &UnordMap<NodeId, NodeId>) -> Result<(), String> {
+        self.spine.remap(remap)?;
         self.sites = self
             .sites
             .to_sorted()
@@ -118,18 +133,6 @@ impl ExecutionMetadata {
                     })
             })
             .collect::<Result<_, _>>()?;
-        self.order = self
-            .order
-            .iter()
-            .map(|node| {
-                remap.get(node).copied().ok_or_else(|| {
-                    format!(
-                        "evaluation plan lost scheduled node {} during remapping",
-                        node.0
-                    )
-                })
-            })
-            .collect::<Result<_, _>>()?;
         Ok(())
     }
 
@@ -138,6 +141,7 @@ impl ExecutionMetadata {
         mut child: Self,
         inherited: ScopeId,
         remap: &UnordMap<NodeId, NodeId>,
+        dag: &Dag,
     ) -> Result<(), String> {
         if child.scopes[0].seed != self.scopes[inherited.0].seed {
             return Err("evaluation child scope changed its inherited raw seed".into());
@@ -145,6 +149,16 @@ impl ExecutionMetadata {
         child.remap(remap)?;
         let scope_offset = self.scopes.len();
         let draw_offset = self.draws;
+        child.spine.rebase(
+            |draw| Ok(DrawId(draw.0 + draw_offset)),
+            |scope| {
+                if scope.0 == 0 {
+                    inherited
+                } else {
+                    ScopeId(scope_offset + scope.0 - 1)
+                }
+            },
+        )?;
         self.draws += child.draws;
         self.scopes.extend(child.scopes.into_iter().skip(1));
         for (node, site) in child.sites.into_sorted() {
@@ -165,18 +179,21 @@ impl ExecutionMetadata {
                 return Err("evaluation child overwrote an existing random site".into());
             }
         }
+        self.spine.append_child(child.spine, dag)?;
         Ok(())
     }
 
-    pub(crate) fn selected(&self, remap: &UnordMap<NodeId, NodeId>) -> Result<Self, String> {
+    pub(crate) fn selected(
+        &self,
+        remap: &UnordMap<NodeId, NodeId>,
+        occurrences: &std::collections::BTreeSet<OccurrenceId>,
+    ) -> Result<Self, String> {
         let mut selected = Self::new(self.scopes[0].seed);
         selected.scopes = self.scopes.clone();
+        selected.spine = self.spine.selected(remap, occurrences)?;
         let mut draws = UnordMap::new();
-        for node in &self.order {
-            if !remap.contains_key(node) {
-                continue;
-            }
-            if let Some(RandomSite::Forward { draw, .. }) = self.sites.get(node) {
+        for event in &selected.spine.source {
+            if let SourceKind::Forward { draw, .. } = event.kind {
                 draws.insert(draw.0, DrawId(selected.draws));
                 selected.draws += 1;
             }
@@ -200,12 +217,21 @@ impl ExecutionMetadata {
             };
             selected.sites.insert(mapped, site);
         }
-        selected.order = self
-            .order
-            .iter()
-            .filter_map(|node| remap.get(node).copied())
-            .collect();
+        selected.spine.rebase(
+            |draw| {
+                draws
+                    .get(&draw.0)
+                    .copied()
+                    .ok_or_else(|| "selected source lost its draw".into())
+            },
+            |scope| scope,
+        )?;
         Ok(selected)
+    }
+
+    pub(crate) fn complete(&mut self, dag: &Dag) -> Result<(), String> {
+        self.spine.complete(dag)?;
+        Ok(())
     }
 }
 
@@ -222,6 +248,28 @@ impl EvaluationPlan {
     /// view does not preserve the plan and cannot recreate one.
     pub fn dag_for_inspection(&self) -> &Dag {
         &self.dag
+    }
+
+    /// Borrow the actual executable sequence, including value-free controls.
+    /// These views do not authorize construction of a runnable plan.
+    pub fn steps_for_inspection(&self) -> &[Step] {
+        &self.metadata.spine.steps
+    }
+
+    /// Independently recorded source occurrences, mapped through the owning
+    /// passes. Backward replay is not a second source occurrence.
+    pub fn source_for_inspection(&self) -> &[crate::execution_spine::Occurrence] {
+        &self.metadata.spine.source
+    }
+
+    #[cfg(feature = "lowering-trace")]
+    pub(crate) fn snapshot(dag: &Dag, metadata: &ExecutionMetadata) -> Self {
+        let mut metadata = metadata.clone();
+        metadata
+            .complete(dag)
+            .expect("observed source region preserves node order");
+        Self::new(dag.clone(), metadata)
+            .expect("observed source region retains its execution census")
     }
 
     pub(crate) fn new(dag: Dag, metadata: ExecutionMetadata) -> Result<Self, String> {
@@ -245,7 +293,54 @@ impl EvaluationPlan {
         }
         let mut seen = vec![false; self.dag.len()];
         let mut draws = vec![None; self.metadata.draws];
-        for &id in &self.metadata.order {
+        let mut source = self.metadata.spine.source.iter();
+        let mut scopes = vec![ScopeId(0)];
+        let mut entered_scopes = std::collections::BTreeSet::new();
+        let mut occurrences = std::collections::BTreeSet::new();
+        for step in &self.metadata.spine.steps {
+            let id = match *step {
+                Step::Node(id) => id,
+                Step::Control {
+                    occurrence,
+                    control,
+                } => {
+                    let expected = source
+                        .next()
+                        .ok_or("execution has an extra source control")?;
+                    if expected.id != occurrence
+                        || expected.kind != SourceKind::Control(control)
+                        || !occurrences.insert(occurrence)
+                    {
+                        return Err(
+                            "execution control disagrees with the independent source census".into(),
+                        );
+                    }
+                    match control {
+                        Control::Enter { scope, seed } => {
+                            if scope.0 == 0
+                                || !entered_scopes.insert(scope.0)
+                                || self
+                                    .metadata
+                                    .scopes
+                                    .get(scope.0)
+                                    .and_then(|scope| scope.seed)
+                                    != Some(seed)
+                            {
+                                return Err(
+                                    "execution enters an invalid or repeated seed scope".into()
+                                );
+                            }
+                            scopes.push(scope);
+                        }
+                        Control::Leave { scope } => {
+                            if scopes.len() <= 1 || scopes.pop() != Some(scope) {
+                                return Err("execution leaves an unmatched seed scope".into());
+                            }
+                        }
+                    }
+                    continue;
+                }
+            };
             let node = self
                 .dag
                 .get(id)
@@ -267,6 +362,21 @@ impl EvaluationPlan {
             let random = matches!(node.op, RiscOp::Dropout { .. } | RiscOp::UniformLike { .. });
             match (random, self.metadata.sites.get(&id)) {
                 (true, Some(RandomSite::Forward { draw, scope })) => {
+                    let expected = source.next().ok_or("execution has an extra source draw")?;
+                    if expected.kind
+                        != (SourceKind::Forward {
+                            node: id,
+                            draw: *draw,
+                            scope: *scope,
+                        })
+                        || !occurrences.insert(expected.id)
+                        || scopes.last() != Some(scope)
+                    {
+                        return Err(
+                            "execution draw disagrees with the independent source census or scope"
+                                .into(),
+                        );
+                    }
                     let entered = draws
                         .get_mut(draw.0)
                         .ok_or("evaluation plan has an invalid DrawId")?;
@@ -310,6 +420,12 @@ impl EvaluationPlan {
             }
             seen[id.0] = true;
         }
+        if source.next().is_some() || scopes != [ScopeId(0)] {
+            return Err("execution omits a source occurrence or pending seed exit".into());
+        }
+        if seen.iter().any(|seen| !seen) {
+            return Err("execution spine omits a selected graph node".into());
+        }
         if self
             .dag
             .roots()
@@ -317,15 +433,6 @@ impl EvaluationPlan {
             .any(|root| !seen.get(root.0).copied().unwrap_or(false))
         {
             return Err("evaluation plan omits a value root".into());
-        }
-        // A runnable plan owns exactly its selected source slice. Census the
-        // graph itself as well as the side tables: deleting a dead site's
-        // order entry AND metadata must not erase an entered effect.
-        if self.dag.nodes().iter().any(|node| {
-            matches!(node.op, RiscOp::Dropout { .. } | RiscOp::UniformLike { .. })
-                && !seen[node.id.0]
-        }) {
-            return Err("evaluation plan omits a source random node".into());
         }
         if self
             .metadata
@@ -355,6 +462,7 @@ impl EvaluationPlan {
             counters: vec![0; self.metadata.scopes.len()],
             keys: vec![None; self.metadata.draws],
             context,
+            scopes: vec![ScopeId(0)],
         })
     }
 }
@@ -371,6 +479,7 @@ struct DrawKey {
 pub struct StagedEvaluationPlan {
     logical: EvaluationPlan,
     segments: Vec<EvaluationSegment>,
+    source_position: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -384,19 +493,46 @@ impl StagedEvaluationPlan {
         Ok(Self {
             logical: EvaluationPlan::new(dag, metadata)?,
             segments: Vec::new(),
+            source_position: 0,
         })
     }
 
-    pub(crate) fn append_segment(&mut self, dag: Dag, remap: &UnordMap<NodeId, NodeId>) {
+    pub(crate) fn source_position(&self) -> usize {
+        self.source_position
+    }
+
+    pub(crate) fn source_len(&self) -> usize {
+        self.logical.metadata.spine.source.len()
+    }
+
+    pub(crate) fn append_segment(
+        &mut self,
+        dag: Dag,
+        remap: &UnordMap<NodeId, NodeId>,
+        source_end: usize,
+    ) -> Result<(), String> {
+        let occurrences = self
+            .logical
+            .metadata
+            .spine
+            .source
+            .get(self.source_position..source_end)
+            .ok_or("staged execution has an invalid source occurrence cut")?
+            .iter()
+            .map(|event| event.id)
+            .collect();
         let mut metadata = self.logical.metadata.clone();
+        metadata.spine = metadata.spine.selected(remap, &occurrences)?;
         metadata.sites = metadata
             .sites
             .into_sorted()
             .into_iter()
             .filter_map(|(node, site)| remap.get(&node).map(|mapped| (*mapped, site)))
             .collect();
-        metadata.order = dag.nodes().iter().map(|node| node.id).collect();
+        metadata.complete(&dag)?;
         self.segments.push(EvaluationSegment { dag, metadata });
+        self.source_position = source_end;
+        Ok(())
     }
 
     /// Start one invocation. Its keys and scope counters survive every cut.
@@ -404,6 +540,9 @@ impl StagedEvaluationPlan {
         &'a self,
         context: &'a mut RandomExecutionContext,
     ) -> Result<StagedEvaluationFrame<'a>, String> {
+        if self.source_position != self.source_len() {
+            return Err("staged execution omits source occurrences".into());
+        }
         Ok(StagedEvaluationFrame {
             frame: self.logical.frame(context)?,
             segments: self.segments.iter(),
@@ -446,11 +585,27 @@ pub(crate) struct ExecutionFrame<'a> {
     counters: Vec<u64>,
     keys: Vec<Option<DrawKey>>,
     context: &'a mut RandomExecutionContext,
+    scopes: Vec<ScopeId>,
 }
 
 impl ExecutionFrame<'_> {
-    pub(crate) fn order(&self) -> &[NodeId] {
-        &self.metadata.order
+    pub(crate) fn steps(&self) -> &[Step] {
+        &self.metadata.spine.steps
+    }
+
+    pub(crate) fn control(&mut self, control: Control) -> Result<(), String> {
+        match control {
+            Control::Enter { scope, .. } => {
+                self.counters[scope.0] = 0;
+                self.scopes.push(scope);
+            }
+            Control::Leave { scope } => {
+                if self.scopes.len() <= 1 || self.scopes.pop() != Some(scope) {
+                    return Err("execution left an unmatched seed scope".into());
+                }
+            }
+        }
+        Ok(())
     }
 
     fn enter(&mut self, node: NodeId, raw_seed: u64) -> Result<DrawKey, String> {
@@ -461,6 +616,9 @@ impl ExecutionFrame<'_> {
             .ok_or("evaluation plan is missing random metadata")?
         {
             RandomSite::Forward { draw, scope } => {
+                if self.scopes.last() != Some(scope) {
+                    return Err("forward draw is outside its entered source scope".into());
+                }
                 let seed = self.metadata.scopes[scope.0]
                     .seed
                     .ok_or("dropout requires a handled Random seed")?;
@@ -557,7 +715,8 @@ mod tests {
             }
         }
         dag.add_root(root);
-        metadata.order = dag.nodes().iter().map(|node| node.id).collect();
+        metadata.spine.record_nodes(&dag);
+        metadata.complete(&dag).unwrap();
         EvaluationPlan::new(dag, metadata).unwrap()
     }
 
@@ -586,10 +745,50 @@ mod tests {
                             scope: ScopeId(1),
                         },
                     );
+                    let enter = Control::Enter {
+                        scope: ScopeId(1),
+                        seed: 42,
+                    };
+                    let leave = Control::Leave { scope: ScopeId(1) };
+                    logical.metadata.spine.source[0].kind = SourceKind::Forward {
+                        node: NodeId(1),
+                        draw: DrawId(0),
+                        scope: ScopeId(1),
+                    };
+                    logical.metadata.spine.source.insert(
+                        0,
+                        crate::execution_spine::Occurrence {
+                            id: OccurrenceId(1),
+                            kind: SourceKind::Control(enter),
+                        },
+                    );
+                    logical
+                        .metadata
+                        .spine
+                        .source
+                        .push(crate::execution_spine::Occurrence {
+                            id: OccurrenceId(2),
+                            kind: SourceKind::Control(leave),
+                        });
+                    logical.metadata.spine.steps.insert(
+                        1,
+                        Step::Control {
+                            occurrence: OccurrenceId(1),
+                            control: enter,
+                        },
+                    );
+                    logical.metadata.spine.steps.insert(
+                        3,
+                        Step::Control {
+                            occurrence: OccurrenceId(2),
+                            control: leave,
+                        },
+                    );
                 }
                 let ty = logical.dag.get(NodeId(0)).unwrap().output_type.clone();
                 let sources = [HostSource {
                     before: 2,
+                    occurrences_before: Some(if nested { 3 } else { 1 }),
                     value: StageValue::Host(HostValueId(0)),
                     ty: HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64)),
                     expression: chelis_deep::parser::parse_str("(lit {type: (t-prim {} int64)} 0)")
@@ -799,7 +998,7 @@ mod tests {
     fn joint_dead_draw_omission_is_detected_against_the_source_graph() {
         let mut plan = fixture(&[0.0, 0.0], 0, false);
         let dead = NodeId(1);
-        plan.metadata.order.retain(|node| *node != dead);
+        plan.metadata.spine.retain_nodes(|node| node != dead);
         plan.metadata.sites.remove(&dead);
         plan.metadata.sites.insert(
             NodeId(2),
@@ -812,7 +1011,238 @@ mod tests {
         assert!(
             run(&plan, &mut context(), 0)
                 .unwrap_err()
-                .contains("source random node")
+                .contains("independent source census")
+        );
+    }
+
+    fn lower_source(source: &str) -> EvaluationPlan {
+        let expr = chelis_deep::parser::parse_str(source)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let inputs = [(
+            "x".into(),
+            TensorType {
+                dims: vec![DimInfo::Lit(32)],
+                precision: Prim::F32,
+            },
+        )]
+        .into_iter()
+        .collect();
+        crate::lower::try_lower_subexpr_evaluation_plan(
+            &expr,
+            inputs,
+            UnordMap::new(),
+            UnordMap::new(),
+            &context(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn value_free_equal_seed_scopes_survive_and_do_not_enter_draws() {
+        let plan = lower_source(
+            "(handle-effect {effect: random} (lit {type: (t-prim {} int64)} 42) (handle-effect {effect: random} (lit {type: (t-prim {} int64)} 42) (var {} x)))",
+        );
+        assert_eq!(plan.source_for_inspection().len(), 4);
+        assert!(matches!(
+            plan.source_for_inspection(),
+            [
+                crate::execution_spine::Occurrence {
+                    kind: SourceKind::Control(Control::Enter {
+                        scope: ScopeId(1),
+                        ..
+                    }),
+                    ..
+                },
+                crate::execution_spine::Occurrence {
+                    kind: SourceKind::Control(Control::Enter {
+                        scope: ScopeId(2),
+                        ..
+                    }),
+                    ..
+                },
+                crate::execution_spine::Occurrence {
+                    kind: SourceKind::Control(Control::Leave { scope: ScopeId(2) }),
+                    ..
+                },
+                crate::execution_spine::Occurrence {
+                    kind: SourceKind::Control(Control::Leave { scope: ScopeId(1) }),
+                    ..
+                },
+            ]
+        ));
+        let mut state = context();
+        state.state.counter = 17;
+        assert_eq!(run(&plan, &mut state, 32).unwrap(), vec![1.0; 32]);
+        assert_eq!(state.state().counter, 17);
+    }
+
+    #[test]
+    fn joint_control_and_runtime_scope_deletion_does_not_delete_source_evidence() {
+        let mut plan = lower_source(
+            "(handle-effect {effect: random} (lit {type: (t-prim {} int64)} 42) (var {} x))",
+        );
+        plan.metadata
+            .spine
+            .steps
+            .retain(|step| matches!(step, Step::Node(_)));
+        plan.metadata.scopes.truncate(1);
+        assert!(plan.validate().unwrap_err().contains("source occurrence"));
+    }
+
+    #[test]
+    fn staged_control_only_segment_requires_the_actual_source_cut() {
+        use crate::host::staged::{HostSource, HostStage, HostValueId, StageValue};
+        use crate::host_type_state::{HostPrecisionTerm, HostTypeTerm};
+        use std::collections::BTreeMap;
+        let logical = lower_source(
+            "(handle-effect {effect: random} (lit {type: (t-prim {} int64)} 42) (var {} x))",
+        );
+        for cut in [Some(2), None, Some(3)] {
+            let mut companion =
+                StagedEvaluationPlan::new(logical.dag.clone(), logical.metadata.clone()).unwrap();
+            let sources = [HostSource {
+                before: 0,
+                occurrences_before: cut,
+                value: StageValue::Host(HostValueId(0)),
+                ty: HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int64)),
+                expression: chelis_deep::parser::parse_str("(lit {type: (t-prim {} int64)} 0)")
+                    .unwrap()
+                    .remove(0),
+                captures: Vec::new(),
+            }];
+            let partition = crate::host::staged::partition(
+                &logical.dag,
+                &sources,
+                &[],
+                &BTreeMap::from([(NodeId(0), "x".into())]),
+                &BTreeMap::new(),
+                Some(&mut companion),
+            );
+            if cut != Some(2) {
+                assert!(partition.unwrap_err().contains("source"));
+                continue;
+            }
+            let partition = partition.unwrap();
+            assert!(matches!(
+                partition.stages(),
+                [
+                    HostStage::Kernel { .. },
+                    HostStage::Source { .. },
+                    HostStage::Kernel { .. }
+                ]
+            ));
+            assert_eq!(companion.segments[0].metadata.spine.source.len(), 2);
+            assert!(companion.segments[1].metadata.spine.source.is_empty());
+            let mut context = context();
+            context.state.counter = 17;
+            let mut frame = companion.frame(&mut context).unwrap();
+            frame.eval_next_kernel(|_| None).unwrap();
+            assert_eq!(frame.frame.scopes, [ScopeId(0)]);
+            frame.with_context(|context| {
+                assert_eq!(context.state.counter, 17);
+                context.state.counter += 1;
+            });
+            frame
+                .eval_next_kernel(|name| {
+                    (name == "x").then(|| TensorValue::from_vec(vec![32], vec![1.0; 32]))
+                })
+                .unwrap();
+            frame.with_context(|context| assert_eq!(context.state.counter, 18));
+        }
+    }
+
+    #[test]
+    fn control_corruption_is_rejected_against_the_source_and_stack() {
+        let source =
+            "(handle-effect {effect: random} (lit {type: (t-prim {} int64)} 42) (var {} x))";
+        let original = lower_source(source);
+        let controls = original
+            .metadata
+            .spine
+            .steps
+            .iter()
+            .enumerate()
+            .filter_map(|(index, step)| matches!(step, Step::Control { .. }).then_some(index))
+            .collect::<Vec<_>>();
+        assert_eq!(controls.len(), 2);
+        for corruption in 0..5 {
+            let mut plan = original.clone();
+            let steps = &mut plan.metadata.spine.steps;
+            match corruption {
+                0 => {
+                    steps.remove(controls[0]);
+                }
+                1 => {
+                    steps.insert(controls[0], steps[controls[0]]);
+                }
+                2 => {
+                    steps.swap(controls[0], controls[1]);
+                }
+                3 => {
+                    let Step::Control {
+                        control: Control::Enter { seed, .. },
+                        ..
+                    } = &mut steps[controls[0]]
+                    else {
+                        unreachable!()
+                    };
+                    *seed = 43;
+                }
+                _ => {
+                    // Even jointly deleting a leave from execution and census
+                    // cannot convert a pending scope into a finished plan.
+                    steps.remove(controls[1]);
+                    plan.metadata.spine.source.pop();
+                }
+            }
+            let error = plan.validate().unwrap_err();
+            assert!(
+                error.contains("source") || error.contains("scope"),
+                "{corruption}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn same_seed_balanced_scope_identity_substitution_is_rejected() {
+        let mut plan = lower_source(
+            "(handle-effect {effect: random} (lit {type: (t-prim {} int64)} 42) (handle-effect {effect: random} (lit {type: (t-prim {} int64)} 42) (var {} x)))",
+        );
+        for step in &mut plan.metadata.spine.steps {
+            if let Step::Control { control, .. } = step {
+                let scope = match control {
+                    Control::Enter { scope, .. } | Control::Leave { scope } => scope,
+                };
+                scope.0 = 3 - scope.0;
+            }
+        }
+        assert!(
+            plan.validate()
+                .unwrap_err()
+                .contains("independent source census")
+        );
+    }
+
+    #[test]
+    fn deleting_the_graph_and_runtime_site_still_cannot_erase_a_source_draw() {
+        let plan = fixture(&[0.0, 0.0], 0, false);
+        let roots = plan.dag.roots().to_vec();
+        let (_, remap) = crate::optimize::project_execution_slice(&plan.dag, &roots, &roots);
+        assert!(!remap.contains_key(&NodeId(1)));
+        let occurrences = plan
+            .metadata
+            .spine
+            .source
+            .iter()
+            .map(|event| event.id)
+            .collect();
+        assert!(
+            plan.metadata
+                .selected(&remap, &occurrences)
+                .unwrap_err()
+                .contains("lost source node")
         );
     }
 
@@ -859,7 +1289,8 @@ mod tests {
         .unwrap();
         let schedule = plan
             .metadata
-            .order
+            .spine
+            .nodes()
             .iter()
             .filter_map(|node| plan.metadata.sites.get(node).map(|site| (*node, *site)))
             .collect::<Vec<_>>();

@@ -644,6 +644,7 @@ struct EvaluationEntry {
     roots: BTreeMap<String, NodeId>,
     nodes: Vec<NodeId>,
     dependencies: BTreeSet<usize>,
+    occurrences: BTreeSet<crate::execution_spine::OccurrenceId>,
     profile: crate::evaluation::EvaluationProfile,
 }
 
@@ -717,7 +718,15 @@ impl EvaluationProgram {
     }
 
     pub fn select_roots(&self, names: &[String]) -> Result<SelectedEvaluation, String> {
-        if self.profile_for_roots(names)? != crate::evaluation::EvaluationProfile::FixedControl {
+        // Explicit observation may select a draw-free region: its seed
+        // controls still matter. Keep profile-based ordinary dispatch as-is.
+        if !matches!(
+            self.profile_for_roots(names)?,
+            crate::evaluation::EvaluationProfile::FixedControl
+                | crate::evaluation::EvaluationProfile::Legacy(
+                    crate::evaluation::LegacyEvaluationReason::NoDropout
+                )
+        ) {
             return Err(
                 "selected roots do not belong to the fixed-control execution profile".into(),
             );
@@ -737,7 +746,11 @@ impl EvaluationProgram {
             })
             .collect::<Vec<_>>();
         let (dag, remap) = crate::optimize::project_execution_slice(&self.dag, &retained, &roots);
-        let execution = self.execution.selected(&remap)?;
+        let occurrences = selected
+            .iter()
+            .flat_map(|id| self.entries[*id].occurrences.iter().copied())
+            .collect();
+        let execution = self.execution.selected(&remap, &occurrences)?;
         let (dag, execution) = normalize_evaluation_dag(dag, execution);
         if dag.roots().len() != names.len() {
             return Err("selected execution changed value-root arity".into());
@@ -910,6 +923,35 @@ fn assert_checked_library_boundary(program: &CheckedProgram) {
         program.annotated_exprs(),
     );
     assert_decode_once_in_env("lower_program_to_library: type_env", program.type_env());
+}
+
+#[cfg(feature = "lowering-trace")]
+pub(crate) fn try_lower_program_to_evaluation_library_with_trace(
+    program: &CheckedProgram,
+) -> Result<
+    (
+        EvaluationLibrary,
+        crate::lowering_trace::EvaluationLoweringTrace,
+    ),
+    LowerDiagnostic,
+> {
+    assert_checked_library_boundary(program);
+    catch_lowering(|| {
+        let collector = crate::lowering_trace::Collector::new_execution();
+        let mut execution = None;
+        let library =
+            lower_program_to_library_inner(program, Some(&mut execution), Some(collector.clone()));
+        let (execution, entries) = execution.expect("observed evaluation library metadata");
+        let program = EvaluationProgram {
+            dag: library.dag.clone(),
+            execution,
+            entries,
+        };
+        (
+            EvaluationLibrary { library, program },
+            collector.finish_execution(),
+        )
+    })
 }
 
 #[cfg(feature = "lowering-trace")]
@@ -1086,11 +1128,14 @@ fn lower_program_to_library_inner(
 
     if let Some(output) = execution_out {
         let mut execution = ctx.execution.take().expect("evaluation library metadata");
+        execution.spine.record_nodes(&ctx.dag);
         execution
             .remap(&remap)
             .and_then(|()| execution.remap(&linear_remap))
             .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None));
-        execution.order = linear_dag.nodes().iter().map(|node| node.id).collect();
+        execution
+            .complete(&linear_dag)
+            .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None));
         for entry in &mut ctx.evaluation_entries {
             for node in &mut entry.nodes {
                 *node = linear_remap[&remap[node]];
@@ -1395,14 +1440,17 @@ fn lower_program_with_context_inner(
         let mut metadata = program.execution.clone();
         // Only terminal ownership markers were stripped; losing a random
         // site still fails the strict remap below.
-        metadata.order.retain(|node| {
+        metadata.spine.retain_nodes(|node| {
             !matches!(
-                program.dag.get(*node).map(|node| &node.op),
+                program.dag.get(node).map(|node| &node.op),
                 Some(RiscOp::Drop)
             )
         });
         metadata
             .remap(&library_remap)
+            .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None));
+        metadata
+            .complete(&ctx.dag)
             .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None));
         ctx.execution = Some(metadata);
         ctx.evaluation_entries = program.entries.clone();
@@ -1457,10 +1505,13 @@ fn lower_program_with_context_inner(
     let dag = insert_drop_nodes_for_unconsumed_values(copy_dag);
     if let Some((_, output)) = execution {
         let mut metadata = ctx.execution.take().expect("evaluation context metadata");
+        metadata.spine.record_nodes(&ctx.dag);
         metadata
             .remap(&remap)
             .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None));
-        metadata.order = dag.nodes().iter().map(|node| node.id).collect();
+        metadata
+            .complete(&dag)
+            .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None));
         for entry in &mut ctx.evaluation_entries {
             for node in &mut entry.nodes {
                 *node = remap[node];
@@ -1888,7 +1939,10 @@ pub(crate) fn try_lower_staged_host_region(
         let root = result.expect_node("staged host tensor region");
         ctx.dag.add_root(root);
         let mut evaluation = ctx.execution.take().map(|mut metadata| {
-            metadata.order = ctx.dag.nodes().iter().map(|node| node.id).collect();
+            metadata.spine.record_nodes(&ctx.dag);
+            metadata
+                .complete(&ctx.dag)
+                .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None));
             crate::evaluation::StagedEvaluationPlan::new(ctx.dag.clone(), metadata)
                 .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None))
         });
@@ -2071,13 +2125,15 @@ fn normalize_evaluation_dag(
     dag: Dag,
     mut execution: crate::evaluation::ExecutionMetadata,
 ) -> (Dag, crate::evaluation::ExecutionMetadata) {
-    execution.order = dag
-        .nodes()
-        .iter()
-        .filter(|node| !matches!(node.op, RiscOp::Load { .. }))
-        .map(|node| node.id)
-        .collect();
-    let (dag, remap) = crate::optimize::dead_code_eliminate_with_retained(&dag, &execution.order);
+    execution.spine.record_nodes(&dag);
+    execution.spine.retain_nodes(|node| {
+        !matches!(
+            dag.get(node).map(|node| &node.op),
+            Some(RiscOp::Load { .. })
+        )
+    });
+    let (dag, remap) =
+        crate::optimize::dead_code_eliminate_with_retained(&dag, &execution.spine.nodes());
     execution
         .remap(&remap)
         .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None));
@@ -2088,7 +2144,9 @@ fn normalize_evaluation_dag(
     let dag = insert_drop_nodes_for_unconsumed_values(dag);
     // The normalization passes preserve source node order; inserted Copies
     // precede their consumer and terminal Drops follow the source spine.
-    execution.order = dag.nodes().iter().map(|node| node.id).collect();
+    execution
+        .complete(&dag)
+        .unwrap_or_else(|message| raise_fatal_lowering_error(message, None, None));
     (dag, execution)
 }
 
@@ -6722,6 +6780,12 @@ impl<'program> LowerCtx<'program> {
     }
 
     fn lower_evaluation_top_level(&mut self, expr: &Expr) {
+        let first_occurrence = self
+            .execution
+            .as_ref()
+            .expect("evaluation lowering owns execution metadata")
+            .spine
+            .occurrence_count();
         let profile = evaluation_profile_from_defs(expr, &self.program_defs);
         let compatibility = !matches!(
             profile,
@@ -6758,6 +6822,15 @@ impl<'program> LowerCtx<'program> {
             roots,
             nodes,
             dependencies: std::mem::take(&mut self.execution_dependencies),
+            occurrences: (first_occurrence
+                ..self
+                    .execution
+                    .as_ref()
+                    .expect("evaluation lowering restores execution metadata")
+                    .spine
+                    .occurrence_count())
+                .map(crate::execution_spine::OccurrenceId)
+                .collect(),
             profile,
         });
     }
@@ -6780,7 +6853,7 @@ impl<'program> LowerCtx<'program> {
             }
         }
 
-        let value = self.lower_expr(expr);
+        let mut value = self.lower_expr(expr);
         if let Some((DeepTag::Def, _, kids)) = stamped_parts(expr)
             && let Some(name) = kids.first().and_then(|expr| match expr {
                 Expr::Atom(Atom::Name(name), _) => Some(name.as_str()),
@@ -6809,7 +6882,14 @@ impl<'program> LowerCtx<'program> {
             if value.contributes_no_root() {
                 self.rootless_defs.insert(name.to_string());
             }
-            self.add_named_roots(name, &value);
+            self.add_named_roots(name, &mut value);
+            if self.execution.is_some() {
+                // A declaration may return an existing value without a new
+                // computation. Its already-emitted observation carrier is
+                // nevertheless its binding identity: reading this declaration
+                // must retain its controls, not just the aliased value's owner.
+                self.bindings.insert(name.into(), value.clone());
+            }
             self.current_span_id = saved_span_id;
         } else {
             for id in value.flatten_nodes() {
@@ -6953,6 +7033,10 @@ impl<'program> LowerCtx<'program> {
         self.next_host_value += 1;
         self.host_sources.push(HostSource {
             before: self.dag.nodes().len(),
+            occurrences_before: self
+                .execution
+                .as_ref()
+                .map(|execution| execution.spine.occurrence_count()),
             value: StageValue::Host(id),
             ty,
             expression,
@@ -7085,6 +7169,10 @@ impl<'program> LowerCtx<'program> {
             };
         self.host_sources.push(HostSource {
             before,
+            occurrences_before: self
+                .execution
+                .as_ref()
+                .map(|execution| execution.spine.occurrence_count()),
             value,
             ty,
             expression: expr.clone(),
@@ -7235,7 +7323,7 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
-    fn add_named_roots(&mut self, prefix: &str, value: &LoweredValue) {
+    fn add_named_roots(&mut self, prefix: &str, value: &mut LoweredValue) {
         match value {
             LoweredValue::Host { .. } => {
                 raise_lowering_error("a host value cannot become a tensor root", None, None)
@@ -7278,9 +7366,12 @@ impl<'program> LowerCtx<'program> {
                 if let Some(roots) = &mut self.evaluation_entry_roots {
                     roots.insert(prefix.into(), stored);
                 }
+                if self.execution.is_some() {
+                    *id = stored;
+                }
             }
             LoweredValue::Tuple(items) => {
-                for (index, item) in items.iter().enumerate() {
+                for (index, item) in items.iter_mut().enumerate() {
                     self.add_named_roots(&format!("{prefix}.{index}"), item);
                 }
             }
@@ -7291,7 +7382,7 @@ impl<'program> LowerCtx<'program> {
                 fields,
                 ..
             } => {
-                for (index, field) in fields.iter().enumerate() {
+                for (index, field) in fields.iter_mut().enumerate() {
                     let label = field_names
                         .as_ref()
                         .and_then(|names| names.get(index).cloned())
@@ -8703,6 +8794,15 @@ impl<'program> LowerCtx<'program> {
         // op and the reason, instead of a generic scalar-output
         // message (or a silent zero gradient for floor/ceil under the
         // unchecked variant).
+        if let Some(execution) = &mut subctx.execution {
+            execution.spine.record_nodes(&subctx.dag);
+        }
+        #[cfg(feature = "lowering-trace")]
+        let execution_before_ad = subctx
+            .trace
+            .as_ref()
+            .zip(subctx.execution.as_ref())
+            .and_then(|(trace, execution)| trace.execution_before_ad(&subctx.dag, execution));
         let grad_result = match &mut subctx.execution {
             Some(execution) => {
                 crate::grad::grad_dag_checked_with_execution(&subctx.dag, output, &wrt, execution)
@@ -8723,6 +8823,23 @@ impl<'program> LowerCtx<'program> {
             .as_ref()
             .map(|trace| trace.gradient(&subctx.dag, output, &wrt, &grad_result));
 
+        #[cfg(feature = "lowering-trace")]
+        if let Some(forward) = execution_before_ad {
+            subctx
+                .trace
+                .as_ref()
+                .expect("execution snapshot has a collector")
+                .execution_after_ad(
+                    trace_gradient.expect("execution snapshot has an AD invocation"),
+                    forward,
+                    &grad_result.dag,
+                    subctx
+                        .execution
+                        .as_ref()
+                        .expect("execution snapshot has metadata"),
+                );
+        }
+
         let arg_map = param_names
             .iter()
             .zip(plans.iter())
@@ -8741,12 +8858,15 @@ impl<'program> LowerCtx<'program> {
         );
         #[cfg(feature = "lowering-trace")]
         let before_splice = subctx.trace.as_ref().map(|_| self.dag.clone());
+        if let Some(execution) = &mut self.execution {
+            execution.spine.record_nodes(&self.dag);
+        }
         let remap = self.splice_dag(&specialized_grad_dag, &arg_map);
         if let Some(child) = subctx.execution.take() {
             self.execution
                 .as_mut()
                 .expect("evaluation parent owns its child plan")
-                .merge_child(child, self.execution_scope, &remap)
+                .merge_child(child, self.execution_scope, &remap, &self.dag)
                 .unwrap_or_else(|message| {
                     raise_fatal_lowering_error(
                         message,
@@ -14125,8 +14245,23 @@ impl<'program> LowerCtx<'program> {
                     execution
                         .scopes
                         .push(crate::evaluation::Scope { seed: Some(seed) });
+                    execution.spine.control(
+                        &self.dag,
+                        crate::execution_spine::Control::Enter {
+                            scope: self.execution_scope,
+                            seed,
+                        },
+                    );
                 }
                 let result = self.lower_expr(&elems[3]);
+                if let Some(execution) = &mut self.execution {
+                    execution.spine.control(
+                        &self.dag,
+                        crate::execution_spine::Control::Leave {
+                            scope: self.execution_scope,
+                        },
+                    );
+                }
                 self.random_seed = saved_seed;
                 self.random_counter = saved_counter;
                 self.execution_scope = saved_scope;

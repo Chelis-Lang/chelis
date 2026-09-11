@@ -1120,6 +1120,46 @@ library DAG empty. `UnloweredDefinitions` records that boundary; the returned
 library's `lowered_names` table identifies the definitions. An empty trace is
 never evidence that the source program's obligations were discharged.
 
+### Source-owned execution sequence and AD capture
+
+Fixed-control evaluation plans retain one ordered sequence of actual graph
+nodes and explicit seed entry/exit controls. A handler that returns an existing
+value, with no draw or newly computed body node, still has both controls.
+Lowering independently records an occurrence census; source occurrence IDs,
+scope IDs, forward draw IDs, graph IDs and raw seed values are distinct.
+Backward replay is not another source occurrence and does not repeat controls.
+
+Declaration selection follows the independently recorded declaration
+dependencies, not only the final graph's value liveness. An alias declaration
+uses its existing named observation carrier so a reference retains that
+declaration's controls; unrelated sibling declarations remain excluded. The
+explicit plan-selection API also admits a draw-free region without changing
+the profile used by ordinary evaluator dispatch. Other exclusions remain errors.
+The owning copy/drop, context-composition and AD/splice boundaries map the existing
+sequence rather than recovering source controls by sorting a resulting graph.
+Host partitioning uses occurrence cuts recorded at the actual source action;
+even a control-only segment executes before that action. Segment frames retain
+the same invocation's saved keys and scope state across those cuts.
+Validation requires the complete selected graph, source census in order,
+balanced unique seed scopes and forward/replay dominance. Joint deletion of
+runtime controls or draw metadata cannot delete the source census.
+
+The same `lowering-trace` feature additionally exposes
+`try_lower_program_to_evaluation_library_with_trace`. Its ordinary counterpart
+does not collect full snapshots. The additive `EvaluationLoweringTrace` links
+execution-bearing pre/post AD regions to the existing gradient/application
+maps, at the actual production call. It retains exact existing DAG types and
+constants; its occurrence census checks execution identity, not an independent
+arithmetic theorem. `LoweringTrace`, public legacy graph/kernel products and
+serialized formats remain unchanged. Inspection views cannot construct plans.
+
+The owning oracle adds value-free/equal-seed controls, independently selected
+dependencies, joint omission/substitution negatives, and execution of the
+captured backward graph with unchanged outer stream state. This is source/IR
+infrastructure, not a compiled-C capability, host-emission snapshot, new wire
+profile or mixed certificate. Joining actual selected emission and independently
+checking both graph correspondences remains required.
+
 ### Opt-in observation of selected compiler emission
 
 The `chelis-compiler-api/emission-observer` feature supplies
