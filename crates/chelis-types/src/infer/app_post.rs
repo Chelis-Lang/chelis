@@ -179,6 +179,16 @@ pub(super) fn finish_unified_app(
         return rejected;
     }
 
+    // chelis#1512: the three dtype-admissibility validators below run ahead of
+    // the route dispatch that owns the deferral site at the bottom of this
+    // function, so they get the same site built early. Each admitted a
+    // `Type::Var` operand and walked away; now each suspends the call instead,
+    // and `replay_dtype_admissibility` re-runs these same three functions once
+    // the operand settles.
+    let dtype_site = func_name
+        .as_deref()
+        .map(|fname| DtypeAdmissibilitySite::new(list, kids, fname, env));
+
     if let Some(rejected) = validate_numeric_and_reduction_arguments(
         list,
         kids,
@@ -187,6 +197,9 @@ pub(super) fn finish_unified_app(
         subst,
         errors,
         &mut checked_route_observed,
+        dtype_site.as_ref(),
+        &result_ty,
+        product,
     ) {
         return rejected;
     }
@@ -200,13 +213,24 @@ pub(super) fn finish_unified_app(
         subst,
         errors,
         &mut checked_route_observed,
+        dtype_site.as_ref(),
+        &result_ty,
+        product,
     ) {
         return rejected;
     }
 
-    if let Some(result) =
-        integer_binop_result_type(list, func_name.as_deref(), &arg_tys, vg, subst, errors)
-    {
+    if let Some(result) = integer_binop_result_type(
+        list,
+        func_name.as_deref(),
+        &arg_tys,
+        vg,
+        subst,
+        errors,
+        dtype_site.as_ref(),
+        &result_ty,
+        product,
+    ) {
         return result;
     }
 
