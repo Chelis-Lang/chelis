@@ -829,7 +829,7 @@ fn an_op_declared_witness_reaches_the_hip_prologue_without_panicking() {
     let emitted = fs::read_to_string(out_dir.join("transformer_block_hip.cpp"))
         .expect("HIP host source is written");
     assert!(
-        emitted.contains("int64_t seq = chelis_tensor_shape("),
+        emitted.contains("chelis_device_metadata seq = chelis_tensor_shape("),
         "and the interface binding is declared from its Load axis: {}",
         &emitted[..emitted.len().min(400)]
     );
