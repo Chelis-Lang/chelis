@@ -360,7 +360,15 @@ mod tests {
             );
             assert_eq!(actual.named_roots(), ordinary.named_roots());
             assert_eq!(actual.forward_node_index(), ordinary.forward_node_index());
-            assert_eq!(actual.dag().nodes(), ordinary.dag().nodes());
+            assert_eq!(actual.dag().nodes().len(), ordinary.dag().nodes().len());
+            for (actual, original) in actual.dag().nodes().iter().zip(ordinary.dag().nodes()) {
+                assert_eq!(actual.id, original.id);
+                assert_eq!(actual.op, original.op);
+                assert_eq!(actual.inputs, original.inputs);
+                assert_eq!(actual.output_type, original.output_type);
+                assert_eq!(actual.shape_deps, original.shape_deps);
+                assert_eq!(actual.reusable_input, original.reusable_input);
+            }
             assert_eq!(actual.dag().roots(), ordinary.dag().roots());
             let mut malformed = checked.clone();
             malformed
