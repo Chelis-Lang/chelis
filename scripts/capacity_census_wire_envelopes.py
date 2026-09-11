@@ -184,16 +184,16 @@ def dag_cases():
                 )
             )
 
-    empty = {"schema_version": 10, "nodes": [], "roots": []}
+    empty = {"schema_version": 11, "nodes": [], "roots": []}
     add("empty", empty, True)
-    for version in (None, 9, 11):
+    for version in (None, 10, 12):
         value = {**empty, "schema_version": version}
         if version is None:
             del value["schema_version"]
         add("version-" + str(version), value, False)
     scalar = {"dtype": "f64", "bits": "8000000000000000"}
     const = {
-        "schema_version": 10,
+        "schema_version": 11,
         "nodes": [
             {
                 "shape_deps": [],
@@ -229,7 +229,7 @@ def dag_cases():
 
     def graph(op):
         return {
-            "schema_version": 10,
+            "schema_version": 11,
             "nodes": [
                 copy.deepcopy(load),
                 {
@@ -298,7 +298,7 @@ def dag_cases():
     witness_node["op"]["name"] = "witness"
     witness_node["output_type"]["dims"] = [{"kind": "lit", "size": 4}]
     reference_graph = {
-        "schema_version": 10,
+        "schema_version": 11,
         "nodes": [
             value_node,
             witness_node,
@@ -401,7 +401,7 @@ def dag_cases():
             add(f"owner-{owner}-to-end", changed, False, "forbids the to_end carrier")
 
     witness = {
-        "schema_version": 10,
+        "schema_version": 11,
         "nodes": [
             copy.deepcopy(load),
             {
@@ -415,6 +415,7 @@ def dag_cases():
                     "parameter": "x",
                     "axis": {"axis": "lit", "value": 0},
                     "requirements": [4, 4, 9],
+                    "claims": [],
                 },
                 "inputs": [0],
                 "output_type": {"dims": [], "precision": "int64"},
@@ -449,14 +450,46 @@ def dag_cases():
         else:
             bad["nodes"][node][field] = value
         add(name, bad, False, error)
-    for field in ("parameter", "axis", "requirements"):
+    for field in ("parameter", "axis", "requirements", "claims"):
         bad = copy.deepcopy(witness)
         del bad["nodes"][1]["op"][field]
         add("missing-witness-" + field, bad, False, "missing field")
+    # wire v11 (chelis#1374): a named claim owes one earlier witness edge, and
+    # its binder identifies the obligation, so neither may be waived.
+    for name, claims, inputs, error in (
+        (
+            "witness-claim-without-edge",
+            [{"claim": "rows", "requirement_declares": True}],
+            [0],
+            "one earlier witness input per named claim",
+        ),
+        (
+            "witness-claim-edge-is-not-a-witness",
+            [{"claim": "rows", "requirement_declares": True}],
+            [0, 0],
+            "earlier rank-0 int64 extent witness",
+        ),
+        (
+            "witness-claim-empty-binder",
+            [{"claim": "", "requirement_declares": True}],
+            [0, 0],
+            "nonempty dimension binder",
+        ),
+        (
+            "witness-claim-missing-role",
+            [{"claim": "rows"}],
+            [0, 0],
+            "missing field",
+        ),
+    ):
+        bad = copy.deepcopy(witness)
+        bad["nodes"][1]["op"]["claims"] = claims
+        bad["nodes"][1]["inputs"] = inputs
+        add(name, bad, False, error)
     for name, field, value, error in (
         ("witness-axis-out-of-range", "axis", {"axis": "lit", "value": 1}, "wire axis"),
-        ("witness-no-input", "inputs", [], "exactly one"),
-        ("witness-extra-input", "inputs", [0, 0], "exactly one"),
+        ("witness-no-input", "inputs", [], "one earlier tensor input"),
+        ("witness-extra-input", "inputs", [0, 0], "one earlier tensor input"),
         ("witness-wrong-output", "output_type", {"dims": [], "precision": "f32"}, "rank-0 int64"),
         (
             "witness-ranked-output",
@@ -479,7 +512,7 @@ def result_reference_cases():
 
     cases = []
     dag = {
-        "schema_version": 10,
+        "schema_version": 11,
         "nodes": [
             {
                 "shape_deps": [],
@@ -533,7 +566,7 @@ def result_reference_cases():
                             "outside the owning DAG",
                         )
                     )
-        for version in (9, 11):
+        for version in (10, 12):
             bad = copy.deepcopy(good)
             bad["dag"]["schema_version"] = version
             cases.append(

@@ -110,13 +110,21 @@ fn host_applied_def_main_is_a_host_lane_root() {
     assert_eq!(root_shape(&result, "main"), vec![2, 2]);
 }
 
-/// Measured #1376 residue: the mismatch now fails at the local extent
-/// consumer. Correct declaring-caller witness attribution remains #1277 work;
-/// this disposition lock is not the named-claim acceptance oracle. The
-/// rank-increasing route traps as `insert` since the #1277 expand/insert
-/// split (#1547, #1590); chelis#1778 records the stale `expand` spelling.
+/// chelis#1376 through the inlined root: the foreign claim `m` on the set
+/// axis of `insert(x, 1, shape(x, 0))` is witnessed by `y` and produced from
+/// `x`, so `spec/04-type-system.md` §4.7.2 checks it at execution.
+///
+/// The single-letter binders make `n` and `m` polymorphic dimension
+/// variables, which inference instantiates against the literal argument
+/// extents, so the requirement resolves to the literal 3 and the produced
+/// side to `x`'s own witness.
+///
+/// EVIDENTIARY STATUS: regression test for the ATTRIBUTION. Before this
+/// change the program failed at the local extent consumer with
+/// `claimed = 3, node N axis 1 = 2` and `domain in expand`, naming a node
+/// identity rather than the disagreeing sources.
 #[test]
-fn host_applied_mismatch_preserves_the_current_local_failure() {
+fn host_applied_mismatch_names_the_disagreeing_sources() {
     let error = eval(EvalRequest {
         source_kind: SourceKind::Surf,
         source: HOST_APPLIED_1376.to_string(),
@@ -129,9 +137,12 @@ fn host_applied_mismatch_preserves_the_current_local_failure() {
         .map(|d| d.message.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(messages.contains("claimed = 3, node "), "{messages}");
     assert!(
-        messages.ends_with("axis 1 = 2\nnumeric trap: domain in insert at int64"),
+        messages.contains("extent `3`: claimed = 3, x axis 0 = 2"),
+        "{messages}"
+    );
+    assert!(
+        messages.ends_with("numeric trap: domain in load at int64"),
         "{messages}"
     );
 }

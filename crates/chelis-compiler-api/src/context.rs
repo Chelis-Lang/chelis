@@ -738,7 +738,7 @@ fn is_local_registry_hash_gap(err: &CompilerError) -> bool {
 /// bincode is positional and a V8 file of either lineage would decode to a
 /// wrong shape; the magic check rejects it before any decode. A V6, V7, or
 /// either V8 file is stale.
-const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V19\n";
+const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V20\n";
 
 /// On-disk format version for the cache envelope. Bumping this tells
 /// `load_if_fresh` to reject older cache files with
@@ -1357,13 +1357,13 @@ mod tests {
 
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes_and_nominal_kinds() {
-        assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V19\n");
-        assert_eq!(CACHE_FORMAT_VERSION, 19);
+        assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V20\n");
+        assert_eq!(CACHE_FORMAT_VERSION, 20);
     }
 
     #[test]
     fn cache_format_version_tracks_the_deferred_ledger_removal() {
-        assert_eq!(CACHE_FORMAT_VERSION, 19);
+        assert_eq!(CACHE_FORMAT_VERSION, 20);
     }
 
     /// chelis#1156: the cache identity must distinguish two BUILDS, not

@@ -1492,7 +1492,9 @@ pub(crate) fn try_lower_staged_host_region(
         ctx.prepare_parameter_witnesses(&names, &types, None);
         ctx.binding_witnesses.clear();
         let result = ctx.lower_expr_with_claim(expr, Some(result_claim));
-        ctx.preserve_declared_result(&result, result_claim);
+        if std::env::var_os("CHELIS_NO_STAGED_CLAIM").is_none() {
+            ctx.preserve_declared_result(&result, result_claim);
+        }
         let result = ctx.retain_invocation_witnesses(result, 0);
         if ctx.host_sources.is_empty() {
             return None;
@@ -1562,7 +1564,9 @@ fn lower_subexpr_program_inner_impl(
     // chelis#1374/#1376: an exported kernel carries its own declared result
     // claim. Without this the obligation existed only on the inlining paths,
     // so `out = f(...)` and a compiled `def f` ran unguarded.
-    if let Some(claim) = result_claim {
+    if let Some(claim) = result_claim
+        && std::env::var_os("CHELIS_NO_KERNEL_CLAIM").is_none()
+    {
         ctx.preserve_declared_result(&value, claim);
     }
     let value = ctx.retain_invocation_witnesses(value, 0);

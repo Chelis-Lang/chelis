@@ -6484,7 +6484,7 @@ mod tests {
         let dag = native_wire_witness_fixture();
         let projected = wire_dag(&dag).unwrap();
         let json = serde_json::to_value(&projected).unwrap();
-        assert_eq!(json["schema_version"], 10);
+        assert_eq!(json["schema_version"], 11);
         assert_eq!(
             json["nodes"][1]["op"]["requirements"],
             serde_json::json!([4, 4, 9])

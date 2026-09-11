@@ -37,6 +37,7 @@ fn fixture() -> WireDag {
                     parameter: "x".into(),
                     axis: WireRtAxis::Lit { value: 0 },
                     requirements: vec![extent(4), extent(4), extent(9)],
+                    claims: vec![],
                 },
                 inputs: vec![0],
                 output_type: WireTensorType {

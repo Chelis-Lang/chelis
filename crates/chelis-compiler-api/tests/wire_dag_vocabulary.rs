@@ -27,7 +27,7 @@ impl serde::de::Error for VocabularyError {
 }
 
 #[test]
-fn wire_dag_operation_vocabulary_is_pinned_to_version_10() {
+fn wire_dag_operation_vocabulary_is_pinned_to_its_schema_version() {
     let decoder = serde::de::value::MapDeserializer::<_, VocabularyError>::new(
         [("kind", "__unknown_operation__")].into_iter(),
     );
@@ -39,6 +39,7 @@ fn wire_dag_operation_vocabulary_is_pinned_to_version_10() {
         "div",
         "floor_div",
         "trunc_div",
+        "mod",
         "cmp_lt",
         "max_elem",
         "min_elem",
@@ -80,6 +81,8 @@ fn wire_dag_operation_vocabulary_is_pinned_to_version_10() {
         "const_tensor",
         "shape",
         "extent_witness",
+        "checked_reshape_extent",
+        "checked_unit_axis",
         "load",
         "store",
         "copy",
@@ -102,7 +105,7 @@ fn wire_dag_operation_vocabulary_is_pinned_to_version_10() {
     actual.sort();
     expected.sort();
     assert_eq!(
-        WIRE_DAG_SCHEMA_VERSION, 10,
+        WIRE_DAG_SCHEMA_VERSION, 11,
         "review vocabulary and migration history with every version change"
     );
     assert_eq!(actual.len(), 63);

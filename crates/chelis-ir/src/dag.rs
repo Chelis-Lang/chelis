@@ -3593,6 +3593,7 @@ mod tests {
                 parameter: "x".into(),
                 axis: RtAxis::Lit(0),
                 requirements: vec![chelis_types::scalar_from_i64("load", Prim::Int64, 4).unwrap()],
+                claims: Vec::new(),
             },
             RiscOp::Sub,
             RiscOp::MinElem,
