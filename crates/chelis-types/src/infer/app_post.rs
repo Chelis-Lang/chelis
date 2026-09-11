@@ -187,7 +187,7 @@ pub(super) fn finish_unified_app(
     // the operand settles.
     let dtype_site = func_name
         .as_deref()
-        .map(|fname| UnresolvedOperandSite::new(list, kids, fname, env));
+        .map(|fname| DtypeAdmissibilitySite::new(list, kids, fname, env));
 
     if let Some(rejected) = validate_numeric_and_reduction_arguments(
         list,

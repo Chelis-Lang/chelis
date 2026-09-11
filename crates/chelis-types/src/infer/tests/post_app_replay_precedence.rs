@@ -13,19 +13,23 @@
 //! before the route dispatch or is absent from it, so nothing in the language
 //! exercises this and no diagnostic can express it. The invariant is asserted
 //! where it is decided instead.
+//!
+//! The other half of the dtype registration's precondition, that it declines an
+//! operand list holding an error witness, is asserted end to end by
+//! `an_error_operand_suppresses_the_dtype_routes_own_diagnostic` in
+//! `tests/unresolved_operand_matrix.rs`, over a witness the checker minted
+//! rather than one a test constructed.
+//!
+//! Round 1 P3-2: the two registrations are now two TYPES, so a route arm cannot
+//! reach the dtype one at all and the census cannot record a `deferred` arm that
+//! suspends the wrong kind. What this file pins is the precedence that survives
+//! that barrier, for a call that legitimately reaches both.
 
 use super::*;
 use crate::infer::checked::PostAppReplay;
-use crate::infer::operand_deferral::UnresolvedOperandSite;
+use crate::infer::operand_deferral::{DtypeAdmissibilitySite, UnresolvedOperandSite};
 
-fn probe() -> (
-    deep::List,
-    Vec<deep::Expr>,
-    Env,
-    InferenceProduct,
-    Subst,
-    Vec<Type>,
-) {
+fn probe() -> (deep::List, Vec<deep::Expr>, Env, InferenceProduct, Subst, Vec<Type>) {
     (
         deep::List { elements: vec![] },
         Vec::new(),
@@ -36,22 +40,35 @@ fn probe() -> (
     )
 }
 
+/// The two capabilities over one call: the route dispatch's site and the dtype
+/// validators' site. Only `finish_unified_app` holds both.
+fn sites<'a>(
+    list: &'a deep::List,
+    kids: &'a [deep::Expr],
+    env: &'a Env,
+) -> (UnresolvedOperandSite<'a>, DtypeAdmissibilitySite<'a>) {
+    (
+        UnresolvedOperandSite::new(list, kids, "probe", env),
+        DtypeAdmissibilitySite::new(list, kids, "probe", env),
+    )
+}
+
 /// REGRESSION TEST. Watched RED against a `register` that returns early on any
 /// existing entry: the ledger then keeps the dtype replay and the route's own
 /// arm is never re-entered.
 #[test]
 fn a_route_registration_replaces_a_dtype_suspension_for_the_same_call() {
     let (list, kids, env, mut product, subst, arg_tys) = probe();
-    let site = UnresolvedOperandSite::new(&list, &kids, "probe", &env);
+    let (route, dtype) = sites(&list, &kids, &env);
 
-    site.register_dtype_admissibility(&arg_tys, &Type::Unit, &subst, &mut product);
+    dtype.register(&arg_tys, &Type::Unit, &subst, &mut product);
     assert_eq!(
         product.post_app_replays_for(&list),
         vec![PostAppReplay::DtypeAdmissibility],
         "the dtype validator registers first, as it runs first"
     );
 
-    site.register(&arg_tys, &Type::Unit, &mut product);
+    route.register(&arg_tys, &Type::Unit, &mut product);
     assert_eq!(
         product.post_app_replays_for(&list),
         vec![PostAppReplay::Route],
@@ -66,10 +83,10 @@ fn a_route_registration_replaces_a_dtype_suspension_for_the_same_call() {
 #[test]
 fn a_dtype_suspension_after_a_route_registration_is_a_no_op() {
     let (list, kids, env, mut product, subst, arg_tys) = probe();
-    let site = UnresolvedOperandSite::new(&list, &kids, "probe", &env);
+    let (route, dtype) = sites(&list, &kids, &env);
 
-    site.register(&arg_tys, &Type::Unit, &mut product);
-    site.register_dtype_admissibility(&arg_tys, &Type::Unit, &subst, &mut product);
+    route.register(&arg_tys, &Type::Unit, &mut product);
+    dtype.register(&arg_tys, &Type::Unit, &subst, &mut product);
     assert_eq!(
         product.post_app_replays_for(&list),
         vec![PostAppReplay::Route],

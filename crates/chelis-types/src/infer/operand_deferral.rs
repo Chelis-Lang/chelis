@@ -86,6 +86,15 @@ impl<'a> UnresolvedOperandSite<'a> {
 
     /// chelis#1512: suspend one dtype-admissibility decision.
     ///
+    /// Private to this module on purpose, and reached only through
+    /// [`DtypeAdmissibilitySite`]. The census recognizes a suspension by the
+    /// `site.register` idiom in the arm body, and `register_dtype_admissibility`
+    /// begins with that same text, so a route arm that called this one by
+    /// mistake would still be recorded `deferred` while its own validation was
+    /// never replayed (round 1 P3-2). Handing the two kinds to two types makes
+    /// that unrepresentable rather than detectable: a route arm holds an
+    /// `UnresolvedOperandSite`, which has no dtype registration at all.
+    ///
     /// The three validators in `app_numeric.rs` and `app_operand_dtype.rs` run
     /// at the head of `finish_unified_app`, ahead of the route dispatch that
     /// owns [`Self::register`]. They decide whether the operand's DTYPE is
@@ -98,7 +107,7 @@ impl<'a> UnresolvedOperandSite<'a> {
     /// The entry shares [`InferenceProduct::post_app_key`] with the route
     /// registration above, so chelis#1774's key translation, its report-once
     /// cancellation and its silent declaration boundary all apply unchanged.
-    pub(super) fn register_dtype_admissibility(
+    fn register_dtype_admissibility(
         &self,
         arg_tys: &[Type],
         result_ty: &Type,
@@ -147,6 +156,42 @@ impl<'a> UnresolvedOperandSite<'a> {
     ) -> Type {
         self.register(arg_tys, result_ty, product);
         eager
+    }
+}
+
+/// chelis#1512: the capability to suspend ONE dtype-admissibility decision.
+///
+/// `finish_unified_app` mints it once, before the three validators run, and
+/// hands each of them a borrow. It is the only route to
+/// [`UnresolvedOperandSite::register_dtype_admissibility`], so no route arm can
+/// register the narrower replay kind for a call whose own arm needs the full
+/// one; see that method's own note.
+pub(super) struct DtypeAdmissibilitySite<'a> {
+    site: UnresolvedOperandSite<'a>,
+}
+
+impl<'a> DtypeAdmissibilitySite<'a> {
+    pub(super) fn new(
+        list: &'a deep::List,
+        kids: &'a [deep::Expr],
+        fname: &'a str,
+        env: &'a Env,
+    ) -> Self {
+        Self {
+            site: UnresolvedOperandSite::new(list, kids, fname, env),
+        }
+    }
+
+    /// Suspend this call's dtype decision.
+    pub(super) fn register(
+        &self,
+        arg_tys: &[Type],
+        result_ty: &Type,
+        subst: &Subst,
+        product: &mut InferenceProduct,
+    ) {
+        self.site
+            .register_dtype_admissibility(arg_tys, result_ty, subst, product);
     }
 }
 

@@ -902,6 +902,21 @@ fn run_dtype_cell(row: &DtypeCell) {
         )
     });
     run_cell(&row.cell);
+
+    // Round 1 P3-1. The shared harness above matches the diagnostic by
+    // SUBSTRING, so a drift in the message tail, or a second diagnostic
+    // appearing beside it, would pass. These routes relocate a decision rather
+    // than restate it, so the two renderings are compared whole: same count,
+    // same kind, same message. Measured equal on all eleven routes.
+    let eager = check(row.cell.resolved_invalid).expect_err("checked by run_cell");
+    let late = check(row.cell.late_invalid).expect_err("checked by run_cell");
+    assert_eq!(
+        summary(&eager),
+        summary(&late),
+        "{}: the late-bound call must produce the SAME diagnostics as the resolved one, whole \
+         and in the same number, not merely a superset containing the fragment",
+        row.cell.route
+    );
 }
 
 /// chelis#1512's remaining class: the dtype-admissibility validators.
@@ -1235,43 +1250,101 @@ fn dtype_routes_caught_before_the_validator_keep_their_verdict() {
 /// entry replays, or a second ledger: a design decision rather than an
 /// extension of the arm split, which is why chelis#1805 owns it.
 ///
-/// NOT a disposition lock on desired behaviour. It pins a KNOWN HOLE so the
-/// suite says out loud what this pull request does not close, and it is the
-/// test chelis#1805 turns red on when it is repaired. Read a failure here as
-/// that repair landing, and move the assertion to the rejecting side.
+/// The first assertion is NOT a lock on desired behaviour. It pins a KNOWN HOLE
+/// so the suite says out loud what this pull request does not close, and it is
+/// the assertion chelis#1805 turns red. Read a failure there as that repair
+/// landing, and move it to the rejecting side. The second is an ordinary
+/// DISPOSITION LOCK: both were measured accepting and rejecting respectively on
+/// `6dbbbf2bc`.
 #[test]
 fn a_late_bound_tensor_precision_is_not_validated_yet() {
-    // The precision of the empty literal is a free `TensorPrec::Var` when the
-    // reduction's dtype rule reads it; the declared result binds it to `int32`
-    // afterwards, and nothing re-consults the policy.
+    // chelis#1805. A reduction's result does not determine its operand, so
+    // nothing here ever binds the empty literal's precision to the `int32` the
+    // declaration names, and the dtype policy is never consulted against it.
+    // Measured ACCEPTED on `6dbbbf2bc` and still accepted here.
     check("def f() -> tensor[int32] = mean(to_tensor([]), 0i32)\n").expect(
         "chelis#1805: an integer `mean` over a late-bound precision is still accepted; if this \
          now rejects, that issue is fixed and this assertion moves",
     );
 
-    // The control, and the reason the row above is a hole rather than a policy:
-    // the same operand with its precision settled first is rejected.
+    // DISPOSITION LOCK, and the reason the assertion above is a hole rather
+    // than a policy: the same operand with its precision settled first is
+    // rejected. Measured REJECTED on `6dbbbf2bc`.
     let errors = check("def f(x: tensor[3, int32]) -> tensor[int32] = mean(x, 0i32)\n")
         .expect_err("a settled integer operand must be rejected");
     assert!(
-        errors.iter().any(|e| e
-            .message
-            .contains("mean on operand precision `int32` is not admitted")),
+        errors
+            .iter()
+            .any(|e| e.message.contains("mean on operand precision `int32` is not admitted")),
         "the resolved rejection must still name the dtype policy:\n{}",
         summary(&errors)
     );
+}
 
-    // The neighbouring route is NOT exposed, which is what makes chelis#1805 a
-    // bounded residual rather than a blanket one: `softmax` preserves its
-    // operand's precision, so signature unification binds it before the
-    // validator runs.
-    let errors = check("def f() -> tensor[3, int32] = softmax(to_tensor([]), 0i32)\n")
-        .expect_err("softmax binds its operand precision through unification first");
-    assert!(
-        errors
-            .iter()
-            .any(|e| e.message.contains("softmax on operand precision `int32`")),
-        "softmax must still reject through the same policy:\n{}",
-        summary(&errors)
-    );
+/// Round 1 P2-1: this pull request NARROWS acceptance on the empty tensor
+/// literal, and the narrowing was neither recorded nor covered.
+///
+/// A shape- and dtype-preserving route ties its result to its operand, so a
+/// declaration that names the result determines the operand as well. The call
+/// is suspended while the operand is still a variable, the declaration binds
+/// it, and the replay then consults the dtype policy against the bound type.
+/// The three programs below were MEASURED accepted at score 1 on `6dbbbf2bc`
+/// and are rejected here.
+///
+/// This is why the sibling above is a bounded residual rather than a blanket
+/// one, and it strengthens `Closes #1512` rather than qualifying it: an empty
+/// literal under a reducing route keeps its hole, an empty literal under a
+/// preserving route does not.
+///
+/// REGRESSION TEST, every assertion. The earlier spelling of this file asserted
+/// the `softmax` row inside the chelis#1805 lock with a mechanism sentence that
+/// was false ("signature unification binds it before the validator runs";
+/// unification did not bind it, and the base accepts the program).
+#[test]
+fn an_empty_literal_the_declared_result_determines_is_now_validated() {
+    for (route, program, diagnostic) in [
+        (
+            "softmax",
+            "def f() -> tensor[3, int32] = softmax(to_tensor([]), 0i32)\n",
+            "softmax on operand precision `int32` is not admitted",
+        ),
+        (
+            "sqrt",
+            "def f() -> tensor[3, int32] = sqrt(to_tensor([]))\n",
+            "sqrt on operand precision `int32` is not admitted",
+        ),
+        (
+            "add",
+            "def f() -> tensor[3, bool] = add(to_tensor([]), to_tensor([]))\n",
+            "add on bool operands is not admitted",
+        ),
+    ] {
+        let errors = check(program).expect_err(&format!(
+            "{route}: an empty literal the declaration determines must now be validated"
+        ));
+        assert!(
+            errors.iter().any(|e| e.message.contains(diagnostic)),
+            "{route}: the narrowed rejection must name the dtype policy, got:\n{}",
+            summary(&errors)
+        );
+    }
+
+    // NEGATIVE TWIN. The narrowing is a dtype verdict, not a rejection of the
+    // empty literal: the same programs at an admissible dtype still check.
+    // DISPOSITION LOCK, accepted on `6dbbbf2bc` and here.
+    for (route, program) in [
+        (
+            "softmax",
+            "def f() -> tensor[3, f32] = softmax(to_tensor([]), 0i32)\n",
+        ),
+        ("sqrt", "def f() -> tensor[3, f32] = sqrt(to_tensor([]))\n"),
+        ("mean", "def f() -> tensor[f32] = mean(to_tensor([]), 0i32)\n"),
+    ] {
+        check(program).unwrap_or_else(|e| {
+            panic!(
+                "{route}: an admissible dtype over an empty literal must still check:\n{}",
+                summary(&e)
+            )
+        });
+    }
 }

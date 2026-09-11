@@ -286,7 +286,7 @@ pub(super) fn validate_numeric_and_reduction_arguments(
     subst: &Subst,
     errors: &mut DiagnosticSink<'_>,
     route_observed: &mut bool,
-    suspension: Option<&UnresolvedOperandSite<'_>>,
+    suspension: Option<&DtypeAdmissibilitySite<'_>>,
     result_ty: &Type,
     product: &mut InferenceProduct,
 ) -> Option<Type> {
@@ -312,7 +312,7 @@ pub(super) fn validate_numeric_and_reduction_arguments(
                 // call gets.
                 Type::Var(_) => {
                     if let Some(site) = suspension {
-                        site.register_dtype_admissibility(arg_tys, result_ty, subst, product);
+                        site.register(arg_tys, result_ty, subst, product);
                     }
                 }
                 _ => {
@@ -358,7 +358,7 @@ pub(super) fn validate_numeric_and_reduction_arguments(
                 // checks decide against the bound one.
                 Type::Var(_) => {
                     if let Some(site) = suspension {
-                        site.register_dtype_admissibility(arg_tys, result_ty, subst, product);
+                        site.register(arg_tys, result_ty, subst, product);
                     }
                 }
                 Type::Tensor(_, _) | Type::Error(_) => {}
@@ -398,7 +398,7 @@ pub(super) fn validate_numeric_and_reduction_arguments(
                 // chelis#1512: the axis is not an `int32` YET.
                 Type::Var(_) => {
                     if let Some(site) = suspension {
-                        site.register_dtype_admissibility(arg_tys, result_ty, subst, product);
+                        site.register(arg_tys, result_ty, subst, product);
                     }
                 }
                 Type::Error(_) => {}
@@ -465,7 +465,7 @@ pub(super) fn integer_binop_result_type(
     vg: &mut VarGen,
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
-    suspension: Option<&UnresolvedOperandSite<'_>>,
+    suspension: Option<&DtypeAdmissibilitySite<'_>>,
     result_ty: &Type,
     product: &mut InferenceProduct,
 ) -> Option<Type> {
@@ -494,19 +494,19 @@ pub(super) fn integer_binop_result_type(
             // and the arm above is the one that then decides.
             (Type::Var(_), Type::Prim(rhs_prec)) if rhs_prec.is_integer() => {
                 if let Some(site) = suspension {
-                    site.register_dtype_admissibility(arg_tys, result_ty, subst, product);
+                    site.register(arg_tys, result_ty, subst, product);
                 }
                 return Some(lhs);
             }
             (Type::Prim(lhs_prec), Type::Var(_)) if lhs_prec.is_integer() => {
                 if let Some(site) = suspension {
-                    site.register_dtype_admissibility(arg_tys, result_ty, subst, product);
+                    site.register(arg_tys, result_ty, subst, product);
                 }
                 return Some(lhs);
             }
             (Type::Var(_), Type::Var(_)) => {
                 if let Some(site) = suspension {
-                    site.register_dtype_admissibility(arg_tys, result_ty, subst, product);
+                    site.register(arg_tys, result_ty, subst, product);
                 }
                 return Some(lhs);
             }
@@ -565,7 +565,7 @@ pub(super) fn integer_binop_result_type(
             | (Type::Var(_), Type::Error(_))
             | (Type::Error(_), Type::Var(_)) => {
                 if let Some(site) = suspension {
-                    site.register_dtype_admissibility(arg_tys, result_ty, subst, product);
+                    site.register(arg_tys, result_ty, subst, product);
                 }
                 return Some(lhs);
             }
@@ -573,7 +573,7 @@ pub(super) fn integer_binop_result_type(
                 if prec.is_integer() =>
             {
                 if let Some(site) = suspension {
-                    site.register_dtype_admissibility(arg_tys, result_ty, subst, product);
+                    site.register(arg_tys, result_ty, subst, product);
                 }
                 return Some(lhs);
             }
