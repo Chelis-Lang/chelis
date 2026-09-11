@@ -2294,11 +2294,9 @@ fn cmd_check(
 /// (`/tmp/.tmpXyZ/...`) without the entire walk getting filtered out
 /// because the temp-dir name starts with a dot.
 fn discover_check_files(target: &Path) -> Result<Vec<PathBuf>, String> {
-    let mut files = Vec::new();
-    let walker = walkdir::WalkDir::new(target)
-        .sort_by_file_name()
-        .into_iter()
-        .filter_entry(|entry| {
+    walk_sources(
+        target,
+        |entry| {
             if entry.depth() == 0 {
                 return true;
             }
@@ -2310,27 +2308,104 @@ fn discover_check_files(target: &Path) -> Result<Vec<PathBuf>, String> {
                 return false;
             }
             true
-        });
-    for entry in walker {
-        let entry = entry.map_err(|e| format!("failed to walk {}: {e}", target.display()))?;
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry.path();
+        },
         // Collect both Surf (`.ch`) and Deep (`.dp`) sources so a mixed
         // directory checks both surfaces. The per-file `cmd_check_one`
         // routes `.dp` through the Deep ingestion helper; both surfaces
         // emit the same CheckResult JSON shape.
-        let is_checkable = matches!(
-            path.extension().and_then(|e| e.to_str()),
-            Some("ch") | Some("dp")
-        );
-        if !is_checkable {
-            continue;
+        |path| {
+            matches!(
+                path.extension().and_then(|e| e.to_str()),
+                Some("ch") | Some("dp")
+            )
+        },
+    )
+}
+
+/// Walk `target` for source files, following symlinks (chelis#1678).
+///
+/// `chelis check <dir>` and `chelis test <dir>` both walk a directory for
+/// sources, and both used to skip every symlink: `walkdir` does not follow
+/// links by default, and each caller then dropped any entry that was not a
+/// regular file. A symlinked source, or a symlinked directory of them, was
+/// never checked or run -- with a successful exit and no warning. A type
+/// error could be hidden just by putting it behind a link.
+///
+/// Following links adds three failure modes the unfollowed walk never met,
+/// and `walkdir` reports each as an error on its entry, which the old code
+/// propagated, aborting the whole run:
+///
+/// - **a loop** (a link back to an ancestor): skipped. Following it would
+///   only revisit files already collected.
+/// - **a dangling link named like a source**: collected, so the caller
+///   reports it unreadable exactly as if the user had named it directly,
+///   rather than skipping it silently.
+/// - **a dangling link to anything else**: skipped, like any non-source.
+///
+/// Every other error -- a directory that cannot be read, reached directly or
+/// through a link -- propagates unchanged. How directory mode should report
+/// those is an open decision on chelis#1678 and is not this helper's to
+/// make.
+///
+/// `keep` is the caller's own entry filter and `is_source` its own suffix
+/// rule. The two walks genuinely differ in both, and this deliberately
+/// shares only the link handling.
+fn walk_sources(
+    target: &Path,
+    keep: impl FnMut(&walkdir::DirEntry) -> bool,
+    is_source: impl Fn(&Path) -> bool,
+) -> Result<Vec<PathBuf>, String> {
+    let mut files = Vec::new();
+    let walker = walkdir::WalkDir::new(target)
+        .follow_links(true)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_entry(keep);
+    for entry in walker {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                if error.loop_ancestor().is_some() {
+                    continue;
+                }
+                if let Some(path) = error.path()
+                    && is_dangling_link(&error, path)
+                {
+                    // An entry that fails to resolve reaches us as an error
+                    // BEFORE `keep` sees it, so the dot-prefix rule every
+                    // caller applies has to be applied here as well.
+                    let hidden = path
+                        .file_name()
+                        .is_some_and(|name| name.to_string_lossy().starts_with('.'));
+                    if !hidden && is_source(path) {
+                        files.push(path.to_path_buf());
+                    }
+                    continue;
+                }
+                return Err(format!("failed to walk {}: {error}", target.display()));
+            }
+        };
+        // With `follow_links`, a link's file type is its target's, so a link
+        // to a source file passes this and is collected under the link's own
+        // path -- the name the user sees in their directory.
+        if entry.file_type().is_file() && is_source(entry.path()) {
+            files.push(entry.path().to_path_buf());
         }
-        files.push(path.to_path_buf());
     }
     Ok(files)
+}
+
+/// Whether a walk error is a symlink whose target does not exist.
+///
+/// Both halves are needed. `NotFound` alone would also match an entry that
+/// vanished mid-walk, and a symlink alone would also match a link to a
+/// directory that exists but cannot be read -- which is a real failure, not
+/// a dangling link, and must keep propagating.
+fn is_dangling_link(error: &walkdir::Error, path: &Path) -> bool {
+    error
+        .io_error()
+        .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+        && fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
 }
 
 /// Returns the JSON report plus a flag indicating whether the report's
@@ -7943,11 +8018,9 @@ fn discover_test_files(target: &Path) -> Result<Vec<PathBuf>, String> {
         }
         return Ok(vec![target.to_path_buf()]);
     }
-    let mut files = Vec::new();
-    let walker = walkdir::WalkDir::new(target)
-        .sort_by_file_name()
-        .into_iter()
-        .filter_entry(|entry| {
+    walk_sources(
+        target,
+        |entry| {
             // Skip dot-prefixed files AND directories (editor temp files, build
             // dirs like `.git` or `target/.rustc_info.json`, hidden fixtures).
             // Also skip `target/` directories which accumulate build artifacts
@@ -7960,19 +8033,9 @@ fn discover_test_files(target: &Path) -> Result<Vec<PathBuf>, String> {
                 return false;
             }
             true
-        });
-    for entry in walker {
-        let entry = entry.map_err(|e| format!("failed to walk {}: {e}", target.display()))?;
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("ch") {
-            continue;
-        }
-        files.push(path.to_path_buf());
-    }
-    Ok(files)
+        },
+        |path| path.extension().and_then(|e| e.to_str()) == Some("ch"),
+    )
 }
 
 /// Render the signal that killed a worker (e.g. "SIGABRT (6)").
