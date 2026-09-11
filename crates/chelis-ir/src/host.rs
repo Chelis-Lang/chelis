@@ -18506,6 +18506,38 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     }
 
     #[test]
+    fn helper_dimension_rebinding_boundary_has_a_nonidentity_discriminator() {
+        use crate::dag::{Dag, DimInfo, RiscOp, TensorType};
+
+        let symbolic = TensorType {
+            dims: vec![DimInfo::Named("n".into(), None)],
+            precision: Prim::F32,
+        };
+        let concrete = TensorType {
+            dims: vec![DimInfo::Lit(3)],
+            precision: Prim::F32,
+        };
+        let mut before = Dag::new();
+        let root = before.add_node(RiscOp::Load { name: "x".into() }, vec![], symbolic, None);
+        before.add_root(root);
+        let mut scope = UnordMap::new();
+        scope.insert("x".into(), HostTypeTerm::Tensor(concrete.clone()));
+
+        let after = remap_tensor_helper_dim_symbols(&before, &scope, &concrete);
+        assert_ne!(
+            bincode::serialize(&before).unwrap(),
+            bincode::serialize(&after).unwrap(),
+            "the actual host boundary must rewrite the symbolic helper"
+        );
+        assert_eq!(after.get(after.roots()[0]).unwrap().output_type, concrete);
+        assert_eq!(
+            before.get(before.roots()[0]).unwrap().output_type.dims,
+            vec![DimInfo::Named("n".into(), None)],
+            "the pass input remains an immutable historical snapshot"
+        );
+    }
+
+    #[test]
     fn tensor_helper_actualization_merges_matmul_synthetic_expand_dims() {
         use crate::dag::{Dag, DimInfo, RiscOp, RtAxis, RtDim, TensorType};
 

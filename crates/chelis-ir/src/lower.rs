@@ -2244,6 +2244,8 @@ fn lower_subexpr_program_inner_impl(
     let before_dce = trace.as_ref().map(|_| ctx.dag.clone());
     let (dce_dag, dce_remap) = crate::optimize::dead_code_eliminate_with_remap(&ctx.dag);
     let (copy_dag, copy_remap) = insert_copy_nodes_for_consuming_fanout(&dce_dag);
+    #[cfg(not(feature = "lowering-trace"))]
+    let _ = (&dce_remap, &copy_remap);
     #[cfg(feature = "lowering-trace")]
     let after_copies = trace.as_ref().map(|_| copy_dag.clone());
     let after_drops = insert_drop_nodes_for_unconsumed_values(copy_dag);
@@ -16382,6 +16384,66 @@ impl<'program> LowerCtx<'program> {
 mod tests {
     use super::*;
     use crate::verify;
+
+    #[cfg(feature = "lowering-trace")]
+    #[test]
+    fn helper_ingress_splits_duplicate_result_roots_in_order() {
+        use crate::lowering_trace::Value;
+
+        let tensor = TensorType {
+            dims: vec![DimInfo::Lit(3)],
+            precision: Prim::F32,
+        };
+        let expr = chelis_deep::parser::parse_str(
+            "(tuple {type: (t-tuple {} (t-tensor {} (d-lit {} 3) (t-prim {} f32)) (t-tensor {} (d-lit {} 3) (t-prim {} f32)))} (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x) (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x))",
+        )
+        .expect("parse typed duplicate tuple")
+        .remove(0);
+        let context = SubexprLoweringContext {
+            program_types: Arc::new(BTreeMap::new()),
+            program_defs: Arc::new(BTreeMap::new()),
+            program_signatures: Arc::new(BTreeMap::new()),
+        };
+        let (dag, _, trace) = try_lower_subexpr_program_with_ordered_inputs_and_trace(
+            &expr,
+            vec![("x".into(), tensor)],
+            &context,
+            None,
+            None,
+            0,
+            false,
+        )
+        .expect("duplicate tuple lowers through the actual helper ingress");
+
+        assert_eq!(trace.packed_roots.len(), 2);
+        assert_ne!(trace.packed_roots[0], trace.packed_roots[1]);
+        assert_eq!(
+            trace.packed_roots,
+            trace.lowering.normalization.before_dce.roots()
+        );
+        assert!(matches!(
+            trace
+                .lowering
+                .normalization
+                .before_dce
+                .get(trace.packed_roots[1])
+                .unwrap()
+                .op,
+            RiscOp::Copy
+        ));
+        assert_eq!(
+            trace.packed_result,
+            Value::Tuple(
+                trace
+                    .packed_roots
+                    .iter()
+                    .copied()
+                    .map(Value::Node)
+                    .collect()
+            )
+        );
+        assert_eq!(dag.roots().len(), 2);
+    }
 
     #[cfg(feature = "lowering-trace")]
     #[test]

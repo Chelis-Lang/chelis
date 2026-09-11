@@ -221,65 +221,8 @@ def selected(
         .as_ref()
         .expect("actual host rebinding output");
     same_dag(after, &helper.dag);
-    assert_ne!(
-        bincode::serialize(before).unwrap(),
-        bincode::serialize(after).unwrap(),
-        "the discriminator must exercise a nonidentity dimension rebinding"
-    );
     let before_again = &trace.lowering.normalization.after_drops;
     same_dag(before_again, before);
-}
-
-#[test]
-fn helper_packing_keeps_duplicate_cotangent_slots_as_distinct_ordered_roots() {
-    let program = manifested(
-        r#"
-def duplicated(x: tensor[3, f32], flag: bool)
-  -> (tensor[3, f32], tensor[3, f32], bool) = {
-  y = add(x, x)
-  (y, y, flag)
-}
-"#,
-    );
-    let (_, plan) = try_lower_manifested_execution_program_with_trace(&program).unwrap();
-    let plan = plan.expect("host execution plan");
-    let function = plan
-        .program()
-        .functions
-        .iter()
-        .find(|function| function.name == "duplicated")
-        .expect("duplicated function");
-    let trace = plan
-        .function_helper_trace("duplicated", 0)
-        .unwrap()
-        .expect("duplicated helper trace");
-    assert_eq!(
-        trace.packed_roots,
-        trace.lowering.normalization.before_dce.roots()
-    );
-    assert_eq!(trace.packed_roots.len(), 2);
-    assert_ne!(trace.packed_roots[0], trace.packed_roots[1]);
-    assert!(matches!(
-        trace
-            .lowering
-            .normalization
-            .before_dce
-            .get(trace.packed_roots[1])
-            .unwrap()
-            .op,
-        RiscOp::Copy
-    ));
-    assert_eq!(
-        trace.packed_result,
-        Value::Tuple(
-            trace
-                .packed_roots
-                .iter()
-                .copied()
-                .map(Value::Node)
-                .collect()
-        )
-    );
 }
 
 #[test]
