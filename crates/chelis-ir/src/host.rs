@@ -543,6 +543,21 @@ impl HostExecutionPlan {
                 .any(|product| product.trace.is_some())
     }
 
+    /// Explicitly discard only opt-in helper observations. Execution
+    /// metadata and exact helper graphs remain attached; callers still cannot
+    /// recover an ordinary host program while either is retained.
+    #[cfg(feature = "lowering-trace")]
+    pub fn discard_helper_traces(mut self) -> Self {
+        for product in self
+            .global
+            .iter_mut()
+            .chain(self.functions.iter_mut().flatten())
+        {
+            product.trace = None;
+        }
+        self
+    }
+
     #[cfg(feature = "lowering-trace")]
     pub fn global_helper_trace(
         &self,
@@ -2227,6 +2242,7 @@ pub fn lower_named_tensor_entry_execution_plan(
         scope,
         &context,
         result_claim.as_ref(),
+        true,
         &planning,
     )
     .map(Some)
@@ -2279,6 +2295,7 @@ pub fn lower_named_tensor_entry_execution_plan_with_trace(
         scope,
         &context,
         result_claim.as_ref(),
+        true,
         &planning,
     )
     .map(Some)
@@ -3753,6 +3770,7 @@ fn host_def_kernel_product(
             kernel_scope_types(&signature.scope, Some(&signature.params)),
             &context,
             Some(&expected),
+            true,
             execution.expect("fixed profile is only selected by the evaluator"),
         )?;
         let rebound =
@@ -4514,6 +4532,7 @@ fn lower_def_body_kernel(
                         scoped,
                         &context,
                         Some(&expected),
+                        true,
                         &planning,
                     )?;
                 (plan, Some(trace))
@@ -4524,6 +4543,7 @@ fn lower_def_body_kernel(
                         scoped,
                         &context,
                         Some(&expected),
+                        true,
                         &planning,
                     )?,
                     None,
@@ -4535,6 +4555,7 @@ fn lower_def_body_kernel(
                 scoped,
                 &context,
                 Some(&expected),
+                true,
                 &planning,
             )?;
             let rebound = remap_tensor_helper_dim_symbols(
@@ -4573,7 +4594,7 @@ fn lower_def_body_kernel(
             0,
             true,
         )
-        .map(|(dag, counter, trace)| ((dag, counter), Some(trace)))
+        .map(|(dag, _, trace)| ((dag, None), Some(trace)))
     } else {
         lower_kernel_dag(
             &signature.body_expr,
@@ -5075,6 +5096,7 @@ fn lower_tensor_helper_product(
                     scoped,
                     &context,
                     Some(expected),
+                    false,
                     &planning,
                 )
                 .map(|(plan, trace)| (plan, Some(trace)))
@@ -5084,6 +5106,7 @@ fn lower_tensor_helper_product(
                     scoped,
                     &context,
                     Some(expected),
+                    false,
                     &planning,
                 )
                 .map(|plan| (plan, None))
@@ -5094,6 +5117,7 @@ fn lower_tensor_helper_product(
                 scoped,
                 &context,
                 Some(expected),
+                false,
                 &planning,
             )
             .map(|plan| (plan, ()));

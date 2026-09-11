@@ -1677,6 +1677,7 @@ pub fn try_lower_subexpr_evaluation_plan(
         scoped_tensor_types.into_sorted(),
         &context,
         None,
+        false,
         execution,
     )
 }
@@ -1686,6 +1687,7 @@ pub(crate) fn try_lower_subexpr_evaluation_with_ordered_inputs(
     scoped_types: Vec<(String, TensorType)>,
     context: &SubexprLoweringContext,
     result_claim: Option<&TensorType>,
+    authored_signature: bool,
     execution: &crate::evaluation::RandomExecutionContext,
 ) -> Result<crate::evaluation::EvaluationPlan, LowerDiagnostic> {
     try_lower_subexpr_evaluation_with_ordered_inputs_impl(
@@ -1693,6 +1695,7 @@ pub(crate) fn try_lower_subexpr_evaluation_with_ordered_inputs(
         scoped_types,
         context,
         result_claim,
+        authored_signature,
         execution,
         #[cfg(feature = "lowering-trace")]
         None,
@@ -1705,6 +1708,7 @@ pub(crate) fn try_lower_subexpr_evaluation_with_ordered_inputs_and_trace(
     scoped_types: Vec<(String, TensorType)>,
     context: &SubexprLoweringContext,
     result_claim: Option<&TensorType>,
+    authored_signature: bool,
     execution: &crate::evaluation::RandomExecutionContext,
 ) -> Result<
     (
@@ -1719,6 +1723,7 @@ pub(crate) fn try_lower_subexpr_evaluation_with_ordered_inputs_and_trace(
         scoped_types,
         context,
         result_claim,
+        authored_signature,
         execution,
         Some(collector.clone()),
     )?;
@@ -1730,6 +1735,7 @@ fn try_lower_subexpr_evaluation_with_ordered_inputs_impl(
     scoped_types: Vec<(String, TensorType)>,
     context: &SubexprLoweringContext,
     result_claim: Option<&TensorType>,
+    authored_signature: bool,
     execution: &crate::evaluation::RandomExecutionContext,
     #[cfg(feature = "lowering-trace")] trace: Option<crate::lowering_trace::Collector>,
 ) -> Result<crate::evaluation::EvaluationPlan, LowerDiagnostic> {
@@ -1745,7 +1751,11 @@ fn try_lower_subexpr_evaluation_with_ordered_inputs_impl(
         .fatal());
     }
     let state = execution.state();
-    catch_lowering(|| {
+    // The explicit collector is invocation-local and is discarded with this
+    // whole attempt on unwind. It contains `RefCell` only to compose nested
+    // lowering contexts, so assert safety at this narrow catch boundary
+    // rather than weakening `catch_lowering` for unrelated callers.
+    catch_lowering(std::panic::AssertUnwindSafe(|| {
         let mut metadata = None;
         let (dag, _, _, _) = lower_subexpr_program_inner_impl(
             expr,
@@ -1755,7 +1765,7 @@ fn try_lower_subexpr_evaluation_with_ordered_inputs_impl(
             state,
             SubexprLoweringOptions {
                 include_list_controls: false,
-                authored_signature: result_claim.is_some(),
+                authored_signature,
             },
             Some(&mut metadata),
             #[cfg(feature = "lowering-trace")]
@@ -1772,7 +1782,7 @@ fn try_lower_subexpr_evaluation_with_ordered_inputs_impl(
                 expr.span_id().map(ToOwned::to_owned),
             )
         })
-    })
+    }))
 }
 
 #[derive(Clone)]
@@ -1929,7 +1939,8 @@ fn try_lower_subexpr_program_with_ordered_inputs_impl(
     #[cfg(feature = "lowering-trace")] trace: Option<crate::lowering_trace::Collector>,
 ) -> Result<(Dag, u64), LowerDiagnostic> {
     assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
-    catch_lowering(|| {
+    // As above, a failed attempt owns and discards its complete collector.
+    catch_lowering(std::panic::AssertUnwindSafe(|| {
         let (dag, random_counter, _, _) = lower_subexpr_program_inner_impl(
             expr,
             scoped_bindings,
@@ -1948,7 +1959,7 @@ fn try_lower_subexpr_program_with_ordered_inputs_impl(
             trace,
         );
         (dag, random_counter)
-    })
+    }))
 }
 
 pub(crate) fn try_lower_staged_host_region(

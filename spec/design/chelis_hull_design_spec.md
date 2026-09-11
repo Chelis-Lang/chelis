@@ -1160,6 +1160,38 @@ infrastructure, not a compiled-C capability, host-emission snapshot, new wire
 profile or mixed certificate. Joining actual selected emission and independently
 checking both graph correspondences remains required.
 
+The feature also provides explicit helper-observing counterparts for manifested
+host execution lowering and fixed-control named-entry lowering. Each successful
+host tensor helper retains one private lowering product containing its existing
+execution metadata and, only for the observing ingress, an owned helper trace.
+The trace reuses the production collector at the helper's actual AD, splice,
+result-packing and normalization boundaries. It adds execution-splice mappings
+for occurrence, draw and scope identities, because the existing
+`Application.remap` intentionally carries node identities only. Normalization
+execution observations refer to the graphs already held by the ordinary trace
+rather than adding another independently pairable graph layer.
+
+Helper products are appended only after the helper succeeds. A rejected or
+speculative lowering therefore contributes no observation. Function projection
+moves the exact function, helper graphs, execution metadata and optional traces
+together; discarded siblings do not become evidence for the selected function.
+The host execution plan exposes only borrowed, function/helper-indexed or
+global-helper-indexed trace access. Its consuming ownership boundary still
+extracts the original graph/metadata association, after an observer has had a
+chance to copy the selected trace. Ordinary lowering and ordinary execution
+lowering do not collect helper snapshots, including in a feature-enabled build.
+An explicit consuming trace-discard operation removes only these optional
+observations; it cannot remove execution metadata or substitute helper graphs.
+The retained helper trace is owned and `Send + Sync`; the collector's local
+`Rc<RefCell<_>>` never enters the returned carrier.
+
+The focused IR oracle for this companion is `cargo nextest run -p chelis-ir
+--features lowering-trace --test helper_lowering_trace --test lowering_trace`.
+It compares traced/untraced helper graphs, raw versus shaped-zero gradients,
+tuple root order, actual fixed-control pre/post-AD execution and function
+projection. This IR evidence still does not bind a trace to final emitted bytes:
+the compiler API must perform that later successful-artifact join exactly once.
+
 ### Opt-in observation of selected compiler emission
 
 The `chelis-compiler-api/emission-observer` feature supplies

@@ -102,6 +102,20 @@ def discarded(x: tensor[3, f32], flag: bool) -> (tensor[3, f32], bool) =
             .is_some()
     );
     assert!(projected.function_helper_trace("discarded", 0).is_err());
+    assert!(projected.into_ordinary().is_err());
+
+    let (_, traced) = try_lower_manifested_execution_program_with_trace(&program).unwrap();
+    let ordinary = traced
+        .unwrap()
+        .discard_helper_traces()
+        .into_ordinary()
+        .expect("explicit trace opt-out retains no execution metadata");
+    assert!(
+        ordinary
+            .functions
+            .iter()
+            .any(|function| function.name == "selected")
+    );
 }
 
 #[test]
@@ -160,7 +174,8 @@ fn fixed_control_helper_trace_captures_actual_pre_and_post_ad_execution() {
     let program = manifested(
         r#"
 def loss(x: tensor[32, f32]) -> f32 = with seed(42i64) {
-  tensor_to_scalar(sum(dropout(x, 0.5f32), 0))
+  draw_free = with seed(7i64) { x }
+  tensor_to_scalar(sum(dropout(draw_free, 0.5f32), 0))
 }
 def derivative(x: tensor[32, f32]) -> tensor[32, f32] = grad(loss)(x)
 "#,
@@ -197,7 +212,27 @@ def derivative(x: tensor[32, f32]) -> tensor[32, f32] = grad(loss)(x)
         2,
         "post-AD capture includes the actual backward replay"
     );
-    assert!(!trace.applications.is_empty());
+    let application = &trace.applications[0];
+    assert_eq!(application.gradient, execution.gradient);
+    assert_eq!(application.remap.occurrences.len(), 5);
+    assert_eq!(application.remap.draws.len(), 1);
+    assert_eq!(application.remap.scopes.len(), 3);
+    for (source, target) in &application.remap.occurrences {
+        assert!(
+            execution
+                .backward
+                .source_for_inspection()
+                .iter()
+                .any(|occurrence| occurrence.id == *source)
+        );
+        assert!(
+            application
+                .after_splice
+                .source
+                .iter()
+                .any(|occurrence| occurrence.id == *target)
+        );
+    }
     assert!(!trace.normalization.before_dce.steps.is_empty());
     assert!(!trace.normalization.after_drops.steps.is_empty());
 }
