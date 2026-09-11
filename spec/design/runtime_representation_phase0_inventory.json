@@ -1638,7 +1638,7 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_expr_at_site",
-      "sample": "{}chelis_rng_current.seed = (uint64_t){seed_var};"
+      "sample": "{}chelis_rng_state {seeded_var} = {{(uint64_t){seed_var}, 0ULL, 1}};"
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_filter",

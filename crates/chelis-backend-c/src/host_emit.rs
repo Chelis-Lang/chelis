@@ -698,11 +698,15 @@ fn append_uniform_sample_helper(out: &mut Vec<String>) {
     out.push(
         "static inline uint64_t chelis_effective_uniform_seed(chelis_rng_state *state, uint64_t baked_seed) {".to_string(),
     );
-    out.push("    if (!state->active) {".to_string());
+    // Advance a frame value and commit it as a whole. The private pointer
+    // transports invocation state; it is not an element-storage view.
+    out.push("    chelis_rng_state current = *state;".to_string());
+    out.push("    if (!current.active) {".to_string());
     out.push("        return baked_seed;".to_string());
     out.push("    }".to_string());
-    out.push("    uint64_t counter = state->counter++;".to_string());
-    out.push("    return state->seed ^ (counter * 0x9E3779B97F4A7C15ULL);".to_string());
+    out.push("    uint64_t counter = current.counter++;".to_string());
+    out.push("    *state = current;".to_string());
+    out.push("    return current.seed ^ (counter * 0x9E3779B97F4A7C15ULL);".to_string());
     out.push("}".to_string());
     out.push(
         "#define CHELIS_EFFECTIVE_UNIFORM_SEED(seed) chelis_effective_uniform_seed(__chelis_rng, seed)"
@@ -3733,18 +3737,19 @@ impl<'a> HostEmitter<'a> {
                 let seed_var = self.next_temp("seed");
                 self.emit_expr_to_var(seed, &seed_var, &HostType::Int64)?;
                 let saved_var = self.next_temp("rng_saved");
+                let seeded_var = self.next_temp("rng_seeded");
                 self.lines.push(format!(
                     "{}chelis_rng_state {saved_var} = *__chelis_rng;",
                     self.indent
                 ));
+                // Install the complete handler frame, just as exit restores
+                // the complete saved frame, before evaluating its body.
                 self.lines.push(format!(
-                    "{}__chelis_rng->seed = (uint64_t){seed_var};",
+                    "{}chelis_rng_state {seeded_var} = {{(uint64_t){seed_var}, 0ULL, 1}};",
                     self.indent
                 ));
                 self.lines
-                    .push(format!("{}__chelis_rng->counter = 0ULL;", self.indent));
-                self.lines
-                    .push(format!("{}__chelis_rng->active = 1;", self.indent));
+                    .push(format!("{}*__chelis_rng = {seeded_var};", self.indent));
                 self.assign_expr(target, body, ty)?;
                 self.lines
                     .push(format!("{}*__chelis_rng = {saved_var};", self.indent));
