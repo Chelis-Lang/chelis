@@ -5049,13 +5049,11 @@ fn lower_def_body_kernel(
                 &planning,
             )
             .map(|plan| (plan, ()));
-            let (plan, trace) = match lowered {
+            let (plan, _trace) = match lowered {
                 Ok(lowered) => lowered,
                 Err(diagnostic) if diagnostic.fatal => return Err(diagnostic),
                 Err(_) => return Ok(None),
             };
-            #[cfg(not(feature = "lowering-trace"))]
-            let _ = trace;
             let rebound = remap_tensor_helper_dim_symbols(
                 plan.dag_for_inspection(),
                 &signature.scope,
@@ -5065,7 +5063,7 @@ fn lower_def_body_kernel(
                 crate::lower::LowerDiagnostic::new(message, None, None).fatal()
             })?;
             #[cfg(feature = "lowering-trace")]
-            let mut trace = trace;
+            let mut trace = _trace;
             #[cfg(feature = "lowering-trace")]
             if let Some(trace) = &mut trace {
                 trace.record_dimension_rebinding(plan.dag_for_inspection());
@@ -11485,6 +11483,27 @@ fn beta_reduce_inline_host_call(expr: &Expr) -> Option<Expr> {
     )))
 }
 
+/// Wrappers are transparent, as in `expr_scalar_primitive` and host lowering.
+fn captured_actual_metadata(mut arg: &Expr) -> Result<Metadata, crate::lower::LowerDiagnostic> {
+    while let Expr::MetaExpr(meta, _) = arg {
+        arg = &meta.expr;
+    }
+    match arg {
+        // RuntimeExpr slots admit literal atoms; they have no node metadata.
+        Expr::Atom(Atom::Int(_) | Atom::Float(_) | Atom::Bool(_) | Atom::Str(_), _) => {
+            Ok(Metadata::default())
+        }
+        _ => stamped_parts(arg)
+            .map(|(_, meta, _)| meta.clone())
+            .ok_or_else(|| {
+                host_expr_lowering_error(
+                    arg,
+                    "a captured call actual has no expression metadata carrier",
+                )
+            }),
+    }
+}
+
 /// A captured definition still has the ordinary call-by-value host boundary.
 /// Prepare actuals in the caller once; only then lower the resolved call with
 /// fresh locals. The callee scope does not inherit caller callable spellings.
@@ -11512,6 +11531,8 @@ fn lower_captured_named_call(
     let mut callee_scope = HostLexicalScope::new();
     let mut bindings = Vec::new();
     for (index, arg) in kids.iter().enumerate().skip(1) {
+        // Preserve actual metadata, never the declaration's formal extent.
+        let metadata = captured_actual_metadata(arg)?;
         let mut ordinal = index;
         let name = loop {
             let candidate = format!("__host_callable_arg_{ordinal}");
@@ -11538,11 +11559,6 @@ fn lower_captured_named_call(
                 value,
             });
         }
-        // Preserve the checked actual's metadata, never substitute the
-        // declaration's formal extent for the actual's observed dimensions.
-        let metadata = stamped_parts(arg)
-            .map(|(_, meta, _)| meta.clone())
-            .unwrap_or_default();
         residual.elements[index + 2] = Expr::List(
             List {
                 elements: vec![
@@ -19246,6 +19262,77 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
             !add_facts.reaches_dynamic_to_tensor,
             "a tensor operand named bc is not a call to the top-level bc definition"
         );
+    }
+
+    #[test]
+    fn issue_1889_actual_metadata_preserves_stamped_and_literal_carriers() {
+        for source in [
+            "(lit {} 3)",
+            "(lit {type: (t-prim {} f32), span: \"actual\"} 3.0)",
+        ] {
+            let legacy = deep_expr(source);
+            let typed = chelis_deep::parser::parse_str(source).unwrap().remove(0);
+            for actual in [legacy, typed] {
+                assert_eq!(
+                    captured_actual_metadata(&actual).unwrap(),
+                    stamped_parts(&actual).unwrap().1.clone()
+                );
+            }
+        }
+        for atom in [
+            Atom::Int(3),
+            Atom::Float(3.0),
+            Atom::Bool(true),
+            Atom::Str("x".into()),
+        ] {
+            let actual = Expr::Atom(atom, chelis_deep::Span::new(0, 0));
+            assert_eq!(
+                captured_actual_metadata(&actual).unwrap(),
+                Metadata::default()
+            );
+        }
+    }
+
+    #[test]
+    fn issue_1889_actual_metadata_uses_transparent_wrappers_inner_stamp() {
+        let inner = deep_expr("(lit {type: (t-prim {} f32), span: \"inner\"} 3.0)");
+        let expected = stamped_parts(&inner).unwrap().1.clone();
+        let outer = deep_expr("(lit {type: (t-prim {} f64), span: \"outer\"} 3.0)");
+        let mut wrapped = inner;
+        for _ in 0..2 {
+            wrapped = Expr::MetaExpr(
+                chelis_deep::MetaExpr {
+                    expr: Box::new(wrapped),
+                    metadata: stamped_parts(&outer).unwrap().1.clone(),
+                },
+                chelis_deep::Span::new(0, 0),
+            );
+        }
+        assert_eq!(captured_actual_metadata(&wrapped).unwrap(), expected);
+    }
+
+    #[test]
+    fn issue_1889_actual_metadata_refuses_malformed_non_expression_carriers() {
+        let span = chelis_deep::Span::new(0, 0);
+        for actual in [
+            Expr::Atom(Atom::Name("x".into()), span),
+            Expr::Atom(Atom::Tag(DeepTag::Lit), span),
+            Expr::Map(Metadata::default(), span),
+            Expr::BareList(Vec::new(), span),
+            Expr::List(
+                List {
+                    elements: vec![
+                        Expr::Atom(Atom::Tag(DeepTag::Lit), span),
+                        Expr::Atom(Atom::Int(3), span),
+                    ],
+                },
+                span,
+            ),
+        ] {
+            let error =
+                captured_actual_metadata(&actual).expect_err("must not manufacture metadata");
+            assert!(error.message.contains("captured call actual"), "{error:?}");
+        }
     }
 
     #[test]
