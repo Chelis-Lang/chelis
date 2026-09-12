@@ -108,6 +108,13 @@ name = "unresolved_operand_census"
 package = "chelis-types"
 name = "unresolved_operand_matrix"
 
+# chelis#1801's checker-visible rows. The two executable halves run through
+# `runtime_extent_slice_b` (registered below) and the phase-A oracle target;
+# this file is the signature matrix and the cross-lane refuted-claim control.
+[[target]]
+package = "chelis-cli"
+name = "issue_1801_wildcard_absorption"
+
 [[target]]
 package = "chelis-compiler-api"
 name = "pipeline_contract"

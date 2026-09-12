@@ -267,13 +267,28 @@ fn infer_app_inner(
     // constructor authority preserves the active declaration/import owner
     // and scheme across ordinary lexical shadowing.
     let applied_constructor_head = source_func_name.as_deref().is_some_and(is_constructor_name);
+    // chelis#1801: bracket the callee's inference so the absorption below
+    // sees exactly the dimension variables THIS application's instantiation
+    // minted. The mark is taken before the callee and read immediately after
+    // it, so no argument's instantiation is in scope.
+    let instantiation_mark = product.instantiation_dvar_mark();
     let func_ty = if applied_constructor_head {
         let source_name = source_func_name.as_deref().unwrap();
         let resolved_constructor = if constructor_out_of_scope(source_name, env) {
             None
         } else {
-            constructor_for_shape(source_name, CallShape::Positional, env, adt_reg)
-                .map(|(_, scheme, _)| env.instantiate(scheme, vg, subst))
+            constructor_for_shape(source_name, CallShape::Positional, env, adt_reg).map(
+                |(_, scheme, _)| {
+                    let (ty, _, dvar_mapping) = env.instantiate_scheme(scheme, vg, subst);
+                    // chelis#1801: a constructor head is instantiated here
+                    // rather than through the Var rule, so it records its
+                    // own fresh dimension variables or the bracket above
+                    // would see none for a `Ctor(...)` application.
+                    product
+                        .record_instantiation_dvars(dvar_mapping.iter().map(|(_, fresh)| *fresh));
+                    ty
+                },
+            )
         };
         match resolved_constructor {
             Some(constructor_type) => constructor_type,
@@ -307,6 +322,7 @@ fn infer_app_inner(
         }
         product.record_canonical(&kids[0], func_ty.clone());
     }
+    let instantiation_dvars = product.instantiation_dvars_since(instantiation_mark);
     // A reduction's axis argument may name a *dimension* of the operand
     // (`sum(x, seq)`, Tier-3 named-axis reduction, spec §4.5.3), not a bound
     // *value*. Like `expand`'s symbolic size arg below, such a name is typed as
@@ -644,6 +660,7 @@ fn infer_app_inner(
 
     match unify(&func_ty, &expected_fn, subst) {
         Ok(()) => {
+            absorb_runtime_extents_into_call_variables(&instantiation_dvars, subst);
             // chelis#1512: watch whether the eager pass rejects this call. A
             // route can suspend on one operand and then reject on another in
             // the same pass, and the replay re-enters the whole route, so the
@@ -682,6 +699,59 @@ fn infer_app_inner(
                 }
             }
             report(errors, e)
+        }
+    }
+}
+
+/// Bind every dimension variable this application's instantiation minted that
+/// met a runtime extent `*` and that no argument bound (chelis#1801).
+///
+/// `spec/04-type-system.md` section 3.2 Application: a dimension variable
+/// minted by an application's instantiation that unifies with a runtime
+/// extent `*`, and that no argument of that application binds to a literal or
+/// named dimension, denotes that runtime extent and is `*` in the
+/// application's result. A literal or name another argument of the same
+/// application binds to it is a claim on the runtime extent, checked by a
+/// section 4.7 guard.
+///
+/// Why here, and not in `unify_dim`. Binding the variable where it meets the
+/// wildcard freezes it: `f(x: tensor[d, f32], y: tensor[d, f32])` applied to
+/// a runtime-extent argument and a `tensor[3, f32]` one would read `*` when
+/// the wildcard came first and `3` when it came second, so the answer would
+/// depend on argument order. That is the loss the Wildcard-against-Var
+/// invariant on `unify_dim` exists to avoid, and it is why this runs after
+/// the WHOLE call has unified: by then every argument has had its chance to
+/// constrain the variable, and the two orders agree.
+///
+/// Why here, and not at generalization. A declared result reaches the
+/// definition boundary before generalization does, so a signature such as
+/// `-> tensor[100, f32]` would have pinned the variable to `100` first and
+/// the absorption could never see it. It would also need a let/def
+/// distinction that this rule does not.
+///
+/// `constraint_dim`, not `apply_dim`, decides "still unbound", because that
+/// is the question `constraint_dim` answers: it resolves the variable and
+/// nothing else. `apply_dim` deliberately answers `Var(v)` for a LABELLED
+/// variable that resolved to a concrete dim, to keep the label's identity
+/// available to name-sensitive operations, so it cannot tell a free variable
+/// from one an argument just bound to a literal.
+///
+/// Swapping the two was measured rather than assumed, and it changed no
+/// reading: the substitution state where they disagree (a labelled variable
+/// bound to a literal AFTER meeting a wildcard) was not reachable from any
+/// source program probed, because `unify_dim` rejects two distinct names
+/// before reaching `bind_dvar` and `bind_dvar`'s Var-to-Var path aliases the
+/// two variables rather than binding one to a literal.
+/// `unify::tests::a_recorded_meeting_does_not_by_itself_mean_the_var_is_still_free`
+/// builds the state directly and locks which predicate answers correctly in
+/// it; the choice here rests on that contract, not on a source witness.
+fn absorb_runtime_extents_into_call_variables(instantiation_dvars: &[DimVar], subst: &mut Subst) {
+    for &dv in instantiation_dvars {
+        if !subst.dvar_met_wildcard(dv) {
+            continue;
+        }
+        if matches!(subst.constraint_dim(&Dim::Var(dv)), Dim::Var(root) if root == dv) {
+            subst.insert_dim(dv, Dim::Wildcard);
         }
     }
 }

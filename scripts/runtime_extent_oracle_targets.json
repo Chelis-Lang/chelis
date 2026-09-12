@@ -368,6 +368,8 @@
         "a_nameless_activation_that_refutes_its_own_claim_is_rejected_on_both_lanes",
         "a_negative_computed_size_under_a_free_result_dim_diverges_by_lane",
         "a_nested_claim_whose_declarer_is_a_runtime_extent_is_refused_by_the_checker",
+        "a_nested_helper_claim_sizes_a_root_on_c",
+        "a_nested_helper_claim_sizes_a_root_on_eval",
         "a_nested_named_result_claim_is_enforced_through_its_resolved_binder",
         "a_nested_param_bound_result_claim_is_refused_by_the_checker",
         "a_node_valued_reshape_target_that_agrees_with_its_claim_executes_on_c",

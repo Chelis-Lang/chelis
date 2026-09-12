@@ -184,7 +184,7 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
             // no `_` arm, so a 63rd `DeepTag` variant fails to compile
             // until this dispatch chooses its disposition.
             match get_tag(list) {
-                Some(DeepTag::Var) => infer_var(list, env, vg, subst, adt_reg, errors),
+                Some(DeepTag::Var) => infer_var(list, env, vg, subst, adt_reg, errors, product),
                 Some(DeepTag::Lit) => {
                     infer_lit(list, env, vg, adt_reg, errors, type_metadata_resolution)
                 }
@@ -456,7 +456,7 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
             let list = node.to_list(*span);
             product.register_bridge_children(node.children_slice(), children(&list));
             match node.tag() {
-                DeepTag::Var => infer_var(&list, env, vg, subst, adt_reg, errors),
+                DeepTag::Var => infer_var(&list, env, vg, subst, adt_reg, errors, product),
                 DeepTag::Lit => {
                     infer_lit(&list, env, vg, adt_reg, errors, type_metadata_resolution)
                 }
@@ -950,6 +950,7 @@ pub(super) fn infer_var(
     subst: &Subst,
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
 ) -> Type {
     let kids = children(list);
     if let Some(name) = kids.first().and_then(|e| symbol_name(e)) {
@@ -993,18 +994,27 @@ pub(super) fn infer_var(
             TopLevelValueVisibility::NotYetDeclared { shadowed } => shadowed.cloned(),
         };
         if let Some(scheme) = resolved_scheme {
-            // spec/04 §3.1.1: inside a recursive binding group, record the
-            // instantiation minted for an in-group reference so the group
-            // can be validated for uniform recursive instantiation.
-            let ty = if super::recursion::should_record_occurrence(name, &scheme) {
-                let (ty, mapping) = env.instantiate_with_tvar_mapping(&scheme, vg, subst);
+            // One instantiation, both renamings. chelis#1801 needs the
+            // dimension pairing on EVERY reference, not only an in-group
+            // one, so the reference instantiates through the single
+            // mechanism and takes what it needs from the result;
+            // `env::tests::dvar_mapping_instantiation_matches_plain_instantiation`
+            // pins that this is the same instantiation the two projections
+            // used to perform.
+            let (ty, tvar_mapping, dvar_mapping) = env.instantiate_scheme(&scheme, vg, subst);
+            // chelis#1801: the application rule reads these back to decide
+            // which of THIS call's fresh dimension variables denote a
+            // runtime extent they met (spec/04-type-system.md section 3.2).
+            product.record_instantiation_dvars(dvar_mapping.iter().map(|(_, fresh)| *fresh));
+            if super::recursion::should_record_occurrence(name, &scheme) {
+                // spec/04 section 3.1.1: inside a recursive binding group,
+                // record the instantiation minted for an in-group reference
+                // so the group can be validated for uniform recursive
+                // instantiation.
                 let span_id = list_span_id(list).map(str::to_string);
                 let span_offset = span_id.as_deref().and_then(parse_span_offset);
-                super::recursion::record_occurrence(name, &mapping, span_id, span_offset);
-                ty
-            } else {
-                env.instantiate(&scheme, vg, subst)
-            };
+                super::recursion::record_occurrence(name, &tvar_mapping, span_id, span_offset);
+            }
             let resolved = subst.apply(&ty);
             // RFC D-CHECK: a bare reference to an out-of-module
             // opaque constructor is hidden, and an out-of-module

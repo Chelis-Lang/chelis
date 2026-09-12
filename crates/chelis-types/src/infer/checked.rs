@@ -311,6 +311,32 @@ pub(super) struct InferenceProduct {
     deferred_shape_checks: Vec<DeferredShapeCheck>,
     pub(super) builtin_selections: Vec<crate::builtin_discovery::BuiltinCaseSelection>,
     pending_builtin_selections: Vec<usize>,
+    /// chelis#1801: the fresh dimension variables scheme instantiation minted
+    /// during this inference run, in mint order.
+    ///
+    /// `spec/04-type-system.md` section 3.2 scopes the runtime-extent
+    /// absorption to the variables ONE application's instantiation minted,
+    /// and the instantiation happens in the Var rule while the decision
+    /// happens in the application rule. This log is how the first tells the
+    /// second, and the pairing is positional rather than keyed: the
+    /// application rule marks the log, infers its callee, and reads back
+    /// exactly the entries that inference appended
+    /// ([`Self::instantiation_dvar_mark`] /
+    /// [`Self::instantiation_dvars_since`]).
+    ///
+    /// A ledger keyed by the callee's node address was the alternative and is
+    /// worse here: the `Expr::Node` ingress path rebuilds a TEMPORARY `List`
+    /// for tag dispatch, so the address the Var rule could write is not the
+    /// address the application rule holds. A slot on `Subst` cleared by
+    /// convention at each call site was the other, and that is the
+    /// flag-by-convention shape chelis#1835 exists to remove.
+    ///
+    /// Append-only and never truncated. A nested callee (`(f(x))(y)`) is then
+    /// covered by the outer mark as well as its own, which is the wanted
+    /// reading: the outer call's callee type IS `f`'s result, so a variable of
+    /// that result meeting `*` in the outer unification denotes the outer
+    /// call's runtime extent.
+    instantiation_dvars: Vec<DimVar>,
 }
 
 #[derive(Clone)]
@@ -444,6 +470,25 @@ pub(super) struct FinalOwnerType {
 }
 
 impl InferenceProduct {
+    /// chelis#1801: record the fresh dimension variables one scheme
+    /// instantiation just minted, in quantifier order.
+    pub(super) fn record_instantiation_dvars(&mut self, fresh: impl IntoIterator<Item = DimVar>) {
+        self.instantiation_dvars.extend(fresh);
+    }
+
+    /// chelis#1801: the current end of the instantiation log. Pair it with
+    /// [`Self::instantiation_dvars_since`] around the inference of a callee.
+    pub(super) fn instantiation_dvar_mark(&self) -> usize {
+        self.instantiation_dvars.len()
+    }
+
+    /// chelis#1801: the dimension variables instantiation minted since
+    /// `mark`, which for a mark taken immediately before a callee's inference
+    /// are exactly the variables that application's instantiation owns.
+    pub(super) fn instantiation_dvars_since(&self, mark: usize) -> Vec<DimVar> {
+        self.instantiation_dvars[mark.min(self.instantiation_dvars.len())..].to_vec()
+    }
+
     pub(super) fn stats(&self) -> InferStats {
         InferStats {
             typed_nodes: self.typed_nodes,

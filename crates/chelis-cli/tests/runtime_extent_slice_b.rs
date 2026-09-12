@@ -7464,3 +7464,72 @@ fn a_rank_two_pad_guards_and_reports_the_runtime_axis_it_widens() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// chelis#1801: a root whose extent arrives through a nested helper's claim.
+// ---------------------------------------------------------------------------
+
+/// `g` resolves its declared result extent only at run time, and `h` claims
+/// one extent for its parameter and its result. On the base sha `h`'s
+/// instantiation variable met `g`'s runtime extent, `unify_dim` left it free,
+/// and def-level generalization quantified it, so `main` checked as `() ->
+/// tensor[d0, f32]`: a root with no ABI, which both lanes dropped in silence.
+/// `spec/04-type-system.md` section 3.2 now makes that variable denote the
+/// extent it met.
+const NESTED_HELPER_ROOT: &str = "def g(x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
+     def h(y: tensor[k, f32]) -> tensor[k, f32] = add(y, y)\n\
+     def main() = h(g(to_tensor([1.0f32, 2.0f32, 3.0f32])))\n";
+
+/// The rendering both lanes owe. `g` keeps the last two of three elements and
+/// `h` doubles them.
+const NESTED_HELPER_ROOT_RENDERING: &str = "main = tensor(shape=[2], data=[4.0, 6.0])";
+
+/// Receipt for corpus row `root.dim_variable.nested_helper.eval`.
+///
+/// Regression test. On the base sha `ae9260727` this program evaluated to
+/// nothing: eval printed the `input contains only def declarations; nothing to
+/// evaluate` warning on stderr, nothing on stdout, and exited 0.
+#[test]
+fn a_nested_helper_claim_sizes_a_root_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = fixture(&dir, "nested_helper_root.ch", NESTED_HELPER_ROOT);
+
+    let evaluated = eval(&path);
+    let stderr = String::from_utf8_lossy(&evaluated.stderr).to_string();
+    assert!(evaluated.status.success(), "{stderr}");
+    assert!(
+        !stderr.contains("nothing to evaluate"),
+        "the root is realizable and must not be dropped: {stderr}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&evaluated.stdout).trim_end(),
+        NESTED_HELPER_ROOT_RENDERING,
+        "the root is sized from the extent `h`'s claim absorbed"
+    );
+}
+
+/// Receipt for corpus row `root.dim_variable.nested_helper.c`.
+///
+/// Regression test. On the base sha the emitted translation unit contained no
+/// `int main(`, so the program linked to an object with no entry point and
+/// the lane reported success having run nothing. The C rendering is asserted
+/// byte-identical to the eval one above.
+#[test]
+fn a_nested_helper_claim_sizes_a_root_on_c() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out, emitted) =
+        c_run_result_with_source(&dir, "nested_helper_root_c", NESTED_HELPER_ROOT);
+    assert!(
+        emitted.contains("int main("),
+        "a realizable root owes a C entry point:\n{emitted}"
+    );
+    assert!(ok, "the sized root must build, link and run: {out}");
+    assert_eq!(
+        out.trim_end(),
+        NESTED_HELPER_ROOT_RENDERING,
+        "C renders the root exactly as eval does"
+    );
+}

@@ -153,6 +153,25 @@ pub struct Subst {
     dimension_labels: Mutex<UnordMap<DimVar, String>>,
     #[serde(skip)]
     protected_dimensions: UnordSet<DimVar>,
+    /// chelis#1801: every dimension variable that has met a runtime extent
+    /// `*` in some unification, whether or not anything later bound it.
+    ///
+    /// `unify_dim`'s wildcard arm deliberately leaves such a variable free
+    /// (the #143 invariant documented on that function), so a later concrete
+    /// argument in the same signature can still constrain it. That leaves no
+    /// record of the meeting at all, and `spec/04-type-system.md` section 3.2
+    /// needs one: a variable an application's instantiation minted, that met
+    /// `*` and that no argument bound, denotes that runtime extent. The set
+    /// is the evidence `infer_app` reads to decide which of a call's fresh
+    /// variables to bind to `Dim::Wildcard` once the whole call has unified.
+    ///
+    /// Membership is monotone and never cleared: dimension variables are
+    /// minted fresh and never reused, so an entry cannot become stale, and
+    /// the absorbing site consults only the variables ONE call's
+    /// instantiation just minted. Not serialized: transient per-pass
+    /// bookkeeping, like the deferred ledgers below.
+    #[serde(skip)]
+    wildcard_touched_dvars: UnordSet<DimVar>,
     #[serde(skip)]
     label_unification_depth: usize,
     /// Only labels written by the active outer unification need rollback.
@@ -633,6 +652,7 @@ impl Clone for Subst {
                     .clone(),
             ),
             protected_dimensions: self.protected_dimensions.clone(),
+            wildcard_touched_dvars: self.wildcard_touched_dvars.clone(),
             label_unification_depth: 0,
             dimension_label_undo: Mutex::new(Vec::new()),
             refined_type_bindings: Vec::new(),
@@ -717,6 +737,10 @@ impl Subst {
     /// point contributes level metadata to the serialized context.
     pub(crate) fn resume_for_new_check(&mut self, var_gen: &VarGen) {
         self.protected_dimensions.clear();
+        // chelis#1801: per-pass evidence, cleared at the pass boundary for the
+        // same reason the protected set is. A resumed check reads it back
+        // empty anyway (it is `serde(skip)`); this covers a live reuse.
+        self.wildcard_touched_dvars.clear();
         assert_eq!(
             self.current_level, 0,
             "a persisted type environment cannot resume inside an inference scope"
@@ -1701,6 +1725,35 @@ impl Subst {
         }
     }
 
+    /// chelis#1801: record that `v` met a runtime extent `*` without being
+    /// bound to it. Written only by [`unify_dim`]'s wildcard-against-variable
+    /// arm; read only by the application rule that absorbs the extent.
+    pub(crate) fn note_wildcard_touch(&mut self, v: DimVar) {
+        self.wildcard_touched_dvars.insert(v);
+    }
+
+    /// chelis#1801: whether `v` has met a runtime extent `*`.
+    ///
+    /// This answers only "did the meeting happen". Whether `v` still denotes
+    /// that extent is a separate question the caller asks of the
+    /// substitution, because an argument in the same call may have bound `v`
+    /// to a literal or named dimension after the meeting.
+    pub(crate) fn dvar_met_wildcard(&self, v: DimVar) -> bool {
+        self.wildcard_touched_dvars.contains(&v)
+    }
+
+    /// chelis#1801: adopt another substitution's wildcard-meeting evidence.
+    ///
+    /// Reached from [`Self::compose`]. A compose that dropped this set would
+    /// silently un-record a meeting, and the application rule would then
+    /// generalize a variable the spec says denotes a runtime extent, which is
+    /// the defect this ledger exists to prevent.
+    fn absorb_wildcard_touches(&mut self, other: &Subst) {
+        for v in other.wildcard_touched_dvars.to_sorted() {
+            self.wildcard_touched_dvars.insert(*v);
+        }
+    }
+
     pub(crate) fn protect_dimensions(&mut self, vars: impl IntoIterator<Item = DimVar>) {
         for v in vars {
             self.protected_dimensions.insert(v);
@@ -1777,6 +1830,11 @@ impl Subst {
     pub fn compose(&mut self, other: &Subst) -> Result<(), TypeError> {
         let mut trial = self.clone();
         trial.compose_bindings(other);
+        // chelis#1801: `compose_bindings` merges the BINDINGS; the
+        // wildcard-meeting evidence is a separate ledger and has to be
+        // carried explicitly or a composed substitution forgets which
+        // variables met a runtime extent.
+        trial.absorb_wildcard_touches(other);
         // Re-canonicalize BOTH operands' labels through the composed alias
         // graph; merely copying incoming entries misses a newly joined class.
         let mut incoming = Vec::new();
@@ -2369,6 +2427,16 @@ pub fn unify_dim(d1: &Dim, d2: &Dim, subst: &mut Subst) -> Result<(), TypeError>
     match (&d1, &d2) {
         (Dim::Name(n1), Dim::Name(n2)) if n1 == n2 => Ok(()),
         (Dim::Lit(l1), Dim::Lit(l2)) if l1 == l2 => Ok(()),
+        // chelis#1801 / spec/04-type-system.md section 3.2: record the
+        // meeting before the permissive arm swallows it. The variable is
+        // still deliberately left FREE here (the Wildcard/Var invariant
+        // above), so a later concrete argument in the same signature can
+        // constrain it; `infer_app` decides what an unconstrained one
+        // denotes once the whole call has unified.
+        (Dim::Wildcard, Dim::Var(v)) | (Dim::Var(v), Dim::Wildcard) => {
+            subst.note_wildcard_touch(*v);
+            Ok(())
+        }
         (Dim::Wildcard, _) | (_, Dim::Wildcard) => Ok(()),
         // Issue #219 Option A: Name and Lit unify without binding any
         // substitution. The Name carries a label for diagnostics, the
@@ -4167,13 +4235,16 @@ mod tests {
         // resolve `Var(v) → Wildcard` and the permissive Wildcard arm
         // would silently accept any concrete value.
         //
-        // The current implementation satisfies this because the
-        // `(Wildcard, _) | (_, Wildcard) => Ok(())` arm matches before
-        // the `(Var(_), _) => bind_dvar(...)` arm (Rust `match` is
-        // first-match-wins) and returns `Ok(())` without touching the
-        // substitution. This test pins the property in case a future
-        // refactor reorders the arms or adds an explicit
-        // `(Wildcard, Var)` arm that does bind.
+        // The current implementation satisfies this because both
+        // wildcard arms match before the `(Var(_), _) => bind_dvar(...)`
+        // arm (Rust `match` is first-match-wins) and neither binds the
+        // dim var. chelis#1801 added the explicit
+        // `(Wildcard, Var(v)) | (Var(v), Wildcard)` arm ahead of the
+        // permissive one; it RECORDS the meeting in
+        // `wildcard_touched_dvars` and still leaves `v` free, which is
+        // what lets the concrete binding below still happen. This test
+        // pins the property in case a future refactor reorders the arms
+        // or makes either wildcard arm bind.
         let mut g = var_gen();
         let dv = g.fresh_dvar();
         let mut s = Subst::new();
@@ -4202,6 +4273,113 @@ mod tests {
         // the sig promised is now enforced end to end.
         let err = unify_dim(&Dim::Var(dv), &Dim::Lit(3), &mut s).unwrap_err();
         assert!(matches!(err.kind, TypeErrorKind::DimensionMismatch));
+    }
+
+    #[test]
+    fn a_wildcard_meeting_a_dim_var_is_recorded_and_survives_clone_and_compose() {
+        // chelis#1801. `unify_dim`'s wildcard arm leaves the variable free
+        // by design, so without this record nothing downstream can tell a
+        // variable that met a runtime extent from one that met nothing. The
+        // application rule reads the record to decide what an unconstrained
+        // instantiation variable denotes (spec/04-type-system.md section
+        // 3.2).
+        //
+        // Evidentiary status: a mechanism test for a mechanism this change
+        // introduces. There is no base-sha reading to compare against; what
+        // it proves is that each of the three carriers keeps the evidence.
+        let mut g = var_gen();
+        let touched = g.fresh_dvar();
+        let untouched = g.fresh_dvar();
+        let mut s = Subst::new();
+
+        assert!(!s.dvar_met_wildcard(touched));
+        assert!(unify_dim(&Dim::Wildcard, &Dim::Var(touched), &mut s).is_ok());
+        assert!(
+            s.dvar_met_wildcard(touched),
+            "the Wildcard-then-Var direction records the meeting",
+        );
+        assert!(
+            !s.dvar_met_wildcard(untouched),
+            "and records nothing about a variable that met nothing",
+        );
+
+        // The symmetric direction records too.
+        let mut symmetric = Subst::new();
+        assert!(unify_dim(&Dim::Var(touched), &Dim::Wildcard, &mut symmetric).is_ok());
+        assert!(symmetric.dvar_met_wildcard(touched));
+
+        // A wildcard against a wildcard names no variable, so it records
+        // nothing: the permissive arm is still what handles it.
+        let mut both_wild = Subst::new();
+        assert!(unify_dim(&Dim::Wildcard, &Dim::Wildcard, &mut both_wild).is_ok());
+        assert!(!both_wild.dvar_met_wildcard(touched));
+
+        // `Subst::clone` carries the record. A clone that dropped it would
+        // silently un-record the meeting for every checking context that
+        // clones the substitution into its own state.
+        let cloned = s.clone();
+        assert!(cloned.dvar_met_wildcard(touched));
+        assert!(!cloned.dvar_met_wildcard(untouched));
+
+        // `Subst::compose` carries it in BOTH directions: from the receiver
+        // (through the trial clone) and from the argument (through
+        // `absorb_wildcard_touches`). The argument direction is the one a
+        // compose can lose, because `compose_bindings` merges only the
+        // binding maps.
+        let mut receiver = Subst::new();
+        receiver.compose(&s).expect("composing a rename is valid");
+        assert!(
+            receiver.dvar_met_wildcard(touched),
+            "compose adopts the argument's wildcard-meeting evidence",
+        );
+
+        let mut carrier = s.clone();
+        carrier
+            .compose(&Subst::new())
+            .expect("composing an empty substitution is valid");
+        assert!(carrier.dvar_met_wildcard(touched), "and keeps its own",);
+    }
+
+    #[test]
+    fn a_recorded_meeting_does_not_by_itself_mean_the_var_is_still_free() {
+        // chelis#1801 negative parity for the test above, and the reason the
+        // absorbing site asks the substitution a second question. The record
+        // is monotone: it says the meeting happened, never that the variable
+        // is still unconstrained. A literal in a later argument of the same
+        // call binds the variable, and `constraint_dim` is what reports that.
+        //
+        // `apply_dim` cannot: it deliberately answers `Var(v)` for a
+        // LABELLED variable that resolved to a concrete dim, so an absorber
+        // written against it would overwrite the literal with `*`.
+        //
+        // Evidentiary status: a disposition lock on which predicate answers
+        // "is this variable still unbound", not a regression test. The state
+        // is built here directly. Swapping the absorbing site to `apply_dim`
+        // was measured and changed no source-level reading, so no source
+        // fixture pins this; what it pins is the contract the absorbing site
+        // relies on.
+        let mut g = var_gen();
+        let dv = g.fresh_dvar();
+        let mut s = Subst::new();
+        s.set_dimension_label(dv, "k".to_string());
+
+        assert!(unify_dim(&Dim::Wildcard, &Dim::Var(dv), &mut s).is_ok());
+        assert!(unify_dim(&Dim::Var(dv), &Dim::Lit(3), &mut s).is_ok());
+
+        assert!(
+            s.dvar_met_wildcard(dv),
+            "the meeting is still recorded after the literal binding",
+        );
+        assert_eq!(
+            s.constraint_dim(&Dim::Var(dv)),
+            Dim::Lit(3),
+            "but the variable is bound, so it denotes the literal",
+        );
+        assert_eq!(
+            s.apply_dim(&Dim::Var(dv)),
+            Dim::Var(dv),
+            "`apply_dim` keeps the label's identity and cannot answer this",
+        );
     }
 
     #[test]

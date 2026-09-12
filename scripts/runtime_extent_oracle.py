@@ -1063,6 +1063,24 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             "cli_slice_b.a_named_bystander_expand_with_no_consumer_agrees_across_lanes",
         ),
+        # chelis#1801. A nullary root whose extent arrives through a nested
+        # helper's claim: the callee's instantiation variable met the inner
+        # helper's runtime extent, nothing bound it, and def-level
+        # generalization quantified it, so the root had no ABI and both lanes
+        # dropped it in silence. `spec/04-type-system.md` section 3.2 now
+        # makes that variable denote the extent it met.
+        _row(
+            "root.dim_variable.nested_helper.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_nested_helper_claim_sizes_a_root_on_c",
+        ),
+        _row(
+            "root.dim_variable.nested_helper.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_nested_helper_claim_sizes_a_root_on_eval",
+        ),
     )
     return tuple(sorted(rows, key=lambda row: row.id))
 
