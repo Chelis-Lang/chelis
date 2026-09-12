@@ -43,14 +43,20 @@ Land #1829 first; it closes the user-visible regression, and its `runtime/mod.rs
 The chelis#893 runtime-representation **Phase 0 inventory** flags new arithmetic in
 `crates/chelis-ir/src/host.rs` under the kind `normalized-key-arithmetic`. On #1843's
 head it flagged two rows: the **refcount decrement in `HostLoweringCacheGuard::drop`**
-and a **counter increment in `top_level_fn_helper_summary_rejects`**. An unclassified row
+and a **counter increment in `top_level_fn_helper_summary_rejects`**. *(That sentence is
+refuted; neither owner has an inventory row. The correction is at the end of this
+section.)* An unclassified row
 is `UNCLASSIFIED_FAILURE` from `scripts/runtime_representation_oracle.py`, not a warning,
 so each needs a sanctioned classification in the baseline or a restructuring that removes
 it. The oracle runs in `heavy-e2e.yml`, never per pull request, so this surfaces after
 merge unless it is dispatched deliberately.
 
-**Correction, 2026-09-12: the claim below that the session type removes a flagged row is
-wrong, and the paragraph is kept only to record the error.** I wrote that
+**Correction, 2026-09-12.** This section originally asserted, of the flagged rows above:
+
+> the first flagged row **stops existing** rather than needing a classification
+
+and the paragraph making that argument is deleted. The claim it rested on is the one
+still standing earlier in this section, now marked there: that
 `HostLoweringCacheGuard::drop`'s refcount decrement and
 `top_level_fn_helper_summary_rejects`'s counter were flagged Phase 0 rows, so deleting the
 guard would remove one. Measured against
