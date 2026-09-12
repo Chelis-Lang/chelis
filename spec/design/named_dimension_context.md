@@ -31,22 +31,15 @@ That label is not resolved against the callee's signature: the same spelling
 may name an unrelated callee parameter. Label transport creates no equality
 claim and imports neither checker-substituted literals nor optional extents;
 an existing produced extent is retained. Authored two-source guards remain
-on the earlier preservation path, whose axis lookup uses only the current
-activation's Caller witnesses. Thus named-axis queries retain their checked
-anchor without introducing a caller/callee namespace collision.
-
-For rank-polymorphic calls, the activation's parameter-witness shapes are
-derived after that call's existing rank substitutions are merged. A witness
-binder therefore follows the expanded formal axis, rather than the raw
-pre-spread offset; this is only witness construction order, not a new relation
-between names.
+on the unchanged preservation path. Parameter-witness construction and rank
+substitution timing are unchanged: checked label transport does not need to
+reclassify names copied through a rank splice as callee-authored binders.
 
 It adds no checker value-root/provenance carrier, global name equivalence,
 extent-based anchor recovery, wire field, cache version, worker protocol, or
-semantic/normative rule. Earlier activation witnesses are excluded even when a
-later call reuses the same tensor node; unrelated copies remain excluded. The
-evaluator/context regression covers direct, alias, both elementwise operand
-orders, caller alpha-renaming, independent same-spelled callee axes and real
+semantic/normative rule. The evaluator/context regression covers direct, alias,
+both elementwise operand orders, caller alpha-renaming, rank-spliced caller
+names, independent same-spelled callee axes and real
 authored mismatches. Native-C attempts stopped before emission at an undeclared
 axis (#1277) or generic unresolved-host diagnostic; those residuals remain
 unclassified and outside this repair. This is a

@@ -9353,6 +9353,7 @@ impl<'program> LowerCtx<'program> {
                 None => Self::default_type(),
             })
             .collect();
+        let witness_param_types = param_types.clone();
         let mut formal_types = Vec::new();
         let mut formal_type_exprs: Vec<Option<Expr>> = Vec::new();
         let mut actual_types = Vec::new();
@@ -9467,23 +9468,6 @@ impl<'program> LowerCtx<'program> {
         let rank_subst =
             tensor_rank_substitutions(&formal_type_exprs, &actual_types, &self.dim_axis_positions);
         self.rank_substitutions.merge(rank_subst);
-        // Parameter witnesses must use this invocation's fully expanded
-        // formal axes. `param_types` above intentionally predates binding: it
-        // establishes the substitutions. Recomputing only this witness view
-        // after the merge keeps a `[..pre, seq, ..post]` declaration aligned
-        // with its concrete caller axes instead of declaring `seq` at the
-        // stale pre-expansion offset.
-        let witness_param_types: Vec<TensorType> = param_type_exprs
-            .iter()
-            .map(|opt_expr| match opt_expr {
-                Some(expr) => Self::formal_param_type_for_call(
-                    expr,
-                    &self.prec_substitutions,
-                    &self.rank_substitutions,
-                ),
-                None => Self::default_type(),
-            })
-            .collect();
         // chelis#620 (Inlining-F1 successor): recursion lowers by BOUNDED
         // UNROLLING. Depth accounting installs *here*, after argument
         // evaluation, so legitimate nested calls passed as arguments to
@@ -14209,26 +14193,20 @@ impl<'program> LowerCtx<'program> {
             return;
         };
         for (axis, dim) in declared.dims.iter().enumerate() {
-            self.preserve_declared_result_axis(id, axis, dim);
-        }
-    }
-
-    /// Validate and retain one authored-result axis. Caller-side checked
-    /// labels are transported separately, after these obligations are kept.
-    fn preserve_declared_result_axis(&mut self, id: NodeId, axis: usize, dim: &DimInfo) {
-        let resolved = match dim {
-            DimInfo::Lit(required) => {
-                self.preserve_literal_result_axis(id, axis, *required)
-                    || self.preserve_op_computed_result_axis(id, axis, None)
+            let resolved = match dim {
+                DimInfo::Lit(required) => {
+                    self.preserve_literal_result_axis(id, axis, *required)
+                        || self.preserve_op_computed_result_axis(id, axis, None)
+                }
+                DimInfo::Named(binder, _) if !binder.is_empty() && binder != "*" => {
+                    self.preserve_named_result_axis(id, axis, binder)
+                        || self.preserve_op_computed_result_axis(id, axis, Some(binder))
+                }
+                _ => false,
+            };
+            if resolved {
+                self.dag.node_mut(id).expect("result").output_type.dims[axis] = dim.clone();
             }
-            DimInfo::Named(binder, _) if !binder.is_empty() && binder != "*" => {
-                self.preserve_named_result_axis(id, axis, binder)
-                    || self.preserve_op_computed_result_axis(id, axis, Some(binder))
-            }
-            _ => false,
-        };
-        if resolved {
-            self.dag.node_mut(id).expect("result").output_type.dims[axis] = dim.clone();
         }
     }
 
@@ -14582,19 +14560,12 @@ impl<'program> LowerCtx<'program> {
     /// check, so both resolve to the witness that reads that `Load` axis.
     fn axis_interface_witness(&self, id: NodeId, axis: usize) -> Option<NodeId> {
         use crate::axis_sources::AxisSource;
-        // A current invocation already has a caller witness for every bound
-        // actual tensor axis, including a literal `to_tensor` argument. Check
-        // it before following a pass-through source: literal axes have no
-        // external-load source, but they are still a declared parameter axis.
-        if let Some(witness) = self.active_caller_witness_for(id, axis) {
-            return Some(witness);
-        }
         if let Some(witness) = self.axis_literal_witness(id, axis) {
             return Some(witness);
         }
         let node = self.dag.get(id)?;
         match crate::axis_sources::output_axis_sources(&self.dag, id).get(axis)? {
-            AxisSource::ExternalAxis { load, axis } => self.active_caller_witness_for(*load, *axis),
+            AxisSource::ExternalAxis { load, axis } => self.caller_witness_for(*load, *axis),
             AxisSource::InputAxis {
                 input,
                 axis: RtAxis::Lit(read),
@@ -14606,21 +14577,20 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
-    /// The current activation's `Caller` witness reading `tensor`'s `axis`.
-    fn active_caller_witness_for(&self, tensor: NodeId, axis: usize) -> Option<NodeId> {
-        self.activation_witnesses.iter().copied().find(|witness| {
-            let Some(node) = self.dag.get(*witness) else {
-                return false;
-            };
+    /// The `Caller` witness reading `tensor`'s `axis`, if this activation
+    /// minted one. Parameter witnesses are unique per tensor and axis.
+    fn caller_witness_for(&self, tensor: NodeId, axis: usize) -> Option<NodeId> {
+        self.dag.nodes().iter().find_map(|node| {
             let RiscOp::ExtentWitness {
                 site: crate::dag::ExtentWitnessSite::Caller,
                 axis: RtAxis::Lit(observed),
                 ..
             } = &node.op
             else {
-                return false;
+                return None;
             };
-            usize::try_from(*observed).ok() == Some(axis) && node.inputs.first() == Some(&tensor)
+            (usize::try_from(*observed).ok() == Some(axis) && node.inputs.first() == Some(&tensor))
+                .then_some(node.id)
         })
     }
 
@@ -20086,67 +20056,6 @@ mod tests {
             recover_anchor_axis(&dims, 0, dims.len(), "absent", &positions),
             AnchorRecovery::Unrecorded
         ));
-    }
-
-    #[test]
-    fn active_caller_witness_does_not_cross_invocations_or_unrelated_copy() {
-        let mut ctx = LowerCtx::new(
-            BTreeMap::new(),
-            BTreeMap::new(),
-            BTreeMap::new(),
-            LinearityInfo::default(),
-        );
-        let ty = TensorType {
-            dims: vec![DimInfo::Lit(2)],
-            precision: Prim::F32,
-        };
-        let shared = ctx.dag.add_node(
-            RiscOp::Load {
-                name: "shared".into(),
-            },
-            vec![],
-            ty.clone(),
-            None,
-        );
-        ctx.bindings.insert("x".into(), LoweredValue::Node(shared));
-        ctx.prepare_parameter_witnesses(&["x".into()], std::slice::from_ref(&ty), None, true);
-        let prior_witness = ctx
-            .active_caller_witness_for(shared, 0)
-            .expect("first activation witness");
-
-        // Rebind the SAME actual node in a later activation. A whole-DAG scan
-        // could select `prior_witness`; only the new activation may win.
-        ctx.bindings.insert("x".into(), LoweredValue::Node(shared));
-        ctx.prepare_parameter_witnesses(&["x".into()], std::slice::from_ref(&ty), None, true);
-        let current_witness = ctx
-            .active_caller_witness_for(shared, 0)
-            .expect("current activation witness");
-
-        assert_ne!(prior_witness, current_witness);
-        assert_ne!(
-            ctx.active_caller_witness_for(shared, 0),
-            Some(prior_witness)
-        );
-        assert_eq!(ctx.axis_interface_witness(shared, 0), Some(current_witness));
-
-        let unrelated = ctx.dag.add_node(
-            RiscOp::Load {
-                name: "unrelated".into(),
-            },
-            vec![],
-            ty,
-            None,
-        );
-        let unrelated_copy = ctx.dag.add_node(
-            RiscOp::Copy,
-            vec![unrelated],
-            TensorType {
-                dims: vec![DimInfo::Lit(2)],
-                precision: Prim::F32,
-            },
-            None,
-        );
-        assert_eq!(ctx.axis_interface_witness(unrelated_copy, 0), None);
     }
 
     #[test]

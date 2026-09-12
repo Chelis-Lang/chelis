@@ -259,17 +259,18 @@ fn helper_result_checked_named_axis_survives_decoded_context_paths() {
     fs::write(root.join("mylib/reef.toml"), mylib_reef_toml()).expect("write mylib reef.toml");
     fs::write(
         root.join("mylib/src/axes.ch"),
-        "module Mylib.Axes\nexport (aligned_left, aligned_right, aligned_matrix, scale, keep)\n\n\
+        "module Mylib.Axes\nexport (aligned_left, aligned_right, aligned_matrix, scale, keep, keep_rank)\n\n\
          def aligned_left[d](x: tensor[d, f32], gain: tensor[fixed, f32]) -> tensor[d, f32] = mul(x, gain)\n\
          def aligned_right[d](x: tensor[d, f32], gain: tensor[fixed, f32]) -> tensor[d, f32] = mul(gain, x)\n\
          def aligned_matrix[d, rows](x: tensor[d, rows, f32], gain: tensor[fixed, rows, f32]) -> tensor[d, rows, f32] = mul(x, gain)\n\
          def scale[d](x: tensor[d, f32], gain: tensor[fixed, f32]) -> tensor[d, f32] = mul(x, insert(sum(gain, fixed), 0i32, shape(x, 0i32)))\n\
-         def keep[d](x: tensor[d, f32], gain: tensor[fixed, f32]) -> tensor[d, f32] = copy(x)\n",
+         def keep[d](x: tensor[d, f32], gain: tensor[fixed, f32]) -> tensor[d, f32] = copy(x)\n\
+         def keep_rank(x: tensor[..rest, f32], gain: tensor[fixed, f32]) -> tensor[..rest, f32] = copy(x)\n",
     )
     .expect("write axes.ch");
     fs::write(root.join("reef.lock"), app_reef_lock()).expect("write reef.lock");
 
-    let snippet = "module App.Eval\nimport Mylib.Axes (aligned_left, aligned_right, aligned_matrix, scale, keep)\n\n\
+    let snippet = "module App.Eval\nimport Mylib.Axes (aligned_left, aligned_right, aligned_matrix, scale, keep, keep_rank)\n\n\
                    def direct() = sum(aligned_left(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32])), fixed)\n\
                    def alias() = {\n  f = aligned_left\n  sum(f(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32])), fixed)\n}\n\
                    def reversed() = sum(aligned_right(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32])), fixed)\n\
@@ -277,6 +278,10 @@ fn helper_result_checked_named_axis_survives_decoded_context_paths() {
                    def scale_bridge(x: tensor[fixed, f32]) -> tensor[fixed, f32] = scale(x, to_tensor([1.0f32, 2.0f32, 3.0f32]))\n\
                    def keep_bridge(x: tensor[fixed, f32]) -> tensor[fixed, f32] = keep(x, to_tensor([1.0f32, 2.0f32, 3.0f32]))\n\
                    def scale_outer(x: tensor[outer, f32]) -> tensor[outer, f32] = scale(x, to_tensor([1.0f32, 2.0f32, 3.0f32]))\n\
+                   def rank_bridge(x: tensor[fixed, f32]) -> tensor[fixed, f32] = keep_rank(x, to_tensor([1.0f32, 2.0f32, 3.0f32]))\n\
+                   def rank_outer(x: tensor[outer, f32]) -> tensor[outer, f32] = keep_rank(x, to_tensor([1.0f32, 2.0f32, 3.0f32]))\n\
+                   rank_kept = rank_bridge(to_tensor([4.0f32, 5.0f32]))\n\
+                   rank_outer_kept = rank_outer(to_tensor([4.0f32, 5.0f32]))\n\
                    scaled = scale_bridge(to_tensor([4.0f32, 5.0f32]))\n\
                    kept = keep_bridge(to_tensor([4.0f32, 5.0f32]))\n\
                    outer_scaled = scale_outer(to_tensor([4.0f32, 5.0f32]))\n";
@@ -288,6 +293,8 @@ fn helper_result_checked_named_axis_survives_decoded_context_paths() {
         "scaled",
         "kept",
         "outer_scaled",
+        "rank_kept",
+        "rank_outer_kept",
     ];
 
     let formatted = format_library_plus_snippet(&root, snippet);
@@ -314,10 +321,10 @@ fn helper_result_checked_named_axis_survives_decoded_context_paths() {
         r#"{"type":"tensor","value":{"shape":[2],"data":{"dtype":"f32","bits":["41c00000","41f00000"]}}}"#,
         "the caller-side `fixed` result label must not capture scale's gain binder"
     );
-    for name in ["kept", "outer_scaled"] {
+    for name in ["kept", "rank_kept", "rank_outer_kept", "outer_scaled"] {
         assert_eq!(
             raw_results[name],
-            if name == "kept" {
+            if name != "outer_scaled" {
                 r#"{"type":"tensor","value":{"shape":[2],"data":{"dtype":"f32","bits":["40800000","40a00000"]}}}"#
             } else {
                 r#"{"type":"tensor","value":{"shape":[2],"data":{"dtype":"f32","bits":["41c00000","41f00000"]}}}"#
