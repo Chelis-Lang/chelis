@@ -2348,6 +2348,31 @@ pub enum ComputedAxisExtent {
     /// A sum that does not fit a host extent computes no extent. The owner's
     /// own allocation owns that failure, so the guard yields rather than
     /// comparing a wrapped number.
+    ///
+    /// There is deliberately NO `> 0` filter here, where [`Self::ShrinkSpan`]
+    /// has one, and the asymmetry is the two quantities rather than an
+    /// oversight. A shrink span of zero selects nothing and computes no
+    /// extent, so the operation's own domain rejection owns it; a pad extent
+    /// of zero is a real extent, and a claim of some other number over it is
+    /// a mismatch the guard still owes. Filtering it would be a silent hole
+    /// rather than parity.
+    ///
+    /// Measured, and the zero extent is REACHABLE, which is what decides it.
+    /// A runtime bound resolving to zero is guarded correctly today:
+    /// `pad(x, [[sub(shape(y, 0i32), shape(y, 0i32)), 1i64]], 0.0f32)` over
+    /// three elements reports `pad axis 0 = 4`. A zero pad EXTENT is reached by
+    /// giving that spelling both bounds and an empty operand, and it behaves
+    /// correctly on both lanes: a declared `tensor[2, f32]` traps
+    /// ``extent `2`: claimed = 2, pad axis 0 = 0``, and a declared
+    /// `tensor[0, f32]` returns `shape=[0]` at exit zero. A `> 0` filter would
+    /// silence the first of those, so it would introduce a defect rather than
+    /// close one.
+    ///
+    /// An earlier version of this comment called the zero extent unreachable,
+    /// on the strength of one spelling the checker refuses (`to_tensor([])`
+    /// needs a resolved element dtype, which a typed parameter position
+    /// supplies). Round 1's verification measured it; the decision is unchanged
+    /// and its reason is now the measurement rather than an absence.
     PadSpan {
         before: RtDim,
         after: RtDim,

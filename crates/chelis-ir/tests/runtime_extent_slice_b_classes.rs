@@ -1950,3 +1950,95 @@ fn folded_interface_claims_follow_declaring_slots_and_axes() {
         );
     }
 }
+
+/// chelis#1800's derivation change, and the two halves that must NOT form a
+/// class.
+///
+/// A `Name` class needs two members, because one witness has nothing to
+/// disagree with. The one exception this change adds is a single member whose
+/// source is [`AxisSource::OpComputed`] and whose dim carries a RESOLVED name:
+/// that member has both a number to compare against and an extent the
+/// operation computes to compare, so it is a complete guard, exactly as C2.4
+/// makes a literal its own canonical value. The positive half is observable
+/// from the CLI through
+/// `runtime_extent_slice_b::a_nested_named_result_claim_is_enforced_through_its_resolved_binder`;
+/// these are the negatives, at the layer that decides them.
+///
+/// Both halves matter because the rule was written narrow on purpose. An
+/// unresolved single member has no canonical value for anything to compare
+/// against, and admitting a resolved member with any other source would mint
+/// a class for every literal-shaped input, which is the mint `is_member`'s
+/// `ExternalAxis` rule exists to prevent.
+///
+/// EVIDENTIARY STATUS: regression tests for a rule this change introduces, at
+/// the derivation layer the suite header names as the lock on the derivation.
+/// Neither can fail on the tree before the change, because the single-member
+/// admission did not exist there; each fails on a tree that widens the
+/// admission past the source or past the resolved dim.
+#[test]
+fn a_single_resolved_op_computed_member_forms_a_class_and_its_two_negatives() {
+    // Positive control: one member, `OpComputed` source, resolved dim.
+    let mut dag = Dag::new();
+    let operand = f32_load(&mut dag, "x", vec![named("r")]);
+    let shrunk = dag.add_node(
+        RiscOp::Shrink {
+            bounds: vec![(
+                RtDim::Lit(1),
+                RtDim::InputAxis {
+                    tensor: 0,
+                    axis: RtAxis::Lit(0),
+                },
+            )],
+        },
+        vec![operand],
+        ty(vec![DimInfo::Named("n".into(), Some(2))], Prim::F32),
+        None,
+    );
+    let _ = shrunk;
+    assert_eq!(
+        claims(&derive_runtime_dim_classes(&dag)),
+        vec![DimClaim::Name("n".into())],
+        "a resolved op-computed member is its own canonical value"
+    );
+    assert_eq!(
+        members_of(
+            &derive_runtime_dim_classes(&dag),
+            DimClaim::Name("n".into())
+        ),
+        vec![(shrunk, 0)],
+        "and the class holds exactly that one member"
+    );
+
+    // Negative one: the SAME member unresolved. Nothing supplies a canonical
+    // value, so C2.4's two-witness rule stands and no class forms.
+    let mut dag = Dag::new();
+    let operand = f32_load(&mut dag, "x", vec![named("r")]);
+    dag.add_node(
+        RiscOp::Shrink {
+            bounds: vec![(
+                RtDim::Lit(1),
+                RtDim::InputAxis {
+                    tensor: 0,
+                    axis: RtAxis::Lit(0),
+                },
+            )],
+        },
+        vec![operand],
+        ty(vec![named("n")], Prim::F32),
+        None,
+    );
+    assert!(
+        !claims(&derive_runtime_dim_classes(&dag)).contains(&DimClaim::Name("n".into())),
+        "an unresolved single member has no canonical value and forms no class"
+    );
+
+    // Negative two: a RESOLVED single member whose source is a `Load` axis.
+    // Admitting it would mint a class for every literal-shaped input.
+    let mut dag = Dag::new();
+    let declared = f32_load(&mut dag, "x", vec![DimInfo::Named("m".into(), Some(4))]);
+    let _ = declared;
+    assert!(
+        !claims(&derive_runtime_dim_classes(&dag)).contains(&DimClaim::Name("m".into())),
+        "a resolved member whose source is an external axis forms no class"
+    );
+}

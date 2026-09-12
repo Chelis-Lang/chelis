@@ -14309,6 +14309,13 @@ impl<'program> LowerCtx<'program> {
     ///   checker's fresh-extent representation under section 4.7.2 and is still
     ///   published as `*`, which reaches neither this arm nor a class.
     ///
+    /// One origin is out of reach, and it is the operand slot rather than the
+    /// walk: `shape_preserving` takes the first rank-matching input, so an
+    /// op-computed origin reachable only through operand 1 is unstamped.
+    /// Measured: the elementwise operand shape check refuses those programs
+    /// before they run, so nothing executes silently, which is why this is
+    /// recorded rather than repaired.
+    ///
     /// chelis#1798 widened WHICH axis this arm reads. It dispatched on the
     /// RESULT node's own source, so a body ending in an operation that merely
     /// FORWARDS an op-computed extent stamped nothing: `add(shrink(x, ..),
@@ -14450,6 +14457,14 @@ impl<'program> LowerCtx<'program> {
     /// That is the residual the design records: no maintainer writes it, and
     /// the repair for it is a per-declaration claim carrier rather than a
     /// tighter test here.
+    ///
+    /// A second residual sits in the predicate rather than here.
+    /// `is_synthesized_dim_name` reads `d<N>` as compiler-minted because that
+    /// is the checker's display spelling for an unresolved dimension variable,
+    /// so a signature that spells a binder `d0` has its claim relabeled by this
+    /// stamp rather than declined. Nothing at this layer distinguishes the two,
+    /// and the repair is to stop sharing the spelling rather than to guess
+    /// here; it is stated so a reader does not mistake it for coverage.
     fn stamp_op_computed_origin(
         &mut self,
         origin: NodeId,

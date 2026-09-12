@@ -3861,14 +3861,21 @@ fn a_non_unit_stride_op_computed_extent_remains_unadmitted() {
     );
 }
 
-/// A declared literal over a non-zero `pad` is guarded at the `pad`, on both
-/// lanes and with the same rendering.
+/// A declared literal over a non-zero `pad` with LITERAL bounds is guarded at
+/// the `pad`, on both lanes and with the same rendering.
 ///
 /// This is the direct spelling of the extent chelis#1837 reaches through
 /// `concat`'s lowered cascade, and it is here because admitting `pad` has to
 /// be visible in the owner's own spelling rather than only through a composed
 /// operation. It also closes a lane divergence the old lock did not measure,
 /// because the lock ran eval only.
+///
+/// This row is the LITERAL-BOUND control. Its `[[1i64, 1i64]]` bounds are
+/// compile-time constants and the extent is non-constant only because the
+/// OPERAND is symbolic, so it does not measure a runtime padding bound. The
+/// three rows below do, and round 1 of this pull request's review found that
+/// distinction hiding a defect: the claim's precondition and its evidence were
+/// measuring different things.
 ///
 /// EVIDENTIARY STATUS: regression test on BOTH lanes, for different base
 /// behaviour on each. Measured at `a5fee66b9`: eval printed
@@ -3919,6 +3926,38 @@ fn a_non_zero_pad_extent_is_guarded_on_both_lanes() {
         assert!(
             out.contains("out = tensor(shape=[5], data=[0.0, 1.0, 2.0, 3.0, 0.0])"),
             "{lane}: with the padded extent and the fill: {out}"
+        );
+    }
+
+    // A pad extent of ZERO, which is why `ComputedAxisExtent::PadSpan` carries
+    // no `> 0` filter where `ShrinkSpan` does. A shrink span of zero computes
+    // no extent and the operation's own domain rejection owns it; a pad extent
+    // of zero is a real extent, so a claim of another number over it is a
+    // mismatch the guard still owes. Round 1's verification measured this
+    // reachable, correcting a comment that had called it unreachable, and a
+    // filter added for parity would silence exactly this row.
+    let zero = "def f(x: tensor[rows, f32], y: tensor[s, f32]) -> tensor[2, f32] = \
+                pad(x, [[sub(shape(y, 0i32), shape(y, 0i32)), \
+                sub(shape(y, 0i32), shape(y, 0i32))]], 0.0f32)\n\
+                out = f(to_tensor([]), to_tensor([1.0f32, 2.0f32]))\n";
+    let (eval_ok, eval_out) = eval_result(&dir, "pad_zero_extent.ch", zero);
+    let (c_ok, c_out) = c_run_result(&dir, "pad_zero_extent_c", zero);
+    let context = "extent `2`: claimed = 2, pad axis 0 = 0";
+    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(!ok, "{lane}: a claim of 2 over a zero extent traps: {out}");
+        assert!(out.contains(context), "{lane}: expected {context}: {out}");
+    }
+
+    // And the agreeing zero, so the row above pins a guard rather than a
+    // lowering that cannot produce an empty axis at all.
+    let zero_ok = zero.replace("-> tensor[2, f32]", "-> tensor[0, f32]");
+    let (eval_ok, eval_out) = eval_result(&dir, "pad_zero_ok.ch", &zero_ok);
+    let (c_ok, c_out) = c_run_result(&dir, "pad_zero_ok_c", &zero_ok);
+    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(ok, "{lane}: an agreeing zero claim executes: {out}");
+        assert!(
+            out.contains("out = tensor(shape=[0], data=[])"),
+            "{lane}: producing the empty axis: {out}"
         );
     }
 }
@@ -6728,6 +6767,220 @@ fn a_caller_transported_result_label_survives_the_op_computed_stamp() {
         assert!(
             out.contains("out = tensor(shape=[3], data=[2.0, 3.0, 4.0])"),
             "{lane}: with the produced extent: {out}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Round 1's P1: a runtime padding bound.
+//
+// Admitting `pad` in `op_computed_axis_extent` made lowering stamp the claim,
+// but `host::rank_preserving_movement_type`'s Pad arm then discarded it. Its
+// runtime case minted a fresh `_rt_pad_dim_N_A` unconditionally, where the
+// sibling Shrink arm asks `op_computed_axis_extent` first and routes through
+// `unresolved_axis`, which keeps the declared dim from the fallback so a class
+// can form. The stamp survived the inlined root, whose root type is not
+// actualized through that function, and died in the exported and
+// value-binding forms.
+//
+// So the rows below are keyed on the BOUND rather than on the operand:
+// `spec/04-type-system.md` section 4.7 names "a non-identity literal step or
+// padding, or any runtime bound" as the movement axes that type a fresh extent
+// the owning operation "declares and guards at run time", and a runtime bound
+// is the half this pull request admitted without guarding.
+// ---------------------------------------------------------------------------
+
+/// A `pad` whose BEFORE bound is read at run time, with `claim` naming the
+/// declared result extent. Three elements padded by two then one is six.
+fn runtime_pad_before_source(claim: &str) -> String {
+    format!(
+        "def f(x: tensor[rows, f32], y: tensor[s, f32]) -> tensor[{claim}, f32] = \
+         pad(x, [[shape(y, 0i32), 1i64]], 0.0f32)\n\
+         out = f({}, {})\n",
+        vector_literal(3),
+        vector_literal(2)
+    )
+}
+
+/// pad.runtime_bound_claim.{eval,c}: a runtime padding bound is guarded in the
+/// value-binding form as well as the inlined root.
+///
+/// The two activation forms are asserted in one test because the defect was
+/// exactly their DIVERGENCE: the root trapped while the value binding did not,
+/// so a row that measured either form alone would have passed.
+///
+/// EVIDENTIARY STATUS: regression test. Measured at `779c46626`, this pull
+/// request's own round-1 head, the value-binding form printed
+/// `out = tensor(shape=[6], data=[0.0, 0.0, 1.0, 2.0, 3.0, 0.0])` and exited
+/// ZERO on eval and on the linked C binary under a declared `tensor[2, f32]`,
+/// while the inlined root trapped. The emitted C carried
+/// `int64_t _rt_pad_dim_3_0 = chelis_movement_extent(...)` and no comparison.
+/// Disposition lock for the agreeing block.
+#[test]
+fn a_runtime_bound_pad_claim_is_guarded_in_every_activation_form() {
+    assert!(
+        gcc_available(),
+        "this row compares two executed lanes; neither may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let context = "extent `2`: claimed = 2, pad axis 0 = 6";
+
+    // The value-binding form, which applies the exported kernel.
+    let binding = runtime_pad_before_source("2");
+    let (eval_ok, eval_out) = eval_result(&dir, "rt_pad_binding.ch", &binding);
+    let (c_ok, c_out) = c_run_result(&dir, "rt_pad_binding_c", &binding);
+    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(!ok, "{lane}: a claim of 2 over a pad to 6 traps: {out}");
+        assert!(
+            out.contains(&domain_trap_line("pad")),
+            "{lane}: [04-NUM-9]'s line names the `pad`: {out}"
+        );
+        assert!(out.contains(context), "{lane}: expected {context}: {out}");
+        assert!(
+            !out.contains("shape=[6]"),
+            "{lane}: and no undeclared extent is produced: {out}"
+        );
+    }
+
+    // The inlined root over the same body, which trapped even before the
+    // repair. Both forms must agree, which is the property this row adds.
+    let root = binding.replace("out = f(", "def main() -> tensor[2, f32] = f(");
+    let (eval_ok, eval_out) = eval_result(&dir, "rt_pad_root.ch", &root);
+    let (c_ok, c_out) = c_run_result(&dir, "rt_pad_root_c", &root);
+    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(!ok, "{lane}: the inlined root traps too: {out}");
+        assert!(out.contains(context), "{lane}: expected {context}: {out}");
+    }
+
+    // The agreeing control: the true padded extent still executes exactly, so
+    // the blocks above pin a guard rather than a lowering that stopped working.
+    let agreeing = runtime_pad_before_source("6");
+    let (eval_ok, eval_out) = eval_result(&dir, "rt_pad_ok.ch", &agreeing);
+    let (c_ok, c_out) = c_run_result(&dir, "rt_pad_ok_c", &agreeing);
+    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(
+            ok,
+            "{lane}: an agreeing runtime-bound claim executes: {out}"
+        );
+        assert!(
+            out.contains("out = tensor(shape=[6], data=[0.0, 0.0, 1.0, 2.0, 3.0, 0.0])"),
+            "{lane}: with the padded extent and the fill: {out}"
+        );
+    }
+}
+
+/// pad.runtime_after_and_named.{eval,c}: the AFTER bound and a NAMED claim
+/// reach the same guard.
+///
+/// Two shapes in one row because they vary one factor each against the row
+/// above: which side of the padding is read at run time, and whether the claim
+/// is a literal or a binder. Both were silent before the repair, and a repair
+/// that only reached the `before` bound or only the literal claim would fail
+/// here.
+///
+/// EVIDENTIARY STATUS: regression test for both blocks. Measured at
+/// `779c46626`, each printed `shape=[6]` and exited ZERO on both lanes.
+#[test]
+fn a_runtime_after_bound_and_a_named_pad_claim_reach_the_same_guard() {
+    assert!(
+        gcc_available(),
+        "this row compares two executed lanes; neither may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    // The runtime bound on the other side of the padding.
+    let after = format!(
+        "def f(x: tensor[rows, f32], y: tensor[s, f32]) -> tensor[2, f32] = \
+         pad(x, [[1i64, shape(y, 0i32)]], 0.0f32)\n\
+         out = f({}, {})\n",
+        vector_literal(3),
+        vector_literal(2)
+    );
+    let (eval_ok, eval_out) = eval_result(&dir, "rt_pad_after.ch", &after);
+    let (c_ok, c_out) = c_run_result(&dir, "rt_pad_after_c", &after);
+    let context = "extent `2`: claimed = 2, pad axis 0 = 6";
+    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(!ok, "{lane}: a runtime `after` bound is guarded too: {out}");
+        assert!(
+            out.contains(&domain_trap_line("pad")),
+            "{lane}: [04-NUM-9]'s line names the `pad`: {out}"
+        );
+        assert!(out.contains(context), "{lane}: expected {context}: {out}");
+    }
+
+    // The NAMED claim over the same runtime-bound pad, declared by a parameter
+    // the body never reads.
+    let named = format!(
+        "def f(w: tensor[n, f32], x: tensor[rows, f32], y: tensor[s, f32]) -> \
+         tensor[n, f32] = pad(x, [[shape(y, 0i32), 1i64]], 0.0f32)\n\
+         out = f({}, {}, {})\n",
+        vector_literal(2),
+        vector_literal(3),
+        vector_literal(2)
+    );
+    let (eval_ok, eval_out) = eval_result(&dir, "rt_pad_named.ch", &named);
+    let (c_ok, c_out) = c_run_result(&dir, "rt_pad_named_c", &named);
+    let context = "extent `n`: claimed = 2, pad axis 0 = 6";
+    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(!ok, "{lane}: a named runtime-bound claim is guarded: {out}");
+        assert!(out.contains(context), "{lane}: expected {context}: {out}");
+    }
+}
+
+/// pad.runtime_bound_axis1.{eval,c}: a rank-2 `pad` guards the axis it widens
+/// and reports that axis, not axis 0.
+///
+/// The axis index travels from `ComputedAxisExtent::PadSpan`'s `operand_axis`
+/// through the site key to the rendering, and a repair that hard-coded axis 0
+/// or keyed the site on the wrong axis would pass every rank-1 row above. The
+/// kept axis is zero-padded, so it stays a pass-through and forms no site of
+/// its own.
+///
+/// EVIDENTIARY STATUS: regression test. Measured at `779c46626`, this program
+/// printed `out = tensor(shape=[2, 6], ...)` and exited ZERO on both lanes
+/// under a declared `tensor[rows, 2, f32]`.
+#[test]
+fn a_rank_two_pad_guards_and_reports_the_runtime_axis_it_widens() {
+    assert!(
+        gcc_available(),
+        "this row compares two executed lanes; neither may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = |claim: &str| {
+        format!(
+            "def f(x: tensor[rows, 3, f32], y: tensor[s, f32]) -> \
+             tensor[rows, {claim}, f32] = \
+             pad(x, [[0i64, 0i64], [shape(y, 0i32), 1i64]], 0.0f32)\n\
+             out = f(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]), {})\n",
+            vector_literal(2)
+        )
+    };
+
+    let mismatched = source("2");
+    let (eval_ok, eval_out) = eval_result(&dir, "rt_pad_axis1.ch", &mismatched);
+    let (c_ok, c_out) = c_run_result(&dir, "rt_pad_axis1_c", &mismatched);
+    let context = "extent `2`: claimed = 2, pad axis 1 = 6";
+    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(!ok, "{lane}: the widened axis is guarded: {out}");
+        assert!(
+            out.contains(&domain_trap_line("pad")),
+            "{lane}: [04-NUM-9]'s line names the `pad`: {out}"
+        );
+        assert!(out.contains(context), "{lane}: expected {context}: {out}");
+        assert!(
+            !out.contains("pad axis 0"),
+            "{lane}: and the guard names the axis it widens, not axis 0: {out}"
+        );
+    }
+
+    let agreeing = source("6");
+    let (eval_ok, eval_out) = eval_result(&dir, "rt_pad_axis1_ok.ch", &agreeing);
+    let (c_ok, c_out) = c_run_result(&dir, "rt_pad_axis1_ok_c", &agreeing);
+    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(ok, "{lane}: the agreeing rank-2 claim executes: {out}");
+        assert!(
+            out.contains("shape=[2, 6]"),
+            "{lane}: keeping the zero-padded axis and widening the other: {out}"
         );
     }
 }

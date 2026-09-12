@@ -747,6 +747,52 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             "cli_slice_b.an_inlined_root_pass_through_claim_is_guarded_on_both_lanes",
         ),
+        # Round 1's P1. A RUNTIME padding bound is a different witness from
+        # a literal one, and the rows are separate because the claim's
+        # precondition is the bound rather than the operand: lowering stamped
+        # the claim and `host::rank_preserving_movement_type`'s Pad arm minted
+        # over it, so the exported and value-binding forms were silent while
+        # the inlined root trapped. Both lanes are `silent_unguarded` here,
+        # unlike the literal-bound rows below: with the declared dim replaced
+        # by a minted `_rt_pad_dim_N_A`, the C movement plan's target check
+        # compares against that minted dim and passes, so C returned the
+        # undeclared shape at exit zero too.
+        _row(
+            "pad.runtime_bound_claim.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_runtime_bound_pad_claim_is_guarded_in_every_activation_form",
+        ),
+        _row(
+            "pad.runtime_bound_claim.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_runtime_bound_pad_claim_is_guarded_in_every_activation_form",
+        ),
+        _row(
+            "pad.runtime_bound_claim.after_and_named.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_runtime_after_bound_and_a_named_pad_claim_reach_the_same_guard",
+        ),
+        _row(
+            "pad.runtime_bound_claim.after_and_named.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_runtime_after_bound_and_a_named_pad_claim_reach_the_same_guard",
+        ),
+        _row(
+            "pad.runtime_bound_claim.rank_two_axis.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_rank_two_pad_guards_and_reports_the_runtime_axis_it_widens",
+        ),
+        _row(
+            "pad.runtime_bound_claim.rank_two_axis.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_rank_two_pad_guards_and_reports_the_runtime_axis_it_widens",
+        ),
         # The C lane's baseline is `lane_divergent` rather than
         # `silent_unguarded`: it did not return a wrong shape, it aborted at
         # the movement plan's generic target check, reporting the allocation
