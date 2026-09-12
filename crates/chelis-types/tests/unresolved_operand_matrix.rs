@@ -1656,6 +1656,51 @@ fn an_ill_typed_destructure_or_field_read_on_a_late_bound_operand_is_now_reporte
         );
     }
 
+    // ONE diagnostic per mistake, not two. Round 1 P3-1: the derivation's
+    // failing shapes bind `projected` to the reported error's witness, so the
+    // suspended route sees a settled `Type::Error` operand and takes its
+    // chelis#731 §C3 cascade-suppression arm instead of reaching the
+    // declaration boundary. Before the fold each program below reported the
+    // field defect AND `unresolved `sum` shape obligation at declaration
+    // boundary`.
+    //
+    // REGRESSION TEST for the count. The field diagnostics themselves are
+    // asserted above; this asserts that nothing follows them.
+    for (case, program) in [
+        (
+            "field read on a target that binds to a tensor",
+            "def apply_t[b](f: (tensor[4, 3, f32]) -> b, x: tensor[4, 3, f32]) -> b = f(x)\n\
+             def probe(t: tensor[4, 3, f32]) -> tensor[3, f32] = apply_t(fn (q) -> sum(q.x, 0), t)\n",
+        ),
+        (
+            "unknown field on a target that binds to a record",
+            "type Box =\n  | Box { x: tensor[4, 3, f32] }\n\
+             def apply_b[b](f: (Box) -> b, r: Box) -> b = f(r)\n\
+             def probe(t: tensor[4, 3, f32]) -> tensor[3, f32] = apply_b(fn (q) -> sum(q.zzz, 0), Box { x: t })\n",
+        ),
+        (
+            "multi-variant target",
+            "type Shape =\n  | Circle { r: tensor[4, 3, f32] }\n  | Square { s: tensor[4, 3, f32] }\n\
+             def apply_s[b](f: (Shape) -> b, r: Shape) -> b = f(r)\n\
+             def probe(t: tensor[4, 3, f32]) -> tensor[3, f32] = apply_s(fn (q) -> sum(q.r, 0), Circle { r: t })\n",
+        ),
+    ] {
+        let errors = check(program).expect_err(&format!("{case}: must be rejected"));
+        assert!(
+            !errors.iter().any(|e| e
+                .message
+                .contains("shape obligation at declaration boundary")),
+            "{case}: the field defect must not drag the route's boundary obligation with it:\n{}",
+            summary(&errors)
+        );
+        assert_eq!(
+            errors.len(),
+            1,
+            "{case}: one mistake must report one diagnostic, got:\n{}",
+            summary(&errors)
+        );
+    }
+
     // CONTROL. Two field reads on one unresolved target both resolve, so the
     // ties report nothing when they agree. DISPOSITION LOCK: accepted on
     // `6abca2406` and here.

@@ -538,95 +538,133 @@ impl InferenceProduct {
                 // was a variable at the access, and the ordinary access rule
                 // is not re-entered, so a wrong field name or a non-record
                 // binding must be reported from here or nowhere.
+                //
+                // Round 1 P3-1: every failing shape BINDS `projected` to the
+                // reported error's witness. The eager arm gets this for free
+                // by returning `report(...)`'s `Type::Error` as the access
+                // type (chelis#731 §C3 cascade suppression); this pass has to
+                // do it by unification, because the route waiting on
+                // `projected` is suspended on the other ledger and reads the
+                // variable rather than a return value. Leaving it free made
+                // every field defect reported here arrive with the route's
+                // declaration-boundary obligation behind it: two diagnostics
+                // for one mistake.
                 DeferredTypeDerivation::RecordField {
                     source,
                     field,
                     projected,
-                } => match subst.apply(&source) {
-                    // Still unbound: carry the derivation to the next pass.
-                    // `replay_ready_shape_checks` repeats until a pass settles
-                    // nothing new, and an entry that never settles costs
-                    // nothing: the route waiting on `projected` reports the
-                    // declaration-boundary obligation instead.
-                    Type::Var(_) => {
-                        self.deferred_type_derivations
-                            .push(DeferredTypeDerivation::RecordField {
-                                source,
-                                field,
-                                projected,
-                            });
-                    }
-                    target @ (Type::Adt(..) | Type::KindedAdt(..)) => {
-                        let adt_name = match &target {
-                            Type::Adt(name, _) | Type::KindedAdt(name, _) => name.clone(),
-                            // The arm pattern admits these two only.
-                            _ => unreachable!("arm matches Adt and KindedAdt only"),
-                        };
-                        let Some(variant) = single_record_variant(adt_reg, &adt_name) else {
-                            errors.push(CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                format!(
-                                    "field access `.{field}` is only defined on a \
-                                     single-record-variant type; `{adt_name}` is a \
-                                     multi-variant or positional-field type (chelis#755)"
-                                ),
-                                vec![
-                                    "pattern-match on the variants with `match` to read \
-                                     their fields"
-                                        .to_string(),
-                                ],
-                            ));
+                } => {
+                    let target = subst.apply(&source);
+                    // One `match` with an explicit `Type::Var` arm, not an
+                    // `if matches!` guard: `unresolved_operand_census.rs`
+                    // enumerates this site by that arm's pattern, and a guard
+                    // naming only `Type::Var` is a spelling its recognizer
+                    // cannot see. Keeping the site enumerable is the point of
+                    // the census, so the shape is deliberate.
+                    let resolved_field: Result<Type, CheckError> = match &target {
+                        // Still unbound: carry the derivation to the next
+                        // pass. `replay_ready_shape_checks` repeats until a
+                        // pass settles nothing new, and an entry that never
+                        // settles costs nothing: the route waiting on
+                        // `projected` reports the declaration-boundary
+                        // obligation instead.
+                        Type::Var(_) => {
+                            self.deferred_type_derivations.push(
+                                DeferredTypeDerivation::RecordField {
+                                    source,
+                                    field,
+                                    projected,
+                                },
+                            );
                             continue;
-                        };
-                        let position = variant
-                            .fields
-                            .iter()
-                            .position(|(name, _)| name.as_deref() == Some(field.as_str()));
-                        let Some(position) = position else {
-                            errors.push(CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                format!("unknown record field '{field}' on {adt_name}"),
-                                vec![format!(
-                                    "known fields: {:?}",
-                                    variant
-                                        .fields
-                                        .iter()
-                                        .filter_map(|(name, _)| name.as_deref())
-                                        .collect::<Vec<_>>()
-                                )],
-                            ));
+                        }
+                        // The target's own rejection was already reported; the
+                        // field inherits its witness and stays silent (§C3).
+                        Type::Error(witness) => {
+                            let _ = unify(&projected, &propagate(witness), subst);
                             continue;
-                        };
-                        let field_types = instantiated_field_types(
-                            &adt_name, variant, &target, adt_reg, vg, subst,
-                        );
-                        match field_types.get(position) {
-                            Some(ty) => {
-                                if let Err(error) = unify(&projected, ty, subst) {
-                                    errors.push(error.into());
+                        }
+                        Type::Adt(adt_name, _) | Type::KindedAdt(adt_name, _) => {
+                            match single_record_variant(adt_reg, adt_name) {
+                                None => Err(CheckError::new(
+                                    CheckErrorKind::TypeMismatch,
+                                    format!(
+                                        "field access `.{field}` is only defined on a \
+                                         single-record-variant type; `{adt_name}` is a \
+                                         multi-variant or positional-field type (chelis#755)"
+                                    ),
+                                    vec![
+                                        "pattern-match on the variants with `match` to read \
+                                         their fields"
+                                            .to_string(),
+                                    ],
+                                )),
+                                Some(variant) => {
+                                    let position = variant.fields.iter().position(|(name, _)| {
+                                        name.as_deref() == Some(field.as_str())
+                                    });
+                                    match position {
+                                        None => Err(CheckError::new(
+                                            CheckErrorKind::TypeMismatch,
+                                            format!("unknown record field '{field}' on {adt_name}"),
+                                            vec![format!(
+                                                "known fields: {:?}",
+                                                variant
+                                                    .fields
+                                                    .iter()
+                                                    .filter_map(|(name, _)| name.as_deref())
+                                                    .collect::<Vec<_>>()
+                                            )],
+                                        )),
+                                        Some(position) => {
+                                            let field_types = instantiated_field_types(
+                                                adt_name, variant, &target, adt_reg, vg, subst,
+                                            );
+                                            match field_types.get(position) {
+                                                Some(ty) => Ok(ty.clone()),
+                                                // `position` came from a
+                                                // validated hit, so a shorter
+                                                // list is an internal
+                                                // inconsistency: loud, never
+                                                // silent (chelis#731 §C3).
+                                                None => Err(CheckError::new(
+                                                    CheckErrorKind::TypeMismatch,
+                                                    format!(
+                                                        "internal: field `{field}` of \
+                                                         `{adt_name}` resolved to position \
+                                                         {position} but no instantiated field \
+                                                         type is available (chelis#731 \
+                                                         [04-TOT-2])"
+                                                    ),
+                                                    vec![],
+                                                )),
+                                            }
+                                        }
+                                    }
                                 }
                             }
-                            None => errors.push(CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                format!(
-                                    "internal: field `{field}` of `{adt_name}` resolved \
-                                     to position {position} but no instantiated field type \
-                                     is available (chelis#731 [04-TOT-2])"
-                                ),
-                                vec![],
-                            )),
+                        }
+                        other => Err(CheckError::new(
+                            CheckErrorKind::TypeMismatch,
+                            format!(
+                                "field access `.{field}` expects a record value, got a \
+                                 value of type `{other}` (chelis#755)"
+                            ),
+                            vec![],
+                        )),
+                    };
+                    match resolved_field {
+                        Ok(field_ty) => {
+                            if let Err(error) = unify(&projected, &field_ty, subst) {
+                                errors.push(error.into());
+                            }
+                        }
+                        Err(error) => {
+                            let witness = report(errors, error);
+                            let _ = unify(&projected, &witness, subst);
                         }
                     }
-                    Type::Error(_) => {}
-                    other => errors.push(CheckError::new(
-                        CheckErrorKind::TypeMismatch,
-                        format!(
-                            "field access `.{field}` expects a record value, got a \
-                             value of type `{other}` (chelis#755)"
-                        ),
-                        vec![],
-                    )),
-                },
+                }
             }
         }
     }
