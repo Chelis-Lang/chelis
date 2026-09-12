@@ -549,12 +549,15 @@ fn runtime_extent_tuple_and_record_roots_size_their_outputs_on_both_lanes() {
 /// manifest rule admits it unchanged, and both lanes render the output the
 /// lock named as correct.
 ///
-/// The test keeps its former name so the phase-A manifest row it appears in
-/// (`scripts/runtime_extent_oracle_targets.json`, the `cli` target's
-/// `expected` list) does not move; the name describes the row, and this
-/// comment describes what the row now proves.
+/// The test was named `..._is_still_dropped_on_both_lanes` while it was the
+/// lock, and is renamed with the flip so the name does not contradict what it
+/// asserts. That costs one line in the phase-A
+/// manifest row (`scripts/runtime_extent_oracle_targets.json`, the `cli`
+/// target's `expected` list, which is mode `all`) and moves no digest:
+/// `FROZEN_PHASE_A_DIGEST` hashes the phase-A CORPUS ROWS, and no corpus row
+/// names this test.
 #[test]
-fn a_root_that_keeps_a_dim_variable_is_still_dropped_on_both_lanes() {
+fn a_root_that_keeps_a_dim_variable_is_sized_on_both_lanes() {
     let source = "def g(x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
         def h(y: tensor[k, f32]) -> tensor[k, f32] = add(y, y)\n\
         def main() = h(g(to_tensor([1.0f32, 2.0f32, 3.0f32])))\n";
