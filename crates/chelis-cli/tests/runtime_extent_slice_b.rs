@@ -406,10 +406,15 @@ fn domain_trap_line(op: &str) -> String {
 
 const DIV_ZERO_TRAP: &str = "numeric trap: division by zero in floor_div at int64";
 
-/// Build to C, link, run, and return whether the binary exited zero plus its
-/// combined output. A build or link failure panics: those are defects in the
-/// fixture or the emitter, never the behaviour under test.
-fn c_run_result(dir: &TempDir, stem: &str, source: &str) -> (bool, String) {
+/// Build to C, link, run, and return the binary's exit STATUS plus its combined
+/// output. A build or link failure panics: those are defects in the fixture or
+/// the emitter, never the behaviour under test.
+///
+/// The status rather than a boolean, because the runtime's two failure shapes
+/// are different exits and the difference is observable: a `Domain` rejection
+/// from `affine_result` exits 1, while `chelis_numeric_trap` reached through a
+/// guard aborts and exits 134.
+fn c_run_status(dir: &TempDir, stem: &str, source: &str) -> (std::process::ExitStatus, String) {
     let out_dir = dir.path().join(format!("{stem}-out"));
     let build = build_c(&fixture(dir, &format!("{stem}.ch"), source), &out_dir);
     assert!(
@@ -424,7 +429,14 @@ fn c_run_result(dir: &TempDir, stem: &str, source: &str) -> (bool, String) {
         .expect("run compiled binary");
     let mut text = String::from_utf8_lossy(&run.stdout).to_string();
     text.push_str(&String::from_utf8_lossy(&run.stderr));
-    (run.status.success(), text)
+    (run.status, text)
+}
+
+/// The same run reduced to whether the binary exited zero, which is what every
+/// row that only needs "it failed" reads.
+fn c_run_result(dir: &TempDir, stem: &str, source: &str) -> (bool, String) {
+    let (status, text) = c_run_status(dir, stem, source);
+    (status.success(), text)
 }
 
 // ---------------------------------------------------------------------------
@@ -3895,58 +3907,177 @@ fn an_empty_shrink_span_diverges_across_lanes_under_the_616_admission_rule() {
     );
 }
 
-/// A `shrink` whose end exceeds the operand's extent, under a declared literal.
-fn end_beyond_operand_source(len: usize) -> String {
+/// chelis#1797's reproducer: a `shrink` whose runtime end overshoots the
+/// operand's extent, under each result-claim spelling the issue's witnesses
+/// take.
+///
+/// The operand holds four elements and the bound is
+/// `[1, shape(x, 0) + 3) = [1, 7)`, so the end overshoots by three and the
+/// span's arithmetic width is six in every spelling. `claim` is the declared
+/// result extent, and the three values separate the three ways a claim can sit
+/// over a span that is out of domain: `2` DISAGREES with the width, `6` AGREES
+/// with it, and `k` is a free dim that claims nothing. Before the repair those
+/// three took three different exits, which is why one of them is not enough.
+fn overshooting_shrink_source(claim: &str) -> String {
     format!(
-        "def f(x: tensor[rows, f32]) -> tensor[2, f32] = \
+        "def f(x: tensor[rows, f32]) -> tensor[{claim}, f32] = \
          shrink(x, [[1i64, add(shape(x, 0i32), 3i64)]])\n\
          out = f({})\n",
-        vector_literal(len)
+        vector_literal(4)
     )
 }
 
-/// The limit of this slice's cross-lane claim, pinned rather than implied.
+/// The three result-claim spellings of the overshoot reproducer.
+const OVERSHOOT_CLAIMS: [&str; 3] = ["2", "6", "k"];
+
+/// The two lines a lane prints for an out-of-domain `shrink` bound, and the
+/// whole of what it prints.
 ///
-/// `spec/05-risc-primitives.md` section 2.4.1 makes "a shrink range overshoot"
-/// an error every execution mode reports with matching language, and the two
-/// lanes do not match here: C's movement plan rejects the span before the guard
-/// site, while the evaluator's guard runs first and reports the claim. The
-/// evaluator cannot simply decline, because its own answer to an overshooting
-/// span is the `assert!` in `eval::shrink`, which PANICS rather than returning
-/// a typed error, so declining the guard would trade a diagnostic naming the
-/// wrong reason for a panic.
+/// `ShapeMetadata::shrunk` (`crates/chelis-abi/src/metadata.rs`) answers a
+/// negative start, an inverted pair, or an end past the operand extent with one
+/// `Domain` message; `affine_result` (`crates/chelis-runtime/src/lib.rs`)
+/// prints it, then [04-NUM-9]'s trap line, then exits 1. `SHRINK_DOMAIN_TRAP`
+/// in `crates/chelis-ir/src/eval.rs` is the evaluator's copy of the same two
+/// lines, so the cross-lane agreement below is one constant compared against
+/// two processes rather than two spellings that have to be kept in step.
+const OVERSHOOT_RENDERING: &str =
+    "Domain: shrink bounds outside input extent\nnumeric trap: domain in shrink at int64\n";
+
+/// The same two lines under the eval lane's reporter, which prefixes `error: `
+/// to the first line of every diagnostic it raises. That prefix is the only
+/// difference between the lanes, and it is the same prefix the extent guard's
+/// [04-NUM-9] line already carries on this lane.
+fn overshoot_eval_rendering() -> String {
+    format!("error: {OVERSHOOT_RENDERING}")
+}
+
+/// Run a fixture under `chelis eval` and return its exit code with its combined
+/// output.
 ///
-/// This slice therefore bounds its cross-lane claim to IN-DOMAIN spans and
-/// pins both dispositions here. Closing the divergence belongs to chelis#1797.
-/// chelis#523, which the assertion's own message cites, is CLOSED and is that
-/// issue's predecessor, not its owner.
+/// [`eval_result`]'s boolean cannot separate the two outcomes chelis#1797 is
+/// about: a typed diagnostic exits 1 and a panicking evaluator exits 101, and
+/// both are "not success".
+fn eval_code(dir: &TempDir, name: &str, source: &str) -> (Option<i32>, String) {
+    let run = eval(&fixture(dir, name, source));
+    let mut text = String::from_utf8_lossy(&run.stdout).to_string();
+    text.push_str(&String::from_utf8_lossy(&run.stderr));
+    (run.status.code(), text)
+}
+
+/// shrink.runtime_bound.overshoot.eval: chelis#1797. An overshooting runtime
+/// `shrink` end is reported as `spec/05-risc-primitives.md` section 2.4.1's
+/// overshoot error, in the compiled lane's exact words, under every
+/// result-claim spelling.
 ///
-/// EVIDENTIARY STATUS: disposition lock for both lanes, not a regression test.
-/// Neither assertion describes an improvement; both describe a limit, and the
-/// test exists so that fixing chelis#1797 has to update it.
+/// Two things had to change together. `eval::shrink` answers an out-of-domain
+/// bound with a typed `Err` carrying the compiled lane's two lines instead of
+/// an `assert!`; and `computed_axis_extent_value` DECLINES a span whose end
+/// runs past the operand, so the extent guard yields and the operation reports
+/// the defect that is actually present. Declining alone would have traded a
+/// diagnostic naming the wrong reason for a panic, which is why chelis#1790
+/// bounded its cross-lane claim to in-domain spans rather than repairing this.
+///
+/// The in-domain guard is untouched, and
+/// [`a_local_unit_extent_claim_traps_at_its_operation_on_eval`] and the
+/// claim rows around it are the controls that say so: a span the operand
+/// contains still compares against its claim and still reports a mismatch as
+/// [04-NUM-9]'s line.
+///
+/// EVIDENTIARY STATUS: regression test, all three spellings. Measured on the
+/// base `6abca2406`: `claim = "2"` printed
+/// ``error: extent `2`: claimed = 2, shrink axis 0 = 6`` with the trap line and
+/// exit 1, naming a claim that was not the defect; `claim = "6"` and
+/// `claim = "k"` both PANICKED at `crates/chelis-ir/src/eval.rs:1496` with
+/// exit 101 and no diagnostic at all.
 #[test]
-fn an_overshooting_shrink_span_is_outside_this_slices_cross_lane_claim() {
+fn an_overshooting_shrink_span_reports_the_domain_error_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for claim in OVERSHOOT_CLAIMS {
+        let (code, out) = eval_code(
+            &dir,
+            &format!("overshoot_{claim}.ch"),
+            &overshooting_shrink_source(claim),
+        );
+        assert_eq!(
+            out,
+            overshoot_eval_rendering(),
+            "claim `{claim}` reports the overshoot and nothing else"
+        );
+        assert_eq!(
+            code,
+            Some(1),
+            "claim `{claim}` exits 1 as a diagnostic, not 101 as a panic: {out}"
+        );
+    }
+}
+
+/// shrink.runtime_bound.overshoot.c: the compiled twin, and the half that makes
+/// the row above a cross-lane claim rather than one lane's wording.
+///
+/// C reaches the rejection before the guard site: `chelis_tensor_affine_plan`
+/// builds the movement plan first, so `ShapeMetadata::shrunk` refuses the
+/// bounds and the emitted claim comparison never executes. That order is the
+/// one the eval lane now takes too, which is what lets both lanes print
+/// [`OVERSHOOT_RENDERING`] verbatim.
+///
+/// EVIDENTIARY STATUS: disposition lock. This lane is unchanged by chelis#1797
+/// and printed exactly these bytes on the base `6abca2406` for all three
+/// spellings; the row is here because the eval receipt above is required to
+/// match it, and because a later change to either lane has to move both.
+#[test]
+fn an_overshooting_shrink_span_reports_the_domain_error_on_c() {
     assert!(
         gcc_available(),
-        "this row compares two executed lanes; neither may skip"
+        "this row is one half of a cross-lane claim; it may not skip"
     );
     let dir = tempfile::tempdir().expect("tempdir");
-    let source = end_beyond_operand_source(4);
-    let (eval_ok, eval_out) = eval_result(&dir, "end_beyond.ch", &source);
-    let (c_ok, c_out) = c_run_result(&dir, "end_beyond_c", &source);
-    assert!(
-        !eval_ok,
-        "an overshoot does not produce a value: {eval_out}"
+    for claim in OVERSHOOT_CLAIMS {
+        let (status, out) = c_run_status(&dir, &format!("overshoot_{claim}_c"), &overshooting_shrink_source(claim));
+        assert_eq!(
+            out, OVERSHOOT_RENDERING,
+            "claim `{claim}` reports the overshoot and nothing else"
+        );
+        assert_eq!(
+            status.code(),
+            Some(1),
+            "claim `{claim}` exits 1, the runtime's `Domain` exit: {out}"
+        );
+    }
+}
+
+/// Negative parity for the pair above, and the boundary of what chelis#1797
+/// repairs: a span that overshoots AND selects nothing is still refused by
+/// chelis#616's operation-level admission rule, which runs before the operand's
+/// shape is consulted.
+///
+/// `[shape(x, 0) + 3, shape(x, 0) + 3)` is `[7, 7)` over an operand of four, so
+/// it is out of domain by the same three elements as the rows above and empty
+/// as well. The `RiscOp::Shrink` arm rejects `start >= end` first and never
+/// reaches `eval::shrink`, so this spelling keeps the admission rule's wording
+/// while the compiled lane keeps saying `Domain: shrink bounds outside input
+/// extent`. That divergence is chelis#1795's, whose reproducer is the same
+/// empty span without the overshoot, and repairing it would change text this
+/// change does not own.
+///
+/// EVIDENTIARY STATUS: disposition lock, eval lane. Unchanged from the base
+/// `6abca2406`. The row exists so the overshoot claim above is read as bounded
+/// to spans that select something, rather than as covering every out-of-domain
+/// bound.
+#[test]
+fn an_overshooting_empty_span_keeps_the_616_admission_rule_wording_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = format!(
+        "def f(x: tensor[rows, f32]) -> tensor[2, f32] = \
+         shrink(x, [[add(shape(x, 0i32), 3i64), add(shape(x, 0i32), 3i64)]])\n\
+         out = f({})\n",
+        vector_literal(4)
     );
-    assert!(!c_ok, "an overshoot does not produce a value: {c_out}");
-    assert!(
-        eval_out.contains("extent `2`: claimed = 2, shrink axis 0 = 6"),
-        "eval's guard runs first and names the claim (chelis#1797): {eval_out}"
+    let (code, out) = eval_code(&dir, "overshoot_empty.ch", &source);
+    assert_eq!(
+        out, "error: shrink axis 0 bound [7, 7] is empty or inverted (start >= end)\n",
+        "the admission rule reports the span, not the overshoot (chelis#1795)"
     );
-    assert!(
-        c_out.contains("shrink bounds outside input extent"),
-        "C's movement plan rejects the span first: {c_out}"
-    );
+    assert_eq!(code, Some(1), "and does so as a diagnostic: {out}");
 }
 
 // ---------------------------------------------------------------------------
