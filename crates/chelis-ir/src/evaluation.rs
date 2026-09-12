@@ -328,6 +328,18 @@ pub struct EvaluationEmissionView<'a> {
 }
 
 impl<'a> EvaluationEmissionView<'a> {
+    /// Complete helper-local source census, including retained requirements.
+    #[cfg(feature = "lowering-trace")]
+    pub fn full_source(self) -> crate::lowering_trace::FullSpineObservation {
+        self.metadata.spine.full_observation()
+    }
+
+    /// The scope allocated by this execution-metadata owner for caller state.
+    #[cfg(feature = "lowering-trace")]
+    pub fn inherited_scope(self) -> ScopeId {
+        ScopeId(0)
+    }
+
     pub fn steps(self) -> &'a [Step] {
         &self.metadata.spine.steps
     }

@@ -204,6 +204,8 @@ pub(crate) fn emit_host_abi_program(
     // no declaration in scope.
     let mut body: Vec<String> = Vec::new();
     let mut helper_requirements = HelperRequirements::default();
+    #[cfg(feature = "native-random-observer")]
+    let source_sites = crate::random_observer::source_sites(projected.source_emission());
     append_scalar_conversion_helpers(&mut body);
     body.push(String::new());
     append_tensor_abi_helpers(&mut body);
@@ -217,6 +219,7 @@ pub(crate) fn emit_host_abi_program(
     #[cfg(feature = "native-random-observer")]
     {
         crate::random_observer::append_support(&mut body);
+        crate::random_observer::append_source_sites(&mut body, &source_sites);
         body.push(String::new());
     }
     append_tensor_math_helpers(&mut body);
@@ -365,6 +368,12 @@ pub(crate) fn emit_host_abi_program(
                 .function_owner_bindings(function_index)
                 .expect("projected function retains verified body-owner bindings"),
             &helper_output_counts,
+            #[cfg(feature = "native-random-observer")]
+            &source_sites
+                .iter()
+                .filter(|s| s.verified.unit_word() == function_index + 1)
+                .cloned()
+                .collect::<Vec<_>>(),
         ) {
             Ok(()) => {
                 function_bodies.extend(fn_buf);
@@ -1661,7 +1670,14 @@ fn append_helper(
         ..crate::CodegenOptions::default()
     };
     let helper_src = if let Some(execution) = verified.execution() {
-        CEmitter::emit_verified_evaluation_with_options(dag, execution, &helper_name, options)?
+        CEmitter::emit_verified_evaluation_with_options(
+            dag,
+            execution,
+            &helper_name,
+            options,
+            #[cfg(feature = "native-random-observer")]
+            verified.source_location(),
+        )?
     } else {
         CEmitter::emit_verified_dag_with_options(dag, &helper_name, options)?
     };
@@ -1897,6 +1913,8 @@ fn emit_function(
     ownership_sites: &[ProjectedHostSite<'_>],
     owner_bindings: &[(VerifiedOwnerId, String)],
     helper_output_counts: &[usize],
+    #[cfg(feature = "native-random-observer")]
+    source_sites: &[crate::random_observer::SourceSite<'_>],
 ) -> Result<(), Unsupported> {
     let params = function
         .params
@@ -1929,6 +1947,22 @@ fn emit_function(
         helper_output_counts,
         ownership_sites,
     );
+    #[cfg(feature = "native-random-observer")]
+    {
+        if !crate::random_observer::source_bijection(source_sites, &emitter.expression_sites) {
+            return Err(invalid_abi_shape(
+                "source identity sidecar is not the verified expression-site bijection".into(),
+                "native Random source identity",
+            ));
+        }
+        emitter.source_sites = source_sites.to_vec();
+        let source = source_sites
+            .first()
+            .expect("function has a body expression");
+        let unit = source.verified.unit_word();
+        let admitted = usize::from(source.supported());
+        out.push(format!("    __chelis_random_function_frame __chelis_source_function = __chelis_random_push_function(__chelis_observer, {unit}ULL, {admitted});"));
+    }
     if owner_bindings.len() < function.params.len()
         || function
             .params
@@ -1981,6 +2015,10 @@ fn emit_function(
     emitter.finish_expression_sites()?;
     out.extend(emitter.lines);
     out.extend(declared_result_extent_guard(function));
+    #[cfg(feature = "native-random-observer")]
+    out.push(
+        "    __chelis_random_pop_function(__chelis_observer, __chelis_source_function);".into(),
+    );
     out.push("    return __result;".to_string());
     out.push("}".to_string());
 
@@ -2611,6 +2649,8 @@ struct HostEmitter<'a> {
     tensor_helper_output_counts: &'a [usize],
     expression_sites: Vec<ProjectedHostSite<'a>>,
     expression_site_index: usize,
+    #[cfg(feature = "native-random-observer")]
+    source_sites: Vec<crate::random_observer::SourceSite<'a>>,
     pre_emitted_clone_sites: UnordSet<HostSiteId>,
     pre_emitted_terminals: UnordSet<(HostSiteId, VerifiedOperationId)>,
     owner_vars: UnordMap<VerifiedOwnerId, String>,
@@ -2673,6 +2713,8 @@ impl<'a> HostEmitter<'a> {
                 .cloned()
                 .collect(),
             expression_site_index: 0,
+            #[cfg(feature = "native-random-observer")]
+            source_sites: Vec::new(),
             pre_emitted_clone_sites: UnordSet::new(),
             pre_emitted_terminals: UnordSet::new(),
             owner_vars: UnordMap::new(),
@@ -3507,7 +3549,42 @@ impl<'a> HostEmitter<'a> {
         ty: &HostType,
     ) -> Result<(), Unsupported> {
         let site = self.next_expression_site()?;
+        #[cfg(feature = "native-random-observer")]
+        let call_frame = {
+            let source = self
+                .source_sites
+                .iter()
+                .find(|s| s.verified.site().id() == site.id);
+            if source.is_some_and(|s| !s.matches(&site, expr)) {
+                return Err(invalid_abi_shape(
+                    "source identity disagrees with projected site/kind/target".into(),
+                    "native Random source identity",
+                ));
+            }
+            let pointer = source.map_or_else(|| "NULL".into(), |s| s.pointer());
+            if matches!(
+                expr.kind,
+                HostExprKind::Call { .. } | HostExprKind::TensorCall { .. }
+            ) {
+                let name = self.next_temp("source_call");
+                self.lines.extend(crate::random_observer::push_source_call(
+                    &self.indent,
+                    &name,
+                    &pointer,
+                ));
+                Some(name)
+            } else {
+                None
+            }
+        };
         self.assign_expr_at_site(target, expr, ty, &site)?;
+        #[cfg(feature = "native-random-observer")]
+        if let Some(frame) = call_frame {
+            self.lines.push(crate::random_observer::pop_source_call(
+                &self.indent,
+                &frame,
+            ));
+        }
         Ok(())
     }
 
@@ -3863,6 +3940,21 @@ impl<'a> HostEmitter<'a> {
             HostExprKind::WithSeed { seed, body, ty } => {
                 let seed_var = self.next_temp("seed");
                 self.emit_expr_to_var(seed, &seed_var, &HostType::Int64)?;
+                #[cfg(feature = "native-random-observer")]
+                let source_frame = {
+                    let pointer = self
+                        .source_sites
+                        .iter()
+                        .find(|s| s.verified.site().id() == site.id)
+                        .map_or_else(|| "NULL".into(), |s| s.pointer());
+                    let frame = self.next_temp("source_host");
+                    self.lines.push(format!("{}__chelis_random_host_frame {frame} = __chelis_random_push_host(__chelis_observer, {pointer}, (uint64_t){seed_var});", self.indent));
+                    self.lines.push(format!(
+                        "{}if (__chelis_observer != NULL) __chelis_observer->host = &{frame};",
+                        self.indent
+                    ));
+                    frame
+                };
                 let saved_var = self.next_temp("rng_saved");
                 let seeded_var = self.next_temp("rng_seeded");
                 self.lines.push(format!(
@@ -3917,6 +4009,7 @@ impl<'a> HostEmitter<'a> {
                         "*__chelis_rng",
                         None,
                     ));
+                    self.lines.push(format!("{}if (__chelis_observer != NULL) __chelis_observer->host = {source_frame}.previous;", self.indent));
                 }
             }
             HostExprKind::TensorCall { helper, args, ty } => {

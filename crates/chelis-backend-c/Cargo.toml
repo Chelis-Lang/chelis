@@ -10,7 +10,7 @@ repository.workspace = true
 sleef = []
 # Translation-unit-private observation of actual Random locals. This feature
 # is for the bounded LaCaDiLE native harness and is never enabled by default.
-native-random-observer = []
+native-random-observer = ["chelis-ir/lowering-trace"]
 
 [dependencies]
 chelis-unord.workspace = true
