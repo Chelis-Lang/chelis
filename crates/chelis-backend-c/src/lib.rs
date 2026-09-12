@@ -316,7 +316,10 @@ pub fn prepare_dag_for_codegen(
     } else {
         dag
     };
-    emit::CEmitter::rename_anonymous_dims(dag)
+    // chelis#1788: split a dimension identity two independent scopes spell
+    // before anything keys a declaration by name, so the anonymous pass
+    // propagates whatever identity each scope ended up with.
+    emit::CEmitter::rename_anonymous_dims(emit::CEmitter::rename_scoped_dims(dag))
 }
 
 /// Select the exact nested C helper DAGs before host ownership lowering.

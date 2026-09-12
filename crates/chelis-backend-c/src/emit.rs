@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use chelis_ir::dag::{
-    Dag, DagNode, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStep, FusedStepOp, NodeId,
-    ReduceWindowKind, RiscOp, RtAxis, RtDim, TensorType,
+    Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStep,
+    FusedStepOp, NodeId, ReduceWindowKind, RiscOp, RtAxis, RtDim, TensorType,
 };
 use chelis_ir::evaluation::{DrawId, EvaluationEmissionView, RandomSite};
 #[cfg(feature = "native-random-observer")]
@@ -1011,6 +1011,180 @@ impl CEmitter {
             "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
         ));
         self.emit_tensor_snapshot(id, true);
+    }
+
+    /// chelis#1788 shape 2. Two roots in ONE emitted function whose signatures
+    /// each spell the same dimension binder, independently.
+    ///
+    /// Declarations are keyed by NAME graph-wide, in `resolve_named_dim_origin`
+    /// and in the prologue loop, so a merged kernel over
+    /// `f(x: tensor[seq, f32])` and `g(y: tensor[batch, seq, f32])` declared
+    /// `seq` once from the first input slot and sized the second root's work
+    /// with the first root's extent. Nothing compared them, because the two
+    /// witnesses are in different scopes and scoping correctly refuses to make
+    /// them one class; the defect was that they were nevertheless one C
+    /// variable.
+    ///
+    /// The repair gives each scope after the first its own identity,
+    /// `<name>__s<k>`, so the prologue declares one variable per scope and each
+    /// root reads its own input. It runs BEFORE `rename_anonymous_dims` so the
+    /// anonymous pass propagates whatever identity a scope ended up with.
+    ///
+    /// Only names a `Load` axis DECLARES are renamed, and only in scopes that
+    /// share no node with an earlier scope, because a shared node cannot carry
+    /// two names for one axis. `node_scopes` is coarse for exactly that reason.
+    ///
+    /// Fail-closed rather than half-renamed: if any op still references the old
+    /// name through a payload this pass does not rewrite, the whole pass is
+    /// abandoned and the graph keeps the behaviour it had. A partially renamed
+    /// graph would declare a symbol nothing reads and read a symbol nothing
+    /// declares.
+    pub(crate) fn rename_scoped_dims(dag: Dag) -> Dag {
+        fn rename_dim_expr(expr: &DimExpr, from: &str, to: &str) -> DimExpr {
+            match expr {
+                DimExpr::Concrete(value) => DimExpr::Concrete(*value),
+                DimExpr::Sym(name) if name == from => DimExpr::Sym(to.to_string()),
+                DimExpr::Sym(name) => DimExpr::Sym(name.clone()),
+                DimExpr::Mul(lhs, rhs) => DimExpr::Mul(
+                    Box::new(rename_dim_expr(lhs, from, to)),
+                    Box::new(rename_dim_expr(rhs, from, to)),
+                ),
+                DimExpr::Div(lhs, rhs) => DimExpr::Div(
+                    Box::new(rename_dim_expr(lhs, from, to)),
+                    Box::new(rename_dim_expr(rhs, from, to)),
+                ),
+            }
+        }
+        fn rename_rt_dim(dim: &RtDim, from: &str, to: &str) -> RtDim {
+            match dim {
+                RtDim::Sym(name) if name == from => RtDim::Sym(to.to_string()),
+                other => other.clone(),
+            }
+        }
+        fn rename_op(op: &RiscOp, from: &str, to: &str) -> RiscOp {
+            let mut renamed = op.clone();
+            match &mut renamed {
+                RiscOp::Reshape { new_shape } => {
+                    for dim in new_shape.iter_mut() {
+                        *dim = rename_rt_dim(dim, from, to);
+                    }
+                }
+                RiscOp::Expand { size, .. } => *size = rename_rt_dim(size, from, to),
+                RiscOp::Shrink { bounds } => {
+                    for (start, end) in bounds.iter_mut() {
+                        *start = rename_rt_dim(start, from, to);
+                        *end = rename_rt_dim(end, from, to);
+                    }
+                }
+                RiscOp::Pad { padding, .. } => {
+                    for (before, after) in padding.iter_mut() {
+                        *before = rename_rt_dim(before, from, to);
+                        *after = rename_rt_dim(after, from, to);
+                    }
+                }
+                RiscOp::BlasMatmul {
+                    batch_dims,
+                    m,
+                    n,
+                    k,
+                    ..
+                } => {
+                    for dim in batch_dims.iter_mut() {
+                        *dim = rename_dim_expr(dim, from, to);
+                    }
+                    *m = rename_dim_expr(m, from, to);
+                    *n = rename_dim_expr(n, from, to);
+                    *k = rename_dim_expr(k, from, to);
+                }
+                _ => {}
+            }
+            renamed
+        }
+
+        let scopes = chelis_ir::node_scopes(&dag);
+        // Which scopes declare each name through a `Load` axis, in the order
+        // the scopes are numbered.
+        let mut declared: Vec<(String, Vec<usize>)> = Vec::new();
+        for node in dag.nodes() {
+            if !matches!(node.op, RiscOp::Load { .. }) {
+                continue;
+            }
+            let Some(Some(scope)) = scopes.get(node.id.0) else {
+                continue;
+            };
+            for dim in &node.output_type.dims {
+                let DimInfo::Named(name, None) = dim else {
+                    continue;
+                };
+                if name.is_empty() || name == "*" {
+                    continue;
+                }
+                match declared.iter_mut().find(|(seen, _)| seen == name) {
+                    Some((_, list)) => {
+                        if !list.contains(scope) {
+                            list.push(*scope);
+                        }
+                    }
+                    None => declared.push((name.clone(), vec![*scope])),
+                }
+            }
+        }
+        // `(scope, old, new)` for every scope after a name's first.
+        let mut renames: Vec<(usize, String, String)> = Vec::new();
+        for (name, mut list) in declared {
+            if list.len() < 2 {
+                continue;
+            }
+            list.sort_unstable();
+            for (index, scope) in list.into_iter().enumerate().skip(1) {
+                renames.push((scope, name.clone(), format!("{name}__s{index}")));
+            }
+        }
+        if renames.is_empty() {
+            return dag;
+        }
+
+        let mut out = dag;
+        let ids: Vec<NodeId> = out.nodes().iter().map(|node| node.id).collect();
+        for id in ids {
+            let Some(Some(scope)) = scopes.get(id.0).copied() else {
+                continue;
+            };
+            let Some(node) = out.get(id) else {
+                continue;
+            };
+            let mut op = node.op.clone();
+            let inputs = node.inputs.clone();
+            let mut ty = node.output_type.clone();
+            let mut changed = false;
+            for (renamed_scope, from, to) in &renames {
+                if *renamed_scope != scope {
+                    continue;
+                }
+                for dim in ty.dims.iter_mut() {
+                    if let DimInfo::Named(name, size) = dim
+                        && name == from
+                    {
+                        *dim = DimInfo::Named(to.clone(), *size);
+                        changed = true;
+                    }
+                }
+                let next = rename_op(&op, from, to);
+                if next != op {
+                    op = next;
+                    changed = true;
+                }
+                if chelis_ir::dag::op_references_symbol(&op, from) {
+                    // A payload this pass does not rewrite still names the old
+                    // identity. Abandon rather than emit a half-renamed graph.
+                    return out;
+                }
+            }
+            if changed {
+                out.replace_node(id, op, inputs, ty);
+            }
+        }
+        out
     }
 
     pub(crate) fn rename_anonymous_dims(dag: Dag) -> Dag {

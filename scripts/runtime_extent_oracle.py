@@ -1192,6 +1192,13 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             "cli_slice_b.a_runtime_shaped_to_tensor_column_routes_to_the_host_lane_on_both_lanes",
         ),
+        # Independent named binders retain separate C declarations per scope.
+        _row(
+            "entry.merged_scopes.declaration.c",
+            "silent_unguarded",
+            EXECUTES,
+            "exec_c.issue_1788_two_scopes_in_one_function_share_one_declaration",
+        ),
     )
     return tuple(sorted(rows, key=lambda row: row.id))
 

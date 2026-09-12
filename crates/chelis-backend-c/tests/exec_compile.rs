@@ -8229,25 +8229,29 @@ int main(void) {
 }
 
 /// chelis#1788: two scopes of one binder, lowered into ONE emitted function,
-/// share one declaration.
+/// each get their own declaration and their own input.
 ///
 /// chelis#1536 scoped a claim's identity so no entry guard pairs axes from
 /// different scopes, and chelis#665 moved declarations onto axis sources. The
-/// declarations are still keyed by NAME across the whole graph, so when both
-/// scopes land in one emitted function the second reads the first's
-/// declaration and no guard compares them. Reaching this needs the codegen
+/// declarations were still keyed by NAME across the whole graph, so when both
+/// scopes landed in one emitted function the second read the first's
+/// declaration and nothing compared them. Reaching this needs the codegen
 /// API: `chelis build` gives each root its own function, where `seq` is then
 /// declared per function from the right input.
 ///
-/// EVIDENTIARY STATUS: **behaviour lock, and a pass here is NOT a correctness
-/// claim.** What it asserts is exactly what the C lane does today, so that a
-/// later change to declaration scoping has to come past it deliberately
-/// rather than by accident. The correct behaviour is two declarations, which
-/// needs the two scopes to carry distinct names in the emitted text: that is
-/// the per-scope rename chelis#1277's claim transport owns, and doing it here
-/// would emit two `int64_t seq` into one function. The failure this locks is
-/// loud rather than silent, a run-time trap in the runtime's elementwise index
-/// step, which is why chelis#1788 is residual rather than a merge blocker.
+/// The repair is the per-scope rename in `prepare_dag_for_codegen`: a name a
+/// `Load` axis declares in more than one scope keeps its spelling in the first
+/// scope and becomes `<name>__s<k>` in the later ones, so the prologue emits
+/// one declaration per scope and each root sizes its work from its own input.
+/// It renames only scopes that share no node, because a shared node cannot
+/// carry two names for one axis.
+///
+/// EVIDENTIARY STATUS: **regression test.** Measured on `0820ee28e`, the
+/// emitted function declared `seq` once from `inputs[0]` and the second root
+/// sized its work from the first root's extent, so this program aborted inside
+/// `chelis_tensor_elementwise_index_step_for_shape` at run time. The row
+/// asserts both halves the repair owes: the emitted declarations, and that the
+/// kernel now RUNS and produces both outputs.
 #[test]
 fn issue_1788_two_scopes_in_one_function_share_one_declaration() {
     use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
@@ -8280,20 +8284,70 @@ fn issue_1788_two_scopes_in_one_function_share_one_declaration() {
     dag.add_root(from_x);
     dag.add_root(from_y);
 
-    let emitted = codegen(&dag, "two_scopes")
-        .expect("a merged two-scope kernel still emits")
-        .c_source;
+    let result = codegen_with_options(
+        &dag,
+        "two_scopes",
+        CodegenOptions {
+            use_blas: false,
+            math_lib_override: Some(MathLib::None),
+            static_entry: false,
+        },
+    )
+    .expect("a merged two-scope kernel still emits");
+    let emitted = &result.c_source;
+    assert!(
+        emitted.contains("int64_t seq = chelis_tensor_shape(inputs[0], 0);"),
+        "the first scope declares `seq` from its own input slot: {emitted}"
+    );
+    assert!(
+        emitted.contains("int64_t seq__s1 = chelis_tensor_shape(inputs[1], 1);"),
+        "and the second scope declares its own identity from ITS input slot: {emitted}"
+    );
     assert_eq!(
         emitted.matches("int64_t seq = ").count(),
         1,
-        "today the two scopes share one declaration; chelis#1788: {emitted}"
-    );
-    assert!(
-        emitted.contains("int64_t seq = chelis_tensor_shape(inputs[0], 0);"),
-        "the one declaration is taken from the first input slot: {emitted}"
+        "exactly one declaration per scope, not a redeclaration: {emitted}"
     );
     assert!(
         !emitted.contains("numeric trap: domain in load at int64"),
-        "and no entry guard compares the two scopes' axes, which is the defect: {emitted}"
+        "two independent signatures are not one class, so no entry guard pairs \
+         their axes: {emitted}"
+    );
+
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+static chelis_tensor *make_view_2d(float* data, int64_t rows, int64_t cols) {{
+    int64_t shape[2] = {{rows, cols}};
+    return chelis_tensor_entry_borrow(
+        2, shape, CHELIS_DTYPE_F32, data,
+        rows * cols * chelis_dtype_size(CHELIS_DTYPE_F32)
+    );
+}}
+
+extern void two_scopes(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    float xd[3] = {{1.0f, 2.0f, 3.0f}};
+    float yd[4] = {{1.0f, 2.0f, 3.0f, 4.0f}};
+    chelis_tensor* inputs[2] = {{make_view_1d(xd, 3), make_view_2d(yd, 2, 2)}};
+    chelis_tensor* outputs[2] = {{NULL, NULL}};
+    two_scopes(inputs, 2, outputs, 2);
+    const float* a = (const float*)chelis_tensor_read_view(outputs[0]).data;
+    const float* b = (const float*)chelis_tensor_read_view(outputs[1]).data;
+    printf("RAN %.1f %.1f %.1f | %.1f %.1f %.1f %.1f\n",
+           a[0], a[1], a[2], b[0], b[1], b[2], b[3]);
+    return 0;
+}}
+"#
+    );
+
+    let (ok, out) = compile_and_run_kernel_capturing("two_scopes", emitted, &harness);
+    assert!(
+        ok,
+        "each scope sizes its own work, so the merged kernel runs: {out}"
+    );
+    assert!(
+        out.contains("RAN -1.0 -2.0 -3.0 | -1.0 -2.0 -3.0 -4.0"),
+        "and both roots produce their exact negated inputs: {out}"
     );
 }

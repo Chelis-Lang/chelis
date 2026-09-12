@@ -54,7 +54,7 @@ pub mod vmap;
 pub use analysis::{
     CopyCostSummary, FunctionCopyCost, analyze_copy_costs, analyze_copy_costs_for_roots,
 };
-pub use axis_sources::{AxisSource, check_axis_sources, output_axis_sources};
+pub use axis_sources::{AxisSource, check_axis_sources, node_scopes, output_axis_sources};
 pub use dag::{Dag, DagNode, DimInfo, NodeId, RiscOp, TensorType};
 pub use grad::{AdError, AdRejectionReason};
 pub use host::{

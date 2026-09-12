@@ -689,6 +689,20 @@ answer is most certain: an input axis wins, an operation-produced extent comes
 next because it names a site, and a literal comes last because no lane declares
 an entry literal today, so preferring one over an available site would leave
 the name undeclared.
+
+A declaration is keyed by NAME across the whole graph, which is correct only
+while one name means one extent in one emitted function. Two roots merged into
+one function can each declare the same binder from their own signature, and
+scoping deliberately keeps those two witnesses in separate classes, so nothing
+compares them; before #1788 they nevertheless shared one C variable and the
+second root sized its work with the first root's extent. The repair is upstream
+of every declaration consumer rather than inside one: `prepare_dag_for_codegen`
+gives each scope after the first its own identity, `<name>__s<k>`, on output
+types and op-internal symbol payloads alike, so one name again means one extent
+and both loops declare what they always declared. It renames only scopes that
+share no node, because a node two roots reach cannot carry two names for one
+axis, and it abandons the rename rather than emit a half-renamed graph if an op
+payload still carries the old identity.
 #665 was a declaration-consumer failure and did not close because an entry
 guard passed; it closes because the kept name is declared from its source. A
 name that resolves to no origin is a typed receipt from
@@ -821,12 +835,12 @@ still reaches the oracle's own
 erased no row: `--phase a` and `--phase b` keep their names, corpora and
 row-transition checks, and each still has to PASS on its own.
 
-The recorded phase-B corpus has 113 rows and none of them is an unexplained
+The recorded phase-B corpus has 114 rows and none of them is an unexplained
 shortfall. `--phase b` reads `RUNTIME EXTENT ORACLE: PASS` rather than
 `RECEIPTS PASS, ROWS SHORT OF EXIT`, and it does so without
 `--allow-shortfall`. That reading, not a hand count, is what to quote. A hand
 count of the JSON's `phase_b` column reaches 27 non-`executes_exactly` values
-against 86 `executes_exactly`, and every one of the twenty-seven is accounted
+against 87 `executes_exactly`, and every one of the twenty-seven is accounted
 for. Twenty-six rows are `rejects_exactly`, an exit state, since those programs
 are SUPPOSED to be rejected and a row that stopped rejecting them would be the
 defect. Nine of the twenty-six predate B2c:
