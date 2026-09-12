@@ -800,34 +800,47 @@ still reaches the oracle's own
 erased no row: `--phase a` and `--phase b` keep their names, corpora and
 row-transition checks, and each still has to PASS on its own.
 
-The recorded phase-B corpus has 88 rows and none of them is an unexplained
+The recorded phase-B corpus has 99 rows and none of them is an unexplained
 shortfall. `--phase b` reads `RUNTIME EXTENT ORACLE: PASS` rather than
 `RECEIPTS PASS, ROWS SHORT OF EXIT`, and it does so without
 `--allow-shortfall`. That reading, not a hand count, is what to quote. A hand
-count of the JSON's `phase_b` column reaches 12 non-`executes_exactly` values
-against 76 `executes_exactly`, and every one of the twelve is accounted for.
-Nine rows are `rejects_exactly`, an exit state, since those programs are
-SUPPOSED to be rejected and a row that stopped rejecting them would be the
-defect: `expand.positional.replacement.non_unit_source_static`,
+count of the JSON's `phase_b` column reaches 23 non-`executes_exactly` values
+against 76 `executes_exactly`, and every one of the twenty-three is accounted
+for. Twenty-two rows are `rejects_exactly`, an exit state, since those programs
+are SUPPOSED to be rejected and a row that stopped rejecting them would be the
+defect. Nine of the twenty-two predate B2c:
+`expand.positional.replacement.non_unit_source_static`,
 `shrink.to_end.nonzero_start`, and the seven `route.untied` rows
 (`gather.gate`, `matmul.match`, `scatter_replace.gate`, `sum.copy`,
 `sum.match`, `sum.record` and `trace.gate`), whose operand is still unresolved
 where the shape-computed route runs, so the route returns a result nothing ties
-to the shape it computes and any declared shape is admitted. One row, `shrink.elementwise_const.build`, is a registered
-`typed_unsupported(#1482)`, an owned receipt rather than an unexplained gap.
-`concat.literal_claim.inlined_root.{c,eval}` remain at `silent_unguarded` and
-are the only DEFERRED rows this phase has: `PHASE_B_DEFERRED` carries the
-reason, which is that the DAG path's joined extent is a compile-time constant
-and section 4.7.2's guard covers only a claim that is not statically proven,
-so the verdict they need is sections 4.4/4.5's and awaits #526.
+to the shape it computes and any declared shape is admitted. Thirteen are
+B2c's: the two `concat.literal_claim.inlined_root` rows, which B2c moved off
+`silent_unguarded`, plus five more lane pairs of the same class
+(`pad.identity_axis.literal_claim.inlined_root`, `claim.literal.identity_root`,
+`pad.literal_claim.inlined_root`, `claim.named.resolved.inlined_root` and
+`claim.literal.nameless_activation`) and the single-row control
+`claim.literal.kernel_entry`, which is one row rather than a pair because a
+checker verdict no lane varies is one row and the program never reaches a
+lane. That control is also the only `rejects_exactly` phase-B row whose baseline
+EQUALS its exit state: it was already refused, correctly, before B2c, so it is this section's
+"Invalid-program controls remain `rejects_exactly`" rather than a defect that
+moved. One row,
+`shrink.elementwise_const.build`, is a registered `typed_unsupported(#1482)`,
+an owned receipt rather than an unexplained gap.
 
-What a deferred row is, stated exactly, because the mechanism is easy to
-overstate. The row is recorded at its MEASURED start state with its reason;
-`exit_shortfall` skips it in every phase, `final` included, so no phase reports
-it and no phase fails for it; and `rows_at_exit` still enforces its receipt, so
-the test that pins the disposition has to keep passing. What `--phase final`
-refuses is `--allow-shortfall`, which a deferred row never needed. The
-obligation itself is tracked by #1837, not by this oracle.
+Phase B has NO deferred rows. `PHASE_B_DEFERRED` is an empty mapping, and B2c
+is what emptied it: `concat.literal_claim.inlined_root.{c,eval}` were the only
+entries, and a claim the lowered graph proves wrong is now rejected before any
+execution rather than recorded at a start state pending #526. The machinery
+itself stays, and what a deferred row means is worth stating exactly because
+it is easy to overstate: the row is recorded at its MEASURED start state with
+its reason; `exit_shortfall` skips it in every phase, `final` included, so no
+phase reports it and no phase fails for it; and `rows_at_exit` still enforces
+its receipt, so the test that pins the disposition has to keep passing. What
+`--phase final` refuses is `--allow-shortfall`, which a deferred row never
+needed. An empty mapping therefore means every phase-B row is at an exit state
+or is an unexplained shortfall, with nothing in between.
 
 The op-computed local guards moved seven rows
 (`expand.shape_derived.declared_result_survives.{c,eval}`,
@@ -1057,7 +1070,7 @@ All are Slice B work under #1277 unless expressly separated.
 
 | owner | entry | deliverable and exit |
 |---|---|---|
-| B2b-0b: remaining local guards | merged B2r/S2b and #1658's broadcast preparation repair | guard literal and resolved numeric claims from independent local size sources; op-computed local extents; exact positive/negative C/Eval rows. The op-computed admission and #1397's declaration half are delivered for `shrink` and for `pad` at the OUTERMOST activation (exported def, value binding, inlined root), and for a declared axis that passes an op-computed extent through; `stride` remains an unadmitted owner. A helper whose NAMED result is consumed inside another def's body is guarded through its resolved binder; the spellings that bind the enclosing result to a rigid dim parameter are checker rejections under section 4.4.1. A claim the owner's own rule statically REFUTES is not stamped: the IR verifier's per-owner size check rejects a graph that states one, so the verdict belongs to sections 4.4/4.5 rather than to 4.7.2's runtime guard, and `concat`'s DAG path, whose Pad+Add cascade lowers only from concrete extents, is residual under #1837 pending #526. An out-of-domain span on the only claim-failing axis of a `shrink` is not reported as a claim failure: the local guard declines a span whose end runs past its operand, so both lanes report spec/05 §2.4.1's overshoot as the runtime's `Domain: shrink bounds outside input extent` line followed by [04-NUM-9]'s trap line, under a disagreeing literal claim, an agreeing one and a free dim alike, wherever the evaluator raises that diagnostic directly (#1797). Two pre-existing divergence classes remain outside that statement and are not closed by it: a SECOND axis whose in-domain span disagrees with its own claim is still reported as that claim on eval while C reports the overshoot, and a host transform such as `grad` prefixes its own wrapper to the eval text. A span that is empty as well as out of domain is still refused first by #616's operation-level admission rule and renders per lane under #1795 |
+| B2b-0b: remaining local guards | merged B2r/S2b and #1658's broadcast preparation repair | guard literal and resolved numeric claims from independent local size sources; op-computed local extents; exact positive/negative C/Eval rows. The op-computed admission and #1397's declaration half are delivered for `shrink` and for `pad` at the OUTERMOST activation (exported def, value binding, inlined root), and for a declared axis that passes an op-computed extent through; `stride` remains an unadmitted owner. A helper whose NAMED result is consumed inside another def's body is guarded through its resolved binder; the spellings that bind the enclosing result to a rigid dim parameter are checker rejections under section 4.4.1. A claim the owner's own rule statically REFUTES is not stamped and is not executed either: B2c REJECTS it when the activation is lowered, with one fatal diagnostic both host lanes render byte-identically at exit 1, which is section 4.7's "A violation proven from literals is a type error" reaching the case the checker cannot see. The checker keeps that verdict wherever the extent IS visible to it, which a literal parameter extent makes it (`claim.literal.kernel_entry.checker`); what it cannot see is an extent that becomes literal only because a call supplied concrete arguments, and `tensor_concat_result_type`'s `Dim::Wildcard` under section 4.5.4 rule 3 is why `concat`'s DAG path is the sharpest instance. #526's `n + n` checker-tier repair is unchanged by this and remains the right fix for the type it would give. Three classes stay outside the rule and are residual rather than repaired: a local `let` annotation, an op-computed origin reachable only through operand 1 (the IR verifier remains the C lane's backstop there and eval has none), and `chelis check` still scoring these programs 1.0, which is section 3.2's application typing and belongs to #526. An out-of-domain span on the only claim-failing axis of a `shrink` is not reported as a claim failure: the local guard declines a span whose end runs past its operand, so both lanes report spec/05 §2.4.1's overshoot as the runtime's `Domain: shrink bounds outside input extent` line followed by [04-NUM-9]'s trap line, under a disagreeing literal claim, an agreeing one and a free dim alike, wherever the evaluator raises that diagnostic directly (#1797). Two pre-existing divergence classes remain outside that statement and are not closed by it: a SECOND axis whose in-domain span disagrees with its own claim is still reported as that claim on eval while C reports the overshoot, and a host transform such as `grad` prefixes its own wrapper to the eval text. A span that is empty as well as out of domain is still refused first by #616's operation-level admission rule and renders per lane under #1795 |
 | B2b-1: claim transport | C2 contract and red fixtures; integrates B2b-0b | preserve the shipped helper-order and C2.4 checked-reshape/unit receipts (#1686/#1687); finish general scoped checked/lowered identities, explicit caller witnesses, multi-claim axes, rebuild/wire transport and migrated binding consumers; #1397's declaration-erasure half, with #1377's literal call/inlined-root exit established by the witness subset. Named result claims and the unread signature witness (#1374, #1376, #1566) are delivered, and a root's restated literal claim defers to them when a graph-fixed extent entails it, never when an ABI parameter's axis does, decided by `resolve_axis_extent`'s origin rather than by the neighbouring operation (#1782) |
 | B2b-root: root execution | can start independently; acceptance composes B2b-1 | #1397's general wildcard-root boundary is closed: a nullary root whose result type carries a runtime extent is kept in the root manifest, so eval renders it and the C host emits an entry. On eval and C such a root is admitted and sized by the runtime rather than needing a sizing diagnosis, because the manifest print path sizes from the realized extent and never materializes a static buffer; guards and device capability diagnostics still apply, and an empty realized bound renders differently per lane under #1795. #1378's exact public value witness is unlocked and reverified. A root that keeps an unresolved dim variable is still dropped and is residual under #1801 |
 | B2b-2: sources and acceptance | guards and claim transport for every newly admitted row | declaration sources are finished (#665/#1556/#1566); supply #1482's missing shape source. No provenance restriction remains: #1266/#569's field and pipe spellings and #1379's arithmetic sizes are all admitted, so what is left of this row's acceptance half is deleting the walk itself. `shape_deps` removal moves out of this row and is residual under #1372, which must now also migrate B2b-0b's declaring-parameter dependency rather than drop it |
