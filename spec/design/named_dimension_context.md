@@ -50,6 +50,11 @@ the narrow label/shared-type-refinement rollback boundary, not atomicity of
 all existing substitution mutations. Context cloning and transactional
 substitution composition remain separate whole-state operations.
 
+The list join uses the constraint view to recognize mismatched concrete
+literal axes even when they retain labels. Equal labelled axes keep their
+name-query view; unresolved authored dimensions still unify rather than
+widen, and the existing list-uniformity guards remain authoritative (§4.5.2).
+
 For example, `aligned[d](x: tensor[d,f32], gain: tensor[fixed,f32]) ->
 tensor[d,f32] = mul(x,gain)` establishes the output label `fixed`; the same
 signature with body `copy(x)` does not. The private table preserves that

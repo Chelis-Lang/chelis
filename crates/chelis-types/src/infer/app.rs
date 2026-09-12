@@ -519,6 +519,16 @@ fn infer_app_inner(
             for (h, t) in head_dims.iter().zip(tail_dims.iter()) {
                 let hr = subst.apply_dim(h);
                 let tr = subst.apply_dim(t);
+                // A labelled identity can already be bound to a literal. Use
+                // constraints to recognize concrete ragged axes, but keep the
+                // label-bearing views for equal axes and rigid unification.
+                if matches!(
+                    (subst.constraint_dim(&hr), subst.constraint_dim(&tr)),
+                    (Dim::Lit(a), Dim::Lit(b)) if a != b
+                ) {
+                    joined_dims.push(Dim::Wildcard);
+                    continue;
+                }
                 let joined = match (&hr, &tr) {
                     (Dim::Lit(a), Dim::Lit(b)) if a == b => Dim::Lit(*a),
                     (Dim::Name(n1), Dim::Name(n2)) if n1 == n2 => Dim::Name(n1.clone()),
