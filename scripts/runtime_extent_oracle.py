@@ -810,20 +810,119 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             "cli_slice_b.a_non_zero_pad_extent_is_guarded_on_both_lanes",
         ),
-        # chelis#1837's DAG path stays at its start state and is deferred:
-        # `PHASE_B_DEFERRED` carries the reason. The receipt is the lock that
-        # pins the unguarded disposition and the measurement behind it.
+        # chelis#1837 and chelis#1930: a declared result claim the LOWERED
+        # graph fixes to another extent is rejected when the activation is
+        # lowered, before any execution, with one fatal diagnostic both host
+        # lanes render byte-identically. `spec/04-type-system.md` section 4.7
+        # makes a violation proven from literals a type error, and section
+        # 4.7.2 conditions its guard on a claim "that is not statically proven
+        # equal to `size`", so these rows were never the guard's. The checker
+        # reaches that verdict wherever it can SEE the extent; an extent that
+        # becomes literal only because a call supplied concrete arguments is
+        # one it cannot see, which is why the rejection sits at lowering.
+        # `claim.literal.kernel_entry.checker` below is the partition's other
+        # half.
         _row(
             "concat.literal_claim.inlined_root.c",
             "silent_unguarded",
-            "silent_unguarded",
-            "cli_slice_b.a_declared_concat_axis_extent_on_the_dag_path_is_not_guarded_by_this_slice",
+            TERMINAL_CONTROL,
+            "cli_slice_b.a_declared_concat_axis_extent_an_inlined_root_refutes_is_rejected_on_both_lanes",
         ),
         _row(
             "concat.literal_claim.inlined_root.eval",
             "silent_unguarded",
+            TERMINAL_CONTROL,
+            "cli_slice_b.a_declared_concat_axis_extent_an_inlined_root_refutes_is_rejected_on_both_lanes",
+        ),
+        # chelis#1930's two lanes had two different baselines for one defect:
+        # eval returned the undeclared shape at exit zero, the C build failed
+        # inside the IR verifier's per-owner size check.
+        _row(
+            "pad.identity_axis.literal_claim.inlined_root.c",
+            "ice",
+            TERMINAL_CONTROL,
+            "cli_slice_b.a_zero_padded_identity_axis_a_declaration_refutes_is_rejected_on_both_lanes",
+        ),
+        _row(
+            "pad.identity_axis.literal_claim.inlined_root.eval",
             "silent_unguarded",
-            "cli_slice_b.a_declared_concat_axis_extent_on_the_dag_path_is_not_guarded_by_this_slice",
+            TERMINAL_CONTROL,
+            "cli_slice_b.a_zero_padded_identity_axis_a_declaration_refutes_is_rejected_on_both_lanes",
+        ),
+        # The smallest member of the class: the body is the parameter, so no
+        # operation exists for a guard to attach to and the refuting extent is
+        # `ExtentOrigin::Literal` rather than `OpComputed`.
+        _row(
+            "claim.literal.identity_root.c",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "cli_slice_b.an_identity_body_that_refutes_its_declared_extent_is_rejected_on_both_lanes",
+        ),
+        _row(
+            "claim.literal.identity_root.eval",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "cli_slice_b.an_identity_body_that_refutes_its_declared_extent_is_rejected_on_both_lanes",
+        ),
+        # `pad.literal_claim` above in the VALUE-BINDING form, which stages its
+        # argument across the host boundary and so keeps section 4.7.2's guard.
+        # The inlined root hands the operation a literal instead, and chelis
+        # #1911 recorded the resulting lane divergence as residual: eval
+        # trapped for a comparison that could never hold while the C build
+        # failed in the verifier.
+        _row(
+            "pad.literal_claim.inlined_root.c",
+            "lane_divergent",
+            TERMINAL_CONTROL,
+            "cli_slice_b.a_literal_pad_claim_an_inlined_root_refutes_is_rejected_on_both_lanes",
+        ),
+        _row(
+            "pad.literal_claim.inlined_root.eval",
+            "lane_divergent",
+            TERMINAL_CONTROL,
+            "cli_slice_b.a_literal_pad_claim_an_inlined_root_refutes_is_rejected_on_both_lanes",
+        ),
+        # A NAMED claim is refutable once chelis#1800 has resolved its
+        # declaring witness to a number. The unresolved form stays a guard and
+        # is the control inside the same receipt.
+        _row(
+            "claim.named.resolved.inlined_root.c",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "cli_slice_b.a_resolved_named_claim_the_inlined_body_refutes_is_rejected_on_both_lanes",
+        ),
+        _row(
+            "claim.named.resolved.inlined_root.eval",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "cli_slice_b.a_resolved_named_claim_the_inlined_body_refutes_is_rejected_on_both_lanes",
+        ),
+        # Only a named call hands the lowerer a callee name. A pipe stage, an
+        # AD or vectorization boundary and a host-applied root do not, so the
+        # diagnostic's owner slot reads `the signature` there; the receipt
+        # asserts both spellings.
+        _row(
+            "claim.literal.nameless_activation.c",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "cli_slice_b.a_nameless_activation_that_refutes_its_own_claim_is_rejected_on_both_lanes",
+        ),
+        _row(
+            "claim.literal.nameless_activation.eval",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "cli_slice_b.a_nameless_activation_that_refutes_its_own_claim_is_rejected_on_both_lanes",
+        ),
+        # One row, not a pair: this verdict is the checker's and no lane varies
+        # it. A literal parameter extent makes the body's own result type
+        # computable, so the signature is refused before lowering runs at all,
+        # which is why the kernel-entry call sites cannot reach the rejection
+        # above.
+        _row(
+            "claim.literal.kernel_entry.checker",
+            "nonconforming_rejection",
+            TERMINAL_CONTROL,
+            "cli_slice_b.a_literal_parameter_extent_keeps_the_checkers_verdict_on_both_lanes",
         ),
         _row(
             "claim.literal.nested_and_unused.eval_c",
@@ -1163,34 +1262,13 @@ def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
     return (self_test_target(python), *manifest_targets("b"))
 
 
-PHASE_B_DEFERRED: Mapping[str, str] = {
-    # Both lanes, one reason: `concat` has no `RiscOp`, and
-    # `tensor_concat_from_nodes` lowers its Pad+Add cascade only from concrete
-    # element extents, writing `Lit(total)` on each `Pad`. The joined extent is
-    # therefore a compile-time constant on this path, which is the case
-    # `spec/04-type-system.md` section 4.7.2's guard explicitly does not cover:
-    # it conditions the check on a claim "that is not statically proven equal
-    # to `size`". Stamping a refuted claim anyway produced
-    # `pad at node 1: output axis 0 has size 100, expected 8` from `verify`'s
-    # per-owner static size check, refusing the C build while the DAG
-    # evaluator, which does not run the verifier, trapped at run time.
-    #
-    # The verdict this row needs is the static one section 4.4/4.5 owns, and
-    # the checker cannot reach it while `tensor_concat_result_type` publishes
-    # the uncomputable extent as `Dim::Wildcard`, which section 4.5.4 rule 3
-    # makes the correct type. Refuting it needs `n + n` at the type level,
-    # which is chelis#526. The host path is unaffected and already traps.
-    "concat.literal_claim.inlined_root.c": (
-        "chelis#1837: the DAG path's joined extent is a compile-time constant, "
-        "so section 4.7.2's runtime guard does not cover it and a refuted claim "
-        "is rejected by the IR verifier; the static verdict awaits chelis#526"
-    ),
-    "concat.literal_claim.inlined_root.eval": (
-        "chelis#1837: the DAG path's joined extent is a compile-time constant, "
-        "so section 4.7.2's runtime guard does not cover it and a refuted claim "
-        "is rejected by the IR verifier; the static verdict awaits chelis#526"
-    ),
-}
+# chelis#1837 and chelis#1930 closed the only deferred rows this phase had:
+# `concat.literal_claim.inlined_root.{c,eval}` now REJECT at lowering rather
+# than returning an undeclared shape, so they are ordinary exit rows and this
+# mapping is empty. The machinery stays because a later row may need it; an
+# empty mapping means every phase-b row is at an exit state or an unexplained
+# shortfall, with nothing in between.
+PHASE_B_DEFERRED: Mapping[str, str] = {}
 
 
 PHASE_A_DEFERRED: Mapping[str, str] = {

@@ -439,6 +439,90 @@ fn c_run_result(dir: &TempDir, stem: &str, source: &str) -> (bool, String) {
     (status.success(), text)
 }
 
+/// The `span_id` a fatal lowering rejection carries for a root spelled
+/// `def main() -> T = <call>`: the call expression, which is the last thing
+/// such a source says.
+///
+/// Computed from the fixture rather than pasted in, so editing a program
+/// cannot leave a stale byte range asserted somewhere that still passes.
+/// Only valid for the single-call-root shape; a rejection raised from a
+/// NESTED activation carries that inner call's span instead.
+fn root_call_span(source: &str) -> String {
+    let body = source.trim_end();
+    let start = body.rfind("= ").expect("a root body follows `= `") + 2;
+    format!("surf:{start}..{}", body.len())
+}
+
+/// Both host lanes must reject `source` when the activation is LOWERED,
+/// before anything executes, printing exactly `line` and nothing else.
+///
+/// Four properties, and each one is a way the rejection could be wrong rather
+/// than a restatement of the others. Exit 1 rather than 101 separates a
+/// deliberate diagnostic from a panic escaping the lowering catch. The exact
+/// equality, rather than a `contains`, is what pins the rendering. The absent
+/// [04-NUM-9] line is `spec/04-type-system.md` section 4.7's own division: a
+/// claim proven wrong is a type error and owes no runtime trap, so a trap
+/// beside this diagnostic would mean the guard had also been recorded. And
+/// the two lanes are compared to EACH OTHER, so a future change that moves
+/// one rendering cannot pass by moving the asserted constant with it.
+fn both_lanes_reject_at_lowering(dir: &TempDir, stem: &str, source: &str, line: &str) {
+    let eval_run = eval(&fixture(dir, &format!("{stem}.ch"), source));
+    let eval_out = format!(
+        "{}{}",
+        String::from_utf8_lossy(&eval_run.stdout),
+        String::from_utf8_lossy(&eval_run.stderr)
+    );
+    let build = build_c(
+        &fixture(dir, &format!("{stem}_c.ch"), source),
+        &dir.path().join(format!("{stem}_c-out")),
+    );
+    let c_out = format!(
+        "{}{}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr)
+    );
+    for (lane, code, out) in [
+        ("eval", eval_run.status.code(), &eval_out),
+        ("c", build.status.code(), &c_out),
+    ] {
+        assert_eq!(
+            code,
+            Some(1),
+            "{lane}: a rejected claim exits 1, where an escaping panic exits 101: {out}"
+        );
+        assert_eq!(
+            out.trim_end(),
+            line,
+            "{lane}: the exact rendering, with nothing beside it"
+        );
+        assert!(
+            !out.contains("numeric trap"),
+            "{lane}: a claim proven wrong owes no [04-NUM-9] trap: {out}"
+        );
+    }
+    assert_eq!(
+        eval_out, c_out,
+        "the two lanes render this rejection byte-identically"
+    );
+}
+
+/// The agreeing control every rejection row owes: the same program with a
+/// claim the body satisfies executes on both lanes and prints `printed`.
+///
+/// Without it a row pins "this program fails" rather than "this CLAIM fails",
+/// and a lowering that refused the whole shape would satisfy it.
+fn both_lanes_execute(dir: &TempDir, stem: &str, source: &str, printed: &str) {
+    let (eval_ok, eval_out) = eval_result(dir, &format!("{stem}.ch"), source);
+    let (c_ok, c_out) = c_run_result(dir, &format!("{stem}_c"), source);
+    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(ok, "{lane}: an agreeing claim executes: {out}");
+        assert!(
+            out.contains(printed),
+            "{lane}: expected `{printed}` in: {out}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Guard-order controls.
 // ---------------------------------------------------------------------------
@@ -6571,8 +6655,8 @@ fn concat_symbolic_root_source(claim: &str) -> String {
     )
 }
 
-/// concat.literal_claim.inlined_root.{eval,c}: the DAG path's declared
-/// concat-axis extent is NOT reached by a runtime extent guard, and why.
+/// concat.literal_claim.inlined_root.{eval,c}: chelis#1837's reproducer is
+/// REJECTED when the activation is lowered, on both lanes, byte-identically.
 ///
 /// `concat` has no `RiscOp`. `tensor_concat_from_nodes` lowers a Pad+Add
 /// cascade, and it lowers one only when it can compute the joined extent from
@@ -6583,71 +6667,422 @@ fn concat_symbolic_root_source(claim: &str) -> String {
 ///
 /// A compile-time constant is exactly what `spec/04-type-system.md` §4.7.2's
 /// guard does NOT cover: it conditions the check on a claim "that is not
-/// statically proven equal to `size`". A statically REFUTED claim is a
-/// §4.4/§4.5 dimension mismatch instead, which
-/// `the_checker_refuses_a_static_pad_extent_a_declaration_refutes` below
-/// shows the checker already reporting wherever it can see the extent.
+/// statically proven equal to `size`". §4.7's first sentence covers it
+/// instead, "A violation proven from literals is a type error", and
+/// `the_checker_refuses_a_static_pad_extent_a_declaration_refutes` below shows
+/// the checker already reporting that verdict wherever it can see the extent.
+/// What the checker cannot see here is that `n` is 4: §3.2 types `probe(lit)`
+/// by the signature, and `tensor_concat_result_type` publishes the joined
+/// extent as `Dim::Wildcard` (§4.5.4 rule 3, the correct TYPE), which the
+/// declaration then narrows. Lowering is the first stage holding both the
+/// claim and the literals, so the rejection is raised there; chelis#526's
+/// checker-tier repair for `n + n` is unchanged by it.
 ///
-/// Measured rather than argued. Stamping the claim onto the origin anyway
-/// produced, on the C lane,
-/// `pad at node 1: output axis 0 has size 100, expected 8` and
-/// `binary op at node 3 has mismatched dimension at axis 0: Lit(100) vs
-/// Lit(8)`, refusing the build, while the DAG evaluator, which does not run
-/// the verifier, trapped at run time. `verify`'s per-owner static size check
-/// computes the same arithmetic the claim contradicts, so the graph cannot
-/// state a refuted claim at all, and a lane divergence whose C side does not
-/// compile is not a repair.
+/// Why a rejection rather than the stamped claim the earlier disposition
+/// declined to write. Stamping it produced, on the C lane,
+/// `pad at node 1: output axis 0 has size 100, expected 8` from `verify`'s
+/// per-owner static size check, refusing the build, while the DAG evaluator,
+/// which does not run the verifier, trapped at run time. `verify` computes
+/// the same arithmetic the claim contradicts, so the graph cannot STATE a
+/// refuted claim at all. The repair is therefore to report it, not to record
+/// it.
 ///
-/// What `concat` needs is therefore the static verdict, which the checker
-/// cannot reach today because `tensor_concat_result_type` publishes the
-/// uncomputable extent as `Dim::Wildcard` (the correct TYPE under §4.5.4 rule
-/// 3) and the declaration narrows it. Refuting it needs `n + n` at the type
-/// level, which is chelis#526, or a re-derivation of the body at a call site
-/// where `n` is known. The host path is unaffected and already traps: that is
-/// the row below.
-///
-/// EVIDENTIARY STATUS: disposition lock on both lanes, not a regression test.
-/// Measured at `a5fee66b9`, this program printed
+/// EVIDENTIARY STATUS: regression test on BOTH lanes. Measured at
+/// `0820ee28e`, before this change, this program printed
 /// `main = tensor(shape=[8, 3], ...)` and exited ZERO on eval and on the
-/// linked C binary under a declared `tensor[100, 3, f32]`; this change leaves
-/// that unchanged. Tracked by chelis#1837, which must update this row when the
-/// static verdict lands.
+/// linked C binary under a declared `tensor[100, 3, f32]`. This test replaces
+/// the lock that pinned that disposition,
+/// `a_declared_concat_axis_extent_on_the_dag_path_is_not_guarded_by_this_slice`.
 #[test]
-fn a_declared_concat_axis_extent_on_the_dag_path_is_not_guarded_by_this_slice() {
+fn a_declared_concat_axis_extent_an_inlined_root_refutes_is_rejected_on_both_lanes() {
     assert!(
         gcc_available(),
-        "this row compares two executed lanes; neither may skip"
+        "this row compares two lanes and links its control; neither may skip"
     );
     let dir = tempfile::tempdir().expect("tempdir");
 
     let claimed = concat_symbolic_root_source("100");
-    let (eval_ok, eval_out) = eval_result(&dir, "concat_root.ch", &claimed);
-    let (c_ok, c_out) = c_run_result(&dir, "concat_root_c", &claimed);
-    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
-        assert!(
-            ok,
-            "{lane}: the DAG path's claim is unenforced (chelis#1837): {out}"
-        );
-        assert!(
-            out.contains("shape=[8, 3]"),
-            "{lane}: and the joined extent is returned instead: {out}"
-        );
-        assert!(
-            !out.contains("extent `100`"),
-            "{lane}: no guard claims to have checked it: {out}"
-        );
-    }
+    both_lanes_reject_at_lowering(
+        &dir,
+        "concat_root",
+        &claimed,
+        &format!(
+            "error: dimension mismatch: `probe` declares extent 100 at result axis 0, \
+             but the inlined body produces 8 at source span `{}`",
+            root_call_span(&claimed)
+        ),
+    );
 
-    // The agreeing control: the true joined extent executes exactly, so the
-    // block above pins an unguarded claim rather than a broken lowering.
-    let agreeing = concat_symbolic_root_source("8");
-    let (eval_ok, eval_out) = eval_result(&dir, "concat_root_ok.ch", &agreeing);
-    let (c_ok, c_out) = c_run_result(&dir, "concat_root_ok_c", &agreeing);
-    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
-        assert!(ok, "{lane}: the true joined extent executes: {out}");
+    // The agreeing control: the true joined extent still executes exactly, so
+    // the block above pins a refuted CLAIM rather than a refused shape.
+    both_lanes_execute(
+        &dir,
+        "concat_root_ok",
+        &concat_symbolic_root_source("8"),
+        "shape=[8, 3]",
+    );
+}
+
+/// chelis#1930's reproducer, with `claim` naming the declared extent of the
+/// axis the `pad` leaves alone. Two rows of three, widened only on axis 1.
+fn zero_padded_identity_axis_source(claim: &str) -> String {
+    format!(
+        "def f(x: tensor[rows, cols, f32], y: tensor[s, f32]) -> tensor[{claim}, 6, f32] = \
+         pad(x, [[0i64, 0i64], [shape(y, 0i32), 1i64]], 0.0f32)\n\
+         def main() -> tensor[{claim}, 6, f32] = \
+         f(to_tensor([[1.0f32, 2.0f32, 3.0f32], [4.0f32, 5.0f32, 6.0f32]]), \
+         to_tensor([1.0f32, 2.0f32]))\n"
+    )
+}
+
+/// pad.identity_axis.literal_claim.inlined_root.{eval,c}: chelis#1930.
+///
+/// The declared result has two axes and the operation widens only one. Axis 1
+/// takes a RUNTIME padding bound (`shape(y, 0i32)`), so it remains §4.7.2's
+/// guard case and nothing here touches it. Axis 0 is padded by
+/// `[[0i64, 0i64]]`, which fixes it to the operand's own extent, so a
+/// declaration claiming 9 over an operand of 2 is proven wrong. The rejection
+/// names axis 0, and that is the row's point: an axis is not exempt from its
+/// declaration merely because the operation left it alone.
+///
+/// EVIDENTIARY STATUS: regression test, watched failing differently on each
+/// lane, which is why #1930 reads as two defects. Measured at `0820ee28e`:
+/// eval printed `main = tensor(shape=[2, 6], ...)` at exit ZERO, while the C
+/// build failed with ``ownership lowering invariant failed in `dag`: pad at
+/// node 3: output axis 0 has size 9, expected 2`` - the IR verifier catching
+/// the stamped claim and reporting it as an internal invariant rather than as
+/// the user's declaration.
+#[test]
+fn a_zero_padded_identity_axis_a_declaration_refutes_is_rejected_on_both_lanes() {
+    assert!(
+        gcc_available(),
+        "this row compares two lanes and links its control; neither may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let claimed = zero_padded_identity_axis_source("9");
+    both_lanes_reject_at_lowering(
+        &dir,
+        "pad_identity_axis",
+        &claimed,
+        &format!(
+            "error: dimension mismatch: `f` declares extent 9 at result axis 0, \
+             but the inlined body produces 2 at source span `{}`",
+            root_call_span(&claimed)
+        ),
+    );
+
+    // The agreeing control. Axis 1's runtime bound still widens three to six,
+    // so the executing half proves the rejection is about axis 0's claim and
+    // not about the shape of the program.
+    both_lanes_execute(
+        &dir,
+        "pad_identity_axis_ok",
+        &zero_padded_identity_axis_source("2"),
+        "shape=[2, 6]",
+    );
+}
+
+/// A body that is its own argument, declared at `claim`. Two elements in.
+fn identity_root_source(claim: &str) -> String {
+    format!(
+        "def f(x: tensor[rows, f32]) -> tensor[{claim}, f32] = x\n\
+         def main() -> tensor[{claim}, f32] = f(to_tensor([1.0f32, 2.0f32]))\n"
+    )
+}
+
+/// claim.literal.identity_root.{eval,c}: no operation at all, and the claim
+/// is still refuted.
+///
+/// The body is the parameter. Its axis resolves straight through to the
+/// caller's literal argument, so `ExtentOrigin::Literal` rather than
+/// `OpComputed` is what proves the declaration wrong, and the row exists
+/// because the two origins are separate arms of
+/// `LowerCtx::graph_fixed_axis_extent`. It is also the smallest member of the
+/// class: with no operation to attach a guard to, §4.7.2 had nothing to place
+/// even in principle, which is why both lanes returned the undeclared extent
+/// in silence.
+///
+/// EVIDENTIARY STATUS: regression test on BOTH lanes. Measured at
+/// `0820ee28e`: `main = tensor(shape=[2], data=[1.0, 2.0])` at exit ZERO on
+/// eval and on the linked C binary, under a declared `tensor[9, f32]`.
+#[test]
+fn an_identity_body_that_refutes_its_declared_extent_is_rejected_on_both_lanes() {
+    assert!(
+        gcc_available(),
+        "this row compares two lanes and links its control; neither may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let claimed = identity_root_source("9");
+    both_lanes_reject_at_lowering(
+        &dir,
+        "identity_root",
+        &claimed,
+        &format!(
+            "error: dimension mismatch: `f` declares extent 9 at result axis 0, \
+             but the inlined body produces 2 at source span `{}`",
+            root_call_span(&claimed)
+        ),
+    );
+
+    both_lanes_execute(
+        &dir,
+        "identity_root_ok",
+        &identity_root_source("2"),
+        "shape=[2]",
+    );
+}
+
+/// A `pad` widening three elements by one, declared at `claim`, reached
+/// through an inlined root rather than a value binding.
+fn pad_inlined_root_source(claim: &str) -> String {
+    format!(
+        "def f(x: tensor[n, f32]) -> tensor[{claim}, f32] = pad(x, [[1i64, 0i64]], 0.0f32)\n\
+         def main() -> tensor[{claim}, f32] = f(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n"
+    )
+}
+
+/// pad.literal_claim.inlined_root.{eval,c}: the lane divergence chelis#1911
+/// recorded as residual, closed.
+///
+/// This is `a_non_zero_pad_extent_is_guarded_on_both_lanes`'s program in the
+/// INLINED-ROOT activation form rather than the value-binding one, and the
+/// form is the whole difference. A value binding stages its argument across
+/// the host boundary, so the `pad`'s operand axis is an `ExternalAxis` and the
+/// extent is a runtime value: §4.7.2's guard owns it, and that row still
+/// renders ``extent `2`: claimed = 2, pad axis 0 = 5`` on both lanes.
+/// An inlined root hands the operation a literal, so the same declaration
+/// becomes provably wrong and changes tiers.
+///
+/// EVIDENTIARY STATUS: regression test, watched failing differently on each
+/// lane. Measured at `0820ee28e`: eval trapped with ``extent `2`: claimed =
+/// 2, pad axis 0 = 4`` - a guard, but for a comparison that could never hold -
+/// while the C build failed with ``ownership lowering invariant failed in
+/// `dag`: pad at node 1: output axis 0 has size 2, expected 4``. #1911's
+/// "every activation form" sentence names this divergence; this row is its
+/// receipt.
+#[test]
+fn a_literal_pad_claim_an_inlined_root_refutes_is_rejected_on_both_lanes() {
+    assert!(
+        gcc_available(),
+        "this row compares two lanes and links its control; neither may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let claimed = pad_inlined_root_source("2");
+    both_lanes_reject_at_lowering(
+        &dir,
+        "pad_inlined_root",
+        &claimed,
+        &format!(
+            "error: dimension mismatch: `f` declares extent 2 at result axis 0, \
+             but the inlined body produces 4 at source span `{}`",
+            root_call_span(&claimed)
+        ),
+    );
+
+    both_lanes_execute(
+        &dir,
+        "pad_inlined_root_ok",
+        &pad_inlined_root_source("4"),
+        "shape=[4]",
+    );
+}
+
+/// A result claimed by the BINDER `n`, which `w`'s literal argument resolves.
+/// `x` is joined to itself, so the body produces six.
+fn resolved_named_claim_source(w: &str, root: &str) -> String {
+    format!(
+        "def g(w: tensor[n, f32], x: tensor[rows, f32]) -> tensor[n, f32] = concat([x, x], 0i32)\n\
+         def main() -> tensor[{root}, f32] = \
+         g(to_tensor([{w}]), to_tensor([1.0f32, 2.0f32, 3.0f32]))\n"
+    )
+}
+
+/// claim.named.resolved.inlined_root.{eval,c}: a NAMED claim is refutable too,
+/// once chelis#1800 has resolved its declaring witness to a number.
+///
+/// `g` claims its result is `n`, and nothing in the graph relates `n` to the
+/// concat, which is precisely why §4.7.2 makes a named claim an execution-time
+/// equality. An inlined root changes what is known rather than what is
+/// claimed: `w`'s argument fixes `n` to 4, the cascade fixes the result to 6,
+/// and `4 == 6` is now a comparison the graph has already decided. The
+/// diagnostic reports the binder beside its resolved value, because a reader
+/// told only "extent 4" would go looking for a 4 the signature never spells.
+///
+/// The unresolved form is the control below and must stay a guard: it is the
+/// ordinary case, where `n`'s declaring argument is a runtime value and §4.7.2
+/// owns the comparison.
+///
+/// EVIDENTIARY STATUS: regression test on BOTH lanes. Measured at
+/// `0820ee28e`: `main = tensor(shape=[6], data=[1.0, 2.0, 3.0, 1.0, 2.0,
+/// 3.0])` at exit ZERO on eval and on the linked C binary, under a declared
+/// `tensor[n, f32]` with `n` fixed to 4.
+#[test]
+fn a_resolved_named_claim_the_inlined_body_refutes_is_rejected_on_both_lanes() {
+    assert!(
+        gcc_available(),
+        "this row compares two lanes and links its control; neither may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let claimed = resolved_named_claim_source("1.0f32, 2.0f32, 3.0f32, 4.0f32", "4");
+    both_lanes_reject_at_lowering(
+        &dir,
+        "named_resolved",
+        &claimed,
+        &format!(
+            "error: dimension mismatch: `g` declares extent `n` = 4 at result axis 0, \
+             but the inlined body produces 6 at source span `{}`",
+            root_call_span(&claimed)
+        ),
+    );
+
+    // The agreeing control: `n` resolved to the extent the body does produce.
+    both_lanes_execute(
+        &dir,
+        "named_resolved_ok",
+        &resolved_named_claim_source(
+            "1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32",
+            "6",
+        ),
+        "shape=[6]",
+    );
+}
+
+/// The same claim reached through a PIPE, whose activation carries no name.
+fn piped_root_source(claim: &str) -> String {
+    format!(
+        "def f(x: tensor[rows, f32]) -> tensor[{claim}, f32] = x\n\
+         def main() -> tensor[{claim}, f32] = to_tensor([1.0f32, 2.0f32]) |> f\n"
+    )
+}
+
+/// The same claim on a root whose body is a `vmap`, which lowers through the
+/// resolved-body boundary rather than through a named call.
+fn vmapped_root_source(claim: &str) -> String {
+    format!(
+        "def f(x: tensor[rows, f32]) -> tensor[9, f32] = pad(x, [[0i64, 0i64]], 0.0f32)\n\
+         def main() -> tensor[2, {claim}, f32] = \
+         vmap(f)(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]))\n"
+    )
+}
+
+/// claim.literal.nameless_activation.{eval,c}: the rejection still reports
+/// when the lowerer has no name for the activation that made the claim.
+///
+/// Only `lower_plain_callable_app` holds a callee name (`inlining_name`, and
+/// even there it is `Option`). A pipe stage and an AD, vectorization or
+/// host-list boundary reach `lower_resolved_body` with a `ResolvedFunction`
+/// that carries a signature and no name, and a root applied host-side has
+/// none either. The diagnostic says `the signature` in that slot rather than
+/// omitting the clause, so the sentence does not change shape with the
+/// spelling that reached it.
+///
+/// The `vmap` half also pins a residual rather than a feature: its rejection
+/// carries NO source span, because `current_span_id` is unset at that
+/// boundary. That is pre-existing `LowerDiagnostic` behaviour, not something
+/// this change introduces, and it is asserted here so the gap is visible
+/// instead of being discovered as a surprise.
+///
+/// EVIDENTIARY STATUS: regression test on BOTH lanes, for both spellings.
+/// Measured at `0820ee28e`: the piped root printed
+/// `main = tensor(shape=[2], data=[1.0, 2.0])` and the vmapped root
+/// `main = tensor(shape=[2, 2], data=[1.0, 2.0, 3.0, 4.0])`, each at exit
+/// ZERO on eval and on the linked C binary, under a declared extent of 9.
+#[test]
+fn a_nameless_activation_that_refutes_its_own_claim_is_rejected_on_both_lanes() {
+    assert!(
+        gcc_available(),
+        "this row compares two lanes and links its controls; neither may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let piped = piped_root_source("9");
+    both_lanes_reject_at_lowering(
+        &dir,
+        "piped_root",
+        &piped,
+        &format!(
+            "error: dimension mismatch: the signature declares extent 9 at result axis 0, \
+             but the inlined body produces 2 at source span `{}`",
+            root_call_span(&piped)
+        ),
+    );
+
+    // The `vmap` boundary, which has no span to report.
+    both_lanes_reject_at_lowering(
+        &dir,
+        "vmapped_root",
+        &vmapped_root_source("9"),
+        "error: dimension mismatch: the signature declares extent 9 at result axis 1, \
+         but the inlined body produces 2",
+    );
+
+    both_lanes_execute(&dir, "piped_root_ok", &piped_root_source("2"), "shape=[2]");
+    both_lanes_execute(
+        &dir,
+        "vmapped_root_ok",
+        &vmapped_root_source("2"),
+        "shape=[2, 2]",
+    );
+}
+
+/// claim.literal.kernel_entry.checker: a LITERAL parameter extent keeps the
+/// checker's verdict, and lowering never sees the program.
+///
+/// This is the control for where the rejection does NOT belong. A standalone
+/// or exported kernel entry reads its parameters from `Load` nodes, whose axes
+/// resolve to `ExtentOrigin::ExternalAxis` and fix nothing. Declare those
+/// extents literally and the operands become compile-time constants, which
+/// would make the kernel entry refutable too - except that the checker then
+/// computes the body's own result type from the same literals and refuses the
+/// signature first. `tensor_concat_result_type`'s wildcard, the reason the
+/// checker cannot do this for the rows above, does not survive concrete
+/// element extents.
+///
+/// So the two tiers partition the class rather than overlapping on it, and
+/// that is what this row asserts: the verdict here names the DEF and its two
+/// function types, which is the checker's rendering, and never the lowering
+/// diagnostic's.
+///
+/// EVIDENTIARY STATUS: disposition lock. Existing checker behaviour that this
+/// change neither introduces nor alters, recorded so a later reader can see
+/// that the kernel-entry call sites were measured rather than assumed.
+#[test]
+fn a_literal_parameter_extent_keeps_the_checkers_verdict_on_both_lanes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let row = "[1.0f32, 2.0f32, 3.0f32]";
+    let rows = [row; 4].join(", ");
+    let source = format!(
+        "def probe(v: tensor[4, 3, f32]) -> tensor[100, 3, f32] = concat([v, v], 0i32)\n\
+         out = probe(to_tensor([{rows}]))\n"
+    );
+
+    let (eval_ok, eval_out) = eval_result(&dir, "kernel_lit.ch", &source);
+    let build = build_c(
+        &fixture(&dir, "kernel_lit_c.ch", &source),
+        &dir.path().join("kernel_lit_c-out"),
+    );
+    let c_out = String::from_utf8_lossy(&build.stderr).to_string();
+    for (lane, ok, out) in [
+        ("eval", eval_ok, &eval_out),
+        ("c", build.status.success(), &c_out),
+    ] {
+        assert!(!ok, "{lane}: a literal-parameter refutation is refused: {out}");
         assert!(
-            out.contains("shape=[8, 3]"),
-            "{lane}: producing the joined shape: {out}"
+            out.contains("DimensionMismatch")
+                && out.contains(
+                    "def 'probe' body doesn't match declared signature: body has type \
+                     `(tensor[4, 3, f32]) -> tensor[8, 3, f32]`, declared type is \
+                     `(tensor[4, 3, f32]) -> tensor[100, 3, f32]`"
+                ),
+            "{lane}: and the CHECKER reports it, naming both function types: {out}"
+        );
+        assert!(
+            !out.contains("the inlined body produces"),
+            "{lane}: lowering is never reached, so its diagnostic must not appear: {out}"
         );
     }
 }
