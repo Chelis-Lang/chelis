@@ -179,8 +179,8 @@ const ALLOWED: &[(&str, usize, &str)] = &[
     // axis, or is the negative row that refuses a non-unit one.
     (
         "crates/chelis-cli/tests/runtime_extent_slice_b.rs",
-        32,
-        "same-rank unit-axis broadcasts and their static/runtime non-unit refusals; includes record/nested-record projections, helper and lambda results, aliased/cast shape carriers, and axis/declared-result mismatch controls, plus chelis#1822's five named-bystander spellings: both expanded-axis positions, the no-consumer form, and the literal-size and rank-1 controls",
+        34,
+        "same-rank unit-axis broadcasts and their static/runtime non-unit refusals; includes record/nested-record projections, helper and lambda results, aliased/cast shape carriers, and axis/declared-result mismatch controls, plus chelis#1822's seven named-bystander spellings: both expanded-axis positions, the no-consumer form, the literal-size and rank-1 controls, and the reduction-consumer and free-result-dimension forms",
     ),
     (
         "crates/chelis-cli/tests/runtime_extent_claim_preparation.rs",
