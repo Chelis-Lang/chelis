@@ -63,6 +63,7 @@ pub(super) fn tensor_concat_result_type(
     element_ty: &Type,
     raw_axis: Option<i64>,
     list_info: ConcatListInfo,
+    subst: &Subst,
 ) -> Result<Type, String> {
     let Type::Tensor(dims, precision) = element_ty else {
         return Err(format!(
@@ -84,19 +85,26 @@ pub(super) fn tensor_concat_result_type(
     out_dims[axis] = match list_info {
         ConcatListInfo::Direct(elements) if !elements.is_empty() => elements
             .iter()
-            .try_fold(0i64, |total, dims| match dims.get(axis) {
-                Some(Dim::Lit(k)) if dims.len() == rank => total.checked_add(*k),
-                _ => None,
+            .try_fold(0i64, |total, dims| {
+                match dims
+                    .get(axis)
+                    .and_then(|d| subst.observe_dim(d).literal_extent())
+                {
+                    Some(k) if dims.len() == rank => total.checked_add(k),
+                    _ => None,
+                }
             })
             .map(Dim::Lit)
             .unwrap_or(Dim::Wildcard),
-        ConcatListInfo::BindingLen(Some(n)) if n >= 1 => match &out_dims[axis] {
-            Dim::Lit(k) => match k.checked_mul(n as i64) {
-                Some(total) => Dim::Lit(total),
-                None => Dim::Wildcard,
-            },
-            _ => Dim::Wildcard,
-        },
+        ConcatListInfo::BindingLen(Some(n)) if n >= 1 => {
+            match subst.observe_dim(&out_dims[axis]).literal_extent() {
+                Some(k) => match k.checked_mul(n as i64) {
+                    Some(total) => Dim::Lit(total),
+                    None => Dim::Wildcard,
+                },
+                _ => Dim::Wildcard,
+            }
+        }
         _ => Dim::Wildcard,
     };
     Ok(Type::Tensor(out_dims, precision.clone()))

@@ -194,6 +194,27 @@ pub(super) fn dims_identical(d1: &Dim, d2: &Dim) -> bool {
     }
 }
 
+/// `where`/`clamp` require identical shapes, unlike permissive dimension
+/// unification or scatter containment. Names do not equal bare literals;
+/// known contradictions take precedence over a matching semantic label.
+pub(super) fn elementwise_shapes_match(a: &[Dim], b: &[Dim], subst: &Subst) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(a, b)| {
+            let a = subst.observe_dim(a);
+            let b = subst.observe_dim(b);
+            if matches!((a.known_extent(), b.known_extent()), (Some(x), Some(y)) if x != y) {
+                return false;
+            }
+            if a.name().is_some() || b.name().is_some() {
+                return a.name() == b.name();
+            }
+            (a.known_extent().is_some() && a.known_extent() == b.known_extent())
+                || (a.variable().is_some() && a.variable() == b.variable())
+                || (a.rank().is_some() && a.rank() == b.rank())
+                || (a.is_wildcard() && b.is_wildcard())
+        })
+}
+
 /// Structural type equality used by `shape_a_relaxed_return` to guard
 /// the relaxed retry: the relaxation is only safe when the body and
 /// declared return differ exactly by a top-level `Ref` wrapper, so the
@@ -258,5 +279,125 @@ pub(super) fn type_for_readonly_check(ty: &Type, subst: &Subst) -> Type {
     match subst.apply(ty) {
         Type::Ref(inner) => subst.apply(&inner),
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod dimension_observation_tests {
+    use super::*;
+
+    fn labelled(subst: &mut Subst, id: u32, name: &str, extent: Option<i64>) -> Dim {
+        let dim = Dim::Var(DimVar(id));
+        subst.protect_dimensions([DimVar(id)]);
+        unify_dim(&dim, &Dim::Name(name.into()), subst).unwrap();
+        if let Some(extent) = extent {
+            unify_dim(&dim, &Dim::Lit(extent), subst).unwrap();
+        }
+        dim
+    }
+
+    #[test]
+    fn observations_keep_constraint_label_and_identity_policies_separate() {
+        let mut subst = Subst::new();
+        let a = labelled(&mut subst, 0, "row", Some(2));
+        let b = labelled(&mut subst, 1, "row", Some(3));
+        let c = labelled(&mut subst, 2, "other", Some(2));
+        let symbolic = labelled(&mut subst, 3, "row", None);
+        let alias = Dim::Var(DimVar(4));
+        unify_dim(&alias, &symbolic, &mut subst).unwrap();
+        for (x, y) in [(&a, &b), (&b, &a), (&a, &c), (&c, &a), (&a, &Dim::Lit(2))] {
+            assert!(!elementwise_shapes_match(
+                std::slice::from_ref(x),
+                std::slice::from_ref(y),
+                &subst
+            ));
+        }
+        assert!(elementwise_shapes_match(
+            std::slice::from_ref(&a),
+            std::slice::from_ref(&symbolic),
+            &subst
+        ));
+        assert_eq!(
+            subst.observe_dim(&alias).variable(),
+            subst.observe_dim(&symbolic).variable()
+        );
+        assert!(subst.observe_dim(&alias).is_protected());
+        assert_eq!(subst.observe_dim(&a).known_extent(), Some(2));
+        assert_eq!(subst.observe_dim(&a).literal_extent(), None);
+        assert_eq!(
+            subst.static_dim_products_match(std::slice::from_ref(&a), &[Dim::Lit(3)]),
+            None
+        );
+        assert_eq!(select_diagonal_extent(&a, &b, &subst).dim, Dim::Lit(2));
+        assert_eq!(select_diagonal_extent(&b, &a, &subst).dim, Dim::Lit(2));
+        assert_eq!(
+            select_diagonal_extent(&symbolic, &alias, &subst).dim,
+            symbolic
+        );
+        // Shape A still compares authored identity, not equal labels.
+        assert!(!dims_identical(&a, &symbolic));
+        assert!(dims_identical(&a, &a));
+        let serialized = bincode::serialize(&subst).unwrap();
+        let decoded: Subst = bincode::deserialize(&serialized).unwrap();
+        assert_eq!(decoded.observe_dim(&a).known_extent(), Some(2));
+        assert_eq!(decoded.observe_dim(&alias).name(), Some("row"));
+        assert!(!decoded.observe_dim(&alias).is_protected());
+    }
+
+    /// This proves only the inference formula seam. The original labelled
+    /// source controls still encounter the pre-existing concrete-metadata
+    /// admission restriction in validate.rs; do not claim source conv coverage.
+    #[test]
+    fn conv_formula_reads_known_constraints_without_inventing_unknown_extents() {
+        let source =
+            chelis_surf::parser::parse_str("def f() = conv(x,k,[1i64],[(0i64,0i64)])").unwrap();
+        let program = chelis_surf::desugar::desugar_program(&source);
+        fn conv_args(expr: &deep::Expr) -> Option<&[deep::Expr]> {
+            let (tag, _, kids) = stamped_parts(expr)?;
+            if tag == DeepTag::App
+                && kids
+                    .first()
+                    .and_then(|e| stamped_parts(e))
+                    .is_some_and(|(tag, _, xs)| {
+                        tag == DeepTag::Var && xs.first().and_then(symbol_name) == Some("conv")
+                    })
+            {
+                Some(&kids[1..])
+            } else {
+                kids.iter().find_map(conv_args)
+            }
+        }
+        let args = program.iter().find_map(conv_args).unwrap();
+        let mut subst = Subst::new();
+        let known = labelled(&mut subst, 0, "width", Some(5));
+        let unknown = labelled(&mut subst, 1, "width", None);
+        let kernel = [Dim::Lit(3), Dim::Lit(2), Dim::Lit(3)];
+        assert_eq!(
+            compute_concrete_conv_spatial(
+                args,
+                &[Dim::Lit(1), Dim::Lit(2), known],
+                &kernel,
+                &subst
+            ),
+            Some(vec![3])
+        );
+        assert_eq!(
+            compute_concrete_conv_spatial(
+                args,
+                &[Dim::Lit(1), Dim::Lit(2), unknown],
+                &kernel,
+                &subst
+            ),
+            None
+        );
+        assert_eq!(
+            compute_concrete_conv_spatial(
+                args,
+                &[Dim::Lit(1), Dim::Lit(2), Dim::Lit(2)],
+                &kernel,
+                &subst
+            ),
+            None
+        );
     }
 }

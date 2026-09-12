@@ -245,12 +245,14 @@ pub(super) fn classify_expand_size(
     expr: &deep::Expr,
     env: &Env,
     adt_reg: &AdtRegistry,
+    subst: &Subst,
 ) -> SizeClass {
     classify_size_in(
         expr,
         &SizeCtx {
             env,
             adt_reg,
+            subst,
             piped: &[],
         },
     )
@@ -263,6 +265,7 @@ pub(super) fn classify_expand_size(
 struct SizeCtx<'a> {
     env: &'a Env,
     adt_reg: &'a AdtRegistry,
+    subst: &'a Subst,
     piped: &'a [PipedParam],
 }
 
@@ -331,7 +334,9 @@ fn classify_size_in(expr: &deep::Expr, ctx: &SizeCtx<'_>) -> SizeClass {
                 .map_or(SizeClass::Unknown, |param| param.class),
             // A name carried by an in-scope tensor's shape is a
             // Form-2 symbolic dim with a real source.
-            Some(name) if env.tensor_carries_dim(name) => SizeClass::ShapeSourced,
+            Some(name) if env.tensor_carries_dim_with_subst(name, ctx.subst) => {
+                SizeClass::ShapeSourced
+            }
             // A recorded `let` provenance (shape-sourced or static).
             Some(name) => match env.size_provenance(name) {
                 Some(crate::env::SizeProvenance::ShapeSourced) => SizeClass::ShapeSourced,
@@ -488,6 +493,7 @@ fn classify_pipe(kids: &[deep::Expr], ctx: &SizeCtx<'_>) -> SizeClass {
                 &SizeCtx {
                     env: ctx.env,
                     adt_reg: ctx.adt_reg,
+                    subst: ctx.subst,
                     piped: &piped,
                 },
             );
@@ -706,7 +712,12 @@ pub(super) fn check_declared_dvars_rigid(
     // A second declared dvar resolving to the same dim is a collapse.
     let mut seen: Vec<(Dim, DimVar)> = Vec::new();
     for dv in declared_dvars {
-        let resolved = subst.apply_dim(&Dim::Var(*dv));
+        let constraint = subst.constraint_dim(&Dim::Var(*dv));
+        let resolved = if matches!(constraint, Dim::Lit(_)) {
+            constraint
+        } else {
+            subst.semantic_dim(&Dim::Var(*dv))
+        };
         if let Dim::Lit(n) = resolved {
             errors.push(CheckError::new(
                 CheckErrorKind::DimensionMismatch,
@@ -815,9 +826,15 @@ pub(super) fn check_return_only_dvars_rigid(
     for t in decl_params {
         crate::env::collect_dims(t, &mut param_dims);
     }
-    let resolved_param_dims: Vec<Dim> = param_dims.iter().map(|d| subst.apply_dim(d)).collect();
+    let resolved_param_dims: Vec<Dim> =
+        param_dims.iter().map(|d| subst.constraint_dim(d)).collect();
     for dv in &ret_only {
-        let resolved = subst.apply_dim(&Dim::Var(*dv));
+        let constraint = subst.constraint_dim(&Dim::Var(*dv));
+        let resolved = if matches!(constraint, Dim::Lit(_)) {
+            constraint
+        } else {
+            subst.semantic_dim(&Dim::Var(*dv))
+        };
         if let Dim::Lit(n) = resolved {
             if resolved_param_dims.contains(&Dim::Lit(n)) {
                 errors.push(CheckError::new(
@@ -841,7 +858,7 @@ pub(super) fn check_return_only_dvars_rigid(
             }
         } else if let Some(pdv) = param_dvars
             .iter()
-            .find(|pdv| subst.apply_dim(&Dim::Var(**pdv)) == resolved)
+            .find(|pdv| subst.semantic_dim(&Dim::Var(**pdv)) == resolved)
         {
             errors.push(CheckError::new(
                 CheckErrorKind::DimensionMismatch,
