@@ -25,13 +25,15 @@ separate obligation; a checker test cannot establish it.
 The #1889 helper-result repair is deliberately below this proposed checker
 carrier. For an inline plain callable, lowering first preserves the helper's
 authored return claim, including its runtime obligation and source diagnostic.
-When non-default, it then separately validates only a distinct, non-wildcard
-*named* checker-annotated call-result axis through the same exact
-current-activation Caller extent witness. A checker-substituted literal is not
-a new runtime obligation, and a known extent attached to an already-authored
-name is not a new name refinement. This permits a literal actual through a
-shape-preserving body operation without treating equal extents as identity,
-while retaining the authored two-source guard.
+When checked and produced ranks agree, it then transports only a distinct,
+non-wildcard *named* checker-annotated call-result axis as a caller-side label.
+That label is not resolved against the callee's signature: the same spelling
+may name an unrelated callee parameter. Label transport creates no equality
+claim and imports neither checker-substituted literals nor optional extents;
+an existing produced extent is retained. Authored two-source guards remain
+on the earlier preservation path, whose axis lookup uses only the current
+activation's Caller witnesses. Thus named-axis queries retain their checked
+anchor without introducing a caller/callee namespace collision.
 
 For rank-polymorphic calls, the activation's parameter-witness shapes are
 derived after that call's existing rank substitutions are merged. A witness
@@ -43,9 +45,11 @@ It adds no checker value-root/provenance carrier, global name equivalence,
 extent-based anchor recovery, wire field, cache version, worker protocol, or
 semantic/normative rule. Earlier activation witnesses are excluded even when a
 later call reuses the same tensor node; unrelated copies remain excluded. The
-evaluator/context regression covers direct, alias, and both elementwise operand
-orders. A native-C attempt stopped before emission at a generic unresolved-host
-diagnostic; its cause is unclassified and outside this repair. This is a
+evaluator/context regression covers direct, alias, both elementwise operand
+orders, caller alpha-renaming, independent same-spelled callee axes and real
+authored mismatches. Native-C attempts stopped before emission at an undeclared
+axis (#1277) or generic unresolved-host diagnostic; those residuals remain
+unclassified and outside this repair. This is a
 lowering-only repair, not approval of the broader origin/template design below.
 
 ## The information-loss witness

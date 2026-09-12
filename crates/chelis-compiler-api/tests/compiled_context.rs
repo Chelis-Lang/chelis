@@ -259,20 +259,36 @@ fn helper_result_checked_named_axis_survives_decoded_context_paths() {
     fs::write(root.join("mylib/reef.toml"), mylib_reef_toml()).expect("write mylib reef.toml");
     fs::write(
         root.join("mylib/src/axes.ch"),
-        "module Mylib.Axes\nexport (aligned_left, aligned_right, aligned_matrix)\n\n\
+        "module Mylib.Axes\nexport (aligned_left, aligned_right, aligned_matrix, scale, keep)\n\n\
          def aligned_left[d](x: tensor[d, f32], gain: tensor[fixed, f32]) -> tensor[d, f32] = mul(x, gain)\n\
          def aligned_right[d](x: tensor[d, f32], gain: tensor[fixed, f32]) -> tensor[d, f32] = mul(gain, x)\n\
-         def aligned_matrix[d, rows](x: tensor[d, rows, f32], gain: tensor[fixed, rows, f32]) -> tensor[d, rows, f32] = mul(x, gain)\n",
+         def aligned_matrix[d, rows](x: tensor[d, rows, f32], gain: tensor[fixed, rows, f32]) -> tensor[d, rows, f32] = mul(x, gain)\n\
+         def scale[d](x: tensor[d, f32], gain: tensor[fixed, f32]) -> tensor[d, f32] = mul(x, insert(sum(gain, fixed), 0i32, shape(x, 0i32)))\n\
+         def keep[d](x: tensor[d, f32], gain: tensor[fixed, f32]) -> tensor[d, f32] = copy(x)\n",
     )
     .expect("write axes.ch");
     fs::write(root.join("reef.lock"), app_reef_lock()).expect("write reef.lock");
 
-    let snippet = "module App.Eval\nimport Mylib.Axes (aligned_left, aligned_right, aligned_matrix)\n\n\
+    let snippet = "module App.Eval\nimport Mylib.Axes (aligned_left, aligned_right, aligned_matrix, scale, keep)\n\n\
                    def direct() = sum(aligned_left(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32])), fixed)\n\
                    def alias() = {\n  f = aligned_left\n  sum(f(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32])), fixed)\n}\n\
                    def reversed() = sum(aligned_right(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32])), fixed)\n\
-                   def mixed_axes() = sum(sum(aligned_matrix(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]), to_tensor([[1.0f32, 1.0f32], [1.0f32, 1.0f32]])), fixed), 0i32)\n";
-    let names = ["direct", "alias", "reversed", "mixed_axes"];
+                   def mixed_axes() = sum(sum(aligned_matrix(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]), to_tensor([[1.0f32, 1.0f32], [1.0f32, 1.0f32]])), fixed), 0i32)\n\
+                   def scale_bridge(x: tensor[fixed, f32]) -> tensor[fixed, f32] = scale(x, to_tensor([1.0f32, 2.0f32, 3.0f32]))\n\
+                   def keep_bridge(x: tensor[fixed, f32]) -> tensor[fixed, f32] = keep(x, to_tensor([1.0f32, 2.0f32, 3.0f32]))\n\
+                   def scale_outer(x: tensor[outer, f32]) -> tensor[outer, f32] = scale(x, to_tensor([1.0f32, 2.0f32, 3.0f32]))\n\
+                   scaled = scale_bridge(to_tensor([4.0f32, 5.0f32]))\n\
+                   kept = keep_bridge(to_tensor([4.0f32, 5.0f32]))\n\
+                   outer_scaled = scale_outer(to_tensor([4.0f32, 5.0f32]))\n";
+    let names = [
+        "direct",
+        "alias",
+        "reversed",
+        "mixed_axes",
+        "scaled",
+        "kept",
+        "outer_scaled",
+    ];
 
     let formatted = format_library_plus_snippet(&root, snippet);
     let raw = eval(EvalRequest {
@@ -293,6 +309,22 @@ fn helper_result_checked_named_axis_survives_decoded_context_paths() {
         r#"{"type":"tensor","value":{"shape":[],"data":{"dtype":"f32","bits":["41200000"]}}}"#,
         "the mixed named/literal helper result retains its complete expected value"
     );
+    assert_eq!(
+        raw_results["scaled"],
+        r#"{"type":"tensor","value":{"shape":[2],"data":{"dtype":"f32","bits":["41c00000","41f00000"]}}}"#,
+        "the caller-side `fixed` result label must not capture scale's gain binder"
+    );
+    for name in ["kept", "outer_scaled"] {
+        assert_eq!(
+            raw_results[name],
+            if name == "kept" {
+                r#"{"type":"tensor","value":{"shape":[2],"data":{"dtype":"f32","bits":["40800000","40a00000"]}}}"#
+            } else {
+                r#"{"type":"tensor","value":{"shape":[2],"data":{"dtype":"f32","bits":["41c00000","41f00000"]}}}"#
+            },
+            "{name}: alpha-renaming the caller must not affect checked result-label transport"
+        );
+    }
 
     let context = compile_reef_context(Path::new("/tmp/x"), &root).expect("context");
     check_in_context(&context, snippet).expect("live checked/lowered context query");
@@ -309,6 +341,35 @@ fn helper_result_checked_named_axis_survives_decoded_context_paths() {
     assert_eq!(
         collect_named_roots_json(&decoded.roots, &names),
         raw_results
+    );
+}
+
+/// A caller-side checked result label must not erase the independent authored
+/// named-result obligation: `out` is produced from `y`, while `fixed` belongs
+/// to `x`, so the mismatch still traps rather than being relabeled away.
+#[test]
+fn checked_result_name_transport_keeps_authored_named_mismatch_rejection() {
+    let error = eval(EvalRequest {
+        source_kind: SourceKind::Surf,
+        source: "def mismatch(x: tensor[fixed, f32], y: tensor[3, f32]) -> tensor[fixed, f32] = copy(y)\n\
+                 out = mismatch(to_tensor([4.0f32, 5.0f32]), to_tensor([1.0f32, 2.0f32, 3.0f32]))\n"
+            .to_string(),
+        bindings: BTreeMap::new(),
+    })
+    .expect_err("the authored fixed result must still compare y with x");
+    let messages = error
+        .errors
+        .iter()
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        messages.contains("extent `fixed`: x axis 0 = 2, y axis 0 = 3"),
+        "authored named diagnostic remains informative: {messages}"
+    );
+    assert!(
+        messages.ends_with("numeric trap: domain in load at int64"),
+        "the real named mismatch must still trap: {messages}"
     );
 }
 
