@@ -382,6 +382,8 @@
         "a_pass_through_literal_claim_is_guarded_at_its_op_computed_origin",
         "a_pass_through_named_claim_is_guarded_at_its_op_computed_origin",
         "a_piped_shape_read_of_a_non_tensor_is_still_sourceless",
+        "a_polymorphic_argument_claim_sizes_a_root_on_c",
+        "a_polymorphic_argument_claim_sizes_a_root_on_eval",
         "a_positional_expand_replaces_a_unit_axis_instead_of_inserting_on_eval",
         "a_rank_two_pad_guards_and_reports_the_runtime_axis_it_widens",
         "a_record_field_reached_through_a_def_parameter_is_an_admissible_expand_size",

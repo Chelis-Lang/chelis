@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "c5a95d5e4e5fd2bb18ce2e965d9faef24f45b8865c399bc433f1c5eb84983e61",
+  "corpus_sha256": "3f1a742371fc4765b55b06dc348802fa8e5792eb1ef32b621d98da1b03137281",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -529,6 +529,30 @@
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_eval"
+    },
+    {
+      "id": "root.dim_variable.nested_helper.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_nested_helper_claim_sizes_a_root_on_c"
+    },
+    {
+      "id": "root.dim_variable.nested_helper.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_nested_helper_claim_sizes_a_root_on_eval"
+    },
+    {
+      "id": "root.dim_variable.polymorphic_argument.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_polymorphic_argument_claim_sizes_a_root_on_c"
+    },
+    {
+      "id": "root.dim_variable.polymorphic_argument.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_polymorphic_argument_claim_sizes_a_root_on_eval"
     },
     {
       "id": "route.untied.gather.gate",

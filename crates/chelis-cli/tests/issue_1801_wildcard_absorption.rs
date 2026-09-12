@@ -6,7 +6,7 @@
 //! `spec/04-type-system.md` section 3.2 Application states the rule. This
 //! file is the checker-visible half: what each signature reads as. The
 //! executable halves are `runtime_extent_slice_a.rs`'s
-//! `a_root_that_keeps_a_dim_variable_is_still_dropped_on_both_lanes` and the
+//! `a_root_that_keeps_a_dim_variable_is_sized_on_both_lanes` and the
 //! two `root.dim_variable.nested_helper` receipts in
 //! `runtime_extent_slice_b.rs`.
 //!
@@ -367,5 +367,168 @@ fn a_refuted_claim_through_a_dim_variable_root_traps_on_both_lanes() {
     assert!(
         compiled_output.contains("extent `k`: a axis 0 = 2, b axis 0 = 3"),
         "and the same context: {compiled_output}"
+    );
+}
+
+/// The nested helper reached through a POLYMORPHIC named def passed as an
+/// argument. Regression test, and chelis#1925's round-1 P1.
+///
+/// `apply1`/`apply2` mint their own dimension variable for the shared extent,
+/// and the polymorphic `h` mints one too while the ARGUMENT is inferred, which
+/// is after the application has read back what its own instantiation minted.
+/// Unification then identifies the two, so the variable the application owns
+/// resolves to a root it does not own and the absorption has to reach the
+/// alias class rather than the one variable.
+///
+/// On the base sha, and on this change's first head `f2238550d`, all three
+/// spellings read `main :: () -> tensor[d0, f32]` with empty eval stdout and no
+/// `int main(` in the emitted C. The lambda and monomorphic spellings below are
+/// the controls that were already correct at `f2238550d`.
+const POLY_HELPERS: &str = "def g(x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
+     def h(y: tensor[k, f32]) -> tensor[k, f32] = add(y, y)\n";
+
+#[test]
+fn a_polymorphic_callee_argument_absorbs_through_its_alias_root() {
+    // The function argument in SECOND position, and the intermediary's own
+    // dimension spelled differently from the helper's.
+    let signatures = signatures(&format!(
+        "{POLY_HELPERS}\
+         def apply2(v: tensor[p, f32], f: (tensor[p, f32]) -> tensor[p, f32]) -> tensor[p, f32] = f(v)\n\
+         def main() = apply2(g(to_tensor([1.0f32, 2.0f32, 3.0f32])), h)\n"
+    ));
+    assert_eq!(
+        signatures.get("main").map(String::as_str),
+        Some("() -> tensor[*, f32]"),
+        "{signatures:?}"
+    );
+}
+
+#[test]
+fn a_polymorphic_callee_argument_absorbs_in_the_other_argument_order() {
+    // The function argument FIRST, so unification reaches the alias before the
+    // wildcard rather than after it. The touch is recorded on the other end of
+    // the class in this order, which is why the absorbing site asks about both.
+    let signatures = signatures(&format!(
+        "{POLY_HELPERS}\
+         def apply1(f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = f(v)\n\
+         def main() = apply1(h, g(to_tensor([1.0f32, 2.0f32, 3.0f32])))\n"
+    ));
+    assert_eq!(
+        signatures.get("main").map(String::as_str),
+        Some("() -> tensor[*, f32]"),
+        "{signatures:?}"
+    );
+}
+
+#[test]
+fn a_polymorphic_callee_argument_absorbs_when_both_spell_the_same_dimension_name() {
+    // Same as above with the intermediary's dimension spelled `k`, the helper's
+    // own name. `unify_dim` compares semantic names before it reaches
+    // `bind_dvar`, so the colliding spelling takes a different path into the
+    // same alias class and must reach the same answer.
+    let signatures = signatures(&format!(
+        "{POLY_HELPERS}\
+         def apply1(f: (tensor[k, f32]) -> tensor[k, f32], v: tensor[k, f32]) -> tensor[k, f32] = f(v)\n\
+         def main() = apply1(h, g(to_tensor([1.0f32, 2.0f32, 3.0f32])))\n"
+    ));
+    assert_eq!(
+        signatures.get("main").map(String::as_str),
+        Some("() -> tensor[*, f32]"),
+        "{signatures:?}"
+    );
+}
+
+/// Disposition lock. A LAMBDA in the function position mints no scheme
+/// dimension variable, so the intermediary's own variable is the alias root and
+/// the absorption reached it at `f2238550d` already. Read `() -> tensor[*,
+/// f32]` there and unchanged by the alias-root repair.
+#[test]
+fn a_lambda_in_the_function_position_still_absorbs() {
+    let signatures = signatures(
+        "def g(x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
+         def apply1(f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = f(v)\n\
+         def main() = apply1(fn (w) -> add(w, w), g(to_tensor([1.0f32, 2.0f32, 3.0f32])))\n",
+    );
+    assert_eq!(
+        signatures.get("main").map(String::as_str),
+        Some("() -> tensor[*, f32]"),
+        "{signatures:?}"
+    );
+}
+
+/// Disposition lock, and the negative parity for the three rows above. A
+/// MONOMORPHIC function argument binds the intermediary's variable to a
+/// literal, so the alias root is a literal rather than a variable and there is
+/// nothing to absorb: the extent stays `2` and the claim on it is a section 4.7
+/// runtime obligation. Read `() -> tensor[2, f32]` on the base sha, at
+/// `f2238550d`, and here.
+#[test]
+fn a_monomorphic_function_argument_keeps_its_literal_extent() {
+    let signatures = signatures(
+        "def g(x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
+         def h3(y: tensor[2, f32]) -> tensor[2, f32] = add(y, y)\n\
+         def apply1(f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = f(v)\n\
+         def main() = apply1(h3, g(to_tensor([1.0f32, 2.0f32, 3.0f32])))\n",
+    );
+    assert_eq!(
+        signatures.get("main").map(String::as_str),
+        Some("() -> tensor[2, f32]"),
+        "{signatures:?}"
+    );
+}
+
+/// Disposition lock. The absorbing site under `grad`, where the transform
+/// rebuilds applications: a concrete result must stay concrete. Read
+/// `() -> tensor[2, f32]` rendering `[0.0, 0.0]` on the base sha, at
+/// `f2238550d`, and here.
+#[test]
+fn the_absorbing_site_under_grad_keeps_a_concrete_result() {
+    let signatures = signatures(
+        "def f(x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = insert(scalar_to_tensor(7.0f32), 0i32, shape(y, 0i32))\n\
+         def h(x: tensor[2, f32]) -> tensor[f32] = sum(f(x, to_tensor([1.0f32, 2.0f32, 3.0f32])), 0i32)\n\
+         def main() = grad(h)(to_tensor([1.0f32, 2.0f32]))\n",
+    );
+    assert_eq!(
+        signatures.get("main").map(String::as_str),
+        Some("() -> tensor[2, f32]"),
+        "{signatures:?}"
+    );
+}
+
+/// Disposition lock, and the guard on the alias-root repair. The enclosing
+/// definition's OWN named binder must not be absorbed even when the aliasing
+/// call sits in its body: the root the class resolves to is not a variable any
+/// instantiation minted, so this application has no authority over it. Read
+/// `(tensor[seq, f32]) -> tensor[seq, f32]` on the base sha, at `f2238550d`,
+/// and here. Without the mint-log guard this reads `tensor[*, f32]`.
+#[test]
+fn an_enclosing_binder_is_not_absorbed_through_an_aliasing_call() {
+    let signatures = signatures(&format!(
+        "{POLY_HELPERS}\
+         def apply1(f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = f(v)\n\
+         def outer(s: tensor[seq, f32]) -> tensor[seq, f32] = apply1(h, s)\n"
+    ));
+    assert_eq!(
+        signatures.get("outer").map(String::as_str),
+        Some("(tensor[seq, f32]) -> tensor[seq, f32]"),
+        "{signatures:?}"
+    );
+}
+
+/// The sharper half of the guard above: the same enclosing binder with a
+/// runtime extent actually IN the alias class, so the class does meet `*` and
+/// only the mint-log guard keeps the binder free. Read `(tensor[seq, f32]) ->
+/// tensor[seq, f32]` on the base sha, at `f2238550d`, and here.
+#[test]
+fn an_enclosing_binder_survives_a_wildcard_in_its_own_alias_class() {
+    let signatures = signatures(&format!(
+        "{POLY_HELPERS}\
+         def apply1(f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = f(v)\n\
+         def outer2(s: tensor[seq, f32]) -> tensor[seq, f32] = apply1(h, g(s))\n"
+    ));
+    assert_eq!(
+        signatures.get("outer2").map(String::as_str),
+        Some("(tensor[seq, f32]) -> tensor[seq, f32]"),
+        "{signatures:?}"
     );
 }

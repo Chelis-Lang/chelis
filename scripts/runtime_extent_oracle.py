@@ -1081,6 +1081,23 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             "cli_slice_b.a_nested_helper_claim_sizes_a_root_on_eval",
         ),
+        # The same root reached through a polymorphic named def passed as an
+        # ARGUMENT, so the callee variable this application minted aliases to
+        # one the argument's own instantiation minted and that root is what
+        # denotes the extent. chelis#1925's round 1 found this spelling still
+        # dropped after the first repair.
+        _row(
+            "root.dim_variable.polymorphic_argument.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_polymorphic_argument_claim_sizes_a_root_on_c",
+        ),
+        _row(
+            "root.dim_variable.polymorphic_argument.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_polymorphic_argument_claim_sizes_a_root_on_eval",
+        ),
     )
     return tuple(sorted(rows, key=lambda row: row.id))
 

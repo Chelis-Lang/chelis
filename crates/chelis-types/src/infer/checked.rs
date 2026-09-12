@@ -337,6 +337,16 @@ pub(super) struct InferenceProduct {
     /// that result meeting `*` in the outer unification denotes the outer
     /// call's runtime extent.
     instantiation_dvars: Vec<DimVar>,
+    /// Membership index over [`Self::instantiation_dvars`].
+    ///
+    /// The absorbing site resolves each bracketed variable to its alias root
+    /// and has to ask whether THAT root was minted by some instantiation,
+    /// which is a question about the whole log rather than about one
+    /// application's slice of it. Scanning the log for every bracketed
+    /// variable of every call would be quadratic in a large program, so the
+    /// set answers it in constant time. The two are written together and
+    /// never separately.
+    instantiation_dvar_index: UnordSet<DimVar>,
 }
 
 #[derive(Clone)]
@@ -473,7 +483,21 @@ impl InferenceProduct {
     /// chelis#1801: record the fresh dimension variables one scheme
     /// instantiation just minted, in quantifier order.
     pub(super) fn record_instantiation_dvars(&mut self, fresh: impl IntoIterator<Item = DimVar>) {
-        self.instantiation_dvars.extend(fresh);
+        for var in fresh {
+            self.instantiation_dvars.push(var);
+            self.instantiation_dvar_index.insert(var);
+        }
+    }
+
+    /// chelis#1801: whether `v` was minted by SOME scheme instantiation in
+    /// this inference run, as opposed to being a binder the enclosing
+    /// definition owns.
+    ///
+    /// The absorbing site needs this about an alias root, which a later
+    /// application's instantiation may have minted, so the question is about
+    /// the whole log and not about one application's bracket.
+    pub(super) fn dvar_was_instantiation_minted(&self, v: DimVar) -> bool {
+        self.instantiation_dvar_index.contains(&v)
     }
 
     /// chelis#1801: the current end of the instantiation log. Pair it with
