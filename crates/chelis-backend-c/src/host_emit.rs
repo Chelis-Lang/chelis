@@ -3597,9 +3597,17 @@ impl<'a> HostEmitter<'a> {
     ) -> Result<(), Unsupported> {
         self.emit_span_comments(expr);
         match &expr.kind {
-            HostExprKind::Int(value) => self
-                .lines
-                .push(format!("{}{target} = {};", self.indent, value)),
+            HostExprKind::Int(value) => {
+                // The positive magnitude of i64::MIN is not a signed C
+                // decimal literal, even when preceded by unary minus.
+                let literal = if *value == i64::MIN {
+                    "INT64_MIN".to_string()
+                } else {
+                    value.to_string()
+                };
+                self.lines
+                    .push(format!("{}{target} = {literal};", self.indent));
+            }
             HostExprKind::Float(value) => self.lines.push(format!(
                 "{}{target} = chelis_f64_from_bits(UINT64_C(0x{:016x}));",
                 self.indent,
