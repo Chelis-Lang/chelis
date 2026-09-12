@@ -23,20 +23,29 @@ separate obligation; a checker test cannot establish it.
 ## #1889 bounded lowering progress
 
 The #1889 helper-result repair is deliberately below this proposed checker
-carrier. For an inline plain callable, lowering now prefers the non-default,
-checker-annotated application result claim over the helper's raw generic return
-binder. It may connect that claim only to the exact current-activation Caller
-extent witness already created for the bound actual tensor axis. This preserves
-the existing declared-result validation and permits a literal actual through a
-shape-preserving body operation without treating equal extents as identity.
+carrier. For an inline plain callable, lowering first preserves the helper's
+authored return claim, including its runtime obligation and source diagnostic.
+When non-default, it then separately validates only a distinct, non-wildcard
+*named* checker-annotated call-result axis through the same exact
+current-activation Caller extent witness. A checker-substituted literal is not
+a new runtime obligation, and a known extent attached to an already-authored
+name is not a new name refinement. This permits a literal actual through a
+shape-preserving body operation without treating equal extents as identity,
+while retaining the authored two-source guard.
+
+For rank-polymorphic calls, the activation's parameter-witness shapes are
+derived after that call's existing rank substitutions are merged. A witness
+binder therefore follows the expanded formal axis, rather than the raw
+pre-spread offset; this is only witness construction order, not a new relation
+between names.
 
 It adds no checker value-root/provenance carrier, global name equivalence,
 extent-based anchor recovery, wire field, cache version, worker protocol, or
 semantic/normative rule. Earlier activation witnesses are excluded even when a
 later call reuses the same tensor node; unrelated copies remain excluded. The
 evaluator/context regression covers direct, alias, and both elementwise operand
-orders. A native-C attempt stopped before emission at generic [05-UNS-1]
-(chelis#730); its cause is unclassified and outside this repair. This is a
+orders. A native-C attempt stopped before emission at a generic unresolved-host
+diagnostic; its cause is unclassified and outside this repair. This is a
 lowering-only repair, not approval of the broader origin/template design below.
 
 ## The information-loss witness

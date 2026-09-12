@@ -259,18 +259,20 @@ fn helper_result_checked_named_axis_survives_decoded_context_paths() {
     fs::write(root.join("mylib/reef.toml"), mylib_reef_toml()).expect("write mylib reef.toml");
     fs::write(
         root.join("mylib/src/axes.ch"),
-        "module Mylib.Axes\nexport (aligned_left, aligned_right)\n\n\
+        "module Mylib.Axes\nexport (aligned_left, aligned_right, aligned_matrix)\n\n\
          def aligned_left[d](x: tensor[d, f32], gain: tensor[fixed, f32]) -> tensor[d, f32] = mul(x, gain)\n\
-         def aligned_right[d](x: tensor[d, f32], gain: tensor[fixed, f32]) -> tensor[d, f32] = mul(gain, x)\n",
+         def aligned_right[d](x: tensor[d, f32], gain: tensor[fixed, f32]) -> tensor[d, f32] = mul(gain, x)\n\
+         def aligned_matrix[d, rows](x: tensor[d, rows, f32], gain: tensor[fixed, rows, f32]) -> tensor[d, rows, f32] = mul(x, gain)\n",
     )
     .expect("write axes.ch");
     fs::write(root.join("reef.lock"), app_reef_lock()).expect("write reef.lock");
 
-    let snippet = "module App.Eval\nimport Mylib.Axes (aligned_left, aligned_right)\n\n\
+    let snippet = "module App.Eval\nimport Mylib.Axes (aligned_left, aligned_right, aligned_matrix)\n\n\
                    def direct() = sum(aligned_left(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32])), fixed)\n\
                    def alias() = {\n  f = aligned_left\n  sum(f(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32])), fixed)\n}\n\
-                   def reversed() = sum(aligned_right(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32])), fixed)\n";
-    let names = ["direct", "alias", "reversed"];
+                   def reversed() = sum(aligned_right(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32])), fixed)\n\
+                   def mixed_axes() = sum(sum(aligned_matrix(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]), to_tensor([[1.0f32, 1.0f32], [1.0f32, 1.0f32]])), fixed), 0i32)\n";
+    let names = ["direct", "alias", "reversed", "mixed_axes"];
 
     let formatted = format_library_plus_snippet(&root, snippet);
     let raw = eval(EvalRequest {
@@ -283,9 +285,14 @@ fn helper_result_checked_named_axis_survives_decoded_context_paths() {
     assert_eq!(raw_results.len(), names.len(), "raw roots: {raw_results:?}");
     let expected =
         r#"{"type":"tensor","value":{"shape":[],"data":{"dtype":"f32","bits":["40a00000"]}}}"#;
-    for name in names {
+    for name in ["direct", "alias", "reversed"] {
         assert_eq!(raw_results[name], expected, "{name}");
     }
+    assert_eq!(
+        raw_results["mixed_axes"],
+        r#"{"type":"tensor","value":{"shape":[],"data":{"dtype":"f32","bits":["41200000"]}}}"#,
+        "the mixed named/literal helper result retains its complete expected value"
+    );
 
     let context = compile_reef_context(Path::new("/tmp/x"), &root).expect("context");
     check_in_context(&context, snippet).expect("live checked/lowered context query");

@@ -9353,7 +9353,6 @@ impl<'program> LowerCtx<'program> {
                 None => Self::default_type(),
             })
             .collect();
-        let witness_param_types = param_types.clone();
         let mut formal_types = Vec::new();
         let mut formal_type_exprs: Vec<Option<Expr>> = Vec::new();
         let mut actual_types = Vec::new();
@@ -9468,6 +9467,23 @@ impl<'program> LowerCtx<'program> {
         let rank_subst =
             tensor_rank_substitutions(&formal_type_exprs, &actual_types, &self.dim_axis_positions);
         self.rank_substitutions.merge(rank_subst);
+        // Parameter witnesses must use this invocation's fully expanded
+        // formal axes. `param_types` above intentionally predates binding: it
+        // establishes the substitutions. Recomputing only this witness view
+        // after the merge keeps a `[..pre, seq, ..post]` declaration aligned
+        // with its concrete caller axes instead of declaring `seq` at the
+        // stale pre-expansion offset.
+        let witness_param_types: Vec<TensorType> = param_type_exprs
+            .iter()
+            .map(|opt_expr| match opt_expr {
+                Some(expr) => Self::formal_param_type_for_call(
+                    expr,
+                    &self.prec_substitutions,
+                    &self.rank_substitutions,
+                ),
+                None => Self::default_type(),
+            })
+            .collect();
         // chelis#620 (Inlining-F1 successor): recursion lowers by BOUNDED
         // UNROLLING. Depth accounting installs *here*, after argument
         // evaluation, so legitimate nested calls passed as arguments to
@@ -9512,24 +9528,21 @@ impl<'program> LowerCtx<'program> {
                 ),
             );
         }
-        // The checked application metadata is the substituted result of this
-        // call. A generic helper's authored result can retain its raw binder,
-        // so use a non-default checked result for the inlined result claim.
-        // Unannotated Deep applications retain the authored-result fallback.
-        let declared_result = if expected_return_ty != &Self::default_type() {
-            expected_return_ty.clone()
-        } else {
-            fn_expr
-                .result_type()
-                .map(|expr| {
-                    Self::type_from_type_expr_with_subst(
-                        expr,
-                        &self.prec_substitutions,
-                        &self.rank_substitutions,
-                    )
-                })
-                .unwrap_or_else(|| expected_return_ty.clone())
-        };
+        // The authored result carries the runtime obligation and its source
+        // diagnostic. Keep it distinct from the checker-substituted result of
+        // this particular application: the latter may refine a named axis for
+        // a following query, but must not replace an authored named claim with
+        // a literal (chelis#1782/#1889).
+        let declared_result = fn_expr
+            .result_type()
+            .map(|expr| {
+                Self::type_from_type_expr_with_subst(
+                    expr,
+                    &self.prec_substitutions,
+                    &self.rank_substitutions,
+                )
+            })
+            .unwrap_or_else(|| expected_return_ty.clone());
         self.prepare_parameter_witnesses(&param_names, &witness_param_types, call_span, true);
         // Each unroll level costs multiple large lowering frames (debug
         // builds overflow the default 8 MB main-thread stack well before the
@@ -9555,6 +9568,27 @@ impl<'program> LowerCtx<'program> {
             self.repair_output_type_if_default(&result, expected_return_ty);
         }
         self.preserve_declared_result(&result, &declared_result);
+        // A checker result can refine an axis to a caller-established name.
+        // Preserve that name only after the authored claim above, and only
+        // through the same per-axis witness validation. In particular, do
+        // not turn checker-substituted literals into new runtime obligations:
+        // the authored claim remains the source of those guards and their
+        // two-source diagnostics (chelis#1782/#1889).
+        if expected_return_ty != &Self::default_type()
+            && let Some(id) = result.as_single_node()
+        {
+            for (axis, checked_dim) in expected_return_ty.dims.iter().enumerate() {
+                if axis < self.dag.get(id).expect("result").output_type.dims.len()
+                    && Self::is_distinct_checked_named_result_axis(
+                        &declared_result,
+                        axis,
+                        checked_dim,
+                    )
+                {
+                    self.preserve_declared_result_axis(id, axis, checked_dim);
+                }
+            }
+        }
         let result = self.retain_invocation_witnesses(result, witness_start);
         self.binding_witnesses = saved_witnesses;
         self.local_unit_refinements = saved_unit_refinements;
@@ -14179,21 +14213,48 @@ impl<'program> LowerCtx<'program> {
             return;
         };
         for (axis, dim) in declared.dims.iter().enumerate() {
-            let resolved = match dim {
-                DimInfo::Lit(required) => {
-                    self.preserve_literal_result_axis(id, axis, *required)
-                        || self.preserve_op_computed_result_axis(id, axis, None)
-                }
-                DimInfo::Named(binder, _) if !binder.is_empty() && binder != "*" => {
-                    self.preserve_named_result_axis(id, axis, binder)
-                        || self.preserve_op_computed_result_axis(id, axis, Some(binder))
-                }
-                _ => false,
-            };
-            if resolved {
-                self.dag.node_mut(id).expect("result").output_type.dims[axis] = dim.clone();
-            }
+            self.preserve_declared_result_axis(id, axis, dim);
         }
+    }
+
+    /// Validate and retain one declared-result axis. Keeping this operation
+    /// per-axis lets a checked call annotation contribute only a new named
+    /// refinement, without importing its unrelated literal claims.
+    fn preserve_declared_result_axis(&mut self, id: NodeId, axis: usize, dim: &DimInfo) {
+        let resolved = match dim {
+            DimInfo::Lit(required) => {
+                self.preserve_literal_result_axis(id, axis, *required)
+                    || self.preserve_op_computed_result_axis(id, axis, None)
+            }
+            DimInfo::Named(binder, _) if !binder.is_empty() && binder != "*" => {
+                self.preserve_named_result_axis(id, axis, binder)
+                    || self.preserve_op_computed_result_axis(id, axis, Some(binder))
+            }
+            _ => false,
+        };
+        if resolved {
+            self.dag.node_mut(id).expect("result").output_type.dims[axis] = dim.clone();
+        }
+    }
+
+    /// A checked call type refines an authored result only when this exact
+    /// axis gained a concrete, non-wildcard name. A known extent attached to
+    /// the same name is not a new name. Literals stay solely in the authored
+    /// result path, where their runtime obligations originate.
+    fn is_distinct_checked_named_result_axis(
+        declared: &TensorType,
+        axis: usize,
+        checked: &DimInfo,
+    ) -> bool {
+        let DimInfo::Named(checked_binder, _) = checked else {
+            return false;
+        };
+        !checked_binder.is_empty()
+            && checked_binder != "*"
+            && !matches!(
+                declared.dims.get(axis),
+                Some(DimInfo::Named(authored_binder, _)) if authored_binder == checked_binder
+            )
     }
 
     /// chelis#1397's declaration half: keep a declared result dimension over an
@@ -20065,6 +20126,57 @@ mod tests {
             None,
         );
         assert_eq!(ctx.axis_interface_witness(unrelated_copy, 0), None);
+    }
+
+    #[test]
+    fn checked_result_refines_only_distinct_named_axes() {
+        let authored = TensorType {
+            dims: vec![
+                DimInfo::Named("d".into(), None),
+                DimInfo::Named("rows".into(), None),
+            ],
+            precision: Prim::F32,
+        };
+        let checked = TensorType {
+            dims: vec![DimInfo::Named("fixed".into(), Some(2)), DimInfo::Lit(3)],
+            precision: Prim::F32,
+        };
+
+        // The first axis is the #1889 caller-established name. The checker
+        // also knows a literal on the second axis, but it is not a new claim.
+        assert!(LowerCtx::is_distinct_checked_named_result_axis(
+            &authored,
+            0,
+            &checked.dims[0]
+        ));
+        assert!(!LowerCtx::is_distinct_checked_named_result_axis(
+            &authored,
+            1,
+            &checked.dims[1]
+        ));
+
+        // An already-authored name and wildcard/empty names never become a
+        // checked-result refinement.
+        assert!(!LowerCtx::is_distinct_checked_named_result_axis(
+            &authored,
+            0,
+            &DimInfo::Named("d".into(), None)
+        ));
+        assert!(!LowerCtx::is_distinct_checked_named_result_axis(
+            &authored,
+            0,
+            &DimInfo::Named("d".into(), Some(2))
+        ));
+        assert!(!LowerCtx::is_distinct_checked_named_result_axis(
+            &authored,
+            0,
+            &DimInfo::Named("*".into(), None)
+        ));
+        assert!(!LowerCtx::is_distinct_checked_named_result_axis(
+            &authored,
+            0,
+            &DimInfo::Named(String::new(), None)
+        ));
     }
 
     /// Tier-3: a `(d-rank {} pre) (d-name {} seq) (d-rank {} post)` formal splits
