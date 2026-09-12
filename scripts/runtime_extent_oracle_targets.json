@@ -332,6 +332,7 @@
       "expected": [
         "a_bare_runtime_scalar_expand_size_is_still_sourceless",
         "a_binder_that_shadows_the_record_base_suppresses_the_hoist",
+        "a_caller_transported_result_label_survives_the_op_computed_stamp",
         "a_checked_arithmetic_expand_size_is_guarded_in_the_expand_position_on_c",
         "a_checked_arithmetic_expand_size_is_guarded_in_the_expand_position_on_eval",
         "a_checked_arithmetic_expand_size_that_agrees_with_its_claim_executes_on_c",

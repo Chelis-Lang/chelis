@@ -3561,8 +3561,7 @@ fn nested_named_result_source(len: usize, declared: &str) -> String {
 /// disposition lock, until chelis#1800 closed it.
 ///
 /// EVIDENTIARY STATUS: regression test for the named block. Measured at
-/// `5cf3dbb63`, which already carries chelis#1798's origin resolution and
-/// chelis#1837's pad admission, this program printed
+/// `a5fee66b9`, this branch's base, this program printed
 /// `out = tensor(shape=[3], data=[2.0, 3.0, 4.0])` and exited ZERO on eval and
 /// on the linked C binary under a declared `tensor[n, f32]` with `n` = 2.
 /// Regression test for the literal block too, which this slice delivered
@@ -3688,7 +3687,7 @@ fn a_nested_claim_whose_declarer_is_a_runtime_extent_is_refused_by_the_checker()
 ///
 /// EVIDENTIARY STATUS: disposition lock, and a correction to the design that
 /// preceded this change, which recorded this spelling as already trapping
-/// ``extent `m` `` at run time. Measured at `5cf3dbb63`, it is a
+/// ``extent `m` `` at run time. Measured at `a5fee66b9`, it is a
 /// `DimensionMismatch` from the checker, with or without the repair: this
 /// change touches `crates/chelis-ir` only, so it cannot reach the verdict.
 #[test]
@@ -3872,7 +3871,7 @@ fn a_non_unit_stride_op_computed_extent_remains_unadmitted() {
 /// because the lock ran eval only.
 ///
 /// EVIDENTIARY STATUS: regression test on BOTH lanes, for different base
-/// behaviour on each. Measured at `1fb6ced38`: eval printed
+/// behaviour on each. Measured at `a5fee66b9`: eval printed
 /// `out = tensor(shape=[5], data=[0.0, 1.0, 2.0, 3.0, 0.0])` and exited ZERO
 /// under a declared `tensor[2, f32]`, while the C binary exited 1 reporting
 /// the generic `Domain: movement target shape mismatch` before
@@ -6524,7 +6523,7 @@ fn concat_symbolic_root_source(claim: &str) -> String {
 /// the row below.
 ///
 /// EVIDENTIARY STATUS: disposition lock on both lanes, not a regression test.
-/// Measured at `1fb6ced38`, this program printed
+/// Measured at `a5fee66b9`, this program printed
 /// `main = tensor(shape=[8, 3], ...)` and exited ZERO on eval and on the
 /// linked C binary under a declared `tensor[100, 3, f32]`; this change leaves
 /// that unchanged. Tracked by chelis#1837, which must update this row when the
@@ -6613,7 +6612,7 @@ fn the_checker_refuses_a_static_pad_extent_a_declaration_refutes() {
 /// having renamed every `concat` trap to `pad`.
 ///
 /// EVIDENTIARY STATUS: disposition lock on both lanes. Measured at
-/// `1fb6ced38`, this program already printed
+/// `a5fee66b9`, this program already printed
 /// ``extent `100`: claimed = 100, concat axis 0 = 8`` and
 /// `numeric trap: domain in concat at int64`, exiting 1 on eval and 134 on the
 /// linked binary. This change neither introduces nor alters it.
@@ -6641,5 +6640,94 @@ fn the_host_path_concat_claim_still_names_concat_on_both_lanes() {
             "{lane}: naming the composed operation the user wrote: {out}"
         );
         assert!(out.contains(context), "{lane}: expected {context}: {out}");
+    }
+}
+
+/// A caller-established result label and an op-computed origin stamp coexist.
+///
+/// This row carries no corpus id: the behaviour is already correct on this
+/// branch's base, so it has no start state to move from. It is registered in
+/// the target manifest as a lock, beside the other four this pull request
+/// adds.
+///
+/// chelis#1889's repair (PR #1895) transports a checked caller-side axis name
+/// onto an already-lowered helper result, and its rule is that "the name is
+/// never interpreted in the callee binder namespace". The resolved stamp this
+/// slice adds writes into the same result type from the callee side, so the
+/// two could have raced: if the relabel renamed the claim the stamp had just
+/// made, the class keyed by the callee binder would lose its declaring witness
+/// and the guard with it.
+///
+/// It does not, and the reason is that the two act on different axes. The
+/// callee binder here is declared by a parameter whose extent is the CALLER's,
+/// so it does not resolve to a graph-fixed value and the stamp leaves it
+/// unresolved; the relabel then renames the result axis to the caller's
+/// spelling, the declaring witness is the caller's own parameter, and the
+/// class forms under that spelling. The trap reports the caller's name, which
+/// is the name the user wrote at the boundary that failed.
+///
+/// This row exists because the interaction is invisible in either change
+/// alone. None of PR #1895's own `compiled_context` programs reaches an
+/// op-computed result: its helpers are `mul`, `copy` and
+/// `insert(sum(gain, fixed), ..)` bodies, and its mismatch control is a `copy`
+/// of a literal-extent tensor, which takes the witness arm rather than the
+/// op-computed one.
+///
+/// EVIDENTIARY STATUS: disposition lock on both lanes. Measured at
+/// `a5fee66b9`, this branch's base, which already carries PR #1895: this
+/// program printed ``extent `fixed`: claimed = 2, shrink axis 0 = 3`` and
+/// trapped there, and prints the same at this head. The row pins that the
+/// resolved stamp did not move the reported name, and it fails on a tree where
+/// the stamp overwrites a transported label.
+#[test]
+fn a_caller_transported_result_label_survives_the_op_computed_stamp() {
+    assert!(
+        gcc_available(),
+        "this row compares two executed lanes; neither may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = |gain: usize| {
+        format!(
+            "def narrow[d](x: tensor[r, f32], gain: tensor[d, f32]) -> tensor[d, f32] = \
+             shrink(x, [[1i64, shape(x, 0i32)]])\n\
+             def caller(g: tensor[fixed, f32], y: tensor[r, f32]) -> tensor[fixed, f32] = \
+             narrow(y, g)\n\
+             out = caller({}, {})\n",
+            vector_literal(gain),
+            vector_literal(4)
+        )
+    };
+
+    let mismatched = source(2);
+    let (eval_ok, eval_out) = eval_result(&dir, "checked_label.ch", &mismatched);
+    let (c_ok, c_out) = c_run_result(&dir, "checked_label_c", &mismatched);
+    let context = "extent `fixed`: claimed = 2, shrink axis 0 = 3";
+    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(
+            !ok,
+            "{lane}: the transported claim of 2 over 3 traps: {out}"
+        );
+        assert!(
+            out.contains(&domain_trap_line("shrink")),
+            "{lane}: [04-NUM-9]'s line names the origin operation: {out}"
+        );
+        assert!(out.contains(context), "{lane}: expected {context}: {out}");
+        assert!(
+            !out.contains("extent `d`"),
+            "{lane}: and the callee binder is not interpreted in the caller's \
+             namespace (chelis#1889): {out}"
+        );
+    }
+
+    // The agreeing control: the caller's gain is 3 and the shrink produces 3.
+    let agreeing = source(3);
+    let (eval_ok, eval_out) = eval_result(&dir, "checked_label_ok.ch", &agreeing);
+    let (c_ok, c_out) = c_run_result(&dir, "checked_label_ok_c", &agreeing);
+    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(ok, "{lane}: an agreeing transported claim executes: {out}");
+        assert!(
+            out.contains("out = tensor(shape=[3], data=[2.0, 3.0, 4.0])"),
+            "{lane}: with the produced extent: {out}"
+        );
     }
 }
