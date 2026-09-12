@@ -1479,7 +1479,14 @@ fn pad(
 ///
 /// The eval lane's reporter prefixes `error: ` to the first line of every
 /// diagnostic it raises, as it does to the extent guard's [04-NUM-9] line; the
-/// message body below is what the two lanes hold in common.
+/// message body below is what the two lanes hold in common. Where this lane
+/// raises the diagnostic DIRECTLY that prefix is the whole of the difference.
+/// A host transform adds its own wrapper above it: `grad` renders
+/// ``host runtime `grad` evaluation failed: `` before this text
+/// (`chelis-compiler-api/src/runtime/transforms.rs`). That wrapper is
+/// pre-existing and uniform over every error it carries, so chelis#1797
+/// neither introduces nor closes it; the text is merely newly reachable there,
+/// because the same program used to panic. The exit status agrees either way.
 const SHRINK_DOMAIN_TRAP: &str = "Domain: shrink bounds outside input extent\n\
                                   numeric trap: domain in shrink at int64";
 
@@ -2384,12 +2391,14 @@ where
                             // operation report it.
                             //
                             // An earlier version of this comment justified the
-                            // decline by saying the C runtime's movement plan
-                            // rejects such a span before the site is reached.
-                            // That was checkable and false:
-                            // `ShapeMetadata::shrunk` rejects only
-                            // `end < start`, so `start == end` builds a plan of
-                            // extent 0 and C's guard runs and reports the claim.
+                            // decline for the EMPTY case by saying the C
+                            // runtime's movement plan rejects such a span
+                            // before the site is reached. That was checkable
+                            // and false: `ShapeMetadata::shrunk` does not
+                            // reject `start == end` (it rejects a negative
+                            // start, `end < start`, and an overshoot), so an
+                            // empty span builds a plan of extent 0 and C's
+                            // guard runs and reports the claim.
                             //
                             // C is the conforming lane there.
                             // `spec/05-risc-primitives.md` section 2.4.1's

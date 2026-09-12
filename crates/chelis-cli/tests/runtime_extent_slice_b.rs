@@ -3937,9 +3937,18 @@ const OVERSHOOT_CLAIMS: [&str; 3] = ["2", "6", "k"];
 /// negative start, an inverted pair, or an end past the operand extent with one
 /// `Domain` message; `affine_result` (`crates/chelis-runtime/src/lib.rs`)
 /// prints it, then [04-NUM-9]'s trap line, then exits 1. `SHRINK_DOMAIN_TRAP`
-/// in `crates/chelis-ir/src/eval.rs` is the evaluator's copy of the same two
-/// lines, so the cross-lane agreement below is one constant compared against
-/// two processes rather than two spellings that have to be kept in step.
+/// in `crates/chelis-ir/src/eval.rs` is the evaluator's own spelling of the
+/// same two lines.
+///
+/// The message therefore exists in two independent literals, and this constant
+/// is a third. Sharing one is not available: `chelis-ir` depends on neither
+/// `chelis-abi` nor `chelis-runtime`, and adding that edge to carry one string
+/// would cost more than the drift it prevents. The mitigation is the pair of
+/// receipts below, which run BOTH lanes as processes and compare each one's
+/// whole output against this constant, so a change to either spelling fails a
+/// test instead of quietly separating the lanes. A shared literal would be
+/// weaker at exactly that: it would let both lanes drift together with nothing
+/// left to notice.
 const OVERSHOOT_RENDERING: &str =
     "Domain: shrink bounds outside input extent\nnumeric trap: domain in shrink at int64\n";
 
@@ -4079,6 +4088,43 @@ fn an_overshooting_empty_span_keeps_the_616_admission_rule_wording_on_eval() {
     let (code, out) = eval_code(&dir, "overshoot_empty.ch", &source);
     assert_eq!(
         out, "error: shrink axis 0 bound [7, 7] is empty or inverted (start >= end)\n",
+        "the admission rule reports the span, not the overshoot (chelis#1795)"
+    );
+    assert_eq!(code, Some(1), "and does so as a diagnostic: {out}");
+}
+
+/// The other non-selecting shape, for the same reason: a span that overshoots
+/// AND is INVERTED. Without this row the bound above is pinned for one of the
+/// two ways a span can select nothing, which would read as if the inverted one
+/// had been repaired.
+///
+/// `[shape(x, 0) + 3, 1)` is `[7, 1)` over an operand of four. Both of
+/// chelis#616's conditions hold, and its `start >= end` rejection is the one
+/// that fires, so this lane keeps the admission rule's wording where the
+/// compiled lane says `Domain: shrink bounds outside input extent`. The
+/// evaluator's own `SHRINK_DOMAIN_TRAP` branch would give the compiled lane's
+/// words for an inverted bound, and it is unreachable from source precisely
+/// because this rejection precedes it.
+///
+/// Cited to chelis#1795 like the empty row, and for the same reason: the
+/// divergence is that operation-level admission rule, which the numbered spec
+/// does not require and which chelis#1797 does not own.
+///
+/// EVIDENTIARY STATUS: disposition lock, eval lane. Unchanged from the base
+/// `6abca2406`, where this spelling took the same rejection before reaching the
+/// former `assert!`.
+#[test]
+fn an_overshooting_inverted_span_keeps_the_616_admission_rule_wording_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = format!(
+        "def f(x: tensor[rows, f32]) -> tensor[2, f32] = \
+         shrink(x, [[add(shape(x, 0i32), 3i64), 1i64]])\n\
+         out = f({})\n",
+        vector_literal(4)
+    );
+    let (code, out) = eval_code(&dir, "overshoot_inverted.ch", &source);
+    assert_eq!(
+        out, "error: shrink axis 0 bound [7, 1] is empty or inverted (start >= end)\n",
         "the admission rule reports the span, not the overshoot (chelis#1795)"
     );
     assert_eq!(code, Some(1), "and does so as a diagnostic: {out}");
