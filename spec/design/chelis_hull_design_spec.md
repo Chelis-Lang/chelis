@@ -1281,6 +1281,43 @@ output changes. This is not a checked source/AD correspondence, Resource
 occurrence census, ordered host-cut collector, native invocation/state receipt,
 numerical proof or external certificate. Those remain separate obligations.
 
+### Value-free Resource cuts in fixed-control C helpers
+
+C fixed-control helper lowering records a checked Resource device literal before
+its body, without creating a DAG value, seed, or runtime action. The existing
+checked-source target validator remains the sole compiler compatibility authority.
+Evaluator and ordinary helper lowering retain their Resource decline; a Resource
+handler without Dropout retains `NoDropout` and its ordinary compilation route.
+In particular, missing trace coverage is not silently promoted to a certificate.
+
+The first Resource cut promotes the original Random schedule/census into a lazy
+private full spine. Before promotion, Random-only plans allocate no sidecar.
+After promotion, the full spine is authoritative; the old random-only vectors
+are checked projections. Appends extend projections incrementally, while rewrites
+rebuild them. Existing public `Copy` carriers and exhaustive variants are unchanged.
+Full-source IDs have a separate namespace from Random occurrence IDs, so AD splice
+and selection rebase them independently. Device text is never a graph identity.
+
+Opt-in `FullSpineObservation` accessors expose actual plan snapshots, including
+pre/post-AD plans and the selected host's retained helpers. They do not reconstruct
+source order from final node liveness. Requirements survive remap, DCE, Copy/Drop
+normalization and source selection; backward replay is not a new source event.
+These are helper-local observations, not an independent checked-AST census or an
+ordered host-invocation collector. Outer host scopes still need a separate join.
+
+The focused tests use CPU Resource around a locally seeded loss, its actual AD
+splice and generated C execution, and reject omitted/duplicated/wrong-ID/reordered
+cuts. Late promotion and a counted 1024-event Random-only case exercise projection
+storage. C/GPU rejection precedes projection. A `main`-selected CPU program excludes
+an unused GPU sibling; direct scalar-gradient selection still visits the whole host
+and rejects that sibling. This newly exposed route boundary is not a claim that the
+same mixed source compiled before this change, and no selection routing is changed.
+
+The source spine, preserving rewrites, additive observations and discriminating
+tests ship together: a marker without retained order or an accessor without the
+actual producer would not supply this evidence slice. None establishes native
+state correspondence, source elaboration, physical memory safety or acceptance.
+
 ## 7. Spec-Driven Test Generation - `Hull.Generate`
 
 Generate random well-typed Deep programs. Naive approach (generate random AST, check if it types) has near-zero hit rate for non-trivial programs. The useful approach is top-down, type-directed generation.

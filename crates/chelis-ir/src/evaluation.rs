@@ -10,7 +10,9 @@ use chelis_unord::UnordMap;
 
 use crate::dag::{Dag, NodeId, RiscOp};
 use crate::eval::TensorValue;
-use crate::execution_spine::{Control, OccurrenceId, SourceKind, Spine, Step};
+#[cfg(any(test, feature = "lowering-trace"))]
+use crate::execution_spine::OccurrenceId;
+use crate::execution_spine::{Control, FullOccurrenceId, SourceKind, Spine, Step};
 use crate::host::RandomLoweringState;
 
 /// Source admission is decided before evaluation. Legacy selection is never
@@ -34,6 +36,12 @@ pub enum LegacyEvaluationReason {
     HigherOrderAd,
     DynamicControl,
     RecursiveControl,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResourcePolicy {
+    Legacy,
+    RecordRequirements,
 }
 
 /// Mutable inherited stream state. An evaluator updates this state when a
@@ -246,7 +254,7 @@ impl ExecutionMetadata {
     pub(crate) fn selected(
         &self,
         remap: &UnordMap<NodeId, NodeId>,
-        occurrences: &std::collections::BTreeSet<OccurrenceId>,
+        occurrences: &std::collections::BTreeSet<FullOccurrenceId>,
     ) -> Result<Self, String> {
         let mut selected = Self::new(self.scopes[0].seed);
         selected.scopes = self.scopes.clone();
@@ -418,6 +426,14 @@ impl EvaluationPlan {
         &self.metadata.spine.source
     }
 
+    /// Opt-in snapshot of the complete source order, including value-free
+    /// Resource requirements. The established random-only views remain
+    /// unchanged for existing consumers.
+    #[cfg(feature = "lowering-trace")]
+    pub fn full_spine_for_inspection(&self) -> crate::lowering_trace::FullSpineObservation {
+        self.metadata.spine.full_observation()
+    }
+
     #[cfg(feature = "lowering-trace")]
     pub(crate) fn snapshot(dag: &Dag, metadata: &ExecutionMetadata) -> Self {
         let mut metadata = metadata.clone();
@@ -447,6 +463,12 @@ impl EvaluationPlan {
         if self.metadata.scopes.is_empty() {
             return Err("evaluation plan has no inherited scope".into());
         }
+        self.metadata.spine.validate_full(|node| {
+            matches!(
+                self.metadata.sites.get(&node),
+                Some(RandomSite::Forward { .. })
+            )
+        })?;
         let mut seen = vec![false; self.dag.len()];
         let mut draws = vec![None; self.metadata.draws];
         let mut source = self.metadata.spine.source.iter();
@@ -576,7 +598,10 @@ impl EvaluationPlan {
             }
             seen[id.0] = true;
         }
-        if source.next().is_some() || scopes != [ScopeId(0)] {
+        if source.next().is_some() {
+            return Err("execution omits a source occurrence or pending seed exit".into());
+        }
+        if scopes != [ScopeId(0)] {
             return Err("execution omits a source occurrence or pending seed exit".into());
         }
         if seen.iter().any(|seen| !seen) {
@@ -678,7 +703,7 @@ impl StagedEvaluationPlan {
             .map(|event| event.id)
             .collect();
         let mut metadata = self.logical.metadata.clone();
-        metadata.spine = metadata.spine.selected(remap, &occurrences)?;
+        metadata.spine = metadata.spine.selected_legacy(remap, &occurrences)?;
         metadata.sites = metadata
             .sites
             .into_sorted()
@@ -874,6 +899,278 @@ mod tests {
         metadata.spine.record_nodes(&dag);
         metadata.complete(&dag).unwrap();
         EvaluationPlan::new(dag, metadata).unwrap()
+    }
+
+    fn resource_fixture(device: &str, draw: bool) -> EvaluationPlan {
+        let mut dag = Dag::new();
+        let ty = TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision: Prim::F32,
+        };
+        let mut metadata = ExecutionMetadata::new(Some(42));
+        let before = (dag.len(), dag.roots().to_vec());
+        metadata.spine.require(&dag, device.to_owned());
+        assert_eq!(before, (dag.len(), dag.roots().to_vec()));
+        let root = if draw {
+            let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+            let root = dag.add_node(
+                RiscOp::Dropout {
+                    rate: 0.5,
+                    seed: 42,
+                },
+                vec![x],
+                ty,
+                None,
+            );
+            metadata.forward(root, ScopeId(0));
+            root
+        } else {
+            dag.add_node(RiscOp::synth_const(Prim::F32, 1.0), vec![], ty, None)
+        };
+        dag.add_root(root);
+        metadata.spine.record_nodes(&dag);
+        metadata.complete(&dag).unwrap();
+        EvaluationPlan::new(dag, metadata).unwrap()
+    }
+
+    #[test]
+    fn resource_cut_is_value_free_and_exactly_validated() {
+        let plan = resource_fixture("cpu:author-device", false);
+        assert!(plan.metadata.spine.has_full_sidecar_for_test());
+        assert!(plan.source_for_inspection().is_empty());
+        assert_eq!(plan.steps_for_inspection(), [Step::Node(NodeId(0))]);
+        #[cfg(feature = "lowering-trace")]
+        {
+            let observed = plan.full_spine_for_inspection();
+            assert!(matches!(
+                observed.source.as_slice(),
+                [crate::lowering_trace::FullSourceOccurrence {
+                    id: crate::lowering_trace::SourceEventId(0),
+                    kind: crate::lowering_trace::FullSourceKind::Requirement(device),
+                }] if device == "cpu:author-device"
+            ));
+            assert!(matches!(
+                observed.steps.as_slice(),
+                [
+                    crate::lowering_trace::FullStep::Requirement {
+                        occurrence: crate::lowering_trace::SourceEventId(0)
+                    },
+                    crate::lowering_trace::FullStep::Node(NodeId(0))
+                ]
+            ));
+        }
+
+        for corruption in 0..3 {
+            let mut damaged = plan.clone();
+            damaged
+                .metadata
+                .spine
+                .corrupt_requirement_for_test(corruption);
+            assert!(
+                damaged.validate().unwrap_err().contains("source"),
+                "corruption {corruption}"
+            );
+        }
+
+        let mut reordered = resource_fixture("cpu:author-device", true);
+        reordered.metadata.spine.corrupt_requirement_for_test(3);
+        assert!(reordered.validate().is_err());
+    }
+
+    #[test]
+    fn full_source_ids_do_not_alias_random_occurrence_ids() {
+        let plan = resource_fixture("cpu:author-device", true);
+        assert_eq!(
+            plan.metadata
+                .spine
+                .full_source_ids_for_test()
+                .map(|id| id.0)
+                .collect::<Vec<_>>(),
+            [0, 1]
+        );
+        assert!(matches!(
+            plan.source_for_inspection(),
+            [crate::execution_spine::Occurrence {
+                id: OccurrenceId(0),
+                kind: SourceKind::Forward { .. },
+            }]
+        ));
+        #[cfg(feature = "lowering-trace")]
+        {
+            let observed = plan.full_spine_for_inspection();
+            assert!(matches!(
+                observed.source.as_slice(),
+                [
+                    crate::lowering_trace::FullSourceOccurrence {
+                        id: crate::lowering_trace::SourceEventId(0),
+                        kind: crate::lowering_trace::FullSourceKind::Requirement(_),
+                    },
+                    crate::lowering_trace::FullSourceOccurrence {
+                        id: crate::lowering_trace::SourceEventId(1),
+                        kind: crate::lowering_trace::FullSourceKind::Forward { .. },
+                    }
+                ]
+            ));
+        }
+    }
+
+    #[test]
+    fn late_resource_promotion_preserves_prior_random_ids_and_mixed_order() {
+        let mut dag = Dag::new();
+        let ty = TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision: Prim::F32,
+        };
+        let mut metadata = ExecutionMetadata::new(None);
+        metadata.scopes.push(Scope { seed: Some(42) });
+        metadata.spine.control(
+            &dag,
+            Control::Enter {
+                scope: ScopeId(1),
+                seed: 42,
+            },
+        );
+        let input = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+        let draw = dag.add_node(
+            RiscOp::Dropout {
+                rate: 0.5,
+                seed: 42,
+            },
+            vec![input],
+            ty,
+            None,
+        );
+        metadata.forward(draw, ScopeId(1));
+        metadata.spine.require(&dag, "cpu:late-promotion".into());
+        metadata
+            .spine
+            .control(&dag, Control::Leave { scope: ScopeId(1) });
+        dag.add_root(draw);
+        metadata.spine.record_nodes(&dag);
+        metadata.complete(&dag).unwrap();
+        let plan = EvaluationPlan::new(dag, metadata).unwrap();
+
+        assert_eq!(
+            plan.source_for_inspection()
+                .iter()
+                .map(|event| event.id.index())
+                .collect::<Vec<_>>(),
+            [0, 1, 2]
+        );
+        assert_eq!(
+            plan.metadata
+                .spine
+                .full_source_ids_for_test()
+                .map(|id| id.0)
+                .collect::<Vec<_>>(),
+            [0, 1, 2, 3]
+        );
+        #[cfg(feature = "lowering-trace")]
+        {
+            let full = plan.full_spine_for_inspection();
+            assert!(matches!(
+                full.source[2].kind,
+                crate::lowering_trace::FullSourceKind::Requirement(ref device)
+                    if device == "cpu:late-promotion"
+            ));
+            let position = |wanted| {
+                full.steps
+                    .iter()
+                    .position(|step| match (wanted, step) {
+                        (0, crate::lowering_trace::FullStep::Control { occurrence, .. }) => {
+                            occurrence.0 == 0
+                        }
+                        (1, crate::lowering_trace::FullStep::Node(node)) => *node == draw,
+                        (2, crate::lowering_trace::FullStep::Requirement { occurrence }) => {
+                            occurrence.0 == 2
+                        }
+                        (3, crate::lowering_trace::FullStep::Control { occurrence, .. }) => {
+                            occurrence.0 == 3
+                        }
+                        _ => false,
+                    })
+                    .unwrap()
+            };
+            assert!(position(0) < position(1));
+            assert!(position(1) < position(2));
+            assert!(position(2) < position(3));
+        }
+    }
+
+    #[test]
+    fn established_random_spine_carriers_remain_copy() {
+        fn assert_copy<T: Copy>() {}
+        assert_copy::<crate::execution_spine::Step>();
+        assert_copy::<crate::execution_spine::SourceKind>();
+        assert_copy::<crate::execution_spine::Occurrence>();
+    }
+
+    #[test]
+    fn growing_source_events_do_not_rebuild_the_legacy_projection_per_event() {
+        let mut metadata = ExecutionMetadata::new(Some(42));
+        let mut dag = Dag::new();
+        let ty = TensorType {
+            dims: vec![DimInfo::Lit(1)],
+            precision: Prim::F32,
+        };
+        for _ in 0..1024 {
+            let input = dag.add_node(
+                RiscOp::synth_const(Prim::F32, 1.0),
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let draw = dag.add_node(
+                RiscOp::Dropout {
+                    rate: 0.5,
+                    seed: 42,
+                },
+                vec![input],
+                ty.clone(),
+                None,
+            );
+            metadata.forward(draw, ScopeId(0));
+        }
+        assert!(!metadata.spine.has_full_sidecar_for_test());
+        assert_eq!(metadata.spine.legacy_projection_rebuilds_for_test(), 0);
+        metadata.spine.record_nodes(&dag);
+        assert_eq!(metadata.spine.legacy_projection_rebuilds_for_test(), 0);
+        metadata.spine.complete(&dag).unwrap();
+        assert_eq!(metadata.spine.legacy_projection_rebuilds_for_test(), 0);
+    }
+
+    #[test]
+    fn evaluator_profile_still_declines_resource_scopes() {
+        let source = "(handle-effect {effect: resource} (lit {} \"cpu:author-device\") \
+                      (handle-effect {effect: random} \
+                      (lit {type: (t-prim {} int64)} 42) \
+                      (app {} (var {} dropout) (var {} x) \
+                      (lit {type: (t-prim {} f32)} 0.5))))";
+        let expression = chelis_deep::parser::parse_str(source)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(
+            crate::lower::evaluation_profile(&expression, &UnordMap::new()),
+            EvaluationProfile::Legacy(LegacyEvaluationReason::ResourceScope)
+        );
+        let error = crate::lower::try_lower_subexpr_evaluation_plan(
+            &expression,
+            [(
+                "x".into(),
+                TensorType {
+                    dims: vec![DimInfo::Lit(4)],
+                    precision: Prim::F32,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            UnordMap::new(),
+            UnordMap::new(),
+            &context(),
+        )
+        .unwrap_err();
+        assert!(error.message.contains("ResourceScope"), "{error}");
     }
 
     fn context() -> RandomExecutionContext {
@@ -1457,13 +1754,7 @@ mod tests {
         let roots = plan.dag.roots().to_vec();
         let (_, remap) = crate::optimize::project_execution_slice(&plan.dag, &roots, &roots);
         assert!(!remap.contains_key(&NodeId(1)));
-        let occurrences = plan
-            .metadata
-            .spine
-            .source
-            .iter()
-            .map(|event| event.id)
-            .collect();
+        let occurrences = plan.metadata.spine.full_source_ids_for_test().collect();
         assert!(
             plan.metadata
                 .selected(&remap, &occurrences)

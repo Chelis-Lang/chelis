@@ -150,6 +150,49 @@ pub struct EffectRemap {
     pub scopes: BTreeMap<crate::evaluation::ScopeId, crate::evaluation::ScopeId>,
 }
 
+/// Trace-local identity in the complete source order. This namespace includes
+/// Resource requirements and is intentionally not interchangeable with the
+/// established random-only `OccurrenceId` namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SourceEventId(pub usize);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FullStep {
+    Node(crate::dag::NodeId),
+    Control {
+        occurrence: SourceEventId,
+        control: crate::execution_spine::Control,
+    },
+    Requirement {
+        occurrence: SourceEventId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FullSourceKind {
+    Forward {
+        node: crate::dag::NodeId,
+        draw: crate::evaluation::DrawId,
+        scope: crate::evaluation::ScopeId,
+    },
+    Control(crate::execution_spine::Control),
+    Requirement(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FullSourceOccurrence {
+    pub id: SourceEventId,
+    pub kind: FullSourceKind,
+}
+
+/// Additive observation of the private full spine. Existing random-only
+/// execution observations and their public exhaustive enums are unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FullSpineObservation {
+    pub steps: Vec<FullStep>,
+    pub source: Vec<FullSourceOccurrence>,
+}
+
 /// Owned execution metadata at a graph boundary already present in the
 /// enclosing trace. This deliberately does not clone that graph again.
 #[derive(Debug, Clone)]
