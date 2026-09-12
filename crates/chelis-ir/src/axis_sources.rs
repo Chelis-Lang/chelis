@@ -2489,12 +2489,19 @@ pub fn op_computed_axis_extent(op: &RiscOp, axis: usize) -> Option<ComputedAxisE
 /// does not run the verifier, trapped at run time. A lane divergence with a
 /// refused build on one side is not a repair.
 ///
-/// So a statically refuted claim is left unstamped here, and the verdict it
-/// is owed belongs to a tier that can report one: this is the numbered spec's
-/// own division, where §4.4 and §4.5 make a statically refuted declared
-/// result a type error and §4.7.2 makes an unprovable one a runtime guard.
-/// `lower_program` returns a `Dag` and has no error channel, so lowering is
-/// not that tier.
+/// So a statically refuted claim is not stamped: it is REJECTED. Lowering
+/// does have an error channel - `LowerDiagnostic::fatal`, raised through
+/// `lower::raise_fatal_lowering_error` and forwarded on both lanes by
+/// `host::try_lower_compiled_program_with_lane_overrides` - and
+/// `lower::LowerCtx::reject_refuted_result_axis` uses it, so a declaration
+/// this function proves wrong ends the program before anything executes,
+/// identically on eval and on C. That is the numbered spec's own division
+/// reaching its conclusion rather than stopping short of one: §4.4 and §4.5
+/// make a statically refuted declared result a type error and §4.7.2 makes an
+/// unprovable one a runtime guard, and the checker reaches the first verdict
+/// wherever it can see the extent. An extent that becomes literal only when a
+/// call is inlined is one the checker cannot see, which is why the rejection
+/// sits here as well (chelis#1837, chelis#1930).
 pub fn static_op_computed_axis_extent(dag: &Dag, node: NodeId, axis: usize) -> Option<usize> {
     let owner = dag.get(node)?;
     let operand_extent = |operand_axis: usize| -> Option<usize> {

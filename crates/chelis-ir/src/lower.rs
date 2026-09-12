@@ -2091,7 +2091,7 @@ pub(crate) fn try_lower_staged_host_region(
         ctx.prepare_parameter_witnesses(&names, &types, None, false);
         ctx.binding_witnesses.clear();
         let result = ctx.lower_expr_with_claim(expr, Some(result_claim));
-        ctx.preserve_declared_result(&result, result_claim);
+        ctx.preserve_declared_result(&result, result_claim, None);
         let result = ctx.retain_invocation_witnesses(result, 0);
         if ctx.host_sources.is_empty() {
             return None;
@@ -2204,7 +2204,7 @@ fn lower_subexpr_program_inner_impl(
     // claim. Without this the obligation existed only on the inlining paths,
     // so `out = f(...)` and a compiled `def f` ran unguarded.
     if let Some(claim) = result_claim {
-        ctx.preserve_declared_result(&value, claim);
+        ctx.preserve_declared_result(&value, claim, None);
     }
     let value = ctx.retain_invocation_witnesses(value, 0);
     // Each leaf of the result pytree must be a DISTINCT root node.
@@ -9551,7 +9551,7 @@ impl<'program> LowerCtx<'program> {
             // the inlined body ends in an untyped default node.
             self.repair_output_type_if_default(&result, expected_return_ty);
         }
-        self.preserve_declared_result(&result, &declared_result);
+        self.preserve_declared_result(&result, &declared_result, inlining_name.as_deref());
         // A checker result may expose a caller-side name for a result axis
         // after the authored result has installed its own obligations. This
         // is label transport, not a callee-authored equality: in particular,
@@ -9644,7 +9644,7 @@ impl<'program> LowerCtx<'program> {
         });
         let result = self.lower_expr_with_claim(body, claim.as_ref());
         if let Some(claim) = &claim {
-            self.preserve_declared_result(&result, claim);
+            self.preserve_declared_result(&result, claim, None);
         }
         let result = self.retain_invocation_witnesses(result, start);
         self.binding_witnesses = saved_witnesses;
@@ -14179,11 +14179,23 @@ impl<'program> LowerCtx<'program> {
     /// A named claim whose declaring witness IS the observed one is proven
     /// equal by the graph and records nothing: that is the ordinary
     /// pass-through `-> tensor[rows, f32]` over a read of the same axis.
-    fn preserve_declared_result(&mut self, result: &LoweredValue, declared: &TensorType) {
+    fn preserve_declared_result(
+        &mut self,
+        result: &LoweredValue,
+        declared: &TensorType,
+        owner: Option<&str>,
+    ) {
         let Some(id) = result.as_single_node() else {
             return;
         };
         for (axis, dim) in declared.dims.iter().enumerate() {
+            // Refutation precedes every stamp. A claim the lowered graph
+            // FIXES to another number is proven wrong, which is the first
+            // sentence of `spec/04-type-system.md` section 4.7 rather than
+            // section 4.7.2's guard, and the arms below would otherwise
+            // either record a check for a comparison that cannot hold or
+            // decline silently.
+            self.reject_refuted_result_axis(id, axis, dim, owner);
             // The op-computed arm may RESOLVE the dim it stamps rather than
             // taking the declared spelling verbatim (chelis#1800's M3), so it
             // reports what to stamp instead of only whether it resolved. The
@@ -14208,6 +14220,117 @@ impl<'program> LowerCtx<'program> {
             if let Some(stamped) = resolved {
                 self.dag.node_mut(id).expect("result").output_type.dims[axis] = stamped;
             }
+        }
+    }
+
+    /// Reject a declared result axis the LOWERED graph fixes to another
+    /// extent, before anything executes and identically on every lane.
+    ///
+    /// `spec/04-type-system.md` section 4.7 splits the two verdicts by what
+    /// is provable, not by which stage notices: "A violation proven from
+    /// literals is a type error. A constraint that depends on runtime values
+    /// is checked before allocation or element access and traps `Domain`."
+    /// Section 4.7.2 conditions its guard on a claim "that is not statically
+    /// proven equal to `size`", so a claim the graph proves UNEQUAL is the
+    /// first sentence's class and never the guard's.
+    ///
+    /// The checker reaches that verdict wherever it can see the extent, and
+    /// `the_checker_refuses_a_static_pad_extent_a_declaration_refutes` pins
+    /// it doing so. What it cannot see is an extent that becomes literal only
+    /// because a CALL supplied concrete arguments: at `probe(lit)` section
+    /// 3.2 types the application by the callee's signature, and for `concat`
+    /// the published result extent is `Dim::Wildcard` (section 4.5.4 rule 3,
+    /// the correct type) which the declaration then narrows. Inlining is the
+    /// first stage that holds both the claim and the literals, so it is where
+    /// the verdict becomes available. chelis#526 is the checker-tier repair
+    /// for the same class and does not change this rule.
+    ///
+    /// FATAL, and that is not decoration.
+    /// `host::try_lower_compiled_program_with_lane_overrides` forwards a
+    /// fatal diagnostic on both lanes and absorbs a non-fatal one into the
+    /// host fallback, so a non-fatal rejection would reject on `chelis build`
+    /// and silently fall through to the host lane on `chelis eval`. The
+    /// Issue #197 AD rejection is the same mechanism for the same reason.
+    ///
+    /// Two arms, gated differently, and the asymmetry is deliberate.
+    /// A LITERAL claim is the user's number wherever the declaration came
+    /// from, matching [`Self::preserve_literal_result_axis`], which is
+    /// likewise ungated. A NAMED claim is refutable only once chelis#1800
+    /// has RESOLVED its declaring witness to a number, and it carries
+    /// [`Self::preserve_op_computed_result_axis`]'s gate with it: a
+    /// synthesized multi-root kernel's signature is not an author's claim, so
+    /// `signature_is_authored` must hold and the binder must name a parameter
+    /// axis of this same activation, or there is nothing to refute.
+    fn reject_refuted_result_axis(
+        &self,
+        id: NodeId,
+        axis: usize,
+        dim: &DimInfo,
+        owner: Option<&str>,
+    ) {
+        let claimed = match dim {
+            DimInfo::Lit(required) => Some((None, *required)),
+            DimInfo::Named(binder, _) if !binder.is_empty() && binder != "*" => {
+                if !self.signature_is_authored {
+                    return;
+                }
+                self.signature_witness_extent(Some(binder.as_str()))
+                    .map(|value| (Some(binder.as_str()), value))
+            }
+            _ => None,
+        };
+        let Some((binder, claimed)) = claimed else {
+            return;
+        };
+        let Some(produced) = self.graph_fixed_axis_extent(id, axis) else {
+            return;
+        };
+        if produced == claimed {
+            return;
+        }
+        let owner = match owner {
+            Some(name) => format!("`{name}`"),
+            None => "the signature".to_owned(),
+        };
+        let claim = match binder {
+            Some(binder) => format!("`{binder}` = {claimed}"),
+            None => claimed.to_string(),
+        };
+        raise_fatal_lowering_error(
+            format!(
+                "dimension mismatch: {owner} declares extent {claim} at result axis \
+                 {axis}, but the inlined body produces {produced}"
+            ),
+            None,
+            self.current_span_id.clone(),
+        );
+    }
+
+    /// The extent the lowered graph FIXES for an axis, or `None` when only run
+    /// time has it.
+    ///
+    /// Two origins fix one. `ExtentOrigin::Literal` is the extent itself.
+    /// `ExtentOrigin::OpComputed` is fixed exactly when every quantity the
+    /// operation's own output-shape rule reads is a compile-time constant,
+    /// which is the question
+    /// [`crate::axis_sources::static_op_computed_axis_extent`] answers and the
+    /// same arithmetic [`crate::verify`]'s per-owner size check performs.
+    ///
+    /// `ExternalAxis` and `ScalarInput` are the guard's own cases and are
+    /// absent on purpose: an input tensor's axis and a rank-0 runtime extent
+    /// are values, not proofs, so a declaration over either is checked at run
+    /// time under section 4.7.2 and nothing here may pre-empt it. This differs
+    /// from [`Self::graph_fixed_witness_extent`], which admits only `Literal`
+    /// because a DECLARING witness observes a parameter axis rather than an
+    /// operation's result.
+    fn graph_fixed_axis_extent(&self, id: NodeId, axis: usize) -> Option<usize> {
+        use crate::axis_sources::ExtentOrigin;
+        match crate::axis_sources::resolve_axis_extent(&self.dag, id, axis)? {
+            ExtentOrigin::Literal(extent) => usize::try_from(extent).ok(),
+            ExtentOrigin::OpComputed { op, axis } => {
+                crate::axis_sources::static_op_computed_axis_extent(&self.dag, op, axis)
+            }
+            ExtentOrigin::ExternalAxis { .. } | ExtentOrigin::ScalarInput { .. } => None,
         }
     }
 
@@ -14458,6 +14581,16 @@ impl<'program> LowerCtx<'program> {
     /// the repair for it is a per-declaration claim carrier rather than a
     /// tighter test here.
     ///
+    /// A claim the operation's own rule statically REFUTES never reaches
+    /// this stamp. [`Self::reject_refuted_result_axis`] runs first and
+    /// rejects the program, so the case this used to decline silently - and
+    /// that `verify`'s per-owner size check would otherwise refuse on the C
+    /// lane while the DAG evaluator, which does not run the verifier, trapped
+    /// at run time - no longer exists. `preserve_op_computed_result_axis`'s
+    /// direct-owner path (`origin == id`) skips this function entirely and is
+    /// covered by that same rejection rather than by a second test here,
+    /// which is why declining here was never enough on its own.
+    ///
     /// A second residual sits in the predicate rather than here.
     /// `is_synthesized_dim_name` reads `d<N>` as compiler-minted because that
     /// is the checker's display spelling for an unresolved dimension variable,
@@ -14485,14 +14618,6 @@ impl<'program> LowerCtx<'program> {
             DimInfo::Lit(_) => {}
             DimInfo::Named(name, _) if crate::axis_sources::is_synthesized_dim_name(name) => {}
             DimInfo::Named(_, _) => return false,
-        }
-        // A claim the operation's own rule statically refutes is not
-        // runtime-checkable, and the graph cannot state it: `verify`'s
-        // per-owner size check compares the same arithmetic and refuses the
-        // build. Leave it unstamped rather than trade a silent claim for a
-        // lane divergence whose C side does not compile.
-        if crate::axis_sources::static_op_computed_axis_extent(&self.dag, origin, axis).is_some() {
-            return false;
         }
         self.dag
             .node_mut(origin)
@@ -15745,7 +15870,7 @@ impl<'program> LowerCtx<'program> {
         self.prepare_parameter_witnesses(&params, &formal_types, call_span, true);
         let result = self.lower_expr_with_claim(&elems[3], declared_result.as_ref());
         if let Some(ty) = &declared_result {
-            self.preserve_declared_result(&result, ty);
+            self.preserve_declared_result(&result, ty, None);
         }
         let result = self.retain_invocation_witnesses(result, witness_start);
         self.binding_witnesses = saved_witnesses;
