@@ -3845,19 +3845,61 @@ fn a_result_name_no_parameter_declares_is_not_stamped_as_a_claim() {
 /// than a lock; the two must not share one test, because a lock and a receipt
 /// make opposite claims about whether the behaviour may change.
 ///
-/// EVIDENTIARY STATUS: disposition lock, not a regression test. The behaviour
-/// asserted here is the base behaviour and this change does not alter it; the
-/// row exists so that admitting `stride` has to update this test.
+/// The disposition is LANE-DIVERGENT, and this row records both halves rather
+/// than the evaluator's alone. An unadmitted owner has no guard site, so the
+/// claim is dropped; the evaluator then returns the undeclared extent at exit
+/// zero, while the C binary aborts at `chelis_movement_check_target`, the
+/// movement plan's own target comparison, which names the allocation rather
+/// than the claim and carries no [04-NUM-9] context line. Tracked by
+/// chelis#1931, which must update this row when `stride` is admitted.
+///
+/// An earlier version of this row called `eval_result` only and asserted `ok`
+/// under "an unadmitted op-computed owner is unchanged by this change, not
+/// newly trapping", which reads as "both lanes execute" when one rejects. The
+/// pad row beside it says the combined lock it was split from "ran eval only";
+/// this is the other half of that same observation.
+///
+/// EVIDENTIARY STATUS: disposition lock on both lanes, not a regression test.
+/// Measured at `f45a7848a`: eval exit 0 with
+/// `out = tensor(shape=[3], data=[1.0, 3.0, 5.0])` under a declared
+/// `tensor[2, f32]`, and the linked binary exit 1 with
+/// `Domain: movement target shape mismatch` before
+/// `numeric trap: domain in stride at int64`. This change alters neither.
 #[test]
 fn a_non_unit_stride_op_computed_extent_remains_unadmitted() {
+    assert!(
+        gcc_available(),
+        "this row records a divergence, so neither lane may skip"
+    );
     let dir = tempfile::tempdir().expect("tempdir");
     let source = "def f(x: tensor[rows, f32]) -> tensor[2, f32] = stride(x, 2i64)\n\
                   out = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]))\n";
+
+    // The evaluator half: silently wrong, which is the defect chelis#1931
+    // tracks rather than a behaviour to preserve.
     let (ok, out) = eval_result(&dir, "stride_unadmitted.ch", source);
+    assert!(ok, "eval returns the undeclared extent at exit zero: {out}");
     assert!(
-        ok,
-        "an unadmitted op-computed owner is unchanged by this change, not \
-         newly trapping: {out}"
+        out.contains("out = tensor(shape=[3], data=[1.0, 3.0, 5.0])"),
+        "eval: and the extent is the stride's, not the declared 2: {out}"
+    );
+    assert!(
+        !out.contains("extent `2`"),
+        "eval: with no guard claiming to have checked it: {out}"
+    );
+
+    // The C half: it rejects, but at the movement plan's target check rather
+    // than the claim's guard, so it names neither extent.
+    let (ok, out) = c_run_result(&dir, "stride_unadmitted_c", source);
+    assert!(!ok, "the C binary rejects: {out}");
+    assert!(
+        out.contains("Domain: movement target shape mismatch")
+            && out.contains(&domain_trap_line("stride")),
+        "c: reporting the allocation rather than the claim: {out}"
+    );
+    assert!(
+        !out.contains("extent `2`: claimed = 2, stride axis 0 = 3"),
+        "c: an admitted owner's rendering would replace this one: {out}"
     );
 }
 
@@ -6280,13 +6322,16 @@ fn the_spellings_that_never_tripped_the_bystander_guard_stay_green() {
 // op-computed arm refused the forwarded source outright: the claim was dropped
 // and both lanes returned the extent the operation computed at exit zero.
 //
-// The repair resolves the declared axis to its `ExtentOrigin` with the total
-// resolver `axis_sources::resolve_axis_extent` before dispatching, and runs
-// the op-computed arm against the ORIGIN's node and axis. `spec/04-type-
-// system.md` section 4.7 puts the guard at "the source position of the
-// operation that introduces the guarded extent", which is that origin, so the
-// claim is stamped there as well as on the result and [04-NUM-9]'s `<op>` slot
-// names `shrink`.
+// The repair resolves the declared axis through
+// `axis_sources::op_computed_axis_origin`, which returns the `(node, axis)` of
+// the operation that INTRODUCES the extent, and runs the op-computed arm
+// against that origin. `runtime_extent_slice_b_sources.rs`'s origin-walk row
+// names the two resolvers where they are tested and pins the difference
+// between them; this header names only its own.
+// `spec/04-type-system.md` section 4.7 puts the guard at "the source position
+// of the operation that introduces the guarded extent", which is that origin,
+// so the claim is stamped there as well as on the result and [04-NUM-9]'s
+// `<op>` slot names `shrink`.
 //
 // Both operands of the `add` shrink the SAME extent in every fixture here.
 // Only input 0's origin carries the stamp, and a second operand of a
