@@ -1,7 +1,37 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "bd66d50389a3d3ccde6a7c28182a30efebfdeaadcd017787eccc3f3d51f9c6be",
+  "corpus_sha256": "c5a95d5e4e5fd2bb18ce2e965d9faef24f45b8865c399bc433f1c5eb84983e61",
   "rows": [
+    {
+      "id": "claim.literal.identity_root.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_slice_b.an_identity_body_that_refutes_its_declared_extent_is_rejected_on_both_lanes"
+    },
+    {
+      "id": "claim.literal.identity_root.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_slice_b.an_identity_body_that_refutes_its_declared_extent_is_rejected_on_both_lanes"
+    },
+    {
+      "id": "claim.literal.kernel_entry",
+      "baseline": "rejects_exactly",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_slice_b.a_literal_parameter_extent_keeps_the_checkers_verdict_on_both_lanes"
+    },
+    {
+      "id": "claim.literal.nameless_activation.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_slice_b.a_nameless_activation_that_refutes_its_own_claim_is_rejected_on_both_lanes"
+    },
+    {
+      "id": "claim.literal.nameless_activation.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_slice_b.a_nameless_activation_that_refutes_its_own_claim_is_rejected_on_both_lanes"
+    },
     {
       "id": "claim.literal.nested_and_unused.eval_c",
       "baseline": "silent_unguarded",
@@ -55,6 +85,18 @@
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.an_inlined_root_pass_through_claim_is_guarded_on_both_lanes"
+    },
+    {
+      "id": "claim.named.resolved.inlined_root.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_slice_b.a_resolved_named_claim_the_inlined_body_refutes_is_rejected_on_both_lanes"
+    },
+    {
+      "id": "claim.named.resolved.inlined_root.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_slice_b.a_resolved_named_claim_the_inlined_body_refutes_is_rejected_on_both_lanes"
     },
     {
       "id": "class.load_load.c",
@@ -137,14 +179,14 @@
     {
       "id": "concat.literal_claim.inlined_root.c",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
-      "receipt": "cli_slice_b.a_declared_concat_axis_extent_on_the_dag_path_is_not_guarded_by_this_slice"
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_slice_b.a_declared_concat_axis_extent_an_inlined_root_refutes_is_rejected_on_both_lanes"
     },
     {
       "id": "concat.literal_claim.inlined_root.eval",
       "baseline": "silent_unguarded",
-      "phase_b": "silent_unguarded",
-      "receipt": "cli_slice_b.a_declared_concat_axis_extent_on_the_dag_path_is_not_guarded_by_this_slice"
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_slice_b.a_declared_concat_axis_extent_an_inlined_root_refutes_is_rejected_on_both_lanes"
     },
     {
       "id": "expand.arith_size.named_claim.c",
@@ -399,6 +441,18 @@
       "receipt": "ir_sources.omitted_or_duplicated_output_axis_source_fails_before_emission"
     },
     {
+      "id": "pad.identity_axis.literal_claim.inlined_root.c",
+      "baseline": "ice",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_slice_b.a_zero_padded_identity_axis_a_declaration_refutes_is_rejected_on_both_lanes"
+    },
+    {
+      "id": "pad.identity_axis.literal_claim.inlined_root.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_slice_b.a_zero_padded_identity_axis_a_declaration_refutes_is_rejected_on_both_lanes"
+    },
+    {
       "id": "pad.literal_claim.c",
       "baseline": "lane_divergent",
       "phase_b": "executes_exactly",
@@ -409,6 +463,18 @@
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_non_zero_pad_extent_is_guarded_on_both_lanes"
+    },
+    {
+      "id": "pad.literal_claim.inlined_root.c",
+      "baseline": "lane_divergent",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_slice_b.a_literal_pad_claim_an_inlined_root_refutes_is_rejected_on_both_lanes"
+    },
+    {
+      "id": "pad.literal_claim.inlined_root.eval",
+      "baseline": "lane_divergent",
+      "phase_b": "rejects_exactly",
+      "receipt": "cli_slice_b.a_literal_pad_claim_an_inlined_root_refutes_is_rejected_on_both_lanes"
     },
     {
       "id": "pad.runtime_bound_claim.after_and_named.c",
