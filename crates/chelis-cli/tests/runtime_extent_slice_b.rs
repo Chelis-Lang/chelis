@@ -5932,7 +5932,7 @@ fn a_named_bystander_axis_keeps_its_size_extent_on_c() {
     );
 }
 
-/// expand.named_bystander.axis0.c: the issue's "axis 0 is unaffected" sentence
+/// expand.named_bystander.axis_zero.c: the issue's "axis 0 is unaffected" sentence
 /// is wrong, and this row is the correction.
 ///
 /// EVIDENTIARY STATUS: regression test. On `6abca2406` the build failed with the
