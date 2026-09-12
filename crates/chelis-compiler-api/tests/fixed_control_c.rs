@@ -453,6 +453,19 @@ fn special_words() -> [SpecialWords; 4] {
 }
 
 fn special_word_driver(words: &SpecialWords, labels: &[String], expected: [[u64; 4]; 6]) -> String {
+    let input: [[u64; 4]; 6] =
+        std::array::from_fn(|offset| std::array::from_fn(|i| words.input[(offset + i) % 6]));
+    native_word_driver(words, labels, &input, &expected)
+}
+
+fn native_word_driver(
+    words: &SpecialWords,
+    labels: &[String],
+    input: &[[u64; 4]],
+    expected: &[[u64; 4]],
+) -> String {
+    assert!(!input.is_empty());
+    assert_eq!(input.len(), expected.len());
     let special = if labels.len() == 1 { "x" } else { "weights" };
     assert!(labels.iter().all(|name| name == "x" || name == "weights"));
     let special_slot = labels.iter().position(|name| name == special).unwrap();
@@ -463,24 +476,26 @@ fn special_word_driver(words: &SpecialWords, labels: &[String], expected: [[u64;
             .collect::<Vec<_>>()
             .join(",")
     };
-    let expected = expected
-        .iter()
-        .map(|row| format!("{{{}}}", encode(row)))
-        .collect::<Vec<_>>()
-        .join(",\n");
+    let rows = |values: &[[u64; 4]]| {
+        values
+            .iter()
+            .map(|row| format!("{{{}}}", encode(row)))
+            .collect::<Vec<_>>()
+            .join(",\n")
+    };
     format!(
         r#"
 int main(void) {{
     int64_t n = 4;
-    const {ctype} classes[] = {{{classes}}};
-    const {ctype} expected[6][4] = {{{expected}}};
-    for (int offset = 0; offset < 6; ++offset) {{
+    const {ctype} input_cases[{cases}][4] = {{{input_cases}}};
+    const {ctype} expected[{cases}][4] = {{{expected}}};
+    for (int offset = 0; offset < {cases}; ++offset) {{
         chelis_tensor *inputs[{count}];
         {ctype} original[{count}][4];
         for (int slot = 0; slot < {count}; ++slot) {{
             chelis_scalar elements[4];
             for (int i = 0; i < 4; ++i) {{
-                original[slot][i] = slot == {special_slot} ? classes[(offset+i)%6] : UINT64_C(0x{one:x});
+                original[slot][i] = slot == {special_slot} ? input_cases[offset][i] : UINT64_C(0x{one:x});
                 elements[i] = chelis_scalar_from_bits({tag}, original[slot][i]);
             }}
             inputs[slot] = chelis_alloc(1, &n, {tag});
@@ -509,7 +524,9 @@ int main(void) {{
 }}
 "#,
         ctype = words.ctype,
-        classes = encode(&words.input),
+        cases = input.len(),
+        input_cases = rows(input),
+        expected = rows(expected),
         count = labels.len(),
         tag = words.tag,
         one = words.one
@@ -537,53 +554,58 @@ fn corrupt_contiguous_dropout(
     source.replacen(lines[0], &replacement, 1)
 }
 
+fn source_ad_plan(prim: Prim, rate: &str) -> (EvaluationPlan, chelis_ir::dag::NodeId) {
+    use chelis_ir::evaluation::RandomSite;
+    let dtype = prim.name();
+    let source = format!(
+        "def sample(x: tensor[4, {dtype}], weights: tensor[4, {dtype}]) -> tensor[4, {dtype}] = with seed(42i64) {{\n loss = fn (v: tensor[4, {dtype}]) -> tensor_to_scalar(sum(mul(dropout(v, {rate}{dtype}), weights), 0i32))\n grad(loss)(x)\n}}\n"
+    );
+    let inputs = ["x", "weights"]
+        .into_iter()
+        .map(|name| {
+            (
+                name.into(),
+                TensorType {
+                    dims: vec![DimInfo::Lit(4)],
+                    precision: prim,
+                },
+            )
+        })
+        .collect();
+    let plan = checked_body_plan(
+        &source,
+        inputs,
+        &RandomExecutionContext::new(RandomLoweringState {
+            seed: Some(7),
+            counter: 13,
+        }),
+    );
+    let replay = plan
+        .clone()
+        .verify_ownership()
+        .unwrap()
+        .with_emission(|owned, execution| {
+            let sites = owned
+                .emission()
+                .nodes()
+                .iter()
+                .filter_map(|node| execution.site(node.id).map(|site| (node.id, site)))
+                .collect::<Vec<_>>();
+            match sites.as_slice() {
+                [
+                    (_, RandomSite::Forward { draw: forward, .. }),
+                    (node, RandomSite::Replay { draw }),
+                ] if draw == forward => *node,
+                other => panic!("actual forward/replay pair: {other:?}"),
+            }
+        });
+    (plan, replay)
+}
+
 #[test]
 fn native_source_ad_replays_signed_and_nonfinite_stored_words() {
-    use chelis_ir::evaluation::RandomSite;
     for words in special_words() {
-        let dtype = words.prim.name();
-        let source = format!(
-            "def sample(x: tensor[4, {dtype}], weights: tensor[4, {dtype}]) -> tensor[4, {dtype}] = with seed(42i64) {{\n loss = fn (v: tensor[4, {dtype}]) -> tensor_to_scalar(sum(mul(dropout(v, 0.5{dtype}), weights), 0i32))\n grad(loss)(x)\n}}\n"
-        );
-        let inputs = ["x", "weights"]
-            .into_iter()
-            .map(|name| {
-                (
-                    name.into(),
-                    TensorType {
-                        dims: vec![DimInfo::Lit(4)],
-                        precision: words.prim,
-                    },
-                )
-            })
-            .collect();
-        let plan = checked_body_plan(
-            &source,
-            inputs,
-            &RandomExecutionContext::new(RandomLoweringState {
-                seed: Some(7),
-                counter: 13,
-            }),
-        );
-        let replay = plan
-            .clone()
-            .verify_ownership()
-            .unwrap()
-            .with_emission(|owned, execution| {
-                let sites = owned
-                    .emission()
-                    .nodes()
-                    .iter()
-                    .filter_map(|node| execution.site(node.id).map(|site| (node.id, site)))
-                    .collect::<Vec<_>>();
-                match sites.as_slice() {
-                    [
-                        (_, RandomSite::Forward { draw: forward, .. }),
-                        (node, RandomSite::Replay { draw }),
-                    ] if draw == forward => *node,
-                    other => panic!("actual forward/replay pair: {other:?}"),
-                }
-            });
+        let (plan, replay) = source_ad_plan(words.prim, "0.5");
         let artifact = chelis_backend_c::codegen_evaluation_with_options(
             plan.verify_ownership().unwrap(),
             "sample",
@@ -683,6 +705,197 @@ fn native_special_words_reject_mask_sign_and_nan_corruption() {
                     )
                 });
                 assert_native_value_failure(&nan, &driver);
+            }
+        }
+    }
+}
+
+#[test]
+fn native_source_ad_replay_finalizes_nonbinary_rate_division() {
+    // [05-OP-37]/[04-NUM-8]/spec06 §2.4: finalized denominator then
+    // division, not a precomputed reciprocal or a different-width divisor.
+    // Independent rational-RNE witnesses: two positive cotangents and their
+    // div results, followed by rate/denominator/reciprocal at arithmetic width.
+    // The reciprocal itself has first been finalized to operand storage.
+    let cases = [
+        (
+            [0x3c05, 0x3c06],
+            [0x3c77, 0x3c79],
+            0x3dccc000,
+            0x3f666000,
+            0x3f8e4000,
+        ),
+        (
+            [0x3f81, 0x3f81],
+            [0x3f90, 0x3f90],
+            0x3dcd0000,
+            0x3f660000,
+            0x3f8e0000,
+        ),
+        (
+            [0x3f800005, 0x3f800007],
+            [0x3f8e38e9, 0x3f8e38ec],
+            0x3dcccccd,
+            0x3f666666,
+            0x3f8e38e4,
+        ),
+        (
+            [0x3ff0000000000005, 0x3ff0000000000000],
+            [0x3ff1c71c71c71c77, 0x3ff1c71c71c71c72],
+            0x3fb999999999999a,
+            0x3feccccccccccccd,
+            0x3ff1c71c71c71c72,
+        ),
+    ];
+    for (words, (input, result, rate, denominator, reciprocal)) in
+        special_words().into_iter().zip(cases)
+    {
+        let literal = |bits: u64| {
+            if words.prim == Prim::F64 {
+                format!("chelis_f64_from_bits(UINT64_C(0x{bits:016x}))")
+            } else {
+                format!("chelis_f32_from_bits(0x{bits:08x}u)")
+            }
+        };
+        let signs = |values: [u64; 2]| {
+            [
+                values[0],
+                values[0] | words.input[0],
+                values[1],
+                values[1] | words.input[0],
+            ]
+        };
+        let input = signs(input);
+        let result = signs(result);
+        let input: [[u64; 4]; 4] =
+            std::array::from_fn(|offset| std::array::from_fn(|i| input[(offset + i) % 4]));
+        // Independently calculated seed42/ordinal0 rate .1 mask: K K K D.
+        // These finite nonzero cotangents are unchanged by either +0 base.
+        let expected: [[u64; 4]; 4] = std::array::from_fn(|offset| {
+            std::array::from_fn(|i| if i == 3 { 0 } else { result[(offset + i) % 4] })
+        });
+        let (plan, replay) = source_ad_plan(words.prim, "0.1");
+        let artifact = chelis_backend_c::codegen_evaluation_with_options(
+            plan.verify_ownership().unwrap(),
+            "sample",
+            Default::default(),
+        )
+        .unwrap();
+        let mut labels = artifact.input_labels.clone();
+        labels.sort();
+        assert_eq!(labels, ["weights", "x"]);
+        let driver = native_word_driver(&words, &artifact.input_labels, &input, &expected);
+        ownership_support::balanced(&ownership_support::run(&artifact.c_source, &driver));
+
+        let denominator = literal(denominator);
+        let reciprocal = literal(reciprocal);
+        let multiplied = corrupt_contiguous_dropout(&artifact.c_source, replay, |line| {
+            line.replace(&format!(" / {denominator}"), &format!(" * {reciprocal}"))
+        });
+        assert_native_value_failure(&multiplied, &driver);
+
+        let wrong_divisor = match words.prim {
+            // Omit the required f16/bf16 denominator storage finalization.
+            Prim::F16 | Prim::Bf16 => format!("(1.0f - {})", literal(rate)),
+            // Compute denominator and division at f64, then narrow at store.
+            Prim::F32 => format!("(1.0 - (double){})", literal(rate)),
+            // Incorrectly funnel the f64 denominator through f32.
+            Prim::F64 => format!("((double)(float){denominator})"),
+            _ => unreachable!(),
+        };
+        let divisor = corrupt_contiguous_dropout(&artifact.c_source, replay, |line| {
+            line.replace(&format!(" / {denominator}"), &format!(" / {wrong_divisor}"))
+        });
+        assert_native_value_failure(&divisor, &driver);
+    }
+}
+
+#[test]
+fn native_mask_threshold_uses_arithmetic_width_and_strict_less_than() {
+    // [05-RNG-1]/[05-OP-37]: compare the exact arithmetic-width unit,
+    // neither its pre-width rational value nor a storage-width surrogate.
+    // Inverting [05-RNG-1]'s bijective map gives ordinal0/index0 words
+    // 7fffffffffffffff, 8000000000000000, 8000000000000800, 7fff000000000000.
+    // Units are .5-2^-53, .5, .5+2^-53, .5-2^-16 respectively. The first
+    // and third round to .5 at f32; only the last storage-rounds to .5 at
+    // f16/bf16 while staying strictly below at their f32 arithmetic width.
+    let cases = [
+        (
+            7396636047707789066_i64,
+            [true, false, true, true],
+            [false, false, true, true],
+        ),
+        (
+            4901139120565445618_i64,
+            [true, false, true, false],
+            [true, false, true, false],
+        ),
+        (
+            6117835775437243522_i64,
+            [true, false, false, false],
+            [true, false, false, false],
+        ),
+        (3386422020048024308_i64, [false; 4], [false; 4]),
+    ];
+    for (words, two) in
+        special_words()
+            .into_iter()
+            .zip([0x4000, 0x4000, 0x40000000, 0x4000000000000000])
+    {
+        for (case, (seed, narrow_mask, wide_mask)) in cases.into_iter().enumerate() {
+            let dtype = words.prim.name();
+            let source = format!(
+                "(handle-effect {{effect: random}} (lit {{type: (t-prim {{}} int64)}} {seed}) (app {{}} (var {{}} dropout) (var {{}} x) (lit {{type: (t-prim {{}} {dtype})}} 0.5)))"
+            );
+            let plan = plan(&source, words.prim, 4);
+            let node = plan.dag_for_inspection().roots()[0];
+            let artifact = chelis_backend_c::codegen_evaluation_with_options(
+                plan.verify_ownership().unwrap(),
+                "sample",
+                Default::default(),
+            )
+            .unwrap();
+            assert_eq!(artifact.input_labels, ["x"]);
+            let mask = if words.prim == Prim::F64 {
+                wide_mask
+            } else {
+                narrow_mask
+            };
+            let input = [[words.one, words.input[1], words.one, words.input[1]]];
+            let expected = [std::array::from_fn(|i| {
+                if mask[i] {
+                    if i % 2 == 0 { two } else { words.doubled[1] }
+                } else {
+                    0
+                }
+            })];
+            let driver = native_word_driver(&words, &artifact.input_labels, &input, &expected);
+            ownership_support::balanced(&ownership_support::run(&artifact.c_source, &driver));
+            if case == 1 {
+                let inclusive = corrupt_contiguous_dropout(&artifact.c_source, node, |line| {
+                    line.replace(" < ", " <= ")
+                });
+                assert_native_value_failure(&inclusive, &driver);
+            }
+            if case == 0 {
+                let (from, to) = if words.prim == Prim::F64 {
+                    ("chelis_dropout_unit(", "chelis_dropout_unit_f32(")
+                } else {
+                    ("chelis_dropout_unit_f32(", "chelis_dropout_unit(")
+                };
+                let width = corrupt_contiguous_dropout(&artifact.c_source, node, |line| {
+                    line.replace(from, to)
+                });
+                assert_native_value_failure(&width, &driver);
+            }
+            if case == 3 && matches!(words.prim, Prim::F16 | Prim::Bf16) {
+                let unit =
+                    "chelis_dropout_unit_f32(__chelis_draw_seed_0, __chelis_draw_ordinal_0, i)";
+                let rounded = format!("chelis_{dtype}_to_f32(chelis_f32_to_{dtype}({unit}))");
+                let storage = corrupt_contiguous_dropout(&artifact.c_source, node, |line| {
+                    line.replace(unit, &rounded)
+                });
+                assert_native_value_failure(&storage, &driver);
             }
         }
     }
