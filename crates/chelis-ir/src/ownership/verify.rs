@@ -597,20 +597,35 @@ fn site_error(index: usize, detail: &'static str) -> OwnershipError {
 /// ownership IR or the site builder. This is deliberately a second traversal
 /// over the retained emission payload: verification would be circular if it
 /// derived its expected sites from the lowering result it is checking.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ExpectedHostSite {
+#[derive(Debug, Clone, Copy)]
+struct ExpectedHostSite<'a> {
     unit: usize,
     kind: super::ir::HostSiteKind,
+    #[cfg(feature = "lowering-trace")]
+    expression: Option<&'a ConcreteHostExpr>,
+    #[cfg(feature = "lowering-trace")]
+    seed_parent: Option<usize>,
+    #[cfg(not(feature = "lowering-trace"))]
+    source_lifetime: std::marker::PhantomData<&'a ()>,
 }
 
-fn expected_site(unit: usize, kind: super::ir::HostSiteKind) -> ExpectedHostSite {
-    ExpectedHostSite { unit, kind }
+fn expected_site(unit: usize, kind: super::ir::HostSiteKind) -> ExpectedHostSite<'static> {
+    ExpectedHostSite {
+        unit,
+        kind,
+        #[cfg(feature = "lowering-trace")]
+        expression: None,
+        #[cfg(feature = "lowering-trace")]
+        seed_parent: None,
+        #[cfg(not(feature = "lowering-trace"))]
+        source_lifetime: std::marker::PhantomData,
+    }
 }
 
-fn census_host_payload(
-    host: &ConcreteHostProgram,
+fn census_host_payload<'a>(
+    host: &'a ConcreteHostProgram,
     manifest: &RootManifest,
-) -> Result<Vec<ExpectedHostSite>, OwnershipError> {
+) -> Result<Vec<ExpectedHostSite<'a>>, OwnershipError> {
     let mut sites = Vec::new();
     for binding in &host.globals {
         sites.push(expected_site(0, super::ir::HostSiteKind::Binding));
@@ -671,15 +686,23 @@ fn census_host_payload(
     Ok(sites)
 }
 
-fn census_host_expr(
-    expr: &ConcreteHostExpr,
-    helpers: &[HostTensorHelper],
+fn census_host_expr<'a>(
+    expr: &'a ConcreteHostExpr,
+    helpers: &'a [HostTensorHelper],
     unit: usize,
-    sites: &mut Vec<ExpectedHostSite>,
+    sites: &mut Vec<ExpectedHostSite<'a>>,
 ) -> Result<(), OwnershipError> {
     use super::ir::HostSiteKind;
 
-    sites.push(expected_site(unit, HostSiteKind::Expression));
+    #[cfg(feature = "lowering-trace")]
+    let start = sites.len();
+    let expression_site = expected_site(unit, HostSiteKind::Expression);
+    #[cfg(feature = "lowering-trace")]
+    let expression_site = ExpectedHostSite {
+        expression: Some(expr),
+        ..expression_site
+    };
+    sites.push(expression_site);
     match &expr.kind {
         ConcreteHostExprKind::Int(_)
         | ConcreteHostExprKind::Float(_)
@@ -815,14 +838,45 @@ fn census_host_expr(
             }
         }
     }
+    #[cfg(feature = "lowering-trace")]
+    if matches!(expr.kind, ConcreteHostExprKind::WithSeed { .. }) {
+        for child in &mut sites[start + 1..] {
+            child.seed_parent.get_or_insert(start);
+        }
+    }
     Ok(())
 }
 
-fn census_host_callback(
-    callback: &ConcreteHostCallback,
-    helpers: &[HostTensorHelper],
+/// Project only the already-verified, retained source-structural census. No
+/// emitted spelling or separately supplied source may construct this cursor.
+#[cfg(feature = "lowering-trace")]
+pub(super) fn source_expressions(
+    emission: super::VerifiedHostEmission<'_>,
+) -> Vec<super::VerifiedHostSourceSite<'_>> {
+    let expected = census_host_payload(&emission.payload.program, &emission.payload.manifest)
+        .expect("verified host payload census");
+    expected
+        .into_iter()
+        .zip(emission.sites())
+        .filter_map(|(expected, site)| {
+            expected
+                .expression
+                .map(|expression| super::VerifiedHostSourceSite {
+                    site,
+                    expression,
+                    seed_parent: expected
+                        .seed_parent
+                        .map(|index| emission.sites.records[index].id),
+                })
+        })
+        .collect()
+}
+
+fn census_host_callback<'a>(
+    callback: &'a ConcreteHostCallback,
+    helpers: &'a [HostTensorHelper],
     unit: usize,
-    sites: &mut Vec<ExpectedHostSite>,
+    sites: &mut Vec<ExpectedHostSite<'a>>,
 ) -> Result<(), OwnershipError> {
     match &callback.kind {
         ConcreteHostCallbackKind::Named { .. } => Ok(()),

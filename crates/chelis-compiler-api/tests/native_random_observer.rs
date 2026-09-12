@@ -6,9 +6,7 @@ mod ownership_support;
 
 use serde_json::{Value, json};
 
-fn observed_source() -> String {
-    ownership_support::emit_selected(
-        r#"
+const OBSERVED_SOURCE: &str = r#"
 def fixed_loss(x: tensor[4, f32]) -> f32 = with seed(7i64) {
   tensor_to_scalar(sum(dropout(x, 0.5f32), 0))
 }
@@ -19,9 +17,420 @@ def run(x: tensor[4, f32]) -> (tensor[4, f32], tensor[4, f32], tensor[4, f32]) =
   following = dropout(x, 0.5f32)
   (replayed, nested, following)
 }
+"#;
+
+fn observed_source() -> String {
+    ownership_support::emit_selected(OBSERVED_SOURCE, "run")
+}
+
+#[test]
+fn host_source_identity_qualifies_nested_and_following_helper_occurrences() {
+    let source = observed_source();
+    let driver = driver(
+        17,
+        r#"
+    if (event->kind != __CHELIS_RANDOM_OBSERVER_INVOCATION_INIT) {
+        assert(event->source != NULL);
+        assert(event->source_certified);
+        if (event->identity == __CHELIS_RANDOM_OBSERVER_FIXED_IDENTITY) {
+            assert(event->calls != NULL);
+            assert(event->has_full_source);
+            assert(event->calls->source == event->source);
+        }
+    }
+    return json_sink(context, event);
 "#,
-        "run",
-    )
+    );
+    let (ledger, stdout) = ownership_support::run_with_stdout(&source, &driver);
+    ownership_support::balanced(&ledger);
+    let rows: Vec<Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(rows, expected_rows());
+}
+
+// Retained compiler metadata is the association authority, never a C label or
+// a guessed Resource offset. This is deliberately not a second RNG machine.
+fn with_source_metadata(source: &str) -> (String, Value) {
+    use chelis_compiler_api::compiler::compile_for_execution_with_observer;
+    use chelis_compiler_api::emission_observer::SelectedEmission;
+    use chelis_compiler_api::schema::{CompileRequest, CompileTarget, SourceKind};
+    use chelis_ir::host::ConcreteHostExprKind as E;
+    use chelis_ir::lowering_trace::FullSourceKind as F;
+    let mut metadata = serde_json::Map::new();
+    let artifact = compile_for_execution_with_observer(CompileRequest {
+        source_kind: SourceKind::Surf, source: source.into(), target: CompileTarget::C, entry_name: Some("run".into()),
+    }, &mut |observation| {
+        let SelectedEmission::Host(host) = observation.selected else { panic!("host fixture"); };
+        for site in host.source_expressions() {
+            let (kind, target, seed) = match &site.expression().kind {
+                E::WithSeed { seed, .. } => { let E::Int(seed) = seed.kind else { continue }; (1, 0, seed as u64) },
+                E::Call { .. } => (2, site.direct_callee_word().unwrap_or(0), 0),
+                E::TensorCall { helper, .. } => (3, *helper, 0),
+                _ => continue,
+            };
+            let mut full = Vec::new();
+            if kind == 3 && let Some(execution) = host.function(site.unit_word() - 1).unwrap().tensor_helper(target).unwrap().execution() {
+                let complete = execution.full_source();
+                for source in complete.source {
+                    let legacy = execution.source().iter().find_map(|legacy| {
+                        use chelis_ir::execution_spine::SourceKind as L;
+                        let matches = match (&source.kind, legacy.kind) {
+                            (F::Forward { node: a, draw: b, scope: c }, L::Forward { node, draw, scope }) => *a == node && *b == draw && *c == scope,
+                            (F::Control(a), L::Control(b)) => *a == b,
+                            _ => false,
+                        };
+                        matches.then(|| legacy.id.index().to_string())
+                    });
+                    let mut entry = match source.kind {
+                        F::Forward { draw, scope, .. } => json!(["forward", draw.index().to_string(), scope.index().to_string(), source.id.0.to_string()]),
+                        F::Control(chelis_ir::execution_spine::Control::Enter { scope, .. }) => json!(["fixed_enter", null, scope.index().to_string(), source.id.0.to_string()]),
+                        F::Control(chelis_ir::execution_spine::Control::Leave { scope }) => json!(["fixed_leave", null, scope.index().to_string(), source.id.0.to_string()]),
+                        F::Requirement(device) => json!(["resource", device, null, source.id.0.to_string()]),
+                    };
+                    entry.as_array_mut().unwrap().push(json!(legacy));
+                    full.push(entry);
+                }
+            }
+            metadata.insert(site.site_word().to_string(), json!({
+                "descriptor": [site.unit_word().to_string(), site.site_word().to_string(), kind.to_string(), target.to_string()],
+                "seed": seed.to_string(), "parent": site.seed_parent_word().map(|s| s.to_string()), "full": full,
+            }));
+        }
+    }).unwrap();
+    let c = artifact
+        .compile_result
+        .files
+        .into_iter()
+        .find(|f| f.path.ends_with(".c"))
+        .unwrap()
+        .contents;
+    (c, Value::Object(metadata))
+}
+
+const SOURCE_SINK: &str = r#"
+static int put_source(FILE *out, const __chelis_random_source_site *source) {
+    if (source == NULL) return fputs("null", out) < 0 ? -1 : 0;
+    return fprintf(out, "[\"%" PRIu64 "\",\"%" PRIu64 "\",\"%d\",\"%" PRIu64 "\"]", source->unit.value, source->site.value, source->kind, source->target.value) < 0 ? -1 : 0;
+}
+static int source_sink(void *context, const __chelis_random_observer_event *event) {
+    FILE *out = context;
+    if (json_sink(context, event)) return -1;
+    if (fprintf(out, "{\"certified\":%s,\"source\":", event->source_certified ? "true" : "false") < 0 || put_source(out, event->source) || fputs(",\"calls\":[", out) < 0) return -1;
+    int first = 1;
+    for (const __chelis_random_call_frame *frame = event->calls; frame != NULL; frame = frame->previous) {
+        if (!first && fputc(',', out) == EOF) return -1;
+        first = 0;
+        if (put_source(out, frame->source)) return -1;
+    }
+    if (fputs("],\"host\":", out) < 0 || put_source(out, event->host_scope == NULL ? NULL : event->host_scope->source) || fputs(",\"full\":", out) < 0) return -1;
+    if (event->has_full_source ? put_u64(out, event->full_source) : fputs("null", out) < 0) return -1;
+    return fprintf(out, ",\"inherited\":%s}\n", event->scope_is_inherited ? "true" : "false") < 0 ? -1 : 0;
+}
+"#;
+
+fn source_rows(c: &str, repeat: bool) -> Vec<(Value, Value)> {
+    let driver = format!(
+        r#"
+{JSON_SINK}
+{SOURCE_SINK}
+int main(void) {{
+    chelis_tensor *x = input(4);
+    for (int i = 0; i < {}; ++i) {{
+        chelis_tuple *result = __chelis_observed_run(x, source_sink, stdout, 17ULL + (uint64_t)i);
+        chelis_tuple_release(result);
+    }}
+    chelis_tensor_release(x);
+    return 0;
+}}
+"#,
+        if repeat { 2 } else { 1 }
+    );
+    let (ledger, stdout) = ownership_support::run_with_stdout(c, &driver);
+    ownership_support::balanced(&ledger);
+    let values: Vec<Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(values.len() % 2, 0);
+    values
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|v| (v[0].clone(), v[1].clone()))
+        .collect()
+}
+
+fn associations_match(rows: &[(Value, Value)], metadata: &Value) -> bool {
+    rows.iter().all(|(row, identity)| {
+        if row["event"] == "invocation_init" {
+            return identity["source"].is_null() && !identity["certified"].as_bool().unwrap();
+        }
+        if identity["certified"] != true {
+            return false;
+        }
+        let Some(id) = identity["source"][1].as_str() else {
+            return false;
+        };
+        let Some(site) = metadata.get(id) else {
+            return false;
+        };
+        if site["descriptor"] != identity["source"] {
+            return false;
+        }
+        let calls = identity["calls"].as_array().unwrap();
+        if calls.iter().any(|call| {
+            call[1]
+                .as_str()
+                .and_then(|id| metadata.get(id))
+                .is_none_or(|s| s["descriptor"] != *call)
+        }) {
+            return false;
+        }
+        if calls
+            .windows(2)
+            .any(|pair| pair[1][2] != "2" || pair[1][3] != pair[0][0])
+        {
+            return false;
+        }
+        if row["identity"] == "fixed" {
+            if calls.first() != Some(&identity["source"]) || identity["source"][2] != "3" {
+                return false;
+            }
+            let event = if row["event"] == "replay" {
+                "forward"
+            } else {
+                row["event"].as_str().unwrap()
+            };
+            let matching: Vec<_> = site["full"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|entry| {
+                    entry[0] == event
+                        && entry[1] == row["draw"]["u64"]
+                        && entry[2] == row["scope"]["u64"]
+                })
+                .collect();
+            if matching.len() != 1 || matching[0][3] != identity["full"]["u64"] {
+                return false;
+            }
+            if row["event"] == "replay" {
+                if !row["occurrence"].is_null() {
+                    return false;
+                }
+            } else if matching[0][4] != row["occurrence"]["u64"] {
+                return false;
+            }
+            if !site["parent"].is_null() && identity["host"][1] != site["parent"] {
+                return false;
+            }
+        } else {
+            if identity["source"][2] != "1" {
+                return false;
+            }
+            if row["event"] == "host_install"
+                && (row["state"]["seed"]["u64"] != site["seed"]
+                    || identity["host"] != identity["source"])
+            {
+                return false;
+            }
+            if row["event"] == "host_restore"
+                && !site["parent"].is_null()
+                && identity["host"][1] != site["parent"]
+            {
+                return false;
+            }
+        }
+        true
+    })
+}
+
+#[test]
+fn retained_full_source_ids_survive_resource_offsets_and_reject_association_mutants() {
+    let input = OBSERVED_SOURCE
+        .replace(
+            "with seed(7i64)",
+            "with device(\"cpu:identity-fixture\") { with seed(7i64)",
+        )
+        .replace("\n}\n\ndef run", "\n}}\n\ndef run");
+    let (c, metadata) = with_source_metadata(&input);
+    let rows = source_rows(&c, true);
+    assert_eq!(rows.len(), 22);
+    assert!(metadata.as_object().unwrap().values().any(|site| {
+        site["full"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event[0] == "resource")
+    }));
+    assert!(associations_match(&rows, &metadata));
+    assert_eq!(rows[3].1["full"], tagged(2)); // independently retained Resource, enter, draw
+    assert_eq!(rows[3].1["inherited"], false);
+    assert_eq!(rows[7].1["inherited"], true);
+    for (label, index, field, replacement) in [
+        ("wrong full source", 3, "full", tagged(0)),
+        ("missing call", 3, "calls", json!([])),
+        (
+            "wrong host occurrence",
+            1,
+            "source",
+            rows[6].1["source"].clone(),
+        ),
+        (
+            "wrong helper with equal local draw",
+            7,
+            "source",
+            rows[9].1["source"].clone(),
+        ),
+        (
+            "wrong inherited host scope",
+            7,
+            "host",
+            rows[9].1["host"].clone(),
+        ),
+    ] {
+        let mut mutant = rows.clone();
+        mutant[index].1[field] = replacement;
+        assert!(!associations_match(&mutant, &metadata), "{label}");
+    }
+    assert_eq!(rows[0].0["invocation"], tagged(17));
+    assert_eq!(rows[11].0["invocation"], tagged(18));
+    assert_eq!(rows[11].0["sequence"], tagged(0));
+    for (field, replacement) in [
+        ("occurrence", tagged(99)),
+        ("draw", Value::Null),
+        ("scope", tagged(99)),
+    ] {
+        let mut mutant = rows.clone();
+        mutant[3].0[field] = replacement;
+        assert!(
+            !associations_match(&mutant, &metadata),
+            "wrong/missing legacy {field}"
+        );
+    }
+
+    // Both following helpers have local occurrence/draw 0. The actual callee
+    // must still reject a different helper slot as its source authority.
+    let helper = &rows[7].1["source"];
+    let guard = format!(
+        "call->source->unit.value == {}ULL && call->source->target.value == {}ULL",
+        helper[0].as_str().unwrap(),
+        helper[3].as_str().unwrap()
+    );
+    assert_eq!(c.matches(&guard).count(), 1);
+    let mutant = c.replace(
+        &guard,
+        &guard.replace(
+            &format!("target.value == {}ULL", helper[3].as_str().unwrap()),
+            "target.value == 999ULL",
+        ),
+    );
+    ownership_support::run_expect_failure(
+        &mutant,
+        &driver(
+            17,
+            "assert(event->kind == __CHELIS_RANDOM_OBSERVER_INVOCATION_INIT || event->source_certified); return json_sink(context, event);",
+        ),
+    );
+}
+
+#[test]
+fn repeated_direct_callees_keep_linked_identity_and_restore_the_call_stack() {
+    let input = r#"
+def fixed_loss(x: tensor[4, f32]) -> f32 = with seed(7i64) { tensor_to_scalar(sum(dropout(x, 0.5f32), 0)) }
+def leaf(x: tensor[4, f32]) -> (tensor[4, f32], tensor[4, f32]) = {
+ replayed = grad(fixed_loss)(x)
+ next = dropout(x, 0.5f32)
+ (replayed, next)
+}
+def middle(x: tensor[4, f32]) -> (tensor[4, f32], tensor[4, f32]) = leaf(x)
+def run(x: tensor[4, f32]) -> ((tensor[4, f32], tensor[4, f32]), (tensor[4, f32], tensor[4, f32]), tensor[4, f32]) = with seed(42i64) {
+ ax = copy(x)
+ bx = copy(x)
+ a = middle(ax)
+ b = with seed(99i64) { middle(bx) }
+ c = dropout(x, 0.5f32)
+ (a, b, c)
+}
+"#;
+    let (c, metadata) = with_source_metadata(input);
+    let rows = source_rows(&c, true);
+    assert!(associations_match(&rows, &metadata), "{rows:#?}");
+    let forwards: Vec<_> = rows
+        .iter()
+        .filter(|(r, _)| r["event"] == "forward" && r["invocation"] == tagged(17))
+        .collect();
+    assert_eq!(forwards.len(), 5);
+    for ((row, _), (seed, counter)) in
+        forwards
+            .iter()
+            .zip([(7, 0), (42, 0), (7, 0), (99, 0), (42, 1)])
+    {
+        assert_eq!(
+            row["used"],
+            json!({"seed": tagged(seed), "counter": tagged(counter)})
+        );
+    }
+    assert_eq!(
+        forwards[0].1["source"], forwards[2].1["source"],
+        "same actual helper"
+    );
+    assert_eq!(forwards[0].1["calls"].as_array().unwrap().len(), 3);
+    assert_ne!(
+        forwards[0].1["calls"][2], forwards[2].1["calls"][2],
+        "distinct source call sites"
+    );
+    assert_eq!(
+        forwards[4].1["calls"].as_array().unwrap().len(),
+        1,
+        "both direct-call frames restored"
+    );
+    assert_eq!(
+        forwards[4].0["used"],
+        json!({"seed": tagged(42), "counter": tagged(1)})
+    );
+    assert_eq!(forwards[4].0["state"], state(Some((42, 2))));
+    assert_eq!(rows.last().unwrap().0["state"], state(None));
+    let callee = forwards[0].1["calls"][1][3].as_str().unwrap();
+    let guard = format!("__chelis_random_push_function(__chelis_observer, {callee}ULL,");
+    assert_eq!(c.matches(&guard).count(), 1);
+    let wrong_callee = c.replace(
+        &guard,
+        "__chelis_random_push_function(__chelis_observer, 999ULL,",
+    );
+    ownership_support::run_expect_failure(
+        &wrong_callee,
+        &driver(
+            17,
+            "assert(event->kind == __CHELIS_RANDOM_OBSERVER_INVOCATION_INIT || event->source_certified); return json_sink(context, event);",
+        ),
+    );
+}
+
+#[test]
+fn unsupported_argument_effects_cannot_certify_descendant_calls() {
+    let input = r#"
+def loss(x: tensor[4, f32]) -> f32 = tensor_to_scalar(sum(x, 0))
+def leaf(x: tensor[4, f32]) -> (tensor[4, f32], tensor[4, f32]) = (dropout(x, 0.5f32), grad(loss)(x))
+def run(x: tensor[4, f32]) -> (tensor[4, f32], tensor[4, f32]) = with seed(42i64) {
+ leaf(with seed(99i64) { dropout(x, 0.5f32) })
+}
+"#;
+    let (c, _) = with_source_metadata(input);
+    let rows = source_rows(&c, false);
+    assert!(
+        rows.iter()
+            .filter(|(row, _)| row["event"] == "forward")
+            .count()
+            >= 2
+    );
+    assert!(
+        rows.iter()
+            .all(|(_, identity)| identity["certified"] == false)
+    );
+    assert_eq!(rows.last().unwrap().0["state"], state(None));
 }
 
 #[test]

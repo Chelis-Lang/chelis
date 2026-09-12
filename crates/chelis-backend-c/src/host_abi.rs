@@ -94,6 +94,11 @@ pub(crate) struct ProjectedHostSite<'a> {
 }
 
 impl<'a> ProjectedHostProgram<'a> {
+    #[cfg(feature = "native-random-observer")]
+    pub(crate) fn source_emission(&self) -> VerifiedHostEmission<'a> {
+        self.emission
+    }
+
     pub(crate) fn program(&self) -> &HostAbiProgram {
         &self.program
     }

@@ -91,11 +91,34 @@ instrumentation as a change to runtime arithmetic.
 
 Fixed events identify the lowering-selected helper producer and retain its
 producer-owned occurrence, draw, and scope IDs where applicable. Replay has no
-second source occurrence. Host `WithSeed` currently has only span provenance,
-which is not an occurrence authority, so its events say
-`HOST_IDENTITY_UNSUPPORTED` and carry no manufactured source ID. Native-to-source
-matching across that boundary therefore remains unsupported until lowering
-owns an unambiguous mapping.
+second source occurrence. The original `identity`/occurrence/draw/scope fields
+remain unchanged, including the legacy `HOST_IDENTITY_UNSUPPORTED` label: no
+Random-only occurrence number is manufactured for a host control.
+
+An additive `source`/`calls`/`host_scope` carrier now associates admitted host
+controls and helper calls with the retained `ConcreteHostExpr` census at its
+ownership-verified `HostSiteId`, before ABI erasure. Unit, host-site, helper,
+legacy occurrence, full `SourceEventId`, draw and scope namespaces stay distinct.
+Seed install/restore share a host site and are distinguished by event kind.
+Linked invocation-owned call frames distinguish repeated calls to the same
+callee/helper; the emitted callee checks its actual sealed unit/helper slot.
+The full/legacy helper join compares source kinds and retains Resource offsets;
+Resource admission is compile-time context, not an invented native checkpoint.
+Replay points to its forward full source ID without becoming a new occurrence.
+`scope_is_inherited` distinguishes the helper owner's caller scope from its
+local scopes; `host_scope` carries the actual linked host handler/call context.
+
+The closed admission is straight-line lets/tuples, literal host seeds, and
+verified static direct/helper calls with value-only arguments (including explicit
+copies and scalar casts, neither of which consumes Random). Branches, loops,
+dynamic seeds and effectful call arguments remain uncertified, not newly
+rejected by ordinary compilation. Unsupported call frames remain unsupported
+through descendants, and call/handler contexts restore on return. A consumer
+must require `source_certified`, not merely a non-null descriptor. This flag
+asserts only this verified source-structural association: `ConcreteHostExpr` is
+not a Surf elaboration proof, and source hashes/C labels do not prove semantics.
+All linked frame pointers must be copied synchronously; no reusable artifact
+authentication, failure-prefix, full R2/R5, or native nonwrapping theorem follows.
 
 The sink is called synchronously and may copy or stream the bounded event; the
 generated observer retains no history and performs no allocation. A null sink
@@ -120,6 +143,15 @@ default-feature backend test separately locks the absence of observer vocabulary
 from emitted C; the feature-on suite also executes the ordinary public wrapper
 and requires that it emit no observation.
 
+Additional actual-C cases compare the selected source census with Resource/full
+IDs, nested/repeated direct callees, restored call stacks, and a following actual
+draw. They reject wrong host/helper/full/scope associations, missing calls and a
+driver-only wrong-helper authority despite equal local draw IDs. Sidecar tests
+reject duplicate, missing, orphan, wrong-kind, wrong-site and wrong-target
+bindings. These tests are separate from the copied successor probe; only the
+following forward event is an actual continuation draw observation, not a
+formal continuation-draw correspondence proof.
+
 Standalone sealed tensor kernels retain their existing ABI and emit no observer
 operations, even with the feature enabled: they have no host invocation observer.
 The feature-enabled integration-support command runs both
@@ -127,5 +159,6 @@ The feature-enabled integration-support command runs both
 the latter also runs in the default-feature PR selection. Feature execution is
 owned by the nightly/manual `heavy-e2e.yml` frontend support slice, not ordinary
 PR success. The solver-free Clippy configurations compile the observer feature.
-This is one delivery slice: the private callback carrier, state-owner hooks,
-and compile/run tests are useful only together; the feature adds no release ABI.
+This is one delivery slice: the verified source census, private linked carrier,
+state-owner hooks and discriminating compile/run tests are useful only together;
+the feature adds no release ABI.

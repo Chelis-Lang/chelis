@@ -1666,7 +1666,7 @@
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_expr_at_site",
-      "sample": "{}chelis_rng_state {seeded_var} = {{(uint64_t){seed_var}, 0ULL, 1}};"
+      "sample": "{}__chelis_random_host_frame {frame} = __chelis_random_push_host(__chelis_observer, {pointer}, (u..."
     },
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=HostEmitter < 'a >::assign_filter",
