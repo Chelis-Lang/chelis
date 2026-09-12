@@ -14213,9 +14213,8 @@ impl<'program> LowerCtx<'program> {
         }
     }
 
-    /// Validate and retain one declared-result axis. Keeping this operation
-    /// per-axis lets a checked call annotation contribute only a new named
-    /// refinement, without importing its unrelated literal claims.
+    /// Validate and retain one authored-result axis. Caller-side checked
+    /// labels are transported separately, after these obligations are kept.
     fn preserve_declared_result_axis(&mut self, id: NodeId, axis: usize, dim: &DimInfo) {
         let resolved = match dim {
             DimInfo::Lit(required) => {
