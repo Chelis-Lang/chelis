@@ -76,17 +76,29 @@ fn imports_follow_qualified_selective_and_wildcard_type_names() {
 
 #[test]
 fn private_helpers_and_transparent_aliases_survive_relocation() {
-    let consumer = "module Std.Use\nimport Std.Helper (Hidden)\nexport (read)\ntype Public = | Public(Option[Hidden])\ndef read(x: Public) -> Public = x";
+    let consumer = "module Std.Use\nimport Std.Helper (Payload)\nexport (read)\ntype Public = | Public(Option[Payload])\ndef read(x: Public) -> Public = x";
     for helper_path in ["helper", "moved/helper"] {
-        let rows = sources(&[
-            (
-                helper_path,
-                "module Std.Helper\nexport (marker)\ntype Hidden = (f64, bool)\ndef marker(x: bool) -> bool = x",
-            ),
-            ("use", consumer),
-        ]);
-        assert!(numeric(&rows, "use::read"));
-        assert!(!numeric(&rows, &format!("{helper_path}::marker")));
+        for (dtype, expected_numeric) in [("f64", true), ("bool", false)] {
+            // The public alias reaches a private local declaration; it does
+            // not make Hidden directly importable (spec/02 P2, P15; #1919).
+            let helper = format!(
+                "module Std.Helper\nexport (marker, Payload)\ntype Hidden = ({dtype}, bool)\ntype Payload = Hidden\ndef marker(x: bool) -> bool = x"
+            );
+            let rows = sources(&[(helper_path, &helper), ("use", consumer)]);
+            assert_eq!(
+                numeric(&rows, "use::read"),
+                expected_numeric,
+                "{helper_path}, {dtype}: {rows:?}"
+            );
+            assert!(!numeric(&rows, &format!("{helper_path}::marker")));
+            rejects(
+                &[
+                    (helper_path, &helper),
+                    ("use", &consumer.replace("Payload", "Hidden")),
+                ],
+                "module `Std.Helper` does not export `Hidden` for import into Std.Use",
+            );
+        }
     }
 }
 

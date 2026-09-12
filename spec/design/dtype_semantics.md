@@ -1117,8 +1117,10 @@ Deliverables, with phase homes:
      declaration linker, then resolves signatures, nominal fields and alias
      bodies through the compiler's Deep type resolver. Source paths and
      authored signatures remain the census identities; qualified compiler
-     names govern the graph. Same-package imports include private helpers,
-     local declarations shadow imports, and unresolved imports, type names,
+     names govern the graph. Same-package imports obey module exports;
+     public transparent aliases may reach private local declarations without
+     making those declarations directly importable. Local declarations shadow
+     imports, and unresolved imports, type names,
      arities or argument kinds fail discovery.
      Finite summaries track concrete numeric domains and formal payload
      positions to a worklist fixed point. They follow the compiler's
