@@ -10,6 +10,69 @@ use chelis_compiler_api::schema::{
 use std::collections::BTreeMap;
 
 #[test]
+fn concrete_static_rate_calls_keep_source_bindings_across_host_boundaries() {
+    // [05-OP-37]/[05-RNG-1], #1764: source-static actuals are not runtime rates.
+    for definition in [
+        "def keep(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = dropout(x, rate)\ndef draw(x: tensor[4, f32]) -> tensor[4, f32] = keep(x, 0.5f32)",
+        "def draw(x: tensor[4, f32]) -> tensor[4, f32] = { rate = 0.5f32\n alias = rate\n dropout(x, alias) }",
+        "def draw(x: tensor[4, f32]) -> tensor[4, f32] = { keep = fn (v: tensor[4, f32], rate: f32) -> dropout(v, rate)\n keep(x, 0.5f32) }",
+        "def keep(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = dropout(x, rate)\ndef draw(x: tensor[4, f32]) -> tensor[4, f32] = { keep = fn (v: tensor[4, f32], rate: f32) -> dropout(v, 0.5f32)\n keep(x, 0.0f32) }",
+    ] {
+        let source = format!(
+            "{definition}\ndef loss(x: tensor[4, f32]) -> tensor[f32] = sum(draw(x), 0i32)\ndef main() = with seed(42i64) {{\n x = to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32])\n first = draw(copy(x))\n backward = grad(loss)(copy(x))\n next = dropout(x, 0.5f32)\n (first, backward, next, x)\n}}\n"
+        );
+        let result = eval_selected(request(&source), &["main".into()])
+            .unwrap_or_else(|error| panic!("{source}\n{error:?}"));
+        for (index, ordinal) in [0, 1, 2].into_iter().enumerate() {
+            assert_eq!(
+                tensor(&result, &format!("main.{index}")),
+                mask(ordinal)[..4]
+            );
+        }
+        assert_eq!(tensor(&result, "main.3"), vec![1.0; 4]);
+    }
+}
+
+#[test]
+fn concrete_static_rate_exported_library_call_survives_context_decode() {
+    use chelis_compiler_api::compiler::{eval_in_context, prepare_eval_in_context};
+    use chelis_compiler_api::{COMPILER_VERSION, compile_reef_context};
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::create_dir(directory.path().join("src")).unwrap();
+    std::fs::write(directory.path().join("reef.toml"), format!("[package]\nname = \"static_rate\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Probe\"\n")).unwrap();
+    std::fs::write(directory.path().join("src/draw.ch"), "module Probe.Draw\nexport (keep)\ndef keep(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = dropout(x, rate)\n").unwrap();
+    let context = compile_reef_context(directory.path(), directory.path()).unwrap();
+    let decoded =
+        chelis_compiler_api::context::CompiledContext::decode(&context.encode().unwrap()).unwrap();
+    let source = "module Probe.Client\nimport Probe.Draw (keep)\ndef main() = with seed(42i64) {\n x = to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32])\n first = keep(copy(x), 0.0f32)\n second = keep(copy(x), 0.5f32)\n (first, second, dropout(x, 0.5f32))\n}\n";
+    for context in [&context, &decoded] {
+        let result = eval_in_context(context, source).unwrap();
+        assert_eq!(tensor(&result, "main.0"), vec![1.0; 4]);
+        assert_eq!(tensor(&result, "main.1"), mask(1)[..4]);
+        assert_eq!(tensor(&result, "main.2"), mask(2)[..4]);
+        let prepared = prepare_eval_in_context(context, source).unwrap();
+        for _ in 0..2 {
+            let result = prepared.eval_root(BTreeMap::new(), "main").unwrap();
+            assert_eq!(tensor(&result, "main.1"), mask(1)[..4]);
+            assert_eq!(tensor(&result, "main.2"), mask(2)[..4]);
+        }
+    }
+}
+
+#[test]
+fn concrete_runtime_rate_actual_is_not_frozen_from_its_evaluated_value() {
+    let source = "def keep(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = dropout(x, rate)\ndef main() = with seed(42i64) { keep(to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32]), tensor_to_scalar(scalar_to_tensor(0.5f32))) }\n";
+    let error = eval_selected(request(source), &["main".into()]).unwrap_err();
+    assert!(
+        error
+            .errors
+            .iter()
+            .any(|error| error.message.contains("dropout")),
+        "{error:?}"
+    );
+}
+
+#[test]
 fn unrelated_scalar_capture_preserves_public_acceptance_and_next_draw() {
     // PR1807 R1: an unrelated rebound scalar is not a closure dependency.
     let ones = "to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32, 1.0f32])";
