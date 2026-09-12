@@ -1490,6 +1490,14 @@ impl Subst {
         }
     }
 
+    /// Current-check authored rigidity, never historical snapshot metadata.
+    /// Instantiation freshens quantified IDs without copying protection;
+    /// lexical captures keep their canonical ID. Both live and decoded imports
+    /// clear historical protection in `resume_for_new_check` before inference.
+    pub(crate) fn is_protected_dimension(&self, var: DimVar) -> bool {
+        matches!(self.resolve_dvar(var), Dim::Var(root) if self.protected_dimensions.contains(&root))
+    }
+
     pub(crate) fn validate_dimension_labels(&self, var_gen: &VarGen) -> Result<(), &'static str> {
         for (var, label) in self
             .dimension_labels
@@ -2761,18 +2769,29 @@ mod tests {
         let mut vg = VarGen::default();
         let quantified = vg.fresh_dvar();
         let capture = vg.fresh_dvar();
+        let alias = vg.fresh_dvar();
+        let alias_chain = vg.fresh_dvar();
         let mut subst = Subst::new();
         subst.protect_dimensions([quantified, capture]);
         for v in [quantified, capture] {
             unify_dim(&Dim::Var(v), &Dim::Name("fixed".into()), &mut subst).unwrap();
         }
+        // Exercise both alias operand orders; binding prefers the protected
+        // representative, including after path compression.
+        unify_dim(&Dim::Var(capture), &Dim::Var(alias), &mut subst).unwrap();
+        unify_dim(&Dim::Var(alias_chain), &Dim::Var(alias), &mut subst).unwrap();
+        assert!(subst.is_protected_dimension(alias_chain));
+        assert_eq!(
+            subst.constraint_dim(&Dim::Var(alias_chain)),
+            Dim::Var(capture)
+        );
         let scheme = Scheme {
             tvars: vec![],
             tvar_restrictions: vec![],
             dvars: vec![quantified],
             rvars: vec![],
             body: Type::Tensor(
-                vec![Dim::Var(quantified), Dim::Var(capture)],
+                vec![Dim::Var(quantified), Dim::Var(alias_chain)],
                 TensorPrec::Concrete(Prim::F32),
             ),
         };
@@ -2784,11 +2803,65 @@ mod tests {
             panic!("tensor")
         };
         assert_ne!(a[0], b[0]);
-        assert_eq!(a[1], Dim::Var(capture));
+        for dims in [&a, &b] {
+            let Dim::Var(fresh) = dims[0] else {
+                panic!("fresh dimension")
+            };
+            assert!(!subst.is_protected_dimension(fresh));
+            let Dim::Var(captured) = dims[1] else {
+                panic!("captured dimension")
+            };
+            assert!(subst.is_protected_dimension(captured));
+            assert_eq!(subst.constraint_dim(&dims[1]), Dim::Var(capture));
+        }
         unify_dim(&a[0], &Dim::Lit(2), &mut subst).unwrap();
         unify_dim(&b[0], &Dim::Lit(3), &mut subst).unwrap();
         assert_eq!(subst.semantic_dim(&a[0]), Dim::Name("fixed".into()));
         assert_eq!(subst.semantic_dim(&b[0]), Dim::Name("fixed".into()));
+    }
+
+    #[test]
+    fn protected_dimension_queries_agree_after_live_and_decoded_resume() {
+        let mut vg = VarGen::default();
+        let historical = vg.fresh_dvar();
+        let alias = vg.fresh_dvar();
+        let mut published = Subst::new();
+        published.protect_dimensions([historical]);
+        unify_dim(
+            &Dim::Var(historical),
+            &Dim::Name("fixed".into()),
+            &mut published,
+        )
+        .unwrap();
+        unify_dim(&Dim::Var(alias), &Dim::Var(historical), &mut published).unwrap();
+        let mut live = published.clone();
+        let mut decoded: Subst =
+            bincode::deserialize(&bincode::serialize(&published).unwrap()).unwrap();
+        // Raw mid-check serialization intentionally omits active protection.
+        // The public context entry point resumes BOTH paths before inference.
+        assert!(live.is_protected_dimension(alias));
+        assert!(!decoded.is_protected_dimension(alias));
+        for subst in [&mut live, &mut decoded] {
+            subst.resume_for_new_check(&vg);
+            assert!(!subst.is_protected_dimension(alias));
+            assert_eq!(
+                subst.semantic_dim(&Dim::Var(alias)),
+                Dim::Name("fixed".into())
+            );
+        }
+        let current = vg.fresh_dvar();
+        let current_alias = vg.fresh_dvar();
+        for subst in [&mut live, &mut decoded] {
+            subst.protect_dimensions([current]);
+            unify_dim(&Dim::Var(current), &Dim::Name("fixed".into()), subst).unwrap();
+            unify_dim(&Dim::Var(current), &Dim::Var(current_alias), subst).unwrap();
+            assert!(subst.is_protected_dimension(current_alias));
+            assert!(!subst.is_protected_dimension(alias));
+        }
+        assert_eq!(
+            bincode::serialize(&live).unwrap(),
+            bincode::serialize(&decoded).unwrap()
+        );
     }
 
     #[test]

@@ -50,10 +50,16 @@ the narrow label/shared-type-refinement rollback boundary, not atomicity of
 all existing substitution mutations. Context cloning and transactional
 substitution composition remain separate whole-state operations.
 
-The list join uses the constraint view to recognize mismatched concrete
-literal axes even when they retain labels. Equal labelled axes keep their
-name-query view; unresolved authored dimensions still unify rather than
-widen, and the existing list-uniformity guards remain authoritative (§4.5.2).
+The §4.5.2 list join classifies axes using constraints, semantic labels and
+current authored rigidity, not the private `Dim::Var` carrier tag. Concrete
+axes retain the head only when their names agree (or both are literals) and
+no known extents conflict. Distinct names and Name/Lit pairs widen even at
+equal extents; equal names retain queries when no extent conflict is known.
+Unresolved protected binders and unlabelled inference variables still unify,
+and wildcard head bias and list-uniformity guards remain authoritative.
+This classification is ephemeral: both live and decoded contexts clear
+historical protection before a new check; instantiation copies labels, not
+protection, while active lexical captures retain their canonical binder IDs.
 
 For example, `aligned[d](x: tensor[d,f32], gain: tensor[fixed,f32]) ->
 tensor[d,f32] = mul(x,gain)` establishes the output label `fixed`; the same
