@@ -748,11 +748,11 @@ still reaches the oracle's own
 erased no row: `--phase a` and `--phase b` keep their names, corpora and
 row-transition checks, and each still has to PASS on its own.
 
-The recorded phase-B corpus has 66 rows and NONE of them is short of exit.
+The recorded phase-B corpus has 70 rows and NONE of them is short of exit.
 `--phase b` reads `RUNTIME EXTENT ORACLE: PASS` rather than `RECEIPTS PASS,
 ROWS SHORT OF EXIT`, and it now does so without `--allow-shortfall`. That
 reading, not a hand count, is what to quote. A hand count of the
-JSON's `phase_b` column reaches 10 instead, because the column holds 56
+JSON's `phase_b` column reaches 10 instead, because the column holds 60
 `executes_exactly` and two other values, neither of which is a shortfall.
 Nine rows are `rejects_exactly`, an exit state, since those programs are
 SUPPOSED to be rejected and a row that stopped rejecting them would be the
