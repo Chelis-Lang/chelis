@@ -90,6 +90,40 @@ fn direct_and_three_alias_forms_agree_on_native_values() {
 }
 
 #[test]
+fn shipped_example_uses_default_style_gates() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/named_callable_alias.ch");
+    for args in [
+        vec!["fmt", "--check"],
+        vec!["lint", "--check"],
+        vec!["check"],
+    ] {
+        let output = Command::cargo_bin("chelis")
+            .unwrap()
+            .env_remove("CHELIS_STYLE_GATE_DISABLE")
+            .args(&args)
+            .arg(&path)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        if args == ["check"] {
+            let checked: serde_json::Value = serde_json::from_slice(&output).unwrap();
+            assert_eq!(checked["score"], 1);
+            assert_eq!(checked["errors"], json!([]));
+        }
+    }
+    Command::cargo_bin("chelis")
+        .unwrap()
+        .env_remove("CHELIS_STYLE_GATE_DISABLE")
+        .args(["validate", "--surf"])
+        .arg(&path)
+        .assert()
+        .success();
+}
+
+#[test]
 fn chained_aliases_in_later_bindings_keep_independent_instantiations() {
     for operation in ["mul(x, gain)", "mul(gain, x)"] {
         let source = format!(
@@ -231,4 +265,167 @@ fn noncallable_shadow_and_unresolved_cycles_do_not_become_known_aliases() {
             .failure();
         assert!(!out.join("invalid.c").exists());
     }
+}
+
+#[test]
+fn tensor_formal_shadows_caller_callable() {
+    for formal in ["scale", "z"] {
+        let source = format!(
+            "def relay(x: tensor[2, f32]) -> tensor[2, f32] = add(x, x)\n\
+             def wrapper({formal}: tensor[2, f32]) -> tensor[2, f32] = relay({formal})\n\
+             out = {{ scale = relay\n f = wrapper\n sum(f(to_tensor([1.0f32, 2.0f32])), 0i32) }}\n"
+        );
+        assert_lanes(&source, &[], &["40c00000"], "out = 6.0\n");
+    }
+}
+
+#[test]
+fn callable_formals_do_not_change_later_actuals() {
+    for call in [
+        "f(square, scale(to_tensor([1.0f32, 2.0f32])))",
+        "choose(square, plus(to_tensor([1.0f32, 2.0f32])))",
+    ] {
+        let body = if call.starts_with("f(") {
+            format!("{{ scale = plus\n f = choose\n sum({call}, 0i32) }}")
+        } else {
+            format!("sum({call}, 0i32)")
+        };
+        let source = format!(
+            "def square(x: tensor[2, f32]) -> tensor[2, f32] = mul(x, x)\n\
+             def plus(x: tensor[2, f32]) -> tensor[2, f32] = add(x, x)\n\
+             def choose(scale: (tensor[2, f32]) -> tensor[2, f32], y: tensor[2, f32]) -> tensor[2, f32] = scale(y)\n\
+             out = {body}\n"
+        );
+        assert_lanes(&source, &[], &["41a00000"], "out = 20.0\n");
+    }
+}
+
+#[test]
+fn unused_actual_keeps_its_extent_trap() {
+    let source = "def narrow[d](x: tensor[r, f32], gain: tensor[d, f32]) -> tensor[d, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
+        def first(x: tensor[2, f32], y: tensor[2, f32]) -> tensor[2, f32] = x\n\
+        out = { f = first\n f(to_tensor([7.0f32, 8.0f32]), narrow(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]), to_tensor([1.0f32, 2.0f32]))) }\n";
+    for source in [
+        source.to_owned(),
+        format!(
+            "{}out = invoke(first)\n",
+            source.replace(
+                "out = { f = first",
+                "def invoke(f: (tensor[2, f32] -> tensor[2, f32] -> tensor[2, f32])) = { f = first"
+            )
+        ),
+    ] {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("unused.ch");
+        let out = dir.path().join("c");
+        common::write_file(&path, &source);
+        let eval = Command::cargo_bin("chelis")
+            .unwrap()
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(["eval", "--timeout", "10", "--file"])
+            .arg(&path)
+            .assert()
+            .failure()
+            .get_output()
+            .clone();
+        Command::cargo_bin("chelis")
+            .unwrap()
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .arg("build")
+            .arg(&path)
+            .args(["--target", "c", "--output"])
+            .arg(&out)
+            .assert()
+            .success();
+        assert!(common::link_generated(&out, "unused.c", "unused").success());
+        let native = std::process::Command::new(out.join("unused"))
+            .output()
+            .unwrap();
+        assert!(!native.status.success());
+        for output in [eval, native] {
+            let text = String::from_utf8_lossy(&output.stderr);
+            assert!(text.contains("claimed = 2, shrink axis 0 = 3"), "{text}");
+        }
+    }
+}
+
+#[test]
+fn unused_and_repeated_actuals_keep_the_callers_random_stream() {
+    for (definition, actuals, first_bits, first_native) in [
+        (
+            "def helper(x: tensor[4, f32], y: tensor[4, f32]) -> tensor[4, f32] = x",
+            "copy(x), dropout(x, 0.5f32)",
+            vec!["3f800000"; 4],
+            "1.0, 1.0, 1.0, 1.0",
+        ),
+        (
+            "def helper(x: tensor[4, f32]) -> tensor[4, f32] = add(x, x)",
+            "dropout(x, 0.5f32)",
+            vec!["00000000", "40800000", "00000000", "00000000"],
+            "0.0, 4.0, 0.0, 0.0",
+        ),
+    ] {
+        for (callee, alias_binding) in [
+            ("helper", ""),
+            ("helper", "f = helper\n"),
+            ("f", "f = helper\n"),
+        ] {
+            let source = format!(
+                "{definition}\nout = with seed(42i64) {{\n x = to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32])\n {alias_binding} result = {callee}({actuals})\n (result, dropout(x, 0.5f32))\n}}\n"
+            );
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("random.ch");
+            common::write_file(&path, &source);
+            Command::cargo_bin("chelis")
+                .unwrap()
+                .env("CHELIS_STYLE_GATE_DISABLE", "1")
+                .arg("check")
+                .arg(&path)
+                .assert()
+                .success();
+            let output = Command::cargo_bin("chelis")
+                .unwrap()
+                .env("CHELIS_STYLE_GATE_DISABLE", "1")
+                .args(["eval", "--json", "--timeout", "10", "--file"])
+                .arg(&path)
+                .assert()
+                .success()
+                .get_output()
+                .stdout
+                .clone();
+            let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+            assert_eq!(value["roots"].as_array().unwrap().len(), 2);
+            for (index, bits) in [
+                first_bits.clone(),
+                vec!["40000000", "00000000", "00000000", "00000000"],
+            ]
+            .iter()
+            .enumerate()
+            {
+                assert_eq!(
+                    value["roots"][index]["value"]["value"],
+                    json!({"shape": [4], "data": {"dtype": "f32", "bits": bits}})
+                );
+            }
+            assert_eq!(
+                common::build_and_run(&source, "random"),
+                format!(
+                    "out.0 = tensor(shape=[4], data=[{first_native}])\nout.1 = tensor(shape=[4], data=[2.0, 0.0, 0.0, 0.0])\n"
+                )
+            );
+        }
+    }
+}
+
+#[test]
+fn unused_agreeing_actual_and_nested_alias_chain_remain_valid() {
+    let source = "def narrow[d](x: tensor[r, f32], gain: tensor[d, f32]) -> tensor[d, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
+        def first(x: tensor[2, f32], y: tensor[2, f32]) -> tensor[2, f32] = x\n\
+        out = { f = first\n g = f\n { h = g\n h(to_tensor([7.0f32, 8.0f32]), narrow(to_tensor([1.0f32, 2.0f32, 3.0f32]), to_tensor([1.0f32, 2.0f32]))) } }\n";
+    assert_lanes(
+        source,
+        &[2],
+        &["40e00000", "41000000"],
+        "out = tensor(shape=[2], data=[7.0, 8.0])\n",
+    );
 }

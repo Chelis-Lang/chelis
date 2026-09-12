@@ -1818,9 +1818,15 @@ pub(crate) struct SubexprLoweringContext {
     program_signatures: Arc<BTreeMap<String, Expr>>,
     lexical_callables: UnordMap<String, Arc<ResolvedFunction>>,
     callable_parameters: UnordSet<String>,
+    defer_named_alias_calls: bool,
 }
 
 impl SubexprLoweringContext {
+    pub(crate) fn with_host_call_boundaries(mut self) -> Self {
+        self.defer_named_alias_calls = true;
+        self
+    }
+
     pub(crate) fn with_lexical_callables(
         mut self,
         callables: UnordMap<String, Arc<ResolvedFunction>>,
@@ -1897,6 +1903,7 @@ pub(crate) fn prepare_subexpr_lowering_context(
         program_signatures,
         lexical_callables: UnordMap::new(),
         callable_parameters: UnordSet::new(),
+        defer_named_alias_calls: false,
     }
 }
 
@@ -2201,6 +2208,7 @@ fn lower_subexpr_program_inner_impl(
     );
     ctx.fn_typed_params
         .extend(context.callable_parameters.to_sorted().into_iter().cloned());
+    ctx.defer_named_alias_calls = context.defer_named_alias_calls;
     #[cfg(feature = "lowering-trace")]
     {
         ctx.trace = trace.clone();
@@ -6237,6 +6245,10 @@ struct LowerCtx<'program> {
     /// alongside `bindings` and `local_callables`. See
     /// `docs/investigations/pipe_fn_param_stage_diagnosis.md`.
     fn_typed_params: UnordSet<String>,
+    defer_named_alias_calls: bool,
+    // Binding-owned distinction: these callable formals already crossed
+    // their caller's argument boundary; a lexical rebind clears the mark.
+    prepared_callable_formals: UnordSet<String>,
     /// Dataflow-local completeness evidence for unresolved callable
     /// applications. Grad subcontexts record a fresh result marker for each
     /// unresolved application, then reject only when one is reverse-reachable
@@ -6364,6 +6376,8 @@ impl<'program> LowerCtx<'program> {
             inlining_depths: UnordMap::new(),
             inlining_active: 0,
             fn_typed_params: UnordSet::new(),
+            defer_named_alias_calls: false,
+            prepared_callable_formals: UnordSet::new(),
             callable_dependency_state: CallableDependencyState::default(),
             rootless_defs: BTreeSet::new(),
             dim_substitutions: UnordMap::new(),
@@ -7841,6 +7855,7 @@ impl<'program> LowerCtx<'program> {
             .map(Self::type_from_type_expr);
         let body_id = self.lower_expr_with_claim(&elems[3], declared_result.as_ref());
         if !name.is_empty() {
+            self.prepared_callable_formals.remove(&name);
             if self.is_host_list_expr(&elems[3]) {
                 self.list_bindings.insert(name.clone(), elems[3].clone());
             }
@@ -7883,7 +7898,10 @@ impl<'program> LowerCtx<'program> {
         let saved_list_bindings = self.list_bindings.clone();
         let saved_shape_bindings = self.shape_bindings.clone();
         let saved_static_size_bindings = self.static_size_bindings.clone();
-        let saved_callables = self.local_callables.clone();
+        let saved_callables = (
+            self.local_callables.clone(),
+            self.prepared_callable_formals.clone(),
+        );
         let saved_fn_typed_params = self.fn_typed_params.clone();
 
         // elems[2] = (bind {} name1 expr1 name2 expr2 ...)
@@ -7967,6 +7985,7 @@ impl<'program> LowerCtx<'program> {
                         }
                         self.bindings.insert(name.clone(), val_id);
                     }
+                    self.prepared_callable_formals.remove(name);
                     self.static_rate_bindings.remove(name);
                     if let Some(value) = static_rate {
                         self.static_rate_bindings.insert(name.clone(), value);
@@ -7988,7 +8007,7 @@ impl<'program> LowerCtx<'program> {
         self.list_bindings = saved_list_bindings;
         self.shape_bindings = saved_shape_bindings;
         self.static_size_bindings = saved_static_size_bindings;
-        self.local_callables = saved_callables;
+        (self.local_callables, self.prepared_callable_formals) = saved_callables;
         self.fn_typed_params = saved_fn_typed_params;
         result
     }
@@ -8314,6 +8333,23 @@ impl<'program> LowerCtx<'program> {
         app_span: Span,
     ) -> Option<LoweredValue> {
         let callable = self.resolve_callable_expr(func)?;
+        // A host helper may not swallow a lexical named call before the
+        // host has evaluated its actuals. Decline the enclosing extraction,
+        // including a block containing this call, through the existing
+        // nonfatal diagnostic route. The resolver owns binding/cycle rules.
+        if self.defer_named_alias_calls
+            && callable_ref_name(func).is_some_and(|name| {
+                self.local_callables.contains_key(&name)
+                    && !self.prepared_callable_formals.contains(&name)
+            })
+            && matches!(&callable, CallableExpr::Plain(function) if function.canonical_definition.is_some())
+        {
+            raise_lowering_error(
+                "a captured named call requires its eager host argument boundary",
+                Some(app_span),
+                func.span_id().map(ToOwned::to_owned),
+            );
+        }
         // If the callee is a named top-level/local def, compute its
         // tracking name so `lower_plain_callable_app` can install a
         // recursion guard around the *body lowering* step (Inlining-F1).
@@ -9354,7 +9390,10 @@ impl<'program> LowerCtx<'program> {
         let saved_list_bindings = self.list_bindings.clone();
         let saved_shape_bindings = self.shape_bindings.clone();
         let saved_static_size_bindings = self.static_size_bindings.clone();
-        let saved_callables = self.local_callables.clone();
+        let saved_callables = (
+            self.local_callables.clone(),
+            self.prepared_callable_formals.clone(),
+        );
         let saved_fn_typed_params = self.fn_typed_params.clone();
         let saved_dim_substitutions = self.dim_substitutions.clone();
         let saved_prec_substitutions = self.prec_substitutions.clone();
@@ -9394,9 +9433,20 @@ impl<'program> LowerCtx<'program> {
         let mut formal_types = Vec::new();
         let mut formal_type_exprs: Vec<Option<Expr>> = Vec::new();
         let mut actual_types = Vec::new();
-        for (((name, arg_expr), param_ty), formal_expr) in param_names
+        // All actuals belong to the caller. Installing even one formal
+        // before finishing this vector changes later callable/value lookup.
+        let actuals = args
             .iter()
-            .zip(args.iter())
+            .map(|arg| {
+                let size = self.fold_static_size(arg);
+                let callable = self.resolve_callable_expr(arg);
+                let value = callable.is_none().then(|| self.lower_expr(arg));
+                (size, callable, value)
+            })
+            .collect::<Vec<_>>();
+        for (((name, (static_size, callable, value)), param_ty), formal_expr) in param_names
+            .iter()
+            .zip(actuals)
             .zip(param_types)
             .zip(param_type_exprs.iter())
         {
@@ -9404,23 +9454,13 @@ impl<'program> LowerCtx<'program> {
             // name. This is required by the [05-OP-35] wrappers: their public
             // count parameter is renamed once more before the builtin
             // index/take/drop app reaches the staged List rewrite.
-            let static_size = self.fold_static_size(arg_expr);
-            // Item 2-extended: shadowing; the inlined fn's param name
-            // is bound to a fresh value (either a `local_callable` or a
-            // `bindings` entry). Drop any outer-scope
-            // `fn_typed_params[name]` so the resolver doesn't
-            // misclassify the shadowed name as a `Parameter` when it's
-            // really backed by a concrete `local_callable` or a tensor
-            // binding. `local_callables` takes precedence in the
-            // resolver anyway, but bindings-only shadowing (non-callable
-            // arg for a non-callable param) would otherwise leak the
-            // outer `fn_typed_params` entry.
-            // Resolve the actual in the caller's scope before the callee's
-            // same-named formal shadows it. Removing the marker first would
-            // erase the only evidence that `model` in `apply(model, x)` is an
-            // unresolved outer callable.
-            let callable = self.resolve_callable_expr(arg_expr);
+            // Both callable representations are shadowed by every formal,
+            // including a tensor formal. Actuals have already been resolved;
+            // removing an outer Parameter marker here cannot erase evidence
+            // needed to classify a later argument in the caller.
             self.fn_typed_params.remove(name);
+            self.local_callables.remove(name);
+            self.prepared_callable_formals.remove(name);
             if let Some(value) = static_size {
                 self.static_size_bindings.insert(name.clone(), value);
             } else {
@@ -9439,11 +9479,12 @@ impl<'program> LowerCtx<'program> {
                         self.fn_typed_params.insert(name.clone());
                     }
                     _ => {
+                        self.prepared_callable_formals.insert(name.clone());
                         self.local_callables.insert(name.clone(), callable);
                     }
                 }
             } else {
-                let arg_id = self.lower_expr(arg_expr);
+                let arg_id = value.expect("non-callable actual was lowered in caller scope");
                 if let LoweredValue::Node(node_id) = &arg_id
                     && let Some(actual_ty) =
                         self.dag.get(*node_id).map(|node| node.output_type.clone())
@@ -9645,7 +9686,7 @@ impl<'program> LowerCtx<'program> {
         self.list_bindings = saved_list_bindings;
         self.shape_bindings = saved_shape_bindings;
         self.static_size_bindings = saved_static_size_bindings;
-        self.local_callables = saved_callables;
+        (self.local_callables, self.prepared_callable_formals) = saved_callables;
         self.fn_typed_params = saved_fn_typed_params;
         self.dim_substitutions = saved_dim_substitutions;
         self.prec_substitutions = saved_prec_substitutions;
@@ -9725,11 +9766,15 @@ impl<'program> LowerCtx<'program> {
         let saved_list_bindings = self.list_bindings.clone();
         let saved_shape_bindings = self.shape_bindings.clone();
         let saved_static_size_bindings = self.static_size_bindings.clone();
-        let saved_callables = self.local_callables.clone();
+        let saved_callables = (
+            self.local_callables.clone(),
+            self.prepared_callable_formals.clone(),
+        );
         let saved_fn_typed_params = self.fn_typed_params.clone();
         for (name, arg_id) in param_names.iter().zip(args.iter().cloned()) {
             // Same shadowing rationale as `lower_plain_callable_app`.
             self.fn_typed_params.remove(name);
+            self.prepared_callable_formals.remove(name);
             if let Some(value) = arg_id
                 .as_single_node()
                 .and_then(|node| self.static_i64_from_node(node))
@@ -9753,7 +9798,7 @@ impl<'program> LowerCtx<'program> {
         self.list_bindings = saved_list_bindings;
         self.shape_bindings = saved_shape_bindings;
         self.static_size_bindings = saved_static_size_bindings;
-        self.local_callables = saved_callables;
+        (self.local_callables, self.prepared_callable_formals) = saved_callables;
         self.fn_typed_params = saved_fn_typed_params;
         result
     }
@@ -15714,7 +15759,10 @@ impl<'program> LowerCtx<'program> {
         let saved_list_bindings = self.list_bindings.clone();
         let saved_shape_bindings = self.shape_bindings.clone();
         let saved_static_size_bindings = self.static_size_bindings.clone();
-        let saved_callables = self.local_callables.clone();
+        let saved_callables = (
+            self.local_callables.clone(),
+            self.prepared_callable_formals.clone(),
+        );
         let saved_fn_typed_params = self.fn_typed_params.clone();
 
         // The checker stamps an alias-expanded function type on the `fn`
@@ -15743,6 +15791,7 @@ impl<'program> LowerCtx<'program> {
         if let Some((DeepTag::Params, _, params)) = stamped_parts(&elems[2]) {
             for (index, param) in params.iter().enumerate() {
                 if let Some((name, authored_ty_expr)) = param_name_and_type_expr(param) {
+                    self.prepared_callable_formals.remove(&name);
                     let checked_ty_expr = checked_param_types.and_then(|types| types.get(index));
                     let ty_expr = match authored_ty_expr {
                         Some(authored) if !Self::type_expr_contains_nominal(authored) => {
@@ -15814,7 +15863,7 @@ impl<'program> LowerCtx<'program> {
         self.list_bindings = saved_list_bindings;
         self.shape_bindings = saved_shape_bindings;
         self.static_size_bindings = saved_static_size_bindings;
-        self.local_callables = saved_callables;
+        (self.local_callables, self.prepared_callable_formals) = saved_callables;
         self.fn_typed_params = saved_fn_typed_params;
         result
     }
@@ -16772,7 +16821,10 @@ impl<'program> LowerCtx<'program> {
                     let saved_list_bindings = self.list_bindings.clone();
                     let saved_shape_bindings = self.shape_bindings.clone();
                     let saved_static_size_bindings = self.static_size_bindings.clone();
-                    let saved_callables = self.local_callables.clone();
+                    let saved_callables = (
+                        self.local_callables.clone(),
+                        self.prepared_callable_formals.clone(),
+                    );
                     let saved_fn_typed_params = self.fn_typed_params.clone();
                     for (name, value) in binds {
                         // Pattern binds shadow every same-named outer
@@ -16781,6 +16833,7 @@ impl<'program> LowerCtx<'program> {
                         self.shape_bindings.remove(&name);
                         self.static_size_bindings.remove(&name);
                         self.local_callables.remove(&name);
+                        self.prepared_callable_formals.remove(&name);
                         self.fn_typed_params.remove(&name);
                         self.bindings.insert(name, value);
                     }
@@ -16789,7 +16842,7 @@ impl<'program> LowerCtx<'program> {
                     self.list_bindings = saved_list_bindings;
                     self.shape_bindings = saved_shape_bindings;
                     self.static_size_bindings = saved_static_size_bindings;
-                    self.local_callables = saved_callables;
+                    (self.local_callables, self.prepared_callable_formals) = saved_callables;
                     self.fn_typed_params = saved_fn_typed_params;
                     return value;
                 }
@@ -17159,6 +17212,9 @@ mod tests {
             program_types: Arc::new(BTreeMap::new()),
             program_defs: Arc::new(BTreeMap::new()),
             program_signatures: Arc::new(BTreeMap::new()),
+            lexical_callables: UnordMap::new(),
+            callable_parameters: UnordSet::new(),
+            defer_named_alias_calls: false,
         };
         let (dag, _, trace) = try_lower_subexpr_program_with_ordered_inputs_and_trace(
             &expr,
@@ -19714,6 +19770,68 @@ mod tests {
             outcome.is_ok(),
             "non-negative seed control must lower: {outcome:?}"
         );
+    }
+
+    #[test]
+    fn issue_1889_actuals_precede_formals_and_callable_shadowing_restores() {
+        let parse = |source: &str| chelis_deep::parser::parse_str(source).unwrap().remove(0);
+        let mut ctx = LowerCtx::new(
+            BTreeMap::new(),
+            BTreeMap::from([
+                (
+                    "plus".into(),
+                    parse("(fn {} (params {} x) (app {} (var {} add) (var {} x) (var {} x)))"),
+                ),
+                (
+                    "square".into(),
+                    parse("(fn {} (params {} x) (app {} (var {} mul) (var {} x) (var {} x)))"),
+                ),
+                (
+                    "choose".into(),
+                    parse("(fn {} (params {} scale y) (app {} (var {} scale) (var {} y)))"),
+                ),
+                (
+                    "wrapper".into(),
+                    parse("(fn {} (params {} scale) (app {} (var {} plus) (var {} scale)))"),
+                ),
+                (
+                    "rebind".into(),
+                    parse(
+                        "(fn {} (params {} scale y) (let {} (bind {} scale (var {} plus)) (app {} (var {} scale) (var {} y))))",
+                    ),
+                ),
+            ]),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        );
+        let plus = ctx.resolve_callable_expr(&parse("(var {} plus)")).unwrap();
+        ctx.local_callables.insert("scale".into(), plus);
+        ctx.defer_named_alias_calls = true;
+        ctx.prepared_callable_formals.insert("scale".into());
+        for (source, expected) in [
+            (
+                "(app {} (var {} choose) (var {} square) (app {} (var {} scale) (lit {} 3.0)))",
+                36.0,
+            ),
+            ("(app {} (var {} wrapper) (lit {} 3.0))", 6.0),
+        ] {
+            let root = ctx.lower_expr(&parse(source)).expect_node("call result");
+            let values =
+                crate::eval::eval_tensor_roots_with_strict(&ctx.dag, &[root], |_| None).unwrap();
+            assert_eq!(values[&root].to_f64_lossy_vec(), vec![expected]);
+            assert!(
+                matches!(ctx.resolve_callable_expr(&parse("(var {} scale)")), Some(CallableExpr::Plain(function)) if function.canonical_definition.as_deref() == Some("plus"))
+            );
+            assert!(!ctx.fn_typed_params.contains("scale"));
+            assert!(ctx.prepared_callable_formals.contains("scale"));
+        }
+        let diagnostic = catch_lowering(std::panic::AssertUnwindSafe(move || {
+            ctx.lower_expr(&parse(
+                "(app {} (var {} rebind) (var {} square) (lit {} 3.0))",
+            ));
+        }))
+        .expect_err("a callee-created lexical alias needs its own host boundary");
+        assert!(diagnostic.message.contains("eager host argument boundary"));
     }
 
     #[test]

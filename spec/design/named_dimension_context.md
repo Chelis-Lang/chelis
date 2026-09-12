@@ -145,8 +145,19 @@ chains reuse that immutable capture. Ordinary value/parameter bindings shadow
 both the type and callable entries; leaving an inner scope restores both.
 The existing host helper profiler and tensor lowerer consume the same lexical
 overlay. A captured top-level helper's body sees its program definitions, not
-same-spelled helper aliases in its caller. No surface-name rewriting, runtime
-callable value, or separate abstract/provenance evaluator is introduced.
+same-spelled helper aliases in its caller. Residual calls use the captured
+declaration identity, not textual alias substitution. No runtime callable
+value or separate abstract/provenance evaluator is introduced.
+
+Actual callable/value/control facts are captured in caller order before any
+formal is installed. Native helper extraction defers lexical named calls to
+an eager host boundary, including calls inside an enclosing tensor expression:
+ordered host bindings evaluate value actuals once even if the callee ignores
+or repeats a formal. The residual resolved-declaration call then uses existing
+helper/staged/polymorphic admission with prepared values. Shape-only DAG edges
+are not repurposed as arbitrary argument/effect roots.
+Already-prepared callable formals do not trigger that lexical-alias deferral;
+the binding-owned mark is cleared on rebinding and restored with callable scope.
 
 `chelis-cli::issue_1889_named_callable_alias` is the bounded oracle: check,
 interpreter shape/dtype/value bits, and compiled native C values for direct and

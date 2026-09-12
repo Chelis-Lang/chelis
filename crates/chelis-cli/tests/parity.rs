@@ -429,6 +429,11 @@ fn parity_generic_value_roots() {
 }
 
 #[test]
+fn parity_named_callable_alias() {
+    drive_parity(&examples_root().join("named_callable_alias.ch"), true);
+}
+
+#[test]
 fn parity_source_file_names() {
     drive_parity(&examples_root().join("source-file-names.ch"), true);
 }
@@ -778,6 +783,7 @@ fn parity_corpus_is_complete() {
         "ordered_extent_claims.ch",
         "checked_runtime_extents.ch",
         "mnist.ch",
+        "named_callable_alias.ch",
         "opaque_invariants.ch",
         "opaque_invariants_simplex.ch",
         "rank_poly_borrow.ch",

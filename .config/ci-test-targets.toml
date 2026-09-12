@@ -2,6 +2,11 @@
 # New integration targets run in the unfiltered nightly unless added here.
 version = 1
 
+# chelis#1889: native callable identity, eager actuals, and retained guards.
+[[target]]
+package = "chelis-cli"
+name = "issue_1889_named_callable_alias"
+
 # chelis#1922: fatal helper-summary error transport and same-process recovery.
 # Host evaluation only; no C build or package provisioning.
 [[target]]

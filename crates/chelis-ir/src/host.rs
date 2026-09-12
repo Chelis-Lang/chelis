@@ -4069,6 +4069,7 @@ fn host_def_kernel_product(
             Some(&signature.params),
             &expected,
             random,
+            false,
         )?
     };
     if let Some(builtin) = kernel_dag_loads_builtin(&dag) {
@@ -5007,7 +5008,7 @@ fn lower_def_body_kernel(
         DefBodyDecision::Kernel(expected) => expected,
     };
     if tensor_helpers.collect_execution {
-        let context = cached_subexpr_lowering_context(program);
+        let context = cached_subexpr_lowering_context(program).with_host_call_boundaries();
         let scoped = kernel_scope_types(&signature.scope, Some(&signature.params));
         if context.c_execution_profile(&signature.body_expr, &scoped)
             == crate::evaluation::EvaluationProfile::FixedControl
@@ -5017,39 +5018,44 @@ fn lower_def_body_kernel(
                 counter: 0,
             });
             #[cfg(feature = "lowering-trace")]
-            let (plan, trace) = if tensor_helpers.collect_trace {
-                let (plan, trace) =
-                    crate::lower::try_lower_subexpr_c_execution_with_ordered_inputs_and_trace(
-                        &signature.body_expr,
-                        scoped,
-                        &context,
-                        Some(&expected),
-                        true,
-                        &planning,
-                    )?;
-                (plan, Some(trace))
-            } else {
-                (
-                    crate::lower::try_lower_subexpr_c_execution_with_ordered_inputs(
-                        &signature.body_expr,
-                        scoped,
-                        &context,
-                        Some(&expected),
-                        true,
-                        &planning,
-                    )?,
-                    None,
+            let lowered = if tensor_helpers.collect_trace {
+                crate::lower::try_lower_subexpr_c_execution_with_ordered_inputs_and_trace(
+                    &signature.body_expr,
+                    scoped,
+                    &context,
+                    Some(&expected),
+                    true,
+                    &planning,
                 )
+                .map(|(plan, trace)| (plan, Some(trace)))
+            } else {
+                crate::lower::try_lower_subexpr_c_execution_with_ordered_inputs(
+                    &signature.body_expr,
+                    scoped,
+                    &context,
+                    Some(&expected),
+                    true,
+                    &planning,
+                )
+                .map(|plan| (plan, None))
             };
             #[cfg(not(feature = "lowering-trace"))]
-            let plan = crate::lower::try_lower_subexpr_c_execution_with_ordered_inputs(
+            let lowered = crate::lower::try_lower_subexpr_c_execution_with_ordered_inputs(
                 &signature.body_expr,
                 scoped,
                 &context,
                 Some(&expected),
                 true,
                 &planning,
-            )?;
+            )
+            .map(|plan| (plan, ()));
+            let (plan, trace) = match lowered {
+                Ok(lowered) => lowered,
+                Err(diagnostic) if diagnostic.fatal => return Err(diagnostic),
+                Err(_) => return Ok(None),
+            };
+            #[cfg(not(feature = "lowering-trace"))]
+            let _ = trace;
             let rebound = remap_tensor_helper_dim_symbols(
                 plan.dag_for_inspection(),
                 &signature.scope,
@@ -5078,7 +5084,7 @@ fn lower_def_body_kernel(
     }
     #[cfg(feature = "lowering-trace")]
     let lowered = if tensor_helpers.collect_trace {
-        let context = cached_subexpr_lowering_context(program);
+        let context = cached_subexpr_lowering_context(program).with_host_call_boundaries();
         let scoped = kernel_scope_types(&signature.scope, Some(&signature.params));
         crate::lower::try_lower_subexpr_program_with_ordered_inputs_and_trace(
             &signature.body_expr,
@@ -5098,6 +5104,7 @@ fn lower_def_body_kernel(
             Some(&signature.params),
             &expected,
             None,
+            true,
         )
         .map(|lowered| (lowered, None))
     };
@@ -5109,6 +5116,7 @@ fn lower_def_body_kernel(
         Some(&signature.params),
         &expected,
         None,
+        true,
     );
     let (dag, _trace) = match lowered {
         #[cfg(feature = "lowering-trace")]
@@ -5174,8 +5182,14 @@ fn lower_kernel_dag(
     declaring_params: Option<&[HostParam]>,
     expected: &TensorType,
     random: Option<RandomLoweringState>,
+    host_call_boundaries: bool,
 ) -> Result<(crate::Dag, Option<u64>), crate::lower::LowerDiagnostic> {
     let context = scope.helper_context(program);
+    let context = if host_call_boundaries {
+        context.with_host_call_boundaries()
+    } else {
+        context
+    };
     let scope_types = kernel_scope_types(scope, declaring_params);
     let (dag, next_random_counter) = match random {
         None => (
@@ -6004,7 +6018,7 @@ fn lower_tensor_helper_dag(
     expected: &TensorType,
 ) -> Option<crate::Dag> {
     lower_tensor_helper_with(expr, program, || {
-        lower_kernel_dag(expr, program, scope, None, expected, None).map(|(dag, _)| dag)
+        lower_kernel_dag(expr, program, scope, None, expected, None, true).map(|(dag, _)| dag)
     })
 }
 
@@ -6026,7 +6040,7 @@ fn lower_tensor_helper_product(
     #[cfg(not(feature = "lowering-trace"))]
     let _ = collect_trace;
     if collect_execution {
-        let context = scope.helper_context(program);
+        let context = scope.helper_context(program).with_host_call_boundaries();
         let scoped = collect_tensor_scope(scope).into_sorted();
         if context.c_execution_profile(expr, &scoped)
             == crate::evaluation::EvaluationProfile::FixedControl
@@ -6099,7 +6113,7 @@ fn lower_tensor_helper_product(
     #[cfg(feature = "lowering-trace")]
     if collect_trace {
         return lower_tensor_helper_with(expr, program, || {
-            let context = scope.helper_context(program);
+            let context = scope.helper_context(program).with_host_call_boundaries();
             let scoped = collect_tensor_scope(scope).into_sorted();
             let (dag, _, trace) =
                 crate::lower::try_lower_subexpr_program_with_ordered_inputs_and_trace(
@@ -6134,7 +6148,7 @@ fn lower_tensor_helper_dag_with_controls(
         record_host_work(|profile| profile.tensor_helper_fail_guard_rejections += 1);
         return None;
     }
-    let context = scope.helper_context(program);
+    let context = scope.helper_context(program).with_host_call_boundaries();
     let mut lowered = match crate::lower::try_lower_subexpr_program_with_context_and_controls(
         expr,
         collect_tensor_scope(scope),
@@ -10924,6 +10938,18 @@ fn lower_app_host_expr(
         .as_ref()
         .map(|(_, ret_ty)| ret_ty.clone())
         .unwrap_or_else(fresh_host_inference);
+    if let Some(callable) = known_callable
+        && matches!(inferred_ret_ty, HostTypeTerm::Tensor(_))
+    {
+        return lower_captured_named_call(
+            app_expr,
+            callable,
+            program,
+            scope,
+            tensor_helpers,
+            expected_ty,
+        );
+    }
     // chelis#935/#936: specialize these bounded generic forms before any
     // helper-summary probe attempts to lower their standalone generic body.
     // The checked application metadata is the authoritative applied result
@@ -11457,6 +11483,93 @@ fn beta_reduce_inline_host_call(expr: &Expr) -> Option<Expr> {
         &substitutions,
         &UnordSet::new(),
     )))
+}
+
+/// A captured definition still has the ordinary call-by-value host boundary.
+/// Prepare actuals in the caller once; only then lower the resolved call with
+/// fresh locals. The callee scope does not inherit caller callable spellings.
+fn lower_captured_named_call(
+    app_expr: &Expr,
+    callable: &crate::lower::ResolvedFunction,
+    program: &HostLoweringSession<'_>,
+    scope: &HostLexicalScope,
+    tensor_helpers: &mut TensorHelperSink,
+    expected_ty: Option<&HostTypeTerm>,
+) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+    let canonical = callable
+        .canonical_definition
+        .as_ref()
+        .expect("named capture");
+    let Expr::List(app, span) = app_expr else {
+        unreachable!("application")
+    };
+    let kids = children(app);
+    let mut residual = app.clone();
+    let Expr::List(callee, _) = &mut residual.elements[2] else {
+        unreachable!("named callee")
+    };
+    callee.elements[2] = Expr::Atom(Atom::Name(canonical.clone()), kids[0].span());
+    let mut callee_scope = HostLexicalScope::new();
+    let mut bindings = Vec::new();
+    for (index, arg) in kids.iter().enumerate().skip(1) {
+        let mut ordinal = index;
+        let name = loop {
+            let candidate = format!("__host_callable_arg_{ordinal}");
+            if !scope.contains_key(&candidate)
+                && !callee_scope.contains_key(&candidate)
+                && !expr_mentions_name(app_expr, &candidate)
+                && find_top_level_def_named(program.exprs(), &candidate).is_none()
+            {
+                break candidate;
+            }
+            ordinal += 1;
+        };
+        if let Some(actual) = scope.captured_callable(arg, program) {
+            callee_scope.insert_callable(name.clone(), expr_host_type(arg, program, scope), actual);
+        } else {
+            let value = lower_host_expr(arg, program, scope, tensor_helpers)?;
+            let ty = host_expr_type(&value);
+            callee_scope.insert(name.clone(), ty.clone());
+            bindings.push(HostBinding {
+                name: name.clone(),
+                display_name: None,
+                display_roots: Vec::new(),
+                ty,
+                value,
+            });
+        }
+        // Preserve the checked actual's metadata, never substitute the
+        // declaration's formal extent for the actual's observed dimensions.
+        let metadata = stamped_parts(arg)
+            .map(|(_, meta, _)| meta.clone())
+            .unwrap_or_default();
+        residual.elements[index + 2] = Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Tag(DeepTag::Var), arg.span()),
+                    Expr::Map(metadata, arg.span()),
+                    Expr::Atom(Atom::Name(name), arg.span()),
+                ],
+            },
+            arg.span(),
+        );
+    }
+    // This is a declaration-identity call, not another lookup through the
+    // alias's spelling. Existing staged/polymorphic/helper admission decides
+    // whether the declaration is called or specialized using prepared vars.
+    let body = lower_host_expr_with_expected(
+        &Expr::List(residual, *span),
+        program,
+        &callee_scope,
+        tensor_helpers,
+        expected_ty,
+    )?;
+    let ty = host_expr_type(&body);
+    Ok(HostExpr::new(HostExprKind::Let {
+        bindings,
+        body: Box::new(body),
+        ty,
+    }))
 }
 
 fn inline_top_level_host_call(expr: &Expr, program: &HostLoweringSession<'_>) -> Option<Expr> {
@@ -12744,12 +12857,20 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
     // a host-only descendant. Other builtins may carry static axis/list
     // arguments, so this two-tensor boundary is specific to matmul.
     let hoist_matmul_operands = kids.len() == 3 && direct_var_name(&kids[0]) == Some("matmul");
-    if !hoist_matmul_operands
-        && !kids
-            .iter()
-            .skip(1)
-            .any(should_keep_tensor_expr_in_host_lane)
-    {
+    // A captured call below a tensor argument can require its own eager
+    // host boundary. Keep tensor-valued actuals outside this extraction;
+    // static scalar axes/rates remain source controls, not runtime inputs.
+    let hoist_captured_tensors = scope
+        .known_callables
+        .to_sorted()
+        .iter()
+        .any(|(_, value)| value.is_some());
+    let needs_host = |arg: &Expr| {
+        should_keep_tensor_expr_in_host_lane(arg)
+            || (hoist_captured_tensors
+                && expr_tensor_type(arg, program, scope).is_some_and(|ty| !ty.dims.is_empty()))
+    };
+    if !hoist_matmul_operands && !kids.iter().skip(1).any(needs_host) {
         return Ok((Cow::Borrowed(expr), Cow::Borrowed(scope), Vec::new()));
     }
 
@@ -12762,7 +12883,7 @@ fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
     let mut bindings = Vec::new();
 
     for (index, arg) in kids.iter().enumerate().skip(1) {
-        if hoist_matmul_operands || should_keep_tensor_expr_in_host_lane(arg) {
+        if hoist_matmul_operands || needs_host(arg) {
             let value = lower_host_expr(arg, program, scope, tensor_helpers)?;
             let preferred_ty = fn_sig
                 .and_then(|(param_tys, _)| param_tys.get(index - 1))
