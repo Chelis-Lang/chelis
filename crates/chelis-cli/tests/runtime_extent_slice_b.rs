@@ -4032,7 +4032,11 @@ fn an_overshooting_shrink_span_reports_the_domain_error_on_c() {
     );
     let dir = tempfile::tempdir().expect("tempdir");
     for claim in OVERSHOOT_CLAIMS {
-        let (status, out) = c_run_status(&dir, &format!("overshoot_{claim}_c"), &overshooting_shrink_source(claim));
+        let (status, out) = c_run_status(
+            &dir,
+            &format!("overshoot_{claim}_c"),
+            &overshooting_shrink_source(claim),
+        );
         assert_eq!(
             out, OVERSHOOT_RENDERING,
             "claim `{claim}` reports the overshoot and nothing else"
