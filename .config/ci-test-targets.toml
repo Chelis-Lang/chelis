@@ -257,3 +257,22 @@ name = "expand_insert_source_literal_inventory"
 [[target]]
 package = "chelis-compiler-api"
 name = "issue_257_tensor_scan_host_runtime"
+
+# chelis#1489: both rows guard a SOUNDNESS property -- a deferred operand
+# decision must still be checked against the declaration -- and neither was
+# registered, so the regression the second row pins reached `main` in #1577 with
+# no per-pull-request job running either suite. They invoke the `chelis` binary
+# per case but emit and link no C, which is the cost shape the notes above say
+# took the Fast Tests job past its budget.
+#
+# Same PROVISIONAL status as the two rows above, pending chelis#1824.
+
+# 16 tests, 3.385 s measured warm.
+[[target]]
+package = "chelis-cli"
+name = "issue_1489_deferred_tensor_operand_gates"
+
+# 8 tests, 2.884 s measured warm.
+[[target]]
+package = "chelis-cli"
+name = "issue_1489_deferred_result_generalization"
