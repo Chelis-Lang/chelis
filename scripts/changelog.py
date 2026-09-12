@@ -71,6 +71,12 @@ class Section:
     end: int
 
 
+@dataclass(frozen=True)
+class Migration:
+    changelog: bytes
+    fragments: dict[str, bytes]
+
+
 def version(value: str) -> str:
     if not SEMVER.fullmatch(value):
         raise PolicyError(f"invalid semantic version: {value!r}")
@@ -141,7 +147,7 @@ def fence_after(line: str, fence: str) -> str:
     return fence if marker[1][0] == "`" and "`" in marker[2] else marker[1]
 
 
-def sections(text: str) -> list[Section]:
+def sections(text: str, *, allow_unreleased: bool = False) -> list[Section]:
     """Locate real release headings, ignoring fenced examples, without rewriting bytes."""
     headers = []
     fence = ""
@@ -156,14 +162,19 @@ def sections(text: str) -> list[Section]:
             if match is None:
                 raise PolicyError(f"CHANGELOG.md: malformed release heading: {stripped!r}")
             if match[1] == "Unreleased":
-                raise PolicyError("CHANGELOG.md: move [Unreleased] notes into changelog.d/ before release assembly")
-            name = version(match[1])
+                if not allow_unreleased:
+                    raise PolicyError("CHANGELOG.md: move [Unreleased] notes into changelog.d/ before release assembly")
+                if match[2] is not None:
+                    raise PolicyError("CHANGELOG.md: legacy [Unreleased] heading must be undated")
+                name = match[1]
+            else:
+                name = version(match[1])
             if name in seen:
                 raise PolicyError(f"CHANGELOG.md: duplicate release section {name}")
             seen.add(name)
-            if match[2] is None:
+            if match[1] != "Unreleased" and match[2] is None:
                 raise PolicyError(f"CHANGELOG.md: missing date for {name}")
-            headers.append((name, release_date(match[2]), offset, offset + len(line)))
+            headers.append((name, "" if match[2] is None else release_date(match[2]), offset, offset + len(line)))
         offset += len(line)
     if fence:
         raise PolicyError("CHANGELOG.md: unclosed code fence")
@@ -171,6 +182,88 @@ def sections(text: str) -> list[Section]:
         raise PolicyError("CHANGELOG.md: no release sections")
     return [Section(*row, headers[i + 1][2] if i + 1 < len(headers) else len(text))
             for i, row in enumerate(headers)]
+
+
+def migration_breaking(body: str) -> tuple[bool, str]:
+    match = re.match(r"^\*\*BREAKING \(([^\r\n()*]+)\): ", body)
+    if match is None:
+        if re.match(r"^\*\*BREAKING\b", body):
+            raise PolicyError("CHANGELOG.md: unsupported legacy BREAKING marker")
+        return False, body
+    return True, "**" + match[1] + ":" + body[match.end() - 1:]
+
+
+def legacy_fragments(body: str) -> list[Fragment]:
+    """Parse the deliberately small legacy-Unreleased grammar without guessing Markdown."""
+    result = []
+    category = None
+    current: list[str] | None = None
+    fence = ""
+
+    def finish() -> None:
+        nonlocal current, fence
+        if current is None:
+            return
+        if fence:
+            raise PolicyError("CHANGELOG.md: legacy [Unreleased] entry has an unclosed code fence")
+        text = "\n".join(current).strip()
+        breaking, text = migration_breaking(text)
+        path = f"changelog.d/legacy-unreleased-{len(result) + 1:03d}.{category}"
+        path += ".breaking.md" if breaking else ".md"
+        result.append(fragment(path, File("100644", (text + "\n").encode())))
+        current = None
+
+    for raw in body.splitlines():
+        if raw.startswith("### "):
+            finish()
+            name = raw.removeprefix("### ")
+            if name.title() != name or name.lower() not in CATEGORIES:
+                raise PolicyError(f"CHANGELOG.md: unsupported legacy [Unreleased] category {raw!r}")
+            category = name.lower()
+        elif raw.startswith("- "):
+            if category is None:
+                raise PolicyError("CHANGELOG.md: legacy [Unreleased] entry precedes a category")
+            finish()
+            current = [raw[2:]]
+            fence = fence_after(current[0], fence)
+        elif not raw.strip():
+            if current is not None:
+                current.append("")
+        elif current is None:
+            raise PolicyError("CHANGELOG.md: unsupported prose in legacy [Unreleased] section")
+        elif not raw.startswith("  "):
+            raise PolicyError("CHANGELOG.md: legacy [Unreleased] continuations require two-space indentation")
+        else:
+            line = raw[2:]
+            current.append(line)
+            fence = fence_after(line, fence)
+    finish()
+    if not result:
+        raise PolicyError("CHANGELOG.md: legacy [Unreleased] section has no entries")
+    return result
+
+
+def migration(tree: dict[str, File]) -> Migration:
+    workspace_version(tree)
+    fragments(tree)
+    text = required(tree, "CHANGELOG.md")
+    found = sections(text, allow_unreleased=True)
+    if found[0].version != "Unreleased":
+        raise PolicyError("CHANGELOG.md: [Unreleased] must be the top release section for migration")
+    if sum(section.version == "Unreleased" for section in found) != 1:
+        raise PolicyError("CHANGELOG.md: expected exactly one top [Unreleased] section")
+    if len(found) == 1:
+        raise PolicyError("CHANGELOG.md: legacy [Unreleased] migration requires a historical release")
+    legacy = found[0]
+    notes = legacy_fragments(text[legacy.body_start:legacy.end])
+    expected = {note.path: (note.body + "\n").encode() for note in notes}
+    migrated = text[:legacy.start] + text[legacy.end:]
+    sections(migrated)
+    for path, data in expected.items():
+        existing = tree.get(path)
+        if existing is not None and existing != File("100644", data):
+            raise PolicyError(f"{path}: migration fragment collision")
+    return Migration(migrated.encode(), expected)
 
 
 def render(notes: list[Fragment], requested: str, date: str) -> str:
@@ -262,6 +355,15 @@ def atomic_write(path: Path, data: bytes) -> None:
             temporary.unlink(missing_ok=True)
 
 
+def write_new_file(path: Path, data: bytes) -> None:
+    """Create a migration fragment without ever replacing an existing path."""
+    with path.open("xb") as stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+    path.chmod(0o644)
+
+
 def git(root: Path, *args: str) -> bytes:
     result = subprocess.run(["git", *args], cwd=root, capture_output=True)
     if result.returncode:
@@ -303,6 +405,22 @@ def is_release(before: dict[str, File], after: dict[str, File]) -> bool:
         return False
 
 
+def is_unreleased_migration(before: dict[str, File], after: dict[str, File]) -> bool:
+    """Admit only exact conservation of the one supported legacy representation."""
+    try:
+        if workspace_version(before) != workspace_version(after):
+            return False
+        expected = migration(before)
+        if after.get("CHANGELOG.md") != File(before["CHANGELOG.md"].mode, expected.changelog):
+            return False
+        for path, file in before.items():
+            if path.startswith("changelog.d/") and path != "changelog.d/README.md" and after.get(path) != file:
+                return False
+        return all(after.get(path) == File("100644", data) for path, data in expected.fragments.items())
+    except PolicyError:
+        return False
+
+
 def check_pr(root: Path, base: str, head: str, labels: set[str]) -> list[str]:
     base = git(root, "rev-parse", "--verify", "--end-of-options", f"{base}^{{commit}}").decode().strip()
     head = git(root, "rev-parse", "--verify", "--end-of-options", f"{head}^{{commit}}").decode().strip()
@@ -319,7 +437,8 @@ def check_pr(root: Path, base: str, head: str, labels: set[str]) -> list[str]:
         except PolicyError as error:
             findings.append(str(error))
     release = is_release(before, after)
-    if "CHANGELOG.md" in paths and not release:
+    legacy_migration = is_unreleased_migration(before, after)
+    if "CHANGELOG.md" in paths and not release and not legacy_migration:
         findings.append("direct CHANGELOG.md edit: expected a reproducible release assembly with unchanged history")
     old_content = set()
     for path, file in before.items():
@@ -328,6 +447,11 @@ def check_pr(root: Path, base: str, head: str, labels: set[str]) -> list[str]:
                 old_content.add(fragment(path, file).content)
             except PolicyError:
                 pass  # A correction to an invalid old fragment is still an authored note.
+    if legacy_migration:
+        # Moving existing prose is not newly authored release content, even
+        # when the same entry is also copied to another fragment filename.
+        old_content.update(fragment(path, File("100644", data)).content
+                           for path, data in migration(before).fragments.items())
     added_note = False
     for path in paths:
         if path.startswith("changelog.d/") and path != "changelog.d/README.md" and path in after:
@@ -361,6 +485,8 @@ def main(argv: list[str] | None = None, *, root: Path = REPO_ROOT) -> int:
     build.add_argument("--version", required=True)
     build.add_argument("--date", required=True)
     build.add_argument("--write", action="store_true")
+    migrate = commands.add_parser("migrate-unreleased", help="preview lossless migration of the legacy top [Unreleased] section")
+    migrate.add_argument("--write", action="store_true")
     extraction = commands.add_parser("extract", help="extract the tagged release's committed notes")
     extraction.add_argument("--version", required=True)
     extraction.add_argument("--output", type=Path, required=True)
@@ -399,6 +525,22 @@ def main(argv: list[str] | None = None, *, root: Path = REPO_ROOT) -> int:
                     if path.is_symlink() or path.read_bytes() != tree[note.path].data:
                         raise OSError(f"{note.path} changed during assembly; not deleting it")
                     path.unlink()
+        elif args.command == "migrate-unreleased":
+            plan = migration(tree)
+            for path in sorted(plan.fragments):
+                print(path)
+            if args.write:
+                expected_tree = dict(tree)
+                expected_tree.update({path: File("100644", data) for path, data in plan.fragments.items()})
+                if disk_tree(root) != tree:
+                    raise OSError("changelog inputs changed during migration; retry the preview")
+                for name, data in plan.fragments.items():
+                    path = root / name
+                    if name not in tree:
+                        write_new_file(path, data)
+                if disk_tree(root) != expected_tree:
+                    raise OSError("changelog inputs changed during migration; legacy section remains")
+                atomic_write(root / "CHANGELOG.md", plan.changelog)
         else:
             output = args.output.resolve()
             if output in (root / "CHANGELOG.md", root / "Cargo.toml") or output.is_relative_to(root / "changelog.d"):

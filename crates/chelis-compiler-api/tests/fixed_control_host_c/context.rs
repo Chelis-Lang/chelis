@@ -236,17 +236,48 @@ fn context_rejects_unbound_names_runtime_controls_and_rootless_entries() {
 }
 
 #[test]
-#[ignore = "chelis#1878: separate pre-existing private-export checker gap; manual command in docs/CHELIS_SURFACE.md"]
-fn diagnostic_private_export_is_already_accepted_by_context_checker() {
-    let context = context_with_library(
+fn context_imports_enforce_module_exports_before_checking_or_emission() {
+    let original = context_with_library(
         "module Probe.Draw\nexport (keep)\ndef keep(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = dropout(x, rate)\ndef private_keep(x: tensor[4, f32]) -> tensor[4, f32] = dropout(x, 0.5f32)\n",
     );
-    let result = chelis_compiler_api::compiler::check_in_context(
-        &context,
-        "module Probe.Client\nimport Probe.Draw (keep)\ndef main(x: tensor[4, f32]) -> tensor[4, f32] = with seed(42i64) { Probe.Draw.private_keep(x) }\n",
-    );
-    assert!(
-        result.is_err(),
-        "private qualified helper should be rejected before code generation: {result:?}"
-    );
+    let decoded = CompiledContext::decode(&original.encode().unwrap()).unwrap();
+    for context in [&original, &decoded] {
+        for import in [
+            "import Probe.Draw",
+            "import Probe.Draw (keep)",
+            "import Probe.Draw (..)",
+        ] {
+            for (call, allowed) in [
+                ("Probe.Draw.keep(x, 0.5f32)", true),
+                ("Probe.Draw.private_keep(x)", false),
+            ] {
+                let source = format!(
+                    "module Probe.Client\n{import}\ndef main(x: tensor[4, f32]) -> tensor[4, f32] = with seed(42i64) {{ {call} }}\n"
+                );
+                let checked = chelis_compiler_api::compiler::check_in_context(context, &source);
+                let emitted = compile_for_execution_in_context(
+                    context,
+                    &source,
+                    CompileTarget::C,
+                    Some("main"),
+                );
+                if allowed {
+                    let checked = checked.unwrap();
+                    assert!(checked.errors.is_empty(), "{checked:?}");
+                    emitted.unwrap();
+                } else {
+                    for error in [checked.unwrap_err(), emitted.unwrap_err()] {
+                        let message = format!("{error:?}");
+                        assert!(
+                            message.contains("does not export `private_keep`"),
+                            "{message}"
+                        );
+                    }
+                }
+            }
+        }
+        let source = "module Probe.Client\nimport Probe.Draw (private_keep)\ndef main(x: tensor[4, f32]) -> tensor[4, f32] = with seed(42i64) { private_keep(x) }\n";
+        let error = chelis_compiler_api::compiler::check_in_context(context, source).unwrap_err();
+        assert!(format!("{error:?}").contains("does not export `private_keep`"));
+    }
 }

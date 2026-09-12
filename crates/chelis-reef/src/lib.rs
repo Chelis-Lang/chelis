@@ -8493,20 +8493,19 @@ fn build_name_resolver(
         let internal_map = internal_maps
             .get(&(import_pkg.clone(), import_module.clone()))
             .ok_or_else(|| format!("missing internal map for module `{import_module}`"))?;
-        let allowed_exports = if import_pkg == module.package_name {
-            import_src.symbols.keys().cloned().collect::<BTreeSet<_>>()
-        } else {
-            match import_package.source {
-                LoadedSourceKind::Path { .. } | LoadedSourceKind::Root => {
-                    import_src.exports.clone()
-                }
-                LoadedSourceKind::LocalRegistry => dep_public_exports(
+        // spec/02 Import/Export: visibility is module-scoped, not package-scoped.
+        // Local helpers remain in module_internal; importing a sibling module
+        // does not grant access to its explicitly unexported bindings (#1878).
+        let allowed_exports = match import_package.source {
+            LoadedSourceKind::LocalRegistry if import_pkg != module.package_name => {
+                dep_public_exports(
                     dep_shells
                         .get(&import_pkg)
                         .ok_or_else(|| format!("missing dependency shell for `{import_pkg}`"))?,
                     import_module,
-                )?,
+                )?
             }
+            _ => import_src.exports.clone(),
         };
         let qualified_map = allowed_exports
             .iter()
@@ -12245,6 +12244,68 @@ version = "0.1.0"
             err.contains("does not export") && err.contains("Missing"),
             "diagnostic must name the unexported leaf; got: {err}"
         );
+    }
+
+    /// #1878: a real private name is not the same control as a nonexistent
+    /// name. Same-package imports obey module exports, while local helpers
+    /// and constructors automatically exported by a public type remain usable.
+    #[test]
+    fn same_package_imports_respect_explicit_module_exports() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                "[package]\nname = \"demo\"\nversion = \"0.1.0\"\ncompiler = \"{CURRENT_COMPILER_VERSION}\"\nmodule_prefix = \"Demo\"\n"
+            ),
+        );
+        write(
+            &root.join("reef.lock"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        );
+        write(
+            &root.join("src/library.ch"),
+            "module Demo.Library\nexport (public_value, Mode)\ntype Mode = | Visible\ntype Hidden = | Secret\ndef secret() -> int32 = 1i32\ndef public_value() -> int32 = secret()\n",
+        );
+        let entry = root.join("src/client.ch");
+        for (body, private_name) in [
+            ("def go() -> int32 = Demo.Library.secret()", "secret"),
+            ("def go() = Demo.Library.Secret", "Secret"),
+            ("def go(x: Demo.Library.Hidden) = x", "Hidden"),
+            (
+                "def go(x: Demo.Library.Mode) -> int32 = match x with { | Demo.Library.Secret => 0i32 | Demo.Library.Visible => 1i32 }",
+                "Secret",
+            ),
+        ] {
+            write(
+                &entry,
+                &format!("module Demo.Client\nimport Demo.Library\n{body}\n"),
+            );
+            let error = prepare_program_for_file(&entry).expect_err("private import must reject");
+            assert!(
+                error.contains(&format!("does not export `{private_name}`")),
+                "{error}"
+            );
+        }
+        write(
+            &entry,
+            "module Demo.Client\nimport Demo.Library (Mode, Visible, public_value)\ndef go(x: Mode) -> int32 = match x with { | Visible => public_value() }\n",
+        );
+        let prepared = prepare_program_for_file(&entry).unwrap().unwrap();
+        let deep = expanded_desugared_program(&prepared.decls).unwrap();
+        checked_program_with_effects(&deep)
+            .expect("local private helper and public constructors remain valid");
+        // Bundled stdlib modules also import siblings, without a dependency
+        // shell for their own package. They still use the same export boundary.
+        let mut graph = load_package_graph_for_eval(root).unwrap();
+        graph.packages.get_mut("demo").unwrap().source = LoadedSourceKind::LocalRegistry;
+        let maps = build_internal_maps(&graph);
+        let module = &graph.packages["demo"].modules["Demo.Client"];
+        let resolver = build_name_resolver(module, &graph, &maps, &BTreeMap::new()).unwrap();
+        assert!(resolve_qualified_name("Demo.Library.public_value", &resolver).is_some());
+        assert!(resolve_qualified_name("Demo.Library.Visible", &resolver).is_some());
+        assert!(resolve_qualified_name("Demo.Library.secret", &resolver).is_none());
+        assert!(resolve_qualified_name("Demo.Library.Secret", &resolver).is_none());
     }
 
     /// Issue #316 (patterns): module-qualified constructor *patterns*

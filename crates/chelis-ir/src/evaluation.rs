@@ -1484,6 +1484,206 @@ mod tests {
     }
 
     #[test]
+    fn source_ad_replays_signed_and_nonfinite_cotangents_with_the_saved_key() {
+        use chelis_types::dtype_semantics::StorageView;
+
+        let bits = |value: &TensorValue| -> Vec<u64> {
+            match value.storage().view() {
+                StorageView::F16(values) => values.iter().map(|v| u64::from(v.to_bits())).collect(),
+                StorageView::Bf16(values) => {
+                    values.iter().map(|v| u64::from(v.to_bits())).collect()
+                }
+                StorageView::F32(values) => values.iter().map(|v| u64::from(v.to_bits())).collect(),
+                StorageView::F64(values) => values.iter().map(|v| v.to_bits()).collect(),
+                _ => panic!("expected a floating tensor"),
+            }
+        };
+        // [04-NUM-2]/[05-OP-37]: independently encoded results of g / 0.5.
+        // These are IEEE conformance cases, not derivatives over nonfinite reals.
+        let cotangents = [-0.0, -3.0, 0.0, f64::INFINITY, f64::NEG_INFINITY, f64::NAN];
+        for (prim, kept_bits, two_bits, minus_three_bits) in [
+            (
+                Prim::F16,
+                [0x8000, 0xc600, 0, 0x7c00, 0xfc00, 0x7e00],
+                0x4000,
+                0xc200,
+            ),
+            (
+                Prim::Bf16,
+                [0x8000, 0xc0c0, 0, 0x7f80, 0xff80, 0x7fc0],
+                0x4000,
+                0xc040,
+            ),
+            (
+                Prim::F32,
+                [
+                    0x80000000, 0xc0c00000, 0, 0x7f800000, 0xff800000, 0x7fc00000,
+                ],
+                0x40000000,
+                0xc0400000,
+            ),
+            (
+                Prim::F64,
+                [
+                    0x8000000000000000,
+                    0xc018000000000000,
+                    0,
+                    0x7ff0000000000000,
+                    0xfff0000000000000,
+                    0x7ff8000000000000,
+                ],
+                0x4000000000000000,
+                0xc008000000000000,
+            ),
+        ] {
+            // Only v is differentiated; weights is a captured tensor input.
+            let source = format!(
+                "def sample(x: tensor[4, {prim}], weights: tensor[4, {prim}]) -> tensor[4, {prim}] = {{\n loss = fn (v: tensor[4, {prim}]) -> tensor_to_scalar(sum(mul(dropout(v, 0.5{prim}), weights), 0i32))\n grad(loss)(x)\n }}\n def next(x: tensor[4, {prim}]) -> tensor[4, {prim}] = dropout(x, 0.5{prim})",
+                prim = prim.name(),
+            );
+            let declarations = chelis_surf::parser::parse_str(&source).unwrap();
+            let checked = chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(
+                &declarations,
+            ))
+            .unwrap();
+            let plan = |name| {
+                crate::host::host_def_evaluation_plan(&checked, name, &context())
+                    .unwrap()
+                    .unwrap()
+                    .plan()
+                    .unwrap()
+                    .clone()
+            };
+            let forward_and_ad = plan("sample");
+            let next = plan("next");
+            let sites = forward_and_ad
+                .metadata
+                .spine
+                .nodes()
+                .iter()
+                .filter_map(|node| {
+                    forward_and_ad
+                        .metadata
+                        .sites
+                        .get(node)
+                        .map(|site| (*node, *site))
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                matches!(
+                    sites.as_slice(),
+                    [
+                        (
+                            _,
+                            RandomSite::Forward {
+                                draw: DrawId(0),
+                                scope: ScopeId(0)
+                            }
+                        ),
+                        (_, RandomSite::Replay { draw: DrawId(0) }),
+                    ]
+                ),
+                "{sites:?}"
+            );
+            let input =
+                TensorValue::finalize_from_wide("load", prim, vec![4], vec![1.0; 4]).unwrap();
+            // Each value reaches every coordinate, both a kept and dropped site.
+            for offset in 0..cotangents.len() {
+                let weights = TensorValue::finalize_from_wide(
+                    "load",
+                    prim,
+                    vec![4],
+                    (0..4)
+                        .map(|i| cotangents[(offset + i) % cotangents.len()])
+                        .collect(),
+                )
+                .unwrap();
+                let mut state = context();
+                {
+                    let mut frame = forward_and_ad.frame(&mut state).unwrap();
+                    let values = crate::eval::eval_tensor_segment_with_strict(
+                        &forward_and_ad.dag,
+                        &mut frame,
+                        |name| match name {
+                            "x" => Some(input.clone()),
+                            "weights" => Some(weights.clone()),
+                            _ => None,
+                        },
+                    )
+                    .unwrap();
+                    // Independent [05-RNG-1] seed42 ordinal0 mask is [drop, keep, drop, drop].
+                    let forward = &values[&sites[0].0];
+                    assert_eq!(forward.prim(), prim);
+                    assert_eq!(forward.shape, [4]);
+                    assert_eq!(bits(forward), [0, two_bits, 0, 0]);
+                    // spec/06 §2.4 adds an exact +0 base before replay and
+                    // again at the gradient root: +0 + (-0) is +0 under RNE.
+                    let replay_input = forward_and_ad.dag.get(sites[1].0).unwrap().inputs[0];
+                    assert_eq!(values[&replay_input].prim(), prim);
+                    assert_eq!(values[&replay_input].shape, [4]);
+                    let expected_input = (0..4)
+                        .map(|i| match (offset + i) % cotangents.len() {
+                            0 => 0,
+                            1 => minus_three_bits,
+                            other => kept_bits[other],
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        bits(&values[&replay_input]),
+                        expected_input,
+                        "replay cotangent"
+                    );
+                    let kept = (offset + 1) % cotangents.len();
+                    let expected = [0, if kept == 0 { 0 } else { kept_bits[kept] }, 0, 0];
+                    for node in [sites[1].0, forward_and_ad.dag.roots()[0]] {
+                        let gradient = &values[&node];
+                        assert_eq!(gradient.prim(), prim);
+                        assert_eq!(gradient.shape, [4]);
+                        assert_eq!(
+                            bits(gradient),
+                            expected,
+                            "{prim:?}, offset={offset}, node={node:?}"
+                        );
+                    }
+                    if offset == 0 {
+                        // A direct -0 cotangent at this already-realized replay
+                        // boundary precedes accumulation and must keep its sign.
+                        let negative_zero =
+                            TensorValue::finalize_from_wide("load", prim, vec![4], vec![-0.0; 4])
+                                .unwrap();
+                        let replay = frame.dropout(sites[1].0, &negative_zero, 0.5, 42).unwrap();
+                        assert_eq!(replay.prim(), prim);
+                        assert_eq!(replay.shape, [4]);
+                        assert_eq!(bits(&replay), [0, kept_bits[0], 0, 0]);
+                    }
+                    assert_eq!(
+                        frame
+                            .keys
+                            .iter()
+                            .map(|key| key.map(|key| (key.seed, key.ordinal)))
+                            .collect::<Vec<_>>(),
+                        [Some((42, 0))]
+                    );
+                    assert_eq!(frame.counters, [0]);
+                    assert_eq!(frame.scopes, [ScopeId(0)]);
+                }
+                assert_eq!(state.state().seed, Some(42));
+                assert_eq!(state.state().counter, 1);
+                let values = eval_tensor_plan_with_strict(&next, &mut state, |name| {
+                    (name == "x").then(|| input.clone())
+                })
+                .unwrap();
+                let result = &values[&next.dag.roots()[0]];
+                assert_eq!(result.prim(), prim);
+                assert_eq!(result.shape, [4]);
+                assert_eq!(bits(result), [two_bits, 0, 0, 0], "ordinal1 continuation");
+                assert_eq!(state.state().seed, Some(42));
+                assert_eq!(state.state().counter, 2);
+            }
+        }
+    }
+
+    #[test]
     fn invalid_dtype_at_dropout_kernel_preserves_frames_keys_and_next_draw() {
         // [05-OP-37]/[05-RNG-1], E1 kernel-boundary evidence. Strict evaluator
         // Load rejects these tagged inputs earlier; this deliberately calls
