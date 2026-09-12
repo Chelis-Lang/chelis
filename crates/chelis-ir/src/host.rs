@@ -18059,7 +18059,7 @@ def bad[b](box: Box[b]) -> bool =
         let checked = surf_check(include_str!(
             "../../../tests/support/helper_summary_fatal.ch"
         ));
-        let _scope = begin_host_lowering_cache_scope(&checked);
+        let session = HostLoweringSession::new(&checked);
         let _restore = MonoProbeGuard::begin();
         MONO_SPECIALIZATIONS.with(|state| {
             state
@@ -18068,10 +18068,9 @@ def bad[b](box: Box[b]) -> bool =
                 .insert("seed-key".into(), "seed-symbol".into());
         });
         let seeded = MONO_SPECIALIZATIONS.with(|state| state.borrow().clone());
-        let cache_key = (&checked as *const CheckedProgram as usize, name.to_string());
         for _ in 0..2 {
             let caught =
-                std::panic::catch_unwind(|| top_level_fn_helper_summary_rejects(&checked, name));
+                std::panic::catch_unwind(|| top_level_fn_helper_summary_rejects(&session, name));
             if let Err(payload) = &caught {
                 eprintln!(
                     "escaped diagnostic: {:?}",
@@ -18096,12 +18095,15 @@ def bad[b](box: Box[b]) -> bool =
             }
             assert!(!is_inlining("sink_output"));
             assert!(!is_inlining("causal_sdpa_with_sink"));
-            HELPER_SUMMARY_REJECTS_CACHE.with(|cache| {
-                assert_eq!(
-                    cache.borrow().get(&cache_key).copied(),
-                    if raises_here { None } else { Some(false) }
-                );
-            });
+            assert_eq!(
+                session
+                    .facts
+                    .helper_summary_rejects
+                    .borrow()
+                    .get(name)
+                    .copied(),
+                if raises_here { None } else { Some(false) }
+            );
             MONO_SPECIALIZATIONS.with(|state| {
                 let restored = state.borrow();
                 assert_eq!(restored.memo, seeded.memo);
