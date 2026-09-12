@@ -347,10 +347,22 @@ impl DeferredOperandGate {
     ///
     /// `copy` and `cast` return a fresh variable that discharge unifies with the
     /// decided type; a host slot returns its builtin's own fixed result type and
-    /// carries none.
+    /// carries none. A shape route returns a fresh variable for the same reason
+    /// `copy` does -- its result is a function of a shape nobody knows yet.
+    ///
+    /// Answering this is not optional bookkeeping. `Env::generalize` refuses to
+    /// quantify anything this returns (chelis#1489, #1832): a result variable
+    /// that is generalized before its gate discharges gives every use of a
+    /// `let`-bound name its own instance, and the declared result is then never
+    /// checked against what the call produces. Returning `None` for a variant
+    /// that does hand out a fresh variable reopens that hole for that variant.
+    /// The match is deliberately exhaustive with no wildcard arm so a new gate
+    /// cannot be added without deciding this.
     fn result(&self) -> Option<&Type> {
         match self {
-            Self::Copy { result } | Self::Cast { result, .. } => Some(result.as_ref()),
+            Self::Copy { result } | Self::Cast { result, .. } | Self::ShapeRoute { result, .. } => {
+                Some(result.as_ref())
+            }
             Self::HostSlot { .. } => None,
         }
     }

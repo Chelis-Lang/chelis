@@ -466,3 +466,64 @@ fn the_arithmetic_routes_are_not_converted() {
         );
     }
 }
+
+/// A `let`-bound shape-route result must stay monomorphic until its gate
+/// discharges (chelis#1489, the defect #1832 fixed for `copy`/`cast`).
+///
+/// A suspended route hands its consumer a FRESH result variable, tied to the
+/// operand only through the gate ledger. `Env::generalize` cannot see that
+/// ledger by levels, so an unannotated `let` inside the suspending scope used
+/// to quantify the variable: every use of the bound name got its own instance,
+/// discharge bound only the original, and the declared result was never checked
+/// against what the route produces.
+///
+/// #1832 closed that by excluding every variable of a pending gate's result
+/// from quantification, keyed on `DeferredOperandGate::result()`. This suite
+/// adds a gate variant, so it inherits the obligation: `result()` must report
+/// the route's result variable, or the hole reopens here.
+///
+/// MUTATION-PROVEN. Returning `None` for `ShapeRoute` -- the reading that looks
+/// like harmless bookkeeping -- makes the false program below check at score
+/// 1.0. The direct (non-`let`) form is still rejected under that mutation, so
+/// only the `let` form pins it.
+#[test]
+fn a_let_bound_route_result_is_checked_against_the_declaration() {
+    let report = check_json(
+        "module Issue1489RouteLetLie\n\
+         def apply_n[b](f: tensor[n, 3, f32] -> b, x: tensor[n, 3, f32]) -> b = f(x)\n\
+         def probe(t: tensor[4, 3, f32], i: tensor[2, int32]) -> tensor[100, 2, f32] =\n\
+        \x20 apply_n(fn (v) -> { g = gather(v, i, -1i32)\n\
+        \x20   g }, t)\n",
+    );
+    assert!(
+        !messages(&report).is_empty(),
+        "`g` is 4 x 2 once `v` settles, so a declared 100 x 2 is FALSE and must \
+         be rejected. A clean report means the route's result variable was \
+         generalized by `let` -- see chelis#1832"
+    );
+}
+
+/// Positive parity for the test above: the TRUE declaration through the same
+/// `let` must still be accepted, so the exclusion cannot be satisfied by a fix
+/// that simply rejects every `let`-bound route result.
+///
+/// It also pins the negative axis: `-1` is normalized against the rank the
+/// operand SETTLES to (2), giving axis 1 and a 4 x 2 result. Freezing the axis
+/// at suspension time, before the rank is known, is the defect the whole
+/// payload-carrying design exists to avoid.
+#[test]
+fn a_let_bound_route_result_with_the_true_type_is_accepted() {
+    let report = check_json(
+        "module Issue1489RouteLetTruth\n\
+         def apply_n[b](f: tensor[n, 3, f32] -> b, x: tensor[n, 3, f32]) -> b = f(x)\n\
+         def probe(t: tensor[4, 3, f32], i: tensor[2, int32]) -> tensor[4, 2, f32] =\n\
+        \x20 apply_n(fn (v) -> { g = gather(v, i, -1i32)\n\
+        \x20   g }, t)\n",
+    );
+    assert!(
+        messages(&report).is_empty(),
+        "4 x 2 is the true result of a -1 axis over a settled rank 2 and must be \
+         accepted; got {:?}",
+        messages(&report)
+    );
+}
