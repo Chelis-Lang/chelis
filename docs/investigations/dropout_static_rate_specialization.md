@@ -13,8 +13,10 @@ Isolated call classification attaches missing argument type annotations from
 the evaluator's existing checked frame types. It does not replace argument
 expressions with their evaluated values. Missing or invalid type evidence
 stays absent. Data arguments are evaluated once and staged by the existing
-typed-placeholder route; source-static scalar controls retain their original
-expressions. Runtime-rate variables and computed scalar rates remain excluded,
+typed-placeholder route. Admission and scalar-staging trials use the same
+annotated source call, so an effecting scalar data argument is not mistaken
+for a control and executed again. Source-static scalar controls retain their
+original expressions. Runtime-rate variables and computed scalar rates remain excluded,
 as do rank-polymorphic or already excluded control profiles. Local callable
 bindings still shadow top-level helpers. No builtin dispatcher, RNG key cache,
 ambient seed, public ABI, numeric carrier or runtime-rate C support is added.
@@ -23,7 +25,9 @@ ambient seed, public ABI, numeric carrier or runtime-rate C support is added.
 dtypes, concrete loss wrappers differentiating generic helpers, complete
 forward/gradient/next-draw values, shape/dtype, input preservation and repeated
 prepared evaluation. Mixed f32/f64/f32 calls keep independent precision, and
-an effecting operand consumes its draw exactly once. Paired runtime-rate and
+effecting tensor and scalar operands consume their draws exactly once. The
+scalar regression compares complete stored words for both bare and copied
+tensor actuals through direct API and repeated prepared evaluation. Paired runtime-rate and
 lexical-shadow controls retain their prior boundaries. `fixed_control_host_c`
 executes generic forward/AD/next-draw source at all four dtypes and balances
 the native ownership ledger. The existing CLI example now includes a generic

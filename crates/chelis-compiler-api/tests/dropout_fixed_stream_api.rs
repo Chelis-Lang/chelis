@@ -300,6 +300,73 @@ fn static_rate_example_includes_generic_evaluator_dispatch() {
     assert_eq!(tensor(&result, "result.3"), [1.0; 4]);
 }
 
+fn generic_scalar_data_argument_source(copy_middle: bool) -> String {
+    let middle_input = if copy_middle { "copy(x)" } else { "x" };
+    format!(
+        "def keep[p: Float](x: tensor[4, p], extra: p) -> tensor[4, p] = mul(dropout(x, cast(0.5, p)), insert(scalar_to_tensor(extra), 0i32, 4i64))\n\
+         def main() = with seed(42i64) {{\n\
+           x = to_tensor([1.0f64, 1.0f64, 1.0f64, 1.0f64])\n\
+           y = to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32])\n\
+           first = keep(copy(y), 1.0f32)\n\
+           middle = keep({middle_input}, tensor_to_scalar(dropout(scalar_to_tensor(1.0f64), 0.0f64)))\n\
+           next = keep(y, 1.0f32)\n (first, middle, next)\n }}"
+    )
+}
+
+fn check_generic_scalar_data_argument_stream(copy_middle: bool) {
+    let source = generic_scalar_data_argument_source(copy_middle);
+    let prepared = prepare_eval(request(&source)).unwrap();
+    // Independently encoded [05-RNG-1] seed42 ordinals0/2/3. The rate-zero
+    // scalar actual consumes ordinal1 once, before the middle helper call.
+    // Full stored words make every coordinate, dtype and zero sign observable.
+    let expected = serde_json::json!([
+        {"shape":[4], "data":{"dtype":"f32", "bits":["00000000","40000000","00000000","00000000"]}},
+        {"shape":[4], "data":{"dtype":"f64", "bits":["4000000000000000","4000000000000000","0000000000000000","0000000000000000"]}},
+        {"shape":[4], "data":{"dtype":"f32", "bits":["00000000","40000000","00000000","00000000"]}}
+    ]);
+    // Run all three entry invocations before asserting, so a red regression
+    // records both immediate and reused-preparation behavior.
+    let actual: Vec<_> = [
+        eval_selected(request(&source), &["main".into()]),
+        prepared.eval_root(BTreeMap::new(), "main"),
+        prepared.eval_root(BTreeMap::new(), "main"),
+    ]
+    .into_iter()
+    .map(|result| {
+        let result = result.unwrap();
+        assert!(result.transcript.is_empty());
+        (0..3)
+            .map(|index| {
+                let name = format!("main.{index}");
+                let root = result
+                    .roots
+                    .iter()
+                    .find(|root| root.name.as_deref() == Some(&name))
+                    .unwrap();
+                let ExecutionValue::Tensor { value } = &root.value else {
+                    panic!("{root:?}")
+                };
+                serde_json::json!({"shape":value.shape, "data":value.data})
+            })
+            .collect::<Vec<_>>()
+    })
+    .collect();
+    assert_eq!(
+        serde_json::json!(actual),
+        serde_json::json!([expected, expected, expected])
+    );
+}
+
+#[test]
+fn generic_scalar_data_argument_consumes_its_draw_once() {
+    check_generic_scalar_data_argument_stream(false);
+}
+
+#[test]
+fn generic_scalar_data_argument_copy_control_keeps_the_same_stream() {
+    check_generic_scalar_data_argument_stream(true);
+}
+
 #[test]
 fn fixed_dropout_composes_with_host_produced_checked_reshape_targets() {
     use chelis_compiler_api::compiler::{eval_in_context, prepare_eval_in_context};

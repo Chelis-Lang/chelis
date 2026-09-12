@@ -316,7 +316,7 @@ fn render_shape(shape: &[usize]) -> String {
 /// Isolated source-call classification must retain the checked frame types
 /// of bare arguments. Attach only missing type evidence: scalar expressions
 /// remain source expressions, never their already-evaluated runtime values.
-fn source_call_with_checked_argument_types(list: &List, types: &[Option<Expr>]) -> Expr {
+fn source_call_with_checked_argument_types(list: &List, types: &[Option<Expr>]) -> List {
     let mut call = list.clone();
     for (argument, ty) in call.elements[3..].iter_mut().zip(types) {
         if let (Expr::List(argument, _), Some(ty)) = (argument, ty)
@@ -327,7 +327,7 @@ fn source_call_with_checked_argument_types(list: &List, types: &[Option<Expr>]) 
             metadata.replace(chelis_deep::annotations::MetadataValue::Type(ty));
         }
     }
-    Expr::List(call, Span::new(0, 0))
+    call
 }
 
 impl<'a> EvalContext<'a> {
@@ -1310,12 +1310,21 @@ impl<'a> EvalContext<'a> {
             && result_type_expr.as_ref().is_some_and(|ty| {
                 tagged_expr_children(ty).is_some_and(|(tag, _)| tag == DeepTag::TTensor)
             })
+            && let source_call = source_call_with_checked_argument_types(list, &arg_type_exprs)
             && chelis_ir::lower::evaluation_profile(
-                &source_call_with_checked_argument_types(list, &arg_type_exprs),
+                &Expr::List(source_call.clone(), Span::new(0, 0)),
                 &self.top_level_defs,
             ) == chelis_ir::evaluation::EvaluationProfile::FixedControl
-            && let Some(value) =
-                self.try_named_axis_def_call(&resolved, &def_expr, kids, &args, true)?
+            // Scalar-staging trials must retain the same checked type evidence
+            // as admission, or a data argument can be mistaken for a control
+            // expression and executed a second time by the lowerer.
+            && let Some(value) = self.try_named_axis_def_call(
+                &resolved,
+                &def_expr,
+                children(&source_call),
+                &args,
+                true,
+            )?
         {
             return Ok(value);
         }
