@@ -447,6 +447,11 @@ def check_pr(root: Path, base: str, head: str, labels: set[str]) -> list[str]:
                 old_content.add(fragment(path, file).content)
             except PolicyError:
                 pass  # A correction to an invalid old fragment is still an authored note.
+    if legacy_migration:
+        # Moving existing prose is not newly authored release content, even
+        # when the same entry is also copied to another fragment filename.
+        old_content.update(fragment(path, File("100644", data)).content
+                           for path, data in migration(before).fragments.items())
     added_note = False
     for path in paths:
         if path.startswith("changelog.d/") and path != "changelog.d/README.md" and path in after:

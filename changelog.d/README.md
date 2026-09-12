@@ -75,6 +75,8 @@ preamble and release history byte-for-byte, and creates numbered
 `legacy-unreleased-*.{category}[.breaking].md` fragments. Existing pending fragments
 are retained. A partial fragment write is recoverable: retry succeeds only when any
 already-created migration fragment has the exact expected bytes and regular-file mode.
+Migrated entries do not count as new release content for unrelated changes in the
+same PR; those still need a fresh fragment or the normal `no-changelog` exemption.
 
 The tag-publishing workflow extracts the committed version section into its
 GitHub Release body. It refuses missing, duplicate, or empty notes, a workspace

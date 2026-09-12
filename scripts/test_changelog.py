@@ -458,6 +458,23 @@ class ChangelogTests(unittest.TestCase):
         self.commit()
         self.policy()
 
+    def test_migration_does_not_count_old_notes_as_new_release_content(self):
+        self.write("CHANGELOG.md", LEGACY_UNRELEASED + HISTORY[HISTORY.index("## [0.1.0]"):])
+        self.base = self.commit()
+        self.cli("migrate-unreleased", "--write")
+        self.write("crates/compiler/src/lib.rs", "pub fn changed_behavior() {}\n")
+        self.commit()
+        self.assertIn("missing fragment", self.policy(success=False).stdout)
+        self.write("changelog.d/duplicate.changed.md",
+                   (self.root / "changelog.d/legacy-unreleased-001.changed.md").read_text())
+        self.commit()
+        self.assertIn("missing fragment", self.policy(success=False).stdout)
+        event = self.write("event.json", json.dumps({"pull_request": {"labels": [{"name": "no-changelog"}]}}))
+        self.policy("--event", str(event))
+        self.write("changelog.d/new.changed.md", "A genuinely new behavior.\n")
+        self.commit()
+        self.policy()
+
     def test_migration_pr_rejects_lost_pending_fragment(self):
         self.write("CHANGELOG.md", LEGACY_UNRELEASED + HISTORY[HISTORY.index("## [0.1.0]"):])
         self.write("changelog.d/pending.fixed.md", "Pending note.\n")
