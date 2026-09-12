@@ -103,10 +103,15 @@ sources. Literal result claims survive, and an anonymous resolved number
 remains a literal obligation. The previous
 same-rank shortcut copied the operand's unit extent onto the output, creating
 a false result claim against the size-source tensor. The unit-precondition
-derivation already read the correct operand and is unchanged. Outputs with
-explicit named dimensions retain their existing preparation path: preserving
-the name without its unread declaring witness can newly execute a wrong
-shape. B2b-1 owns preservation and enforcement of those scoped claims.
+derivation already read the correct operand and is unchanged. An explicit name
+ON THE EXPANDED AXIS retains its existing preparation path: preserving the name
+without its unread declaring witness can newly execute a wrong shape. A name on
+a KEPT axis does not, and chelis#1822 is why that distinction is the rule rather
+than "outputs with explicit named dimensions": gating on every axis sent an
+`expand` whose bystander axis carries a signature binder to the same-rank
+shortcut, which stamped the operand's pre-expand extent onto the axis `spec/05`
+section 2.4 replaces. B2b-1 owns preservation and enforcement of those scoped
+claims.
 
 The bounded acceptance command is `singleton_broadcast_contract` in C5.
 Literal call/inlining obligations, op-computed local guards, and scoped claim transport

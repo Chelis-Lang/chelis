@@ -189,3 +189,36 @@ fn an_unread_named_claim_keeps_its_existing_rejection_path() {
         "the unread named witness must not turn a rejected mismatch into unchecked execution"
     );
 }
+
+/// chelis#1822: a real name on a BYSTANDER axis must not send the `expand` to
+/// the pass-through arm, which copies the operand's PRE-EXPAND extent onto the
+/// expanded axis.
+///
+/// This is the other half of the boundary the sibling lock above holds. That
+/// one puts the name ON the expanded axis, where `spec/05` section 2.4 does
+/// replace the extent and #1619's rejection path still has to run. This one
+/// puts it on a KEPT axis, which the earlier guard swept in by testing every
+/// axis rather than the expanded one. Both are needed: each alone admits a
+/// wrong repair.
+///
+/// EVIDENTIARY STATUS: regression test. On `6abca2406` this produced
+/// `[Lit(2), Lit(1), Lit(4)]`, the operand's own dims, with the pre-expand `1`
+/// standing where the size source's extent belongs and `batch` erased too.
+#[test]
+fn a_named_bystander_axis_does_not_replace_the_expanded_axis_with_the_operand() {
+    let (dag, result) = fixture(
+        vec![DimInfo::Lit(2), DimInfo::Lit(1), DimInfo::Lit(4)],
+        vec![named("batch"), named("*"), named("*")],
+        source(),
+    );
+    let prepared = prepare_dag_for_codegen(dag, CodegenOptions::default());
+    assert_eq!(
+        prepared.get(result).unwrap().output_type.dims,
+        vec![named("batch"), named("width"), DimInfo::Lit(4)],
+        "the expanded axis takes the size source's extent and the bystander keeps its name"
+    );
+    assert!(
+        derive_unit_extent_claims(&prepared).is_empty(),
+        "the operand's literal unit extent proves only its precondition"
+    );
+}
