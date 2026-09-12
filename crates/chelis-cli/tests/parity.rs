@@ -728,9 +728,10 @@ fn parity_annotated_concat_softmax_eval_and_c_rejection() {
         .arg(directory.path().join("out"))
         .output()
         .unwrap();
-    assert!(
-        !output.status.success(),
-        "C host softmax remains unsupported"
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "C host softmax rejects without a crash"
     );
     assert!(output.stdout.is_empty());
     assert_eq!(
