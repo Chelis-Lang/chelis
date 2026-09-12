@@ -1821,18 +1821,42 @@ impl Subst {
         }
     }
 
-    /// chelis#1801: adopt another substitution's class evidence.
+    /// chelis#1801: re-canonicalize both operands' class evidence through the
+    /// COMPOSED alias graph.
     ///
-    /// Reached from [`Self::compose`]. A compose that dropped these sets
-    /// would silently un-record a meeting or a pin, and the application rule
-    /// would then generalize a class the spec says denotes a runtime extent,
-    /// or absorb one an argument claimed.
-    fn absorb_wildcard_touches(&mut self, other: &Subst) {
-        for v in other.wildcard_touched_classes.to_sorted() {
-            self.wildcard_touched_classes.insert(*v);
+    /// Reached from [`Self::compose`], and a set union is the wrong operation
+    /// here. `compose_bindings` merges only the binding maps, so composition
+    /// can JOIN two classes that were separate in either operand: a flag
+    /// keyed to the variable that rooted its class before the compose is then
+    /// keyed to a member that no longer roots it, and the query on the new
+    /// root answers false. Every incoming key is therefore re-resolved
+    /// against the composed graph and re-keyed to the root it now has, which
+    /// is exactly what the label pass in [`Self::compose`] does and for the
+    /// same reason.
+    ///
+    /// Protection is folded in on the way through. The pin query reads
+    /// `protected_dimensions` at the root, so a protected member that the
+    /// compose demoted out of the root position would otherwise stop pinning
+    /// its class. Carrying the other operand's protection here is also the
+    /// conservative direction: it can only withhold an absorption, never
+    /// erase a claim.
+    fn recanonicalize_class_flags(&mut self, left: &Subst, right: &Subst) {
+        let mut touched: Vec<DimVar> = Vec::new();
+        let mut pinned: Vec<DimVar> = Vec::new();
+        for source in [left, right] {
+            touched.extend(source.wildcard_touched_classes.to_sorted().iter().copied());
+            pinned.extend(source.name_pinned_classes.to_sorted().iter().copied());
+            pinned.extend(source.protected_dimensions.to_sorted().iter().copied());
         }
-        for v in other.name_pinned_classes.to_sorted() {
-            self.name_pinned_classes.insert(*v);
+        self.wildcard_touched_classes.clear();
+        self.name_pinned_classes.clear();
+        for v in touched {
+            let root = self.dvar_class_root(v);
+            self.wildcard_touched_classes.insert(root);
+        }
+        for v in pinned {
+            let root = self.dvar_class_root(v);
+            self.name_pinned_classes.insert(root);
         }
     }
 
@@ -1912,11 +1936,11 @@ impl Subst {
     pub fn compose(&mut self, other: &Subst) -> Result<(), TypeError> {
         let mut trial = self.clone();
         trial.compose_bindings(other);
-        // chelis#1801: `compose_bindings` merges the BINDINGS; the
-        // wildcard-meeting evidence is a separate ledger and has to be
-        // carried explicitly or a composed substitution forgets which
-        // variables met a runtime extent.
-        trial.absorb_wildcard_touches(other);
+        // chelis#1801: `compose_bindings` merges the BINDINGS; the class
+        // evidence is separate and has to be re-canonicalized through the
+        // composed alias graph, never copied, because the compose can join
+        // two classes that were separate in either operand.
+        trial.recanonicalize_class_flags(self, other);
         // Re-canonicalize BOTH operands' labels through the composed alias
         // graph; merely copying incoming entries misses a newly joined class.
         let mut incoming = Vec::new();
@@ -4546,6 +4570,154 @@ mod tests {
         assert!(
             s.dvar_class_is_name_pinned(binder),
             "asked from either member",
+        );
+    }
+
+    #[test]
+    fn a_name_meeting_a_labelled_variable_pins_its_class_without_binding_it() {
+        // chelis#1925 round 2, the first of the paths that pin or union
+        // WITHOUT a plain `insert_dim`. `bind_dvar`'s first arm sets the
+        // label and returns, so an authored name claiming this class leaves
+        // nothing for `constraint_dim` to report and no union for the merge
+        // to hook. The pin is the only carrier, and without it the absorbing
+        // site would take a class section 3.2 excludes.
+        //
+        // Evidentiary status: disposition lock on that arm. Deleting its
+        // `note_name_pin` call fails the last assertion.
+        let mut g = var_gen();
+        let minted = g.fresh_dvar();
+        let mut s = Subst::new();
+        // Labelled but NOT protected: the arm fires on either condition, and
+        // this is the half that protection does not already cover.
+        s.set_dimension_label(minted, "seq".to_string());
+
+        assert!(unify_dim(&Dim::Wildcard, &Dim::Var(minted), &mut s).is_ok());
+        assert!(unify_dim(&Dim::Var(minted), &Dim::Name("seq".to_string()), &mut s).is_ok());
+
+        assert_eq!(
+            s.constraint_dim(&Dim::Var(minted)),
+            Dim::Var(minted),
+            "the name arm binds nothing, so the class still reads as unbound",
+        );
+        assert!(s.dvar_class_met_wildcard(minted));
+        assert!(
+            s.dvar_class_is_name_pinned(minted),
+            "and the authored name pins it against absorption",
+        );
+    }
+
+    #[test]
+    fn a_swapped_binding_direction_still_lands_the_evidence_on_the_merged_root() {
+        // The second such path. When `v` is protected and the other operand
+        // is not, `bind_dvar` recurses with the operands SWAPPED, so the
+        // union direction flips. The merge therefore hooks the actual insert
+        // rather than the entry; hooking the entry would key the evidence to
+        // a variable that does not root the merged class.
+        //
+        // Evidentiary status: disposition lock on where the hook sits.
+        let mut g = var_gen();
+        let binder = g.fresh_dvar();
+        let minted = g.fresh_dvar();
+        let mut s = Subst::new();
+        s.protect_dimensions([binder]);
+
+        // The meeting is recorded on the unprotected member, and the
+        // protected one is unified FIRST, which is the direction that
+        // recurses.
+        assert!(unify_dim(&Dim::Wildcard, &Dim::Var(minted), &mut s).is_ok());
+        assert!(unify_dim(&Dim::Var(binder), &Dim::Var(minted), &mut s).is_ok());
+
+        assert!(
+            s.dvar_class_met_wildcard(binder),
+            "the meeting survives the swap, asked from the protected member",
+        );
+        assert!(s.dvar_class_met_wildcard(minted), "and from the other one");
+        assert!(
+            s.dvar_class_is_name_pinned(minted),
+            "and the protected member pins the class it was merged into",
+        );
+    }
+
+    #[test]
+    fn a_literal_claim_against_a_named_dimension_leaves_no_absorbable_class() {
+        // The third such path. `unify_dim`'s `(Name, Lit)` arm returns `Ok`
+        // binding nothing (issue #219 Option A), so a literal claim against a
+        // named dimension produces no union event either. It needs no hook:
+        // by the time that arm matches, `constraint_dim` has already resolved
+        // both operands to non-variables, so no class is left for an
+        // application to absorb, and the class the name came from was pinned
+        // when the name reached it.
+        //
+        // Evidentiary status: a reachability receipt for that claim rather
+        // than a lock on a repair. It is the row to re-run if the arm ever
+        // starts binding.
+        let mut g = var_gen();
+        let named = g.fresh_dvar();
+        let bystander = g.fresh_dvar();
+        let mut s = Subst::new();
+        s.set_dimension_label(named, "batch".to_string());
+
+        assert!(unify_dim(&Dim::Wildcard, &Dim::Var(named), &mut s).is_ok());
+        assert!(unify_dim(&Dim::Var(named), &Dim::Name("batch".to_string()), &mut s).is_ok());
+        assert!(
+            s.dvar_class_is_name_pinned(named),
+            "the name pinned the class before any literal arrived",
+        );
+
+        // The literal claim now meets the NAME, not the variable.
+        assert!(unify_dim(&Dim::Name("batch".to_string()), &Dim::Lit(3), &mut s).is_ok());
+        assert!(
+            s.dvar_class_is_name_pinned(named),
+            "and the literal arm leaves the pin where it was",
+        );
+        assert!(
+            !s.dvar_class_met_wildcard(bystander),
+            "recording nothing about any other class",
+        );
+    }
+
+    #[test]
+    fn compose_rekeys_class_evidence_onto_the_root_the_composed_graph_gives_it() {
+        // The fourth such path, and the one a set union gets wrong.
+        // `compose_bindings` merges only the binding maps, so a compose can
+        // JOIN two classes that were separate in either operand. Copying the
+        // flags across leaves the meeting keyed to a variable that no longer
+        // roots the joined class, and the query on the new root answers
+        // false.
+        //
+        // Evidentiary status: regression test for the re-canonicalization.
+        // Replacing `recanonicalize_class_flags` with the set union it
+        // supersedes fails the second-to-last assertion, which is how it was
+        // checked.
+        let mut g = var_gen();
+        let met = g.fresh_dvar();
+        let joiner = g.fresh_dvar();
+
+        // The left operand knows the meeting and roots that class at `met`.
+        let mut left = Subst::new();
+        assert!(unify_dim(&Dim::Wildcard, &Dim::Var(met), &mut left).is_ok());
+        assert!(left.dvar_class_met_wildcard(met));
+
+        // The right operand knows an aliasing the left never saw, and it
+        // re-roots that class onto `joiner`.
+        let mut right = Subst::new();
+        assert!(unify_dim(&Dim::Var(met), &Dim::Var(joiner), &mut right).is_ok());
+        assert!(!right.dvar_class_met_wildcard(joiner));
+
+        left.compose(&right).expect("composing an alias is valid");
+
+        assert_eq!(
+            left.constraint_dim(&Dim::Var(met)),
+            Dim::Var(joiner),
+            "the compose joined the classes and `joiner` roots the result",
+        );
+        assert!(
+            left.dvar_class_met_wildcard(joiner),
+            "so the meeting has to be readable from the new root",
+        );
+        assert!(
+            left.dvar_class_met_wildcard(met),
+            "and from the member it was recorded on",
         );
     }
 
