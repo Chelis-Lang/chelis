@@ -22,7 +22,7 @@ What makes it structural: no key, so nothing is stale; the borrow checker binds 
 
 `issue_1205_host_lowering_work_is_linear` (16716) is the shape. Its sibling `issue_1835_kernel_decision_work_is_linear` lives in the same `#[cfg(test)]` module because `HostWorkProfile` is crate-private, which is also why it runs: `gate.py ci-fast` runs `cargo nextest run --workspace --lib --bins` in the per-PR `Fast Tests (Linux)` job (`ci.yml:556-598`, `ci_test_targets.py:69`). An integration file needs a `ci-test-targets.toml` row or runs only nightly in `full-workspace`, cancelled at 60 minutes (#1819); a feature-gated accessor like `lowering-trace` is nightly-only (`gate.py:529`).
 
-Fixture: `f_i(x: tensor[4, f32]) -> tensor[4, f32] = add(f_{i+1}(x), f_{i+1}(x))`, depth 12, leaf `mul(x, x)`, built as `issue_1205_host_profile` does. Drive `host_def_kernel` per def, root first, then a second full pass. Assert counts: `helper_summary_builds <= 12` after pass one, unchanged after pass two; `program_def_collections == 1`; each def's decision equals the C lane's from `try_lower_compiled_program` (the B2h agreement). A depth-6 row shows +6 builds, against the re-expanding tree's own depth-6 count. **Correction, 2026-09-12: the figure below was attached to the wrong fixture.** This paragraph originally read "Today it reads **398,574**", a number measured by the chelis#1829 implementer on a *scalar* chain, which I folded in here as a correction to my own about-2^12 estimate without checking that the two fixtures were the same shape. They are not. On the base, chelis#1835's implementer measures the **tensor** fixture above at **78** and the **scalar** chain at **398,574**. Both shapes exhibit the defect; they differ by orders of magnitude because the scalar chain's re-expansion is not bounded by tensor-helper structure. The receipt in PR #1910 carries both, each figure attributed to its own chain, which is the right shape for it. The mechanism the original sentence described is unchanged and correct: each probe's own lowering re-probes its callees, so the expansion is not one tree of depth 12 but a tree whose every node re-expands. Only the number's subject was wrong. A receipt should name which chain it measures. It stays red after #1829, which arms the guard in `runtime/mod.rs`, not `host_def_kernel`; the receipt separates the issues. Record the red count in the PR before the fix.
+Fixture: `f_i(x: tensor[4, f32]) -> tensor[4, f32] = add(f_{i+1}(x), f_{i+1}(x))`, depth 12, leaf `mul(x, x)`, built as `issue_1205_host_profile` does. Drive `host_def_kernel` per def, root first, then a second full pass. Assert counts: `helper_summary_builds <= 12` after pass one, unchanged after pass two; `program_def_collections == 1`; each def's decision equals the C lane's from `try_lower_compiled_program` (the B2h agreement). A depth-6 row shows +6 builds, against the re-expanding tree's own depth-6 count. **Correction, 2026-09-12 (the fixture figure).** This paragraph originally read "Today it reads **398,574**", a number measured by the chelis#1829 implementer on a *scalar* chain, which I folded in here as a correction to my own about-2^12 estimate without checking that the two fixtures were the same shape. They are not. On the base, chelis#1835's implementer measures the **tensor** fixture above at **78** and the **scalar** chain at **398,574**. Both shapes exhibit the defect; they differ by orders of magnitude because the scalar chain's re-expansion is not bounded by tensor-helper structure. The receipt in PR #1910 carries both, each figure attributed to its own chain, which is the right shape for it. The mechanism the original sentence described is unchanged and correct: each probe's own lowering re-probes its callees, so the expansion is not one tree of depth 12 but a tree whose every node re-expands. Only the number's subject was wrong. A receipt should name which chain it measures. It stays red after #1829, which arms the guard in `runtime/mod.rs`, not `host_def_kernel`; the receipt separates the issues. Record the red count in the PR before the fix.
 
 ## 4. Question 4: numbered spec
 
@@ -44,14 +44,14 @@ The chelis#893 runtime-representation **Phase 0 inventory** flags new arithmetic
 `crates/chelis-ir/src/host.rs` under the kind `normalized-key-arithmetic`. On #1843's
 head it flagged two rows: the **refcount decrement in `HostLoweringCacheGuard::drop`**
 and a **counter increment in `top_level_fn_helper_summary_rejects`**. *(That sentence is
-refuted; neither owner has an inventory row. The correction is at the end of this
-section.)* An unclassified row
+refuted; neither owner has an inventory row. The correction is below, under
+**Correction, 2026-09-12 (the flagged-row claim)**.)* An unclassified row
 is `UNCLASSIFIED_FAILURE` from `scripts/runtime_representation_oracle.py`, not a warning,
 so each needs a sanctioned classification in the baseline or a restructuring that removes
 it. The oracle runs in `heavy-e2e.yml`, never per pull request, so this surfaces after
 merge unless it is dispatched deliberately.
 
-**Correction, 2026-09-12.** This section originally asserted, of the flagged rows above:
+**Correction, 2026-09-12 (the flagged-row claim).** This section originally asserted:
 
 > the first flagged row **stops existing** rather than needing a classification
 
