@@ -766,6 +766,31 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             TERMINAL_CONTROL,
             "types_unresolved_operand.a_gated_copy_result_ties_its_sum_consumer_to_the_bound_operand",
         ),
+        # chelis#1836 through chelis#1690's operand gates. A suspended
+        # `DeferredOperandGate::ShapeRoute` publishes a fresh result variable,
+        # which is this issue's third provenance, so each of these routes
+        # became a new instance when chelis#1690 landed. All three were
+        # measured at score 1 with no errors on `e0a482248`, this branch's
+        # base. `scatter` is the fourth gated route and is not registered: it
+        # was not probed.
+        _row(
+            "route.untied.gather.gate",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "types_unresolved_operand.a_gather_gate_result_ties_its_sum_consumer_to_the_bound_operand",
+        ),
+        _row(
+            "route.untied.trace.gate",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "types_unresolved_operand.a_trace_gate_result_ties_its_sum_consumer_to_the_bound_operand",
+        ),
+        _row(
+            "route.untied.scatter_replace.gate",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "types_unresolved_operand.a_scatter_replace_gate_result_ties_its_sum_consumer_to_the_bound_operand",
+        ),
     )
     return tuple(sorted(rows, key=lambda row: row.id))
 

@@ -1716,3 +1716,114 @@ fn an_ill_typed_destructure_or_field_read_on_a_late_bound_operand_is_now_reporte
         )
     });
 }
+
+// ---------------------------------------------------------------------------
+// chelis#1836 through chelis#1690's operand gates.
+//
+// chelis#1690 defers `gather`, `scatter`, `scatter_replace` and `trace` on
+// their operand through `DeferredOperandGate::ShapeRoute`, whose suspended
+// form publishes a FRESH result variable, in its own words "exactly as the
+// `copy`/`cast` gates do". That is this issue's third provenance, so each of
+// those routes became a new chelis#1836 instance the moment chelis#1690
+// landed: a shape-computed consumer of the gate's result took its eager
+// `Type::Var` arm and published a result the declaration could bind freely.
+//
+// EVIDENTIARY STATUS: REGRESSION TESTS, every rejecting assertion. Each false
+// declaration was MEASURED at score 1 with `errors []` on `e0a482248`, this
+// branch's base, with a binary built from that commit's
+// `crates/chelis-types/src`. The true twins were measured accepting there and
+// accept here, so they are DISPOSITION LOCKS: the repair rejects the wrong
+// claim, not the form.
+//
+// One test per corpus row, so `route.untied.{gather,trace,scatter_replace}
+// .gate` each name a receipt that fails alone.
+// ---------------------------------------------------------------------------
+
+/// chelis#1690's `gather` gate: `sum(gather(v, i, 0i32), 0)`.
+#[test]
+fn a_gather_gate_result_ties_its_sum_consumer_to_the_bound_operand() {
+    let program = |declared: &str| {
+        format!(
+            "def apply_v[b](f: tensor[4, 3, f32] -> b, x: tensor[4, 3, f32]) -> b = f(x)\n\
+             def probe(t: tensor[4, 3, f32], i: tensor[2, int32]) -> {declared} = apply_v(fn (v) -> sum(gather(v, i, 0i32), 0), t)\n"
+        )
+    };
+
+    // Measured score 1, `errors []` on `e0a482248`.
+    expect_exact_error(
+        &program("tensor[99, f32]"),
+        &signature_mismatch(
+            "tensor[4, 3, f32], tensor[2, int32]",
+            "tensor[3, f32]",
+            "tensor[99, f32]",
+        ),
+    );
+
+    // NEGATIVE TWIN.
+    check(&program("tensor[3, f32]")).unwrap_or_else(|e| {
+        panic!(
+            "gather's true result shape behind its gate must still check:\n{}",
+            summary(&e)
+        )
+    });
+}
+
+/// chelis#1690's `trace` gate: `sum(trace(v, 0i32, 1i32), 0)`.
+///
+/// The rank-zero result is declared `tensor[f32]` and RENDERS as
+/// `tensor[, f32]`, the spelling chelis#1148 and chelis#1355 pin. Both
+/// spellings appear below deliberately: the declaration uses the source form,
+/// the diagnostic quotes the rendered one.
+#[test]
+fn a_trace_gate_result_ties_its_sum_consumer_to_the_bound_operand() {
+    let program = |declared: &str| {
+        format!(
+            "def apply_w[b](f: tensor[4, 4, 3, f32] -> b, x: tensor[4, 4, 3, f32]) -> b = f(x)\n\
+             def probe(t: tensor[4, 4, 3, f32]) -> {declared} = apply_w(fn (v) -> sum(trace(v, 0i32, 1i32), 0), t)\n"
+        )
+    };
+
+    // Measured score 1, `errors []` on `e0a482248`.
+    expect_exact_error(
+        &program("tensor[99, f32]"),
+        &signature_mismatch("tensor[4, 4, 3, f32]", "tensor[, f32]", "tensor[99, f32]"),
+    );
+
+    // NEGATIVE TWIN, at the rank-zero declaration.
+    check(&program("tensor[f32]")).unwrap_or_else(|e| {
+        panic!(
+            "trace's true rank-zero result behind its gate must still check:\n{}",
+            summary(&e)
+        )
+    });
+}
+
+/// chelis#1690's `scatter_replace` gate:
+/// `sum(scatter_replace(v, i, u, 0i32), 0)`.
+#[test]
+fn a_scatter_replace_gate_result_ties_its_sum_consumer_to_the_bound_operand() {
+    let program = |declared: &str| {
+        format!(
+            "def apply_v[b](f: tensor[4, 3, f32] -> b, x: tensor[4, 3, f32]) -> b = f(x)\n\
+             def probe(t: tensor[4, 3, f32], i: tensor[2, int32], u: tensor[2, 3, f32]) -> {declared} = apply_v(fn (v) -> sum(scatter_replace(v, i, u, 0i32), 0), t)\n"
+        )
+    };
+
+    // Measured score 1, `errors []` on `e0a482248`.
+    expect_exact_error(
+        &program("tensor[99, f32]"),
+        &signature_mismatch(
+            "tensor[4, 3, f32], tensor[2, int32], tensor[2, 3, f32]",
+            "tensor[3, f32]",
+            "tensor[99, f32]",
+        ),
+    );
+
+    // NEGATIVE TWIN.
+    check(&program("tensor[3, f32]")).unwrap_or_else(|e| {
+        panic!(
+            "scatter_replace's true result shape behind its gate must still check:\n{}",
+            summary(&e)
+        )
+    });
+}
