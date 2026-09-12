@@ -18461,6 +18461,148 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
         drop(outer_scope);
     }
 
+    /// chelis#1835 fixture: a fan-out chain of defs, each calling the next
+    /// from two argument positions.
+    ///
+    /// Two shapes, because the kernel decision costs differently on each. A
+    /// TENSOR-returning chain reaches the helper-summary probe and stays on
+    /// the kernel path. A SCALAR-returning chain reaches the same probe
+    /// first, because `def_body_decision_impl` asks it before the declared
+    /// result type can rule the def out, and the probe's own lowering then
+    /// takes the host lane, whose inliner duplicates the callee body per call
+    /// site. The second shape is therefore the expensive one, and both are
+    /// the same defect: a per-definition fact recomputed per ask.
+    fn issue_1835_fanout_source(depth: usize, tensor_result: bool) -> String {
+        let (module, ty, leaf) = if tensor_result {
+            ("Demo.KernelFanout", "tensor[4, f32]", "mul(x, x)")
+        } else {
+            ("Demo.ScalarFanout", "int64", "mul(x, x)")
+        };
+        let mut lines = vec![format!("module {module}"), String::new()];
+        for level in 0..depth {
+            lines.push(format!(
+                "def f{level}(x: {ty}) -> {ty} = add(f{next}(x), f{next}(x))",
+                next = level + 1
+            ));
+        }
+        lines.push(format!("def f{depth}(x: {ty}) -> {ty} = {leaf}"));
+        lines.push(String::new());
+        lines.join("\n")
+    }
+
+    /// Which defs the C lane lowered through the tensor DAG. A kernel body
+    /// becomes a call to an extracted tensor helper attached to the emitted
+    /// host function; a host-lane body has none.
+    fn issue_1835_c_lane_kernel_defs(checked: &CheckedProgram, names: &[String]) -> Vec<bool> {
+        let compiled = try_lower_compiled_program(checked).expect("#1835 fixture lowers on C");
+        let host = compiled.host.expect("#1835 fixture emits a host program");
+        names
+            .iter()
+            .map(|name| {
+                host.functions
+                    .iter()
+                    .find(|function| &function.name == name)
+                    .is_some_and(|function| !function.tensor_helpers.is_empty())
+            })
+            .collect()
+    }
+
+    /// chelis#1835 class receipt. `host_def_kernel` is the entry every lane
+    /// asks for one def's kernel decision, and its cost must be linear in the
+    /// definition count with NO opt-in: no flag to arm, no scope to hold, no
+    /// argument beyond the session every caller must now build. A second full
+    /// pass must add no work at all, and the answers must agree with the lane
+    /// that compiles the whole program (chelis#1277 B2h).
+    ///
+    /// Evidentiary status: REGRESSION TEST for every assertion, watched red on
+    /// the base sha `6abca2406`, where the memo is gated on a thread-local
+    /// flag that no `host_def_kernel` caller arms. Thirteen definitions cost
+    /// 78 summary builds and 728 definition collections on the tensor chain,
+    /// and 398,574 builds and 797,174 collections on the scalar chain; the
+    /// second pass repeated both figures exactly, which is the memo never
+    /// being read. The pull request records the runs.
+    #[test]
+    fn issue_1835_kernel_decision_work_is_linear() {
+        const DEPTH: usize = 12;
+        for tensor_result in [true, false] {
+            std::thread::Builder::new()
+                .name(format!("issue-1835-fanout-{tensor_result}"))
+                .stack_size(512 * 1024 * 1024)
+                .spawn(move || {
+                    let typed = surf_check(&issue_1835_fanout_source(DEPTH, tensor_result));
+                    let effected = chelis_effects::check_program(&typed).expect("effect check");
+                    let checked =
+                        chelis_types::check_linearity(&effected).expect("linearity check");
+                    let names = (0..=DEPTH)
+                        .map(|level| format!("f{level}"))
+                        .collect::<Vec<_>>();
+
+                    reset_host_work_profile();
+                    let first_answers = names
+                        .iter()
+                        .map(|name| {
+                            host_def_kernel(&checked, name, None)
+                                .expect("#1835 fixture reaches a kernel decision")
+                                .is_some()
+                        })
+                        .collect::<Vec<_>>();
+                    let first = take_host_work_profile();
+                    let second_answers = names
+                        .iter()
+                        .map(|name| {
+                            host_def_kernel(&checked, name, None)
+                                .expect("#1835 fixture reaches a kernel decision")
+                                .is_some()
+                        })
+                        .collect::<Vec<_>>();
+                    let second = take_host_work_profile();
+                    eprintln!(
+                        "#1835 tensor_result={tensor_result} depth={DEPTH} defs={} \
+                         helper_summary_builds={}+{} program_def_collections={}+{}",
+                        names.len(),
+                        first.helper_summary_builds,
+                        second.helper_summary_builds,
+                        first.program_def_collections,
+                        second.program_def_collections
+                    );
+
+                    assert!(
+                        first.helper_summary_builds <= names.len(),
+                        "#1835: an unopted `host_def_kernel` caller must build at most one \
+                         summary per definition; {} definitions produced {} builds \
+                         (tensor_result={tensor_result})",
+                        names.len(),
+                        first.helper_summary_builds
+                    );
+                    assert_eq!(
+                        second.helper_summary_builds, 0,
+                        "#1835: a second full pass over the same program must build no \
+                         further summaries (tensor_result={tensor_result})"
+                    );
+                    assert_eq!(
+                        first.program_def_collections + second.program_def_collections,
+                        1,
+                        "#1835: program definitions must be collected once for the session, \
+                         not once per decision (tensor_result={tensor_result})"
+                    );
+                    assert_eq!(
+                        first_answers, second_answers,
+                        "#1835: a memoized decision must not differ from the one that built \
+                         it (tensor_result={tensor_result})"
+                    );
+                    assert_eq!(
+                        first_answers,
+                        issue_1835_c_lane_kernel_defs(&checked, &names),
+                        "#1835: the shared decision must answer what the C lane compiles \
+                         (chelis#1277 B2h; tensor_result={tensor_result})"
+                    );
+                })
+                .expect("#1835 fanout thread starts")
+                .join()
+                .expect("#1835 fanout thread completes");
+        }
+    }
+
     fn issue_1205_source(operations: usize, flat: bool) -> String {
         let module = if flat { "Flat" } else { "Nested" };
         let mut lines = vec![
