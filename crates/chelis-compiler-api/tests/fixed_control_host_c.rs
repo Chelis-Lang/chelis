@@ -1,4 +1,6 @@
 //! Source/API/native acceptance for [05-OP-37] and [05-RNG-1] through a host helper.
+#[path = "fixed_control_host_c/context.rs"]
+mod context;
 #[allow(dead_code)]
 mod ownership_support;
 

@@ -192,6 +192,20 @@ outside this repair. Legacy bare-Dag Rust evaluators and baked-seed wire/cache
 projections are unchanged; cloning a plan's inspection DAG loses execution
 metadata and is not a supported conversion back to the repaired source path.
 
+The C callable context API preserves fixed-control plans for selected tensor
+entries using checked Reef library helpers, including encoded/decoded contexts
+(chelis#1876). Source-fixed rates, saved-mask input AD, nested seeds and subsequent
+draws use the same ownership-verified plan as direct source compilation. Entry
+selection still names only new-code tensor roots; runtime-rate and rootless
+entries retain their existing rejection.
+
+The separate qualified-private-library checker gap remains tracked by chelis#1878.
+Its ignored negative is a manual regression, expected to fail until that issue is
+repaired: `cargo nextest run -p chelis-compiler-api --test fixed_control_host_c -E
+'test(diagnostic_private_export_is_already_accepted_by_context_checker)'
+--run-ignored only`. Ordinary context transport tests do not claim export-checker
+completeness.
+
 ### 1.7 Sparse tensor-lane nodes — `spec/05` §3.5
 
 First-class `RiscOp`s with evaluator/verifier/AD/C+HIP support:
