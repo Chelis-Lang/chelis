@@ -74,6 +74,30 @@ result = with seed(42i64) {{
 }
 
 #[test]
+fn generic_static_rate_gradient_and_next_draw_reach_native_host_helpers() {
+    // Independently calculated seed42 masks at ordinals0/1/2. The generic
+    // source AD must replay ordinal1, leaving ordinal2 for the final call.
+    for dtype in ["f16", "bf16", "f32", "f64"] {
+        let source = format!(
+            "def keep[p: Float](x: tensor[4, p]) -> tensor[4, p] = dropout(x, cast(0.5, p))\n\
+             def loss(x: tensor[4, {dtype}]) -> {dtype} = tensor_to_scalar(sum(keep(x), 0i32))\n\
+             result = with seed(42i64) {{\n\
+               x = to_tensor([cast(1.0, {dtype}), cast(1.0, {dtype}), cast(1.0, {dtype}), cast(1.0, {dtype})])\n\
+               first = keep(copy(x))\n backward = grad(loss)(copy(x))\n next = keep(copy(x))\n\
+               [first, backward, next, x]\n }}"
+        );
+        let c = ownership_support::emit(&source, dtype);
+        let (summary, stdout) = ownership_support::run_program(&c);
+        ownership_support::balanced(&summary);
+        assert_eq!(
+            stdout,
+            "result = [tensor(shape=[4], data=[0.0, 2.0, 0.0, 0.0]), tensor(shape=[4], data=[2.0, 0.0, 0.0, 0.0]), tensor(shape=[4], data=[2.0, 2.0, 0.0, 0.0]), tensor(shape=[4], data=[1.0, 1.0, 1.0, 1.0])]\n",
+            "{dtype}"
+        );
+    }
+}
+
+#[test]
 fn concrete_wrapper_reaches_generic_static_rate_host_helper() {
     let c = ownership_support::emit_selected(
         r#"
