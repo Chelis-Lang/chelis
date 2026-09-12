@@ -6948,12 +6948,33 @@ fn a_resolved_named_claim_the_inlined_body_refutes_is_rejected_on_both_lanes() {
     );
 }
 
-/// The same claim reached through a PIPE, whose activation carries no name.
+/// The same claim reached through a PIPE. Its activation carried no name
+/// until chelis#1923 folded the stage into the application it denotes.
 fn piped_root_source(claim: &str) -> String {
     format!(
         "def f(x: tensor[rows, f32]) -> tensor[{claim}, f32] = x\n\
          def main() -> tensor[{claim}, f32] = to_tensor([1.0f32, 2.0f32]) |> f\n"
     )
+}
+
+/// The direct spelling the piped one folds to, byte for byte the same
+/// program to the checker and the lowerer.
+fn direct_root_source(claim: &str) -> String {
+    format!(
+        "def f(x: tensor[rows, f32]) -> tensor[{claim}, f32] = x\n\
+         def main() -> tensor[{claim}, f32] = f(to_tensor([1.0f32, 2.0f32]))\n"
+    )
+}
+
+/// The `span_id` a folded pipe stage carries: the stage name itself, which is
+/// the text the author wrote for that activation.
+///
+/// Computed from the fixture for the same reason `root_call_span` is, so
+/// editing the program cannot leave a stale byte range asserted.
+fn pipe_stage_span(source: &str) -> String {
+    let body = source.trim_end();
+    let start = body.rfind("|> ").expect("a pipe stage follows `|> `") + 3;
+    format!("surf:{start}..{}", body.len())
 }
 
 /// The same claim on a root whose body is a `vmap`, which lowers through the
@@ -6970,24 +6991,38 @@ fn vmapped_root_source(claim: &str) -> String {
 /// when the lowerer has no name for the activation that made the claim.
 ///
 /// Only `lower_plain_callable_app` holds a callee name (`inlining_name`, and
-/// even there it is `Option`). A pipe stage and an AD, vectorization or
-/// host-list boundary reach `lower_resolved_body` with a `ResolvedFunction`
-/// that carries a signature and no name, and a root applied host-side has
-/// none either. The diagnostic says `the signature` in that slot rather than
-/// omitting the clause, so the sentence does not change shape with the
-/// spelling that reached it.
+/// even there it is `Option`). An AD, vectorization or host-list boundary
+/// reaches `lower_resolved_body` with a `ResolvedFunction` that carries a
+/// signature and no name, and a root applied host-side has none either. The
+/// diagnostic says `the signature` in that slot rather than omitting the
+/// clause, so the sentence does not change shape with the spelling that
+/// reached it. The `vmap` half below is that witness.
+///
+/// chelis#1923 took the PIPE STAGE off that list, which is why the piped half
+/// reads differently here than it did when this row landed. A pipe stage is
+/// folded into the application it denotes before the checker runs, so it now
+/// reaches `lower_plain_callable_app` with the callee's name in hand and the
+/// rejection says `f` rather than `the signature`. That is the better
+/// diagnostic and it is the one the DIRECT spelling of the same program has
+/// always given, so the piped half is now an agreement lock between the two
+/// spellings: same sentence, each pointing at its own source text. The span
+/// differs because the folded application carries the STAGE's span, which is
+/// the `f` the author wrote, where the direct spelling carries the whole
+/// call.
 ///
 /// The `vmap` half also pins a residual rather than a feature: its rejection
 /// carries NO source span, because `current_span_id` is unset at that
-/// boundary. That is pre-existing `LowerDiagnostic` behaviour, not something
-/// this change introduces, and it is asserted here so the gap is visible
-/// instead of being discovered as a surprise.
+/// boundary. That is pre-existing `LowerDiagnostic` behaviour and is asserted
+/// here so the gap is visible instead of being discovered as a surprise.
 ///
 /// EVIDENTIARY STATUS: regression test on BOTH lanes, for both spellings.
 /// Measured at `0820ee28e`: the piped root printed
 /// `main = tensor(shape=[2], data=[1.0, 2.0])` and the vmapped root
 /// `main = tensor(shape=[2, 2], data=[1.0, 2.0, 3.0, 4.0])`, each at exit
 /// ZERO on eval and on the linked C binary, under a declared extent of 9.
+/// The piped half's rendering was re-measured at this head, where it names
+/// `f`; on `23729c638` it said `the signature` and carried the whole call's
+/// span.
 #[test]
 fn a_nameless_activation_that_refutes_its_own_claim_is_rejected_on_both_lanes() {
     assert!(
@@ -7002,9 +7037,24 @@ fn a_nameless_activation_that_refutes_its_own_claim_is_rejected_on_both_lanes() 
         "piped_root",
         &piped,
         &format!(
-            "error: dimension mismatch: the signature declares extent 9 at result axis 0, \
+            "error: dimension mismatch: `f` declares extent 9 at result axis 0, \
              but the inlined body produces 2 at source span `{}`",
-            root_call_span(&piped)
+            pipe_stage_span(&piped)
+        ),
+    );
+
+    // The direct spelling of the same program, which is what the piped one
+    // now folds to. Same sentence, its own span: the agreement chelis#1923
+    // exists to produce, asserted here rather than assumed.
+    let direct = direct_root_source("9");
+    both_lanes_reject_at_lowering(
+        &dir,
+        "direct_root",
+        &direct,
+        &format!(
+            "error: dimension mismatch: `f` declares extent 9 at result axis 0, \
+             but the inlined body produces 2 at source span `{}`",
+            root_call_span(&direct)
         ),
     );
 
@@ -7785,6 +7835,353 @@ fn a_three_member_alias_class_sizes_a_root_in_every_argument_order_on_c() {
     assert_eq!(rendered[0], THREE_MEMBER_RENDERING, "first");
     assert_eq!(rendered[1], rendered[0], "middle renders as first on C too");
     assert_eq!(rendered[2], rendered[0], "and last");
+}
+
+// ---------------------------------------------------------------------------
+// chelis#1923 and chelis#1791 half A: a pipe stage denotes first-argument
+// insertion, in the checker and in the lowerer.
+//
+// `spec/02-surf-syntax.md` §0.1 fixes the meaning: `x |> f(y)` means
+// `f(x, y)`. Every consumer that met a `Pipe` node used to reconstruct that
+// application for itself, and they did not all reconstruct it the same way.
+// The checker typed a bare-name `to_tensor` stage from the callee's FUNCTION
+// type rather than as the application, so the stage's result type stayed an
+// unresolved variable and every rule that reads an application's arguments
+// was lost downstream of it: `expand`'s size, `sum`'s axis. The lowerer had
+// the matching defect on its own side.
+//
+// `chelis_deep::pipe::fold_pipe` states the sentence once, and the checker
+// folds its input before inferring anything, so every later pass sees the
+// application. A pipe reaching lowering is now a fail-closed error rather
+// than a second derivation.
+// ---------------------------------------------------------------------------
+
+/// The size is read from an in-scope tensor, so it IS materializable: this
+/// program is the one a bare-name stage broke for no reason.
+const PIPED_SHAPE_SOURCED_EXPAND: &str = "module Repro.PipeShape\n\
+sig f: tensor[a, f32] -> tensor[a, f32]\n\
+def f(x: tensor[a, f32]) = {\n  \
+a_dim = cast(shape(x, cast(0, int32)), int64)\n  \
+[0.25f32] |> to_tensor |> expand(0i32, a_dim)\n\
+}\n\
+out = f(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n";
+
+/// The same program with the `expand` applied instead of piped, which always
+/// worked. It is the control that says the defect was the notation.
+const DIRECT_SHAPE_SOURCED_EXPAND: &str = "module Repro.DirectShape\n\
+sig f: tensor[a, f32] -> tensor[a, f32]\n\
+def f(x: tensor[a, f32]) = {\n  \
+a_dim = cast(shape(x, cast(0, int32)), int64)\n  \
+expand(to_tensor([0.25f32]), 0i32, a_dim)\n\
+}\n\
+out = f(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n";
+
+/// `sum` downstream of the same stage: the second witness that made this a
+/// class rather than one builtin's bug.
+const PIPED_SUM_AFTER_A_BARE_STAGE: &str = "module Repro.PipeSum\n\
+sig f: tensor[a, f32] -> tensor[f32]\n\
+def f(x: tensor[a, f32]) = [0.25f32] |> to_tensor |> sum(0)\n\
+out = f(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n";
+
+/// pipe.bare_name_stage.to_tensor.expand.{eval,c}
+///
+/// EVIDENTIARY STATUS: regression test on both lanes. On `f45a7848a` this
+/// program was REJECTED at check, score 0.9647, with "unresolved `expand`
+/// shape obligation at declaration boundary", while the applied spelling
+/// below checked clean at score 1. Neither lane could run it.
+#[test]
+fn a_bare_name_pipe_stage_upstream_of_expand_checks_and_runs() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let expected = "out = tensor(shape=[3], data=[0.25, 0.25, 0.25])";
+    let (ok, out) = c_run_result(&dir, "pipe_bare_expand_c", PIPED_SHAPE_SOURCED_EXPAND);
+    assert!(
+        ok,
+        "a materializable piped expand must build and run: {out}"
+    );
+    assert!(out.contains(expected), "{out}");
+    let (eval_ok, eval_out) =
+        eval_result(&dir, "pipe_bare_expand_eval.ch", PIPED_SHAPE_SOURCED_EXPAND);
+    assert!(eval_ok, "{eval_out}");
+    assert!(
+        eval_out.contains(expected),
+        "the lanes agree byte for byte: {eval_out}"
+    );
+}
+
+/// The applied control, which says the repair is about the notation rather
+/// than about `expand` or `to_tensor`.
+///
+/// EVIDENTIARY STATUS: disposition lock. Clean and correct on `f45a7848a`.
+#[test]
+fn the_applied_spelling_of_the_same_expand_is_unchanged() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let expected = "out = tensor(shape=[3], data=[0.25, 0.25, 0.25])";
+    let (ok, out) = c_run_result(&dir, "pipe_applied_expand_c", DIRECT_SHAPE_SOURCED_EXPAND);
+    assert!(ok, "{out}");
+    assert!(out.contains(expected), "{out}");
+    let (eval_ok, eval_out) = eval_result(
+        &dir,
+        "pipe_applied_expand_eval.ch",
+        DIRECT_SHAPE_SOURCED_EXPAND,
+    );
+    assert!(eval_ok && eval_out.contains(expected), "{eval_out}");
+}
+
+/// pipe.bare_name_stage.to_tensor.sum.{eval,c}: the second witness.
+///
+/// EVIDENTIARY STATUS: regression test on both lanes. On `f45a7848a` this
+/// was rejected at check with the same declaration-boundary message, score
+/// 0.94, which is what made the defect a class over every rule that reads an
+/// application's arguments rather than one builtin's bug.
+#[test]
+fn a_bare_name_pipe_stage_upstream_of_sum_checks_and_runs() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(&dir, "pipe_bare_sum_c", PIPED_SUM_AFTER_A_BARE_STAGE);
+    assert!(ok, "{out}");
+    assert!(out.contains("out = 0.25"), "{out}");
+    let (eval_ok, eval_out) =
+        eval_result(&dir, "pipe_bare_sum_eval.ch", PIPED_SUM_AFTER_A_BARE_STAGE);
+    assert!(eval_ok, "{eval_out}");
+    assert!(eval_out.contains("out = 0.25"), "{eval_out}");
+}
+
+// ---------------------------------------------------------------------------
+// chelis#1791 half A: a bare-name stage at a CALL SITE breaks the callee's
+// expand shape source.
+//
+// Same class as the rows above, met at the lowerer instead of the checker.
+// `[...] |> to_tensor |> g(b)` checked clean and evaluated correctly, and the
+// C lane refused to build it: the old `lower_pipe` synthesized
+// `(app (var g) (var __acc))` with `__acc` bound to an already-lowered value,
+// so `g`'s `expand` size resolved to a name no in-scope tensor axis supplied
+// and chelis#469's lowering error fired on a program the checker had
+// accepted. After the fold the lowerer receives `g(to_tensor([...]), b)` and
+// resolves the source exactly as it does for the applied spelling.
+// ---------------------------------------------------------------------------
+
+/// The issue's reproducer A. `g`'s `expand` reads its size from `g`'s own
+/// parameter, so the extent is materializable in either spelling.
+const BARE_STAGE_AT_A_CALL_SITE: &str = "module Repro.PipeCallSite\n\
+sig g: tensor[a, f32] -> tensor[1, f32] -> tensor[a, f32]\n\
+def g(x: tensor[a, f32], b: tensor[1, f32]) = {\n  \
+a_dim = cast(shape(x, cast(0, int32)), int64)\n  \
+expand(b, cast(0, int32), a_dim)\n\
+}\n\
+out = [1.0f32, 2.0f32, 3.0f32] |> to_tensor |> g(to_tensor([0.25f32]))\n";
+
+/// The same call written with `to_tensor` applied, which always built. The
+/// bare-name stage is the whole difference.
+const APPLIED_STAGE_AT_A_CALL_SITE: &str = "module Repro.AppliedCallSite\n\
+sig g: tensor[a, f32] -> tensor[1, f32] -> tensor[a, f32]\n\
+def g(x: tensor[a, f32], b: tensor[1, f32]) = {\n  \
+a_dim = cast(shape(x, cast(0, int32)), int64)\n  \
+expand(b, cast(0, int32), a_dim)\n\
+}\n\
+out = to_tensor([1.0f32, 2.0f32, 3.0f32]) |> g(to_tensor([0.25f32]))\n";
+
+/// The direct spelling `chelis lint --fix` rewrites INTO the pipe form.
+const DIRECT_CALL_FOR_LINT_FIX: &str = "module Repro.LintFixCallSite\n\
+sig g: tensor[a, f32] -> tensor[1, f32] -> tensor[a, f32]\n\
+def g(x: tensor[a, f32], b: tensor[1, f32]) = {\n  \
+a_dim = cast(shape(x, cast(0, int32)), int64)\n  \
+expand(b, cast(0, int32), a_dim)\n\
+}\n\
+out = g(to_tensor([1.0f32, 2.0f32, 3.0f32]), to_tensor([0.25f32]))\n";
+
+/// pipe.bare_name_stage.expand_source.{eval,c}
+///
+/// EVIDENTIARY STATUS: regression test on the C lane, disposition lock on
+/// eval. On `08e46ebe6` this checked clean at score 1 and eval printed the
+/// tensor below, while `chelis build --target c` exited 1 with "`expand` size
+/// resolves to `a_dim`, but no in-scope tensor axis supplies that extent".
+/// Both lanes carry a row because the pair diverged, which is the property
+/// section 4.7 forbids; the eval half of that pair was the correct one.
+#[test]
+fn a_bare_name_stage_at_a_call_site_keeps_the_callees_expand_source() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let expected = "out = tensor(shape=[3], data=[0.25, 0.25, 0.25])";
+    let (ok, out) = c_run_result(&dir, "pipe_call_site_c", BARE_STAGE_AT_A_CALL_SITE);
+    assert!(ok, "the C lane must build and run this program: {out}");
+    assert!(out.contains(expected), "{out}");
+    let (eval_ok, eval_out) =
+        eval_result(&dir, "pipe_call_site_eval.ch", BARE_STAGE_AT_A_CALL_SITE);
+    assert!(eval_ok, "{eval_out}");
+    assert!(
+        eval_out.contains(expected),
+        "and the lanes agree byte for byte: {eval_out}"
+    );
+}
+
+/// The applied control for the same call site.
+///
+/// EVIDENTIARY STATUS: disposition lock. Built and printed the same line on
+/// `08e46ebe6`.
+#[test]
+fn the_applied_stage_at_the_same_call_site_is_unchanged() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let expected = "out = tensor(shape=[3], data=[0.25, 0.25, 0.25])";
+    let (ok, out) = c_run_result(&dir, "applied_call_site_c", APPLIED_STAGE_AT_A_CALL_SITE);
+    assert!(ok, "{out}");
+    assert!(out.contains(expected), "{out}");
+    let (eval_ok, eval_out) = eval_result(
+        &dir,
+        "applied_call_site_eval.ch",
+        APPLIED_STAGE_AT_A_CALL_SITE,
+    );
+    assert!(eval_ok && eval_out.contains(expected), "{eval_out}");
+}
+
+/// pipe.bare_name_stage.lint_fix.c: the row's own name. Following the style
+/// tool must not break a building program.
+///
+/// This runs the real style path, with no `--allow-style-violations` and no
+/// `CHELIS_STYLE_GATE_DISABLE`, because that is the defect: `lint --fix`'s
+/// `prefer-pipe-operator` rewrites the direct call into the bare-name stage
+/// spelling.
+///
+/// EVIDENTIARY STATUS: regression test. Measured on `08e46ebe6`: the direct
+/// program builds and runs, `chelis lint --fix` makes two replacements, the
+/// rewritten program still checks at score 1 and still evaluates, and
+/// `chelis build --target c` then exits 1 with chelis#469's lowering error.
+#[test]
+fn a_lint_fix_of_a_direct_call_still_checks_evaluates_and_builds() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = fixture(&dir, "lint_fix_call.ch", DIRECT_CALL_FOR_LINT_FIX);
+    let styled = |args: &[&str]| {
+        Command::cargo_bin("chelis")
+            .expect("chelis")
+            .args(args)
+            .output()
+            .expect("styled chelis invocation")
+    };
+    let expected = "data=[0.25, 0.25, 0.25]";
+    let before = styled(&["eval", "--file", path.to_str().unwrap()]);
+    assert!(
+        String::from_utf8_lossy(&before.stdout).contains(expected),
+        "the direct spelling works before the fix: {}",
+        String::from_utf8_lossy(&before.stderr)
+    );
+
+    let formatted = styled(&["fmt", "--inplace", path.to_str().unwrap()]);
+    assert!(formatted.status.success(), "fmt must succeed");
+    let fixed = styled(&["lint", "--fix", path.to_str().unwrap()]);
+    assert!(
+        String::from_utf8_lossy(&fixed.stdout).contains("replacement"),
+        "the fix rewrites the call into the pipe form: {}{}",
+        String::from_utf8_lossy(&fixed.stdout),
+        String::from_utf8_lossy(&fixed.stderr)
+    );
+    let rewritten = fs::read_to_string(&path).expect("rewritten fixture");
+    assert!(
+        rewritten.contains("|> to_tensor |> g(to_tensor([0.25f32]))"),
+        "the bare-name stage is what the tool produces: {rewritten}"
+    );
+
+    let checked = styled(&["check", path.to_str().unwrap()]);
+    assert!(
+        checked.status.success(),
+        "the fixed program must still check: {}",
+        String::from_utf8_lossy(&checked.stdout)
+    );
+    let out_dir = dir.path().join("lint_fix_call-out");
+    let built = styled(&[
+        "build",
+        path.to_str().unwrap(),
+        "--target",
+        "c",
+        "-o",
+        out_dir.to_str().unwrap(),
+    ]);
+    assert!(
+        built.status.success(),
+        "and must still build: {}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let status = link_generated(&out_dir, "lint_fix_call.c", "lint_fix_call");
+    assert!(status.success(), "link failed: {status}");
+    let run = StdCommand::new(out_dir.join("lint_fix_call"))
+        .output()
+        .expect("run compiled binary");
+    let text = String::from_utf8_lossy(&run.stdout).to_string();
+    assert!(
+        run.status.success() && text.contains(expected),
+        "and print the same tensor: {text}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// chelis#1791 half B, through the CLI: `chelis check` must reject a sourceless
+// `expand` size written as a pipe stage exactly as it rejects the direct
+// spelling.
+//
+// `crates/chelis-types/tests/issue_530_expand_inline_size_gate.rs` holds the
+// checker-level rows and the byte comparison. This row exists because the
+// verdict a user sees is `chelis check`'s.
+// ---------------------------------------------------------------------------
+
+/// The issue's reproducer B, whose size is a cast over a bare `int32`
+/// parameter and so has no tensor shape source.
+const SOURCELESS_PIPE_STAGE: &str = "module Repro.BPipe\n\
+sig f: tensor[a, f32] -> int32 -> tensor[a, f32]\n\
+def f(x: tensor[a, f32], k: int32) = {\n  \
+a_dim = k |> cast(int64)\n  \
+[0.25f32] |> to_tensor |> expand(0i32, a_dim)\n\
+}\n";
+
+/// The same program with the `expand` written directly.
+const SOURCELESS_DIRECT: &str = "module Repro.BDirect\n\
+sig f: tensor[a, f32] -> int32 -> tensor[a, f32]\n\
+def f(x: tensor[a, f32], k: int32) = {\n  \
+a_dim = k |> cast(int64)\n  \
+expand(to_tensor([0.25f32]), 0i32, a_dim)\n\
+}\n";
+
+/// expand.sourceless_size.pipe_position: the user-visible verdict.
+///
+/// EVIDENTIARY STATUS: regression test on the pipe spelling, disposition lock
+/// on the direct one. On `08e46ebe6` the pipe spelling was rejected, but with
+/// chelis#1909's declaration-boundary obligation message rather than section
+/// 4.7.2's, so the substring assertion below failed. Before chelis#1909, on
+/// `6abca2406`, it scored a clean 1.0 with an empty error list and the
+/// sourceless size reached the lowerer instead.
+#[test]
+fn a_sourceless_expand_size_is_rejected_in_pipe_position_by_the_cli() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let needle = "but no tensor in scope carries it";
+    let piped = check(&fixture(&dir, "sourceless_pipe.ch", SOURCELESS_PIPE_STAGE));
+    let piped_out = String::from_utf8_lossy(&piped.stdout).to_string();
+    assert!(
+        piped_out.contains(needle) && piped_out.contains("chelis#469"),
+        "the pipe stage must carry the section 4.7.2 sourceless-size diagnostic: {piped_out}"
+    );
+    assert!(
+        !piped_out.contains("\"score\": 1,"),
+        "and must not score a clean 1.0: {piped_out}"
+    );
+    let direct = check(&fixture(&dir, "sourceless_direct.ch", SOURCELESS_DIRECT));
+    let direct_out = String::from_utf8_lossy(&direct.stdout).to_string();
+    assert!(
+        direct_out.contains(needle) && direct_out.contains("chelis#469"),
+        "the direct spelling keeps its diagnostic: {direct_out}"
+    );
 }
 
 // ---------------------------------------------------------------------------

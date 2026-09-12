@@ -17,6 +17,7 @@ pub mod node;
 pub mod parser;
 pub mod path;
 mod pattern;
+pub mod pipe;
 pub mod printer;
 pub mod raw;
 pub mod role;

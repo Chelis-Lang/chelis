@@ -724,12 +724,14 @@ const BASELINE: &[Entry] = &[
     (
         Pat::RustDebugNumericFormat,
         "crates/chelis-compiler-api/src/runtime/eval.rs",
-        24,
+        23,
         "declared derived-Debug residue carriers: Err(format!) \
          diagnostics over Value/callable/handle shapes; the seven \
          chelis#890/#903 JSON/CSV builtin dispatch arms left with \
          chelis#997's FO-DIAG migration onto host_ops::describe_value / \
-         describe_argument",
+         describe_argument. One fewer since chelis#1923: the evaluator's \
+         pipe-only callable-application path is deleted, and with it its \
+         `pipe stage is not callable: {other:?}` arm",
     ),
     (
         Pat::RustDebugNumericFormat,

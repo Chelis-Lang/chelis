@@ -12,7 +12,6 @@ use crate::CheckedProgram;
 use crate::cancel::CancelToken;
 use crate::errors::{CheckError, CheckErrorKind};
 use crate::infer::SignatureInferenceMetadata;
-use crate::pipe_stage::resolve_pipe_stage_callee;
 use crate::types::Type;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -776,7 +775,23 @@ impl Checker {
                     self.invalid_borrow(expr, "borrow is only valid as a direct call argument")
                 }
                 Some(DeepTag::App) => self.check_app(expr, list, scope),
-                Some(DeepTag::Pipe) => self.check_pipe(list, scope),
+                // chelis#1923: a pipe cannot reach linearity, which reads the
+                // checked program, because every checker entry folds it into
+                // the application it denotes. The arm that used to sit here
+                // peered through the desugarer's synthesized stage lambda to
+                // ask the inner callee whether the piped value is borrowed or
+                // consumed; the folded application puts that callee in callee
+                // position, so `check_app` asks the same question once. Fail
+                // closed rather than falling through to the structural walk,
+                // which would answer silently.
+                Some(DeepTag::Pipe) => self.push_diagnostic(CheckError::new(
+                    CheckErrorKind::MalformedForm,
+                    "a pipe reached linearity unfolded: every checker entry folds a pipe into \
+                     the application it denotes (spec/02-surf-syntax.md section 0.1; \
+                     chelis#1923)"
+                        .to_string(),
+                    vec![],
+                )),
                 Some(DeepTag::Let) => self.check_let(list, scope),
                 Some(DeepTag::Fn) => self.check_fn(expr, list, scope),
                 Some(DeepTag::If) => self.check_if(list, scope),
@@ -882,69 +897,6 @@ impl Checker {
             }
         }
         self.maybe_mark_reusable_app_input(expr, kids, scope);
-    }
-
-    // Issue #226 diagnosis (regression introduced indirectly by #183
-    // `fix(types): substitute ADT type params into record-pattern
-    // bindings`). Before #183 the destructured record-field bindings
-    // (`PosEmbedParams { table: table }` -> a new local `table`) carried
-    // a fresh type variable in the annotated Deep, so
-    // `expr_is_owned_linear` returned `false` and `check_pipe`
-    // accidentally accepted `table |> shape(0)` followed by a later
-    // `gather(table, ...)`. #183 stamps the resolved field type onto
-    // pattern bindings (the right fix in isolation); that exposed a
-    // pre-existing gap in `check_pipe`. The branch below classifies the
-    // piped value with `var_name(stage)`, which only matches the bare-
-    // var stage shape `(var f)`. For any non-bare-var stage
-    // `chelis_surf::desugar::desugar_pipe_stage` emits a synthesized
-    // `(fn (params __chelis_pipe) (app callee ... (var __chelis_pipe)
-    // ...))` lambda, so `var_name(stage)` returns `None` and
-    // `arg_is_borrowed(stage, None, 0, scope)` falls through to a
-    // function-type lookup on the LAMBDA itself, not on the inner
-    // `callee`. That means borrow-arg builtins called with explicit
-    // arguments (`shape(0)`, `add(y)`, `mul(k)`, `matmul(w)`, ...) get
-    // mis-tagged as structural consumes of the piped variable, tripping
-    // `UseAfterConsume` on any later read with a malformed "pipe into
-    // stage at offset 0 from offset 0" message (both offsets zero
-    // because the synthesized lambda has no source span). The upcoming
-    // fix introduces `resolve_pipe_stage_callee` and peers through the
-    // synthesized lambda to recover the inner callee and the piped
-    // value's arg position before consulting `arg_is_borrowed`.
-    fn check_pipe(&mut self, list: &List, scope: &mut LinearScope) {
-        let kids = children(list);
-        if kids.is_empty() {
-            return;
-        }
-        let mut current = &kids[0];
-        for stage in &kids[1..] {
-            // Pipe stages with explicit args (e.g. `x |> shape(0)`)
-            // are desugared by `chelis_surf::desugar::desugar_pipe_stage`
-            // into a synthesized one-arg lambda
-            // `(fn (params __chelis_pipe) (app callee ... (var __chelis_pipe) ...))`
-            // where the piped value lands at the `__chelis_pipe`
-            // position in the inner app's args. To classify whether the
-            // piped value is borrowed (read) or consumed by the stage,
-            // look through that lambda and ask the inner callee at its
-            // actual arg position. Without this peering, every
-            // non-bare-var stage falls through to the "stage callee
-            // unknown" branch and the piped value is treated as a
-            // structural consume — which mis-fires whenever a borrow-
-            // arg builtin (`shape`, `add`, `mul`, ...) is invoked with
-            // explicit non-piped args. Closes issue #226.
-            let (callee_expr, callee_builtin, piped_arg_index) = resolve_pipe_stage_callee(stage);
-            if self.arg_is_borrowed(callee_expr, callee_builtin, piped_arg_index, scope) {
-                if is_var_expr(current) && self.expr_is_owned_linear(current, scope) {
-                    self.read_var_expr(current, scope);
-                } else {
-                    self.check_expr(current, scope);
-                }
-            } else if is_var_expr(current) && self.expr_is_owned_linear(current, scope) {
-                self.consume_var_expr(current, scope, pipe_site(current, stage));
-            } else {
-                self.check_expr(current, scope);
-            }
-            current = stage;
-        }
     }
 
     fn check_borrow_arg(&mut self, borrow_expr: &Expr, inner: &Expr, scope: &mut LinearScope) {
@@ -2488,17 +2440,6 @@ fn generic_site(expr: &Expr) -> ConsumeSite {
 fn realize_site(expr: &Expr) -> ConsumeSite {
     ConsumeSite {
         description: format!("realize {}", diag_site(expr)),
-        kind: ConsumeKind::Structural,
-    }
-}
-
-fn pipe_site(current: &Expr, stage: &Expr) -> ConsumeSite {
-    ConsumeSite {
-        description: format!(
-            "pipe into stage {} from {}",
-            diag_site(stage),
-            diag_site(current)
-        ),
         kind: ConsumeKind::Structural,
     }
 }

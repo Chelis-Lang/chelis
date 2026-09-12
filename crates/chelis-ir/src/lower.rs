@@ -302,54 +302,6 @@ fn bare_var_name(expr: &Expr) -> Option<String> {
     Some(name.clone())
 }
 
-/// Synthetic accumulator-binding name reserved for the IR-side pipe
-/// rewrite (Item 2c). Chosen to be unrepresentable in Surf so it cannot
-/// collide with user bindings; `lower_pipe` saves and restores any prior
-/// entry under this name before/after the synthesized lookup.
-fn synth_pipe_acc_binding_name() -> String {
-    "__chelis_pipe_acc__".to_string()
-}
-
-/// Synthesize `(app {} (var {} fname) (var {} acc_name))` — the Deep
-/// expression that `lower_app` will route through `lower_builtin_app`
-/// for an unresolved-as-callable bare-var pipe stage. The accumulator
-/// `var` is resolved against the binding inserted by `lower_pipe` before
-/// the call.
-fn synth_unary_app(fname: &str, acc_name: &str, app_span: Span) -> Expr {
-    let zero_span = Span::new(0, 0);
-    let callee = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Var), zero_span),
-                Expr::Map(Metadata::default(), zero_span),
-                Expr::Atom(Atom::Name(fname.to_string()), zero_span),
-            ],
-        },
-        zero_span,
-    );
-    let arg = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Var), zero_span),
-                Expr::Map(Metadata::default(), zero_span),
-                Expr::Atom(Atom::Name(acc_name.to_string()), zero_span),
-            ],
-        },
-        zero_span,
-    );
-    Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::App), zero_span),
-                Expr::Map(Metadata::default(), zero_span),
-                callee,
-                arg,
-            ],
-        },
-        app_span,
-    )
-}
-
 /// Synthesize `(app {} (var {} fname) <operand> <axis>)` — one stage of the
 /// chelis#339 variadic named-axis reduction desugar. `sum(x, seq, head)`
 /// lowers as the documented composition `sum(sum(x, head), seq)`: each
@@ -1866,6 +1818,17 @@ pub(crate) fn prepare_subexpr_lowering_context(
 ) -> SubexprLoweringContext {
     assert_decode_once_in_env("lower_subexpr_program: type_env", full_type_env);
     assert_decode_once_in_env("lower_subexpr_program: program_defs", &program_defs);
+    // chelis#1923, the other half of this ingress: the def bodies the
+    // subexpression inlines are unchecked Deep too, and a pipe in one of them
+    // reaches lowering exactly as a pipe in the subexpression itself would.
+    // Folded here, beside the decode-once assertions, so this boundary
+    // normalizes everything it admits rather than half of it.
+    let program_defs = Arc::new(
+        program_defs
+            .iter()
+            .map(|(name, body)| (name.clone(), chelis_deep::pipe::fold_pipes(body)))
+            .collect::<BTreeMap<_, _>>(),
+    );
     let program_types = full_type_env
         .iter()
         .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
@@ -1994,6 +1957,16 @@ fn try_lower_subexpr_program_with_ordered_inputs_impl(
     #[cfg(feature = "lowering-trace")] trace: Option<crate::lowering_trace::Collector>,
 ) -> Result<(Dag, u64), LowerDiagnostic> {
     assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
+    // chelis#1923: this is the one lowering ingress that receives UNCHECKED
+    // Deep, measured and in use. Every whole-program entry takes a
+    // `CheckedProgram`, whose input the checker folded, but a subexpression
+    // can arrive from a caller that parsed or synthesized it, so the fold
+    // runs here at the boundary rather than leaving a pipe to reach the
+    // fail-closed raise. This is the SAME `fold_pipe`, not a second
+    // derivation of spec/02 §0.1: a boundary that folds its own way is
+    // exactly what this change removed.
+    let folded = chelis_deep::pipe::fold_pipes(expr);
+    let expr = &folded;
     // As above, a failed attempt owns and discards its complete collector.
     catch_lowering(std::panic::AssertUnwindSafe(|| {
         let (dag, random_counter, _, _) = lower_subexpr_program_inner_impl(
@@ -15952,250 +15925,20 @@ impl<'program> LowerCtx<'program> {
     }
 
     /// `(pipe {} x f g ...)` -- chain: lower x, then apply f, then g, etc.
-    fn lower_pipe(&mut self, elems: &[Expr]) -> LoweredValue {
-        if elems.len() < 3 {
-            raise_malformed_deep(
-                "a `pipe` form with no seed expression",
-                None,
-                self.current_span_id.clone(),
-            );
-        }
-        let mut current = self.lower_expr(&elems[2]);
-        for func_expr in &elems[3..] {
-            // Bucket 4e: a unary `(var {} fname)` stage where `fname` is
-            // a known elementwise/tensor builtin can lower directly via
-            // tier2 (no lambda intermediary). For *unknown* var names
-            // (user-defined fns, library re-exports, etc.) we fall
-            // through to `resolve_callable_expr` below, so the stage is
-            // treated as a plain function reference and gets the same
-            // unary-application semantics as `f(current)`.
-            //
-            // The previous implementation hit `_ => current` and then
-            // `continue`, which silently dropped the user-defined fn
-            // (the accumulator was returned unchanged). Top-level
-            // bindings then materialised as `()`/Unit in generated C.
-            let unary_builtin_name = if let Some((DeepTag::Var, _, kids)) = stamped_parts(func_expr)
-                && let Some(Expr::Atom(Atom::Name(fname), _)) = kids.first()
-            {
-                Some(fname.as_str())
-            } else {
-                None
-            };
-            let is_known_unary_builtin = matches!(
-                unary_builtin_name,
-                Some(
-                    "neg"
-                        | "exp"
-                        | "log"
-                        | "sin"
-                        | "sqrt"
-                        | "cos"
-                        | "tan"
-                        | "atan"
-                        | "abs"
-                        | "floor"
-                        | "ceil"
-                        | "round"
-                        | "relu"
-                        | "sigmoid"
-                        | "tanh"
-                        | "silu"
-                        | "gelu"
-                )
-            );
-            if is_known_unary_builtin
-                && let Some((DeepTag::Var, _, kids)) = stamped_parts(func_expr)
-                && let Some(Expr::Atom(Atom::Name(fname), _)) = kids.first()
-            {
-                let current_node = current.expect_node("pipe stage");
-                let ty = self
-                    .dag
-                    .get(current_node)
-                    .map(|node| node.output_type.clone())
-                    .unwrap_or_else(Self::default_type);
-                current = match fname.as_str() {
-                    "neg" => LoweredValue::Node(self.dag.add_node(
-                        RiscOp::Neg,
-                        vec![current_node],
-                        ty,
-                        self.current_span_id.clone(),
-                    )),
-                    "exp" => LoweredValue::Node(self.lower_transcendental(
-                        RiscOp::Exp,
-                        current_node,
-                        &ty,
-                    )),
-                    "log" => LoweredValue::Node(self.lower_transcendental(
-                        RiscOp::Log,
-                        current_node,
-                        &ty,
-                    )),
-                    "sin" => LoweredValue::Node(self.lower_transcendental(
-                        RiscOp::Sin,
-                        current_node,
-                        &ty,
-                    )),
-                    "sqrt" => LoweredValue::Node(self.lower_transcendental(
-                        RiscOp::Sqrt,
-                        current_node,
-                        &ty,
-                    )),
-                    "cos" => LoweredValue::Node(self.lower_transcendental(
-                        RiscOp::Cos,
-                        current_node,
-                        &ty,
-                    )),
-                    "tan" => LoweredValue::Node(self.lower_transcendental(
-                        RiscOp::Tan,
-                        current_node,
-                        &ty,
-                    )),
-                    "atan" => LoweredValue::Node(self.lower_transcendental(
-                        RiscOp::Atan,
-                        current_node,
-                        &ty,
-                    )),
-                    "abs" => LoweredValue::Node(self.lower_exact_numeric_unary(
-                        RiscOp::Abs,
-                        current_node,
-                        &ty,
-                    )),
-                    "floor" => LoweredValue::Node(self.lower_exact_numeric_unary(
-                        RiscOp::Floor,
-                        current_node,
-                        &ty,
-                    )),
-                    "ceil" => LoweredValue::Node(self.lower_exact_numeric_unary(
-                        RiscOp::Ceil,
-                        current_node,
-                        &ty,
-                    )),
-                    "round" => LoweredValue::Node(self.lower_exact_numeric_unary(
-                        RiscOp::Round,
-                        current_node,
-                        &ty,
-                    )),
-                    "relu" => LoweredValue::Node(tier2::lower_relu(
-                        &mut self.dag,
-                        current_node,
-                        &ty,
-                        self.current_span_id.as_deref(),
-                    )),
-                    "sigmoid" => LoweredValue::Node(tier2::lower_sigmoid(
-                        &mut self.dag,
-                        current_node,
-                        &ty,
-                        self.current_span_id.as_deref(),
-                    )),
-                    "tanh" => LoweredValue::Node(tier2::lower_tanh(
-                        &mut self.dag,
-                        current_node,
-                        &ty,
-                        self.current_span_id.as_deref(),
-                    )),
-                    "silu" => LoweredValue::Node(tier2::lower_silu(
-                        &mut self.dag,
-                        current_node,
-                        &ty,
-                        self.current_span_id.as_deref(),
-                    )),
-                    "gelu" => LoweredValue::Node(tier2::lower_gelu(
-                        &mut self.dag,
-                        current_node,
-                        &ty,
-                        self.current_span_id.as_deref(),
-                    )),
-                    // `is_known_unary_builtin` guarantees this branch is
-                    // never hit, but keep it as an explicit fallthrough
-                    // marker so any future name added to the predicate
-                    // without a corresponding match arm fails loudly.
-                    _ => unreachable!(
-                        "pipe stage `{fname}` was classified as a known \
-                         unary builtin but has no lowering arm"
-                    ),
-                };
-                continue;
-            }
-            if let Some(callable) = self.resolve_callable_expr(func_expr) {
-                current = match callable {
-                    CallableExpr::Plain(fn_expr) => {
-                        self.lower_plain_callable_with_values(&fn_expr, &[current.clone()])
-                    }
-                    CallableExpr::Vmap { fn_expr, axis } => {
-                        let current_node = current.expect_node("pipe stage");
-                        self.lower_vmap_callable_with_nodes(
-                            &fn_expr,
-                            axis,
-                            &[current_node],
-                            func_expr.span(),
-                        )
-                    }
-                    CallableExpr::Grad { fn_expr, wrt } => {
-                        // `x |> grad(f)` lowers as `grad(f)(x)` — reuse
-                        // the non-pipe grad lowering with the previous
-                        // stage's value as the single argument.
-                        self.lower_grad_callable_with_values(
-                            &fn_expr,
-                            wrt.as_deref(),
-                            &[current.clone()],
-                            func_expr.span(),
-                        )
-                    }
-                    CallableExpr::VmapGrad { fn_expr, wrt, axis } => {
-                        // `xs |> vmap(grad(f))` lowers as
-                        // `vmap(grad(f))(xs)` — reuse the non-pipe
-                        // vmap-grad lowering with the previous stage's
-                        // NodeId as the single argument.
-                        let current_node = current.expect_node("pipe stage");
-                        self.lower_vmap_grad_callable_with_nodes(
-                            &fn_expr,
-                            wrt.as_deref(),
-                            axis,
-                            &[current_node],
-                            func_expr.span(),
-                        )
-                    }
-                    // Item 2-extended G10: `x |> f` where `f` is a fn-typed
-                    // parameter. The DAG has no `RiscOp::Call`, so mark the
-                    // provisional result as unresolved. A surrounding `grad`
-                    // rejects it only when that fresh marker reaches the
-                    // differentiated output; a dead pure pipe stage cannot
-                    // erase an otherwise-proven zero cotangent (chelis#1102).
-                    // See `docs/investigations/pipe_fn_param_stage_diagnosis.md`.
-                    CallableExpr::Parameter { .. } => self.mark_unresolved_callable_value(current),
-                };
-                continue;
-            }
-            // Item 2c: bare `(var {} name)` stage where `name` is neither a
-            // local callable nor a program def is a primitive (builtin) used
-            // as a unary pipe stage — e.g. `... |> tensor_to_scalar`. The
-            // host lane already normalizes this via `beta_reduce_pipe_stage`
-            // (`crates/chelis-ir/src/host.rs:2947`); the IR lane has to
-            // mirror that rewrite. Synthesize `(app (var name) (var __acc))`
-            // with the accumulator bound to the already-lowered `current`
-            // value, then dispatch through `lower_app` which routes
-            // unresolved-name callees through `lower_builtin_app`.
-            //
-            // See `docs/investigations/c_backend_grad_piped_body_diagnosis.md`.
-            if let Some(unary_name) = bare_var_name(func_expr) {
-                let acc_binding = synth_pipe_acc_binding_name();
-                let saved = self.bindings.get(&acc_binding).cloned();
-                self.bindings.insert(acc_binding.clone(), current.clone());
-                let synthesized = synth_unary_app(&unary_name, &acc_binding, func_expr.span());
-                current = self.lower_expr(&synthesized);
-                match saved {
-                    Some(prior) => {
-                        self.bindings.insert(acc_binding, prior);
-                    }
-                    None => {
-                        self.bindings.remove(&acc_binding);
-                    }
-                }
-                continue;
-            }
-            current = self.lower_unrepresentable("pipe stage", std::slice::from_ref(func_expr));
-        }
-        current
+    /// A `pipe` must never reach lowering: `chelis_deep::pipe::fold_pipe`
+    /// replaced it with the application `spec/02-surf-syntax.md` §0.1 says it
+    /// denotes, at the checker's input, so every pass after the checker sees
+    /// that application and none of them re-derives the sentence for itself.
+    /// A pipe arriving here means the fold did not run, and lowering one
+    /// anyway is what chelis#1923 and chelis#1791 were: two derivations of one
+    /// sentence that disagreed. So this fails closed rather than keeping a
+    /// second path alive to hide the day the first stops folding.
+    fn lower_pipe(&mut self, _elems: &[Expr]) -> LoweredValue {
+        raise_malformed_deep(
+            "a pipe reached lowering unfolded",
+            None,
+            self.current_span_id.clone(),
+        )
     }
 
     /// `(cast {} expr (t-prim {} name))` -- precision cast.
@@ -21740,19 +21483,33 @@ mod regression_tests {
         assert!(captured_lower_message(err).contains("guards are not supported"));
     }
 
+    /// chelis#1923 renamed what this program is unsupported FOR.
+    ///
+    /// `1.0 |> grad(f)` used to report an unsupported "pipe stage", because
+    /// the lowerer met a `Pipe` node and declined it as a pipe. The pipe is
+    /// now folded into the application spec/02-surf-syntax.md §0.1 says it
+    /// denotes, `(app (grad f) 1.0)`, so what the lowerer declines is the
+    /// thing actually unsupported by IR evaluation: `grad`. The diagnostic
+    /// names the real form and keeps pointing at the build workaround, which
+    /// is what the row exists to guarantee; only the subject changed, and it
+    /// got more accurate.
     #[test]
-    fn unsupported_pipe_stage_returns_diagnostic_without_panicking_public_api() {
+    fn an_unsupported_transform_in_pipe_position_names_the_transform() {
         let exprs = chelis_deep::parser::parse_str(
             "(pipe {} (lit {type: (t-prim {} f32)} 1.0) (grad {} (var {} f)))",
         )
         .expect("parse failed");
         let err =
             try_lower_subexpr_program(&exprs[0], UnordMap::new(), UnordMap::new(), UnordMap::new())
-                .expect_err("unsupported pipe stage should return diagnostic");
+                .expect_err("an unsupported transform should return a diagnostic");
         let message = err.to_string();
         assert!(
-            message.contains("pipe stage is not supported by IR evaluation yet"),
-            "unexpected diagnostic: {message}"
+            message.contains("`grad` is not supported by IR evaluation yet"),
+            "the diagnostic names the transform, not the notation: {message}"
+        );
+        assert!(
+            !message.contains("pipe"),
+            "and no longer mentions a pipe, because none reached lowering: {message}"
         );
         assert!(
             message.contains("chelis build --target c"),

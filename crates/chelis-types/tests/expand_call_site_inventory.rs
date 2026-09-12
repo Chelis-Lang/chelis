@@ -179,8 +179,8 @@ const ALLOWED: &[(&str, usize, &str)] = &[
     // axis, or is the negative row that refuses a non-unit one.
     (
         "crates/chelis-cli/tests/runtime_extent_slice_b.rs",
-        34,
-        "same-rank unit-axis broadcasts and their static/runtime non-unit refusals; includes record/nested-record projections, helper and lambda results, aliased/cast shape carriers, and axis/declared-result mismatch controls, plus chelis#1822's seven named-bystander spellings: both expanded-axis positions, the no-consumer form, the literal-size and rank-1 controls, and the reduction-consumer and free-result-dimension forms",
+        41,
+        "same-rank unit-axis broadcasts and their static/runtime non-unit refusals; includes record/nested-record projections, helper and lambda results, aliased/cast shape carriers, and axis/declared-result mismatch controls, plus chelis#1822's seven named-bystander spellings: both expanded-axis positions, the no-consumer form, the literal-size and rank-1 controls, and the reduction-consumer and free-result-dimension forms, and chelis#1923/#1791's seven pipe-position spellings: the piped shape-sourced broadcast with its applied control, the same broadcast reached through a callee from a bare-name stage with its applied control and its `lint --fix` twin, and the sourceless size written both ways",
     ),
     (
         "crates/chelis-cli/tests/runtime_extent_claim_preparation.rs",
@@ -229,6 +229,15 @@ const ALLOWED: &[(&str, usize, &str)] = &[
         "crates/chelis-types/tests/issue_942_inferred_tensor_cast.rs",
         14,
         "unit-extent operands at a legal axis, plus one axis-out-of-range negative row",
+    ),
+    // chelis#1791 half B at the checker: the section 4.7.2 size rule must
+    // answer the same way in pipe position as in direct position, so the two
+    // spellings of the sourceless program sit beside the shape-sourced
+    // control. All three broadcast a unit axis of `to_tensor([0.25f32])`.
+    (
+        "crates/chelis-types/tests/issue_530_expand_inline_size_gate.rs",
+        3,
+        "the sourceless size written directly and as a pipe stage, plus the shape-sourced pipe control; all same-rank unit-axis broadcasts",
     ),
     (
         "crates/chelis-types/tests/unresolved_operand_matrix.rs",

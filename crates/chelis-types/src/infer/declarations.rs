@@ -1788,15 +1788,26 @@ pub(super) fn param_has_consuming_use_inner(
                 type_headers,
                 errors,
             ),
-            Some(DeepTag::Pipe) => pipe_consumes_param(
-                list,
-                param,
-                bound,
-                available_signatures,
-                type_env,
-                type_headers,
-                errors,
-            ),
+            // chelis#1923: a pipe cannot reach here. Declaration collection
+            // runs on the checker's input, which every entry folds, so the
+            // borrow-arg classifier meets the stage callee in callee position
+            // and `app_consumes_param` above asks the question once. The arm
+            // that used to sit here peered through the desugarer's stage
+            // lambda to ask the same thing a second way. Fail closed.
+            Some(DeepTag::Pipe) => {
+                report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::MalformedForm,
+                        "a pipe reached declaration analysis unfolded: every checker entry \
+                         folds a pipe into the application it denotes \
+                         (spec/02-surf-syntax.md section 0.1; chelis#1923)"
+                            .to_string(),
+                        vec![],
+                    ),
+                );
+                true
+            }
             Some(DeepTag::Fn) => {
                 let kids = children(list);
                 if kids.len() < 2 {
@@ -2017,58 +2028,6 @@ pub(super) fn app_consumes_param(
         ) {
             return true;
         }
-    }
-    false
-}
-
-pub(super) fn pipe_consumes_param(
-    list: &deep::List,
-    param: &str,
-    bound: &mut Vec<UnordSet<String>>,
-    available_signatures: &UnordMap<String, Type>,
-    type_env: &BTreeMap<String, deep::Expr>,
-    type_headers: &TypeResolutionEnv,
-    errors: &mut DiagnosticSink<'_>,
-) -> bool {
-    let kids = children(list);
-    if kids.is_empty() {
-        return false;
-    }
-    let mut current = &kids[0];
-    for stage in &kids[1..] {
-        // Issue #229 (sibling sweep of chelis#226): peer through any
-        // synthesized `__chelis_pipe` lambda the desugarer emits for
-        // explicit-arg pipe stages so the borrow-arg classifier sees
-        // the inner callee and the piped value's actual arg position
-        // — not the lambda's type. Without this peering, every
-        // non-bare-var pipe stage is mis-classified as a consuming
-        // use, the wrapping function never gets auto-borrow inferred,
-        // and downstream calls spuriously consume their argument.
-        let (_callee_expr, callee_builtin, piped_arg_index) =
-            crate::pipe_stage::resolve_pipe_stage_callee(stage);
-        if is_direct_unshadowed_var(current, param, bound) {
-            if !callee_arg_is_borrowed(
-                callee_builtin,
-                piped_arg_index,
-                available_signatures,
-                type_env,
-                type_headers,
-                errors,
-            ) {
-                return true;
-            }
-        } else if param_has_consuming_use_inner(
-            current,
-            param,
-            bound,
-            available_signatures,
-            type_env,
-            type_headers,
-            errors,
-        ) {
-            return true;
-        }
-        current = stage;
     }
     false
 }
