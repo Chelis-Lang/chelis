@@ -20,8 +20,12 @@
 //! (`gather`, `scatter`, `scatter_replace`, `diagonal`, `trace`, `concat`)
 //! compute a result FROM the operand's shape; a deferral there must reproduce
 //! every constraint the eager arm imposed, and measurement showed that is more
-//! than the one helper call the arm appears to make. They still reject, and
-//! chelis#1489 stays open for them -- 121 occurrences, 1.7%.
+//! than the one helper call the arm appears to make. They were unconverted when
+//! this file was written and two tests here pinned that. They now defer, by
+//! carrying that other evidence on the gate:
+//! `issue_1489_shape_route_deferral.rs` owns them, and the two pins are retired
+//! rather than inverted, because that file asserts the same routes from the
+//! other side.
 //!
 //! `cast` and `copy` defer by re-entering their OWN eager decision with the
 //! settled type, rather than by a re-derivation of it. An earlier revision
@@ -450,41 +454,6 @@ fn a_deferred_copy_unwraps_a_borrow_as_the_eager_one_does() {
     );
 }
 
-/// `diagonal`'s half of the exclusion, at a rank where the call is otherwise
-/// well formed.
-///
-/// Rank 2, so `diagonal(v, 0i32, 1i32)` has no axis-bounds objection and the
-/// only remaining one IS the unresolved operand.
-#[test]
-fn diagonal_still_rejects_an_unresolved_operand() {
-    let report = check_json(
-        "module Issue1489Diag\n\
-         def apply_it(f: (tensor[3, 2, f32]) -> tensor[3, 2, f32], \
-         t: tensor[3, 2, f32]) -> tensor[3, 2, f32] = f(t)\n\
-         def probe(t: tensor[3, 2, f32]) -> tensor[3, 2, f32] =\n\
-        \x20 apply_it(fn (v) -> diagonal(v, 0i32, 1i32), t)\n",
-    );
-    let found = messages(&report);
-    assert!(
-        found
-            .iter()
-            .any(|m| m.contains("diagonal expects tensor input")),
-        "diagonal is deliberately not converted and must still reject the \
-         unresolved operand by name, not merely error for some other reason; \
-         got {found:?}"
-    );
-    // The rejection must name an unresolved identity. Without this the pin
-    // survives a fixture whose operand has quietly become resolved, which is
-    // how the previous `expand`-based fixture stopped testing anything.
-    assert!(
-        found
-            .iter()
-            .any(|m| m.contains("diagonal expects tensor input") && m.contains('?')),
-        "the fixture's operand must still be UNRESOLVED at the gate, so the \
-         rejection names an inference identity; got {found:?}"
-    );
-}
-
 /// The ten csv host-lane slots convert at one seam, `unify_host_slot`. They
 /// admit no tensor at all, so deferring does not make them accept one — it
 /// makes the rejection name the RESOLVED type instead of an inference
@@ -539,67 +508,6 @@ fn a_host_slot_rejection_names_the_resolved_type_not_an_identity() {
         assert!(
             !found.iter().any(|m| m.contains('?')),
             "{call}: no message may name an inference identity; got {found:?}"
-        );
-    }
-}
-
-/// The six tensor routes are NOT converted here. This pins CURRENT BEHAVIOUR
-/// so a silent change is caught; it is not an endorsement of that behaviour.
-///
-/// chelis#1489 names `infer_gather_result_type` (`gather`, `scatter`,
-/// `scatter_replace`) and `tensor_concat_result_type` (`concat`) as the
-/// STRONGER defect of the four it reports: neither takes `subst`, so neither
-/// can distinguish "not a tensor" from "not yet resolved" even in principle.
-/// They remain open on that issue.
-///
-/// What is decided is only that they are not converted by the same mechanism
-/// as `copy` and `cast`. Each computes its result from the operand's shape, so
-/// a deferral must reproduce every constraint the eager arm imposed. Measured,
-/// replaying only the route's result helper drops `scatter`'s updates-shape
-/// unification and freezes a negative axis normalized against an unresolved
-/// rank, admitting programs that type-check and then emit C contradicting
-/// their own exported signature. Giving the two helpers `subst` and a tolerant
-/// arm -- the issue's own suggestion for them -- is a different change from
-/// this one and is not made here.
-#[test]
-fn the_shape_computing_routes_still_reject_an_unresolved_operand() {
-    // `diagonal` has its own rank-2 case above: this fixture's operand is
-    // rank 1, where `diagonal` would fail on axis bounds whatever the gate
-    // decides, so a pin here could not tell the two apart.
-    //
-    // The operand is a lambda parameter rather than a positional `expand`
-    // result: chelis#1277 S2b gave `expand` exactly one result shape, so an
-    // `expand`-built operand is no longer unresolved and these routes accept
-    // it. The `?N` assertion below is what keeps that from silently
-    // recurring.
-    for (call, gate) in [
-        (
-            "gather(v, to_tensor([0i32]), 0i32)",
-            "gather expects tensor input",
-        ),
-        (
-            "concat([v, v], 0i32)",
-            "concat expects List[tensor[...]] for tensor concatenation",
-        ),
-    ] {
-        let report = check_json(&format!(
-            "module Issue1489NotConverted\n\
-             def apply_it(f: (tensor[3, f32]) -> tensor[3, f32], t: tensor[3, f32]) \
-             -> tensor[3, f32] = f(t)\n\
-             def probe(t: tensor[3, f32]) -> tensor[3, f32] =\n\
-            \x20 apply_it(fn (v) -> {call}, t)\n"
-        ));
-        let found = messages(&report);
-        assert!(
-            found.iter().any(|m| m.contains(gate)),
-            "{call} is deliberately not converted and must still reject; a \
-             clean report here means it was converted without reproducing the \
-             eager arm's constraints; got {found:?}"
-        );
-        assert!(
-            found.iter().any(|m| m.contains(gate) && m.contains('?')),
-            "the fixture's operand must still be UNRESOLVED at the gate, so \
-             the rejection names an inference identity; got {found:?}"
         );
     }
 }

@@ -136,11 +136,18 @@ pub struct Subst {
     /// — ~97% of the measured occurrences. `round_to` is NOT among them: see
     /// `unify_host_slot_eager`.
     ///
-    /// `gather`, `scatter`, `scatter_replace`, `diagonal`, `trace` and
-    /// `concat` do NOT record: their results are shape functions of the
-    /// operand, a deferral there must reproduce more than one helper call, and
-    /// they are pinned to keep rejecting by
-    /// `the_shape_computing_routes_still_reject_an_unresolved_operand`.
+    /// `gather`, `scatter`, `scatter_replace` and `trace` record too, as
+    /// [`DeferredOperandGate::ShapeRoute`]. Their results are shape functions of
+    /// the operand, so that variant carries the arm's other evidence -- the RAW
+    /// axis, the indices, and `scatter`'s updates operand -- and discharge
+    /// replays the whole arm rather than the one helper call it appears to make.
+    ///
+    /// `concat` and `diagonal` do NOT record. They compute a new extent
+    /// arithmetically (a sum, a minimum), their helpers encode a dim they
+    /// cannot compute with as `Dim::Wildcard`, and a dim can still be a
+    /// variable when the operand's TYPE variable binds -- so deferring them let
+    /// a false declared extent check, build and run. They stay on their eager
+    /// paths; `the_arithmetic_routes_are_not_converted` pins the exclusion.
     ///
     /// Recording rather than tolerating is deliberate. The ~71 sibling gates
     /// return on an unresolved operand and forget it, which is sound for them
@@ -200,7 +207,7 @@ pub struct Subst {
 /// into a `CheckError` (it is also what holds the declared type-parameter
 /// names the message may want).
 #[derive(Debug, Clone)]
-pub enum OperandGateFailure {
+pub(crate) enum OperandGateFailure {
     /// The operand settled to something the gate does not accept.
     Rejected {
         gate: DeferredOperandGate,
@@ -225,7 +232,7 @@ pub enum OperandGateFailure {
 /// Not `Copy`: the host-slot arm carries the expected type and the producer's
 /// own slot wording, so discharge can re-decide without re-running the call.
 #[derive(Debug, Clone, PartialEq)]
-pub enum DeferredOperandGate {
+pub(crate) enum DeferredOperandGate {
     /// `copy` with an unresolved operand. Carries the result variable the call
     /// returned: `copy(&t)` yields `t`, not `&t`, so discharge must unify the
     /// eager arm's own answer into it rather than let the operand's type stand.
@@ -253,6 +260,86 @@ pub enum DeferredOperandGate {
         description: String,
         expected: Box<Type>,
     },
+    /// A shape-computing route whose result is a function of the operand's
+    /// shape: `gather`, `scatter`, `scatter_replace` and `trace` (chelis#1489
+    /// gate 3). `concat` and `diagonal` are deliberately excluded; see the
+    /// deferred-operand ledger's doc.
+    ///
+    /// The payload is the WHOLE call minus its operand, and
+    /// `infer::shape_route_result` is the one function that decides it. The
+    /// eager arm builds this same payload and calls that same function with a
+    /// resolved operand, so there is no second implementation of any route --
+    /// this is a deferral of one decision, not a copy of the arm's tail.
+    ShapeRoute {
+        route: ShapeRoute,
+        result: Box<Type>,
+    },
+}
+
+impl ShapeRoute {
+    /// Whether this route's arm normalizes one borrow off its operand.
+    ///
+    /// `gather` and `trace` read their operand through `type_for_readonly_check`,
+    /// which strips one `Type::Ref`; `scatter` and `scatter_replace` pass
+    /// `subst.apply` and reject a borrowed operand. Stripping unconditionally in
+    /// the shared decision widened those in the ACCEPTING direction -- and, when
+    /// `concat` still went through here, a borrowed `concat` passed its element
+    /// guard with empty per-element dims and made the concat axis a wildcard, so
+    /// any declared extent was admitted.
+    ///
+    /// The strip is a property of the route, so it is recorded as one.
+    pub(crate) fn normalizes_borrow(&self) -> bool {
+        match self {
+            Self::Gather { op, .. } => op == "gather",
+            Self::Trace { .. } => true,
+        }
+    }
+
+    /// The builtin's name, for the diagnostic.
+    pub(crate) fn op(&self) -> &str {
+        match self {
+            Self::Gather { op, .. } => op,
+            Self::Trace { .. } => "trace",
+        }
+    }
+}
+
+/// A shape-computing call with its operand left out (chelis#1489).
+///
+/// Carries every input the decision needs EXCEPT the operand, so the same
+/// value decides the call eagerly and after a deferral.
+///
+/// Two fields are deliberately raw rather than pre-computed, because
+/// pre-computing them needs the operand:
+///
+/// - `raw_axis` is the axis as written. The eager resolvers normalize a
+///   negative axis against the operand's RANK and yield 0 when the operand is
+///   not a concrete tensor, so an axis resolved before the operand settled
+///   would be wrong. It is normalized inside the decision instead.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ShapeRoute {
+    /// `gather`, and `scatter`/`scatter_replace` when `updates` is present.
+    Gather {
+        op: String,
+        indices: Box<Type>,
+        raw_axis: Option<i64>,
+        updates: Option<Box<Type>>,
+        /// `scatter`'s mode string, exactly as written. Validated inside the
+        /// decision: validating it in the arm meant the deferred path skipped
+        /// it and demoted a type error to a runtime abort.
+        mode: Option<String>,
+    },
+    /// `trace`, which takes an axis PAIR.
+    ///
+    /// `diagonal` also takes one and is deliberately NOT here: it computes the
+    /// minimum of two extents, and when a dim it reads is still a variable at
+    /// discharge its helper falls back to `Dim::Wildcard`, which the declared
+    /// signature then narrows to any extent at all. It stays on its eager path
+    /// until that helper stops encoding "unknown" as permissive; see chelis#1489.
+    Trace {
+        raw_axis1: Option<i64>,
+        raw_axis2: Option<i64>,
+    },
 }
 
 impl DeferredOperandGate {
@@ -260,10 +347,22 @@ impl DeferredOperandGate {
     ///
     /// `copy` and `cast` return a fresh variable that discharge unifies with the
     /// decided type; a host slot returns its builtin's own fixed result type and
-    /// carries none.
+    /// carries none. A shape route returns a fresh variable for the same reason
+    /// `copy` does -- its result is a function of a shape nobody knows yet.
+    ///
+    /// Answering this is not optional bookkeeping. `Env::generalize` refuses to
+    /// quantify anything this returns (chelis#1489, #1832): a result variable
+    /// that is generalized before its gate discharges gives every use of a
+    /// `let`-bound name its own instance, and the declared result is then never
+    /// checked against what the call produces. Returning `None` for a variant
+    /// that does hand out a fresh variable reopens that hole for that variant.
+    /// The match is deliberately exhaustive with no wildcard arm so a new gate
+    /// cannot be added without deciding this.
     fn result(&self) -> Option<&Type> {
         match self {
-            Self::Copy { result } | Self::Cast { result, .. } => Some(result.as_ref()),
+            Self::Copy { result } | Self::Cast { result, .. } | Self::ShapeRoute { result, .. } => {
+                Some(result.as_ref())
+            }
             Self::HostSlot { .. } => None,
         }
     }
@@ -333,6 +432,53 @@ impl DeferredOperandGate {
                     });
                 }
             }
+            Self::ShapeRoute {
+                ref route,
+                ref result,
+            } => {
+                match crate::infer::shape_route_result(route, resolved) {
+                    Ok((settled, updates)) => {
+                        // The updates equation `scatter` imposes is part of the
+                        // arm, not of the helper. Replaying only the helper
+                        // would drop it.
+                        if let Some(expected_updates) = updates
+                            && let ShapeRoute::Gather {
+                                updates: Some(actual),
+                                ..
+                            } = route
+                            && let Err(te) = unify(&expected_updates, actual.as_ref(), subst)
+                        {
+                            // Record the unification error itself, not a generic
+                            // result mismatch. The eager arm reports `te.into()`,
+                            // which carries `DimensionMismatch`; collapsing that
+                            // onto `TypeMismatch` would change a published
+                            // diagnostic kind by inference order -- the wire
+                            // change `kind()`'s own doc forbids.
+                            subst.record_operand_gate_failure(OperandGateFailure::Decision {
+                                error: te.into(),
+                            });
+                            return;
+                        }
+                        if unify(result.as_ref(), &settled, subst).is_err() {
+                            let expected = subst.apply(result.as_ref());
+                            subst.record_operand_gate_failure(OperandGateFailure::ResultMismatch {
+                                gate: self.clone(),
+                                expected,
+                                settled,
+                            });
+                        }
+                    }
+                    Err(message) => {
+                        subst.record_operand_gate_failure(OperandGateFailure::Decision {
+                            error: crate::errors::CheckError::new(
+                                crate::errors::CheckErrorKind::TypeMismatch,
+                                message,
+                                Vec::new(),
+                            ),
+                        })
+                    }
+                }
+            }
         }
     }
 
@@ -346,22 +492,26 @@ impl DeferredOperandGate {
     /// (``got `t` ``) where the eager arm printed the internal identity --
     /// that one is [04-FIT-9] and is asserted by
     /// `a_never_resolved_declared_parameter_is_named_not_numbered`.
-    pub fn message(&self, subject: &str) -> String {
+    pub(crate) fn message(&self, subject: &str) -> String {
         match self {
             Self::Copy { .. } => format!("copy requires tensor input, got {subject}"),
             Self::Cast { .. } => format!("cast requires tensor or prim type, got {subject}"),
             Self::HostSlot {
                 fname, description, ..
             } => format!("{fname} expects {description}, got {subject}"),
+            Self::ShapeRoute { route, .. } => {
+                format!("{} expects tensor input, got {subject}", route.op())
+            }
         }
     }
 
     /// What to call this constraint's call in a diagnostic.
-    pub fn noun(&self) -> &str {
+    pub(crate) fn noun(&self) -> &str {
         match self {
             Self::Copy { .. } => "copy",
             Self::Cast { .. } => "cast",
             Self::HostSlot { fname, .. } => fname,
+            Self::ShapeRoute { route, .. } => route.op(),
         }
     }
 
@@ -371,16 +521,18 @@ impl DeferredOperandGate {
     /// something consumers count by name (chelis#1334 tallies these), so
     /// collapsing gates onto a different kind would be a wire change smuggled
     /// in behind a timing fix.
-    pub fn kind(&self) -> crate::errors::CheckErrorKind {
+    pub(crate) fn kind(&self) -> crate::errors::CheckErrorKind {
         use crate::errors::CheckErrorKind as Kind;
         match self {
             Self::Cast { .. } => Kind::CastNonTensor,
-            Self::Copy { .. } | Self::HostSlot { .. } => Kind::TypeMismatch,
+            Self::Copy { .. } | Self::HostSlot { .. } | Self::ShapeRoute { .. } => {
+                Kind::TypeMismatch
+            }
         }
     }
 
     /// The repair hint, where the eager path carried one.
-    pub fn suggestions(&self) -> Vec<String> {
+    pub(crate) fn suggestions(&self) -> Vec<String> {
         match self {
             Self::Copy { .. } => vec!["Wrap only tensor values in copy".to_string()],
             _ => Vec::new(),
@@ -837,7 +989,7 @@ impl Subst {
     /// Suspend an operand decision on the variable that has to be bound
     /// before it can be made (chelis#1489). Unification discharges it at that
     /// binding; see the `deferred_tensor_operands` field doc.
-    pub fn record_deferred_tensor_operand(&self, v: TypeVar, gate: DeferredOperandGate) {
+    pub(crate) fn record_deferred_tensor_operand(&self, v: TypeVar, gate: DeferredOperandGate) {
         self.deferred_tensor_operands
             .lock()
             .expect("subst.deferred_tensor_operands poisoned")
@@ -888,7 +1040,7 @@ impl Subst {
 
     /// Record a discharge failure for the per-def reporting pass
     /// (chelis#1489).
-    pub fn record_operand_gate_failure(&self, failure: OperandGateFailure) {
+    pub(crate) fn record_operand_gate_failure(&self, failure: OperandGateFailure) {
         self.operand_gate_failures
             .lock()
             .expect("subst.operand_gate_failures poisoned")
@@ -897,7 +1049,7 @@ impl Subst {
 
     /// Drain the discharge failures. Called once per def body, with
     /// [`Self::take_deferred_tensor_operands`], by the reporting pass.
-    pub fn take_operand_gate_failures(&self) -> Vec<OperandGateFailure> {
+    pub(crate) fn take_operand_gate_failures(&self) -> Vec<OperandGateFailure> {
         std::mem::take(
             &mut *self
                 .operand_gate_failures
@@ -950,7 +1102,7 @@ impl Subst {
 
     /// Drain the deferred tensor-operand ledger. Called once per def body's
     /// inference so one def's deferrals cannot leak into the next.
-    pub fn take_deferred_tensor_operands(&self) -> Vec<(TypeVar, DeferredOperandGate)> {
+    pub(crate) fn take_deferred_tensor_operands(&self) -> Vec<(TypeVar, DeferredOperandGate)> {
         std::mem::take(
             &mut *self
                 .deferred_tensor_operands
