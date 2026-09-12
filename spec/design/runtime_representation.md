@@ -1405,6 +1405,20 @@ and one invocation's Random keys/counters; host sources and checked numeric
 segments execute in their original order. The companion is not serialized,
 and does not change the public legacy stage, kernel, or wire structures.
 
+The opt-in native Random observer registers
+`chelis-backend-c/src/random_observer.rs` in the Phase 0 source universe:
+84 sources (73 Rust, eleven C/C++/Objective-C). Its private invocation parameter
+and C state-observation prelude add two scanner-visible Phase 4 owners:
+`backend-element-spelling` at `host_emit.rs::emit_function`, and
+`load-store-template` at `random_observer.rs::SUPPORT`. The foundation therefore
+extends from 361 to 363 rows and active debt from 247 to 249; every prior row,
+classifier rule and mutation implementation remains unchanged. The integrity
+digest binds those exact additional owners and source count, with no exemption
+for the opt-in feature. Existing backend-element-spelling, load-store-template,
+unregistered-source and subdirectory closure mutations remain the negative
+witnesses. This amendment changes no public descriptor, dtype, width or numbered
+representation semantics.
+
 ## B2. Invariants at every phase boundary
 
 1. The public C ABI remains [05-OP-31]/[05-OP-44]-exact and

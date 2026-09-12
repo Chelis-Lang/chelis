@@ -15,7 +15,7 @@ kernel behavior. It proves three things and nothing more:
 
 The inventory's completeness claim is over `INVENTORY_SOURCES`: an explicit,
 reviewed list of the repository files that can carry a representation seam.
-Seventy-two are Rust and eleven are C, C++, or Objective-C sources. A completeness
+Seventy-three are Rust and eleven are C, C++, or Objective-C sources. A completeness
 claim stated over a *language* instead cannot be discharged, because a reviewer
 can always name one more construct; stated over a file list it is decidable,
 and `_assert_source_list_current` proves the list still equals the tracked
@@ -63,7 +63,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # This is the reviewed Phase 0 contract digest. Updating it is a freeze move,
 # not a regeneration step: spec/design/runtime_representation.md B1 requires a
 # design amendment and a mutation whenever it changes.
-FREEZE_SHA256 = "d87cef198c2d5b9fca494fd848fcecfe5c70ed28a05735c2ee7e13f810440d30"
+FREEZE_SHA256 = "ba54e4c3f15a6524039c77aed2663665432dca270ce2ea1529428f3b82269abf"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -100,6 +100,7 @@ INVENTORY_SOURCES: tuple[str, ...] = (
     "crates/chelis-backend-c/src/host_emit.rs",
     "crates/chelis-backend-c/src/lib.rs",
     "crates/chelis-backend-c/src/memory.rs",
+    "crates/chelis-backend-c/src/random_observer.rs",
     "crates/chelis-backend-c/src/toolchain.rs",
     "crates/chelis-backend-hip/runtime/chelis_device_descriptor.h",
     "crates/chelis-backend-hip/runtime/chelis_device_owner.cpp",
