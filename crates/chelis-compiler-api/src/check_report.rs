@@ -61,8 +61,15 @@ impl CheckResult {
 }
 
 /// The report document's layout, as a `serde_json` formatter.
+///
+/// Public so the directory envelope (`schema::CheckDirectoryReport`, spec/04
+/// § Directory mode) renders its members exactly as a file's report renders
+/// them. The envelope is serialized by its caller, as every other
+/// `chelis-compiler-api` wire type is: the §C6 wire census owns this crate's
+/// compiled `Serialize` calls, and `CheckResult::to_report_json` above is the
+/// one publication route it registers here.
 #[derive(Default)]
-struct ReportFormatter {
+pub struct ReportFormatter {
     /// Nesting depth of the enclosing objects, for the indent.
     object_depth: usize,
     /// Nesting depth of the enclosing arrays. Non-zero means compact.

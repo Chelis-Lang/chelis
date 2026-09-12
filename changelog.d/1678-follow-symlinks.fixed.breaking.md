@@ -12,9 +12,10 @@ reports it as an unreadable file, exactly as naming it directly would, and
 `test` reports it as a failing file. A dangling link to anything else,
 including one named like a dot-entry, is ignored.
 
-Any other link that fails to resolve now aborts the walk, whatever its name:
-a link to a directory that cannot be read, a self-referencing link, or a link
-through a file. The previous walk skipped every link, so each of these used to
-pass. A link to a source directory is also followed wherever it points, so a
-file reached through two links is checked twice. See
+A link to a source directory is followed wherever it points, including out of
+the directory named on the command line. A link that fails to resolve for any
+other reason -- a link to a directory that cannot be read, a self-referencing
+link, or a link through a file -- stops `chelis test`, which skipped every
+link before. `chelis check` reports it and carries on; the entry that follows
+in this release describes its envelope. See
 [#1678](https://github.com/Chelis-Lang/chelis/issues/1678).

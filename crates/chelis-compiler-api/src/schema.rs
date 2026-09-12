@@ -1,10 +1,15 @@
 mod artifact;
 mod dag_domains;
+mod directory;
 mod envelopes;
 mod execution;
 pub mod numbers;
 mod reports;
 pub use artifact::{ArtifactAbiVersion, CompiledArtifactManifest};
+pub use directory::{
+    CheckDirectoryEntry, CheckDirectoryReport, EmptyWalk, EntryPath, UnrepresentablePath,
+    WireCheckDirectoryEntry, WireCheckDirectoryReport, escaped_path,
+};
 pub use execution::NumericScalar;
 use numbers::{NonnegativeCount, NonnegativeExtent, SourceFloat, SourceInteger, UnitInterval};
 
@@ -478,6 +483,11 @@ impl GeneralKind {
             | DiagnosticKind::InvalidHandler
             | DiagnosticKind::BuildTargetMismatch
             | DiagnosticKind::TypeTotality => None,
+            // chelis#1678: directory mode's walk failures reach the wire only
+            // through `CheckDirectoryReport`, which is the one place that can
+            // tell a walk failure from an empty corpus ([04-FIT-23],
+            // [04-FIT-24]).
+            DiagnosticKind::DirectoryWalkError | DiagnosticKind::EmptyCorpus => None,
             DiagnosticKind::SurfParseError => Some(Self::SurfParseError),
             DiagnosticKind::DeepParseError => Some(Self::DeepParseError),
             DiagnosticKind::MacroError => Some(Self::MacroError),
@@ -3094,13 +3104,16 @@ mod tests {
     /// effect checker's four, which reach the wire only through
     /// `Diagnostic::from_effect_error`. Stated as a list so that adding a
     /// governed identity and quietly excluding it from general production
-    /// has to be written down here.
-    const NON_GENERAL_KINDS: [DiagnosticKind; 5] = [
+    /// has to be written down here. chelis#1678 adds directory mode's two,
+    /// which only `CheckDirectoryReport` produces.
+    const NON_GENERAL_KINDS: [DiagnosticKind; 7] = [
         DiagnosticKind::UnsupportedFeature,
         DiagnosticKind::UnhandledEffect,
         DiagnosticKind::InvalidHandler,
         DiagnosticKind::BuildTargetMismatch,
         DiagnosticKind::TypeTotality,
+        DiagnosticKind::DirectoryWalkError,
+        DiagnosticKind::EmptyCorpus,
     ];
 
     #[test]

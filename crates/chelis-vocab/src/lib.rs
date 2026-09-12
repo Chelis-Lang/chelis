@@ -76,10 +76,14 @@ pub enum DiagnosticKind {
     InvalidHandler,
     BuildTargetMismatch,
     TypeTotality,
+    // chelis#1678: directory mode's two failures that belong to no single
+    // file (spec/04 [04-FIT-23] and [04-FIT-24]).
+    DirectoryWalkError,
+    EmptyCorpus,
 }
 
 impl DiagnosticKind {
-    pub const ALL: [Self; 52] = [
+    pub const ALL: [Self; 54] = [
         Self::SurfParseError,
         Self::DeepParseError,
         Self::MacroError,
@@ -132,6 +136,8 @@ impl DiagnosticKind {
         Self::InvalidHandler,
         Self::BuildTargetMismatch,
         Self::TypeTotality,
+        Self::DirectoryWalkError,
+        Self::EmptyCorpus,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -188,6 +194,8 @@ impl DiagnosticKind {
             Self::InvalidHandler => "InvalidHandler",
             Self::BuildTargetMismatch => "BuildTargetMismatch",
             Self::TypeTotality => "TypeTotality",
+            Self::DirectoryWalkError => "directory_walk_error",
+            Self::EmptyCorpus => "empty_corpus",
         }
     }
 
