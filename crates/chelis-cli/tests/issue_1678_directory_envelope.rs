@@ -410,7 +410,11 @@ fn a_non_utf8_path_is_a_walk_failure_not_a_lossy_entry() {
         "{}",
         run.stdout
     );
-    assert!(run.error_messages()[0].contains("not valid UTF-8"));
+    let message = &run.error_messages()[0];
+    assert!(message.contains("not valid UTF-8"), "{message}");
+    // [05-HOST-4]'s rendering, which [04-FIT-23] adopts: the offending byte
+    // comes back out of the message instead of being replaced.
+    assert!(message.contains("\\xffbad.ch"), "{message}");
     assert_eq!(run.code, Some(2));
 }
 
@@ -565,6 +569,35 @@ fn a_failed_walk_is_not_also_an_empty_corpus() {
         "{}",
         run.stdout
     );
+}
+
+/// The count is a lower bound when the second walk -- the one that counts what
+/// the exclusions removed -- cannot read part of an excluded subtree, and the
+/// message says so rather than presenting a partial count as exact.
+#[test]
+fn the_excluded_count_is_marked_a_lower_bound_when_it_is_one() {
+    let dir = tempdir().unwrap();
+    write(&dir.path().join(".hidden/a.ch"), CLEAN);
+    fs::create_dir_all(dir.path().join(".hidden/locked")).unwrap();
+    write(&dir.path().join(".hidden/locked/b.ch"), CLEAN);
+    let exact = check(dir.path());
+    assert!(
+        exact.error_messages()[0].contains(" 2 excluded"),
+        "a readable excluded subtree counts exactly: {}",
+        exact.stdout
+    );
+
+    let Some(_guard) = Unreadable::new(&dir.path().join(".hidden/locked")) else {
+        return;
+    };
+    let run = check(dir.path());
+    assert_eq!(run.error_kinds(), ["empty_corpus"], "{}", run.stdout);
+    assert!(
+        run.error_messages()[0].contains("at least 1 excluded"),
+        "{}",
+        run.stdout
+    );
+    assert_eq!(run.code, Some(2));
 }
 
 // ---------------------------------------------------------------------------

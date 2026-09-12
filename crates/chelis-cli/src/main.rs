@@ -10,7 +10,7 @@ use chelis_compiler_api::compiler::{BuildTarget, CompilerError};
 use chelis_compiler_api::schema::{
     CheckDirectoryEntry, CheckDirectoryReport, CheckResult, Diagnostic, EntryPath, EvalRequest,
     SourceKind, WireInferredAdtArg, WireInferredDim, WireInferredDimensionArg, WireInferredEffect,
-    WireInferredPrecision, WireInferredType,
+    WireInferredPrecision, WireInferredType, escaped_path,
 };
 use chelis_deep::DeepTag;
 use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr};
@@ -2459,7 +2459,7 @@ fn describe_empty_corpus(target: &Path) -> String {
     format!(
         "no .ch or .dp files to check under {}: {bound}{excluded} excluded under dot-prefixed \
          entries or `target` directories",
-        target.display()
+        escaped_path(target)
     )
 }
 
@@ -2568,7 +2568,7 @@ fn walk_sources(target: &Path, rules: &WalkRules) -> Vec<WalkItem> {
         Err(error) => {
             items.push(WalkItem::Failure(format!(
                 "cannot read directory {}: {error}",
-                target.display()
+                escaped_path(target)
             )));
             return items;
         }
@@ -2594,7 +2594,7 @@ fn walk_sources(target: &Path, rules: &WalkRules) -> Vec<WalkItem> {
                 } else if error.kind() != io::ErrorKind::NotFound {
                     items.push(WalkItem::Failure(format!(
                         "cannot resolve {}: {error}",
-                        path.display()
+                        escaped_path(&path)
                     )));
                 }
                 continue;
@@ -2613,7 +2613,7 @@ fn walk_sources(target: &Path, rules: &WalkRules) -> Vec<WalkItem> {
                 Err(error) => {
                     items.push(WalkItem::Failure(format!(
                         "cannot resolve {}: {error}",
-                        path.display()
+                        escaped_path(&path)
                     )));
                     continue;
                 }
@@ -2649,7 +2649,7 @@ fn sorted_entries(dir: &Path) -> Result<Vec<(std::ffi::OsString, PathBuf)>, Stri
             .collect()
     };
     let mut entries =
-        read().map_err(|error| format!("cannot read directory {}: {error}", dir.display()))?;
+        read().map_err(|error| format!("cannot read directory {}: {error}", escaped_path(dir)))?;
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(entries)
 }

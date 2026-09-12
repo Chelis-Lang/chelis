@@ -2433,8 +2433,10 @@ Each entry carries:
 > resolve, including to directories and to locations outside the target.
 > Below the target, it excludes every entry whose name begins with `.` and
 > every directory named `target`; the target itself is never excluded. The
-> name test applies to the entry's own name before any link is resolved, so
-> an excluded link contributes nothing, whatever it resolves to. A checkable
+> dot-prefix test applies to the entry's own name before anything about the
+> entry is resolved, so a dot-prefixed link contributes nothing, whatever it
+> resolves to or fails to resolve to. The `target` exclusion is a rule about
+> directories, so it applies once the entry resolves to one. A checkable
 > file is a regular file, reached directly or through links, whose name ends
 > in `.ch` or `.dp`.
 >
@@ -2476,7 +2478,11 @@ Each entry carries:
 > that directory. So does each entry [04-FIT-20] makes a walk failure, and
 > each path [04-FIT-21] cannot represent. The walk continues past every one
 > of them: each checkable file it can still reach is an entry. An unreadable
-> target therefore yields an envelope with no entries and one diagnostic. The reports of the readable files are additional
+> target therefore yields an envelope with no entries and one diagnostic.
+> A path inside one of these messages is rendered as [05-HOST-4] renders one:
+> reversible escaped host bytes. A message that names a path SHALL NOT
+> substitute for bytes it cannot represent, or two paths the walk rejected
+> become one message a reader cannot tell apart. The reports of the readable files are additional
 > information, not a partial success; the envelope still fails under
 > [04-FIT-25].
 

@@ -8,7 +8,7 @@ mod reports;
 pub use artifact::{ArtifactAbiVersion, CompiledArtifactManifest};
 pub use directory::{
     CheckDirectoryEntry, CheckDirectoryReport, EmptyWalk, EntryPath, UnrepresentablePath,
-    WireCheckDirectoryEntry, WireCheckDirectoryReport,
+    WireCheckDirectoryEntry, WireCheckDirectoryReport, escaped_path,
 };
 pub use execution::NumericScalar;
 use numbers::{NonnegativeCount, NonnegativeExtent, SourceFloat, SourceInteger, UnitInterval};

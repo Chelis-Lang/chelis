@@ -87,6 +87,25 @@ impl EntryPath {
     }
 }
 
+/// A path rendered as [05-HOST-4] renders one in a diagnostic: reversible
+/// escaped host bytes, delimited by `b"` and `"`.
+///
+/// A diagnostic that names a path must not substitute for the bytes it could
+/// not represent, or two names the walk rejected become one unrecoverable
+/// message. `Path::display()` substitutes U+FFFD, so it cannot be used here.
+/// spec/05 [05-HOST-4] already fixed this rendering for `list_dir`'s own
+/// conversion diagnostic, and spec/04 [04-FIT-23] adopts it.
+///
+/// `escape_ascii` is the same primitive `list_dir`'s renderer uses
+/// (`runtime::eval::list_dir_names_to_strings`), so the two cannot drift into
+/// spelling one byte differently.
+pub fn escaped_path(path: &Path) -> String {
+    format!(
+        "b\"{}\"",
+        path.as_os_str().as_encoded_bytes().escape_ascii()
+    )
+}
+
 /// A path [04-FIT-21] cannot write as an entry's `file`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnrepresentablePath {
@@ -98,7 +117,7 @@ impl UnrepresentablePath {
         Self {
             message: format!(
                 "cannot report {}: its path is not valid UTF-8",
-                relative.display()
+                escaped_path(relative)
             ),
         }
     }
@@ -107,7 +126,7 @@ impl UnrepresentablePath {
         Self {
             message: format!(
                 "cannot report {}: it is not a path below the target",
-                relative.display()
+                escaped_path(relative)
             ),
         }
     }
@@ -348,6 +367,17 @@ mod tests {
         }
     }
 
+    /// [05-HOST-4]'s rendering, which [04-FIT-23] adopts: the bytes come back
+    /// out of the message, so two names the walk rejected stay distinct.
+    #[test]
+    fn a_path_renders_as_reversible_escaped_host_bytes() {
+        assert_eq!(escaped_path(Path::new("plain.ch")), "b\"plain.ch\"");
+        assert_eq!(
+            escaped_path(Path::new("a\tb\nc\\d\"e'f")),
+            "b\"a\\tb\\nc\\\\d\\\"e\\'f\""
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_non_utf8_path_is_refused_not_replaced() {
@@ -355,6 +385,11 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
         let path = Path::new(OsStr::from_bytes(b"dir/\xffname.ch"));
         let error = EntryPath::new(path).unwrap_err();
-        assert!(error.to_string().contains("not valid UTF-8"), "{error}");
+        let message = error.to_string();
+        assert!(message.contains("not valid UTF-8"), "{message}");
+        // The offending byte survives as `\xff`, and nothing was substituted
+        // for it: `Path::display()` would have written U+FFFD here.
+        assert!(message.contains("b\"dir/\\xffname.ch\""), "{message}");
+        assert!(!message.contains('\u{fffd}'), "{message}");
     }
 }
