@@ -49,12 +49,26 @@ so each needs a sanctioned classification in the baseline or a restructuring tha
 it. The oracle runs in `heavy-e2e.yml`, never per pull request, so this surfaces after
 merge unless it is dispatched deliberately.
 
-**This cuts both ways for §2's proposal, and the favourable direction is the larger one.**
-The session type deletes `HostLoweringCacheGuard`, its `Drop`, and #1829's refcount
-outright, so the first flagged row **stops existing** rather than needing a
-classification. That is a second, independent argument for the structural repair over
-arming the flag at one more entry point: the flag's own bookkeeping is inventory debt,
-and the borrow checker's is not.
+**Correction, 2026-09-12: the claim below that the session type removes a flagged row is
+wrong, and the paragraph is kept only to record the error.** I wrote that
+`HostLoweringCacheGuard::drop`'s refcount decrement and
+`top_level_fn_helper_summary_rejects`'s counter were flagged Phase 0 rows, so deleting the
+guard would remove one. Measured against
+`spec/design/runtime_representation_phase0_inventory.json` on `main`: **neither owner
+appears anywhere in the inventory** (`HostLoweringCacheGuard` 0 occurrences,
+`top_level_fn_helper_summary_rejects` 0). The refcount was hand-spelled in a way the
+method-name rule does not match, so no row ever existed for it.
+
+`crates/chelis-ir/src/host.rs` **does** carry three `normalized-key-arithmetic` owners -
+`infer_app_expr_host_type`, `mono_specialization_symbol`, and
+`try_lower_general_list_grad_app`, each present in both `foundation_rows` and
+`active_debt` - so "host.rs has no rows" would be equally wrong. The three that exist are
+simply not the two I named.
+
+So the honest claim for an implementation is **"adds no flagged row"**, not "removes one",
+and an implementer adding arithmetic here should check whether it lands under one of those
+three existing owners or creates a fourth. The rest of §2's argument for the structural
+repair stands on its own terms and never depended on this.
 
 **But §3's counted receipt meets the same guard.** `HostWorkProfile.helper_summary_builds`
 is a counter increment in this exact file, and `issue_1835_kernel_decision_work_is_linear`
