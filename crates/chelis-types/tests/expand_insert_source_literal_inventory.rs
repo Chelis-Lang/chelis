@@ -171,8 +171,8 @@ const ALLOWED: &[(&str, usize, usize, &str)] = &[
     (
         "crates/chelis-ir/src/host.rs",
         8,
-        5,
-        "two movement dispatch lists carry both spellings; the surplus is the IR op's printed name and assertions about Expand nodes",
+        6,
+        "two movement dispatch lists carry both spellings; the surplus is the IR op's printed name and assertions about Expand nodes. The sixth insert is chelis#1922's assertion of the retained insert diagnostic during a helper-summary probe; it is not a dispatch site and needs no expand counterpart",
     ),
     (
         "crates/chelis-ir/src/lower.rs",
