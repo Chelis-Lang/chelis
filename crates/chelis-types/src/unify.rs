@@ -2676,14 +2676,29 @@ fn bind_dvar(v: DimVar, dim: &Dim, subst: &mut Subst) -> Result<(), TypeError> {
         subst.set_dimension_label(v, name.clone());
         // chelis#1801 note: this arm records an authored name as a LABEL and
         // binds nothing, so it is the one place a name reaches a class
-        // without `constraint_dim` being able to report it. It needs no pin
-        // of its own. The arm fires only when `v` is protected or already
-        // labelled, a `Dim::Name` operand arises only from the definition
-        // under check, and that definition's binders are protected, so the
-        // rigidity ledger below already pins every class this arm can reach.
+        // without `constraint_dim` being able to report it, and it carries no
+        // pin of its own. Not because the operand must come from the
+        // definition under check: `def named(w: tensor[batch, f32])` keeps
+        // `batch` as a `Dim::Name` in its published scheme, so instantiating
+        // it anywhere contributes one. The route is the arm's OWN
+        // precondition. It fires only when `v` is protected, which the pin
+        // reads directly, or already labelled, and a label is never created
+        // from nothing: the three production writers of `set_dimension_label`
+        // are `copy_dimension_label`, which propagates an existing label to a
+        // fresh instantiation id, and the two below, which each require an
+        // existing label or protection. Every label therefore traces back to
+        // a declared binder.
+        //
+        // What that argument does NOT establish is that the labelled variable
+        // is itself protected, because the instantiation copy lands a label on
+        // a fresh unprotected id. chelis#1925's round 3 measured the gap
+        // instead of arguing it: instrumenting all 196 `.ch` files in the
+        // corpus plus 32 probes found no unpinned class reaching this arm, and
+        // the labelled-then-named state, constructed four ways, binds through
+        // the fall-through below so `constraint_dim` reports it.
         // `a_name_arm_class_is_pinned_by_protection_not_by_a_second_ledger`
-        // locks the remaining state and says what to add if a
-        // labelled-but-unprotected variable ever meets a name.
+        // locks what the arm leaves behind and says where the pin goes if a
+        // program ever reaches that state.
         return Ok(());
     }
     if let Dim::Var(other) = dim

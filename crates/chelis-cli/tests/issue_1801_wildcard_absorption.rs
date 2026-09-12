@@ -782,3 +782,198 @@ fn a_three_member_result_only_binder_is_absorbed_on_both_lanes() {
         "C renders the root exactly as eval does"
     );
 }
+
+/// DISPOSITION LOCK, not a receipt, and deliberately not a corpus row.
+///
+/// `(pick(h))(g(t))` with `pick(f) = f` returns a first-class function from an
+/// application and then applies it. chelis#1925's round 3 measured what this
+/// change does to it: base published `() -> tensor[d0, f32]` and dropped the
+/// root from both lanes, and the absorption makes it executable, at which
+/// point the two lanes print DIFFERENT VALUES at exit 0. Eval applies `h` and
+/// renders `[4.0, 6.0]`; C does not, and renders `[2.0, 3.0]`.
+///
+/// The C mis-lowering is older than this change and is chelis#1951. The
+/// attribution is measured, not argued: `a_nested_application_divergence_is_older_than_this_change`
+/// below replaces the runtime extent with a literal so that base publishes
+/// `tensor[2, f32]` and executes the same program, and base and this head then
+/// render the same two disagreeing values. What this change does is route a
+/// program base dropped in silence into a defect that was already there,
+/// turning a silent drop into a silent wrong answer.
+///
+/// The lock asserts BOTH measured values so that no later change can record
+/// this program as executing exactly while the lanes still disagree. When
+/// chelis#1951 is fixed, this test fails and is replaced by a cross-lane
+/// receipt asserting one rendering.
+#[test]
+fn a_nested_application_root_is_executable_and_the_lanes_still_disagree() {
+    let source = format!(
+        "{POLY_HELPERS}\
+         def pick(f: tensor[p, f32] -> tensor[p, f32]) -> tensor[p, f32] -> tensor[p, f32] = f\n\
+         def main() = (pick(h))(g(to_tensor([1.0f32, 2.0f32, 3.0f32])))\n"
+    );
+    let published = signatures(&source);
+    assert_eq!(
+        published.get("main").map(String::as_str),
+        Some("() -> tensor[*, f32]"),
+        "the absorption reaches this spelling: {published:?}"
+    );
+
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("nested_application_root.ch");
+    let report = check(&source, &path);
+    assert_eq!(report["score"].as_f64(), Some(1.0), "{report}");
+
+    let evaluated = eval_file(&path);
+    assert!(
+        evaluated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&evaluated.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&evaluated.stdout).trim_end(),
+        "main = tensor(shape=[2], data=[4.0, 6.0])",
+        "eval applies the picked function"
+    );
+
+    let out_dir = dir.path().join("nested-application-out");
+    let build = build_c(&path, &out_dir);
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let compiled = compile_and_run_c(&out_dir, "nested_application_root");
+    assert!(
+        compiled.status.success(),
+        "C exits 0 here, which is the problem: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&compiled.stdout).trim_end(),
+        "main = tensor(shape=[2], data=[2.0, 3.0])",
+        "chelis#1951: C does not apply the picked function, and says so at exit 0"
+    );
+}
+
+/// The attribution control for the lock above, and a disposition lock in its
+/// own right. Replacing the runtime extent with a literal gives a program base
+/// publishes as `tensor[2, f32]` and executes on both lanes, so this change
+/// does not touch it. Base and this head both render `[4.0, 6.0]` on eval and
+/// `[2.0, 3.0]` on C, measured with two binaries: the divergence is
+/// chelis#1951's and predates this change entirely.
+#[test]
+fn a_nested_application_divergence_is_older_than_this_change() {
+    let source = format!(
+        "{POLY_HELPERS}\
+         def pick(f: tensor[p, f32] -> tensor[p, f32]) -> tensor[p, f32] -> tensor[p, f32] = f\n\
+         def main() = (pick(h))(to_tensor([2.0f32, 3.0f32]))\n"
+    );
+    let published = signatures(&source);
+    assert_eq!(
+        published.get("main").map(String::as_str),
+        Some("() -> tensor[2, f32]"),
+        "no runtime extent here, so nothing is absorbed: {published:?}"
+    );
+
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("nested_application_concrete.ch");
+    let report = check(&source, &path);
+    assert_eq!(report["score"].as_f64(), Some(1.0), "{report}");
+
+    let evaluated = eval_file(&path);
+    assert_eq!(
+        String::from_utf8_lossy(&evaluated.stdout).trim_end(),
+        "main = tensor(shape=[2], data=[4.0, 6.0])",
+        "eval applies the picked function"
+    );
+
+    let out_dir = dir.path().join("nested-application-concrete-out");
+    let build = build_c(&path, &out_dir);
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let compiled = compile_and_run_c(&out_dir, "nested_application_concrete");
+    assert_eq!(
+        String::from_utf8_lossy(&compiled.stdout).trim_end(),
+        "main = tensor(shape=[2], data=[2.0, 3.0])",
+        "chelis#1951 on a program this change does not touch"
+    );
+}
+
+/// DISPOSITION LOCK. Two runtime extents that DISAGREE reach one absorbed
+/// class through two function-typed arguments. This change makes the program
+/// executable, and both lanes then refuse it, which is the right verdict, with
+/// different renderings, which is not.
+///
+/// Eval refuses at the checker's binder-equality rule with
+/// ``dimension binder `p` has inconsistent runtime witnesses: 2 and 1``; C
+/// refuses at the [04-NUM-9] guard with ``extent `k`: claimed = 2, shrink axis
+/// 0 = 1`` and `numeric trap: domain in shrink at int64`, aborting rather than
+/// exiting non-zero cleanly. Both are refusals and no wrong value is produced,
+/// so this is a rendering divergence rather than a soundness one.
+///
+/// The eval rendering is chelis#1788's subject and PR #1938's M7e re-renders
+/// exactly that message, so that work owns the convergence. The lock asserts
+/// both renderings as measured on this head so the divergence cannot be
+/// recorded as agreement, and it is the test to update when M7e lands.
+#[test]
+fn two_disagreeing_extents_in_one_class_are_refused_by_both_lanes_differently() {
+    let source = format!(
+        "{POLY_HELPERS}{THIRD_HELPER}\
+         def g2(x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[2i64, shape(x, 0i32)]])\n\
+         def apply4(f: tensor[p, f32] -> tensor[p, f32], v: tensor[p, f32], q2: tensor[p, f32] -> tensor[p, f32], w: tensor[p, f32]) -> tensor[p, f32] = add(f(v), q2(w))\n\
+         def main() = apply4(h, g(to_tensor([1.0f32, 2.0f32, 3.0f32])), h2, g2(to_tensor([7.0f32, 8.0f32, 9.0f32])))\n"
+    );
+    let published = signatures(&source);
+    assert_eq!(
+        published.get("main").map(String::as_str),
+        Some("() -> tensor[*, f32]"),
+        "the class absorbs even though its two witnesses disagree: {published:?}"
+    );
+
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("two_extents_differ.ch");
+    let report = check(&source, &path);
+    assert_eq!(report["score"].as_f64(), Some(1.0), "{report}");
+
+    let evaluated = eval_file(&path);
+    assert!(
+        !evaluated.status.success(),
+        "eval must refuse: {}",
+        String::from_utf8_lossy(&evaluated.stdout)
+    );
+    let eval_stderr = String::from_utf8_lossy(&evaluated.stderr).to_string();
+    assert!(
+        eval_stderr.contains("dimension binder `p` has inconsistent runtime witnesses: 2 and 1"),
+        "chelis#1788 / PR #1938's M7e owns this rendering: {eval_stderr}"
+    );
+
+    let out_dir = dir.path().join("two-extents-out");
+    let build = build_c(&path, &out_dir);
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let compiled = compile_and_run_c(&out_dir, "two_extents_differ");
+    assert!(
+        !compiled.status.success(),
+        "C must refuse too: {}",
+        String::from_utf8_lossy(&compiled.stdout)
+    );
+    let compiled_output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&compiled.stdout),
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    assert!(
+        compiled_output.contains("extent `k`: claimed = 2, shrink axis 0 = 1"),
+        "C refuses at the guard instead, with its own context: {compiled_output}"
+    );
+    assert!(
+        compiled_output.contains("numeric trap: domain in shrink at int64"),
+        "and [04-NUM-9]'s trap line: {compiled_output}"
+    );
+}
