@@ -5987,6 +5987,60 @@ fn a_named_bystander_expand_with_no_consumer_agrees_across_lanes() {
     );
 }
 
+/// A reduction consumer and a declared FREE result dim on the expanded axis:
+/// the two further lane divergences round 1 measured.
+///
+/// They vary the two things the rows above hold fixed. One replaces the
+/// elementwise consumer with a `sum`, so the operand's wrong prepared extent
+/// reaches a reduction rather than a binary op; the other declares the result
+/// dim free instead of literal, so nothing downstream constrains the expanded
+/// axis at all. Both had a correct interpreter answer and a trapping binary on
+/// the base, which is the divergence the no-consumer row records for a third
+/// shape.
+///
+/// EVIDENTIARY STATUS: regression tests on the C lane, disposition locks on
+/// eval. Reverting `emit.rs` to `origin/main` and rerunning, both binaries
+/// abort with ``extent `1`: claimed = 1, features axis 1 = 4`` and
+/// `numeric trap: domain in load at int64` while eval prints these exact
+/// values.
+#[test]
+fn a_reduction_consumer_and_a_free_result_dim_also_agree_across_lanes() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cases = [
+        (
+            "bystander_reduction",
+            "sig f: tensor[batch, 4, f32] -> tensor[batch, 1, f32] -> tensor[batch, f32]\n",
+            "sum(expand(mask, 1i32, cast(shape(features, cast(1, int32)), int64)), 1)",
+            "out = tensor(shape=[2], data=[4.0, 8.0])",
+        ),
+        (
+            "bystander_free_result",
+            "sig f: tensor[batch, 4, f32] -> tensor[batch, 1, f32] -> tensor[batch, m, f32]\n",
+            "expand(mask, 1i32, cast(shape(features, cast(1, int32)), int64))",
+            "out = tensor(shape=[2, 4], data=[1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0])",
+        ),
+    ];
+    for (stem, signature, body, expected) in cases {
+        let source = format!(
+            "{signature}\
+             def f(features: tensor[batch, 4, f32], mask: tensor[batch, 1, f32]) = {body}\n\
+             out = f(to_tensor([[1.0f32, 2.0f32, 3.0f32, 4.0f32], \
+             [5.0f32, 6.0f32, 7.0f32, 8.0f32]]), to_tensor([[1.0f32], [2.0f32]]))\n"
+        );
+        let (ok, out) = c_run_result(&dir, stem, &source);
+        assert!(ok, "{stem} must not trap on its own broadcast: {out}");
+        assert!(out.contains(expected), "{stem} on C: {out}");
+        let (eval_ok, eval_out) = eval_result(&dir, &format!("{stem}.ch"), &source);
+        assert!(
+            eval_ok && eval_out.contains(expected),
+            "{stem} on eval: {eval_out}"
+        );
+    }
+}
+
 /// The two spellings that never reached the broken arm, so the narrowed guard
 /// must leave them exactly where they were.
 ///

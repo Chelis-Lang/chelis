@@ -372,6 +372,7 @@
         "a_record_projection_is_an_admissible_expand_size",
         "a_record_projection_nested_in_a_let_value_is_hoisted",
         "a_record_projection_with_an_out_of_range_axis_is_still_rejected",
+        "a_reduction_consumer_and_a_free_result_dim_also_agree_across_lanes",
         "a_repeated_free_result_name_declares_from_its_first_site",
         "a_result_name_no_parameter_declares_is_not_stamped_as_a_claim",
         "a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_eval",
