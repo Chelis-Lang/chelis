@@ -44,19 +44,27 @@ use std::fs;
 use std::process::Command as StdCommand;
 use tempfile::{TempDir, tempdir};
 
-/// Examples the C backend refuses at its early capability gate, with the
+/// Examples the C backend refuses at a capability gate, with the
 /// diagnostic that refusal must carry. The census asserts the refusal rather
 /// than skipping the file: a bare skip stops measuring quietly, and deleting
 /// the assertion would make the census's claim smaller than its name.
 ///
 /// The staged Dropout example still reaches chelis#1192 before any C exists.
 /// Fixed-control Dropout is compiled and joins the ordinary guard census.
-/// When the staged build succeeds, this row fails and that example must join
-/// the censused set too.
-const REFUSED_BY_A_CAPABILITY_GATE: &[(&str, &str)] = &[(
-    "dropout_staged_claim.ch",
-    "unimplemented chelis#1192: compiled `dropout` kernels are not implemented",
-)];
+/// Annotated concat/softmax executes on Eval, but C host emission refuses
+/// softmax; `parity_annotated_concat_softmax_eval_and_c_rejection` owns the
+/// full-value positive and exact C diagnostic. No C guard artifact exists.
+/// When either build succeeds, its row fails and must join the guard census.
+const REFUSED_BY_A_CAPABILITY_GATE: &[(&str, &str)] = &[
+    (
+        "dropout_staged_claim.ch",
+        "unimplemented chelis#1192: compiled `dropout` kernels are not implemented",
+    ),
+    (
+        "annotated_concat_softmax.ch",
+        "unsupported: builtin `softmax` on `chelis build` host emission (codegen:c); deliberate [04-TOT-2]: the checked builtin vocabulary and C expression vocabulary disagree; no fallback expression is permitted",
+    ),
+];
 
 /// A two-row operand: `min(2, 4) = 2`.
 const TWO_BY_FOUR: &str = "[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]]";
@@ -530,8 +538,9 @@ fn the_census_reader_finds_a_guard_that_is_there() {
     );
 }
 
-/// THE CENSUS. Every executable Phase 0 example is built to C and every
-/// return-boundary guard the emitter produced is collected. The guard fires
+/// THE CENSUS. Every executable Phase 0 example is offered to C. Recorded
+/// capability refusals are asserted; every successfully emitted
+/// return-boundary guard is collected. The guard fires
 /// only where a host-lane function's return expression is a direct builtin
 /// application AND its declared tensor result carries a literal extent, which
 /// no shipped example does today, so this change adds no guard to the corpus
@@ -592,7 +601,7 @@ fn no_shipped_example_gains_a_return_boundary_guard() {
             let build = build_c(path, &out);
             let stderr = String::from_utf8_lossy(&build.stderr).to_string();
             assert!(
-                !build.status.success() && stderr.contains(diagnostic),
+                build.status.code() == Some(1) && stderr.contains(diagnostic),
                 "{name} is recorded as refused by a capability gate, but the build \
                  succeeded or failed for another reason: {stderr}"
             );

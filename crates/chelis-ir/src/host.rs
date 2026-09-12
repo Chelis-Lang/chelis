@@ -4167,7 +4167,11 @@ pub(crate) fn body_form_the_dag_cannot_carry(
     let defs = cached_program_defs(program);
     let mut walk = UncarriableWalk {
         defs: &defs,
-        visited: UnordSet::new(),
+        active: UnordSet::new(),
+        completed: UnordMap::new(),
+        cycle_cutoff: false,
+        #[cfg(test)]
+        def_visits: 0,
         evaluation_dropout,
         scopes: vec![
             params
@@ -4191,12 +4195,21 @@ pub(crate) fn body_form_the_dag_cannot_carry(
 /// concat input facts. Neither class evaluates arbitrary tensor expressions.
 struct UncarriableWalk<'a> {
     defs: &'a BTreeMap<String, Expr>,
-    visited: UnordSet<String>,
+    active: UnordSet<String>,
+    completed: UnordMap<String, Vec<CompletedAdmission>>,
+    cycle_cutoff: bool,
+    #[cfg(test)]
+    def_visits: usize,
     evaluation_dropout: bool,
     scopes: Vec<UnordMap<String, AdmissionBinding>>,
 }
 
-#[derive(Clone, Default)]
+struct CompletedAdmission {
+    inputs: Vec<AdmissionBinding>,
+    reason: Option<String>,
+}
+
+#[derive(Clone, Default, PartialEq, Eq)]
 struct AdmissionBinding {
     constructor: bool,
     concat: ConcatInputFact,
@@ -4204,7 +4217,7 @@ struct AdmissionBinding {
 
 /// Only direct input forwarding, lexical aliases, and literal List spines.
 /// An unknown computed tensor is not evidence that its DAG cannot be built.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq, Eq)]
 enum ConcatInputFact {
     #[default]
     Unknown,
@@ -4503,10 +4516,11 @@ impl UncarriableWalk<'_> {
         let Some((DeepTag::Fn, _, fn_kids)) = stamped_parts(body) else {
             return None;
         };
-        if !self.visited.insert(name.to_string()) {
+        if self.active.contains(name) {
+            self.cycle_cutoff = true;
             return None;
         }
-        let params = fn_kids
+        let params: Vec<_> = fn_kids
             .first()
             .map_or_else(Vec::new, fn_param_names)
             .into_iter()
@@ -4534,10 +4548,41 @@ impl UncarriableWalk<'_> {
                 )
             })
             .collect();
-        let saved = std::mem::replace(&mut self.scopes, vec![params]);
+        // A callee runs under only these resolved bindings. The definition
+        // table and evaluation mode are invariant for this walk; free names
+        // resolve there, never in the caller's discarded lexical scopes.
+        // Compare exact facts (including constructor status), not a wildcard
+        // join or a name-only visited bit that conflates distinct actuals.
+        let inputs: Vec<_> = params.iter().map(|(_, binding)| binding.clone()).collect();
+        if let Some(completed) = self
+            .completed
+            .get(name)
+            .and_then(|contexts| contexts.iter().find(|context| context.inputs == inputs))
+        {
+            return completed.reason.clone();
+        }
+        self.active.insert(name.to_string());
+        let enclosing_cutoff = std::mem::replace(&mut self.cycle_cutoff, false);
+        #[cfg(test)]
+        {
+            self.def_visits += 1;
+        }
+        let saved = std::mem::replace(&mut self.scopes, vec![params.into_iter().collect()]);
         let found = fn_kids.get(1).and_then(|fn_body| self.expr(fn_body));
         self.scopes = saved;
-        self.visited.remove(name);
+        self.active.remove(name);
+        // A cycle-truncated traversal depends on the active stack and is not
+        // a completed context. Propagate that fact through its ancestors.
+        if !self.cycle_cutoff {
+            self.completed
+                .entry(name.to_string())
+                .or_default()
+                .push(CompletedAdmission {
+                    inputs,
+                    reason: found.clone(),
+                });
+        }
+        self.cycle_cutoff |= enclosing_cutoff;
         found
     }
 }
@@ -17490,7 +17535,10 @@ mod tests {
             };
             let mut walk = UncarriableWalk {
                 defs: &defs,
-                visited: UnordSet::new(),
+                active: UnordSet::new(),
+                completed: UnordMap::new(),
+                cycle_cutoff: false,
+                def_visits: 0,
                 evaluation_dropout: false,
                 scopes: vec![UnordMap::from([(
                     "x".to_string(),
@@ -17523,7 +17571,10 @@ mod tests {
         let defs = BTreeMap::new();
         let mut walk = UncarriableWalk {
             defs: &defs,
-            visited: UnordSet::new(),
+            active: UnordSet::new(),
+            completed: UnordMap::new(),
+            cycle_cutoff: false,
+            def_visits: 0,
             evaluation_dropout: false,
             scopes: vec![UnordMap::from([(
                 "xs".to_string(),
@@ -17564,6 +17615,132 @@ mod tests {
                 host,
                 "{source}"
             );
+        }
+    }
+
+    fn admission_test_walk(defs: &BTreeMap<String, Expr>) -> UncarriableWalk<'_> {
+        UncarriableWalk {
+            defs,
+            active: UnordSet::new(),
+            completed: UnordMap::new(),
+            cycle_cutoff: false,
+            def_visits: 0,
+            evaluation_dropout: false,
+            scopes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn concat_admission_shared_context_visits_each_helper_once() {
+        // Sharing must not expand into every call path. Count body visits,
+        // not wall time; the trailing rank must still choose Host.
+        let depth = 12;
+        let mut source = "def level_0(x: tensor[2, f32]) -> tensor[2, f32] = x\n".to_string();
+        for level in 1..=depth {
+            source.push_str(&format!(
+                "def level_{level}(x: tensor[2, f32]) -> tensor[2, f32] = add(level_{}(copy(x)), level_{}(copy(x)))\n",
+                level - 1, level - 1
+            ));
+        }
+        source.push_str(&format!(
+            "def run(x: tensor[2, f32]) -> tensor[2, f32] = {{\n z = level_{depth}(copy(x))\n _ = rank(x)\n z\n}}\n"
+        ));
+        let program = surf_check(&source);
+        let defs = cached_program_defs(&program);
+        let mut walk = admission_test_walk(&defs);
+        assert!(
+            walk.def("run", &defs["run"], None)
+                .unwrap()
+                .contains("rank")
+        );
+        assert_eq!(walk.def_visits, depth + 2);
+    }
+
+    #[test]
+    fn concat_admission_completed_context_retains_order_and_exact_facts() {
+        let program = surf_check(
+            "def second[s](x: tensor[s, *, f32], y: tensor[s, *, f32]) = concat([y, y], 1i32)\n",
+        );
+        let defs = cached_program_defs(&program);
+        let fixed = ConcatInputFact::Tensor(TensorType {
+            dims: vec![DimInfo::Lit(2), DimInfo::Lit(2)],
+            precision: Prim::F32,
+        });
+        let dynamic = ConcatInputFact::Tensor(TensorType {
+            dims: vec![DimInfo::Lit(2), DimInfo::Named("width".to_string(), None)],
+            precision: Prim::F32,
+        });
+        for order in [[false, true, false, true], [true, false, true, false]] {
+            let mut walk = admission_test_walk(&defs);
+            for host in order {
+                let actuals = if host {
+                    vec![fixed.clone(), dynamic.clone()]
+                } else {
+                    vec![dynamic.clone(), fixed.clone()]
+                };
+                assert_eq!(
+                    walk.def("second", &defs["second"], Some(actuals)).is_some(),
+                    host
+                );
+            }
+            assert_eq!(
+                walk.def_visits, 2,
+                "two distinct ordered contexts, not four calls"
+            );
+        }
+    }
+
+    #[test]
+    fn concat_admission_completed_callee_does_not_capture_caller_bindings() {
+        let program = surf_check(
+            "def global(x: tensor[2, f32]) -> int32 = rank(x)\ndef call(x: tensor[2, f32]) -> int32 = global(x)\n",
+        );
+        let defs = cached_program_defs(&program);
+        let mut walk = admission_test_walk(&defs);
+        // A free callee name resolves against program definitions, not a
+        // same-spelled caller alias, including its constructor classification.
+        for constructor in [false, true] {
+            walk.scopes = vec![UnordMap::from([(
+                "global".to_string(),
+                AdmissionBinding {
+                    constructor,
+                    concat: ConcatInputFact::Unknown,
+                },
+            )])];
+            assert!(
+                walk.def("call", &defs["call"], None)
+                    .unwrap()
+                    .contains("rank")
+            );
+            assert_eq!(walk.bound("global"), Some(constructor));
+        }
+        assert_eq!(walk.def_visits, 2, "call and global each visited once");
+    }
+
+    #[test]
+    fn concat_admission_cycle_cutoff_is_not_a_completed_negative() {
+        // Private walk control: b reached under active a cannot conclude that
+        // a lacks Host forms. A later fresh b must still see a's trailing rank.
+        let defs = BTreeMap::from([
+            (
+                "a".to_string(),
+                parse_one_expr(
+                    "(fn {} (params {}) (tuple {} (app {} (var {} b)) (app {} (var {} rank) (lit {} 1))))",
+                ),
+            ),
+            (
+                "b".to_string(),
+                parse_one_expr("(fn {} (params {}) (app {} (var {} a)))"),
+            ),
+        ]);
+        let mut walk = admission_test_walk(&defs);
+        for name in ["a", "b", "a", "b"] {
+            assert!(
+                walk.def(name, &defs[name], Some(Vec::new()))
+                    .unwrap()
+                    .contains("rank")
+            );
+            assert!(walk.active.is_empty(), "active guard must unwind");
         }
     }
 
