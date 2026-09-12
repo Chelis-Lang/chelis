@@ -235,6 +235,76 @@ fn eval_in_context_uses_context_lowering_map_for_host_library_calls() {
     );
 }
 
+/// chelis#1889: a checked call result may carry a caller-established named
+/// axis that differs from the generic helper's raw return binder. Lowering
+/// must retain that checked result annotation through direct calls, aliases,
+/// and either elementwise operand order; otherwise the following named
+/// reduction reaches `resolve_reduce_axis` after monomorphization with no
+/// `fixed` anchor.
+#[test]
+fn helper_result_checked_named_axis_survives_decoded_context_paths() {
+    // `format_library_plus_snippet` intentionally contains linker-emitted
+    // names, just like the production monolithic baseline.
+    let _linked = chelis_compiler_api::install_linked_program_guard();
+    let dir = TempDir::new().expect("tempdir");
+    let root = dir.path().join("myapp");
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::create_dir_all(root.join("mylib/src")).expect("mkdir mylib/src");
+    fs::write(root.join("reef.toml"), app_reef_toml()).expect("write app reef.toml");
+    fs::write(
+        root.join("src/main.ch"),
+        "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n",
+    )
+    .expect("write main.ch");
+    fs::write(root.join("mylib/reef.toml"), mylib_reef_toml()).expect("write mylib reef.toml");
+    fs::write(
+        root.join("mylib/src/axes.ch"),
+        "module Mylib.Axes\nexport (aligned_left, aligned_right)\n\n\
+         def aligned_left[d](x: tensor[d, f32], gain: tensor[fixed, f32]) -> tensor[d, f32] = mul(x, gain)\n\
+         def aligned_right[d](x: tensor[d, f32], gain: tensor[fixed, f32]) -> tensor[d, f32] = mul(gain, x)\n",
+    )
+    .expect("write axes.ch");
+    fs::write(root.join("reef.lock"), app_reef_lock()).expect("write reef.lock");
+
+    let snippet = "module App.Eval\nimport Mylib.Axes (aligned_left, aligned_right)\n\n\
+                   def direct() = sum(aligned_left(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32])), fixed)\n\
+                   def alias() = {\n  f = aligned_left\n  sum(f(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32])), fixed)\n}\n\
+                   def reversed() = sum(aligned_right(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32])), fixed)\n";
+    let names = ["direct", "alias", "reversed"];
+
+    let formatted = format_library_plus_snippet(&root, snippet);
+    let raw = eval(EvalRequest {
+        source_kind: SourceKind::Surf,
+        source: formatted,
+        bindings: BTreeMap::new(),
+    })
+    .expect("raw monolithic helper-result query");
+    let raw_results = collect_named_roots_json(&raw.roots, &names);
+    assert_eq!(raw_results.len(), names.len(), "raw roots: {raw_results:?}");
+    let expected =
+        r#"{"type":"tensor","value":{"shape":[],"data":{"dtype":"f32","bits":["40a00000"]}}}"#;
+    for name in names {
+        assert_eq!(raw_results[name], expected, "{name}");
+    }
+
+    let context = compile_reef_context(Path::new("/tmp/x"), &root).expect("context");
+    check_in_context(&context, snippet).expect("live checked/lowered context query");
+    let live = eval_in_context(&context, snippet).expect("live context eval");
+    assert_eq!(collect_named_roots_json(&live.roots, &names), raw_results);
+
+    // This is an in-process codec round-trip. It verifies that the serialized
+    // context retains the same checked result annotation after decode; it does
+    // not claim a separate worker or disk-cache execution.
+    let restored = CompiledContext::decode(&context.encode().expect("encode context"))
+        .expect("decode context");
+    check_in_context(&restored, snippet).expect("decoded checked/lowered context query");
+    let decoded = eval_in_context(&restored, snippet).expect("decoded context eval");
+    assert_eq!(
+        collect_named_roots_json(&decoded.roots, &names),
+        raw_results
+    );
+}
+
 #[test]
 fn compile_context_accepts_symbolic_matmul_aliases_from_library_helpers() {
     let dir = TempDir::new().expect("tempdir");

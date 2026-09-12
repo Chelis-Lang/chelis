@@ -20,6 +20,25 @@ No tensor layout, runtime ABI, RNG, effect, AD, or public shell signature change
 is part of this design. Runtime preservation of a named extent claim is a
 separate obligation; a checker test cannot establish it.
 
+## #1889 bounded lowering progress
+
+The #1889 helper-result repair is deliberately below this proposed checker
+carrier. For an inline plain callable, lowering now prefers the non-default,
+checker-annotated application result claim over the helper's raw generic return
+binder. It may connect that claim only to the exact current-activation Caller
+extent witness already created for the bound actual tensor axis. This preserves
+the existing declared-result validation and permits a literal actual through a
+shape-preserving body operation without treating equal extents as identity.
+
+It adds no checker value-root/provenance carrier, global name equivalence,
+extent-based anchor recovery, wire field, cache version, worker protocol, or
+semantic/normative rule. Earlier activation witnesses are excluded even when a
+later call reuses the same tensor node; unrelated copies remain excluded. The
+evaluator/context regression covers direct, alias, and both elementwise operand
+orders. A native-C attempt stopped before emission at generic [05-UNS-1]
+(chelis#730); its cause is unclassified and outside this repair. This is a
+lowering-only repair, not approval of the broader origin/template design below.
+
 ## The information-loss witness
 
 These are diagnostic source sketches, not new normative examples:
