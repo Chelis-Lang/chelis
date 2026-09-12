@@ -1031,6 +1031,43 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             TERMINAL_CONTROL,
             "types_unresolved_operand.a_scatter_replace_gate_result_ties_its_sum_consumer_to_the_bound_operand",
         ),
+        # chelis#1805: a tensor operand whose PRECISION is a type variable. The
+        # dtype validators reject only a concrete inadmissible dtype and the
+        # readiness predicate answers ready for a tensor whatever its precision
+        # holds, so a float-only route reached through an unbounded `[p]` binder
+        # checked clean and the compiled C lane printed `f = 2` for a true
+        # 2.3333333. All four rows were measured accepted at score 1 on
+        # `0820ee28e`. Each is a CHECKER verdict that no lane varies, so each is
+        # one row rather than a pair.
+        #
+        # Two further instantiation spellings are NOT closed and have no row
+        # here: a helper reached as a function value (chelis#1940) and a
+        # two-def polymorphic chain (chelis#1941).
+        # `two_instantiation_spellings_remain_unreached` locks both.
+        _row(
+            "dtype.late_precision.instantiation",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "types_unresolved_operand.a_late_bound_tensor_precision_is_rejected_at_the_instantiation",
+        ),
+        _row(
+            "dtype.late_precision.binds_one_application_later",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "types_unresolved_operand.a_precision_that_binds_one_application_later_is_decided_on_binding",
+        ),
+        _row(
+            "dtype.late_precision.declared_bound",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "types_unresolved_operand.a_bounded_precision_binder_is_decided_by_its_family_at_once",
+        ),
+        _row(
+            "dtype.late_precision.family_routes",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "types_unresolved_operand.every_family_policy_route_rejects_an_inadmissible_instantiation",
+        ),
         # chelis#1822: the C preparation's `Expand` arm was gated on NO axis
         # carrying a real name, so a signature binder on a kept axis sent the
         # node to the pass-through arm and the operand's pre-expand extent was

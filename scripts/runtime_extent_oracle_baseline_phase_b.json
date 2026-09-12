@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "dd31a50181c95454e34396e4a12aa85217cbfb32808dd5d20f11b37bbb5eeb95",
+  "corpus_sha256": "7548b5e3bccb7d9ac38c02999d1770e699a5314341ca21fdd01af9c52c940df4",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -187,6 +187,30 @@
       "baseline": "silent_unguarded",
       "phase_b": "rejects_exactly",
       "receipt": "cli_slice_b.a_declared_concat_axis_extent_an_inlined_root_refutes_is_rejected_on_both_lanes"
+    },
+    {
+      "id": "dtype.late_precision.binds_one_application_later",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "types_unresolved_operand.a_precision_that_binds_one_application_later_is_decided_on_binding"
+    },
+    {
+      "id": "dtype.late_precision.declared_bound",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "types_unresolved_operand.a_bounded_precision_binder_is_decided_by_its_family_at_once"
+    },
+    {
+      "id": "dtype.late_precision.family_routes",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "types_unresolved_operand.every_family_policy_route_rejects_an_inadmissible_instantiation"
+    },
+    {
+      "id": "dtype.late_precision.instantiation",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "types_unresolved_operand.a_late_bound_tensor_precision_is_rejected_at_the_instantiation"
     },
     {
       "id": "expand.arith_size.named_claim.c",
