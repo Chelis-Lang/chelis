@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "8b9b7fa8b82b7594fa375bc61c849745d91410dff7319556255415c738b5d71d",
+  "corpus_sha256": "010e8e092a856cf64c477ec34398b0b87b14565e39b81a2ed4a325d71cdf1be1",
   "rows": [
     {
       "id": "claim.literal.nested_and_unused.eval_c",
@@ -331,6 +331,30 @@
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_eval"
+    },
+    {
+      "id": "route.untied.matmul.match",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "types_unresolved_operand.a_match_destructured_matmul_operand_is_tied_to_the_bound_scrutinee"
+    },
+    {
+      "id": "route.untied.sum.copy",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "types_unresolved_operand.a_gated_copy_result_ties_its_sum_consumer_to_the_bound_operand"
+    },
+    {
+      "id": "route.untied.sum.match",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "types_unresolved_operand.a_match_destructured_sum_operand_is_tied_to_the_bound_scrutinee"
+    },
+    {
+      "id": "route.untied.sum.record",
+      "baseline": "silent_unguarded",
+      "phase_b": "rejects_exactly",
+      "receipt": "types_unresolved_operand.a_record_field_sum_operand_is_tied_to_the_bound_target"
     },
     {
       "id": "shrink.elementwise_const.build",

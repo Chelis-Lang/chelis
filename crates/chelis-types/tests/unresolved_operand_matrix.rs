@@ -1250,21 +1250,32 @@ fn dtype_routes_caught_before_the_validator_keep_their_verdict() {
 /// entry replays, or a second ledger: a design decision rather than an
 /// extension of the arm split, which is why chelis#1805 owns it.
 ///
-/// The first assertion is NOT a lock on desired behaviour. It pins a KNOWN HOLE
-/// so the suite says out loud what this pull request does not close, and it is
-/// the assertion chelis#1805 turns red. Read a failure there as that repair
-/// landing, and move it to the rejecting side. The second is an ordinary
-/// DISPOSITION LOCK: both were measured accepting and rejecting respectively on
-/// `6dbbbf2bc`.
+/// chelis#1836 changed WHICH rule rejects the first program, and did not close
+/// chelis#1805. The widened readiness predicate suspends a reduction on every
+/// unresolved outer constructor, and `to_tensor([])` has one: a reduction's
+/// result cannot determine its operand's rank, so nothing binds the literal and
+/// the obligation reaches the declaration boundary. The verdict is therefore a
+/// SHAPE verdict; the dtype policy is still never consulted, so chelis#1805's
+/// hole is untouched and its own receipt needs a fixture whose operand
+/// constructor IS determined.
+///
+/// Evidentiary status, per assertion. The first is a REGRESSION TEST for
+/// chelis#1836's narrowing: measured on `6abca2406` as score 1 with
+/// `errors []` at check and `error: to_tensor requires a resolved checked
+/// element dtype [05-OP-57]` at eval, a check-clean program that does not run.
+/// The second is an ordinary DISPOSITION LOCK, measured rejecting on
+/// `6dbbbf2bc` and here.
 #[test]
 fn a_late_bound_tensor_precision_is_not_validated_yet() {
-    // chelis#1805. A reduction's result does not determine its operand, so
-    // nothing here ever binds the empty literal's precision to the `int32` the
-    // declaration names, and the dtype policy is never consulted against it.
-    // Measured ACCEPTED on `6dbbbf2bc` and still accepted here.
-    check("def f() -> tensor[int32] = mean(to_tensor([]), 0i32)\n").expect(
-        "chelis#1805: an integer `mean` over a late-bound precision is still accepted; if this \
-         now rejects, that issue is fixed and this assertion moves",
+    let errors = check("def f() -> tensor[int32] = mean(to_tensor([]), 0i32)\n")
+        .expect_err("an unresolved reduction operand must be rejected");
+    assert!(
+        errors.iter().any(|e| e
+            .message
+            .starts_with("unresolved `mean` shape obligation at declaration boundary")),
+        "the rejection must be the boundary obligation, not the dtype policy \
+         (chelis#1805 is still open):\n{}",
+        summary(&errors)
     );
 
     // DISPOSITION LOCK, and the reason the assertion above is a hole rather
@@ -1338,10 +1349,6 @@ fn an_empty_literal_the_declared_result_determines_is_now_validated() {
             "def f() -> tensor[3, f32] = softmax(to_tensor([]), 0i32)\n",
         ),
         ("sqrt", "def f() -> tensor[3, f32] = sqrt(to_tensor([]))\n"),
-        (
-            "mean",
-            "def f() -> tensor[f32] = mean(to_tensor([]), 0i32)\n",
-        ),
     ] {
         check(program).unwrap_or_else(|e| {
             panic!(
@@ -1350,4 +1357,242 @@ fn an_empty_literal_the_declared_result_determines_is_now_validated() {
             )
         });
     }
+
+    // chelis#1836 NARROWS this twin further, and only for a REDUCING route.
+    // `softmax` and `sqrt` preserve their operand's shape, so the declared
+    // result determines the operand and the empty literal binds. `mean` does
+    // not: its result has one fewer axis, so no declaration can supply the
+    // operand's rank, the suspension is never discharged, and the obligation
+    // reaches the declaration boundary.
+    //
+    // REGRESSION TEST. Measured on `6abca2406` as score 1 with `errors []` at
+    // check and `error: to_tensor requires a resolved checked element dtype
+    // [05-OP-57]` at eval: the acceptance this replaces was a check-clean
+    // program that does not run, which is the defect class this ledger exists
+    // to close rather than a capability being removed.
+    let errors = check("def f() -> tensor[f32] = mean(to_tensor([]), 0i32)\n")
+        .expect_err("a reducing route over an unresolved literal must be rejected");
+    assert!(
+        errors.iter().any(|e| e
+            .message
+            .starts_with("unresolved `mean` shape obligation at declaration boundary")),
+        "the narrowing must be the boundary obligation:\n{}",
+        summary(&errors)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// chelis#1836: a shape-computed route whose operand resolves AFTER the route
+// runs, reached through a provenance the lambda-ownership predicate did not
+// recognize.
+//
+// The suspension chelis#1512 installed waited on
+// `shape_operand_awaits_lambda_binding`: true only for a variable in
+// `shape_lambda_tvars` or free in one of their substitutions. Three
+// provenances are not owned that way -- a `pat-tuple` element on an
+// unresolved scrutinee, a field access on an unresolved target, and a
+// chelis#1577 gate's result -- so for them the route took its eager
+// `Type::Var` arm, published the call's own result variable, and the
+// declaration was free to bind that variable to any shape at all.
+//
+// Each cell below is the pair the issue names: the FALSE declared shape must
+// be rejected with the direct spelling's own `DimensionMismatch` text, and
+// the TRUE declared shape must still check. Asserting the text rather than
+// mere rejection is the same discipline the rest of this file follows: a
+// relocated decision can be reported by an unrelated rule.
+// ---------------------------------------------------------------------------
+
+/// The direct spelling's rejection, which every untied form must reproduce.
+fn signature_mismatch(params: &str, body_result: &str, declared_result: &str) -> String {
+    format!(
+        "def 'probe' body doesn't match declared signature: body has type \
+         `({params}) -> {body_result}`, declared type is `({params}) -> {declared_result}`"
+    )
+}
+
+fn expect_exact_error(program: &str, expected: &str) {
+    let errors = check(program)
+        .expect_err(&format!("this program must be rejected:\n{program}"));
+    assert!(
+        errors.iter().any(|e| e.message == expected),
+        "the rejection must be the direct spelling's own text.\nexpected: {expected}\ngot:\n{}",
+        summary(&errors)
+    );
+}
+
+/// chelis#1836 cell 1: `sum` over a `match`-destructured operand.
+///
+/// `pattern_bindings`'s `pat-tuple` arm handed every sub-pattern
+/// `vg.fresh_type()` and unified nothing, so `a` in `| (a, k) =>` descended
+/// from `q` by name alone and never bound when `q` did. The repair unifies the
+/// unresolved scrutinee with a tuple of one fresh element per sub-pattern --
+/// the pattern fixes the arity -- so `a` IS `q`'s first element.
+///
+/// REGRESSION TEST for the first assertion: measured on `6abca2406` as score
+/// 1 with `errors []`. DISPOSITION LOCK for the second and third: the true
+/// declaration and the never-applied lambda were measured accepting there too,
+/// and only the never-applied one moves (it is now an unresolved obligation,
+/// which is the acceptance boundary chelis#1489 set for a shape-computed
+/// route whose operand no application ever supplies).
+#[test]
+fn a_match_destructured_sum_operand_is_tied_to_the_bound_scrutinee() {
+    let program = |declared: &str| {
+        format!(
+            "def apply_p[b](f: ((tensor[4, 3, f32], int32)) -> b, r: (tensor[4, 3, f32], int32)) -> b = f(r)\n\
+             def probe(t: tensor[4, 3, f32]) -> {declared} = apply_p(fn (q) -> match q with {{ | (a, k) => sum(a, 0) }}, (t, 1i32))\n"
+        )
+    };
+
+    expect_exact_error(
+        &program("tensor[100, f32]"),
+        &signature_mismatch("tensor[4, 3, f32]", "tensor[3, f32]", "tensor[100, f32]"),
+    );
+
+    // NEGATIVE TWIN: the shape the route actually produces still checks, so
+    // the repair rejects a wrong claim rather than the destructuring form.
+    check(&program("tensor[3, f32]")).unwrap_or_else(|e| {
+        panic!(
+            "the true result shape must still check:\n{}",
+            summary(&e)
+        )
+    });
+
+    // The operand that NEVER binds is the acceptance boundary, not a pass:
+    // the lambda is never applied, so no application supplies `q`'s
+    // constructor. Measured accepting at score 1 on `6abca2406`.
+    let errors = check("def lam() = fn (q) -> match q with { | (a, k) => sum(a, 0) }\n")
+        .expect_err("a never-applied shape-computed route must be rejected");
+    assert!(
+        errors.iter().any(|e| e
+            .message
+            .starts_with("unresolved `sum` shape obligation at declaration boundary")),
+        "the boundary rejection must name the route:\n{}",
+        summary(&errors)
+    );
+}
+
+/// chelis#1836 cell 2: `matmul` over the same `match`-destructured operand.
+///
+/// The rule is a different one (`check_matmul_signature`, whose own eager
+/// `Type::Var` arm is at the head of both operand reads), so it is a separate
+/// cell rather than a spelling of cell 1.
+///
+/// REGRESSION TEST for the first assertion, measured score 1 `errors []` on
+/// `6abca2406`; DISPOSITION LOCK for the second, accepted there and here.
+#[test]
+fn a_match_destructured_matmul_operand_is_tied_to_the_bound_scrutinee() {
+    let program = |declared: &str| {
+        format!(
+            "def apply_p[b](f: ((tensor[4, 3, f32], int32)) -> b, r: (tensor[4, 3, f32], int32)) -> b = f(r)\n\
+             def probe(t: tensor[4, 3, f32], w: tensor[3, 5, f32]) -> {declared} = apply_p(fn (q) -> match q with {{ | (a, k) => matmul(a, w) }}, (t, 1i32))\n"
+        )
+    };
+
+    expect_exact_error(
+        &program("tensor[100, 5, f32]"),
+        &signature_mismatch(
+            "tensor[4, 3, f32], tensor[3, 5, f32]",
+            "tensor[4, 5, f32]",
+            "tensor[100, 5, f32]",
+        ),
+    );
+
+    // NEGATIVE TWIN.
+    check(&program("tensor[4, 5, f32]")).unwrap_or_else(|e| {
+        panic!("matmul's true result shape must still check:\n{}", summary(&e))
+    });
+}
+
+/// chelis#1836 cell 3: `sum` over a field of an unresolved record target.
+///
+/// `infer_access`'s `Type::Var` arm publishes a fresh variable and records the
+/// target on the deferred OPACITY ledger, which revisits the target but never
+/// ties the projected field type to the field the target turns out to have.
+/// The repair registers a `DeferredTypeDerivation::RecordField` beside the
+/// existing tuple-projection entry, resolved by ADT field lookup when the
+/// target binds.
+///
+/// This cell is why the widened readiness predicate is not the whole repair:
+/// with the predicate alone the projected variable never binds and this
+/// program is rejected as an unresolved obligation, which is false -- the
+/// application does supply the target.
+///
+/// REGRESSION TEST for the first assertion, measured score 1 `errors []` on
+/// `6abca2406`; DISPOSITION LOCK for the second.
+#[test]
+fn a_record_field_sum_operand_is_tied_to_the_bound_target() {
+    let program = |declared: &str| {
+        format!(
+            "type Box =\n  | Box {{ x: tensor[4, 3, f32] }}\n\
+             def apply_b[b](f: (Box) -> b, r: Box) -> b = f(r)\n\
+             def probe(t: tensor[4, 3, f32]) -> {declared} = apply_b(fn (q) -> sum(q.x, 0), Box {{ x: t }})\n"
+        )
+    };
+
+    expect_exact_error(
+        &program("tensor[100, f32]"),
+        &signature_mismatch("tensor[4, 3, f32]", "tensor[3, f32]", "tensor[100, f32]"),
+    );
+
+    // NEGATIVE TWIN.
+    check(&program("tensor[3, f32]")).unwrap_or_else(|e| {
+        panic!(
+            "the true result shape over a record field must still check:\n{}",
+            summary(&e)
+        )
+    });
+}
+
+/// chelis#1836 cell 4: `sum` over a chelis#1577 `copy` gate's result.
+///
+/// `copy` used to reject an unresolved operand eagerly, so no route downstream
+/// of it ever saw a variable. chelis#1577 made it defer, and its result is a
+/// fresh variable tied to the operand only through the gate ledger -- which
+/// the ownership predicate did not follow. This is the cell that makes the
+/// class newly reachable, and the one the issue asks to be closed before
+/// chelis#1577 ships.
+///
+/// REGRESSION TEST for the first assertion, measured score 1 `errors []` on
+/// `6abca2406`; DISPOSITION LOCK for the second and third.
+#[test]
+fn a_gated_copy_result_ties_its_sum_consumer_to_the_bound_operand() {
+    let program = |declared: &str| {
+        format!(
+            "def apply_n[b](f: tensor[n, 3, f32] -> b, x: tensor[n, 3, f32]) -> b = f(x)\n\
+             def probe(t: tensor[4, 3, f32]) -> {declared} = apply_n(fn (v) -> sum(copy(v), 0), t)\n"
+        )
+    };
+
+    expect_exact_error(
+        &program("tensor[100, f32]"),
+        &signature_mismatch("tensor[4, 3, f32]", "tensor[3, f32]", "tensor[100, f32]"),
+    );
+
+    // NEGATIVE TWIN.
+    check(&program("tensor[3, f32]")).unwrap_or_else(|e| {
+        panic!(
+            "the true result shape behind a copy gate must still check:\n{}",
+            summary(&e)
+        )
+    });
+
+    // The unapplied form keeps `copy`'s own rejection AND gains the boundary
+    // obligation: the gate never discharges, so its consumer never settles.
+    // Measured on `6abca2406` reporting only the `copy` diagnostic.
+    let errors = check("def lam() = fn (v) -> sum(copy(v), 0)\n")
+        .expect_err("a never-applied gated route must be rejected");
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.starts_with("copy requires tensor input, got ?")),
+        "the existing copy rejection must not be lost:\n{}",
+        summary(&errors)
+    );
+    assert!(
+        errors.iter().any(|e| e
+            .message
+            .starts_with("unresolved `sum` shape obligation at declaration boundary")),
+        "the consumer's own obligation must also be reported:\n{}",
+        summary(&errors)
+    );
 }

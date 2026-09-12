@@ -166,7 +166,6 @@ pub(super) fn infer_tuple_get(
         // type for concrete tuples.
         Type::Var(_) => {
             let projected = vg.fresh_type();
-            product.derive_shape_lambda_type(&tuple_ty, &projected, subst);
             product.defer_tuple_projection(tuple_ty, index, projected.clone());
             projected
         }
@@ -656,7 +655,22 @@ pub(super) fn infer_access(
             // sanctions) rather than an exemption. Unification narrows it, and
             // the deferred ledger still catches an out-of-module opaque pin.
             subst.record_deferred_opaque_use(tv, crate::unify::DeferredOpaqueUse::Access);
-            vg.fresh_type()
+            // chelis#1836: the fresh variable is also TIED to the field the
+            // target turns out to carry. The opacity ledger above revisits the
+            // TARGET when it binds; it says nothing about the projected field
+            // type, so a shape-computed route over `q.x` used to publish a
+            // result the declaration could bind to any shape, and under the
+            // widened readiness predicate it would instead suspend on an
+            // operand nothing ever binds. The derivation ledger resolves the
+            // projection by ADT field lookup at the same point tuple
+            // projection is resolved.
+            let projected = vg.fresh_type();
+            product.defer_record_field(
+                resolved.clone(),
+                field_name.to_string(),
+                projected.clone(),
+            );
+            projected
         }
         // chelis#755 (discovered-hole conversion, chelis#731 Phase 2): field
         // access on a non-record value (a tensor, prim, tuple, function, ...)

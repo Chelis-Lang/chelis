@@ -292,7 +292,6 @@ pub(super) struct InferenceProduct {
     /// run. Scheduling and initialization-cycle diagnostics consume this same
     /// instance so the two policies cannot drift or repeat the lexical walk.
     pub(super) top_level_references: TopLevelReferenceGraph,
-    shape_lambda_tvars: UnordSet<TypeVar>,
     /// chelis#1512: true while `replay_ready_shape_checks` is running. The
     /// `PostApp` replay re-enters `finish_unified_app`, whose own tail calls
     /// this function again; without the flag that recursion is unbounded.
@@ -399,6 +398,20 @@ enum DeferredTypeDerivation {
         index: usize,
         projected: Type,
     },
+    /// chelis#1836: a field read whose target was still a type variable.
+    ///
+    /// `infer_access` cannot name the field's type before the target's ADT is
+    /// known, and this type system has no row-polymorphic record to bind the
+    /// target to, so the access publishes a fresh variable. Recording the
+    /// derivation here is what ties that variable to the field the target
+    /// turns out to carry; without it a shape-computed route over `q.x`
+    /// suspends on an operand nothing ever binds and is rejected at the
+    /// declaration boundary even though the application supplies `q`.
+    RecordField {
+        source: Type,
+        field: String,
+        projected: Type,
+    },
 }
 
 pub(super) struct TypeStampEpoch {
@@ -459,53 +472,6 @@ impl InferenceProduct {
         self.next_deferred_shape_id
     }
 
-    pub(super) fn note_shape_lambda_param(&mut self, ty: &Type) {
-        // Record semantic unknown-constructor ownership, not the surface fact
-        // that an annotation node was absent. A synthesized `(t-var _ )`, an
-        // authored bare type variable, and a variable later exposed by tuple/
-        // record projection all remain owned by this lambda parameter. A
-        // declared tensor with only symbolic dims/precision has a known outer
-        // constructor and therefore never reaches the Type::Var readiness arm.
-        self.shape_lambda_tvars.extend(crate::env::free_tvars(ty));
-    }
-
-    /// True only when the unresolved outer constructor descends from a lambda
-    /// parameter whose constructor was not fixed by its annotation. Ownership
-    /// is transitive through unification: if an origin variable has become a
-    /// tuple/record/function shape containing `current`, a projection-derived
-    /// `current` still belongs to the same parameter. Other unresolved values
-    /// retain their existing wildcard/contextual-inference contract.
-    pub(super) fn shape_operand_awaits_lambda_binding(&self, ty: &Type, subst: &Subst) -> bool {
-        let applied = subst.apply(ty);
-        match applied {
-            Type::Var(current) => self
-                .shape_lambda_tvars
-                .to_sorted()
-                .into_iter()
-                .any(|origin| {
-                    crate::env::free_tvars(&subst.apply(&Type::Var(*origin))).contains(&current)
-                }),
-            Type::Ref(inner) => self.shape_operand_awaits_lambda_binding(&inner, subst),
-            _ => false,
-        }
-    }
-
-    /// Preserve parameter ownership across an inference operation that
-    /// deliberately produces a fresh type without unifying it back into the
-    /// source type. Tuple projection is the current such operation: an open
-    /// tuple has no row/arity type to bind, but its projected element still
-    /// semantically descends from the parameter.
-    pub(super) fn derive_shape_lambda_type(
-        &mut self,
-        source: &Type,
-        derived: &Type,
-        subst: &Subst,
-    ) {
-        if self.shape_operand_awaits_lambda_binding(source, subst) {
-            self.note_shape_lambda_param(derived);
-        }
-    }
-
     pub(super) fn defer_tuple_projection(&mut self, source: Type, index: usize, projected: Type) {
         self.deferred_type_derivations
             .push(DeferredTypeDerivation::TupleProjection {
@@ -515,9 +481,20 @@ impl InferenceProduct {
             });
     }
 
+    pub(super) fn defer_record_field(&mut self, source: Type, field: String, projected: Type) {
+        self.deferred_type_derivations
+            .push(DeferredTypeDerivation::RecordField {
+                source,
+                field,
+                projected,
+            });
+    }
+
     fn resolve_deferred_type_derivations(
         &mut self,
+        vg: &mut VarGen,
         subst: &mut Subst,
+        adt_reg: &AdtRegistry,
         errors: &mut DiagnosticSink<'_>,
     ) {
         let derivations = std::mem::take(&mut self.deferred_type_derivations);
@@ -552,6 +529,103 @@ impl InferenceProduct {
                     other => errors.push(CheckError::new(
                         CheckErrorKind::TypeMismatch,
                         format!("expected tuple type, got {other}"),
+                        vec![],
+                    )),
+                },
+                // chelis#1836. The diagnostics here are deliberately silent
+                // for every shape `infer_access` already rejects on its own
+                // once the target is known: this pass runs on a target that
+                // was a variable at the access, and the ordinary access rule
+                // is not re-entered, so a wrong field name or a non-record
+                // binding must be reported from here or nowhere.
+                DeferredTypeDerivation::RecordField {
+                    source,
+                    field,
+                    projected,
+                } => match subst.apply(&source) {
+                    // Still unbound: carry the derivation to the next pass.
+                    // `replay_ready_shape_checks` repeats until a pass settles
+                    // nothing new, and an entry that never settles costs
+                    // nothing: the route waiting on `projected` reports the
+                    // declaration-boundary obligation instead.
+                    Type::Var(_) => {
+                        self.deferred_type_derivations
+                            .push(DeferredTypeDerivation::RecordField {
+                                source,
+                                field,
+                                projected,
+                            });
+                    }
+                    target @ (Type::Adt(..) | Type::KindedAdt(..)) => {
+                        let adt_name = match &target {
+                            Type::Adt(name, _) | Type::KindedAdt(name, _) => name.clone(),
+                            // The arm pattern admits these two only.
+                            _ => unreachable!("arm matches Adt and KindedAdt only"),
+                        };
+                        let Some(variant) =
+                            single_record_variant(adt_reg, &adt_name)
+                        else {
+                            errors.push(CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                format!(
+                                    "field access `.{field}` is only defined on a \
+                                     single-record-variant type; `{adt_name}` is a \
+                                     multi-variant or positional-field type (chelis#755)"
+                                ),
+                                vec![
+                                    "pattern-match on the variants with `match` to read \
+                                     their fields"
+                                        .to_string(),
+                                ],
+                            ));
+                            continue;
+                        };
+                        let position = variant
+                            .fields
+                            .iter()
+                            .position(|(name, _)| name.as_deref() == Some(field.as_str()));
+                        let Some(position) = position else {
+                            errors.push(CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                format!("unknown record field '{field}' on {adt_name}"),
+                                vec![format!(
+                                    "known fields: {:?}",
+                                    variant
+                                        .fields
+                                        .iter()
+                                        .filter_map(|(name, _)| name.as_deref())
+                                        .collect::<Vec<_>>()
+                                )],
+                            ));
+                            continue;
+                        };
+                        let field_types = instantiated_field_types(
+                            &adt_name, variant, &target, adt_reg, vg, subst,
+                        );
+                        match field_types.get(position) {
+                            Some(ty) => {
+                                if let Err(error) = unify(&projected, ty, subst) {
+                                    errors.push(error.into());
+                                }
+                            }
+                            None => errors.push(CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                format!(
+                                    "internal: field `{field}` of `{adt_name}` resolved \
+                                     to position {position} but no instantiated field type \
+                                     is available (chelis#731 [04-TOT-2])"
+                                ),
+                                vec![],
+                            )),
+                        }
+                    }
+                    Type::Error(_) => {}
+                    other => errors.push(CheckError::new(
+                        CheckErrorKind::TypeMismatch,
+                        format!(
+                            "field access `.{field}` expects a record value, got a \
+                             value of type `{other}` (chelis#755)"
+                        ),
                         vec![],
                     )),
                 },
@@ -706,7 +780,7 @@ impl InferenceProduct {
         adt_reg: &AdtRegistry,
         errors: &mut DiagnosticSink<'_>,
     ) {
-        self.resolve_deferred_type_derivations(subst, errors);
+        self.resolve_deferred_type_derivations(vg, subst, adt_reg, errors);
         let checks = std::mem::take(&mut self.deferred_shape_checks);
         for check in checks {
             if check
@@ -1202,6 +1276,17 @@ pub(super) fn reconcile_replayed_result(
 /// variables. It must wait only while an operand's *type constructor* is still
 /// unknown; treating every free variable as pending would reject legitimate
 /// rank/dtype-polymorphic signatures at their declaration boundary.
+///
+/// chelis#1836: this is the ONE readiness predicate. The `app_post` routes
+/// used to suspend on a narrower provenance question instead -- does the
+/// unresolved constructor descend from an annotation-free lambda parameter --
+/// which answered no for a `pat-tuple` element on an unresolved scrutinee, a
+/// field of an unresolved record target, and a chelis#1577 gate's result. Each
+/// of those took the route's eager `Type::Var` arm, published the call's own
+/// result variable, and let the declaration bind it to any shape at all. A
+/// route that suspends on the same condition it resumes on cannot grow that
+/// hole again for a fourth provenance, so the provenance set is gone rather
+/// than extended.
 pub(super) fn shape_operand_awaits_binding(ty: &Type, subst: &Subst) -> bool {
     match subst.apply(ty) {
         Type::Var(_) => true,

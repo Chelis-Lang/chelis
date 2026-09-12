@@ -734,6 +734,38 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             "cli_slice_b.an_overshooting_shrink_span_reports_the_domain_error_on_c",
         ),
+        # chelis#1836. A shape-computed route whose operand is still an
+        # unresolved type variable when the route runs published the call's own
+        # result variable, so a false declared shape checked at score 1 with no
+        # errors on `6abca2406` and the runtime extent guard was the only thing
+        # left to catch it. Four provenances, one per row: the two `match`
+        # destructurings, the record field, and the chelis#1577 `copy` gate.
+        # Single rows rather than `.c`/`.eval` pairs: the verdict is a CHECKER
+        # rejection that no lane varies, and the programs never reach a lane.
+        _row(
+            "route.untied.sum.match",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "types_unresolved_operand.a_match_destructured_sum_operand_is_tied_to_the_bound_scrutinee",
+        ),
+        _row(
+            "route.untied.matmul.match",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "types_unresolved_operand.a_match_destructured_matmul_operand_is_tied_to_the_bound_scrutinee",
+        ),
+        _row(
+            "route.untied.sum.record",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "types_unresolved_operand.a_record_field_sum_operand_is_tied_to_the_bound_target",
+        ),
+        _row(
+            "route.untied.sum.copy",
+            "silent_unguarded",
+            TERMINAL_CONTROL,
+            "types_unresolved_operand.a_gated_copy_result_ties_its_sum_consumer_to_the_bound_operand",
+        ),
     )
     return tuple(sorted(rows, key=lambda row: row.id))
 
