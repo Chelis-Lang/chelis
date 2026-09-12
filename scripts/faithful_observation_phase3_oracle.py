@@ -182,6 +182,13 @@ REQUIRED_EVAL_RECEIPTS = {
 # definition is exactly those ten added lines: the drift comparison, the
 # missing/extra partition, and the assertion are unchanged, and every added row
 # carries its own reviewed executable evidence in the owning pull request.
+# chelis#1906 adds annotated_concat_softmax.ch with a full-value eval row and
+# exact C rejection, not C parity. Relative to the prior frozen definition,
+# the only other changes are the reviewed dropout_entry.ch (#1877),
+# dropout_static_rate.ch (#1874), and wildcard_extents.ch (#1898) names.
+# All four additions retain the drift comparison and every previous entry.
+# The new example also has a separate CLI bit oracle and nonuniform API
+# softmax reference tests; the existing definition-mutation controls remain.
 REQUIRED_TEST_DEFINITION_SHA256: dict[Path, dict[str, str]] = {
     PARITY_SOURCE: {
         "parity_checked_reshape": "3f2defb3802726dac732a24ee5a9815433c8a16679f60a8ae337268305119424",
@@ -194,7 +201,7 @@ REQUIRED_TEST_DEFINITION_SHA256: dict[Path, dict[str, str]] = {
         "parity_count_bool_axes": "66e82bb4aeedafabc5d77eefeec25cb2728085becf2fdf44c335631fde750ba9",
         "parity_checked_sparse_axes": "69b1b926e2294ef2dcf704f68d218f0c692788c943aa3f6a88ed06e331e107b0",
         "parity_checked_window_geometry": "9df8502bf07ccbbd5731c79596d328130cddedede4217f7af585063404cc64dc",
-        "parity_corpus_is_complete": "299df07a2d53bdb6c4041bad7f531c60c44ad2f29e6104e313aaeed10070f961",
+        "parity_corpus_is_complete": "4e54da267d709f12d1afe50779a80d0171bc0c4aa97a0974d44307349900b3ce",
         "parity_explicit_normalization": "d09c17ffa744ee21214877d59476ce58441480e4f6f8a29d6eb5edf3ad1417cb",
         "parity_dict_foundation": "1bfd21bf0d78c9f36869908852a963037e0f13e36d5f9bc73b77131ff9d2970f",
         "parity_generic_explicit_shape": "72ebff1fb9ca21ef52e6622c724f90e7f24f9054c8bff0b5c582be8582007f73",

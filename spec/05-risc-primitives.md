@@ -3855,6 +3855,9 @@ integer inner products.
 softmax(x: tensor[D, p], axis: int) → tensor[D, p]
 ```
 
+An admissible explicit result annotation preserves the same computation.
+An unknown operand extent remains a runtime extent; it does not erase rank.
+
 Normalize the selected axis to its nonnegative index `a`; let
 `extent = shape(x,a)`. Restore a reduced axis by inserting it at that same
 position, including when it is not the trailing axis:

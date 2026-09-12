@@ -4826,7 +4826,7 @@ fn tensor_shape_template_expr(expr: &Expr) -> Option<&Expr> {
     args.first()
 }
 
-fn concrete_dim_len(dim: &DimInfo) -> Option<usize> {
+pub(crate) fn concrete_dim_len(dim: &DimInfo) -> Option<usize> {
     match dim {
         DimInfo::Lit(n) => Some(*n),
         DimInfo::Named(_, Some(n)) => Some(*n),
@@ -5161,7 +5161,7 @@ pub(crate) fn extract_int_for_dim(expr: &Expr) -> Option<i64> {
 /// negative-axis convention for the axis-taking ops. issue #364/#319: the
 /// `cast`-axis fix must not lose the `-1` axis form that `softmax(x, -1)`
 /// (and the SDPA grad path) depend on.
-fn extract_int_axis(expr: &Expr) -> Option<i64> {
+pub(crate) fn extract_int_axis(expr: &Expr) -> Option<i64> {
     if let Some(n) = extract_int_for_dim(expr) {
         return Some(n);
     }
@@ -11757,11 +11757,10 @@ impl<'program> LowerCtx<'program> {
             }
 
             // Issue #368: `concat` of a statically-enumerable list of
-            // tensors along a constant axis. `concat` is otherwise a
-            // host-runtime op with no RISC DAG lowering and no adjoint, so
+            // tensors along a constant axis. Before the static construction,
             // a `grad` through `mean`/`max_reduce` over a concat'd window
-            // stack hit the fallback below, which emits a rank-0
-            // `Load { name: "concat" }` placeholder. The reduce then ran on
+            // stack hit a rank-0 `Load { name: "concat" }` placeholder.
+            // The reduce then ran on
             // a rank-0 operand: `mean` panicked indexing `dims[axis]` of the
             // empty shape, and `max_reduce` built a backward node pairing a
             // rank-1 cotangent with the rank-0 collapse (verify "1 vs 0").
@@ -11775,26 +11774,18 @@ impl<'program> LowerCtx<'program> {
             // validates. Non-concat axes (including symbolic dims) ride
             // through untouched because their padding is `(0, 0)`.
             //
-            // Falls through to the host fallback when the list is not
+            // Rejects this DAG slice when the list is not
             // statically enumerable, the axis is not a constant, an element
             // is not a recognized tensor node, or an element's concat-axis
             // extent is not a concrete literal (a ragged/runtime concat,
-            // which still needs the host lane).
+            // which still needs the host lane). Host admission precedes
+            // lowering; a forced DAG must never fabricate a concat input.
             "concat" if args.len() == 2 => {
                 if let Some(node) = self.lower_tensor_concat(&args[0], &args[1]) {
                     return node;
                 }
-                for arg in args {
-                    self.lower_expr(arg);
-                }
-                self.dag.add_node(
-                    RiscOp::Load {
-                        name: func_name.into(),
-                    },
-                    vec![],
-                    Self::default_type(),
-                    self.current_span_id.clone(),
-                )
+                self.reject_lowering_slice(Some(&args[0]),
+                    "tensor concat cannot be represented by the static tensor DAG; use its host execution path (chelis#1906)".to_string())
             }
 
             // chelis#513 / chelis#558: a `shape(operand, axis)` read used
