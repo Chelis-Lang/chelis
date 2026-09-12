@@ -5842,3 +5842,229 @@ fn checked_arithmetic_operators_reach_the_same_guard_on_c() {
         "and produces the declared shape exactly: {out}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// chelis#1822: an `expand` whose kept axis carries a signature binder.
+//
+// `spec/05-risc-primitives.md` section 2.4 replaces the size-1 axis with the
+// size argument's extent, so the expanded axis is the size and never the
+// operand's. The C preparation's `Expand` arm resolves each anonymous output
+// axis from its own source, but its guard required that NO axis carry a real
+// name. With a named bystander (`batch`) the arm was skipped, and the
+// pass-through arm copied the operand's PRE-EXPAND dims onto the output.
+//
+// The consumer form then failed `spec/04-type-system.md` section 4.7.2's
+// check/build agreement at ownership verification. The no-consumer form had
+// nothing to verify, so the wrong type reached codegen and the binary trapped
+// while eval returned the right answer, which is a lane divergence rather than
+// an internal error.
+//
+// The issue's "axis 0 is unaffected" sentence is false and the axis-0 row
+// below is why: the variable is a named bystander plus a shape-sourced size,
+// not the position of the expanded axis.
+// ---------------------------------------------------------------------------
+
+/// The issue's reproducer: `batch` spans both parameters and the broadcast size
+/// is read from the other operand's axis 1.
+const NAMED_BYSTANDER_AXIS_ONE: &str = "module Repro.Ax1\n\
+sig f: tensor[batch, 4, f32] -> tensor[batch, 1, f32] -> tensor[batch, 4, f32]\n\
+def f(features: tensor[batch, 4, f32], mask: tensor[batch, 1, f32]) = \
+mul(features, expand(mask, 1i32, cast(shape(features, cast(1, int32)), int64)))\n\
+out = f(to_tensor([[1.0f32, 2.0f32, 3.0f32, 4.0f32], [5.0f32, 6.0f32, 7.0f32, 8.0f32]]), \
+to_tensor([[1.0f32], [2.0f32]]))\n";
+
+/// The same shape with the expanded axis at position 0 and `batch` at 1.
+const NAMED_BYSTANDER_AXIS_ZERO: &str = "module Repro.Ax0\n\
+sig f: tensor[4, batch, f32] -> tensor[1, batch, f32] -> tensor[4, batch, f32]\n\
+def f(features: tensor[4, batch, f32], mask: tensor[1, batch, f32]) = \
+mul(features, expand(mask, 0i32, cast(shape(features, cast(0, int32)), int64)))\n\
+out = f(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32], [5.0f32, 6.0f32], [7.0f32, 8.0f32]]), \
+to_tensor([[1.0f32, 2.0f32]]))\n";
+
+/// The same `expand` with no binary consumer, so nothing verifies the type it
+/// produced.
+const NAMED_BYSTANDER_NO_CONSUMER: &str = "module Repro.NoConsumer\n\
+sig f: tensor[batch, 4, f32] -> tensor[batch, 1, f32] -> tensor[batch, 4, f32]\n\
+def f(features: tensor[batch, 4, f32], mask: tensor[batch, 1, f32]) = \
+expand(mask, 1i32, cast(shape(features, cast(1, int32)), int64))\n\
+out = f(to_tensor([[1.0f32, 2.0f32, 3.0f32, 4.0f32], [5.0f32, 6.0f32, 7.0f32, 8.0f32]]), \
+to_tensor([[1.0f32], [2.0f32]]))\n";
+
+/// The literal-size spelling, which never reached the broken arm.
+const NAMED_BYSTANDER_LITERAL_SIZE: &str = "module Repro.LiteralSize\n\
+sig f: tensor[batch, 4, f32] -> tensor[batch, 1, f32] -> tensor[batch, 4, f32]\n\
+def f(features: tensor[batch, 4, f32], mask: tensor[batch, 1, f32]) = \
+mul(features, expand(mask, 1i32, 4i64))\n\
+out = f(to_tensor([[1.0f32, 2.0f32, 3.0f32, 4.0f32], [5.0f32, 6.0f32, 7.0f32, 8.0f32]]), \
+to_tensor([[1.0f32], [2.0f32]]))\n";
+
+/// The rank-1 spelling, whose only axis is the expanded one, so no bystander
+/// existed to trip the guard.
+const NAMED_BYSTANDER_RANK_ONE: &str = "module Repro.Rank1\n\
+sig f: tensor[4, f32] -> tensor[1, f32] -> tensor[4, f32]\n\
+def f(features: tensor[4, f32], mask: tensor[1, f32]) = \
+mul(features, expand(mask, 0i32, cast(shape(features, cast(0, int32)), int64)))\n\
+out = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]), to_tensor([1.0f32]))\n";
+
+/// expand.named_bystander.consumer.c, with its eval lane as the byte-identity
+/// twin.
+///
+/// EVIDENTIARY STATUS: regression test on the C lane. On `6abca2406` the build
+/// failed with ``ownership lowering invariant failed in `dag`: binary op at
+/// node 5 has mismatched dimension at axis 1: Lit(4) vs Lit(1)``. The eval
+/// assertion is a disposition lock: eval already printed this exact line, and
+/// it is what the C lane now has to match.
+#[test]
+fn a_named_bystander_axis_keeps_its_size_extent_on_c() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let expected = "out = tensor(shape=[2, 4], data=[1.0, 2.0, 3.0, 4.0, 10.0, 12.0, 14.0, 16.0])";
+    let (ok, out) = c_run_result(&dir, "bystander_ax1_c", NAMED_BYSTANDER_AXIS_ONE);
+    assert!(ok, "a check-clean program must build and run: {out}");
+    assert!(out.contains(expected), "{out}");
+    let (eval_ok, eval_out) = eval_result(&dir, "bystander_ax1_eval.ch", NAMED_BYSTANDER_AXIS_ONE);
+    assert!(eval_ok, "{eval_out}");
+    assert!(
+        eval_out.contains(expected),
+        "the lanes agree byte for byte: {eval_out}"
+    );
+}
+
+/// expand.named_bystander.axis_zero.c: the issue's "axis 0 is unaffected" sentence
+/// is wrong, and this row is the correction.
+///
+/// EVIDENTIARY STATUS: regression test. On `6abca2406` the build failed with the
+/// same invariant naming axis 0 instead of axis 1, so the position of the
+/// expanded axis was never the variable.
+#[test]
+fn a_named_bystander_axis_keeps_its_size_extent_on_axis_zero_too() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let expected = "out = tensor(shape=[4, 2], data=[1.0, 4.0, 3.0, 8.0, 5.0, 12.0, 7.0, 16.0])";
+    let (ok, out) = c_run_result(&dir, "bystander_ax0_c", NAMED_BYSTANDER_AXIS_ZERO);
+    assert!(ok, "{out}");
+    assert!(out.contains(expected), "{out}");
+    let (eval_ok, eval_out) = eval_result(&dir, "bystander_ax0_eval.ch", NAMED_BYSTANDER_AXIS_ZERO);
+    assert!(eval_ok, "{eval_out}");
+    assert!(eval_out.contains(expected), "{eval_out}");
+}
+
+/// expand.named_bystander.no_consumer.{c,eval}: the lane divergence.
+///
+/// EVIDENTIARY STATUS: regression test on the C lane, disposition lock on eval.
+/// On `6abca2406` the C binary built and then aborted with ``extent `1`:
+/// claimed = 1, features axis 1 = 4`` and `numeric trap: domain in load at
+/// int64`, exit 134, while eval printed the correct value. With no binary
+/// consumer nothing verified the prepared type, so the defect surfaced as a
+/// divergence rather than as the build error the two rows above recorded.
+#[test]
+fn a_named_bystander_expand_with_no_consumer_agrees_across_lanes() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let expected = "out = tensor(shape=[2, 4], data=[1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0])";
+    let (ok, out) = c_run_result(&dir, "bystander_nocons_c", NAMED_BYSTANDER_NO_CONSUMER);
+    assert!(ok, "the binary must not trap on its own broadcast: {out}");
+    assert!(out.contains(expected), "{out}");
+    assert!(
+        !out.contains("numeric trap"),
+        "and the trap the prepared type used to provoke is gone: {out}"
+    );
+    let (eval_ok, eval_out) = eval_result(
+        &dir,
+        "bystander_nocons_eval.ch",
+        NAMED_BYSTANDER_NO_CONSUMER,
+    );
+    assert!(eval_ok, "{eval_out}");
+    assert!(
+        eval_out.contains(expected),
+        "the lane that was already right is unchanged: {eval_out}"
+    );
+}
+
+/// A reduction consumer and a declared FREE result dim on the expanded axis:
+/// the two further lane divergences round 1 measured.
+///
+/// They vary the two things the rows above hold fixed. One replaces the
+/// elementwise consumer with a `sum`, so the operand's wrong prepared extent
+/// reaches a reduction rather than a binary op; the other declares the result
+/// dim free instead of literal, so nothing downstream constrains the expanded
+/// axis at all. Both had a correct interpreter answer and a trapping binary on
+/// the base, which is the divergence the no-consumer row records for a third
+/// shape.
+///
+/// EVIDENTIARY STATUS: regression tests on the C lane, disposition locks on
+/// eval. Reverting `emit.rs` to `origin/main` and rerunning, both binaries
+/// abort with ``extent `1`: claimed = 1, features axis 1 = 4`` and
+/// `numeric trap: domain in load at int64` while eval prints these exact
+/// values.
+#[test]
+fn a_reduction_consumer_and_a_free_result_dim_also_agree_across_lanes() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cases = [
+        (
+            "bystander_reduction",
+            "sig f: tensor[batch, 4, f32] -> tensor[batch, 1, f32] -> tensor[batch, f32]\n",
+            "sum(expand(mask, 1i32, cast(shape(features, cast(1, int32)), int64)), 1)",
+            "out = tensor(shape=[2], data=[4.0, 8.0])",
+        ),
+        (
+            "bystander_free_result",
+            "sig f: tensor[batch, 4, f32] -> tensor[batch, 1, f32] -> tensor[batch, m, f32]\n",
+            "expand(mask, 1i32, cast(shape(features, cast(1, int32)), int64))",
+            "out = tensor(shape=[2, 4], data=[1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0])",
+        ),
+    ];
+    for (stem, signature, body, expected) in cases {
+        let source = format!(
+            "{signature}\
+             def f(features: tensor[batch, 4, f32], mask: tensor[batch, 1, f32]) = {body}\n\
+             out = f(to_tensor([[1.0f32, 2.0f32, 3.0f32, 4.0f32], \
+             [5.0f32, 6.0f32, 7.0f32, 8.0f32]]), to_tensor([[1.0f32], [2.0f32]]))\n"
+        );
+        let (ok, out) = c_run_result(&dir, stem, &source);
+        assert!(ok, "{stem} must not trap on its own broadcast: {out}");
+        assert!(out.contains(expected), "{stem} on C: {out}");
+        let (eval_ok, eval_out) = eval_result(&dir, &format!("{stem}.ch"), &source);
+        assert!(
+            eval_ok && eval_out.contains(expected),
+            "{stem} on eval: {eval_out}"
+        );
+    }
+}
+
+/// The two spellings that never reached the broken arm, so the narrowed guard
+/// must leave them exactly where they were.
+///
+/// EVIDENTIARY STATUS: disposition locks. Both built and ran correctly on
+/// `6abca2406`; the literal size resolves without an axis source at all, and
+/// the rank-1 form has no bystander axis to trip the guard.
+#[test]
+fn the_spellings_that_never_tripped_the_bystander_guard_stay_green() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out) = c_run_result(&dir, "bystander_lit_c", NAMED_BYSTANDER_LITERAL_SIZE);
+    assert!(ok, "{out}");
+    assert!(
+        out.contains(
+            "out = tensor(shape=[2, 4], data=[1.0, 2.0, 3.0, 4.0, 10.0, 12.0, 14.0, 16.0])"
+        ),
+        "{out}"
+    );
+    let (ok, out) = c_run_result(&dir, "bystander_rank1_c", NAMED_BYSTANDER_RANK_ONE);
+    assert!(ok, "{out}");
+    assert!(
+        out.contains("out = tensor(shape=[4], data=[1.0, 2.0, 3.0, 4.0])"),
+        "{out}"
+    );
+}

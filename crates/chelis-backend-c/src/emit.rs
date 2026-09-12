@@ -1066,20 +1066,32 @@ impl CEmitter {
                     continue;
                 }
                 let mut new_ty = node.output_type.clone();
-                if matches!(node.op, RiscOp::Expand { .. })
-                    && !new_ty
-                        .dims
-                        .iter()
-                        .any(|dim| matches!(dim, DimInfo::Named(name, _) if !is_anon(name)))
+                if let RiscOp::Expand {
+                    axis: expanded_axis,
+                    ..
+                } = &node.op
+                    && !matches!(
+                        new_ty.dims.get(*expanded_axis),
+                        Some(DimInfo::Named(name, _)) if !is_anon(name)
+                    )
                 {
                     // [05-MOV-1], #1619: the replaced/inserted axis reads
                     // the size carrier; kept axes read their own operand
                     // positions. Rank equality does not prove pass-through.
                     // Numeric result claims remain independent of their
-                    // sources. Explicit named outputs stay on the existing
-                    // path: preserving one without its unread signature
-                    // witness can newly execute an unchecked wrong shape.
-                    // B2b-1 owns that scoped claim-transport repair.
+                    // sources. An explicit name ON THE EXPANDED AXIS stays on
+                    // the existing path: preserving one without its unread
+                    // signature witness can newly execute an unchecked wrong
+                    // shape, and B2b-1 owns that scoped claim-transport
+                    // repair. chelis#1822: a real name on a BYSTANDER axis is
+                    // not that case. Testing every axis sent an `expand` whose
+                    // kept axis carries a signature binder to the pass-through
+                    // arm below, which copies the operand's PRE-EXPAND extent
+                    // onto the expanded axis, so `spec/05` section 2.4's
+                    // replacement was undone: the consumer then failed
+                    // ownership verification, or with no consumer the wrong
+                    // type reached codegen and the binary trapped while eval
+                    // returned the right answer.
                     let sources = chelis_ir::output_axis_sources(&out, id);
                     for (axis, dim) in new_ty.dims.iter_mut().enumerate() {
                         if !matches!(dim, DimInfo::Named(name, _) if is_anon(name)) {

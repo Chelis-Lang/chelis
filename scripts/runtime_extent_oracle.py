@@ -791,6 +791,38 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             TERMINAL_CONTROL,
             "types_unresolved_operand.a_scatter_replace_gate_result_ties_its_sum_consumer_to_the_bound_operand",
         ),
+        # chelis#1822: the C preparation's `Expand` arm was gated on NO axis
+        # carrying a real name, so a signature binder on a kept axis sent the
+        # node to the pass-through arm and the operand's pre-expand extent was
+        # stamped over the expanded axis. Only the C lane moved, so only the C
+        # lane has a row for the two consumer forms; each receipt asserts the
+        # eval lane as its byte-identity twin. The no-consumer form had nothing
+        # to verify, so its prepared type reached codegen and the pair diverged
+        # rather than failing the build, which is why both its lanes are rows.
+        _row(
+            "expand.named_bystander.consumer.c",
+            "ice",
+            EXECUTES,
+            "cli_slice_b.a_named_bystander_axis_keeps_its_size_extent_on_c",
+        ),
+        _row(
+            "expand.named_bystander.axis_zero.c",
+            "ice",
+            EXECUTES,
+            "cli_slice_b.a_named_bystander_axis_keeps_its_size_extent_on_axis_zero_too",
+        ),
+        _row(
+            "expand.named_bystander.no_consumer.c",
+            "lane_divergent",
+            EXECUTES,
+            "cli_slice_b.a_named_bystander_expand_with_no_consumer_agrees_across_lanes",
+        ),
+        _row(
+            "expand.named_bystander.no_consumer.eval",
+            "lane_divergent",
+            EXECUTES,
+            "cli_slice_b.a_named_bystander_expand_with_no_consumer_agrees_across_lanes",
+        ),
     )
     return tuple(sorted(rows, key=lambda row: row.id))
 

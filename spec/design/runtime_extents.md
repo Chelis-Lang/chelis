@@ -103,10 +103,15 @@ sources. Literal result claims survive, and an anonymous resolved number
 remains a literal obligation. The previous
 same-rank shortcut copied the operand's unit extent onto the output, creating
 a false result claim against the size-source tensor. The unit-precondition
-derivation already read the correct operand and is unchanged. Outputs with
-explicit named dimensions retain their existing preparation path: preserving
-the name without its unread declaring witness can newly execute a wrong
-shape. B2b-1 owns preservation and enforcement of those scoped claims.
+derivation already read the correct operand and is unchanged. An explicit name
+ON THE EXPANDED AXIS retains its existing preparation path: preserving the name
+without its unread declaring witness can newly execute a wrong shape. A name on
+a KEPT axis does not, and chelis#1822 is why that distinction is the rule rather
+than "outputs with explicit named dimensions": gating on every axis sent an
+`expand` whose bystander axis carries a signature binder to the same-rank
+shortcut, which stamped the operand's pre-expand extent onto the axis `spec/05`
+section 2.4 replaces. B2b-1 owns preservation and enforcement of those scoped
+claims.
 
 The bounded acceptance command is `singleton_broadcast_contract` in C5.
 Literal call/inlining obligations, op-computed local guards, and scoped claim transport
@@ -743,11 +748,11 @@ still reaches the oracle's own
 erased no row: `--phase a` and `--phase b` keep their names, corpora and
 row-transition checks, and each still has to PASS on its own.
 
-The recorded phase-B corpus has 66 rows and NONE of them is short of exit.
+The recorded phase-B corpus has 70 rows and NONE of them is short of exit.
 `--phase b` reads `RUNTIME EXTENT ORACLE: PASS` rather than `RECEIPTS PASS,
 ROWS SHORT OF EXIT`, and it now does so without `--allow-shortfall`. That
 reading, not a hand count, is what to quote. A hand count of the
-JSON's `phase_b` column reaches 10 instead, because the column holds 56
+JSON's `phase_b` column reaches 10 instead, because the column holds 60
 `executes_exactly` and two other values, neither of which is a shortfall.
 Nine rows are `rejects_exactly`, an exit state, since those programs are
 SUPPOSED to be rejected and a row that stopped rejecting them would be the
