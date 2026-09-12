@@ -14184,19 +14184,29 @@ impl<'program> LowerCtx<'program> {
             return;
         };
         for (axis, dim) in declared.dims.iter().enumerate() {
+            // The op-computed arm may RESOLVE the dim it stamps rather than
+            // taking the declared spelling verbatim (chelis#1800's M3), so it
+            // reports what to stamp instead of only whether it resolved. The
+            // two witness arms stamp the declaration as written.
             let resolved = match dim {
                 DimInfo::Lit(required) => {
-                    self.preserve_literal_result_axis(id, axis, *required)
-                        || self.preserve_op_computed_result_axis(id, axis, None)
+                    if self.preserve_literal_result_axis(id, axis, *required) {
+                        Some(dim.clone())
+                    } else {
+                        self.preserve_op_computed_result_axis(id, axis, dim)
+                    }
                 }
                 DimInfo::Named(binder, _) if !binder.is_empty() && binder != "*" => {
-                    self.preserve_named_result_axis(id, axis, binder)
-                        || self.preserve_op_computed_result_axis(id, axis, Some(binder))
+                    if self.preserve_named_result_axis(id, axis, binder) {
+                        Some(dim.clone())
+                    } else {
+                        self.preserve_op_computed_result_axis(id, axis, dim)
+                    }
                 }
-                _ => false,
+                _ => None,
             };
-            if resolved {
-                self.dag.node_mut(id).expect("result").output_type.dims[axis] = dim.clone();
+            if let Some(stamped) = resolved {
+                self.dag.node_mut(id).expect("result").output_type.dims[axis] = stamped;
             }
         }
     }
@@ -14298,30 +14308,85 @@ impl<'program> LowerCtx<'program> {
     ///   A result name declared NOWHERE else needs no such gate: it is the
     ///   checker's fresh-extent representation under section 4.7.2 and is still
     ///   published as `*`, which reaches neither this arm nor a class.
+    ///
+    /// One origin is out of reach, and it is the operand slot rather than the
+    /// walk: `shape_preserving` takes the first rank-matching input, so an
+    /// op-computed origin reachable only through operand 1 is unstamped.
+    /// Measured: the elementwise operand shape check refuses those programs
+    /// before they run, so nothing executes silently, which is why this is
+    /// recorded rather than repaired.
+    ///
+    /// chelis#1798 widened WHICH axis this arm reads. It dispatched on the
+    /// RESULT node's own source, so a body ending in an operation that merely
+    /// FORWARDS an op-computed extent stamped nothing: `add(shrink(x, ..),
+    /// shrink(y, ..))` under a declared `tensor[n, f32]` carries
+    /// `AxisSource::InputAxis` on the `add`, the two witness arms walk those
+    /// hops looking for an `ExtentWitness` an op-computed origin never has,
+    /// and this arm refused the forwarded source outright. Measured at
+    /// `6abca2406`: `shape=[3]` at exit zero on both lanes under `n` = 2.
+    ///
+    /// [`crate::axis_sources::op_computed_axis_origin`] now reports the
+    /// operation that INTRODUCES the extent, crossing pass-through hops and
+    /// stopping at any axis the operation sets, and the claim is stamped on
+    /// that origin's axis as well as on the result. The origin is where
+    /// section 4.7 puts the guard and where `local_dim_guard_sites` keys its
+    /// site; the result's own forwarded axis is refused membership by
+    /// `is_member`, so stamping only the result would leave a claim no site
+    /// checks. Rejected: teaching the derivation to walk pass-through members
+    /// instead, which puts one claim on two nodes and lets two consumers
+    /// disagree, and observing the result AFTER it runs, which section 4.7
+    /// forbids because the origin's own allocation is the allocation the
+    /// guard has to precede.
     fn preserve_op_computed_result_axis(
         &mut self,
         id: NodeId,
         axis: usize,
-        binder: Option<&str>,
-    ) -> bool {
-        use crate::axis_sources::AxisSource;
+        declared: &DimInfo,
+    ) -> Option<DimInfo> {
+        let binder = match declared {
+            DimInfo::Named(binder, _) if !binder.is_empty() && binder != "*" => {
+                Some(binder.as_str())
+            }
+            _ => None,
+        };
         if let Some(binder) = binder
             && (!self.signature_is_authored || self.signature_witness(binder).is_none())
         {
-            return false;
+            return None;
         }
-        let Some(AxisSource::OpComputed { axis: computed, .. }) =
-            crate::axis_sources::output_axis_sources(&self.dag, id)
-                .get(axis)
-                .cloned()
-        else {
-            return false;
+        let (origin, computed) = crate::axis_sources::op_computed_axis_origin(&self.dag, id, axis)?;
+        let node = self.dag.get(origin)?;
+        // The admission answer itself belongs to the guard site rather than to
+        // this stamp; what matters here is that there IS one, because a claim
+        // stamped onto an unadmitted owner would have no site to check it.
+        crate::axis_sources::op_computed_axis_extent(&node.op, computed)?;
+        // chelis#1800's second site: a NAMED claim whose declaring witness
+        // observes a graph-fixed extent is stamped RESOLVED, as
+        // `DimInfo::Named(binder, Some(v))`.
+        //
+        // `axis_claim` keeps that a `Name` claim, and `local_dim_guard_sites`
+        // already renders a resolved member as `CanonicalExtent::Resolved(v)`,
+        // so the guard reports the binder and compares against the number.
+        // Without it the class keyed by the binder had ONE member, because the
+        // declaring axis carries `Lit(v)` and so belongs to the `Literal(v)`
+        // class instead, and C2.4 does not make a one-member `Name` class a
+        // class: `g`'s kernel declared `int64_t k = chelis_movement_extent(..)`
+        // and compared nothing. The matching derivation change is the
+        // single-member rule in `derive_runtime_dim_classes`.
+        let declared = match (binder, self.signature_witness_extent(binder)) {
+            (Some(binder), Some(value)) => DimInfo::Named(binder.to_owned(), Some(value)),
+            _ => declared.clone(),
         };
-        let Some(node) = self.dag.get(id) else {
-            return false;
-        };
-        if crate::axis_sources::op_computed_axis_extent(&node.op, computed).is_none() {
-            return false;
+        let declared = &declared;
+        // chelis#1798: the claim belongs to the operation that INTRODUCES the
+        // extent, which is the origin rather than whichever node ends the
+        // body. Section 4.7 puts the guard at "the source position of the
+        // operation that introduces the guarded extent", and the class member
+        // the guard site is keyed on is that origin's axis: the result's own
+        // forwarded axis is excluded from membership by `is_member`, so
+        // stamping only the result leaves a claim with no site to check it.
+        if origin != id && !self.stamp_op_computed_origin(origin, computed, declared) {
+            return None;
         }
         // A NAMED claim's canonical value is the declaring parameter's axis, so
         // the kernel needs that parameter even when the body never reads it.
@@ -14345,6 +14410,95 @@ impl<'program> LowerCtx<'program> {
                 result.shape_deps.push(witness);
             }
         }
+        Some(declared.clone())
+    }
+
+    /// The graph-fixed extent a named claim's declaring witness observes.
+    ///
+    /// `None` when the binder has no signature witness, or when that witness
+    /// observes a RUNTIME extent, which is the ordinary case: the claim then
+    /// stays unresolved and its class takes the canonical value from the
+    /// declaring member at run time. `Some(v)` is the case chelis#1800 needs,
+    /// where the declaring argument is graph-fixed - a constant, or any axis
+    /// whose origin resolves to a literal - so the claim has a number and
+    /// nothing else in the class can supply one.
+    fn signature_witness_extent(&self, binder: Option<&str>) -> Option<usize> {
+        self.graph_fixed_witness_extent(self.signature_witness(binder?)?)
+    }
+
+    /// Write a declared result dimension onto the op-computed ORIGIN axis a
+    /// pass-through result resolved to, reporting whether the origin can carry
+    /// it.
+    ///
+    /// What the origin axis already states is the extent the OPERATION
+    /// computes, in whichever of three spellings the lowerer had for it: an
+    /// anonymous or synthesized name (`spec/04-type-system.md` §4.7.2's fresh
+    /// extent, the ordinary case), or the literal the lowerer recorded when it
+    /// could compute the value. `tensor_concat_from_nodes` is the literal
+    /// case, and it is the one chelis#1837 needs: over concrete element
+    /// extents the cascade writes `Lit(total)` on each `Pad`, so the pad that
+    /// origins a declared `tensor[100, 3, f32]` states `Lit(8)`. A declaration
+    /// replaces that record, because §4.7.2 makes the declared dimension the
+    /// claim and the guard the comparison; the record is what the guard then
+    /// compares against, read from the operation's own carriers rather than
+    /// from this dim.
+    ///
+    /// The one state it must NOT replace is a USER-SPELLED name, which is
+    /// another signature's claim with its own declaring witness. Overwriting
+    /// that would move the first declaration's guard onto the second's claim:
+    /// one origin would carry two claims and lowering order would decide which
+    /// survived. This declines instead, leaving the second claim exactly as
+    /// unstamped as it is today rather than silently redirecting the first.
+    /// An axis already carrying exactly this claim is already stamped and the
+    /// stamp succeeds having written nothing.
+    ///
+    /// Two declarations claiming different LITERALS over one shared origin are
+    /// not told apart from the operation's own record, so the later one wins.
+    /// That is the residual the design records: no maintainer writes it, and
+    /// the repair for it is a per-declaration claim carrier rather than a
+    /// tighter test here.
+    ///
+    /// A second residual sits in the predicate rather than here.
+    /// `is_synthesized_dim_name` reads `d<N>` as compiler-minted because that
+    /// is the checker's display spelling for an unresolved dimension variable,
+    /// so a signature that spells a binder `d0` has its claim relabeled by this
+    /// stamp rather than declined. Nothing at this layer distinguishes the two,
+    /// and the repair is to stop sharing the spelling rather than to guess
+    /// here; it is stated so a reader does not mistake it for coverage.
+    fn stamp_op_computed_origin(
+        &mut self,
+        origin: NodeId,
+        axis: usize,
+        declared: &DimInfo,
+    ) -> bool {
+        let Some(existing) = self
+            .dag
+            .get(origin)
+            .and_then(|node| node.output_type.dims.get(axis))
+        else {
+            return false;
+        };
+        if existing == declared {
+            return true;
+        }
+        match existing {
+            DimInfo::Lit(_) => {}
+            DimInfo::Named(name, _) if crate::axis_sources::is_synthesized_dim_name(name) => {}
+            DimInfo::Named(_, _) => return false,
+        }
+        // A claim the operation's own rule statically refutes is not
+        // runtime-checkable, and the graph cannot state it: `verify`'s
+        // per-owner size check compares the same arithmetic and refuses the
+        // build. Leave it unstamped rather than trade a silent claim for a
+        // lane divergence whose C side does not compile.
+        if crate::axis_sources::static_op_computed_axis_extent(&self.dag, origin, axis).is_some() {
+            return false;
+        }
+        self.dag
+            .node_mut(origin)
+            .expect("op-computed origin")
+            .output_type
+            .dims[axis] = declared.clone();
         true
     }
 

@@ -13296,10 +13296,54 @@ fn actualize_tensor_helper_types(
                                         ))
                                     })
                             }
-                            _ => Some(crate::dag::DimInfo::Named(
-                                reserve_runtime_dim_name(occupied_dim_names, "pad", node_id, axis),
-                                None,
-                            )),
+                            // Any RUNTIME bound. chelis#1397's rule, which
+                            // the `Shrink` arm below states and this arm
+                            // did not apply: minting a fresh symbol over an
+                            // axis whose DECLARED extent is a claim discards
+                            // the claim rather than discharging it, so the
+                            // admission is ASKED rather than assumed.
+                            // `op_computed_axis_extent` is the one answer
+                            // `local_dim_guard_sites` uses to decide whether
+                            // this axis gets a guard site, and
+                            // `unresolved_axis` keeps the declared dim from
+                            // the fallback so that site can form.
+                            //
+                            // Until the `pad` admission landed, the coupling
+                            // was structural here too: no runtime-bound pad
+                            // axis was admitted, so minting could not discard
+                            // a claim. Admitting the owner without this made
+                            // the claim silent in the exported and
+                            // value-binding forms while the inlined root, whose
+                            // root type is not actualized through this
+                            // function, still trapped. Measured at
+                            // `779c46626`: `-> tensor[2, f32] =
+                            // pad(x, [[shape(y, 0i32), 1i64]], 0.0f32)` over
+                            // three elements printed `shape=[6]` at exit zero
+                            // on both lanes as a value binding and trapped as
+                            // an inlined root.
+                            _ => {
+                                if crate::axis_sources::op_computed_axis_extent(op, axis).is_some()
+                                {
+                                    Some(unresolved_axis(
+                                        "pad",
+                                        node_id,
+                                        axis,
+                                        input.dims.len(),
+                                        fallback,
+                                        occupied_dim_names,
+                                    ))
+                                } else {
+                                    Some(crate::dag::DimInfo::Named(
+                                        reserve_runtime_dim_name(
+                                            occupied_dim_names,
+                                            "pad",
+                                            node_id,
+                                            axis,
+                                        ),
+                                        None,
+                                    ))
+                                }
+                            }
                         },
                     )
                     .collect::<Option<Vec<_>>>()?
@@ -13380,8 +13424,11 @@ fn actualize_tensor_helper_types(
                             // discards the claim rather than discharging it.
                             // `unresolved_axis` mints only when the node
                             // carries no usable dimension of its own, which
-                            // is the same rule the `pad` arm above already
-                            // applies.
+                            // is the same rule the `pad` arm above applies.
+                            // That sentence described only pad's `(Lit, Lit)`
+                            // case until chelis#1911's round 1; pad's runtime
+                            // case minted unconditionally and discarded the
+                            // claim.
                             //
                             // Keeping the claim is only safe when something
                             // checks it, so the admission is ASKED rather than

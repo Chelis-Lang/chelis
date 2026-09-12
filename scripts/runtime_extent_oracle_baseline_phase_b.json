@@ -1,12 +1,60 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "697d664e55280dcea9304e1f6d424d1aadbb4fa4462d649ee6af1ed10aea6e38",
+  "corpus_sha256": "bd66d50389a3d3ccde6a7c28182a30efebfdeaadcd017787eccc3f3d51f9c6be",
   "rows": [
     {
       "id": "claim.literal.nested_and_unused.eval_c",
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "literal_claim.literal_claim_transport_survives_nested_and_unused_calls"
+    },
+    {
+      "id": "claim.literal.pass_through.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_pass_through_literal_claim_is_guarded_at_its_op_computed_origin"
+    },
+    {
+      "id": "claim.literal.pass_through.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_pass_through_literal_claim_is_guarded_at_its_op_computed_origin"
+    },
+    {
+      "id": "claim.named.nested_fresh_result.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_nested_named_result_claim_is_enforced_through_its_resolved_binder"
+    },
+    {
+      "id": "claim.named.nested_fresh_result.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_nested_named_result_claim_is_enforced_through_its_resolved_binder"
+    },
+    {
+      "id": "claim.named.pass_through.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_pass_through_named_claim_is_guarded_at_its_op_computed_origin"
+    },
+    {
+      "id": "claim.named.pass_through.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_pass_through_named_claim_is_guarded_at_its_op_computed_origin"
+    },
+    {
+      "id": "claim.named.pass_through.inlined_root.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.an_inlined_root_pass_through_claim_is_guarded_on_both_lanes"
+    },
+    {
+      "id": "claim.named.pass_through.inlined_root.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.an_inlined_root_pass_through_claim_is_guarded_on_both_lanes"
     },
     {
       "id": "class.load_load.c",
@@ -85,6 +133,18 @@
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.splicing_f_of_n_n_yields_one_member_per_output_axis_on_eval"
+    },
+    {
+      "id": "concat.literal_claim.inlined_root.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "silent_unguarded",
+      "receipt": "cli_slice_b.a_declared_concat_axis_extent_on_the_dag_path_is_not_guarded_by_this_slice"
+    },
+    {
+      "id": "concat.literal_claim.inlined_root.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "silent_unguarded",
+      "receipt": "cli_slice_b.a_declared_concat_axis_extent_on_the_dag_path_is_not_guarded_by_this_slice"
     },
     {
       "id": "expand.arith_size.named_claim.c",
@@ -337,6 +397,54 @@
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "ir_sources.omitted_or_duplicated_output_axis_source_fails_before_emission"
+    },
+    {
+      "id": "pad.literal_claim.c",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_non_zero_pad_extent_is_guarded_on_both_lanes"
+    },
+    {
+      "id": "pad.literal_claim.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_non_zero_pad_extent_is_guarded_on_both_lanes"
+    },
+    {
+      "id": "pad.runtime_bound_claim.after_and_named.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_runtime_after_bound_and_a_named_pad_claim_reach_the_same_guard"
+    },
+    {
+      "id": "pad.runtime_bound_claim.after_and_named.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_runtime_after_bound_and_a_named_pad_claim_reach_the_same_guard"
+    },
+    {
+      "id": "pad.runtime_bound_claim.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_runtime_bound_pad_claim_is_guarded_in_every_activation_form"
+    },
+    {
+      "id": "pad.runtime_bound_claim.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_runtime_bound_pad_claim_is_guarded_in_every_activation_form"
+    },
+    {
+      "id": "pad.runtime_bound_claim.rank_two_axis.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_rank_two_pad_guards_and_reports_the_runtime_axis_it_widens"
+    },
+    {
+      "id": "pad.runtime_bound_claim.rank_two_axis.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_rank_two_pad_guards_and_reports_the_runtime_axis_it_widens"
     },
     {
       "id": "rebuild.classes_after_each_pass",

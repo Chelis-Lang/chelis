@@ -120,6 +120,35 @@ fn is_anonymous(name: &str) -> bool {
     name.is_empty() || name == "*"
 }
 
+/// Whether a dimension name was minted by the compiler rather than written in
+/// a signature.
+///
+/// Three minting vocabularies exist and all three name a FRESH extent that no
+/// signature declares: the lowerer's `_rt_<operation>_dim_<node>_<axis>` for
+/// an extent an operation computes, the C emitter's and DAG's
+/// `_anon_dim_<node>_<axis>` for an axis with no name at all, and the
+/// checker's `d<N>` for an unresolved dimension variable. An anonymous
+/// spelling is included, since it is the same fact with no spelling.
+///
+/// The distinction this draws is ownership, not cosmetics. A user-spelled
+/// name on an axis is a claim some signature makes about it, with its own
+/// declaring witness and its own guard; a synthesized name is the compiler's
+/// placeholder for an extent nothing has claimed yet. Consumers that must not
+/// overwrite one signature's claim with another's ask this question.
+///
+/// `d<N>` is the one spelling a user could also write. Nothing distinguishes
+/// them at this layer, so a signature declaring `tensor[d0, f32]` is read as
+/// synthesized. That is the checker's existing display vocabulary rather than
+/// a choice made here.
+pub fn is_synthesized_dim_name(name: &str) -> bool {
+    is_anonymous(name)
+        || name.starts_with("_rt_")
+        || name.starts_with("_anon_dim_")
+        || name
+            .strip_prefix('d')
+            .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// An axis of the tensor in `slot`. Ranks are bounded by addressable memory,
 /// so the `i32` conversion cannot fail in practice; a hypothetical failure
 /// degrades to the operation's own rule rather than fabricating an axis.
@@ -1707,8 +1736,34 @@ pub fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass> {
         // with. A `Literal` class needs one, because C2.4 makes the literal
         // the canonical VALUE rather than a first member, so a single
         // runtime-sourced axis claiming a literal already owes a guard.
+        //
+        // One `Name` class needs only one, and for the same reason the
+        // `Literal` rule gives: a RESOLVED claim is its own canonical value.
+        // A single member whose source is `OpComputed` and whose dim carries
+        // `Named(_, Some(v))` has both a number to compare against and an
+        // extent the operation computes to compare, so it is a complete guard
+        // with nothing missing. chelis#1800 is the case: `f(w: tensor[n, f32],
+        // x) -> tensor[n, f32]` called with a graph-fixed `w` puts `Lit(v)` on
+        // the declaring axis, which belongs to the `Literal(v)` class rather
+        // than to `n`'s, leaving `n` with the op-computed member alone;
+        // lowering resolves that member's claim so the number travels with it.
+        //
+        // The rule is deliberately this narrow. An unresolved single member
+        // still forms no class, because nothing supplies its canonical value,
+        // and a resolved member with any OTHER source is not admitted: an
+        // entry class resolved this way would mint a guard for every
+        // literal-shaped input, which is the mint `is_member`'s `ExternalAxis`
+        // rule exists to prevent.
         let needed = match claim {
-            DimClaim::Name(_) => 2,
+            DimClaim::Name(_) => {
+                let resolved_op_computed = members.len() == 1
+                    && matches!(members[0].member.source, AxisSource::OpComputed { .. })
+                    && dag
+                        .get(members[0].member.node)
+                        .and_then(|node| node.output_type.dims.get(members[0].member.axis))
+                        .is_some_and(|dim| matches!(dim, DimInfo::Named(_, Some(_))));
+                if resolved_op_computed { 1 } else { 2 }
+            }
             DimClaim::Literal(_) => 1,
         };
         if members.len() < needed {
@@ -2238,10 +2293,18 @@ pub enum LocalGuardObservation {
 /// `spec/04-type-system.md` section 4.7's movement paragraph makes `shrink`
 /// the owner whose symbolic axes "always mint fresh extents"; a `pad` with
 /// non-zero padding and a `stride` with a non-unit step mint fresh extents
-/// under the same sentence and are NOT admitted here (chelis#1379 owns the
-/// arithmetic-sized forms). They keep the behaviour they have rather than
-/// becoming newly silent: no site existed for them before this variant and
-/// none exists after it.
+/// under the same sentence.
+///
+/// `stride` is still NOT admitted, and keeps the behaviour it has rather than
+/// becoming newly silent: no site existed for it before this enum and none
+/// exists after it. chelis#1379 owns the arithmetic-sized forms.
+///
+/// The admission test is whether the extent is readable BEFORE the owner
+/// runs, which is what C2.5 requires of a computed-extent observation: "An
+/// extent computed by the operation must be computed/validated before its
+/// first shape-dependent allocation/access". Both admitted owners pass it
+/// from their own carriers and the operand's realized shape, and both of
+/// those are the owner's producers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComputedAxisExtent {
     /// `shrink`'s half-open span on one axis: the extent is `end - start`
@@ -2263,6 +2326,114 @@ pub enum ComputedAxisExtent {
         end: RtDim,
         operand_axis: usize,
     },
+    /// `pad`'s widened axis: the extent is the operand's extent at
+    /// `operand_axis` plus `before` plus `after`
+    /// (`spec/05-risc-primitives.md` section 2.4).
+    ///
+    /// Every `pad` bound is readable before the pad runs. `RtDim::ToEnd` is a
+    /// `Shrink` `end` only, so a padding bound is a literal, a rank-0 integer
+    /// input of this node, or a folded read of one of its inputs' shape
+    /// metadata, and all three are this node's own producers. `operand_axis`
+    /// is carried rather than re-derived, as [`Self::ShrinkSpan`] carries it,
+    /// so a consumer reading this variant needs nothing but the variant;
+    /// `pad` preserves rank, so it equals the output axis.
+    ///
+    /// chelis#1837 is why this owner is admitted. `concat` has no `RiscOp`:
+    /// `tensor_concat_from_nodes` lowers a Pad+Add cascade, and the first Pad
+    /// of that cascade is the origin of the result's concat axis. Without an
+    /// admission here a declared concat-axis extent had no guard site on the
+    /// DAG path, so `def main() -> tensor[100, 3, f32] = probe(...)` returned
+    /// eight rows at exit zero on both host lanes.
+    ///
+    /// A sum that does not fit a host extent computes no extent. The owner's
+    /// own allocation owns that failure, so the guard yields rather than
+    /// comparing a wrapped number.
+    ///
+    /// There is deliberately NO `> 0` filter here, where [`Self::ShrinkSpan`]
+    /// has one, and the asymmetry is the two quantities rather than an
+    /// oversight. A shrink span of zero selects nothing and computes no
+    /// extent, so the operation's own domain rejection owns it; a pad extent
+    /// of zero is a real extent, and a claim of some other number over it is
+    /// a mismatch the guard still owes. Filtering it would be a silent hole
+    /// rather than parity.
+    ///
+    /// Measured, and the zero extent is REACHABLE, which is what decides it.
+    /// A runtime bound resolving to zero is guarded correctly today:
+    /// `pad(x, [[sub(shape(y, 0i32), shape(y, 0i32)), 1i64]], 0.0f32)` over
+    /// three elements reports `pad axis 0 = 4`. A zero pad EXTENT is reached by
+    /// giving that spelling both bounds and an empty operand, and it behaves
+    /// correctly on both lanes: a declared `tensor[2, f32]` traps
+    /// ``extent `2`: claimed = 2, pad axis 0 = 0``, and a declared
+    /// `tensor[0, f32]` returns `shape=[0]` at exit zero. A `> 0` filter would
+    /// silence the first of those, so it would introduce a defect rather than
+    /// close one.
+    ///
+    /// An earlier version of this comment called the zero extent unreachable,
+    /// on the strength of one spelling the checker refuses (`to_tensor([])`
+    /// needs a resolved element dtype, which a typed parameter position
+    /// supplies). Round 1's verification measured it; the decision is unchanged
+    /// and its reason is now the measurement rather than an absence.
+    PadSpan {
+        before: RtDim,
+        after: RtDim,
+        operand_axis: usize,
+    },
+}
+
+/// The op-computed origin a declared result axis reaches through
+/// PASS-THROUGH hops alone, as `(node, axis)`.
+///
+/// This answers "which operation introduces the extent this axis carries",
+/// which is the question `spec/04-type-system.md` section 4.7 asks when it
+/// places a local guard at "the source position of the operation that
+/// introduces the guarded extent". [`resolve_axis_extent`] answers a
+/// different one, "where does this axis's VALUE come from", and the two
+/// diverge on exactly the axes C2.4 separates: a set axis and a forwarded
+/// axis both carry [`AxisSource::InputAxis`], and only the forwarded one
+/// passes an extent through.
+///
+/// Measured, which is why the distinction is drawn here rather than left to
+/// the value resolver. `expand(x, 0i32, shape(small, 0i32))` under a declared
+/// `tensor[3, f32]`, with `small` a runtime `shrink`, has an `InputAxis`
+/// source on the axis the `expand` SETS. The value resolver walks that hop
+/// into the `shrink` and reports an op-computed origin there; a claim stamped
+/// on it moves the guard off the `expand`, whose own axis is the class
+/// witness [`is_member`] admits, and the trap renames itself from `expand` to
+/// `shrink`. `issue_616_runtime_movement_c_parity`'s identity row measures
+/// that rename.
+///
+/// So the walk crosses a hop only where [`is_member`] would refuse the axis
+/// as a pass-through, and stops at the first axis the operation sets, whose
+/// own claim is the one its guard checks. The walk is bounded by the node
+/// count, so a malformed graph cannot spin.
+pub fn op_computed_axis_origin(dag: &Dag, node: NodeId, axis: usize) -> Option<(NodeId, usize)> {
+    op_computed_axis_origin_bounded(dag, node, axis, dag.nodes().len())
+}
+
+fn op_computed_axis_origin_bounded(
+    dag: &Dag,
+    node: NodeId,
+    axis: usize,
+    fuel: usize,
+) -> Option<(NodeId, usize)> {
+    if fuel == 0 {
+        return None;
+    }
+    let owner = dag.get(node)?;
+    match output_axis_sources(dag, node).into_iter().nth(axis)? {
+        AxisSource::OpComputed {
+            op: origin,
+            axis: computed,
+        } => Some((origin, computed)),
+        AxisSource::InputAxis {
+            input,
+            axis: RtAxis::Lit(read),
+        } if !sets_axis(&owner.op, axis) => {
+            let operand = *owner.inputs.get(input)?;
+            op_computed_axis_origin_bounded(dag, operand, usize::try_from(read).ok()?, fuel - 1)
+        }
+        _ => None,
+    }
 }
 
 /// The computed extent of `axis`, when `op` is an admitted op-computed owner.
@@ -2284,7 +2455,90 @@ pub fn op_computed_axis_extent(op: &RiscOp, axis: usize) -> Option<ComputedAxisE
                     operand_axis: axis,
                 })
         }
+        RiscOp::Pad { padding, .. } => {
+            padding
+                .get(axis)
+                .map(|(before, after)| ComputedAxisExtent::PadSpan {
+                    before: before.clone(),
+                    after: after.clone(),
+                    operand_axis: axis,
+                })
+        }
         _ => None,
+    }
+}
+
+/// The extent an admitted op-computed axis produces, when every quantity its
+/// output-shape rule reads is a compile-time constant.
+///
+/// `None` means the extent is a runtime value, which is the case
+/// `spec/04-type-system.md` §4.7.2's guard exists for: it conditions the check
+/// on a claim "that is not statically proven equal to `size`".
+///
+/// `Some(v)` means the operation's own rule PROVES the extent, so a
+/// declaration claiming a different value is statically refuted rather than
+/// runtime-checkable, and the graph cannot state it: [`crate::verify`]'s
+/// per-owner static size check compares the same arithmetic and rejects an
+/// output dim that disagrees. Measured, which is why this exists.
+/// `concat([v, v], 0i32)` over four concrete rows under a declared
+/// `tensor[100, 3, f32]` lowers to a Pad+Add cascade whose pads state
+/// `Lit(8)`; stamping `Lit(100)` onto the origin produced
+/// `pad at node 1: output axis 0 has size 100, expected 8` and
+/// `binary op at node 3 has mismatched dimension at axis 0: Lit(100) vs
+/// Lit(8)`, refusing the build on the C lane while the DAG evaluator, which
+/// does not run the verifier, trapped at run time. A lane divergence with a
+/// refused build on one side is not a repair.
+///
+/// So a statically refuted claim is left unstamped here, and the verdict it
+/// is owed belongs to a tier that can report one: this is the numbered spec's
+/// own division, where §4.4 and §4.5 make a statically refuted declared
+/// result a type error and §4.7.2 makes an unprovable one a runtime guard.
+/// `lower_program` returns a `Dag` and has no error channel, so lowering is
+/// not that tier.
+pub fn static_op_computed_axis_extent(dag: &Dag, node: NodeId, axis: usize) -> Option<usize> {
+    let owner = dag.get(node)?;
+    let operand_extent = |operand_axis: usize| -> Option<usize> {
+        let operand = *owner.inputs.first()?;
+        match dag.get(operand)?.output_type.dims.get(operand_axis)? {
+            DimInfo::Lit(size) | DimInfo::Named(_, Some(size)) => Some(*size),
+            DimInfo::Named(_, None) => None,
+        }
+    };
+    match op_computed_axis_extent(&owner.op, axis)? {
+        ComputedAxisExtent::ShrinkSpan {
+            start,
+            end,
+            operand_axis,
+        } => {
+            let extent = operand_extent(operand_axis);
+            let start = static_bound(&start, extent)?;
+            let end = static_bound(&end, extent)?;
+            end.checked_sub(start)
+        }
+        ComputedAxisExtent::PadSpan {
+            before,
+            after,
+            operand_axis,
+        } => {
+            let extent = operand_extent(operand_axis)?;
+            let before = static_bound(&before, Some(extent))?;
+            let after = static_bound(&after, Some(extent))?;
+            extent.checked_add(before)?.checked_add(after)
+        }
+    }
+}
+
+/// A movement bound's compile-time value, or `None` when only run time has it.
+///
+/// `RtDim::ToEnd` resolves to the operand's extent, which is a compile-time
+/// constant exactly when that extent is. Every other runtime carrier - a
+/// rank-0 node, a folded shape read, a symbol bound at entry - is a value no
+/// compile-time arithmetic has.
+fn static_bound(bound: &RtDim, operand_extent: Option<usize>) -> Option<usize> {
+    match bound {
+        RtDim::Lit(value) => Some(*value),
+        RtDim::ToEnd => operand_extent,
+        RtDim::Node(_) | RtDim::Sym(_) | RtDim::InputAxis { .. } => None,
     }
 }
 

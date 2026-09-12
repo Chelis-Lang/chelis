@@ -3311,6 +3311,37 @@ fn computed_axis_extent_value(
             }
             Ok(end.checked_sub(start).filter(|span| *span > 0))
         }
+        crate::axis_sources::ComputedAxisExtent::PadSpan {
+            before,
+            after,
+            operand_axis,
+        } => {
+            // The operand is this node's producer, so its realized extent is
+            // readable here, before the pad allocates. An absent operand or
+            // axis is a malformed graph the verifier rejects, and the guard
+            // declines rather than substituting a number: a fabricated extent
+            // would compare a claim against a value nothing produced.
+            let Some(extent) = node
+                .inputs
+                .first()
+                .and_then(|id| values.get(id))
+                .and_then(|operand| operand.shape.get(*operand_axis).copied())
+            else {
+                return Ok(None);
+            };
+            // `resolve_eval_bound`'s fourth argument resolves `RtDim::ToEnd`,
+            // which a padding bound never is; passing the operand's extent
+            // keeps one resolver for both owners rather than a second that
+            // differs only in what it refuses.
+            let before = resolve_eval_bound(before, node, values, extent)?;
+            let after = resolve_eval_bound(after, node, values, extent)?;
+            // A sum past the host's extent capacity computes no extent. The
+            // pad's own allocation owns that failure, so the guard yields
+            // instead of comparing a wrapped number.
+            Ok(extent
+                .checked_add(before)
+                .and_then(|widened| widened.checked_add(after)))
+        }
     }
 }
 

@@ -700,6 +700,132 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "exec_c.numeric_local_extent_claims_execute_exactly",
         ),
         _row(
+            "claim.literal.pass_through.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_pass_through_literal_claim_is_guarded_at_its_op_computed_origin",
+        ),
+        _row(
+            "claim.literal.pass_through.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_pass_through_literal_claim_is_guarded_at_its_op_computed_origin",
+        ),
+        _row(
+            "claim.named.nested_fresh_result.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_nested_named_result_claim_is_enforced_through_its_resolved_binder",
+        ),
+        _row(
+            "claim.named.nested_fresh_result.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_nested_named_result_claim_is_enforced_through_its_resolved_binder",
+        ),
+        _row(
+            "claim.named.pass_through.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_pass_through_named_claim_is_guarded_at_its_op_computed_origin",
+        ),
+        _row(
+            "claim.named.pass_through.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_pass_through_named_claim_is_guarded_at_its_op_computed_origin",
+        ),
+        _row(
+            "claim.named.pass_through.inlined_root.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.an_inlined_root_pass_through_claim_is_guarded_on_both_lanes",
+        ),
+        _row(
+            "claim.named.pass_through.inlined_root.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.an_inlined_root_pass_through_claim_is_guarded_on_both_lanes",
+        ),
+        # Round 1's P1. A RUNTIME padding bound is a different witness from
+        # a literal one, and the rows are separate because the claim's
+        # precondition is the bound rather than the operand: lowering stamped
+        # the claim and `host::rank_preserving_movement_type`'s Pad arm minted
+        # over it, so the exported and value-binding forms were silent while
+        # the inlined root trapped. Both lanes are `silent_unguarded` here,
+        # unlike the literal-bound rows below: with the declared dim replaced
+        # by a minted `_rt_pad_dim_N_A`, the C movement plan's target check
+        # compares against that minted dim and passes, so C returned the
+        # undeclared shape at exit zero too.
+        _row(
+            "pad.runtime_bound_claim.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_runtime_bound_pad_claim_is_guarded_in_every_activation_form",
+        ),
+        _row(
+            "pad.runtime_bound_claim.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_runtime_bound_pad_claim_is_guarded_in_every_activation_form",
+        ),
+        _row(
+            "pad.runtime_bound_claim.after_and_named.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_runtime_after_bound_and_a_named_pad_claim_reach_the_same_guard",
+        ),
+        _row(
+            "pad.runtime_bound_claim.after_and_named.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_runtime_after_bound_and_a_named_pad_claim_reach_the_same_guard",
+        ),
+        _row(
+            "pad.runtime_bound_claim.rank_two_axis.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_rank_two_pad_guards_and_reports_the_runtime_axis_it_widens",
+        ),
+        _row(
+            "pad.runtime_bound_claim.rank_two_axis.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_rank_two_pad_guards_and_reports_the_runtime_axis_it_widens",
+        ),
+        # The C lane's baseline is `lane_divergent` rather than
+        # `silent_unguarded`: it did not return a wrong shape, it aborted at
+        # the movement plan's generic target check, reporting the allocation
+        # instead of the claim and with no [04-NUM-9] context line, while eval
+        # printed the padded shape at exit zero.
+        _row(
+            "pad.literal_claim.c",
+            "lane_divergent",
+            EXECUTES,
+            "cli_slice_b.a_non_zero_pad_extent_is_guarded_on_both_lanes",
+        ),
+        _row(
+            "pad.literal_claim.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_non_zero_pad_extent_is_guarded_on_both_lanes",
+        ),
+        # chelis#1837's DAG path stays at its start state and is deferred:
+        # `PHASE_B_DEFERRED` carries the reason. The receipt is the lock that
+        # pins the unguarded disposition and the measurement behind it.
+        _row(
+            "concat.literal_claim.inlined_root.c",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.a_declared_concat_axis_extent_on_the_dag_path_is_not_guarded_by_this_slice",
+        ),
+        _row(
+            "concat.literal_claim.inlined_root.eval",
+            "silent_unguarded",
+            "silent_unguarded",
+            "cli_slice_b.a_declared_concat_axis_extent_on_the_dag_path_is_not_guarded_by_this_slice",
+        ),
+        _row(
             "claim.literal.nested_and_unused.eval_c",
             "silent_unguarded",
             EXECUTES,
@@ -1037,6 +1163,36 @@ def phase_b_targets(python: str = sys.executable) -> tuple[TestTarget, ...]:
     return (self_test_target(python), *manifest_targets("b"))
 
 
+PHASE_B_DEFERRED: Mapping[str, str] = {
+    # Both lanes, one reason: `concat` has no `RiscOp`, and
+    # `tensor_concat_from_nodes` lowers its Pad+Add cascade only from concrete
+    # element extents, writing `Lit(total)` on each `Pad`. The joined extent is
+    # therefore a compile-time constant on this path, which is the case
+    # `spec/04-type-system.md` section 4.7.2's guard explicitly does not cover:
+    # it conditions the check on a claim "that is not statically proven equal
+    # to `size`". Stamping a refuted claim anyway produced
+    # `pad at node 1: output axis 0 has size 100, expected 8` from `verify`'s
+    # per-owner static size check, refusing the C build while the DAG
+    # evaluator, which does not run the verifier, trapped at run time.
+    #
+    # The verdict this row needs is the static one section 4.4/4.5 owns, and
+    # the checker cannot reach it while `tensor_concat_result_type` publishes
+    # the uncomputable extent as `Dim::Wildcard`, which section 4.5.4 rule 3
+    # makes the correct type. Refuting it needs `n + n` at the type level,
+    # which is chelis#526. The host path is unaffected and already traps.
+    "concat.literal_claim.inlined_root.c": (
+        "chelis#1837: the DAG path's joined extent is a compile-time constant, "
+        "so section 4.7.2's runtime guard does not cover it and a refuted claim "
+        "is rejected by the IR verifier; the static verdict awaits chelis#526"
+    ),
+    "concat.literal_claim.inlined_root.eval": (
+        "chelis#1837: the DAG path's joined extent is a compile-time constant, "
+        "so section 4.7.2's runtime guard does not cover it and a refuted claim "
+        "is rejected by the IR verifier; the static verdict awaits chelis#526"
+    ),
+}
+
+
 PHASE_A_DEFERRED: Mapping[str, str] = {
     "expand.input_axis.metal_device": (
         "runtime_extents.md C2.5: no Metal device-path expand row executes until "
@@ -1058,7 +1214,7 @@ PHASE_REGISTRY: Mapping[str, PhaseSpec] = {
         corpus=generated_phase_b_corpus(),
         baseline_path=BASELINE_PATH_PHASE_B,
         targets=phase_b_targets,
-        deferred={},
+        deferred=PHASE_B_DEFERRED,
     ),
 }
 

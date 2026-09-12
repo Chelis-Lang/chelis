@@ -200,6 +200,28 @@ fn issue_664_elementwise_stride_operand_mismatch_errs_in_both_lanes() {
 
 /// Pad variant: `[4]` vs `[3]` — pre-fix the C binary's last element was
 /// an out-of-bounds read of `x`.
+///
+/// The DIAGNOSTIC moved with chelis#1837's `pad` admission, and the property
+/// this row owns did not. These programs carry two real defects: the declared
+/// result claims `n` while the movement produces something else, and the `add`
+/// then mixes two extents. `spec/04-type-system.md` section 4.7 decides which
+/// is reported, in terms: a local guard "takes the source position of the
+/// operation that introduces the guarded extent: an independent effect or trap
+/// that precedes that operation in source order is observed first, and one
+/// that follows it is observed only if the guard passes". The `pad` binding
+/// precedes the `add`, so the claim is reported and the operand mismatch is
+/// reached only if the claim holds.
+///
+/// chelis#664's property is loud rejection on both lanes, never exit 0 over
+/// mismatched shapes, and `assert_error_parity` still enforces exactly that.
+/// `issue_664_elementwise_pad_operand_check_survives_an_agreeing_claim` and
+/// its shrink twin below are the controls that the operand check itself is intact, on this same pad
+/// path: give the claim a value the pad actually produces and the guard passes,
+/// so the `add` is reached and reports the operand mismatch with this row's
+/// former needles.
+///
+/// Measured on both lanes at this head: eval and the linked binary print the
+/// same two lines, the binary exiting 134.
 #[test]
 fn issue_664_elementwise_pad_operand_mismatch_errs_in_both_lanes() {
     let source = format!(
@@ -209,8 +231,8 @@ fn issue_664_elementwise_pad_operand_mismatch_errs_in_both_lanes() {
     assert_error_parity(
         &source,
         "elempad",
-        "tensor shapes must match for elementwise op",
-        "elementwise operand shape mismatch",
+        "extent `n`: claimed = 3, pad axis 0 = 4",
+        "extent `n`: claimed = 3, pad axis 0 = 4",
     );
 }
 
@@ -219,6 +241,12 @@ fn issue_664_elementwise_pad_operand_mismatch_errs_in_both_lanes() {
 /// pre-existing #616-era path, not just the chelis#632-widened one. (A
 /// literal bound would pin the sig's `n` at check time; the runtime
 /// bound `n - 3` keeps the wildcard route: `[3]` vs `[6]` at run time.)
+///
+/// Its diagnostic moved for the reason the pad row above records, and to the
+/// same rule: the `shrink` binding precedes the `add`, so the declared result's
+/// claim over the shrink is reported first. Both lanes agree, and both still
+/// reject. The agreeing-claim control below covers the second clause of that
+/// rule for this family.
 #[test]
 fn issue_664_elementwise_shrink_control_errs_in_both_lanes() {
     let source = format!(
@@ -228,8 +256,8 @@ fn issue_664_elementwise_shrink_control_errs_in_both_lanes() {
     assert_error_parity(
         &source,
         "elemshrink",
-        "tensor shapes must match for elementwise op",
-        "elementwise operand shape mismatch",
+        "extent `n`: claimed = 6, shrink axis 0 = 3",
+        "extent `n`: claimed = 6, shrink axis 0 = 3",
     );
 }
 
@@ -290,4 +318,71 @@ fn issue_664_identity_reshape_sym_target_still_runs() {
         six()
     );
     assert_value_parity(&source, "reshapeident", &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+}
+
+/// The second clause of section 4.7's ordering rule, on the same pad path the
+/// two rows above changed: a trap that FOLLOWS the guarded operation "is
+/// observed only if the guard passes".
+///
+/// So give the claim a value the pad actually produces. Three elements padded
+/// by one is four, and `tensor[4, f32]` is what the body makes, so the claim's
+/// guard passes, the `add` is reached, and the elementwise operand mismatch is
+/// reported with the needles the pad row above used to assert. Without this
+/// control, "the claim is reported first" is consistent with the operand check
+/// having been lost altogether, and nothing on this path would notice.
+///
+/// The `stride` row cannot serve as that control even though it still reports
+/// the operand mismatch: `stride` is not an admitted op-computed owner, so no
+/// claim guard forms there and it exercises neither the ordering nor the pad
+/// path.
+///
+/// The eval needle carries the two SHAPES, which is the part that says the
+/// operand check ran rather than something else rejecting: `[4] vs [3]` names
+/// the padded result against the unpadded operand. The C needle deliberately
+/// stops before the node id. `emit_runtime_dim_sites`' own comment gives the
+/// reason in terms: `spec/06` sections 5.2-5.4's dead-code and
+/// common-subexpression passes renumber nodes, so "the same defect printed a
+/// different number depending on what else the program contained". The axis is
+/// stable and the message is stable; the id is not, and pinning it would make
+/// this row fail on an unrelated pass change. Measured here as `node 2` for the
+/// pad and `node 5` for the shrink, which is exactly why neither is asserted.
+///
+/// EVIDENTIARY STATUS: disposition lock on both lanes. The behaviour is what
+/// the base does and what this head does; the row exists so that a repair which
+/// silenced the operand check while keeping the claim guard would fail here.
+#[test]
+fn issue_664_elementwise_pad_operand_check_survives_an_agreeing_claim() {
+    let source = format!(
+        "module Repro.ElemPadOk\nsig f: tensor[n, f32] -> tensor[4, f32]\ndef f(x) = {{\n  p = pad(x, [[cast(1, int64), cast(0, int64)]], cast(0.0, f32))\n  add(p, x)\n}}\nout = f(to_tensor([{}]))\n",
+        f32_literal(&[1.0, 2.0, 3.0])
+    );
+    assert_error_parity(
+        &source,
+        "elempadok",
+        "tensor shapes must match for elementwise op, got [4] vs [3]",
+        "elementwise operand shape mismatch",
+    );
+}
+
+/// The shrink twin of the control above, because the two rows this pull request
+/// changed are a pad and a shrink and the ordering rule has to hold for both.
+///
+/// The runtime bound `n - 3` makes the shrink produce 3 from six elements, so a
+/// declared `tensor[3, f32]` agrees, the claim's guard passes, and the `add`
+/// reports `[3] vs [6]`.
+///
+/// EVIDENTIARY STATUS: disposition lock on both lanes, measured at
+/// `f45a7848a`.
+#[test]
+fn issue_664_elementwise_shrink_operand_check_survives_an_agreeing_claim() {
+    let source = format!(
+        "module Repro.ElemShrinkOk\nsig f: tensor[n, f32] -> tensor[3, f32]\ndef f(x) = {{\n  k = cast(sub(cast(shape(x, cast(0, int32)), int64), cast(3, int64)), int64)\n  s = shrink(x, [[cast(0, int64), k]])\n  add(s, x)\n}}\nout = f(to_tensor([{}]))\n",
+        six()
+    );
+    assert_error_parity(
+        &source,
+        "elemshrinkok",
+        "tensor shapes must match for elementwise op, got [3] vs [6]",
+        "elementwise operand shape mismatch",
+    );
 }
