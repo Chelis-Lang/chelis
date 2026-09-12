@@ -376,6 +376,7 @@
         "a_shape_derived_bound_keeps_its_declared_result_dimension_on_c",
         "a_shape_derived_bound_keeps_its_declared_result_dimension_on_eval",
         "a_shape_read_mixed_with_a_runtime_scalar_is_an_admissible_expand_size_on_eval",
+        "a_sourceless_expand_size_is_rejected_in_pipe_position_by_the_cli",
         "a_static_non_unit_source_under_a_same_rank_claim_is_a_type_error",
         "a_synthesized_kernel_parameter_collision_emits_no_guard",
         "a_typed_binder_beside_a_projection_does_not_stop_the_hoist",
@@ -489,6 +490,22 @@
         "two_signatures_spelling_one_binder_bind_independently_on_eval"
       ],
       "note": "The DAG evaluator's own guard and binding rows, with inputs bound at the API boundary. No corpus row cites them, because `chelis eval --file` supplies no input bindings and so cannot reach this evaluator for any fixture form; that is the reason the file exists, recorded in its header. Registering the target anyway makes the oracle execute them and makes a rename here fail the fast gate, which is what chelis#1742 added the manifest for."
+    },
+    {
+      "phase": "b",
+      "id": "types_expand_size",
+      "package": "chelis-types",
+      "kind": "test",
+      "file": "crates/chelis-types/tests/issue_530_expand_inline_size_gate.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "issue1791_a_shape_sourced_size_in_pipe_position_still_checks_clean",
+        "issue1791_a_sourceless_size_rejects_in_pipe_position_too",
+        "issue1791_the_direct_spelling_keeps_its_exact_rendering",
+        "issue1791_the_named_axis_form_keeps_its_own_literal_size_diagnostic"
+      ]
     }
   ]
 }

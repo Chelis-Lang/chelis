@@ -179,8 +179,16 @@ const ALLOWED: &[(&str, usize, &str)] = &[
     // axis, or is the negative row that refuses a non-unit one.
     (
         "crates/chelis-cli/tests/runtime_extent_slice_b.rs",
-        27,
-        "same-rank unit-axis broadcasts and their static/runtime non-unit refusals; includes record/nested-record projections, helper and lambda results, aliased/cast shape carriers, and axis/declared-result mismatch controls",
+        29,
+        "same-rank unit-axis broadcasts and their static/runtime non-unit refusals; includes record/nested-record projections, helper and lambda results, aliased/cast shape carriers, and axis/declared-result mismatch controls, plus chelis#1791's pipe-position and direct-position sourceless-size pair",
+    ),
+    // chelis#1791 half B: the section 4.7.2 size gate in pipe position. Each
+    // site broadcasts a unit axis of a rank-1 operand, so none is migration
+    // debt; the file's #530 sites all spell `insert`.
+    (
+        "crates/chelis-types/tests/issue_530_expand_inline_size_gate.rs",
+        3,
+        "the sourceless size written as a pipe stage, the same size written directly, and the shape-sourced pipe-stage control",
     ),
     (
         "crates/chelis-cli/tests/runtime_extent_claim_preparation.rs",

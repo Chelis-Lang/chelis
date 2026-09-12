@@ -209,3 +209,181 @@ fn issue530_cast_literal_size_still_accepted() {
         rep.err().map(|r| messages(&r))
     );
 }
+
+// ---------------------------------------------------------------------------
+// chelis#1791 half B: the same gate in PIPE position.
+//
+// `check_expand_signature` matched the operand's type before applying the size
+// rule, and its `Type::Var(_) | Type::Error(_)` arm returns the applied result
+// type, dropping every later rule. In pipe position the operand is
+// `(var __chelis_pipe)`, still an unresolved `Type::Var`, so one program was
+// rejected written directly and accepted written as a pipe stage: a genuinely
+// sourceless size reached the lowerer, where section 4.7.2 says the checker
+// owes the rejection. A size's provenance is a property of the size expression
+// alone, so the rule now runs before the operand is consulted.
+//
+// Half A of #1791, the bare-name pipe stage that breaks the LOWERER's
+// shape-source resolution for an otherwise fine shape-sourced size, is a
+// separate defect with a separate root cause and is untouched here.
+// ---------------------------------------------------------------------------
+
+/// The issue's reproducer B, whose size `a_dim` is a cast over a bare `int32`
+/// parameter and therefore has no tensor shape source.
+const SOURCELESS_IN_PIPE_POSITION: &str = "sig f: tensor[a, f32] -> int32 -> tensor[a, f32]\n\
+def f(x: tensor[a, f32], k: int32) = {\n  \
+a_dim = k |> cast(int64)\n  \
+[0.25f32] |> to_tensor |> expand(0i32, a_dim)\n\
+}\n";
+
+/// The same program with the `expand` written directly, which is the spelling
+/// that already rejected.
+const SOURCELESS_IN_DIRECT_POSITION: &str = "sig f: tensor[a, f32] -> int32 -> tensor[a, f32]\n\
+def f(x: tensor[a, f32], k: int32) = {\n  \
+a_dim = k |> cast(int64)\n  \
+expand(to_tensor([0.25f32]), 0i32, a_dim)\n\
+}\n";
+
+/// The same pipe chain whose size IS shape-sourced, so nothing should reject.
+const SHAPE_SOURCED_IN_PIPE_POSITION: &str = "sig f: tensor[a, f32] -> tensor[a, f32]\n\
+def f(x: tensor[a, f32]) = {\n  \
+a_dim = cast(shape(x, cast(0, int32)), int64)\n  \
+[0.25f32] |> to_tensor |> expand(0i32, a_dim)\n\
+}\n";
+
+/// chelis#1791's pipe half: the two spellings are one program, so they reject
+/// with the same bytes.
+///
+/// Comparing the whole message list rather than a substring is the point of
+/// this row. A pipe stage that rejected with some other diagnostic would still
+/// be a check/build disagreement fixed by accident, and section 4.7.2 requires
+/// the positions to agree, not merely both to fail.
+///
+/// EVIDENTIARY STATUS: regression test. On `6abca2406` the pipe spelling
+/// checked clean at score 1 while the direct spelling rejected, and the
+/// sourceless size reached the lowerer.
+#[test]
+fn issue1791_a_sourceless_size_rejects_in_pipe_position_too() {
+    let piped = check_ir_program(&surf_to_deep(SOURCELESS_IN_PIPE_POSITION))
+        .expect_err("a sourceless size must reject in pipe position");
+    let direct = check_ir_program(&surf_to_deep(SOURCELESS_IN_DIRECT_POSITION))
+        .expect_err("the direct spelling already rejected");
+    assert_eq!(
+        messages(&piped),
+        messages(&direct),
+        "one program, one diagnostic, whichever position it is written in"
+    );
+    assert!(
+        messages(&piped)
+            .iter()
+            .any(|m| m.contains("no tensor in scope carries it") && m.contains("chelis#469")),
+        "and it is the section 4.7.2 sourceless-size diagnostic: {:?}",
+        messages(&piped)
+    );
+}
+
+/// The direct spelling's own rendering, asserted independently so the row above
+/// cannot pass by making BOTH positions wrong in the same way.
+///
+/// EVIDENTIARY STATUS: disposition lock. Byte-identical on `6abca2406`.
+#[test]
+fn issue1791_the_direct_spelling_keeps_its_exact_rendering() {
+    let direct = check_ir_program(&surf_to_deep(SOURCELESS_IN_DIRECT_POSITION))
+        .expect_err("the direct spelling rejects");
+    assert_eq!(
+        messages(&direct),
+        vec![
+            "`expand` size resolves to the symbolic dimension `a_dim`, but no tensor in scope \
+             carries it. Runtime extents use exact `int64`; source the value from an in-scope \
+             tensor dimension or a `shape(tensor, int32-axis)` read. A bare runtime scalar has \
+             no shape identity to attach to the result yet. Tracked by Chelis-Lang/chelis#469 \
+             (spec/04-type-system.md \u{00a7}4.7.2)"
+                .to_string()
+        ]
+    );
+}
+
+/// The negative twin of the pipe row: hoisting the rule must reject on
+/// PROVENANCE, not on the pipe spelling.
+///
+/// EVIDENTIARY STATUS: disposition lock. Clean on `6abca2406` and still clean.
+#[test]
+fn issue1791_a_shape_sourced_size_in_pipe_position_still_checks_clean() {
+    let rep = check_ir_program(&surf_to_deep(SHAPE_SOURCED_IN_PIPE_POSITION));
+    assert!(
+        rep.is_ok(),
+        "a shape-sourced size is materializable in either position; got {:?}",
+        rep.err().map(|r| messages(&r))
+    );
+}
+
+/// The named-axis form keeps its own section 4.5.3 diagnostic, in BOTH
+/// positions.
+///
+/// Both size rules are hoisted above the operand-type match in the precedence
+/// they already had below it: the named-axis form's compile-time-literal rule
+/// first, because it is the more specific statement of what that form
+/// requires, then the section 4.7.2 provenance rule for every other spelling.
+/// So the direct-position rendering does not move, and the pipe-position
+/// spelling that used to check clean now rejects with that same message.
+///
+/// Keeping the precedence is the whole point. An unconditional hoist of the
+/// provenance rule alone also closes the pipe hole, and was measured to
+/// replace the direct-position rendering for
+/// `insert(b, m, cast(k, int64), n)` with the sourceless one, which is a
+/// silent change to an established diagnostic that nothing here asked for.
+/// The two resolvers differ for the same reason: a named-axis size resolves
+/// no names, a provenance size resolves static bindings, and using one for
+/// both would move a verdict.
+///
+/// EVIDENTIARY STATUS: regression test on the two pipe spellings, disposition
+/// lock on the two direct ones. On `6abca2406` both pipe programs scored 1
+/// with an empty error list, and both direct programs carried this exact
+/// message at scores 0.88 and 0.9142857142857143.
+#[test]
+fn issue1791_the_named_axis_form_keeps_its_own_literal_size_diagnostic() {
+    let needle = "the named-axis insert form requires a compile-time literal size";
+
+    // Direct position, four-argument anchored form: the lock.
+    let anchored = check_ir_program(&surf_to_deep(
+        "def g(b: tensor[n, f32], k: int32) -> tensor[m, n, f32] = \
+         insert(b, m, cast(k, int64), n)\n",
+    ))
+    .expect_err("the named-axis form requires a literal size");
+    assert!(
+        messages(&anchored).iter().any(|m| m.contains(needle)),
+        "the form's own diagnostic is unchanged in direct position: {:?}",
+        messages(&anchored)
+    );
+
+    // Pipe position, three-argument named form: the regression.
+    let named_in_pipe = check_ir_program(&surf_to_deep(
+        "sig f: int32 -> tensor[m, 1, f32]\n\
+         def f(k: int32) = {\n  \
+         a_dim = k |> cast(int64)\n  \
+         [0.25f32] |> to_tensor |> insert(m, a_dim)\n\
+         }\n",
+    ))
+    .expect_err("a sourceless named-axis size must reject in pipe position too");
+    assert!(
+        messages(&named_in_pipe).iter().any(|m| m.contains(needle)),
+        "and it is the SAME diagnostic there, not the provenance one: {:?}",
+        messages(&named_in_pipe)
+    );
+
+    // Pipe position, four-argument anchored form.
+    let anchored_in_pipe = check_ir_program(&surf_to_deep(
+        "sig f: int32 -> tensor[m, 1, f32]\n\
+         def f(k: int32) = {\n  \
+         a_dim = k |> cast(int64)\n  \
+         [0.25f32] |> to_tensor |> insert(m, a_dim, n)\n\
+         }\n",
+    ))
+    .expect_err("the anchored form rejects in pipe position too");
+    assert!(
+        messages(&anchored_in_pipe)
+            .iter()
+            .any(|m| m.contains(needle)),
+        "{:?}",
+        messages(&anchored_in_pipe)
+    );
+}

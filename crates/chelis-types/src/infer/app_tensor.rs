@@ -862,6 +862,56 @@ pub(super) fn check_expand_signature(
         return report_builtin_arity_bare(errors, builtin, "3 or 4 arguments", arg_tys.len());
     }
 
+    // chelis#1791: a size's provenance is a property of the size expression
+    // alone and does not depend on the operand's type, so the rejection runs
+    // here rather than beside the result typing below.
+    //
+    // Below the operand-type match it was unreachable for an unresolved
+    // operand: the `Type::Var(_) | Type::Error(_)` arm returns the applied
+    // result type and drops every later rule. In pipe position the operand is
+    // `(var __chelis_pipe)`, still a `Type::Var`, so the SAME program was
+    // rejected written directly and accepted written as a pipe stage, and a
+    // genuinely sourceless size reached the lowerer as a build error.
+    // `spec/04-type-system.md` §4.7.2 rejects a sourceless runtime scalar AT
+    // CHECK, so all three lanes have to agree on it.
+    //
+    // The size is `arg_exprs.get(2)` in both arities: the four-argument form
+    // is `{builtin}(x, new, size, anchor)`, whose fourth argument is the
+    // anchor.
+    //
+    // Both size rules run here, in the precedence they already had below the
+    // match, so no rendering moves. The named-axis form's §4.5.3
+    // compile-time-literal rule is the more specific statement of what that
+    // form requires and comes first; the §4.7.2 provenance rule serves every
+    // other spelling. A named-axis size resolves no names (`|_| None`), which
+    // is the resolver its original site uses, while a provenance size resolves
+    // static bindings; using one resolver for both would move a verdict.
+    let names_the_new_axis = axis_is_dim_name
+        && arg_exprs.get(1).and_then(extract_int_for_dim).is_none()
+        && arg_exprs.get(1).and_then(symbolic_dim_ref_name).is_some();
+    if names_the_new_axis {
+        if arg_exprs
+            .get(2)
+            .and_then(|expr| fold_static_int_expr(expr, |_| None))
+            .is_none()
+        {
+            return report(
+                errors,
+                named_axis_literal_size_error(builtin, arg_exprs.get(2)),
+            );
+        }
+    } else if size_class == SizeClass::Sourceless
+        && arg_exprs
+            .get(2)
+            .and_then(|expr| fold_static_int_expr(expr, |name| env.static_size_value(name)))
+            .is_none()
+    {
+        return report(
+            errors,
+            sourceless_expand_size_error(builtin, arg_exprs.get(2)),
+        );
+    }
+
     let input_ty = type_for_readonly_check(&arg_tys[0], subst);
     let (input_dims, input_prec) = match input_ty {
         Type::Tensor(dims, prec) => (dims, prec),
@@ -1278,19 +1328,13 @@ pub(super) fn check_named_expand_signature(
         .get(2)
         .and_then(|expr| fold_static_int_expr(expr, |_| None))
     else {
+        // Unreachable from `check_expand_signature`, which applies the same
+        // rule before the operand's type is matched (chelis#1791); kept
+        // because this site needs the folded value and the helper is the one
+        // construction of the rendering.
         return report(
             errors,
-            CheckError::new(
-                CheckErrorKind::DimensionMismatch,
-                format!(
-                    "{builtin}: the named-axis insert form requires a compile-time literal size \
-                 (an Ni64 literal or `cast(N, int64)` constant), got {}; the inserted axis's \
-                 extent must be stampable onto the new named dim at lowering \
-                 (spec/04-type-system.md \u{00a7}4.5.3)",
-                    describe_axis_arg(arg_exprs.get(2)),
-                ),
-                vec![],
-            ),
+            named_axis_literal_size_error(builtin, arg_exprs.get(2)),
         );
     };
     if size < 0 {

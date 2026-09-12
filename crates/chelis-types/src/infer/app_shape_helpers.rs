@@ -207,6 +207,31 @@ pub(super) enum SizeClass {
 /// Factored out so the diagnostic text has a single source of truth.
 /// `size_expr` is the size sub-expression (used only to name a symbolic
 /// dimension when the size is a bare `var`).
+/// The §4.5.3 rejection for a named-axis `insert` whose size is not a
+/// compile-time literal.
+///
+/// Extracted so the check can run both before the operand's type is matched
+/// (chelis#1791: the unresolved-operand arm returns early, so in pipe position
+/// the rule never ran) and at its original site inside
+/// `check_named_expand_signature`, which still needs the folded value. One
+/// construction means the rendering cannot drift between the two positions.
+pub(super) fn named_axis_literal_size_error(
+    builtin: &'static str,
+    size_expr: Option<&deep::Expr>,
+) -> CheckError {
+    CheckError::new(
+        CheckErrorKind::DimensionMismatch,
+        format!(
+            "{builtin}: the named-axis insert form requires a compile-time literal size \
+                 (an Ni64 literal or `cast(N, int64)` constant), got {}; the inserted axis's \
+                 extent must be stampable onto the new named dim at lowering \
+                 (spec/04-type-system.md \u{00a7}4.5.3)",
+            describe_axis_arg(size_expr),
+        ),
+        vec![],
+    )
+}
+
 pub(super) fn sourceless_expand_size_error(
     builtin: &'static str,
     size_expr: Option<&deep::Expr>,

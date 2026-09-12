@@ -240,11 +240,21 @@ const ALLOWED: &[(&str, usize, usize, &str)] = &[
         4,
         "equal, but not fully paired: `shape_override_operand_error`'s list still names only `expand`. Round 2 probed the chelis#731 cascade through both spellings and got one identical witness, because the Error-propagating arm covers it first, so the gap is inert today. Two asymmetries in one file cancel, which is why the reason and not the count carries this",
     ),
+    // chelis#1791 moved the named-axis literal-size rejection's rendering into
+    // `app_shape_helpers.rs`, beside the sourceless one, so both size rules
+    // could run above the operand-type match from one construction each. The
+    // literal moved between these two files; the pair's total is unchanged.
+    (
+        "crates/chelis-types/src/infer/app_shape_helpers.rs",
+        0,
+        1,
+        "asymmetric by construction: this file holds the size REJECTION renderings, and the named-axis one names `insert` because it is telling the user which form requires a literal. No `expand` literal belongs here, since the sourceless rendering names its callee through `{builtin}`",
+    ),
     (
         "crates/chelis-types/src/infer/app_tensor.rs",
         1,
-        10,
-        "the one `expand` is guidance about the `expand`+`mul` lowering of an integer inner product. The `insert`s are the one-shape flag plus the diagnostics that name `insert` as the fix when a program asks `expand` to raise a rank: the named-axis rejection, the four-argument rejection, the axis-range message, and the rank message. Every one of them names its own callee through `{builtin}` and names `insert` as a literal because it is telling the user which other operation to write",
+        9,
+        "the one `expand` is guidance about the `expand`+`mul` lowering of an integer inner product. The `insert`s are the one-shape flag plus the diagnostics that name `insert` as the fix when a program asks `expand` to raise a rank: the four-argument rejection, the axis-range message, and the rank message. Every one of them names its own callee through `{builtin}` and names `insert` as a literal because it is telling the user which other operation to write. The named-axis rejection was one of them until chelis#1791 moved its rendering to `app_shape_helpers.rs`",
     ),
     ("crates/chelis-types/src/infer/common.rs", 1, 1, ""),
     (

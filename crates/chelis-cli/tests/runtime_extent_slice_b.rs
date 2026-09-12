@@ -5842,3 +5842,59 @@ fn checked_arithmetic_operators_reach_the_same_guard_on_c() {
         "and produces the declared shape exactly: {out}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// chelis#1791 half B, through the CLI: `chelis check` must reject a sourceless
+// `expand` size written as a pipe stage, exactly as it rejects the direct
+// spelling.
+//
+// `crates/chelis-types/tests/issue_530_expand_inline_size_gate.rs` holds the
+// checker-level rows and the byte comparison. This row exists because the
+// verdict a user sees is `chelis check`'s, and the issue reports the pipe
+// spelling scoring 1.0 there.
+// ---------------------------------------------------------------------------
+
+/// The issue's reproducer B, whose size is a cast over a bare `int32`
+/// parameter and so has no tensor shape source.
+const SOURCELESS_PIPE_STAGE: &str = "module Repro.BPipe\n\
+sig f: tensor[a, f32] -> int32 -> tensor[a, f32]\n\
+def f(x: tensor[a, f32], k: int32) = {\n  \
+a_dim = k |> cast(int64)\n  \
+[0.25f32] |> to_tensor |> expand(0i32, a_dim)\n\
+}\n";
+
+/// The same program with the `expand` written directly.
+const SOURCELESS_DIRECT: &str = "module Repro.BDirect\n\
+sig f: tensor[a, f32] -> int32 -> tensor[a, f32]\n\
+def f(x: tensor[a, f32], k: int32) = {\n  \
+a_dim = k |> cast(int64)\n  \
+expand(to_tensor([0.25f32]), 0i32, a_dim)\n\
+}\n";
+
+/// expand.sourceless_size.pipe_position: the user-visible verdict.
+///
+/// EVIDENTIARY STATUS: regression test on the pipe spelling, disposition lock
+/// on the direct one. On `6abca2406` `chelis check` scored the pipe spelling
+/// 1.0 with an empty error list while the direct spelling scored
+/// 0.9142857142857143 and carried this diagnostic.
+#[test]
+fn a_sourceless_expand_size_is_rejected_in_pipe_position_by_the_cli() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let needle = "but no tensor in scope carries it";
+    let piped = check(&fixture(&dir, "sourceless_pipe.ch", SOURCELESS_PIPE_STAGE));
+    let piped_out = String::from_utf8_lossy(&piped.stdout).to_string();
+    assert!(
+        piped_out.contains(needle) && piped_out.contains("chelis#469"),
+        "the pipe stage must carry the section 4.7.2 sourceless-size diagnostic: {piped_out}"
+    );
+    assert!(
+        !piped_out.contains("\"score\": 1,"),
+        "and must not score a clean 1.0: {piped_out}"
+    );
+    let direct = check(&fixture(&dir, "sourceless_direct.ch", SOURCELESS_DIRECT));
+    let direct_out = String::from_utf8_lossy(&direct.stdout).to_string();
+    assert!(
+        direct_out.contains(needle) && direct_out.contains("chelis#469"),
+        "the direct spelling keeps its diagnostic: {direct_out}"
+    );
+}

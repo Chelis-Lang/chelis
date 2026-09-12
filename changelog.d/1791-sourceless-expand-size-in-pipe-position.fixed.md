@@ -1,0 +1,1 @@
+A sourceless `expand` or `insert` size is now rejected at check when the operation is written as a pipe stage, matching the direct spelling's diagnostic exactly, instead of passing `chelis check` and failing at lowering (chelis#1791).

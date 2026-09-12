@@ -83,7 +83,14 @@ independent declaration, value and failure assertions. Remaining failure boundar
   checker's provenance walk stopped letting a sourceless operand poison an
   expression that already carried a real shape source, and its operator set now
   agrees with the shared static folder's. A size with no admissible operand at
-  all is still sourceless with its unchanged diagnostic. With #1266/#569
+  all is still sourceless with its unchanged diagnostic. Since chelis#1791 both
+  size rules run before the operand's type is matched, in the precedence they
+  had below it: the unresolved-operand early return dropped them, and a pipe
+  stage's operand is unresolved, so one program was rejected written directly
+  and accepted written as a pipe stage. The named-axis form's §4.5.3
+  literal-size rule goes first, being the more specific statement of what that
+  form requires, so its rendering is the same in both positions; the provenance
+  rule serves every other spelling. With #1266/#569
   admitted beside it, no provenance restriction remains and removing the walk
   itself is all that is left of B2b-2's acceptance half.
 - #1482 needs an actual shape source for a synthesized constant. The
@@ -743,14 +750,15 @@ still reaches the oracle's own
 erased no row: `--phase a` and `--phase b` keep their names, corpora and
 row-transition checks, and each still has to PASS on its own.
 
-The recorded phase-B corpus has 57 rows and NONE of them is short of exit.
+The recorded phase-B corpus has 60 rows and NONE of them is short of exit.
 `--phase b` reads `RUNTIME EXTENT ORACLE: PASS` rather than `RECEIPTS PASS,
 ROWS SHORT OF EXIT`, and it now does so without `--allow-shortfall`. That
 reading, not a hand count, is what to quote. A hand count of the
-JSON's `phase_b` column reaches 3 instead, because the column holds 54
-`executes_exactly` and three other values, none of which is a shortfall:
-`expand.positional.replacement.non_unit_source_static` and
-`shrink.to_end.nonzero_start` are `rejects_exactly`, an exit state, since those
+JSON's `phase_b` column reaches 4 instead, because the column holds 56
+`executes_exactly` and four other values, none of which is a shortfall:
+`expand.positional.replacement.non_unit_source_static`,
+`shrink.to_end.nonzero_start` and `expand.sourceless_size.pipe_position` are
+`rejects_exactly`, an exit state, since those
 programs are SUPPOSED to be rejected and a row that stopped rejecting them would
 be the defect, and `shrink.elementwise_const.build` is a registered
 `typed_unsupported(#1482)`, an owned receipt rather than an unexplained gap.

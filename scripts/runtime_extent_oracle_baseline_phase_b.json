@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "8b9b7fa8b82b7594fa375bc61c849745d91410dff7319556255415c738b5d71d",
+  "corpus_sha256": "ebb537ecb81444ac85f13d367b4a9d55583e7bbfc66a74f87c0ac926c1c1b4ae",
   "rows": [
     {
       "id": "claim.literal.nested_and_unused.eval_c",
@@ -247,6 +247,12 @@
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_shape_derived_bound_keeps_its_declared_result_dimension_on_eval"
+    },
+    {
+      "id": "expand.sourceless_size.pipe_position",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "rejects_exactly",
+      "receipt": "types_expand_size.issue1791_a_sourceless_size_rejects_in_pipe_position_too"
     },
     {
       "id": "guard.local.declaration_order.eval_c",

@@ -734,6 +734,17 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             "cli_slice_b.an_overshooting_shrink_span_reports_the_domain_error_on_c",
         ),
+        # chelis#1791 half B: `check_expand_signature` matched the operand's
+        # type before applying the size rule, and the unresolved-operand arm
+        # returns early, so in pipe position the rule was dropped and a
+        # sourceless size reached the lowerer. One row, not a lane pair: this
+        # is a checker verdict, and no lane varies once check rejects.
+        _row(
+            "expand.sourceless_size.pipe_position",
+            "nonconforming_rejection",
+            "rejects_exactly",
+            "types_expand_size.issue1791_a_sourceless_size_rejects_in_pipe_position_too",
+        ),
     )
     return tuple(sorted(rows, key=lambda row: row.id))
 
