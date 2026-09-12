@@ -362,6 +362,32 @@ that these cannot be swapped. `insert` has no unit-operand precondition.
 Multiple obligations on one axis survive independently; coalesce a duplicate
 representation of the same obligation, not distinct trapping operations.
 
+##### Host declared-result guards (#1771)
+
+The DECLARED-RESULT guard compares a declared literal result extent against
+the tensor the function produced. Its `<op>` slot resolves through a block
+tail, a let binding and a callee body, because [04-NUM-9] requires the lowered
+primitive name and forbids renaming it to the composed source operation. Its
+POSITION is the producing expression inside the guarded function's own body,
+which is what section 4.7 asks for: an effect bound after that expression is
+observed only when the guard passes.
+
+Across a function BOUNDARY it is not what section 4.7 asks for. The guard sits
+at the CALL, so a callee's own effects after the producing operation are
+observed first. Threading a caller's claim into a callee is unbounded on the C
+lane, where a callee is emitted once as a shared function and two callers with
+different declared literals would need two specializations of it; the two lanes
+have to agree on placement, so the interpreter must not thread it either.
+Closing this needs a decision about how a declared-result obligation crosses a
+function boundary at all, which is #1945. The divergence is measured on both
+lanes and locked rather than assumed.
+
+Two shapes name no single producer and
+emit nothing: a branchy tail, whose branches each have their own primitive,
+and a lowered tensor helper, whose DAG carries the literal-result claim
+already. A NAMED declared result is unguarded on this lane in every form,
+because the guard reads a literal declared extent only; that is #1900.
+
 #### C2.6 Atomic integration and wire ordering
 
 B2b-1 first implements literal call claims through an explicit IR witness.
@@ -835,12 +861,12 @@ still reaches the oracle's own
 erased no row: `--phase a` and `--phase b` keep their names, corpora and
 row-transition checks, and each still has to PASS on its own.
 
-The recorded phase-B corpus has 114 rows and none of them is an unexplained
+The recorded phase-B corpus has 120 rows and none of them is an unexplained
 shortfall. `--phase b` reads `RUNTIME EXTENT ORACLE: PASS` rather than
 `RECEIPTS PASS, ROWS SHORT OF EXIT`, and it does so without
 `--allow-shortfall`. That reading, not a hand count, is what to quote. A hand
 count of the JSON's `phase_b` column reaches 27 non-`executes_exactly` values
-against 87 `executes_exactly`, and every one of the twenty-seven is accounted
+against 93 `executes_exactly`, and every one of the twenty-seven is accounted
 for. Twenty-six rows are `rejects_exactly`, an exit state, since those programs
 are SUPPOSED to be rejected and a row that stopped rejecting them would be the
 defect. Nine of the twenty-six predate B2c:

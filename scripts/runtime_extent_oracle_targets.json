@@ -557,6 +557,32 @@
         "the_spellings_the_argument_reader_does_not_resolve_remain_unreached"
       ],
       "note": "chelis#1836. The first phase-b target in `chelis-types`: all seven cells are CHECKER verdicts, so their receipts are unit-level and no lane splits them. Four cover the provenances the issue names (the two `match` destructurings, the record field and chelis#1577's `copy` gate) and three cover chelis#1690's `gather`, `trace` and `scatter_replace` gates; `scatter`, its fourth gated route, was not probed and is not registered. Named with `--exact` rather than running the whole file for the reason `exec_c` gives: the receipt check requires the observed test set to EQUAL the expected one, and `unresolved_operand_matrix.rs` holds thirty-odd chelis#1512 cells this phase does not own. chelis#1805 adds the listed precision-policy receipts, signature-bound controls, lexical-scope and bool-arithmetic pairs, full family-instantiation matrix, and measured residual locks. All are checker verdicts with exact named test receipts."
+    },
+    {
+      "phase": "b",
+      "id": "cli_return_boundary",
+      "package": "chelis-cli",
+      "kind": "test",
+      "file": "crates/chelis-cli/tests/issue_1739_diagonal_runtime_bound.rs",
+      "selector": {
+        "mode": "exact"
+      },
+      "expected": [
+        "a_branchy_tail_is_not_guarded_and_is_residual",
+        "an_effect_inside_the_callee_after_the_producing_operation_is_still_observed",
+        "both_lanes_execute_exactly_on_an_agreeing_block_bodied_return",
+        "both_lanes_execute_exactly_on_an_agreeing_call_bodied_return",
+        "both_lanes_observe_the_following_effect_when_the_guard_passes",
+        "eval_traps_before_an_effect_that_follows_the_producing_operation",
+        "eval_traps_on_a_block_bodied_return",
+        "eval_traps_on_a_call_bodied_return",
+        "the_c_lane_traps_before_an_effect_that_follows_the_producing_operation",
+        "the_c_lane_traps_on_a_block_bodied_return",
+        "the_c_lane_traps_on_a_call_bodied_return",
+        "the_census_reader_finds_the_guard_a_block_tail_moved",
+        "value_aliases_keep_the_guard_at_the_original_producer"
+      ],
+      "note": "chelis#1771's three witness pairs plus their negative parity. Named with `--exact` rather than running the whole file for the reason `exec_c` gives: the receipt check requires the observed test set to EQUAL the expected one, and `issue_1739_diagonal_runtime_bound.rs` also holds chelis#1739's own direct-return rows and the shipped-example census, which this phase does not own. The agreeing twins, the branchy residual lock and the moved-guard census control run here because a trap row proves nothing on its own: without them, a guard that fired on every host-lane return would satisfy every regression row in this target."
     }
   ]
 }

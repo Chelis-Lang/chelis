@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "e7060183d920b6027feef5dcabefe45053160cebf9ccb7b28d0f22c07e7dc4d6",
+  "corpus_sha256": "407d3a26b22fa94cd7ef47b544a4e01f0eec4353e698d4667f5071094f4763af",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -559,6 +559,42 @@
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_eval"
+    },
+    {
+      "id": "return.block_bodied.effect_order.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_return_boundary.the_c_lane_traps_before_an_effect_that_follows_the_producing_operation"
+    },
+    {
+      "id": "return.block_bodied.effect_order.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_return_boundary.eval_traps_before_an_effect_that_follows_the_producing_operation"
+    },
+    {
+      "id": "return.block_bodied.literal.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_return_boundary.the_c_lane_traps_on_a_block_bodied_return"
+    },
+    {
+      "id": "return.block_bodied.literal.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_return_boundary.eval_traps_on_a_block_bodied_return"
+    },
+    {
+      "id": "return.call_bodied.literal.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_return_boundary.the_c_lane_traps_on_a_call_bodied_return"
+    },
+    {
+      "id": "return.call_bodied.literal.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_return_boundary.eval_traps_on_a_call_bodied_return"
     },
     {
       "id": "root.dim_variable.argument_order.c",
