@@ -1484,6 +1484,136 @@ mod tests {
     }
 
     #[test]
+    fn invalid_dtype_at_dropout_kernel_preserves_frames_keys_and_next_draw() {
+        // [05-OP-37]/[05-RNG-1], E1 kernel-boundary evidence. Strict evaluator
+        // Load rejects these tagged inputs earlier; this deliberately calls
+        // the real dropout frame, not a well-typed source evaluation.
+        for prim in [
+            Prim::Bool,
+            Prim::Int8,
+            Prim::Int16,
+            Prim::Int32,
+            Prim::Int64,
+        ] {
+            for count in [0, 4] {
+                for nested in [false, true] {
+                    let body = format!(
+                        "(let {{}} (bind {{}} gradient (app {{}} (grad {{}} (fn {{}} (params {{}} (t {{type: (t-tensor {{}} (d-lit {{}} {count}) (t-prim {{}} f32))}})) (app {{type: (t-tensor {{}} (t-prim {{}} f32))}} (var {{}} sum) (app {{}} (var {{}} dropout) (var {{}} t) (lit {{type: (t-prim {{}} f32)}} 0.5)) (lit {{type: (t-prim {{}} int32)}} 0)))) (var {{}} x))) (app {{}} (var {{}} dropout) (var {{}} x) (lit {{type: (t-prim {{}} f32)}} 0.5)))"
+                    );
+                    let source = if nested {
+                        format!(
+                            "(handle-effect {{effect: random}} (lit {{type: (t-prim {{}} int64)}} 42) {body})"
+                        )
+                    } else {
+                        body
+                    };
+                    let plan = lower_source_with_count(&source, count);
+                    let bad = TensorValue::finalize_from_wide_int(
+                        "load",
+                        prim,
+                        vec![count],
+                        vec![1; count],
+                    )
+                    .unwrap();
+                    let valid = TensorValue::finalize_from_wide(
+                        "load",
+                        Prim::F32,
+                        vec![count],
+                        vec![1.0; count],
+                    )
+                    .unwrap();
+                    let mut state = context();
+                    // A nested seed must preserve an already-advanced parent.
+                    state.state.counter = u64::from(nested);
+                    let snapshot = |frame: &ExecutionFrame<'_>| {
+                        (
+                            frame.context.state.seed,
+                            frame.context.state.counter,
+                            frame.counters.clone(),
+                            frame.scopes.clone(),
+                            frame
+                                .keys
+                                .iter()
+                                .map(|key| key.map(|key| (key.seed, key.ordinal)))
+                                .collect::<Vec<_>>(),
+                        )
+                    };
+                    {
+                        let mut frame = plan.frame(&mut state).unwrap();
+                        let mut calls = 0;
+                        for step in plan.steps_for_inspection() {
+                            match *step {
+                                Step::Control { control, .. } => frame.control(control).unwrap(),
+                                Step::Node(node) => {
+                                    let RiscOp::Dropout { rate, seed } =
+                                        plan.dag.get(node).unwrap().op
+                                    else {
+                                        continue;
+                                    };
+                                    let before = snapshot(&frame);
+                                    assert_eq!(
+                                        frame.dropout(node, &bad, rate, seed).unwrap_err(),
+                                        "dropout requires a floating tensor"
+                                    );
+                                    assert_eq!(
+                                        snapshot(&frame),
+                                        before,
+                                        "{prim:?}, count={count}, nested={nested}, call={calls}"
+                                    );
+                                    let result = frame.dropout(node, &valid, rate, seed).unwrap();
+                                    let expected = if calls < 2 {
+                                        [0.0f64, 2.0, 0.0, 0.0]
+                                    } else {
+                                        [2.0f64, 0.0, 0.0, 0.0]
+                                    };
+                                    assert_eq!(result.prim(), Prim::F32);
+                                    assert_eq!(result.shape, [count]);
+                                    assert_eq!(
+                                        result
+                                            .to_f64_lossy_vec()
+                                            .iter()
+                                            .map(|value| value.to_bits())
+                                            .collect::<Vec<_>>(),
+                                        expected[..count]
+                                            .iter()
+                                            .map(|value| value.to_bits())
+                                            .collect::<Vec<_>>()
+                                    );
+                                    calls += 1;
+                                }
+                            }
+                        }
+                        assert_eq!(calls, 3, "forward, replay, then next forward");
+                        assert_eq!(
+                            frame
+                                .keys
+                                .iter()
+                                .map(|key| key.map(|key| (key.seed, key.ordinal)))
+                                .collect::<Vec<_>>(),
+                            [Some((42, 0)), Some((42, 1))]
+                        );
+                        assert_eq!(frame.scopes, [ScopeId(0)]);
+                        assert_eq!(frame.counters, if nested { vec![0, 2] } else { vec![0] });
+                    }
+                    let preserved = if nested { 1 } else { 2 };
+                    assert_eq!(state.state().seed, Some(42));
+                    assert_eq!(state.state().counter, preserved);
+                    let expected = if nested {
+                        vec![2.0, 0.0, 0.0, 0.0]
+                    } else {
+                        vec![2.0, 2.0, 0.0, 0.0]
+                    };
+                    assert_eq!(
+                        run(&fixture(&[0.5], 4, false), &mut state, 4).unwrap(),
+                        expected
+                    );
+                    assert_eq!(state.state().counter, preserved + 1);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn accepted_empty_and_zero_rate_calls_each_enter_once() {
         for count in [0, 1, 32] {
             let mut context = context();
@@ -1551,6 +1681,10 @@ mod tests {
     }
 
     fn lower_source(source: &str) -> EvaluationPlan {
+        lower_source_with_count(source, 32)
+    }
+
+    fn lower_source_with_count(source: &str, count: usize) -> EvaluationPlan {
         let expr = chelis_deep::parser::parse_str(source)
             .unwrap()
             .pop()
@@ -1558,7 +1692,7 @@ mod tests {
         let inputs = [(
             "x".into(),
             TensorType {
-                dims: vec![DimInfo::Lit(32)],
+                dims: vec![DimInfo::Lit(count)],
                 precision: Prim::F32,
             },
         )]
