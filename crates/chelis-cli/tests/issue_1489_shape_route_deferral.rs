@@ -261,6 +261,14 @@ fn an_operand_that_never_resolves_is_still_rejected() {
 /// mode became a RUNTIME abort in both the C and eval lanes instead of a type
 /// error. `spec/04-type-system.md` §3.2 forbids exactly that: "the verdict never
 /// depends on the order in which inference reaches the operand".
+///
+/// READ THIS AS A TRIPWIRE, NOT A FEATURE PIN. A build predating this change
+/// reports the same message, because `main`'s eager arm reaches the mode check
+/// before it rejects the unresolved operand. So this test passing does not by
+/// itself show that the deferred path validates the mode; what it catches is
+/// the round-1 implementation, which replayed only the helper tail and dropped
+/// the check. `every_shape_route_agrees_deferred_and_eager` is the pin that
+/// does fail on a pre-change build. Noted by review round 4.
 #[test]
 fn a_deferred_scatter_still_validates_its_mode() {
     let call =
