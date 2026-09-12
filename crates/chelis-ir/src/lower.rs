@@ -2018,7 +2018,7 @@ fn try_lower_subexpr_program_with_ordered_inputs_impl(
 pub(crate) fn try_lower_staged_host_region(
     expr: &Expr,
     params: &[crate::host::HostParam],
-    program: &CheckedProgram,
+    program: &crate::host::HostLoweringSession<'_>,
     context: &SubexprLoweringContext,
     result_claim: &TensorType,
     random: Option<crate::host::RandomLoweringState>,
@@ -6090,7 +6090,7 @@ fn permuted_tensor_type(ty: &TensorType, axes: &[usize]) -> TensorType {
 }
 
 struct LowerCtx<'program> {
-    host_program: Option<&'program CheckedProgram>,
+    host_program: Option<&'program crate::host::HostLoweringSession<'program>>,
     host_sources: Vec<crate::host::staged::HostSource>,
     host_value_types: BTreeMap<NodeId, crate::host_type_state::HostTypeTerm>,
     host_external_inputs: BTreeMap<NodeId, String>,

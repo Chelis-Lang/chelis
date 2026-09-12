@@ -14,7 +14,7 @@
 //! four others are regression tests, watched returning `Err` (a failed kernel
 //! lowering) on the tree without the walker and `Ok(false)` with it.
 
-use chelis_ir::host::host_def_kernel;
+use chelis_ir::host::{HostLoweringSession, host_def_kernel};
 
 fn checked_surf(src: &str) -> chelis_types::CheckedProgram {
     let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
@@ -40,7 +40,7 @@ fn checked_surf(src: &str) -> chelis_types::CheckedProgram {
 
 fn decision(src: &str, name: &str) -> Result<bool, String> {
     let program = checked_surf(src);
-    host_def_kernel(&program, name, None)
+    host_def_kernel(&HostLoweringSession::new(&program), name, None)
         .map(|kernel| kernel.is_some())
         .map_err(|diagnostic| diagnostic.to_string())
 }
@@ -122,7 +122,9 @@ fn tensor_helper_retains_declaring_parameter_order() {
             counter: 9,
         }),
     ] {
-        let kernel = host_def_kernel(&program, "f", random).unwrap().unwrap();
+        let kernel = host_def_kernel(&HostLoweringSession::new(&program), "f", random)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             kernel
                 .inputs

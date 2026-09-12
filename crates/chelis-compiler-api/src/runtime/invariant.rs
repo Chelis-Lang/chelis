@@ -822,7 +822,7 @@ pub(crate) fn revalidate_adt_value(
         type_env: UnordMap::new(),
         adt_fields: adt_fields.clone(),
         tensor_bindings: &empty_tensors,
-        program: None,
+        session: None,
         def_kernels: UnordMap::new(),
         transcript: Vec::new(),
         transcript_capture: None,
