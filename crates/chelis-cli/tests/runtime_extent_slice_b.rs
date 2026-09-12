@@ -5975,8 +5975,11 @@ fn a_named_bystander_expand_with_no_consumer_agrees_across_lanes() {
         !out.contains("numeric trap"),
         "and the trap the prepared type used to provoke is gone: {out}"
     );
-    let (eval_ok, eval_out) =
-        eval_result(&dir, "bystander_nocons_eval.ch", NAMED_BYSTANDER_NO_CONSUMER);
+    let (eval_ok, eval_out) = eval_result(
+        &dir,
+        "bystander_nocons_eval.ch",
+        NAMED_BYSTANDER_NO_CONSUMER,
+    );
     assert!(eval_ok, "{eval_out}");
     assert!(
         eval_out.contains(expected),
@@ -5999,7 +6002,9 @@ fn the_spellings_that_never_tripped_the_bystander_guard_stay_green() {
     let (ok, out) = c_run_result(&dir, "bystander_lit_c", NAMED_BYSTANDER_LITERAL_SIZE);
     assert!(ok, "{out}");
     assert!(
-        out.contains("out = tensor(shape=[2, 4], data=[1.0, 2.0, 3.0, 4.0, 10.0, 12.0, 14.0, 16.0])"),
+        out.contains(
+            "out = tensor(shape=[2, 4], data=[1.0, 2.0, 3.0, 4.0, 10.0, 12.0, 14.0, 16.0])"
+        ),
         "{out}"
     );
     let (ok, out) = c_run_result(&dir, "bystander_rank1_c", NAMED_BYSTANDER_RANK_ONE);
