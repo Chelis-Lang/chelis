@@ -1199,6 +1199,11 @@ Three deliberate boundaries of this rule:
 
 A wildcard dimension unifies with any other dimension (like a variable) but is NOT generalized — it's a permanent "I don't know." To restore named-dimension checking after a wildcard, use an explicit annotation.
 
+The spelling `*` does not declare a dimension binder. Distinct wildcard
+occurrences impose no equality on their runtime extents, including across
+axes or parameters of one function; genuine repeated names still impose
+their declared equality obligations (§4.7).
+
 #### 4.5.1 Rank-Uniform `List[tensor[...]]` Elements
 
 A `List[T]` is statically homogeneous in `T`, and a tensor's rank is part
