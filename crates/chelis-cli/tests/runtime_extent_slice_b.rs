@@ -6943,10 +6943,7 @@ fn a_resolved_named_claim_the_inlined_body_refutes_is_rejected_on_both_lanes() {
     both_lanes_execute(
         &dir,
         "named_resolved_ok",
-        &resolved_named_claim_source(
-            "1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32",
-            "6",
-        ),
+        &resolved_named_claim_source("1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32", "6"),
         "shape=[6]",
     );
 }
@@ -7070,7 +7067,10 @@ fn a_literal_parameter_extent_keeps_the_checkers_verdict_on_both_lanes() {
         ("eval", eval_ok, &eval_out),
         ("c", build.status.success(), &c_out),
     ] {
-        assert!(!ok, "{lane}: a literal-parameter refutation is refused: {out}");
+        assert!(
+            !ok,
+            "{lane}: a literal-parameter refutation is refused: {out}"
+        );
         assert!(
             out.contains("DimensionMismatch")
                 && out.contains(
