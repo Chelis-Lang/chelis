@@ -133,7 +133,7 @@ All references below are against the baseline named above; paths omit `crates/`.
 | Checker bindings | `chelis-types/src/env.rs:103,387,394,405,642`: ordinary, constructor, lexical bindings and instantiation; `adt.rs:134` constructor schemes | One private binding product pairs semantic scheme with value-root/template evidence. Shadowing, cloning and constructor lookup must move both together; no stale side table keyed only by spelling. |
 | Local utilities | Public `Env::bind`, `lookup`, `instantiate`, `generalize` and Env serde | No public accepted-program entry currently takes Env. They are low-level utilities, not a bypass into `CheckedProgram`; keep this distinction. Internal trusted builtin/declaration construction must explicitly establish its evidence. |
 | Live checker context | `chelis-types/src/context.rs:118,197`; `infer/program.rs:483,644,794,967` builders, layering, checking | Preserve relations and root allocation high-water marks through resume/base extension. A naked Scheme cannot recreate a checked binding. |
-| Direct serde | `TypeEnv` derives Deserialize; `check_ir_with_context` resumes it without rechecking library bodies (`infer/program.rs:1012`) | This IS checker-evidence ingress, unlike display. Remove raw snapshot admission or provide validated source-backed admission; absent relations must reject. Direct Env/Scheme deserialization must not be promoted into that authority. |
+| Direct serde | `TypeEnv` derives Deserialize; `check_ir_with_context` resumes it without rechecking library bodies (`infer/program.rs:1012`) | This IS checker-evidence ingress, unlike display. Settle its trust policy: faithful trusted-snapshot transport or source-backed admission under an untrusted-payload boundary; absent relations must reject. Direct Env/Scheme deserialization must not be promoted into that authority. |
 | Dependency and stdlib caches | `chelis-compiler-api/src/library_cache.rs:185,215`; `stdlib_cache.rs:137,184`; payload versions 14/18 in `cache_envelope.rs:80,86` | Both deserialize TypeEnv plus CheckedProgram through `validate_cached_library`; bump owner versions/keys and re-establish relation authority, including direct serde of these wrappers. |
 | Compiled contexts | `chelis-compiler-api/src/context.rs:179,205,271,792,857`; version 20 | Disk/encode/decode share an envelope, but the public Deserialize implementation also exists. Guard both, not only `decode`; preserve proof pairing, re-lowering and identity checks. |
 | Workers and bindings | `chelis-cli/src/main.rs:6823,8892`: tempfile encode/decode and package-root check; `chelis-python/src/lib.rs:869`: context loader | Workers consume the same accepted context, not a separate raw TypeEnv route. Invalid explicit handoffs stay fatal; absence may use the existing source-build path. |
@@ -146,7 +146,7 @@ relations for bodies. Private witness storage may reuse DimVar allocation, but
 must retain a distinct role in free-variable, name-query and generalization
 operations. Roots and relation templates are not ordinary quantifiers.
 
-### Decode authority: selected safe baseline, not an approved wire layout
+### Decode authority: admission alternatives, not an approved wire layout
 
 Structural validation can check occurrence paths, owner/kind/name agreement,
 references, allocation bounds, and fresh/captured partitions. It cannot prove
@@ -156,31 +156,39 @@ matching LibraryProofIds proves neither that omission property nor inference.
 effects/linearity, not dimension re-inference; re-lowering checks another
 obligation and does not fill this gap.
 
-The smallest defensible admission baseline is source-backed rebuilding through
-the existing checked-library builders. Serialized templates are not independent
-authority: recompute and use checker-produced bindings, or compare the complete
-canonical relation product before reusing one. In-memory checked contexts remain
-cheaply reusable. Source-free direct TypeEnv snapshots must not resume checking;
-removing their Deserialize admission is a deliberate Rust embedding/serialization
-compatibility change, not a shell source-API change. Do not promise unchanged
-embedding behavior. There is no versionless empty-ledger fallback.
+One sufficient option under an untrusted-payload boundary is source-backed
+rebuilding through the existing checked-library builders. Under that policy,
+serialized templates are not independent authority: recompute and use
+checker-produced bindings, or compare the complete canonical relation product
+before reusing one. In-memory checked contexts remain cheaply reusable. Selecting
+this policy would exclude source-free direct TypeEnv snapshots from resuming
+checking; removing their Deserialize admission would be a deliberate Rust
+embedding/serialization compatibility change, not a shell source-API change.
+The information-loss witness does not establish that this option is minimal or
+that faithful serialization of a trusted checker snapshot is insufficient.
+Retaining trusted-snapshot transport is an alternative requiring explicit
+producer/decoder trust assumptions and complete preservation of private binding
+products. Settle that boundary before choosing either policy; do not promise
+unchanged embedding behavior. Neither option permits a versionless empty-ledger
+fallback.
 
 Do not equate retained CheckedProgram bodies with authentic authored source.
 Both `exprs()` and `annotated_exprs()` return the same annotated vector
 (`chelis-types/src/infer/checked.rs:1689`). Inferred type metadata and authored
 signature scope must not be mistaken for interchangeable source on reconstruction.
-The safe baseline re-prepares from available package source, or transports an
+The source-backed option re-prepares from available package source, or transports an
 explicit original prepared-source recipe with its declaration/signature context
 through the existing owner envelope. The exact representation is future work,
 not invented here. A layered library needs its base plus extension and their
 scope context; old proof IDs cannot simply be recomputed from concatenated
 annotated bodies (the semantic validator documents that distinction).
 
-Direct payload-only rebuilds without this source authority reject. Workers must
-receive sufficient source recipe or an already admitted live context; rebuilding
-per process has a performance cost that must be measured, not hidden by trusting
-unchecked relation bytes. Faster proof-carrying snapshot admission would require
-a separate justified validator, not a digest substitute.
+Under the source-backed option, direct payload-only rebuilds without this source
+authority reject. Workers would need a sufficient source recipe or an already
+admitted live context; rebuilding per process has a performance cost that must
+be measured before selecting that option. Trusted-snapshot transport instead
+relies on its stated trust boundary; structural checks or a digest must not be
+described as proving semantic completeness of an untrusted snapshot.
 
 ## Mergeable implementation sequence
 
