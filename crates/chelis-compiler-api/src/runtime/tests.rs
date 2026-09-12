@@ -65,7 +65,14 @@ fn checked_surf(source: &str) -> CheckedProgram {
 #[test]
 fn issue_1829_interpreter_entry_bounds_kernel_decision_probes() {
     const DEPTH: usize = 12;
-    // A large stack so that an unarmed base run reports the probe COUNT rather
+    // The chain is TENSOR-returning, and that is what keeps the `probes > 0`
+    // guard below meaningful. chelis#1835 made the callee summary probe the
+    // last host-lane predicate asked, after the declared result type has had
+    // its chance, so a SCALAR-returning chain now reaches no probe at all and
+    // this fixture would assert a bound on zero work. A tensor result is the
+    // shape that still asks the question the receipt is counting.
+    //
+    // A large stack so that an unmemoized run reports the probe COUNT rather
     // than overflowing: the probe recurses once per call-graph level per call
     // site, and the default test stack aborts the whole process at depth 12.
     std::thread::Builder::new()
@@ -75,12 +82,17 @@ fn issue_1829_interpreter_entry_bounds_kernel_decision_probes() {
             let mut source = String::new();
             for level in 0..DEPTH {
                 source.push_str(&format!(
-                    "def f{level}(x: int64) -> int64 = add(f{next}(x), f{next}(x))\n",
+                    "def f{level}(x: tensor[4, f32]) -> tensor[4, f32] = \
+                     add(f{next}(x), f{next}(x))\n",
                     next = level + 1
                 ));
             }
-            source.push_str(&format!("def f{DEPTH}(x: int64) -> int64 = x\n"));
-            source.push_str("result = f0(cast(1, int64))\n");
+            source.push_str(&format!(
+                "def f{DEPTH}(x: tensor[4, f32]) -> tensor[4, f32] = mul(x, x)\n"
+            ));
+            source
+                .push_str("seed = reshape(insert(to_tensor([cast(1.0, f32)]), 0, 4i64), [4i64])\n");
+            source.push_str("result = f0(seed)\n");
 
             let checked = checked_surf(&source);
             let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
@@ -101,8 +113,9 @@ fn issue_1829_interpreter_entry_bounds_kernel_decision_probes() {
                 .get("result")
                 .map(render_value)
                 .expect("#1829 fixture binds `result`");
+            eprintln!("#1829 entry depth={DEPTH} definitions={definitions} probes={probes}");
             assert_eq!(
-                result, "4096",
+                result, "tensor(shape=[4], data=[4096.0, 4096.0, 4096.0, 4096.0])",
                 "#1829 fixture must still compute the right answer"
             );
             assert!(
