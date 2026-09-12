@@ -42,6 +42,7 @@ report.
 | B2b-1 literal claim transport | #1668 (`84ae9bd7f`) | explicit caller-axis witnesses and invocation dependencies retain literal claims through direct, nested and discarded calls |
 | exact wire migration | #1664 (`ad9b6c248`) | WireDag v9 uses exact numeric codecs and validated fixed-width references; stdlib/library/context caches are 16/12/18 |
 | helper guard order | #1688 (`4f3812e2f`) | declared helper input order and one shared IR comparison schedule; the 50-case exported/binding/main oracle passes |
+| B2h memo representation | #1910 (chelis#1835) | the kernel decision's per-program facts are fields of a `HostLoweringSession` bound to its program; the thread-local flag, the pointer keys and the arming guard are deleted, and the callee summary probe is the last host-lane predicate asked |
 
 The extent carrier is no longer a display name, and sources/classes already
 exist. What remains is preservation of a claim and its caller witnesses,
@@ -686,6 +687,24 @@ host def body binds to a local before the tensor helper is attempted, and the
 helper takes that local as its own tensor input. That IS materializing the
 field's tensor as the actual shape input, and it is the prologue-local rewrite
 #1266 reports downstream applying by hand.
+
+One decision, asked once. The shared decision is derived once per program per
+host-lowering session, and the "once" is a property of the representation
+rather than of a caller's discipline: the per-program facts behind the
+decision, the program's definitions and call graph among them, are fields of
+a `HostLoweringSession` that borrows the program they describe, so every
+caller establishes one and none can read a fact derived from a different
+program. The earlier arrangement keyed those facts on the program's address
+and gated them on a thread-local flag, which three entry points grew into and
+the third never armed (#1829); a flag can be forgotten at the next entry
+point, and a type cannot. What follows from that, and is worth stating because
+it is the reason a cheaper second predicate was rejected: nothing may answer
+"is this def a kernel" except this decision. A syntactic surrogate for the
+callee summary probe would be a second definition of one question, and the two
+would drift. The probe may be asked LATER, and now is, last among the
+host-lane predicates, because every cheaper predicate that answers first is a
+callee lowering not run; asking it earlier changed no answer and cost a
+lowering per non-tensor definition (#1835).
 
 The binding is not unconditional, and both exits are loud rather than wrong. A
 base name an inner binder also rebinds keeps ALL of its projections where they
