@@ -868,6 +868,12 @@ impl Subst {
         let mut tvars = UnordSet::default();
         let mut dvars = UnordSet::default();
         let mut rvars = UnordSet::default();
+        // Almost every `generalize` runs with an empty ledger -- a suspended
+        // operand decision is the exception, not the rule -- so leave without
+        // applying the substitution or walking a type in that case.
+        if ledger.is_empty() {
+            return (tvars, dvars, rvars);
+        }
         for (_, gate) in ledger.iter() {
             let Some(result) = gate.result() else {
                 continue;

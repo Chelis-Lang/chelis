@@ -146,11 +146,16 @@ fn every_use_of_a_let_bound_deferred_result_is_the_same_type() {
         \x20 apply_n(fn (v) -> {{ g = copy(v)\n\
         \x20   (g, g) }}, t)\n"
     );
-    let found = messages(&check_json(&source));
+    let report = check_json(&source);
     assert!(
-        !found.is_empty(),
+        !messages(&report).is_empty(),
         "both components are the same `g`, so they cannot be both 4 x 3 and \
          100 x 3; a clean report means each use got its own instance"
+    );
+    assert!(
+        kinds(&report).iter().any(|k| k == "DimensionMismatch"),
+        "expected a DimensionMismatch between the two uses; got {:?}",
+        messages(&report)
     );
 }
 
@@ -176,12 +181,17 @@ fn a_partly_unified_pending_result_keeps_its_dims_monomorphic() {
         \x20 apply_n(fn (v) -> {{ g = id_dim(copy(v))\n\
         \x20   g }}, t)\n"
     );
-    let found = messages(&check_json(&source));
+    let report = check_json(&source);
     assert!(
-        !found.is_empty(),
+        !messages(&report).is_empty(),
         "`g` is 4 x 3 once `v` settles, so a declared 100 x 3 is FALSE; a clean \
          report means the dim variable the pending result was partly unified \
          with got generalized"
+    );
+    assert!(
+        kinds(&report).iter().any(|k| k == "DimensionMismatch"),
+        "expected a DimensionMismatch against the declared 100 x 3; got {:?}",
+        messages(&report)
     );
 }
 
@@ -199,12 +209,18 @@ fn a_rank_polymorphic_pending_result_keeps_its_rank_monomorphic() {
         \x20 apply_n(fn (v) -> {{ g = id_rank(copy(v))\n\
         \x20   g }}, t)\n"
     );
-    let found = messages(&check_json(&source));
+    let report = check_json(&source);
     assert!(
-        !found.is_empty(),
+        !messages(&report).is_empty(),
         "`g` is rank 2 once `v` settles, so a declared rank-3 result is FALSE; a \
          clean report means the rank variable the pending result was partly \
          unified with got generalized"
+    );
+    assert!(
+        kinds(&report).iter().any(|k| k == "DimensionMismatch"),
+        "expected a DimensionMismatch against the declared rank-3 result; got \
+         {:?}",
+        messages(&report)
     );
 }
 
@@ -225,11 +241,17 @@ fn a_dtype_polymorphic_pending_result_keeps_its_dtype_monomorphic() {
             \x20   g }}, t)\n"
         )
     };
+    let report = check_json(&source("tensor[4, 3, f64]"));
     assert!(
-        !messages(&check_json(&source("tensor[4, 3, f64]"))).is_empty(),
+        !messages(&report).is_empty(),
         "`g` is f32 once `v` settles, so a declared f64 result is FALSE; a clean \
          report means the precision variable the pending result was partly \
          unified with got generalized"
+    );
+    assert!(
+        kinds(&report).iter().any(|k| k == "TypeMismatch"),
+        "expected a TypeMismatch against the declared f64 result; got {:?}",
+        messages(&report)
     );
     assert!(
         messages(&check_json(&source("tensor[4, 3, f32]"))).is_empty(),

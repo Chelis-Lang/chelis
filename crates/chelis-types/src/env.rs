@@ -813,8 +813,19 @@ impl Env {
         }
     }
 
-    /// Exact pre-#1207 environment-sweep implementation. It is compiled only
-    /// into tests and the temporary parity-oracle feature.
+    /// The pre-#1207 environment-sweep implementation, kept as the reference
+    /// the parity assertion in `generalize` checks the level-based path
+    /// against. It is compiled only into tests and the temporary parity-oracle
+    /// feature.
+    ///
+    /// It is a reference for *which variables the environment leaves free*, not
+    /// for which of those may be quantified. Two exclusions are therefore
+    /// mirrored here deliberately rather than inherited: a recursive group's
+    /// instantiation variables (`tvar_pinned`) and, since chelis#1489, a
+    /// pending operand gate's result variables. Both are properties of the
+    /// inference state that no environment sweep can observe, so omitting
+    /// either here would make the oracle disagree with a correct production
+    /// path. Keep the two sets of exclusions in step.
     #[cfg(feature = "generalize-sweep-oracle")]
     fn generalize_by_sweep(&self, ty: &Type, subst: &Subst) -> Scheme {
         let ty = subst.apply(ty);
