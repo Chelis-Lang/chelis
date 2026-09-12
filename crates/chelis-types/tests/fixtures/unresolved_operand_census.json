@@ -768,16 +768,16 @@
     },
     {
       "file": "checked.rs",
-      "function": "shape_operand_awaits_binding",
-      "ordinal": 1,
+      "function": "resolve_deferred_type_derivations",
+      "ordinal": 2,
       "pattern": "Type::Var(_)",
       "disposition": "not_a_route"
     },
     {
       "file": "checked.rs",
-      "function": "shape_operand_awaits_lambda_binding",
+      "function": "shape_operand_awaits_binding",
       "ordinal": 1,
-      "pattern": "Type::Var(current)",
+      "pattern": "Type::Var(_)",
       "disposition": "not_a_route"
     },
     {
@@ -869,6 +869,13 @@
       "function": "check_literal_pattern",
       "ordinal": 1,
       "pattern": "resolved , Type::Var(_) | Type::Error(_)",
+      "disposition": "not_a_route"
+    },
+    {
+      "file": "expr_pattern.rs",
+      "function": "pattern_bindings",
+      "ordinal": 1,
+      "pattern": "Type::Var(_)",
       "disposition": "not_a_route"
     },
     {
