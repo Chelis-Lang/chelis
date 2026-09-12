@@ -471,14 +471,13 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
             transcript: Vec::new(),
         })?;
     // chelis#1829: the kernel-decision probe behind `def_kernel` expands the
-    // call graph as a tree and is memoized only while a host-lowering scope is
-    // armed. Before #1693 this program held new code only, so an imported name
-    // was not found and never probed; it now composes the library in, so every
-    // imported definition takes that path. Hold one scope for the whole
-    // evaluation, declared after `kernel_program` so it drops first, while the
-    // program it keys on is still alive.
+    // call graph as a tree, so it must be derived once per definition for the
+    // whole evaluation. Before #1693 this program held new code only, so an
+    // imported name was not found and never probed; it now composes the
+    // library in, so every imported definition takes that path. The session
+    // `ctx` owns below is what holds those facts, and the borrow checker, not
+    // a declaration order, is what keeps it inside `kernel_program`'s life.
     let eval_program = kernel_program.as_ref().unwrap_or(program);
-    let _host_lowering_scope = chelis_ir::host::begin_host_lowering_cache_scope(eval_program);
 
     // Lowered classification. A new-code value binding that references a
     // library function (e.g. `imported_val = lib_add(20, 22)`) must
@@ -577,7 +576,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         type_env,
         adt_fields,
         tensor_bindings,
-        program: Some(eval_program),
+        session: Some(chelis_ir::host::HostLoweringSession::new(eval_program)),
         def_kernels: UnordMap::new(),
         transcript: Vec::new(),
         transcript_capture: crate::transcript_capture::current_transcript_capture(),
@@ -1012,12 +1011,17 @@ struct EvalContext<'a> {
     type_env: UnordMap<String, Expr>,
     adt_fields: UnordMap<String, Vec<String>>,
     tensor_bindings: &'a UnordMap<String, RuntimeTensorValue>,
-    /// The checked program under evaluation. The kernel decision for a def
-    /// application is read off it through `chelis_ir::host::host_def_kernel`
-    /// (chelis#1277 B2h), so eval and C answer "is this def a kernel" from one
-    /// function. `None` only for the invariant-predicate evaluator, which has
-    /// no program and therefore no kernels: it interprets every application.
-    program: Option<&'a CheckedProgram>,
+    /// The host-lowering session over the checked program under evaluation.
+    /// The kernel decision for a def application is read through it by
+    /// `chelis_ir::host::host_def_kernel` (chelis#1277 B2h), so eval and C
+    /// answer "is this def a kernel" from one function. One session serves the
+    /// whole evaluation, so each definition's decision is derived once
+    /// (chelis#1835); before that the memo behind it was gated on a
+    /// thread-local flag this entry never armed, and every applied definition
+    /// re-expanded the call graph (chelis#1829). `None` only for the
+    /// invariant-predicate evaluator, which has no program and therefore no
+    /// kernels: it interprets every application.
+    session: Option<chelis_ir::host::HostLoweringSession<'a>>,
     /// Per-def kernel decision: `None` is the host lane, `Some` a kernel whose
     /// DAG draws no Random and is reused across applications. A Random-drawing
     /// kernel is re-lowered per application and never cached (see

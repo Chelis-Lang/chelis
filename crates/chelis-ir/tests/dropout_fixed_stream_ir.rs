@@ -19,9 +19,13 @@ fn typed_rate_plan(source: &str) -> Result<EvaluationPlan, String> {
         seed: Some(42),
         counter: 0,
     });
-    let product = chelis_ir::host::host_def_evaluation_plan(&checked, "sample", &context)
-        .map_err(|error| error.to_string())?
-        .ok_or("no tensor kernel")?;
+    let product = chelis_ir::host::host_def_evaluation_plan(
+        &chelis_ir::host::HostLoweringSession::new(&checked),
+        "sample",
+        &context,
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or("no tensor kernel")?;
     if product.profile() != chelis_ir::evaluation::EvaluationProfile::FixedControl {
         return Err(format!("unexpected profile: {:?}", product.profile()));
     }
@@ -279,9 +283,13 @@ fn staged_claim_failure_commits_the_preceding_draw_and_reuse_keeps_live_ordinals
         seed: Some(42),
         counter: 5,
     });
-    let product = chelis_ir::host::host_def_evaluation_plan(&checked, "sample", &context)
-        .unwrap()
-        .unwrap();
+    let product = chelis_ir::host::host_def_evaluation_plan(
+        &chelis_ir::host::HostLoweringSession::new(&checked),
+        "sample",
+        &context,
+    )
+    .unwrap()
+    .unwrap();
     let staged = product.kernel_for_inspection().staged.as_ref().unwrap();
     let execution = product
         .staged_plan()
@@ -598,9 +606,13 @@ fn local_movement_failure_occurs_after_the_earlier_entered_draw() {
         seed: Some(42),
         counter: 5,
     });
-    let kernel = chelis_ir::host::host_def_evaluation_plan(&checked, "sample", &context)
-        .unwrap()
-        .unwrap();
+    let kernel = chelis_ir::host::host_def_evaluation_plan(
+        &chelis_ir::host::HostLoweringSession::new(&checked),
+        "sample",
+        &context,
+    )
+    .unwrap()
+    .unwrap();
     let plan = kernel
         .plan()
         .expect("fixed-control helper has execution transport");
@@ -626,9 +638,13 @@ fn explicit_drop_in_gradient_retains_draws_and_verified_terminal_ownership() {
         seed: Some(42),
         counter: 0,
     });
-    let kernel = chelis_ir::host::host_def_evaluation_plan(&checked, "sample", &context)
-        .unwrap()
-        .unwrap();
+    let kernel = chelis_ir::host::host_def_evaluation_plan(
+        &chelis_ir::host::HostLoweringSession::new(&checked),
+        "sample",
+        &context,
+    )
+    .unwrap()
+    .unwrap();
     let plan = kernel.plan().unwrap();
     let dag = plan.dag_for_inspection();
     assert_eq!(

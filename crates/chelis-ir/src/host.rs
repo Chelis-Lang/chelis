@@ -6,7 +6,6 @@ use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
-use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -32,30 +31,12 @@ thread_local! {
     // recursive/mutually recursive definitions — the specialized body would
     // re-encounter the same call and inline forever.
     static INLINING_STACK: RefCell<UnordSet<String>> = RefCell::new(UnordSet::new());
-    static TYPE_POLYMORPHIC_FN_CACHE: RefCell<UnordMap<(usize, String), bool>> =
-        RefCell::new(UnordMap::new());
-    static TOP_LEVEL_FN_CALL_GRAPH_CACHE:
-        RefCell<UnordMap<usize, BTreeMap<String, BTreeSet<String>>>> =
-        RefCell::new(UnordMap::new());
-    static PROGRAM_DEFS_CACHE: RefCell<UnordMap<usize, Arc<BTreeMap<String, Expr>>>> =
-        RefCell::new(UnordMap::new());
-    static DEF_EFFECT_ROWS_CACHE:
-        RefCell<UnordMap<usize, Arc<BTreeMap<String, chelis_types::types::EffectSet>>>> =
-        RefCell::new(UnordMap::new());
-    static SUBEXPR_LOWERING_CONTEXT_CACHE:
-        RefCell<UnordMap<usize, crate::lower::SubexprLoweringContext>> =
-        RefCell::new(UnordMap::new());
-    static HELPER_SUMMARY_REJECTS_CACHE: RefCell<UnordMap<(usize, String), bool>> =
-        RefCell::new(UnordMap::new());
-    static DYNAMIC_TO_TENSOR_DEF_SUMMARIES_CACHE:
-        RefCell<UnordMap<usize, Arc<BTreeMap<String, bool>>>> = RefCell::new(UnordMap::new());
+    // The per-program memos that used to live here are fields of
+    // `HostLoweringSession` (chelis#1835). The push/pop stacks stay: they
+    // track where the lowerer currently IS, which is a property of the
+    // thread's call stack rather than of the program.
     static TENSOR_HELPER_PREFLIGHT_STACK:
         RefCell<Vec<UnordMap<usize, TensorHelperPreflightFacts>>> = const { RefCell::new(Vec::new()) };
-    static HOST_LOWERING_CACHE_ACTIVE: Cell<bool> = const { Cell::new(false) };
-    // chelis#1829: how many `HostLoweringCacheGuard`s are live on this thread.
-    // The caches are armed while this is non-zero, so an inner scope cannot
-    // disarm an outer one when it drops.
-    static HOST_LOWERING_CACHE_DEPTH: Cell<usize> = const { Cell::new(0) };
     // chelis#1829: kernel-decision summary probes that missed the memo and ran
     // a full callee lowering. `HostWorkProfile` beside it is `cfg(test)`-only
     // and therefore invisible to downstream crates, so this one is always
@@ -257,154 +238,102 @@ fn pop_inlining(name: &str) {
     });
 }
 
-fn clear_host_lowering_caches() {
-    TYPE_POLYMORPHIC_FN_CACHE.with(|cache| cache.borrow_mut().clear());
-    TOP_LEVEL_FN_CALL_GRAPH_CACHE.with(|cache| cache.borrow_mut().clear());
-    PROGRAM_DEFS_CACHE.with(|cache| cache.borrow_mut().clear());
-    DEF_EFFECT_ROWS_CACHE.with(|cache| cache.borrow_mut().clear());
-    SUBEXPR_LOWERING_CONTEXT_CACHE.with(|cache| cache.borrow_mut().clear());
-    HELPER_SUMMARY_REJECTS_CACHE.with(|cache| cache.borrow_mut().clear());
-    DYNAMIC_TO_TENSOR_DEF_SUMMARIES_CACHE.with(|cache| cache.borrow_mut().clear());
-    TENSOR_HELPER_PREFLIGHT_STACK.with(|stack| stack.borrow_mut().clear());
+/// The per-program facts host lowering derives once and reads many times.
+///
+/// Each field is its own `RefCell` rather than one cell over the struct,
+/// because a miss on one memo re-enters another: computing a definition's
+/// helper-summary rejection runs a probe lowering, and that lowering asks for
+/// the program's definitions, its call graph and other definitions' summaries.
+/// One cell would make that safe only by the discipline of never holding a
+/// borrow across a computation; seven make it safe structurally.
+#[derive(Default)]
+struct DefLaneFacts {
+    /// Per def: does the checker-recorded authored signature carry a stored
+    /// type variable?
+    type_polymorphic: RefCell<UnordMap<String, bool>>,
+    /// Per def: does a probe lowering of its body register a summary
+    /// rejection? This is the memo the kernel decision reads, and the one
+    /// whose miss costs a full callee lowering (chelis#1835).
+    helper_summary_rejects: RefCell<UnordMap<String, bool>>,
+    /// Program-wide: the top-level fn call graph.
+    call_graph: RefCell<Option<BTreeMap<String, BTreeSet<String>>>>,
+    /// Program-wide: every top-level definition body by name.
+    program_defs: RefCell<Option<Arc<BTreeMap<String, Expr>>>>,
+    /// Program-wide: the checker's effect row per definition.
+    def_effect_rows: RefCell<Option<Arc<BTreeMap<String, chelis_types::types::EffectSet>>>>,
+    /// Program-wide: the subexpression lowering context the evaluation
+    /// profile and the C execution plan both read.
+    subexpr_lowering_context: RefCell<Option<crate::lower::SubexprLoweringContext>>,
+    /// Program-wide: which definitions reach a runtime-shaped `to_tensor`.
+    dynamic_to_tensor_def_summaries: RefCell<Option<Arc<BTreeMap<String, bool>>>>,
 }
 
-/// Drop every entry keyed on one program address.
+/// One host-lowering session: a checked program, plus the facts host lowering
+/// derives from it.
 ///
-/// Every cache above is keyed on `program as *const CheckedProgram as usize`,
-/// which is sound only while that program is alive: a freed program's address
-/// can be reused by a later one. Inside a single scope the scope's own program
-/// is borrowed for the whole scope and cannot be freed, and `chelis-ir` never
-/// constructs a `CheckedProgram`, so the outermost program is safe by
-/// construction. A nested scope brings a second program in, and that one can
-/// be dropped while the outer scope stays armed, so a scope evicts its own
-/// program's address when it begins and again when it drops.
+/// This is the representation chelis#1835 puts where a thread-local memo used
+/// to be. That memo was seven caches keyed on
+/// `program as *const CheckedProgram as usize` and gated on a thread-local
+/// flag an entry point had to arm. #935 introduced it for two caches, #1332
+/// grew it to seven, and #1531 added a third entry point, `host_def_kernel`,
+/// that never armed it, so the interpreter paid a call-graph expansion per
+/// applied definition (chelis#1829).
 ///
-/// Stated as narrowly as the code earns it: rows for a program that owns a
-/// scope are evicted on that scope's begin and on its drop, so they never
-/// outlive it. That is not a universal sentence about every row. A program
-/// probed while some OTHER program's scope is armed writes rows under no
-/// scope of its own, and those live until the outermost scope drops. No
-/// production caller does that: the interpreter threads exactly one program
-/// per scope, and the only other `begin` is the C-lane whole-program
-/// lowering. Keying these caches on something that cannot be recycled,
-/// rather than on an address, is the representation change chelis#1835 owns.
-/// chelis#1829.
-fn evict_host_lowering_cache_entries(program_key: usize) {
-    fn drop_program_rows<V>(cache: &mut UnordMap<(usize, String), V>, program_key: usize) {
-        let stale = cache
-            .to_sorted()
-            .into_iter()
-            .map(|(key, _)| key)
-            .filter(|(program, _)| *program == program_key)
-            .cloned()
-            .collect::<Vec<_>>();
-        for key in stale {
-            cache.remove(&key);
+/// What the type buys, in order of how much it matters:
+///
+/// - There is no key, so no entry can be stale. A freed program's address can
+///   be reused by a later one; a borrow cannot.
+/// - The borrow checker binds the facts to the program they describe, so they
+///   cannot outlive it.
+/// - Nested entries are two sessions that share nothing, so a whole-program
+///   lowering reached from inside an evaluation can neither read nor clear
+///   the evaluation's facts. The arming flag had no way to express that.
+/// - An entry point that does not establish a session does not compile, which
+///   is the part no convention could supply.
+///
+/// `Deref` is what keeps the change mechanical: every function that took
+/// `&CheckedProgram` takes `&HostLoweringSession` and reads the program
+/// through it unchanged.
+pub struct HostLoweringSession<'program> {
+    program: &'program CheckedProgram,
+    facts: DefLaneFacts,
+}
+
+impl<'program> HostLoweringSession<'program> {
+    /// Begin a session over `program`. Nothing is derived here; every field
+    /// fills in on its first miss.
+    pub fn new(program: &'program CheckedProgram) -> Self {
+        Self {
+            program,
+            facts: DefLaneFacts::default(),
         }
     }
-    TYPE_POLYMORPHIC_FN_CACHE.with(|cache| drop_program_rows(&mut cache.borrow_mut(), program_key));
-    HELPER_SUMMARY_REJECTS_CACHE
-        .with(|cache| drop_program_rows(&mut cache.borrow_mut(), program_key));
-    TOP_LEVEL_FN_CALL_GRAPH_CACHE.with(|cache| {
-        cache.borrow_mut().remove(&program_key);
-    });
-    PROGRAM_DEFS_CACHE.with(|cache| {
-        cache.borrow_mut().remove(&program_key);
-    });
-    DEF_EFFECT_ROWS_CACHE.with(|cache| {
-        cache.borrow_mut().remove(&program_key);
-    });
-    SUBEXPR_LOWERING_CONTEXT_CACHE.with(|cache| {
-        cache.borrow_mut().remove(&program_key);
-    });
-    DYNAMIC_TO_TENSOR_DEF_SUMMARIES_CACHE.with(|cache| {
-        cache.borrow_mut().remove(&program_key);
-    });
-}
 
-/// Arms the host-lowering memo for one program, for as long as it is held.
-///
-/// Scopes nest. The outermost `begin` clears every cache and arms the flag;
-/// an inner `begin` evicts only the entering program's rows, so an inner
-/// lowering can neither read a recycled address nor discard the rows the outer
-/// scope is still using. `Drop` disarms and clears only when the last scope
-/// ends, which is what lets the interpreter hold one across a whole evaluation
-/// while a nested whole-program lowering comes and goes. chelis#1829.
-struct HostLoweringCacheGuard {
-    program_key: usize,
-}
-
-impl HostLoweringCacheGuard {
-    fn begin(program: &CheckedProgram) -> Self {
-        let program_key = program as *const CheckedProgram as usize;
-        let depth = HOST_LOWERING_CACHE_DEPTH.with(Cell::get);
-        if depth == 0 {
-            clear_host_lowering_caches();
-        } else {
-            evict_host_lowering_cache_entries(program_key);
-        }
-        HOST_LOWERING_CACHE_DEPTH.with(|active| active.set(depth + 1));
-        HOST_LOWERING_CACHE_ACTIVE.with(|active| active.set(true));
-        Self { program_key }
+    /// The program this session derives its facts from.
+    pub fn program(&self) -> &'program CheckedProgram {
+        self.program
     }
 }
 
-impl Drop for HostLoweringCacheGuard {
-    fn drop(&mut self) {
-        let remaining = HOST_LOWERING_CACHE_DEPTH.with(|depth| {
-            // This is a scope depth, never a capacity key. The chelis#893
-            // runtime-representation inventory's `CAPACITY_FOLDS` rule keys on
-            // the `saturating_*` and `checked_mul` method names wherever they
-            // appear in IR-class code, so the floor is spelled out here rather
-            // than classified as capacity arithmetic it is not; chelis#1851
-            // tracks the inventory's name-keyed rule. chelis#1835's
-            // structural repair deletes this guard and this counter with it.
-            let current = depth.get();
-            let remaining = if current > 0 { current - 1 } else { 0 };
-            depth.set(remaining);
-            remaining
-        });
-        if remaining == 0 {
-            HOST_LOWERING_CACHE_ACTIVE.with(|active| active.set(false));
-            clear_host_lowering_caches();
-        } else {
-            // A scope's rows must not outlive the scope. Evicting only on
-            // `begin` left an inner scope's rows in the caches after its
-            // program was gone, so a later program allocated at the same
-            // address could read them; evicting here as well is what makes
-            // the sentence on `evict_host_lowering_cache_entries` true on
-            // both edges rather than only on entry.
-            evict_host_lowering_cache_entries(self.program_key);
-        }
+impl Deref for HostLoweringSession<'_> {
+    type Target = CheckedProgram;
+
+    fn deref(&self) -> &Self::Target {
+        self.program
     }
 }
 
-/// A live host-lowering memo scope. See [`begin_host_lowering_cache_scope`].
-///
-/// The `PhantomData` is the contract, not decoration. The `&'program
-/// CheckedProgram` ties the scope to the program it arms for, so the borrow
-/// checker refuses to drop that program while rows keyed on its address are
-/// still readable. The `*const ()` makes the scope neither `Send` nor `Sync`,
-/// because the caches it arms are thread-locals: dropping the scope on another
-/// thread would leave the arming thread armed forever with rows retained.
-pub struct HostLoweringCacheScope<'program> {
-    /// Held for its `Drop`, never read.
-    _guard: HostLoweringCacheGuard,
-    program: PhantomData<(&'program CheckedProgram, *const ())>,
-}
-
-/// Arm the host-lowering memo for `program` until the returned scope drops.
-///
-/// The kernel-decision probe behind `host_def_kernel` expands the call graph
-/// as a tree, so an interpreter that applies imported definitions must hold
-/// one of these for the whole evaluation or pay that expansion per definition
-/// (chelis#1829). The probe's own algorithm is chelis#1835 and is unchanged.
-pub fn begin_host_lowering_cache_scope(program: &CheckedProgram) -> HostLoweringCacheScope<'_> {
-    HostLoweringCacheScope {
-        _guard: HostLoweringCacheGuard::begin(program),
-        program: PhantomData,
-    }
-}
+/// A caught lowering panic cannot leave a session's facts WRONG, only
+/// incomplete. Every field is written once, with a fully computed value, and
+/// a `RefCell` guard releases its borrow while unwinding, so a retry after a
+/// caught panic recomputes the missing fact rather than reading a half-built
+/// one. `try_lower_compiled_program_with_lane_overrides` runs the whole-program
+/// lowering inside `catch_lowering_external` while holding the session, and
+/// this is the claim that call site needs. Asserting it here rather than with
+/// an `AssertUnwindSafe` at the call site keeps the claim attached to the type
+/// that has to satisfy it, so a future field cannot smuggle itself past a
+/// blanket assertion.
+impl std::panic::RefUnwindSafe for HostLoweringSession<'_> {}
 
 /// Kernel-decision summary probes on this thread that missed the memo and ran
 /// a full callee lowering. A counted receipt bounds this instead of timing the
@@ -472,7 +401,7 @@ impl CallableScope {
 struct TensorHelperPreflightGuard;
 
 impl TensorHelperPreflightGuard {
-    fn begin(expr: &Expr, program: &CheckedProgram) -> Self {
+    fn begin(expr: &Expr, program: &HostLoweringSession<'_>) -> Self {
         let summaries = cached_dynamic_to_tensor_def_summaries(program);
         let mut facts = UnordMap::new();
         analyze_tensor_helper_preflight(expr, &summaries, &mut facts);
@@ -480,7 +409,7 @@ impl TensorHelperPreflightGuard {
         Self
     }
 
-    fn begin_if_uncovered(expr: &Expr, program: &CheckedProgram) -> Option<Self> {
+    fn begin_if_uncovered(expr: &Expr, program: &HostLoweringSession<'_>) -> Option<Self> {
         let key = expr as *const Expr as usize;
         let covered = TENSOR_HELPER_PREFLIGHT_STACK.with(|stack| {
             stack
@@ -2163,7 +2092,11 @@ fn try_lower_compiled_program_with_lane_overrides(
     collect_execution: bool,
     collect_trace: bool,
 ) -> Result<(CompiledProgram, HostExecutionMetadata), crate::lower::LowerDiagnostic> {
-    let _cache_guard = HostLoweringCacheGuard::begin(program);
+    // The whole-program lowering owns its session. Every function below reads
+    // the program through it, so there is no entry to this lowering that can
+    // forget to establish one (chelis#1835).
+    let session = HostLoweringSession::new(program);
+    let program = &session;
     let mut lowered_names = top_level_lowering_map(program.exprs(), program.type_env());
     if let Some(manifest) = manifest {
         for entry in &manifest.entries {
@@ -2308,7 +2241,7 @@ type NamedTensorEntryLoweringInputs = (
 );
 
 fn named_tensor_entry_lowering_inputs(
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     name: &str,
 ) -> Option<NamedTensorEntryLoweringInputs> {
     let defs = cached_program_defs(program);
@@ -2350,6 +2283,10 @@ fn named_tensor_entry_lowering_inputs(
 }
 
 pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Option<crate::Dag> {
+    // A whole-program entry owns its session, so nothing outside this crate
+    // has to know one exists (chelis#1835).
+    let session = HostLoweringSession::new(program);
+    let program = &session;
     let (body_expr, scope, result_claim, defs) = named_tensor_entry_lowering_inputs(program, name)?;
     // Issue #197: a fatal lowering diagnostic (AD-rejection) must
     // propagate as a panic so the outer `catch_lowering_external`
@@ -2388,6 +2325,10 @@ pub fn lower_named_tensor_entry_execution_plan(
     program: &CheckedProgram,
     name: &str,
 ) -> Result<Option<crate::evaluation::EvaluationPlan>, crate::lower::LowerDiagnostic> {
+    // A whole-program entry owns its session, so nothing outside this crate
+    // has to know one exists (chelis#1835).
+    let session = HostLoweringSession::new(program);
+    let program = &session;
     lower_named_tensor_entry_execution_with(
         program,
         name,
@@ -2406,8 +2347,9 @@ pub fn lower_named_tensor_entry_execution_plan_with_trace(
     )>,
     crate::lower::LowerDiagnostic,
 > {
+    let session = HostLoweringSession::new(program);
     lower_named_tensor_entry_execution_with(
-        program,
+        &session,
         name,
         crate::lower::try_lower_subexpr_c_execution_with_ordered_inputs_and_trace,
     )
@@ -2416,7 +2358,7 @@ pub fn lower_named_tensor_entry_execution_plan_with_trace(
 // Observation must not duplicate the admission policy, source scope or initial
 // Random frame. Only the actual lowerer's optional return product differs.
 fn lower_named_tensor_entry_execution_with<T>(
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     name: &str,
     lower: impl FnOnce(
         &Expr,
@@ -2502,6 +2444,10 @@ pub fn function_has_tensor_signature(program: &ConcreteHostProgram, name: &str) 
 /// through `lower_named_tensor_entry_dag` (that IS the #818 fix), so it is
 /// NOT excluded here. Only genuinely host-lane-owned forms are.
 pub fn named_entry_uses_grad_like(program: &CheckedProgram, name: &str) -> bool {
+    // A whole-program entry owns its session, so nothing outside this crate
+    // has to know one exists (chelis#1835).
+    let session = HostLoweringSession::new(program);
+    let program = &session;
     let defs = cached_program_defs(program);
     match lookup_program_def(&defs, name) {
         Some(body) => expr_contains_grad_like(body),
@@ -2542,14 +2488,14 @@ pub fn program_has_top_level_value_bindings(program: &CheckedProgram) -> bool {
 
 #[cfg(test)]
 fn lower_host_program(
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     lowered_names: &BTreeMap<String, bool>,
 ) -> Result<HostProgram, crate::lower::LowerDiagnostic> {
     lower_host_program_with_execution(program, lowered_names, false, false).map(|(host, _)| host)
 }
 
 fn lower_host_program_with_execution(
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     lowered_names: &BTreeMap<String, bool>,
     collect_execution: bool,
     collect_trace: bool,
@@ -3859,8 +3805,35 @@ enum DefBodyDecision {
 /// decides what a failed kernel lowering means on its lane (the C lane's
 /// fall-through to host lowering is chelis#1515 and is not part of this
 /// function).
+///
+/// The decision is answered once per definition per session, and the session
+/// is what makes "once" a type-level fact rather than a convention: the memo
+/// is its field, so a caller holding only a checked program has nothing to
+/// read a memoized decision out of and cannot reach this function at all.
+/// That is the chelis#1835 repair. It replaces a thread-local flag that this
+/// entry point, added by chelis#1531, never armed.
+///
+/// ```compile_fail
+/// # use chelis_types::CheckedProgram;
+/// fn bypass(program: &CheckedProgram) {
+///     // No session: `&CheckedProgram` is not `&HostLoweringSession`, and
+///     // `Deref` runs the other way.
+///     let _ = chelis_ir::host::host_def_kernel(program, "f", None);
+/// }
+/// ```
+///
+/// The session form is the one that compiles:
+///
+/// ```no_run
+/// # use chelis_ir::host::HostLoweringSession;
+/// # use chelis_types::CheckedProgram;
+/// fn decide(program: &CheckedProgram) {
+///     let session = HostLoweringSession::new(program);
+///     let _ = chelis_ir::host::host_def_kernel(&session, "f", None);
+/// }
+/// ```
 pub fn host_def_kernel(
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     name: &str,
     random: Option<RandomLoweringState>,
 ) -> Result<Option<HostDefKernel>, crate::lower::LowerDiagnostic> {
@@ -3868,8 +3841,33 @@ pub fn host_def_kernel(
         .map(|product| product.map(|product| product.kernel))
 }
 
+/// The evaluator's counterpart to [`host_def_kernel`], carrying the execution
+/// plan beside the kernel. It requires a session for the same reason and with
+/// the same force: a caller holding only a checked program cannot reach it.
+///
+/// ```compile_fail
+/// # use chelis_ir::evaluation::RandomExecutionContext;
+/// # use chelis_ir::host::RandomLoweringState;
+/// # use chelis_types::CheckedProgram;
+/// fn bypass(program: &CheckedProgram) {
+///     let context = RandomExecutionContext::new(RandomLoweringState { seed: None, counter: 0 });
+///     let _ = chelis_ir::host::host_def_evaluation_plan(program, "f", &context);
+/// }
+/// ```
+///
+/// ```no_run
+/// # use chelis_ir::evaluation::RandomExecutionContext;
+/// # use chelis_ir::host::RandomLoweringState;
+/// # use chelis_ir::host::HostLoweringSession;
+/// # use chelis_types::CheckedProgram;
+/// fn plan(program: &CheckedProgram) {
+///     let session = HostLoweringSession::new(program);
+///     let context = RandomExecutionContext::new(RandomLoweringState { seed: None, counter: 0 });
+///     let _ = chelis_ir::host::host_def_evaluation_plan(&session, "f", &context);
+/// }
+/// ```
 pub fn host_def_evaluation_plan(
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     name: &str,
     context: &crate::evaluation::RandomExecutionContext,
 ) -> Result<Option<HostDefEvaluationPlan>, crate::lower::LowerDiagnostic> {
@@ -3877,7 +3875,7 @@ pub fn host_def_evaluation_plan(
 }
 
 fn host_def_kernel_product(
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     name: &str,
     random: Option<RandomLoweringState>,
     execution: Option<&crate::evaluation::RandomExecutionContext>,
@@ -4015,7 +4013,7 @@ fn host_def_kernel_product(
 }
 
 fn staged_def_kernel(
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     signature: &HostDefSignature,
     random: Option<RandomLoweringState>,
 ) -> Result<staged::StagingAttempt<HostDefKernel>, crate::lower::LowerDiagnostic> {
@@ -4023,7 +4021,7 @@ fn staged_def_kernel(
 }
 
 fn staged_def_kernel_product(
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     signature: &HostDefSignature,
     random: Option<RandomLoweringState>,
     execution_out: Option<&mut Option<crate::evaluation::StagedEvaluationPlan>>,
@@ -4115,7 +4113,7 @@ fn staged_def_kernel_product(
 /// Whether `name`'s checked effect row carries an effect with no DAG form
 /// (`IO`, `Test`, `Resource`). Read off the same effect inference the root
 /// manifest uses, cached per program like the other host-lowering facts.
-fn def_effect_row_forbids_kernel(program: &CheckedProgram, name: &str) -> bool {
+fn def_effect_row_forbids_kernel(program: &HostLoweringSession<'_>, name: &str) -> bool {
     cached_def_effect_rows(program)
         .get(name)
         .is_some_and(|row| {
@@ -4131,20 +4129,13 @@ fn def_effect_row_forbids_kernel(program: &CheckedProgram, name: &str) -> bool {
 }
 
 fn cached_def_effect_rows(
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
 ) -> Arc<BTreeMap<String, chelis_types::types::EffectSet>> {
-    let key = program as *const CheckedProgram as usize;
-    if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get)
-        && let Some(cached) = DEF_EFFECT_ROWS_CACHE.with(|cache| cache.borrow().get(&key).cloned())
-    {
+    if let Some(cached) = program.facts.def_effect_rows.borrow().clone() {
         return cached;
     }
     let rows = Arc::new(chelis_effects::def_effect_rows(program));
-    if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get) {
-        DEF_EFFECT_ROWS_CACHE.with(|cache| {
-            cache.borrow_mut().insert(key, rows.clone());
-        });
-    }
+    *program.facts.def_effect_rows.borrow_mut() = Some(rows.clone());
     rows
 }
 
@@ -4159,7 +4150,7 @@ fn cached_def_effect_rows(
 /// lane the non-fatal fall-through (chelis#1515) already chose, so the emitted
 /// program is unchanged, which the corpus capture proves rather than assumes.
 pub(crate) fn body_form_the_dag_cannot_carry(
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     body: &Expr,
     params: &[HostParam],
     evaluation_dropout: bool,
@@ -4798,7 +4789,7 @@ fn is_static_scalar(expr: &Expr) -> bool {
 /// recursive, callable-parameter or summary-rejecting callee reached, root
 /// not kept in the host lane, no dynamic `to_tensor` reach, no forward `fail`.
 fn def_body_decision(
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     signature: &HostDefSignature,
 ) -> Result<DefBodyDecision, crate::lower::LowerDiagnostic> {
     let fixed_dropout = cached_subexpr_lowering_context(program).c_execution_profile(
@@ -4809,7 +4800,7 @@ fn def_body_decision(
 }
 
 fn def_body_decision_impl(
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     signature: &HostDefSignature,
     evaluation_dropout: bool,
 ) -> Result<DefBodyDecision, crate::lower::LowerDiagnostic> {
@@ -4823,8 +4814,6 @@ fn def_body_decision_impl(
         .params
         .iter()
         .any(|param| matches!(param.ty, HostTypeTerm::Fn(_, _)));
-    let calls_summary_rejecting_function =
-        expr_calls_summary_rejecting_top_level_fn(body_expr, program)?;
     let HostTypeTerm::Tensor(expected) = signature.ret_ty.clone() else {
         return Ok(DefBodyDecision::Host);
     };
@@ -4847,11 +4836,19 @@ fn def_body_decision_impl(
     {
         return Ok(DefBodyDecision::Host);
     }
+    // The callee summary probe is asked LAST of the host-lane predicates, and
+    // only after the declared result type, the effect row and the body form
+    // have each had their chance to answer. It is the only one that lowers a
+    // callee, so every cheaper predicate that answers first is a probe not
+    // run. Asking it eagerly made a non-tensor definition pay for a result
+    // the very next line discarded, which is what every definition in
+    // `Std.Io.Json` was doing; `||` short-circuits, so the order IS the
+    // saving. The predicates are independent, so the decision is unchanged.
     if any_callable_param
         || expr_needs_host_lane_tensor_lowering(body_expr, program)
         || expr_calls_top_level_fn_with_callable_param(body_expr, program)
-        || calls_summary_rejecting_function
         || should_keep_tensor_expr_in_host_lane(body_expr)
+        || expr_calls_summary_rejecting_top_level_fn(body_expr, program)?
     {
         return Ok(DefBodyDecision::Host);
     }
@@ -4891,7 +4888,7 @@ fn def_body_decision_impl(
 /// which is the pre-existing chelis#1515 split; `host_def_kernel` does not
 /// inherit it.
 fn lower_def_body_kernel(
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     signature: &HostDefSignature,
     tensor_helpers: &mut TensorHelperSink,
 ) -> Result<Option<HostExpr>, crate::lower::LowerDiagnostic> {
@@ -5081,7 +5078,7 @@ fn kernel_dag_loads_builtin(dag: &crate::Dag) -> Option<String> {
 /// an `Err`; the callers decide what it means on their lane.
 fn lower_kernel_dag(
     expr: &Expr,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     declaring_params: Option<&[HostParam]>,
     expected: &TensorType,
@@ -5144,7 +5141,7 @@ fn host_def_signature(
     name: &str,
     body: &Expr,
     ty_expr: Option<&Expr>,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
 ) -> Option<HostDefSignature> {
     // Preserve authored dimension identities while expanding only the
     // checker-validated nominal aliases below. Replacing this expression with
@@ -5243,7 +5240,7 @@ fn lower_host_function(
     name: &str,
     body: &Expr,
     ty_expr: Option<&Expr>,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     collect_execution: bool,
     collect_trace: bool,
 ) -> Result<Option<LoweredHostFunction>, crate::lower::LowerDiagnostic> {
@@ -5367,7 +5364,7 @@ fn synthesize_callable_application(
 /// missing on the reef'd deep AST's `app` nodes.
 fn try_lower_tensor_helper_call(
     expr: &Expr,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
     expected: TensorType,
@@ -5488,7 +5485,7 @@ fn hoisted_local_name(hoists: &mut Vec<HoistedProjection>, candidate: HoistedPro
 /// local each, keyed by path so a repeated projection binds once.
 fn hoist_record_projections(
     expr: &Expr,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     bound: &UnordSet<String>,
     hoists: &mut Vec<HoistedProjection>,
@@ -5585,7 +5582,7 @@ fn hoist_record_projections(
 /// so a compile-time-known record construction keeps its kernel lowering.
 fn lower_host_body_with_record_locals(
     signature: &HostDefSignature,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     tensor_helpers: &mut TensorHelperSink,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
     let mut bound = UnordSet::new();
@@ -5821,7 +5818,7 @@ fn is_bound_bare_projection(node_tag: DeepTag, index: usize, child: &Expr) -> bo
 /// projection of a runtime record, and name the local it binds to.
 fn record_projection_hoist(
     expr: &Expr,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     bound: &UnordSet<String>,
 ) -> Option<HoistedProjection> {
@@ -5872,7 +5869,7 @@ fn record_projection_path(expr: &Expr) -> Option<Vec<String>> {
 // policy. Keep this guard outside both concrete lowering implementations.
 fn lower_tensor_helper_with<T>(
     expr: &Expr,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     lower: impl FnOnce() -> Result<T, crate::lower::LowerDiagnostic>,
 ) -> Option<T> {
     let defs = cached_program_defs(program);
@@ -5911,7 +5908,7 @@ fn lower_tensor_helper_with<T>(
 
 fn lower_tensor_helper_dag(
     expr: &Expr,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     expected: &TensorType,
 ) -> Option<crate::Dag> {
@@ -5929,7 +5926,7 @@ struct LoweredTensorHelper {
 
 fn lower_tensor_helper_product(
     expr: &Expr,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     expected: &TensorType,
     collect_execution: bool,
@@ -6037,7 +6034,7 @@ fn lower_tensor_helper_product(
 
 fn lower_tensor_helper_dag_with_controls(
     expr: &Expr,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     expected: &TensorType,
 ) -> Option<crate::lower::LoweredSubexprWithControls> {
@@ -6182,7 +6179,7 @@ fn finish_tensor_helper_product(
 
 fn lower_staged_host_plan(
     plan: &staged::HostStagedPlan,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     helpers: &mut TensorHelperSink,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
@@ -7140,7 +7137,7 @@ fn summary_dims_bind_to_inputs(input_tys: &[TensorType], dims: &[DimExpr]) -> bo
 
 fn lower_host_expr(
     expr: &Expr,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
@@ -7152,7 +7149,7 @@ fn lower_host_expr(
 /// than repeating the `match expected_ty` at each one.
 fn lower_host_expr_with_expected_opt(
     expr: &Expr,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
     expected_ty: Option<&HostTypeTerm>,
@@ -7162,7 +7159,7 @@ fn lower_host_expr_with_expected_opt(
 
 fn lower_host_expr_with_expected(
     expr: &Expr,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
     expected_ty: Option<&HostTypeTerm>,
@@ -7433,7 +7430,7 @@ fn expr_mentions_name(expr: &Expr, name: &str) -> bool {
 
 fn lower_host_expr_kind(
     expr: &Expr,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
     expected_ty: Option<&HostTypeTerm>,
@@ -8924,7 +8921,7 @@ fn should_keep_tensor_expr_in_host_lane(expr: &Expr) -> bool {
 
 fn lower_match_host_expr(
     list: &List,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
     // chelis#1201: the match's RESULT type, when the caller knows it. Arm
@@ -9184,7 +9181,7 @@ fn lower_match_host_expr(
 
 fn lower_literal_match_host_expr(
     list: &List,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
     scrutinee: HostExpr,
@@ -9284,7 +9281,7 @@ fn host_literal_expr(expr: &Expr, expected_ty: &HostTypeTerm) -> Option<HostExpr
 
 fn lower_record_host_expr(
     list: &List,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
     expected_ty: Option<&HostTypeTerm>,
@@ -9428,7 +9425,7 @@ fn lower_record_host_expr(
 
 fn lower_access_host_expr(
     list: &List,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
@@ -9516,7 +9513,7 @@ fn pattern_field_bindings<'a>(
 
 fn lower_tuple_get_host_expr(
     list: &List,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
@@ -9623,7 +9620,7 @@ fn is_dual_scalar_type(ty: &HostTypeTerm) -> bool {
 /// Returns `None` if the def is not a `(fn (params ...) body)` form or any
 /// parameter is non-scalar.
 fn resolve_scalar_def<'a>(
-    program: &'a CheckedProgram,
+    program: &'a HostLoweringSession<'a>,
     name: &str,
 ) -> Option<(Vec<String>, Vec<HostTypeTerm>, &'a Expr)> {
     let mut found: Option<(&'a List,)> = None;
@@ -9679,7 +9676,7 @@ fn resolve_scalar_def<'a>(
 /// to the existing unresolved-callable-marker rejection path).
 fn try_lower_scalar_grad_app(
     list: &List,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
 ) -> Result<Option<HostExpr>, crate::lower::LowerDiagnostic> {
@@ -9861,7 +9858,7 @@ fn static_list_spine_items(expr: &Expr) -> Option<Vec<Expr>> {
 /// walk is shape evidence, not argument evaluation.
 fn resolve_list_grad_shape_expr(
     actual: &Expr,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     defs: &BTreeMap<String, Expr>,
 ) -> Expr {
     let mut resolved = actual.clone();
@@ -9889,7 +9886,7 @@ fn resolve_list_grad_shape_expr(
 fn list_grad_pack_plan(
     ty: &HostTypeTerm,
     actual: &Expr,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
 ) -> Option<ListGradPackPlan> {
     if let HostTypeTerm::Adt(name, arguments) = ty
         && let Some((_, alias)) = program
@@ -10101,7 +10098,7 @@ fn pack_list_grad_roots(
 fn try_lower_general_list_grad_app(
     app_expr: &Expr,
     list: &List,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
     expected_ty: Option<&HostTypeTerm>,
@@ -10413,7 +10410,7 @@ const MAX_DUAL_INLINE_DEPTH: usize = 64;
 fn dual_eval(
     expr: &Expr,
     env: &UnordMap<String, Dual>,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     depth: usize,
 ) -> Option<Dual> {
     if depth > MAX_DUAL_INLINE_DEPTH {
@@ -10472,7 +10469,7 @@ fn dual_eval(
 fn dual_eval_let(
     list: &List,
     env: &UnordMap<String, Dual>,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     depth: usize,
 ) -> Option<Dual> {
     let kids = children(list);
@@ -10498,7 +10495,7 @@ fn dual_eval_let(
 fn dual_eval_app(
     list: &List,
     env: &UnordMap<String, Dual>,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     depth: usize,
 ) -> Option<Dual> {
     let kids = children(list);
@@ -10647,7 +10644,7 @@ fn dual_eval_app(
 fn dual_eval_user_call(
     op: &str,
     args: &[Dual],
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     depth: usize,
 ) -> Option<Dual> {
     let (param_names, param_tys, body) = resolve_scalar_def(program, op)?;
@@ -10681,7 +10678,7 @@ fn is_zero_float(expr: &HostExpr) -> bool {
 fn lower_app_host_expr(
     app_expr: &Expr,
     list: &List,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
     expected_ty: Option<&HostTypeTerm>,
@@ -11343,7 +11340,7 @@ fn beta_reduce_inline_host_call(expr: &Expr) -> Option<Expr> {
     )))
 }
 
-fn inline_top_level_host_call(expr: &Expr, program: &CheckedProgram) -> Option<Expr> {
+fn inline_top_level_host_call(expr: &Expr, program: &HostLoweringSession<'_>) -> Option<Expr> {
     let Expr::List(app_list, _span) = expr else {
         return None;
     };
@@ -11399,7 +11396,7 @@ fn lower_recursive_generic_call(
     args: &[Expr],
     explicit_ty: &HostTypeTerm,
     inferred_ret_ty: &HostTypeTerm,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
@@ -11850,7 +11847,7 @@ fn ensure_mono_specialization(
     body: &Expr,
     param_tys: &[HostTypeTerm],
     ret_ty: &HostTypeTerm,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     tensor_helpers: &TensorHelperSink,
 ) -> Result<String, crate::lower::LowerDiagnostic> {
     let canonical_key = mono_specialization_key(name, param_tys, ret_ty);
@@ -11957,7 +11954,7 @@ struct MonoSpecializedFunctionInput<'a> {
     ret_ty: &'a HostTypeTerm,
     body_expr: &'a Expr,
     fn_expr: &'a Expr,
-    program: &'a CheckedProgram,
+    program: &'a HostLoweringSession<'a>,
     spec_scope: &'a UnordMap<String, HostTypeTerm>,
     collect_execution: bool,
     collect_trace: bool,
@@ -12037,7 +12034,7 @@ fn lower_mono_specialized_function(
 /// lowering path; eagerly inlining those can expand recursive library code
 /// exponentially.
 fn top_level_fn_is_nullary_generic_constructor_wrapper(
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     name: &str,
 ) -> bool {
     let Some((params, ret)) = lookup_declared_fn_type(program, name) else {
@@ -12328,7 +12325,7 @@ fn inline_local_callable_lets(expr: &Expr) -> Expr {
     )
 }
 
-fn expr_needs_host_lane_tensor_lowering(expr: &Expr, program: &CheckedProgram) -> bool {
+fn expr_needs_host_lane_tensor_lowering(expr: &Expr, program: &HostLoweringSession<'_>) -> bool {
     let graph = top_level_fn_call_graph(program);
     let recursive = recursive_top_level_fn_names_from_graph(&graph);
     let fn_names = graph.keys().cloned().collect::<BTreeSet<_>>();
@@ -12337,7 +12334,10 @@ fn expr_needs_host_lane_tensor_lowering(expr: &Expr, program: &CheckedProgram) -
         .any(|name| call_graph_reaches_any(&graph, &name, &recursive))
 }
 
-fn top_level_fn_needs_host_lane_tensor_lowering(program: &CheckedProgram, name: &str) -> bool {
+fn top_level_fn_needs_host_lane_tensor_lowering(
+    program: &HostLoweringSession<'_>,
+    name: &str,
+) -> bool {
     let graph = top_level_fn_call_graph(program);
     let recursive = recursive_top_level_fn_names_from_graph(&graph);
     call_graph_reaches_any(&graph, name, &recursive)
@@ -12360,7 +12360,7 @@ fn top_level_fn_needs_host_lane_tensor_lowering(program: &CheckedProgram, name: 
 /// corrected, the fallback is driven directly off the
 /// `SummaryRejection` machinery instead.
 fn top_level_fn_helper_summary_rejects(
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     name: &str,
 ) -> Result<bool, crate::lower::LowerDiagnostic> {
     // chelis#935/#936 bounded generic functions are specialized before
@@ -12378,10 +12378,12 @@ fn top_level_fn_helper_summary_rejects(
     if is_inlining(name) {
         return Ok(false);
     }
-    let cache_key = (program as *const CheckedProgram as usize, name.to_string());
-    if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get)
-        && let Some(cached) =
-            HELPER_SUMMARY_REJECTS_CACHE.with(|cache| cache.borrow().get(&cache_key).copied())
+    if let Some(cached) = program
+        .facts
+        .helper_summary_rejects
+        .borrow()
+        .get(name)
+        .copied()
     {
         return Ok(cached);
     }
@@ -12434,11 +12436,11 @@ fn top_level_fn_helper_summary_rejects(
         collect_function_summary_rejections(&mut lowered.function);
         !lowered.function.summary_rejections.is_empty()
     });
-    if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get) {
-        HELPER_SUMMARY_REJECTS_CACHE.with(|cache| {
-            cache.borrow_mut().insert(cache_key, rejects);
-        });
-    }
+    program
+        .facts
+        .helper_summary_rejects
+        .borrow_mut()
+        .insert(name.to_string(), rejects);
     Ok(rejects)
 }
 
@@ -12452,7 +12454,10 @@ fn top_level_fn_helper_summary_rejects(
 ///
 /// This replaces the prior incidental trigger (the over-broad recursion
 /// classification) for the local-wrapper-over-callable-param case.
-fn expr_calls_top_level_fn_with_callable_param(expr: &Expr, program: &CheckedProgram) -> bool {
+fn expr_calls_top_level_fn_with_callable_param(
+    expr: &Expr,
+    program: &HostLoweringSession<'_>,
+) -> bool {
     let graph = top_level_fn_call_graph(program);
     let fn_names = graph.keys().cloned().collect::<BTreeSet<_>>();
     collect_called_top_level_fns(expr, &fn_names)
@@ -12460,7 +12465,7 @@ fn expr_calls_top_level_fn_with_callable_param(expr: &Expr, program: &CheckedPro
         .any(|name| top_level_fn_has_callable_param(program, name))
 }
 
-fn top_level_fn_has_callable_param(program: &CheckedProgram, name: &str) -> bool {
+fn top_level_fn_has_callable_param(program: &HostLoweringSession<'_>, name: &str) -> bool {
     let Some((param_tys, _)) = lookup_declared_fn_type(program, name) else {
         return false;
     };
@@ -12477,7 +12482,7 @@ fn top_level_fn_has_callable_param(program: &CheckedProgram, name: &str) -> bool
 /// direct host function call to the unspecialized helper.
 fn expr_calls_summary_rejecting_top_level_fn(
     expr: &Expr,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
 ) -> Result<bool, crate::lower::LowerDiagnostic> {
     let graph = top_level_fn_call_graph(program);
     let fn_names = graph.keys().cloned().collect::<BTreeSet<_>>();
@@ -12496,12 +12501,10 @@ fn expr_calls_summary_rejecting_top_level_fn(
     Ok(false)
 }
 
-fn top_level_fn_call_graph(program: &CheckedProgram) -> BTreeMap<String, BTreeSet<String>> {
-    let key = program as *const CheckedProgram as usize;
-    if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get)
-        && let Some(cached) =
-            TOP_LEVEL_FN_CALL_GRAPH_CACHE.with(|cache| cache.borrow().get(&key).cloned())
-    {
+fn top_level_fn_call_graph(
+    program: &HostLoweringSession<'_>,
+) -> BTreeMap<String, BTreeSet<String>> {
+    if let Some(cached) = program.facts.call_graph.borrow().clone() {
         return cached;
     }
     let defs = cached_program_defs(program);
@@ -12521,11 +12524,7 @@ fn top_level_fn_call_graph(program: &CheckedProgram) -> BTreeMap<String, BTreeSe
             (name.clone(), callees)
         })
         .collect();
-    if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get) {
-        TOP_LEVEL_FN_CALL_GRAPH_CACHE.with(|cache| {
-            cache.borrow_mut().insert(key, graph.clone());
-        });
-    }
+    *program.facts.call_graph.borrow_mut() = Some(graph.clone());
     graph
 }
 
@@ -12595,7 +12594,7 @@ type HoistedHostLaneBindings<'expr, 'scope> = (
 
 fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
     expr: &'expr Expr,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     scope: &'scope UnordMap<String, HostTypeTerm>,
     fn_sig: Option<&(Vec<HostTypeTerm>, HostTypeTerm)>,
     tensor_helpers: &mut TensorHelperSink,
@@ -12694,12 +12693,8 @@ fn host_fn_signature(ty: &HostTypeTerm) -> Option<(Vec<HostTypeTerm>, HostTypeTe
     }
 }
 
-fn top_level_fn_is_type_polymorphic(program: &CheckedProgram, name: &str) -> bool {
-    let key = (program as *const CheckedProgram as usize, name.to_string());
-    if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get)
-        && let Some(cached) =
-            TYPE_POLYMORPHIC_FN_CACHE.with(|cache| cache.borrow().get(&key).copied())
-    {
+fn top_level_fn_is_type_polymorphic(program: &HostLoweringSession<'_>, name: &str) -> bool {
+    if let Some(cached) = program.facts.type_polymorphic.borrow().get(name).copied() {
         return cached;
     }
     // Only checker-recorded authored/synthesized signatures establish
@@ -12708,15 +12703,15 @@ fn top_level_fn_is_type_polymorphic(program: &CheckedProgram, name: &str) -> boo
     let polymorphic = checked_authored_function_signature(program, name).is_some_and(|signature| {
         checker_type_has_stored_variable(signature, program.adt_registry(), &mut UnordSet::new())
     });
-    if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get) {
-        TYPE_POLYMORPHIC_FN_CACHE.with(|cache| {
-            cache.borrow_mut().insert(key, polymorphic);
-        });
-    }
+    program
+        .facts
+        .type_polymorphic
+        .borrow_mut()
+        .insert(name.to_string(), polymorphic);
     polymorphic
 }
 
-fn top_level_fn_is_nested_rank_polymorphic(program: &CheckedProgram, name: &str) -> bool {
+fn top_level_fn_is_nested_rank_polymorphic(program: &HostLoweringSession<'_>, name: &str) -> bool {
     // chelis#940: a dimension may be hidden behind `Frame[n] -> Column[n] ->
     // tensor[n, _]`, so a signature-local `d-var` scan is insufficient.
     // Inspect checker-owned ADT parameter roles specifically: a direct
@@ -12733,7 +12728,7 @@ fn top_level_fn_is_nested_rank_polymorphic(program: &CheckedProgram, name: &str)
 }
 
 fn checked_authored_function_signature<'a>(
-    program: &'a CheckedProgram,
+    program: &'a HostLoweringSession<'a>,
     name: &str,
 ) -> Option<&'a Type> {
     if let Some(inference) = program.signature_inference().functions.get(name)
@@ -12888,7 +12883,7 @@ fn checker_type_has_erased_adt_variable(
 
 fn lower_host_callback(
     expr: &Expr,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
 ) -> Result<Option<HostCallback>, crate::lower::LowerDiagnostic> {
@@ -12975,7 +12970,7 @@ fn lower_host_callback(
 
 fn lower_list_literal_items(
     expr: &Expr,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
     tensor_helpers: &mut TensorHelperSink,
 ) -> Result<Option<Vec<HostExpr>>, crate::lower::LowerDiagnostic> {
@@ -13864,30 +13859,19 @@ fn expr_contains_grad_like(expr: &Expr) -> bool {
     }
 }
 
-fn cached_program_defs(program: &CheckedProgram) -> Arc<BTreeMap<String, Expr>> {
-    let key = program as *const CheckedProgram as usize;
-    if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get)
-        && let Some(cached) = PROGRAM_DEFS_CACHE.with(|cache| cache.borrow().get(&key).cloned())
-    {
+fn cached_program_defs(program: &HostLoweringSession<'_>) -> Arc<BTreeMap<String, Expr>> {
+    if let Some(cached) = program.facts.program_defs.borrow().clone() {
         return cached;
     }
     let defs = Arc::new(collect_program_defs(program.exprs()));
-    if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get) {
-        PROGRAM_DEFS_CACHE.with(|cache| {
-            cache.borrow_mut().insert(key, defs.clone());
-        });
-    }
+    *program.facts.program_defs.borrow_mut() = Some(defs.clone());
     defs
 }
 
 fn cached_subexpr_lowering_context(
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
 ) -> crate::lower::SubexprLoweringContext {
-    let key = program as *const CheckedProgram as usize;
-    if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get)
-        && let Some(cached) =
-            SUBEXPR_LOWERING_CONTEXT_CACHE.with(|cache| cache.borrow().get(&key).cloned())
-    {
+    if let Some(cached) = program.facts.subexpr_lowering_context.borrow().clone() {
         return cached;
     }
     record_host_work(|profile| {
@@ -13902,19 +13886,18 @@ fn cached_subexpr_lowering_context(
         cached_program_defs(program),
         Arc::new(crate::lower::collect_top_level_sigs(program.exprs())),
     );
-    if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get) {
-        SUBEXPR_LOWERING_CONTEXT_CACHE.with(|cache| {
-            cache.borrow_mut().insert(key, context.clone());
-        });
-    }
+    *program.facts.subexpr_lowering_context.borrow_mut() = Some(context.clone());
     context
 }
 
-fn cached_dynamic_to_tensor_def_summaries(program: &CheckedProgram) -> Arc<BTreeMap<String, bool>> {
-    let key = program as *const CheckedProgram as usize;
-    if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get)
-        && let Some(cached) =
-            DYNAMIC_TO_TENSOR_DEF_SUMMARIES_CACHE.with(|cache| cache.borrow().get(&key).cloned())
+fn cached_dynamic_to_tensor_def_summaries(
+    program: &HostLoweringSession<'_>,
+) -> Arc<BTreeMap<String, bool>> {
+    if let Some(cached) = program
+        .facts
+        .dynamic_to_tensor_def_summaries
+        .borrow()
+        .clone()
     {
         return cached;
     }
@@ -13966,11 +13949,7 @@ fn cached_dynamic_to_tensor_def_summaries(program: &CheckedProgram) -> Arc<BTree
     }
 
     let summaries = Arc::new(summaries);
-    if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get) {
-        DYNAMIC_TO_TENSOR_DEF_SUMMARIES_CACHE.with(|cache| {
-            cache.borrow_mut().insert(key, summaries.clone());
-        });
-    }
+    *program.facts.dynamic_to_tensor_def_summaries.borrow_mut() = Some(summaries.clone());
     summaries
 }
 
@@ -14378,7 +14357,7 @@ fn host_type_from_tensor_input(ty: &TensorType) -> HostTypeTerm {
 /// specialization the substitution is empty and this is the identity.
 pub(crate) fn expr_host_type(
     expr: &Expr,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
 ) -> HostTypeTerm {
     let raw = expr_host_type_raw(expr, program, scope);
@@ -14422,9 +14401,9 @@ fn resolve_host_type_alias<'a>(registry: &'a AdtRegistry, name: &str) -> Option<
 /// tensor type. Dimension-kinded alias arguments remain dimensions during
 /// substitution; they are erased only when an enclosing nominal value's host
 /// layout deliberately has no slot for them.
-fn expand_host_type_aliases(program: &CheckedProgram, ty: HostTypeTerm) -> HostTypeTerm {
+fn expand_host_type_aliases(program: &HostLoweringSession<'_>, ty: HostTypeTerm) -> HostTypeTerm {
     fn expand(
-        program: &CheckedProgram,
+        program: &HostLoweringSession<'_>,
         ty: HostTypeTerm,
         visiting: &mut UnordSet<String>,
     ) -> HostTypeTerm {
@@ -14565,7 +14544,7 @@ fn apply_host_type_subst(
 
 fn expr_host_type_raw(
     expr: &Expr,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
 ) -> HostTypeTerm {
     match expr {
@@ -14615,7 +14594,7 @@ fn app_expr_needs_inferred_type(explicit: &HostTypeTerm) -> bool {
 
 fn infer_app_expr_host_type(
     expr: &Expr,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
 ) -> Option<HostTypeTerm> {
     let (DeepTag::App, _, kids) = stamped_parts(expr)? else {
@@ -15005,7 +14984,7 @@ fn lookup_type_expr<'a>(type_env: &'a BTreeMap<String, Expr>, name: &str) -> Opt
     })
 }
 
-fn lookup_authored_defsig_type_expr(program: &CheckedProgram, name: &str) -> Option<Expr> {
+fn lookup_authored_defsig_type_expr(program: &HostLoweringSession<'_>, name: &str) -> Option<Expr> {
     let mut exact = None;
     let mut terminal_matches = Vec::new();
     for expr in top_level_items(program.exprs()) {
@@ -15031,20 +15010,23 @@ fn lookup_authored_defsig_type_expr(program: &CheckedProgram, name: &str) -> Opt
     })
 }
 
-fn lookup_declared_type_expr(program: &CheckedProgram, name: &str) -> Option<Expr> {
+fn lookup_declared_type_expr(program: &HostLoweringSession<'_>, name: &str) -> Option<Expr> {
     lookup_authored_defsig_type_expr(program, name)
         .or_else(|| checked_authored_function_signature(program, name).map(type_to_deep_expr))
         .or_else(|| lookup_type_expr(program.type_env(), name).cloned())
 }
 
-fn lookup_declared_host_type(program: &CheckedProgram, name: &str) -> Option<HostTypeTerm> {
+fn lookup_declared_host_type(
+    program: &HostLoweringSession<'_>,
+    name: &str,
+) -> Option<HostTypeTerm> {
     lookup_declared_type_expr(program, name)
         .as_ref()
         .and_then(|ty| decode_expanded_host_type_expr(program, ty))
 }
 
 fn lookup_declared_fn_type(
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     name: &str,
 ) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> {
     lookup_declared_type_expr(program, name)
@@ -15110,7 +15092,7 @@ fn find_top_level_def_named<'a>(exprs: &'a [Expr], name: &str) -> Option<(&'a st
 
 fn expr_tensor_type(
     expr: &Expr,
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     scope: &UnordMap<String, HostTypeTerm>,
 ) -> Option<TensorType> {
     match expr_host_type(expr, program, scope) {
@@ -15163,7 +15145,7 @@ fn parse_fn_type_expr(expr: &Expr) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> 
 }
 
 fn expand_host_fn_type_aliases(
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     signature: (Vec<HostTypeTerm>, HostTypeTerm),
 ) -> (Vec<HostTypeTerm>, HostTypeTerm) {
     let (params, ret) = signature;
@@ -15204,7 +15186,10 @@ fn authored_nominal_dimension(expr: &Expr) -> Option<DimInfo> {
     }
 }
 
-fn decode_expanded_host_type_expr(program: &CheckedProgram, expr: &Expr) -> Option<HostTypeTerm> {
+fn decode_expanded_host_type_expr(
+    program: &HostLoweringSession<'_>,
+    expr: &Expr,
+) -> Option<HostTypeTerm> {
     if let Expr::MetaExpr(meta, _) = expr {
         return decode_expanded_host_type_expr(program, &meta.expr);
     }
@@ -15276,7 +15261,7 @@ fn decode_expanded_host_type_expr(program: &CheckedProgram, expr: &Expr) -> Opti
 }
 
 fn parse_expanded_fn_type_expr(
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     expr: &Expr,
 ) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> {
     let (args, ret) = parse_fn_type_expr_parts(expr)?;
@@ -16665,7 +16650,7 @@ impl GenericAdtConstructor {
     }
 }
 
-fn adt_constructor_definitions(program: &CheckedProgram) -> Vec<GenericAdtConstructor> {
+fn adt_constructor_definitions(program: &HostLoweringSession<'_>) -> Vec<GenericAdtConstructor> {
     let mut definitions = Vec::new();
     for definition in program.adt_registry().defs.values() {
         // These prelude declarations have dedicated host representations and
@@ -16909,7 +16894,7 @@ fn checker_type_stores_variable(
 /// with `Unit` as a private layout witness. Ordinary value parameters remain
 /// untouched and therefore still fail loudly if unresolved.
 fn instantiate_adt_constructor(
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     definition: &GenericAdtConstructor,
     instantiated_ty: &HostTypeTerm,
 ) -> Result<InstantiatedAdtConstructor, AdtInstantiationError> {
@@ -17066,7 +17051,7 @@ enum AdtConstructorResolution {
 }
 
 fn resolve_adt_constructor_definition(
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     ctor_name: &str,
 ) -> AdtConstructorResolution {
     let definitions = adt_constructor_definitions(program);
@@ -17079,7 +17064,7 @@ fn resolve_adt_constructor_definition(
 /// constructor name; the checked result type is the structural owner receipt
 /// that lowering needs, whereas the sorted registry population is not scope.
 fn resolve_adt_constructor_definition_for_type(
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     ctor_name: &str,
     checked_ty: &HostTypeTerm,
 ) -> AdtConstructorResolution {
@@ -17176,7 +17161,7 @@ fn ambiguous_constructor_error(
 /// on its own, so the program still fails closed rather than lowering
 /// down a silently different path.
 fn lookup_adt_constructor_definition(
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     ctor_name: &str,
 ) -> Option<GenericAdtConstructor> {
     match resolve_adt_constructor_definition(program, ctor_name) {
@@ -17186,7 +17171,7 @@ fn lookup_adt_constructor_definition(
 }
 
 fn lookup_access_field(
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     base: &HostExpr,
     field_name: &str,
 ) -> Result<Option<(usize, HostTypeTerm)>, AdtInstantiationError> {
@@ -17221,7 +17206,7 @@ fn lookup_access_field(
 }
 
 fn lookup_adt_field_on_type(
-    program: &CheckedProgram,
+    program: &HostLoweringSession<'_>,
     adt_name: &str,
     args: &[HostTypeTerm],
     field_name: &str,
@@ -17362,7 +17347,7 @@ thread_local! {
     /// it reads as unresolved even though the specialization pinned `a` at
     /// its call site. Threading a substitution parameter would touch ~130
     /// call sites across this file; scoping it here matches the idiom
-    /// `MONO_SPECIALIZATIONS` and `HOST_LOWERING_CACHE_ACTIVE` already use,
+    /// `MONO_SPECIALIZATIONS` and `INLINING_STACK` already use,
     /// and applies at the single point that decodes a node's checked type.
     static ACTIVE_TYPE_SUBST: RefCell<Vec<UnordMap<String, HostTypeTerm>>> =
         const { RefCell::new(Vec::new()) };
@@ -17600,7 +17585,7 @@ mod tests {
                 "def second[s](x: tensor[s, *, f32], y: tensor[s, *, f32]) = concat([y, y], 1i32)\ndef run[s](x: tensor[s, {x_width}, f32], y: tensor[s, {y_width}, f32]) -> tensor[s, *, f32] = softmax(second(y, x), -1)\n"
             );
             let program = surf_check(&source);
-            let defs = cached_program_defs(&program);
+            let defs = cached_program_defs(&HostLoweringSession::new(&program));
             let (_, _, run) = stamped_parts(&defs["run"]).unwrap();
             let (_, _, params) = stamped_parts(&run[0]).unwrap();
             let params: Vec<_> = params
@@ -17611,7 +17596,13 @@ mod tests {
                 })
                 .collect();
             assert_eq!(
-                body_form_the_dag_cannot_carry(&program, &run[1], &params, false).is_some(),
+                body_form_the_dag_cannot_carry(
+                    &HostLoweringSession::new(&program),
+                    &run[1],
+                    &params,
+                    false
+                )
+                .is_some(),
                 host,
                 "{source}"
             );
@@ -17646,7 +17637,7 @@ mod tests {
             "def run(x: tensor[2, f32]) -> tensor[2, f32] = {{\n z = level_{depth}(copy(x))\n _ = rank(x)\n z\n}}\n"
         ));
         let program = surf_check(&source);
-        let defs = cached_program_defs(&program);
+        let defs = cached_program_defs(&HostLoweringSession::new(&program));
         let mut walk = admission_test_walk(&defs);
         assert!(
             walk.def("run", &defs["run"], None)
@@ -17661,7 +17652,7 @@ mod tests {
         let program = surf_check(
             "def second[s](x: tensor[s, *, f32], y: tensor[s, *, f32]) = concat([y, y], 1i32)\n",
         );
-        let defs = cached_program_defs(&program);
+        let defs = cached_program_defs(&HostLoweringSession::new(&program));
         let fixed = ConcatInputFact::Tensor(TensorType {
             dims: vec![DimInfo::Lit(2), DimInfo::Lit(2)],
             precision: Prim::F32,
@@ -17695,7 +17686,7 @@ mod tests {
         let program = surf_check(
             "def global(x: tensor[2, f32]) -> int32 = rank(x)\ndef call(x: tensor[2, f32]) -> int32 = global(x)\n",
         );
-        let defs = cached_program_defs(&program);
+        let defs = cached_program_defs(&HostLoweringSession::new(&program));
         let mut walk = admission_test_walk(&defs);
         // A free callee name resolves against program definitions, not a
         // same-spelled caller alias, including its constructor classification.
@@ -18001,7 +17992,7 @@ def bad[b](box: Box[b]) -> bool =
         MONO_SPECIALIZATIONS.with(|state| *state.borrow_mut() = seeded.clone());
 
         assert_eq!(
-            top_level_fn_helper_summary_rejects(&checked, "bad_wrap"),
+            top_level_fn_helper_summary_rejects(&HostLoweringSession::new(&checked), "bad_wrap"),
             Ok(false),
             "a speculative lowering error is not a summary rejection"
         );
@@ -18024,8 +18015,15 @@ def bad[b](box: Box[b]) -> bool =
 
         let body = find_top_level_def_expr(checked.exprs(), "bad_wrap")
             .expect("the checked program contains bad_wrap");
-        let error = lower_host_function("bad_wrap", body, None, &checked, false, false)
-            .expect_err("real lowering must report the genuine bad call");
+        let error = lower_host_function(
+            "bad_wrap",
+            body,
+            None,
+            &HostLoweringSession::new(&checked),
+            false,
+            false,
+        )
+        .expect_err("real lowering must report the genuine bad call");
         assert_eq!(
             error.message,
             "unsupported: Deep expression `app` on host expression lowering: generic host \
@@ -18205,20 +18203,24 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
         lines.join("\n")
     }
 
-    /// chelis#1829 class receipt. The interpreter reaches `host_def_kernel`
-    /// once per applied definition; with a host-lowering scope armed for the
-    /// program, the summary probes behind those calls are bounded by the
-    /// definition count instead of expanding the call graph as a tree.
+    /// chelis#1829 class receipt, reshaped for the session. The interpreter
+    /// reaches `host_def_kernel` once per applied definition, and the summary
+    /// probes behind those calls must be bounded by the definition count
+    /// rather than expanding the call graph as a tree.
     ///
-    /// Evidentiary status: DISPOSITION LOCK on the scope introduced by
-    /// chelis#1829. It cannot be a regression test against the base, because
-    /// `begin_host_lowering_cache_scope` does not exist there. Its red was
-    /// established by mutation: with the scope's body neutered, the same
-    /// assertion reads 2^depth. The underlying tree expansion is chelis#1835
-    /// and is unchanged by this repair; this locks only that an armed scope
-    /// bounds it.
+    /// What this pins that `issue_1835_kernel_decision_work_is_linear` does
+    /// not: the always-compiled probe counter and the `cfg(test)` profile
+    /// count the SAME misses. The counted receipt in `chelis-compiler-api`
+    /// reads only the former, so a divergence there would let that receipt
+    /// pass on the wrong number.
+    ///
+    /// Evidentiary status: REGRESSION TEST against the base sha, where
+    /// `host_def_kernel` took a bare program, nothing armed the memo, and
+    /// this fixture cost 398,574 builds for thirteen definitions. It was a
+    /// disposition lock on chelis#1843's armed scope; the session makes the
+    /// same assertion hold with no scope to arm.
     #[test]
-    fn issue_1829_interpreter_scope_bounds_kernel_decision_probes() {
+    fn issue_1829_interpreter_session_bounds_kernel_decision_probes() {
         let depth = 12;
         std::thread::Builder::new()
             .name("issue-1829-fanout".to_string())
@@ -18231,9 +18233,9 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
                 reset_host_work_profile();
                 reset_host_summary_probe_builds();
                 {
-                    let _scope = begin_host_lowering_cache_scope(&checked);
+                    let session = HostLoweringSession::new(&checked);
                     for name in &names {
-                        host_def_kernel(&checked, name, None)
+                        host_def_kernel(&session, name, None)
                             .expect("#1829 fixture reaches a kernel decision");
                     }
                 }
@@ -18246,7 +18248,7 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
                 );
                 assert!(
                     profile.helper_summary_builds <= names.len(),
-                    "#1829: an armed scope must build at most one summary per definition; \
+                    "#1829: a session must build at most one summary per definition; \
                      {} definitions produced {} builds",
                     names.len(),
                     profile.helper_summary_builds
@@ -18263,202 +18265,239 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
             .expect("#1829 probe thread completes");
     }
 
-    /// chelis#1829 hazard (1). A nested scope must not disarm or empty the
-    /// scope that encloses it: the interpreter holds one across a whole
-    /// evaluation, and a whole-program lowering reached from inside it would
-    /// otherwise drop the memo mid-flight.
+    /// chelis#1829 hazard (1), restated for the session. The interpreter holds
+    /// one session across a whole evaluation, and a whole-program lowering
+    /// reached from inside it builds a second. Under the thread-local memo
+    /// that inner entry could disarm the flag and clear every cache, so the
+    /// hazard needed a refcount to describe. Two sessions share nothing, so
+    /// the property to hold is now the simpler one: an inner session neither
+    /// clears the enclosing session's facts nor reads them.
     ///
-    /// Evidentiary status: DISPOSITION LOCK on the refcounted guard. Against
-    /// the base the inner drop disarmed the flag and cleared every cache,
-    /// which is the behaviour this pins as gone.
+    /// Evidentiary status: REGRESSION TEST against the base sha, where both
+    /// programs' facts lived in one thread-local map and the outer program's
+    /// rows were observable from the inner entry (and, before chelis#1843's
+    /// refcount, cleared by its drop). It replaces
+    /// `issue_1829_nested_scope_keeps_the_outer_memo_armed_and_populated`,
+    /// whose flag and refcount no longer exist.
     #[test]
-    fn issue_1829_nested_scope_keeps_the_outer_memo_armed_and_populated() {
+    fn issue_1829_a_nested_session_neither_clears_nor_reads_the_enclosing_one() {
         let outer = surf_check("module Demo.Outer\n\ndef outer_fn(x: int64) -> int64 = x\n");
         let inner = surf_check("module Demo.Inner\n\ndef inner_fn(x: int64) -> int64 = x\n");
-        let outer_key = &outer as *const CheckedProgram as usize;
+        let outer_session = HostLoweringSession::new(&outer);
 
-        let outer_scope = begin_host_lowering_cache_scope(&outer);
-        let defs = cached_program_defs(&outer);
-        assert!(defs.contains_key("outer_fn"), "the outer program memoizes");
         assert!(
-            PROGRAM_DEFS_CACHE.with(|cache| cache.borrow().contains_key(&outer_key)),
-            "#1829: the outer scope must populate the memo"
+            cached_program_defs(&outer_session).contains_key("outer_fn"),
+            "#1829: the enclosing session must actually derive facts, or this \
+             receipt would pass without measuring anything"
         );
 
         {
-            let _inner_scope = begin_host_lowering_cache_scope(&inner);
+            let inner_session = HostLoweringSession::new(&inner);
+            let inner_defs = cached_program_defs(&inner_session);
             assert!(
-                HOST_LOWERING_CACHE_ACTIVE.with(Cell::get),
-                "#1829: an inner scope stays armed"
+                inner_defs.contains_key("inner_fn") && !inner_defs.contains_key("outer_fn"),
+                "#1829: an inner session's facts describe its own program only"
+            );
+            assert!(
+                !cached_program_defs(&outer_session).contains_key("inner_fn"),
+                "#1829: an inner session must not write into the enclosing one"
             );
         }
 
+        // The inner session is gone. The enclosing one is untouched, and the
+        // borrow checker, not a refcount, is what made that true.
         assert!(
-            HOST_LOWERING_CACHE_ACTIVE.with(Cell::get),
-            "#1829: an inner scope's drop must not disarm the outer scope"
-        );
-        assert!(
-            PROGRAM_DEFS_CACHE.with(|cache| cache.borrow().contains_key(&outer_key)),
-            "#1829: an inner scope's drop must not empty the outer scope's memo"
-        );
-
-        drop(outer_scope);
-        assert!(
-            !HOST_LOWERING_CACHE_ACTIVE.with(Cell::get),
-            "#1829: the last scope to drop disarms the memo"
-        );
-        assert!(
-            PROGRAM_DEFS_CACHE.with(|cache| cache.borrow().is_empty()),
-            "#1829: the last scope to drop clears the memo"
+            cached_program_defs(&outer_session).contains_key("outer_fn"),
+            "#1829: an inner session's drop must not clear the enclosing session"
         );
     }
 
-    /// chelis#1829 P2-1 (round 1). A scope's rows must not outlive the scope.
-    /// Eviction used to run only on `begin`, so an inner scope's rows stayed in
-    /// the caches after its program was dropped, and a later program allocated
-    /// at that address could read them. The reviewer reproduced exactly that.
+    /// chelis#1835 fixture: a fan-out chain of defs, each calling the next
+    /// from two argument positions.
     ///
-    /// This lock establishes the invariant directly rather than by hoping an
-    /// allocator recycles an address: it asserts the inner program's rows are
-    /// present while its scope is live and gone the moment that scope drops,
-    /// which is what makes a recycled address harmless. The presence assertion
-    /// is what stops this passing without measuring anything.
-    ///
-    /// Evidentiary status: DISPOSITION LOCK on the drop-edge eviction added in
-    /// round 1. Against the pre-round head the post-drop assertion fails.
-    #[test]
-    fn issue_1829_dropping_an_inner_scope_evicts_its_own_rows() {
-        let outer = surf_check("module Demo.Outer2\n\ndef outer_fn(x: int64) -> int64 = x\n");
-        let inner = surf_check("module Demo.Inner2\n\ndef inner_fn(x: int64) -> int64 = x\n");
-        let outer_key = &outer as *const CheckedProgram as usize;
-        let inner_key = &inner as *const CheckedProgram as usize;
-        assert_ne!(outer_key, inner_key, "two live programs have two addresses");
+    /// Two shapes, because the kernel decision costs differently on each. A
+    /// TENSOR-returning chain reaches the helper-summary probe and stays on
+    /// the kernel path. A SCALAR-returning chain reaches the same probe
+    /// first, because `def_body_decision_impl` asks it before the declared
+    /// result type can rule the def out, and the probe's own lowering then
+    /// takes the host lane, whose inliner duplicates the callee body per call
+    /// site. The second shape is therefore the expensive one, and both are
+    /// the same defect: a per-definition fact recomputed per ask.
+    fn issue_1835_fanout_source(depth: usize, tensor_result: bool) -> String {
+        let (module, ty, leaf) = if tensor_result {
+            ("Demo.KernelFanout", "tensor[4, f32]", "mul(x, x)")
+        } else {
+            ("Demo.ScalarFanout", "int64", "mul(x, x)")
+        };
+        let mut lines = vec![format!("module {module}"), String::new()];
+        for level in 0..depth {
+            lines.push(format!(
+                "def f{level}(x: {ty}) -> {ty} = add(f{next}(x), f{next}(x))",
+                next = level + 1
+            ));
+        }
+        lines.push(format!("def f{depth}(x: {ty}) -> {ty} = {leaf}"));
+        lines.push(String::new());
+        lines.join("\n")
+    }
 
-        let outer_scope = begin_host_lowering_cache_scope(&outer);
-        cached_program_defs(&outer);
-        {
-            let _inner_scope = begin_host_lowering_cache_scope(&inner);
-            cached_program_defs(&inner);
-            HELPER_SUMMARY_REJECTS_CACHE.with(|cache| {
-                cache
-                    .borrow_mut()
-                    .insert((inner_key, "inner_fn".to_string()), true);
-            });
-            assert!(
-                PROGRAM_DEFS_CACHE.with(|cache| cache.borrow().contains_key(&inner_key)),
-                "#1829: the inner scope must actually populate rows, or this lock \
-                 would pass without measuring anything"
-            );
+    /// Which defs the C lane lowered through the tensor DAG. A kernel body
+    /// becomes a call to an extracted tensor helper attached to the emitted
+    /// host function; a host-lane body has none.
+    fn issue_1835_c_lane_kernel_defs(checked: &CheckedProgram, names: &[String]) -> Vec<bool> {
+        let compiled = try_lower_compiled_program(checked).expect("#1835 fixture lowers on C");
+        let host = compiled.host.expect("#1835 fixture emits a host program");
+        names
+            .iter()
+            .map(|name| {
+                host.functions
+                    .iter()
+                    .find(|function| &function.name == name)
+                    .is_some_and(|function| !function.tensor_helpers.is_empty())
+            })
+            .collect()
+    }
+
+    /// chelis#1835 class receipt. `host_def_kernel` is the entry every lane
+    /// asks for one def's kernel decision, and its cost must be linear in the
+    /// definition count with NO opt-in: no flag to arm, no scope to hold, no
+    /// argument beyond the session every caller must now build. A second full
+    /// pass must add no work at all, and the answers must agree with the lane
+    /// that compiles the whole program (chelis#1277 B2h).
+    ///
+    /// Evidentiary status: REGRESSION TEST for every assertion, watched red on
+    /// the base sha `6abca2406`, where the memo is gated on a thread-local
+    /// flag that no `host_def_kernel` caller arms. Thirteen definitions cost
+    /// 78 summary builds and 728 definition collections on the tensor chain,
+    /// and 398,574 builds and 797,174 collections on the scalar chain; the
+    /// second pass repeated both figures exactly, which is the memo never
+    /// being read. The pull request records the runs.
+    #[test]
+    fn issue_1835_kernel_decision_work_is_linear() {
+        const DEPTH: usize = 12;
+        for tensor_result in [true, false] {
+            std::thread::Builder::new()
+                .name(format!("issue-1835-fanout-{tensor_result}"))
+                .stack_size(512 * 1024 * 1024)
+                .spawn(move || {
+                    let typed = surf_check(&issue_1835_fanout_source(DEPTH, tensor_result));
+                    let effected = chelis_effects::check_program(&typed).expect("effect check");
+                    let checked =
+                        chelis_types::check_linearity(&effected).expect("linearity check");
+                    let names = (0..=DEPTH)
+                        .map(|level| format!("f{level}"))
+                        .collect::<Vec<_>>();
+
+                    // One session, established by the caller because the type
+                    // leaves it no choice, and NO other opt-in.
+                    let session = HostLoweringSession::new(&checked);
+                    reset_host_work_profile();
+                    let first_answers = names
+                        .iter()
+                        .map(|name| {
+                            host_def_kernel(&session, name, None)
+                                .expect("#1835 fixture reaches a kernel decision")
+                                .is_some()
+                        })
+                        .collect::<Vec<_>>();
+                    let first = take_host_work_profile();
+                    let second_answers = names
+                        .iter()
+                        .map(|name| {
+                            host_def_kernel(&session, name, None)
+                                .expect("#1835 fixture reaches a kernel decision")
+                                .is_some()
+                        })
+                        .collect::<Vec<_>>();
+                    let second = take_host_work_profile();
+                    eprintln!(
+                        "#1835 tensor_result={tensor_result} depth={DEPTH} defs={} \
+                         helper_summary_builds={}+{} program_def_collections={}+{}",
+                        names.len(),
+                        first.helper_summary_builds,
+                        second.helper_summary_builds,
+                        first.program_def_collections,
+                        second.program_def_collections
+                    );
+
+                    assert!(
+                        first.helper_summary_builds <= names.len(),
+                        "#1835: an unopted `host_def_kernel` caller must build at most one \
+                         summary per definition; {} definitions produced {} builds \
+                         (tensor_result={tensor_result})",
+                        names.len(),
+                        first.helper_summary_builds
+                    );
+                    assert_eq!(
+                        second.helper_summary_builds, 0,
+                        "#1835: a second full pass over the same program must build no \
+                         further summaries (tensor_result={tensor_result})"
+                    );
+                    assert_eq!(
+                        first.program_def_collections + second.program_def_collections,
+                        1,
+                        "#1835: program definitions must be collected once for the session, \
+                         not once per decision (tensor_result={tensor_result})"
+                    );
+                    assert_eq!(
+                        first_answers, second_answers,
+                        "#1835: a memoized decision must not differ from the one that built \
+                         it (tensor_result={tensor_result})"
+                    );
+                    assert_eq!(
+                        first_answers,
+                        issue_1835_c_lane_kernel_defs(&checked, &names),
+                        "#1835: the shared decision must answer what the C lane compiles \
+                         (chelis#1277 B2h; tensor_result={tensor_result})"
+                    );
+                })
+                .expect("#1835 fanout thread starts")
+                .join()
+                .expect("#1835 fanout thread completes");
         }
 
+        // Both chains above answer uniformly, all-kernel or all-host, so their
+        // cross-lane comparison cannot fail for a PER-DEFINITION disagreement:
+        // two constant vectors of the same constant are equal whatever the
+        // decision did. This program's answers are non-uniform by
+        // construction, one definition per documented class, so the
+        // comparison has something to disagree about.
+        let mixed = surf_check(
+            "module Demo.MixedLanes\n\n             def k(x: tensor[4, f32]) -> tensor[4, f32] = mul(x, x)\n             def loud(x: tensor[4, f32]) -> tensor[4, f32] ! {IO} = {\n               _ = print(x)\n  x\n}\n             def s(x: int64) -> int64 = add(x, x)\n             def k2(x: tensor[4, f32]) -> tensor[4, f32] = add(k(x), k(x))\n",
+        );
+        let mixed = chelis_types::check_linearity(
+            &chelis_effects::check_program(&mixed).expect("mixed effect check"),
+        )
+        .expect("mixed linearity check");
+        let mixed_names = ["k", "loud", "s", "k2"].map(String::from).to_vec();
+        let mixed_session = HostLoweringSession::new(&mixed);
+        let mixed_answers = mixed_names
+            .iter()
+            .map(|name| {
+                host_def_kernel(&mixed_session, name, None)
+                    .expect("#1835 mixed fixture reaches a kernel decision")
+                    .is_some()
+            })
+            .collect::<Vec<_>>();
+        eprintln!("#1835 mixed answers={mixed_answers:?}");
         assert!(
-            !PROGRAM_DEFS_CACHE.with(|cache| cache.borrow().contains_key(&inner_key)),
-            "#1829: an inner scope's definition rows must not outlive its drop"
+            mixed_answers.iter().any(|kernel| *kernel)
+                && mixed_answers.iter().any(|kernel| !*kernel),
+            "#1835: the mixed fixture must answer non-uniformly, or the cross-lane \
+             comparison below is two constant vectors again; got {mixed_answers:?}"
         );
         assert_eq!(
-            HELPER_SUMMARY_REJECTS_CACHE.with(|cache| cache
-                .borrow()
-                .get(&(inner_key, "inner_fn".to_string()))
-                .copied()),
-            None,
-            "#1829: an inner scope's program-keyed summary rows must not outlive its drop"
+            mixed_answers,
+            vec![true, false, false, true],
+            "#1835: a pure tensor body is a kernel, an IO effect row and a non-tensor \
+             result are host code (chelis#1277 B2h's documented classes)"
         );
-        assert!(
-            PROGRAM_DEFS_CACHE.with(|cache| cache.borrow().contains_key(&outer_key)),
-            "#1829: the drop must evict only the dropping scope's program"
+        assert_eq!(
+            mixed_answers,
+            issue_1835_c_lane_kernel_defs(&mixed, &mixed_names),
+            "#1835: the shared decision must answer what the C lane compiles, per \
+             definition and not merely in aggregate (chelis#1277 B2h)"
         );
-
-        drop(outer_scope);
-    }
-
-    /// chelis#1829 P2-2 (round 1). `HostLoweringCacheScope` arms thread-local
-    /// caches, so sending one to another thread and dropping it there leaves
-    /// the arming thread armed forever with rows retained. The reviewer proved
-    /// the type satisfied `thread::spawn`'s bound and did exactly that.
-    ///
-    /// This is a COMPILE-TIME lock, not a runtime one: the two blanket impls
-    /// below are ambiguous for any `Send` type, so if the `*const ()` marker is
-    /// ever removed this call stops compiling and the crate's test target fails
-    /// to build. A runtime test cannot assert a negative trait bound.
-    ///
-    /// The companion invariant, that the scope cannot outlive the program it
-    /// arms for, needs no test: the `&'program CheckedProgram` in the scope's
-    /// `PhantomData` makes the borrow checker enforce it.
-    ///
-    /// Evidentiary status: DISPOSITION LOCK on the marker added in round 1.
-    #[test]
-    fn issue_1829_cache_scope_cannot_cross_a_thread() {
-        trait AmbiguousIfSend<Witness> {
-            fn assert_not_send() {}
-        }
-        impl<T: ?Sized> AmbiguousIfSend<()> for T {}
-        impl<T: ?Sized + Send> AmbiguousIfSend<u8> for T {}
-        // Resolves only while `HostLoweringCacheScope` is NOT `Send`.
-        <HostLoweringCacheScope<'_> as AmbiguousIfSend<_>>::assert_not_send();
-    }
-
-    /// chelis#1829 hazard (2). Cache keys are program addresses, so a scope
-    /// entering on an address that a freed program once occupied must not read
-    /// that program's rows. `begin` evicts the entering program's address, and
-    /// only that address.
-    ///
-    /// Evidentiary status: DISPOSITION LOCK on the eviction. A real address
-    /// reuse cannot be forced deterministically, so the row that a recycled
-    /// address would present is planted directly.
-    #[test]
-    fn issue_1829_entering_scope_evicts_only_its_own_program_address() {
-        let outer = surf_check("module Demo.Held\n\ndef held_fn(x: int64) -> int64 = x\n");
-        let entering =
-            surf_check("module Demo.Entering\n\ndef entering_fn(x: int64) -> int64 = x\n");
-        let outer_key = &outer as *const CheckedProgram as usize;
-        let entering_key = &entering as *const CheckedProgram as usize;
-        assert_ne!(
-            outer_key, entering_key,
-            "two live programs have two addresses"
-        );
-
-        let outer_scope = begin_host_lowering_cache_scope(&outer);
-        cached_program_defs(&outer);
-        // The rows a freed predecessor at `entering`'s address would leave.
-        PROGRAM_DEFS_CACHE.with(|cache| {
-            cache
-                .borrow_mut()
-                .insert(entering_key, Arc::new(BTreeMap::new()));
-        });
-        HELPER_SUMMARY_REJECTS_CACHE.with(|cache| {
-            let mut cache = cache.borrow_mut();
-            cache.insert((entering_key, "stale_fn".to_string()), true);
-            cache.insert((outer_key, "held_fn".to_string()), true);
-        });
-
-        {
-            let _inner_scope = begin_host_lowering_cache_scope(&entering);
-            assert!(
-                !PROGRAM_DEFS_CACHE.with(|cache| cache.borrow().contains_key(&entering_key)),
-                "#1829: entering a scope must evict the entering address's rows"
-            );
-            assert!(
-                HELPER_SUMMARY_REJECTS_CACHE.with(|cache| cache
-                    .borrow()
-                    .get(&(entering_key, "stale_fn".to_string()))
-                    .is_none()),
-                "#1829: eviction covers the program-keyed summary rows too"
-            );
-            assert!(
-                PROGRAM_DEFS_CACHE.with(|cache| cache.borrow().contains_key(&outer_key)),
-                "#1829: eviction must not reach another program's rows"
-            );
-            assert_eq!(
-                HELPER_SUMMARY_REJECTS_CACHE.with(|cache| cache
-                    .borrow()
-                    .get(&(outer_key, "held_fn".to_string()))
-                    .copied()),
-                Some(true),
-                "#1829: the held program's summary rows survive an inner scope"
-            );
-        }
-
-        drop(outer_scope);
     }
 
     fn issue_1205_source(operations: usize, flat: bool) -> String {
@@ -18639,12 +18678,14 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
                              out = index(to_list(nested(cast(1.0, f32))), 0i64)\n"
                         );
                         let typed = surf_check(&source);
-                        let defs = cached_program_defs(&typed);
+                        let defs = cached_program_defs(&HostLoweringSession::new(&typed));
                         let nested_body = lookup_program_def(&defs, "nested")
                             .expect("nested definition is present");
 
                         reset_host_work_profile();
-                        let summaries = cached_dynamic_to_tensor_def_summaries(&typed);
+                        let summaries = cached_dynamic_to_tensor_def_summaries(
+                            &HostLoweringSession::new(&typed),
+                        );
                         assert_eq!(summaries.get("nested"), Some(&true));
                         let summary_profile = take_host_work_profile();
                         let summary_work = summary_profile.tensor_helper_preflight_nodes
@@ -18730,8 +18771,8 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
              }\n\
              out = index(to_list(sibling(cast(1.0, f32))), 0i64)\n",
         );
-        let summaries = cached_dynamic_to_tensor_def_summaries(&typed);
-        let defs = cached_program_defs(&typed);
+        let summaries = cached_dynamic_to_tensor_def_summaries(&HostLoweringSession::new(&typed));
+        let defs = cached_program_defs(&HostLoweringSession::new(&typed));
         for (definition, final_callee) in [
             ("sibling", "bc"),
             ("nested", "f"),
@@ -18817,7 +18858,7 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
              def twice(bc: tensor[1, f32]) -> tensor[1, f32] = add(bc, bc)\n\
              r = index(to_list(twice(to_tensor([cast(1.0, f32)]))), 0i64)\n",
         );
-        let summaries = cached_dynamic_to_tensor_def_summaries(&typed);
+        let summaries = cached_dynamic_to_tensor_def_summaries(&HostLoweringSession::new(&typed));
         assert_eq!(
             summaries.get("bc"),
             Some(&true),
@@ -18849,7 +18890,8 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
              def wrapper(x: tensor[1, f32]) -> tensor[1, f32] = local(x)\n\
              out = index(to_list(wrapper(to_tensor([cast(1.0, f32)]))), 0i64)\n",
         );
-        let shadowed_summaries = cached_dynamic_to_tensor_def_summaries(&shadowed);
+        let shadowed_summaries =
+            cached_dynamic_to_tensor_def_summaries(&HostLoweringSession::new(&shadowed));
         assert_eq!(shadowed_summaries.get("bc"), Some(&true));
         for name in ["local", "wrapper", "out"] {
             assert_eq!(
@@ -18858,7 +18900,7 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
                 "a local callable named bc must shadow the top-level helper in {name}"
             );
         }
-        let shadowed_defs = cached_program_defs(&shadowed);
+        let shadowed_defs = cached_program_defs(&HostLoweringSession::new(&shadowed));
         let local_body = lookup_program_def(&shadowed_defs, "local").expect("local definition");
         let local_call = issue_1205_find_named_app(local_body, "bc").expect("local bc call");
         let mut shadowed_facts = UnordMap::new();
@@ -18878,7 +18920,8 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
              def wrapper(c: f32) -> tensor[1, f32] = aliased(c)\n\
              out = index(to_list(wrapper(cast(1.0, f32))), 0i64)\n",
         );
-        let aliased_summaries = cached_dynamic_to_tensor_def_summaries(&aliased);
+        let aliased_summaries =
+            cached_dynamic_to_tensor_def_summaries(&HostLoweringSession::new(&aliased));
         for name in ["bc", "aliased", "wrapper", "out"] {
             assert_eq!(
                 aliased_summaries.get(name),
@@ -18886,7 +18929,7 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
                 "the alias f = bc must propagate the dynamic helper summary through {name}"
             );
         }
-        let aliased_defs = cached_program_defs(&aliased);
+        let aliased_defs = cached_program_defs(&HostLoweringSession::new(&aliased));
         let aliased_body =
             lookup_program_def(&aliased_defs, "aliased").expect("aliased definition");
         let alias_call = issue_1205_find_named_app(aliased_body, "f").expect("local f call");
@@ -18948,7 +18991,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
   Frame { cols: singleton(column) }
 "#,
         );
-        let definitions = adt_constructor_definitions(&checked);
+        let definitions = adt_constructor_definitions(&HostLoweringSession::new(&checked));
         assert!(
             definitions
                 .iter()
@@ -18992,7 +19035,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             "checker metadata must record the authored generic signature"
         );
         assert!(
-            top_level_fn_is_type_polymorphic(&checked, "from_column"),
+            top_level_fn_is_type_polymorphic(&HostLoweringSession::new(&checked), "from_column"),
             "the stored dtype behind Frame -> Hamt -> Column must classify from checker metadata"
         );
     }
@@ -19012,7 +19055,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         assert!(!apply.authored_signature);
         assert!(apply.authored_signature_type.is_none());
         assert!(
-            !top_level_fn_is_type_polymorphic(&checked, "apply"),
+            !top_level_fn_is_type_polymorphic(&HostLoweringSession::new(&checked), "apply"),
             "an inferred/generalized callback is not an authored generic ABI"
         );
     }
@@ -19032,15 +19075,15 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             "#,
         );
         assert!(
-            top_level_fn_is_type_polymorphic(&checked, "Left.identity"),
+            top_level_fn_is_type_polymorphic(&HostLoweringSession::new(&checked), "Left.identity"),
             "an exact qualified checker record must classify"
         );
         assert!(
-            top_level_fn_is_type_polymorphic(&checked, "Right.identity"),
+            top_level_fn_is_type_polymorphic(&HostLoweringSession::new(&checked), "Right.identity"),
             "the other exact qualified checker record must classify"
         );
         assert!(
-            !top_level_fn_is_type_polymorphic(&checked, "identity"),
+            !top_level_fn_is_type_polymorphic(&HostLoweringSession::new(&checked), "identity"),
             "an ambiguous terminal name must not select either qualified checker record"
         );
     }
@@ -19167,7 +19210,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         // Empty checked program: the arm under test must not depend on
         // program-level lookups for the precision recovery.
         let program = surf_check("unrelated = 1\n");
-        infer_app_expr_host_type(&app, &program, &UnordMap::new())
+        infer_app_expr_host_type(&app, &HostLoweringSession::new(&program), &UnordMap::new())
     }
 
     #[test]
@@ -19277,7 +19320,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             "rows".to_string(),
             HostTypeTerm::List(Box::new(HostTypeTerm::Tensor(rank2_element()))),
         );
-        infer_app_expr_host_type(&app, &program, &scope)
+        infer_app_expr_host_type(&app, &HostLoweringSession::new(&program), &scope)
     }
 
     #[test]
@@ -19730,7 +19773,9 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             dims: vec![DimInfo::Lit(4)],
             precision: Prim::F32,
         };
-        let dag = lower_tensor_helper_dag(body, &checked, &scope, &expected).expect("helper dag");
+        let dag =
+            lower_tensor_helper_dag(body, &HostLoweringSession::new(&checked), &scope, &expected)
+                .expect("helper dag");
         let root = dag.roots().first().and_then(|id| dag.get(*id)).unwrap();
         assert_eq!(root.op, RiscOp::Exp, "{:?}", dag.nodes());
     }
@@ -19829,7 +19874,8 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             "#,
         );
         let lowered = top_level_lowering_map(checked.exprs(), checked.type_env());
-        let host = lower_host_program(&checked, &lowered).expect("host program must lower");
+        let host = lower_host_program(&HostLoweringSession::new(&checked), &lowered)
+            .expect("host program must lower");
         let out_binding = host
             .globals
             .iter()
@@ -21179,6 +21225,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     }
 
     fn lower_against(program: &CheckedProgram, source: &str) -> Result<HostExpr, String> {
+        let program = &HostLoweringSession::new(program);
         let mut helpers = TensorHelperSink::new(false, false);
         lower_host_expr(&deep_expr(source), program, &UnordMap::new(), &mut helpers)
             .map_err(|diagnostic| diagnostic.message)
@@ -21190,9 +21237,10 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         // (spec/04-type-system.md, "Module identity"), so the
         // later-sorting package still resolves to its own declaration.
         let checked = parse_and_check(COLLIDING_DECLARATIONS);
-        let AdtConstructorResolution::Unique(definition) =
-            resolve_adt_constructor_definition(&checked, "Blib__Wrapped")
-        else {
+        let AdtConstructorResolution::Unique(definition) = resolve_adt_constructor_definition(
+            &HostLoweringSession::new(&checked),
+            "Blib__Wrapped",
+        ) else {
             panic!("an exactly-spelled constructor must resolve uniquely");
         };
         assert_eq!(definition.adt_name, "Blib__Wrapped");
@@ -21217,7 +21265,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             "(field {} amount (t-prim {} f32))))\n"
         ));
         let AdtConstructorResolution::Unique(definition) =
-            resolve_adt_constructor_definition(&checked, "Wrapped")
+            resolve_adt_constructor_definition(&HostLoweringSession::new(&checked), "Wrapped")
         else {
             panic!("an uncontested terminal spelling must still resolve");
         };
@@ -21231,7 +21279,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         // the defect under a different first-match rule.
         let checked = parse_and_check(COLLIDING_DECLARATIONS);
         let AdtConstructorResolution::Ambiguous(candidates) =
-            resolve_adt_constructor_definition(&checked, "Wrapped")
+            resolve_adt_constructor_definition(&HostLoweringSession::new(&checked), "Wrapped")
         else {
             panic!("a contested terminal spelling must not resolve");
         };
@@ -21262,7 +21310,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             "(deftype {} BbbBox () (variant {} Boxed (field {} amount (t-prim {} f32))))\n"
         ));
         let AdtConstructorResolution::Unique(definition) =
-            resolve_adt_constructor_definition(&checked, "Boxed")
+            resolve_adt_constructor_definition(&HostLoweringSession::new(&checked), "Boxed")
         else {
             panic!("same-name declarations keep their existing deterministic choice");
         };
@@ -21275,9 +21323,14 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         // collision: admitting both declarations made them disagree on
         // the index of `amount` and rejected a valid access.
         let checked = parse_and_check(COLLIDING_DECLARATIONS);
-        let found = lookup_adt_field_on_type(&checked, "Blib__Wrapped", &[], "amount")
-            .expect("no instantiation error")
-            .expect("`amount` is declared on Blib__Wrapped");
+        let found = lookup_adt_field_on_type(
+            &HostLoweringSession::new(&checked),
+            "Blib__Wrapped",
+            &[],
+            "amount",
+        )
+        .expect("no instantiation error")
+        .expect("`amount` is declared on Blib__Wrapped");
         assert_eq!(found.0, 1, "`amount` is field 1 in the exact declaration");
     }
 

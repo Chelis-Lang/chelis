@@ -429,10 +429,11 @@ impl<'a> EvalContext<'a> {
     ) -> Result<Option<Arc<DefEvaluationKernel>>, String> {
         if self.execution_exclusion.is_some() {
             return self
-                .program
-                .map(|program| {
+                .session
+                .as_ref()
+                .map(|session| {
                     chelis_ir::host::host_def_kernel(
-                        program,
+                        session,
                         name,
                         Some(RandomLoweringState {
                             seed: self.random_seed,
@@ -451,14 +452,14 @@ impl<'a> EvalContext<'a> {
         if let Some(cached) = self.def_kernels.get(name) {
             return Ok(cached.clone());
         }
-        let Some(program) = self.program else {
+        let Some(session) = self.session.as_ref() else {
             return Ok(None);
         };
         let random = RandomLoweringState {
             seed: self.random_seed,
             counter: self.random_counter,
         };
-        let kernel = host_def_evaluation_plan(program, name, &RandomExecutionContext::new(random))
+        let kernel = host_def_evaluation_plan(session, name, &RandomExecutionContext::new(random))
             .map_err(|diagnostic| diagnostic.to_string())?
             .map(|plan| Arc::new(DefEvaluationKernel::Planned(plan)));
         let context_bound = kernel
