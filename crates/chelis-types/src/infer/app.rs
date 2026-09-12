@@ -19,21 +19,19 @@ enum ListAxis {
 
 impl ListAxis {
     fn classify(dim: &Dim, subst: &Subst) -> Self {
-        let label = match subst.semantic_dim(dim) {
-            Dim::Name(name) => Some(name),
-            _ => None,
-        };
-        match subst.constraint_dim(dim) {
-            Dim::Var(v) if label.is_none() || subst.is_protected_dimension(v) => Self::Variable,
-            Dim::Rank(_) => Self::Variable,
-            Dim::Wildcard => Self::Wildcard,
-            constraint => Self::Concrete {
-                extent: match constraint {
-                    Dim::Lit(n) => Some(n),
-                    _ => None,
-                },
-                label,
-            },
+        let observation = subst.observe_dim(dim);
+        if observation.rank().is_some()
+            || (observation.variable().is_some()
+                && (observation.name().is_none() || observation.is_protected()))
+        {
+            Self::Variable
+        } else if observation.is_wildcard() {
+            Self::Wildcard
+        } else {
+            Self::Concrete {
+                extent: observation.known_extent(),
+                label: observation.name().map(str::to_owned),
+            }
         }
     }
 }

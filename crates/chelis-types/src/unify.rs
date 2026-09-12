@@ -78,6 +78,57 @@ pub enum TypeErrorKind {
     NotAFunction,
 }
 
+/// A derived observation, never a replacement dimension for propagation.
+/// Labels, known constraints, and current authored rigidity are independent.
+/// Deliberately has no equality or conversion to `Dim`: each operation chooses
+/// its own proof/admission policy, and keeps the original ID in surviving axes.
+pub(crate) struct DimObservation {
+    constraint: Dim,
+    name: Option<String>,
+    protected: bool,
+}
+
+impl DimObservation {
+    pub(crate) fn known_extent(&self) -> Option<i64> {
+        match self.constraint {
+            Dim::Lit(n) => Some(n),
+            _ => None,
+        }
+    }
+
+    /// The literal category of policies that admit named runtime claims
+    /// (expand/reshape/concat), not every internally known constraint.
+    pub(crate) fn literal_extent(&self) -> Option<i64> {
+        if self.name.is_none() {
+            self.known_extent()
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+    pub(crate) fn variable(&self) -> Option<DimVar> {
+        match self.constraint {
+            Dim::Var(v) => Some(v),
+            _ => None,
+        }
+    }
+    pub(crate) fn rank(&self) -> Option<RankVar> {
+        match self.constraint {
+            Dim::Rank(v) => Some(v),
+            _ => None,
+        }
+    }
+    pub(crate) fn is_wildcard(&self) -> bool {
+        matches!(self.constraint, Dim::Wildcard)
+    }
+    pub(crate) fn is_protected(&self) -> bool {
+        self.protected
+    }
+}
+
 /// Substitution: maps type variables to types and dim variables to dims.
 ///
 /// The maps are wrapped in `Mutex` so [`Subst::apply`] and
@@ -916,9 +967,7 @@ impl Subst {
 
     pub(crate) fn static_dim_product(&self, dims: &[Dim]) -> Option<i128> {
         dims.iter().try_fold(1_i128, |product, dim| {
-            let Dim::Lit(value) = self.apply_dim(dim) else {
-                return None;
-            };
+            let value = self.observe_dim(dim).literal_extent()?;
             product.checked_mul(i128::from(value))
         })
     }
@@ -929,10 +978,7 @@ impl Subst {
     pub(crate) fn static_dim_products_match(&self, lhs: &[Dim], rhs: &[Dim]) -> Option<bool> {
         fn values(subst: &Subst, dims: &[Dim]) -> Option<Vec<i64>> {
             dims.iter()
-                .map(|dim| match subst.apply_dim(dim) {
-                    Dim::Lit(value) => Some(value),
-                    _ => None,
-                })
+                .map(|dim| subst.observe_dim(dim).literal_extent())
                 .collect()
         }
 
@@ -1531,6 +1577,25 @@ impl Subst {
         match dim {
             Dim::Var(v) => self.resolve_dvar(*v),
             _ => dim.clone(),
+        }
+    }
+
+    pub(crate) fn observe_dim(&self, dim: &Dim) -> DimObservation {
+        let constraint = self.constraint_dim(dim);
+        let name = match dim {
+            Dim::Var(v) => self.dimension_label(*v),
+            Dim::Name(name) => Some(name.clone()),
+            _ => None,
+        }
+        .or_else(|| match &constraint {
+            Dim::Name(name) => Some(name.clone()),
+            _ => None,
+        });
+        let protected = matches!(&constraint, Dim::Var(v) if self.is_protected_dimension(*v));
+        DimObservation {
+            constraint,
+            name,
+            protected,
         }
     }
 

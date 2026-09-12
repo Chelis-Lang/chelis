@@ -1,4 +1,371 @@
 //! Persistent semantic-label transport, separate from the immutable prototype oracle.
+
+/// Consumer families, not repeated witnesses of only one operation.
+#[test]
+fn dimension_observations_cover_arithmetic_comparison_and_propagation() {
+    let cases = [
+        (
+            "diagonal cannot erase authored result identity",
+            false,
+            "def run[d](x: tensor[d,d,f32], g: tensor[row,row,f32]) -> tensor[17,f32] = diagonal(square(x,g),0i32,1i32)",
+        ),
+        (
+            "stride identity cannot erase authored result identity",
+            false,
+            "def run[d](x: tensor[d,f32], g: tensor[row,f32]) -> tensor[17,f32] = stride(tag(x,g),1i64)",
+        ),
+        (
+            "pad identity cannot erase authored result identity",
+            false,
+            "def run[d](x: tensor[d,f32], g: tensor[row,f32]) -> tensor[17,f32] = pad(tag(x,g),[[0i64,0i64]],0.0f32)",
+        ),
+        (
+            "deferred gather retained name",
+            true,
+            "def apply_it[d,b](f: tensor[d,2,f32] -> b, t: tensor[d,2,f32]) -> b = f(t)\ndef run[d](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[1,int32]) = sum(apply_it(fn (v) -> { r = gather(v,i,-1i32)\n r },tag2(x,g)),row)",
+        ),
+        (
+            "deferred gather false result",
+            false,
+            "def apply_it[d,b](f: tensor[d,2,f32] -> b, t: tensor[d,2,f32]) -> b = f(t)\ndef run[d,e](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[1,int32]) -> tensor[e,1,f32] = apply_it(fn (v) -> { r = gather(v,i,-1i32)\n r },tag2(x,g))",
+        ),
+        (
+            "deferred trace retained name",
+            true,
+            "def apply_it[d,b](f: tensor[d,2,2,f32] -> b, t: tensor[d,2,2,f32]) -> b = f(t)\ndef run[d](x: tensor[d,2,2,f32], g: tensor[batch,row,col,f32]) = sum(apply_it(fn (v) -> { r = trace(v,1i32,2i32)\n r },tag3(x,g)),batch)",
+        ),
+        (
+            "deferred trace false result",
+            false,
+            "def apply_it[d,b](f: tensor[d,2,2,f32] -> b, t: tensor[d,2,2,f32]) -> b = f(t)\ndef run[d,e](x: tensor[d,2,2,f32], g: tensor[batch,row,col,f32]) -> tensor[e,f32] = apply_it(fn (v) -> { r = trace(v,1i32,2i32)\n r },tag3(x,g))",
+        ),
+        (
+            "deferred scatter retained name",
+            true,
+            "def apply_it[d,b](f: tensor[d,2,f32] -> b, t: tensor[d,2,f32]) -> b = f(t)\ndef run[d](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[1,int32], u: tensor[d,1,f32]) = sum(apply_it(fn (v) -> { r = scatter(v,i,u,-1i32,\"add\")\n r },tag2(x,g)),row)",
+        ),
+        (
+            "deferred scatter bad updates",
+            false,
+            "def apply_it[d,b](f: tensor[d,2,f32] -> b, t: tensor[d,2,f32]) -> b = f(t)\ndef run[d](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[1,int32], u: tensor[d,3,f32]) = sum(apply_it(fn (v) -> { r = scatter(v,i,u,-1i32,\"add\")\n r },tag2(x,g)),row)",
+        ),
+        (
+            "deferred scatter_replace retained name",
+            true,
+            "def apply_it[d,b](f: tensor[d,2,f32] -> b, t: tensor[d,2,f32]) -> b = f(t)\ndef run[d](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[1,int32], u: tensor[d,1,f32]) = sum(apply_it(fn (v) -> { r = scatter_replace(v,i,u,-1i32)\n r },tag2(x,g)),row)",
+        ),
+        (
+            "deferred scatter_replace bad updates",
+            false,
+            "def apply_it[d,b](f: tensor[d,2,f32] -> b, t: tensor[d,2,f32]) -> b = f(t)\ndef run[d](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[1,int32], u: tensor[d,3,f32]) = sum(apply_it(fn (v) -> { r = scatter_replace(v,i,u,-1i32)\n r },tag2(x,g)),row)",
+        ),
+        (
+            "expand bare nonunit",
+            false,
+            "def run(x: tensor[4,f32]) = expand(x,0i32,3i64)",
+        ),
+        (
+            "reshape bare bad product",
+            false,
+            "def run(x: tensor[4,f32]) = reshape(x,[3i64])",
+        ),
+        (
+            "concat bare wrong sum",
+            false,
+            "def run(x: tensor[2,f32], y: tensor[2,f32]) -> tensor[5,f32] = concat([x,y],0i32)",
+        ),
+        (
+            "window unknown runtime claim",
+            true,
+            "def run[d](x: tensor[d,f32], g: tensor[row,f32]) -> tensor[2,f32] = reduce_window_sum(tag(x,g),[2i64],[1i64])",
+        ),
+        (
+            "stride unknown runtime claim",
+            true,
+            "def run[d](x: tensor[d,f32], g: tensor[row,f32]) -> tensor[3,f32] = stride(tag(x,g),2i64)",
+        ),
+        (
+            "pad unknown runtime claim",
+            true,
+            "def run[d](x: tensor[d,f32], g: tensor[row,f32]) -> tensor[6,f32] = pad(tag(x,g),[[0i64,1i64]],0.0f32)",
+        ),
+        (
+            "diagonal bound identity query",
+            true,
+            "def run(x: tensor[2,2,f32], g: tensor[2,2,f32]) = sum(diagonal(square(x,g),0i32,1i32),row)",
+        ),
+        (
+            "where bound contradiction",
+            false,
+            "def run(x: tensor[2,f32], g: tensor[2,f32], y: tensor[3,f32], h: tensor[3,f32], c: tensor[row,bool]) = where(c,tag(x,g),tag(y,h))",
+        ),
+        (
+            "where bare literal not a name",
+            false,
+            "def run(x: tensor[2,f32], g: tensor[2,f32], y: tensor[2,f32], c: tensor[row,bool]) = where(c,tag(x,g),y)",
+        ),
+        (
+            "clamp bound contradiction",
+            false,
+            "def run(x: tensor[2,f32], g: tensor[2,f32], y: tensor[3,f32], h: tensor[3,f32]) = clamp(tag(x,g),tag(y,h),tag(y,h))",
+        ),
+        (
+            "gather retained name",
+            true,
+            "def run[d](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[1,int64]) = sum(gather(tag2(x,g),i,1i32),row)",
+        ),
+        (
+            "trace retained name",
+            true,
+            "def run[d](x: tensor[d,2,2,f32], g: tensor[batch,row,col,f32]) = sum(trace(tag3(x,g),1i32,2i32),batch)",
+        ),
+        (
+            "gather declared identity wrong",
+            false,
+            "def run[d,e](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[1,int64]) -> tensor[e,1,f32] = gather(tag2(x,g),i,1i32)",
+        ),
+        (
+            "trace declared identity wrong",
+            false,
+            "def run[d,e](x: tensor[d,2,2,f32], g: tensor[batch,row,col,f32]) -> tensor[e,f32] = trace(tag3(x,g),1i32,2i32)",
+        ),
+        (
+            "unresolved gather lambda at binding rejects",
+            false,
+            "def run[d](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[1,int32]) = { f = fn (v) -> gather(v,i,1i32)\n sum(f(tag2(x,g)),row) }",
+        ),
+        (
+            "unresolved trace lambda at binding rejects",
+            false,
+            "def run[d](x: tensor[d,2,2,f32], g: tensor[batch,row,col,f32]) = { f = fn (v) -> trace(v,1i32,2i32)\n sum(f(tag3(x,g)),batch) }",
+        ),
+        (
+            "scatter symbolic",
+            true,
+            "def run[d](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[row,1,int64], u: tensor[row,1,f32]) -> tensor[d,2,f32] = scatter_elements(tag2(x,g),i,u,1i32)",
+        ),
+        (
+            "scatter different name",
+            false,
+            "def run[d](x: tensor[d,2,f32], g: tensor[row,col,f32], i: tensor[other,1,int64], u: tensor[other,1,f32]) -> tensor[d,2,f32] = scatter_elements(tag2(x,g),i,u,1i32)",
+        ),
+        (
+            "scatter known fits",
+            true,
+            "def run(x: tensor[4,2,f32], g: tensor[4,2,f32], i: tensor[3,1,int64], u: tensor[3,1,f32]) = scatter_elements(tag2(x,g),i,u,1i32)",
+        ),
+        (
+            "scatter known overshoot",
+            false,
+            "def run(x: tensor[4,2,f32], g: tensor[4,2,f32], i: tensor[5,1,int64], u: tensor[5,1,f32]) = scatter_elements(tag2(x,g),i,u,1i32)",
+        ),
+        (
+            "where symbolic",
+            true,
+            "def run[d](x: tensor[d,f32], g: tensor[row,f32], c: tensor[row,bool]) -> tensor[d,f32] = where(c,tag(x,g),g)",
+        ),
+        (
+            "where distinct name",
+            false,
+            "def run[d](x: tensor[d,f32], g: tensor[row,f32], c: tensor[other,bool]) = where(c,tag(x,g),g)",
+        ),
+        (
+            "clamp symbolic",
+            true,
+            "def run[d](x: tensor[d,f32], g: tensor[row,f32]) -> tensor[d,f32] = clamp(tag(x,g),g,g)",
+        ),
+        (
+            "clamp distinct name",
+            false,
+            "def run[d](x: tensor[d,f32], g: tensor[row,f32], lo: tensor[other,f32]) = clamp(tag(x,g),lo,lo)",
+        ),
+        (
+            "layer norm positive",
+            true,
+            "def run(x: tensor[2,4,f32], g: tensor[2,4,f32], w: tensor[col,f32]) = layer_norm(tag2(x,g),w,w,0.001f32)",
+        ),
+        (
+            "layer norm zero",
+            false,
+            "def run(x: tensor[2,0,f32], g: tensor[2,0,f32], w: tensor[col,f32]) = layer_norm(tag2(x,g),w,w,0.001f32)",
+        ),
+        (
+            "expand unit",
+            true,
+            "def run(x: tensor[1,f32], g: tensor[1,f32]) -> tensor[3,f32] = expand(tag(x,g),0i32,3i64)",
+        ),
+        (
+            "expand named nonunit runtime claim",
+            true,
+            "def run(x: tensor[4,f32], g: tensor[4,f32]) = expand(tag(x,g),0i32,3i64)",
+        ),
+        (
+            "matmul unit batch",
+            true,
+            "def run(x: tensor[1,2,3,f32], g: tensor[1,2,3,f32], y: tensor[4,3,5,f32]) -> tensor[4,2,5,f32] = matmul(tag3(x,g),y)",
+        ),
+        (
+            "matmul wrong batch",
+            false,
+            "def run(x: tensor[2,2,3,f32], g: tensor[2,2,3,f32], y: tensor[4,3,5,f32]) = matmul(tag3(x,g),y)",
+        ),
+        (
+            "window extent",
+            true,
+            "def run(x: tensor[4,f32], g: tensor[4,f32]) -> tensor[3,f32] = reduce_window_sum(tag(x,g),[2i64],[1i64])",
+        ),
+        (
+            "window oversize",
+            false,
+            "def run(x: tensor[2,f32], g: tensor[2,f32]) = reduce_window_sum(tag(x,g),[3i64],[1i64])",
+        ),
+        (
+            "window wrong extent",
+            false,
+            "def run(x: tensor[4,f32], g: tensor[4,f32]) -> tensor[2,f32] = reduce_window_sum(tag(x,g),[2i64],[1i64])",
+        ),
+        (
+            "shrink fits",
+            true,
+            "def run(x: tensor[4,f32], g: tensor[4,f32]) -> tensor[3,f32] = shrink(tag(x,g),[[0i64,3i64]])",
+        ),
+        (
+            "shrink overshoot",
+            false,
+            "def run(x: tensor[4,f32], g: tensor[4,f32]) = shrink(tag(x,g),[[0i64,5i64]])",
+        ),
+        (
+            "stride extent",
+            true,
+            "def run(x: tensor[4,f32], g: tensor[4,f32]) -> tensor[2,f32] = stride(tag(x,g),2i64)",
+        ),
+        (
+            "stride wrong extent",
+            false,
+            "def run(x: tensor[4,f32], g: tensor[4,f32]) -> tensor[3,f32] = stride(tag(x,g),2i64)",
+        ),
+        (
+            "stride identity query",
+            true,
+            "def run[d](x: tensor[d,f32], g: tensor[row,f32]) = sum(stride(tag(x,g),1i64),row)",
+        ),
+        (
+            "stride bound identity query",
+            true,
+            "def run(x: tensor[4,f32], g: tensor[4,f32]) = sum(stride(tag(x,g),1i64),row)",
+        ),
+        (
+            "pad extent",
+            true,
+            "def run(x: tensor[4,f32], g: tensor[4,f32]) -> tensor[5,f32] = pad(tag(x,g),[[0i64,1i64]],0.0f32)",
+        ),
+        (
+            "pad wrong extent",
+            false,
+            "def run(x: tensor[4,f32], g: tensor[4,f32]) -> tensor[6,f32] = pad(tag(x,g),[[0i64,1i64]],0.0f32)",
+        ),
+        (
+            "pad identity query",
+            true,
+            "def run[d](x: tensor[d,f32], g: tensor[row,f32]) = sum(pad(tag(x,g),[[0i64,0i64]],0.0f32),row)",
+        ),
+        (
+            "pad bound identity query",
+            true,
+            "def run(x: tensor[4,f32], g: tensor[4,f32]) = sum(pad(tag(x,g),[[0i64,0i64]],0.0f32),row)",
+        ),
+        (
+            "reshape product",
+            true,
+            "def run(x: tensor[4,f32], g: tensor[4,f32]) -> tensor[2,2,f32] = reshape(tag(x,g),[2i64,2i64])",
+        ),
+        (
+            "reshape named input runtime product claim",
+            true,
+            "def run(x: tensor[4,f32], g: tensor[4,f32]) = reshape(tag(x,g),[3i64])",
+        ),
+        (
+            "reshape negative",
+            false,
+            "def run(x: tensor[4,f32], g: tensor[4,f32]) = reshape(tag(x,g),[-1i64])",
+        ),
+        (
+            "concat sum",
+            true,
+            "def run(x: tensor[2,f32], g: tensor[2,f32]) -> tensor[4,f32] = concat([tag(x,g),tag(x,g)],0i32)",
+        ),
+        (
+            "concat named input unknown sum runtime claim",
+            true,
+            "def run(x: tensor[2,f32], g: tensor[2,f32]) -> tensor[5,f32] = concat([tag(x,g),tag(x,g)],0i32)",
+        ),
+        (
+            "diagonal selected name query",
+            true,
+            "def run[d](x: tensor[d,d,f32], g: tensor[row,row,f32]) = sum(diagonal(square(x,g),0i32,1i32),row)",
+        ),
+        (
+            "diagonal minimum",
+            true,
+            "def run(x: tensor[2,4,f32], g: tensor[2,4,f32]) -> tensor[2,f32] = diagonal(tag2(x,g),0i32,1i32)",
+        ),
+        (
+            "diagonal wrong minimum",
+            false,
+            "def run(x: tensor[2,4,f32], g: tensor[2,4,f32]) -> tensor[3,f32] = diagonal(tag2(x,g),0i32,1i32)",
+        ),
+    ];
+    let mut failures = Vec::new();
+    for reverse in [false, true] {
+        let library = "def tag[d](x: tensor[d,f32], g: tensor[row,f32]) -> tensor[d,f32] = MUL\ndef tag2[d,e](x: tensor[d,e,f32], g: tensor[row,col,f32]) -> tensor[d,e,f32] = MUL\ndef tag3[d,e,f](x: tensor[d,e,f,f32], g: tensor[batch,row,col,f32]) -> tensor[d,e,f,f32] = MUL\ndef square[d](x: tensor[d,d,f32], g: tensor[row,row,f32]) -> tensor[d,d,f32] = MUL".replace("MUL", if reverse { "mul(g,x)" } else { "mul(x,g)" });
+        let (live, _) = build_compiled_library_context(&parse(&library)).unwrap();
+        let decoded: TypeEnv = bincode::deserialize(&bincode::serialize(&live).unwrap()).unwrap();
+        let (layered, _) = build_compiled_library_context_with_base(&live, &parse("def forward[d](x: tensor[d,f32], g: tensor[row,f32]) -> tensor[d,f32] = tag(x,g)\ndef forward2[d,e](x: tensor[d,e,f32], g: tensor[row,col,f32]) -> tensor[d,e,f32] = tag2(x,g)\ndef forward3[d,e,f](x: tensor[d,e,f,f32], g: tensor[batch,row,col,f32]) -> tensor[d,e,f,f32] = tag3(x,g)\ndef forward_square[d](x: tensor[d,d,f32], g: tensor[row,row,f32]) -> tensor[d,d,f32] = square(x,g)")).unwrap();
+        for (name, expected, source) in cases {
+            for route in 0..4 {
+                let result = match route {
+                    0 => check_ir_program(&parse(&format!("{library}\n{source}"))),
+                    1 => check_ir_with_context(&live, &parse(source)),
+                    2 => check_ir_with_context(&decoded, &parse(source)),
+                    _ => check_ir_with_context(
+                        &layered,
+                        &parse(
+                            &source
+                                .replace("tag(", "forward(")
+                                .replace("tag2(", "forward2(")
+                                .replace("tag3(", "forward3(")
+                                .replace("square(", "forward_square("),
+                        ),
+                    ),
+                };
+                let correct = if expected {
+                    result.is_ok()
+                } else {
+                    result.as_ref().err().is_some_and(|r| {
+                        r.errors.iter().any(|e| {
+                            matches!(
+                                e.kind,
+                                CheckErrorKind::DimensionMismatch | CheckErrorKind::TypeMismatch
+                            )
+                        })
+                    })
+                };
+                if !correct {
+                    failures.push(format!(
+                        "{name} reverse={reverse} route={route} expected={expected}: {:?}",
+                        result.err().map(|r| r.errors)
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} consumer observations failed:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
 use chelis_surf::{desugar::desugar_program, parser::parse_str};
 use chelis_types::errors::CheckErrorKind;
 use chelis_types::{

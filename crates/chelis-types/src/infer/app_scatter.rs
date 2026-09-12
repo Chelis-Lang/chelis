@@ -145,11 +145,11 @@ pub(super) fn check_scatter_elements(
         if dim_index == axis {
             continue;
         }
-        let index_dim = subst.apply_dim(index_dim);
-        let data_dim = subst.apply_dim(data_dim);
-        match (&index_dim, &data_dim) {
-            (Dim::Lit(index), Dim::Lit(data)) if index <= data => {}
-            (Dim::Lit(index), Dim::Lit(data)) => {
+        let index_dim = subst.observe_dim(index_dim);
+        let data_dim = subst.observe_dim(data_dim);
+        match (index_dim.known_extent(), data_dim.known_extent()) {
+            (Some(index), Some(data)) if index <= data => {}
+            (Some(index), Some(data)) => {
                 return report(
                     errors,
                     CheckError::new(
@@ -161,7 +161,12 @@ pub(super) fn check_scatter_elements(
                     ),
                 );
             }
-            (left, right) if left == right => {}
+            // Containment, not unification: names can prove symbolic equality,
+            // but must never hide the concrete overshoot handled above.
+            _ if index_dim.name().is_some() && index_dim.name() == data_dim.name() => {}
+            _ if index_dim.variable().is_some() && index_dim.variable() == data_dim.variable() => {}
+            _ if index_dim.rank().is_some() && index_dim.rank() == data_dim.rank() => {}
+            _ if index_dim.is_wildcard() && data_dim.is_wildcard() => {}
             _ => {
                 return report(
                     errors,

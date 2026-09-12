@@ -805,10 +805,10 @@ pub(super) struct DiagonalExtent {
 
 /// The single decision function for a `diagonal` axis pair.
 ///
-/// `dim` is unchanged from chelis#1355: two literals declare their minimum,
-/// two occurrences of one named extent declare that name, and everything else
-/// keeps the wildcard, because `Dim` (`crates/chelis-types/src/types.rs`) has
-/// no bounded variant and `min(n, 4)` cannot be spelled.
+/// Preserve chelis#1355's minimum/name policy while observing carrier
+/// constraints: known extents declare their minimum, equal names retain the
+/// selected identity when no known contradiction exists, and unknown pairs
+/// keep the wildcard. `Dim` has no bounded variant for `min(n, 4)`.
 ///
 /// `bound` is what chelis#1739 adds. A literal beside a non-literal extent is
 /// an upper bound on the result: whatever `n` is at run time, `min(n, 4) <= 4`.
@@ -820,27 +820,25 @@ pub(super) struct DiagonalExtent {
 /// Callers that need the bound read it through [`diagonal_result_bound`], which
 /// maps the pair position back onto the operand's axes. Both readers go through
 /// this one function so the eager and deferred shape routes cannot drift.
-pub(super) fn select_diagonal_extent(a: &Dim, b: &Dim) -> DiagonalExtent {
-    fn bounded_by_a_literal(dim: &Dim) -> bool {
-        match dim {
-            Dim::Name(_) | Dim::Var(_) | Dim::Wildcard => true,
-            Dim::Lit(_) | Dim::Rank(_) => false,
-        }
-    }
-
-    let dim = match (a, b) {
-        (Dim::Lit(lhs), Dim::Lit(rhs)) => Dim::Lit(*lhs.min(rhs)),
-        (Dim::Name(lhs), Dim::Name(rhs)) if lhs == rhs => Dim::Name(lhs.clone()),
+pub(super) fn select_diagonal_extent(a: &Dim, b: &Dim, subst: &Subst) -> DiagonalExtent {
+    let left = subst.observe_dim(a);
+    let right = subst.observe_dim(b);
+    let same_name = left.name().is_some() && left.name() == right.name();
+    let dim = match (left.known_extent(), right.known_extent()) {
+        // Known unequal extents must not be hidden by equal labels.
+        (Some(lhs), Some(rhs)) if lhs != rhs || !same_name => Dim::Lit(lhs.min(rhs)),
+        // Retain the selected identity, not a bare Name before result guards.
+        _ if same_name => a.clone(),
         _ => Dim::Wildcard,
     };
-    let bound = match (a, b) {
-        (Dim::Lit(extent), other) if bounded_by_a_literal(other) => Some(DiagonalBound {
+    let bound = match (left.known_extent(), right.known_extent()) {
+        (Some(extent), None) if right.rank().is_none() => Some(DiagonalBound {
             selected: 0,
-            extent: *extent,
+            extent,
         }),
-        (other, Dim::Lit(extent)) if bounded_by_a_literal(other) => Some(DiagonalBound {
+        (None, Some(extent)) if left.rank().is_none() => Some(DiagonalBound {
             selected: 1,
-            extent: *extent,
+            extent,
         }),
         _ => None,
     };
@@ -858,6 +856,7 @@ pub(super) fn diagonal_result_bound(
     tensor_ty: &Type,
     axis1: usize,
     axis2: usize,
+    subst: &Subst,
 ) -> Option<(usize, usize, i64)> {
     let Type::Tensor(dims, _) = tensor_ty else {
         return None;
@@ -865,7 +864,7 @@ pub(super) fn diagonal_result_bound(
     if axis1 >= dims.len() || axis2 >= dims.len() || axis1 == axis2 {
         return None;
     }
-    let bound = select_diagonal_extent(&dims[axis1], &dims[axis2]).bound?;
+    let bound = select_diagonal_extent(&dims[axis1], &dims[axis2], subst).bound?;
     let source_axis = if bound.selected == 0 { axis1 } else { axis2 };
     let result_axis = if axis1 < axis2 { axis1 } else { axis1 - 1 };
     Some((result_axis, source_axis, bound.extent))
@@ -875,6 +874,7 @@ pub(super) fn infer_diagonal_result_type(
     tensor_ty: &Type,
     axis1: usize,
     axis2: usize,
+    subst: &Subst,
 ) -> Result<Type, String> {
     let Type::Tensor(dims, precision) = tensor_ty else {
         return Err(format!("diagonal expects tensor input, got {tensor_ty}"));
@@ -902,7 +902,7 @@ pub(super) fn infer_diagonal_result_type(
     // Everything else keeps the wildcard - distinct names, a mixed
     // literal/symbolic pair, a dimension variable, a rank spread - because there
     // the minimum genuinely is not known at check time.
-    let diag_dim = select_diagonal_extent(&dims[axis1], &dims[axis2]).dim;
+    let diag_dim = select_diagonal_extent(&dims[axis1], &dims[axis2], subst).dim;
     let mut out_dims = Vec::with_capacity(dims.len() - 1);
     for (index, dim) in dims.iter().enumerate() {
         if index == axis1 {

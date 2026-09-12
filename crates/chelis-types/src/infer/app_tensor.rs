@@ -135,7 +135,7 @@ pub(super) fn check_layer_norm_signature(
     }
 
     let hidden_dim = x_dims.last().cloned().expect("checked non-empty");
-    if subst.apply_dim(&hidden_dim) == Dim::Lit(0) {
+    if subst.observe_dim(&hidden_dim).known_extent() == Some(0) {
         return report(
             errors,
             CheckError::new(
@@ -228,11 +228,8 @@ pub(super) fn compute_concrete_conv_spatial(
         .zip(&kernel_dims[2..])
         .zip(params)
         .map(|((input, kernel), (stride, low, high))| {
-            let (Dim::Lit(input), Dim::Lit(kernel)) =
-                (subst.apply_dim(input), subst.apply_dim(kernel))
-            else {
-                return None;
-            };
+            let input = subst.observe_dim(input).known_extent()?;
+            let kernel = subst.observe_dim(kernel).known_extent()?;
             conv_output_extent(input, kernel, stride, low, high)
         })
         .collect()
@@ -445,9 +442,9 @@ pub(super) fn check_matmul_signature(
             (Some(lhs_dim), Some(rhs_dim)) => {
                 let lhs_applied = subst.apply_dim(lhs_dim);
                 let rhs_applied = subst.apply_dim(rhs_dim);
-                if lhs_applied == Dim::Lit(1) {
+                if subst.observe_dim(lhs_dim).known_extent() == Some(1) {
                     rhs_applied
-                } else if rhs_applied == Dim::Lit(1) {
+                } else if subst.observe_dim(rhs_dim).known_extent() == Some(1) {
                     lhs_applied
                 } else {
                     if let Err(te) = unify_dim(&lhs_applied, &rhs_applied, subst) {
@@ -821,10 +818,18 @@ pub(super) fn check_reduction_signature(
 /// Everything else, a named dim or an unconstrained extent, is admitted here
 /// and carries the claim into the IR, where the §4.7 runtime extent guard
 /// compares it against the value observed.
-fn unit_extent_claim_error(builtin: &str, input_dims: &[Dim], axis: usize) -> Option<CheckError> {
-    match input_dims.get(axis) {
-        Some(Dim::Lit(1)) => None,
-        Some(Dim::Lit(extent)) => Some(CheckError::new(
+fn unit_extent_claim_error(
+    builtin: &str,
+    input_dims: &[Dim],
+    axis: usize,
+    subst: &Subst,
+) -> Option<CheckError> {
+    match input_dims
+        .get(axis)
+        .and_then(|d| subst.observe_dim(d).literal_extent())
+    {
+        Some(1) => None,
+        Some(extent) => Some(CheckError::new(
             CheckErrorKind::DimensionMismatch,
             format!(
                 "{builtin} requires the operand's extent at axis {axis} to be 1, got \
@@ -1174,7 +1179,7 @@ pub(super) fn check_expand_signature(
                 expected.insert(axis, size.clone());
                 Type::Tensor(expected, input_prec)
             } else {
-                if let Some(error) = unit_extent_claim_error(builtin, &input_dims, axis) {
+                if let Some(error) = unit_extent_claim_error(builtin, &input_dims, axis, subst) {
                     return report(errors, error);
                 }
                 let mut expected = input_dims.clone();
@@ -1192,7 +1197,7 @@ pub(super) fn check_expand_signature(
                 expected.insert(axis, size.clone());
                 Type::Tensor(expected, input_prec)
             } else {
-                if let Some(error) = unit_extent_claim_error(builtin, &input_dims, axis) {
+                if let Some(error) = unit_extent_claim_error(builtin, &input_dims, axis, subst) {
                     return report(errors, error);
                 }
                 let mut expected = input_dims.clone();

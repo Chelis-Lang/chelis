@@ -813,8 +813,8 @@ pub(super) fn check_shrink_signature(
                 ),
             );
         }
-        if let Dim::Lit(input_dim) = dim
-            && *end > *input_dim
+        if let Some(input_dim) = subst.observe_dim(dim).known_extent()
+            && *end > input_dim
         {
             return report(
                 errors,
@@ -1002,9 +1002,11 @@ pub(super) fn check_stride_signature(
             );
         }
         let step_us = *step as usize;
-        match dim {
-            Dim::Lit(input_dim) => {
-                let out = (*input_dim as usize).div_ceil(step_us);
+        // Existing identity steps retain the carrier, including its label.
+        match (step_us, subst.observe_dim(dim).known_extent()) {
+            (1, _) => out_dims.push(dim.clone()),
+            (_, Some(input_dim)) => {
+                let out = (input_dim as usize).div_ceil(step_us);
                 out_dims.push(Dim::Lit(out as i64));
             }
             // chelis#632: only an IDENTITY step (1) passes a symbolic dim
@@ -1015,11 +1017,7 @@ pub(super) fn check_stride_signature(
             // tripped §4.4.1 rigidity on sig-symbol direct returns; the
             // fresh wildcard's extent is op-declared and runtime-guarded
             // by the chelis#616 machinery.
-            other => out_dims.push(if step_us == 1 {
-                other.clone()
-            } else {
-                Dim::Wildcard
-            }),
+            _ => out_dims.push(Dim::Wildcard),
         }
     }
 
@@ -1231,19 +1229,16 @@ pub(super) fn check_pad_signature(
                 ),
             );
         }
-        match dim {
-            Dim::Lit(input_dim) => {
+        match (*lo == 0 && *hi == 0, subst.observe_dim(dim).known_extent()) {
+            (true, _) => out_dims.push(dim.clone()),
+            (_, Some(input_dim)) => {
                 out_dims.push(Dim::Lit(input_dim + lo + hi));
             }
             // chelis#632: only ZERO padding passes a symbolic dim through
             // (identity; mirrors `shape_source_for_axis`'s zero-pad arm).
             // Non-zero padding widens the extent to `d + lo + hi`; see
             // the stride arm above for the full rationale.
-            other => out_dims.push(if *lo == 0 && *hi == 0 {
-                other.clone()
-            } else {
-                Dim::Wildcard
-            }),
+            _ => out_dims.push(Dim::Wildcard),
         }
     }
 
@@ -1471,12 +1466,11 @@ pub(super) fn check_reduce_window_signature(
     let mut out_dims = Vec::with_capacity(dims.len());
     out_dims.extend(dims[..leading].iter().map(|d| subst.apply_dim(d)));
     for i in 0..n {
-        let resolved = subst.apply_dim(&dims[leading + i]);
-        match &resolved {
-            Dim::Lit(in_dim) => {
+        match subst.observe_dim(&dims[leading + i]).known_extent() {
+            Some(in_dim) => {
                 let w = window_shape[i];
                 let s = strides[i];
-                if *in_dim < w {
+                if in_dim < w {
                     return report(
                         errors,
                         CheckError::new(
@@ -1496,7 +1490,7 @@ pub(super) fn check_reduce_window_signature(
                 // `out = floor((in_dim - w) / s) + 1 >= 1`, so the Valid
                 // output extent is always positive here — the `in_dim < w`
                 // guard above is what rejects the empty-window case.
-                let out = (*in_dim - w) / s + 1;
+                let out = (in_dim - w) / s + 1;
                 out_dims.push(Dim::Lit(out));
             }
             _ => out_dims.push(Dim::Wildcard),
@@ -1820,9 +1814,11 @@ pub(super) fn reshape_output_dims(
 }
 
 fn validate_reshape_target_dims(dims: &[Dim], subst: &Subst) -> Result<(), TypeError> {
-    if let Some(value) = dims.iter().find_map(|dim| match subst.apply_dim(dim) {
-        Dim::Lit(value) if value < 0 => Some(value),
-        _ => None,
+    if let Some(value) = dims.iter().find_map(|dim| {
+        subst
+            .observe_dim(dim)
+            .literal_extent()
+            .filter(|value| *value < 0)
     }) {
         return Err(TypeError {
             kind: TypeErrorKind::DimensionMismatch,

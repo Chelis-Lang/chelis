@@ -61,6 +61,29 @@ This classification is ephemeral: both live and decoded contexts clear
 historical protection before a new check; instantiation copies labels, not
 protection, while active lexical captures retain their canonical binder IDs.
 
+All checker consumers derive an ephemeral `DimObservation` rather than
+interpreting a carrier `Var` as a language-level category. The interface keeps
+known constraint extents, semantic names, canonical unresolved IDs and current
+protection separate; it has no generic equality or conversion back to `Dim`.
+Each operation owns its policy. Scatter-elements containment checks known
+numeric bounds before symbolic equality. Where/clamp retain strict matching
+shapes, including Name/Lit distinction and rejection of known contradictions
+behind equal labels. Window, stride, pad, diagonal and convolution inference
+read known constraints for their existing calculations. Surviving axes and
+existing identity operations keep the original IDs for authored-result guards.
+The joined gather/scatter/trace deferred routes copy IDs and keep their result
+dependencies; arithmetic routes are not added to that deferral ledger.
+
+Known constraints do not globally turn named runtime claims into literals.
+Expand's named operand claim, reshape's named-input product obligation, and
+concat's named-axis unknown rule retain their existing admission policies
+(§§4.5.4, 4.7.2–4.7.3). Truly unknown arithmetic remains unknown. The consumer
+oracle pairs known contradictions with runtime-admissible unknown claims and
+tests whole, live, decoded and layered contexts in both multiplication orders.
+The convolution formula has private-seam coverage only: the labelled source
+positive still encounters the baseline concrete-metadata restriction in the
+final checker validator. That is not claimed fixed by an inference formula.
+
 For example, `aligned[d](x: tensor[d,f32], gain: tensor[fixed,f32]) ->
 tensor[d,f32] = mul(x,gain)` establishes the output label `fixed`; the same
 signature with body `copy(x)` does not. The private table preserves that

@@ -45,10 +45,7 @@ fn declared_result_literal(
         if dims.len() != result_rank {
             return None;
         }
-        match dims.get(result_axis)? {
-            Dim::Lit(value) => Some(*value),
-            Dim::Name(_) | Dim::Var(_) | Dim::Wildcard | Dim::Rank(_) => None,
-        }
+        subst.observe_dim(dims.get(result_axis)?).literal_extent()
     };
 
     if let Some(found) = expected_result
@@ -98,7 +95,7 @@ fn reject_unreachable_diagonal_extent(
     errors: &mut DiagnosticSink<'_>,
     expected_result: Option<&Type>,
 ) -> Option<Type> {
-    let (result_axis, source_axis, bound) = diagonal_result_bound(operand, axis1, axis2)?;
+    let (result_axis, source_axis, bound) = diagonal_result_bound(operand, axis1, axis2, subst)?;
     let Type::Tensor(inferred_dims, _) = inferred else {
         return None;
     };
@@ -886,8 +883,8 @@ pub(super) fn finish_unified_app(
                         Type::Tensor(else_dims, else_prec),
                     ) => {
                         if then_prec != else_prec
-                            || cond_dims != then_dims
-                            || then_dims != else_dims
+                            || !elementwise_shapes_match(cond_dims, then_dims, subst)
+                            || !elementwise_shapes_match(then_dims, else_dims, subst)
                         {
                             return report(
                                 errors,
@@ -999,7 +996,7 @@ pub(super) fn finish_unified_app(
                     Ok(axis) => axis,
                     Err(err) => return err,
                 };
-                match infer_diagonal_result_type(&diagonal_operand, axis1, axis2) {
+                match infer_diagonal_result_type(&diagonal_operand, axis1, axis2, subst) {
                     Ok(ty) => {
                         // chelis#1739: the result dim stays a wildcard for a
                         // mixed (symbolic, literal) pair, and a wildcard
@@ -1077,8 +1074,10 @@ pub(super) fn finish_unified_app(
                         Type::Tensor(low_dims, low_prec),
                         Type::Tensor(high_dims, high_prec),
                     ) => {
-                        let low_ok = low_dims.is_empty() || low_dims == input_dims;
-                        let high_ok = high_dims.is_empty() || high_dims == input_dims;
+                        let low_ok = low_dims.is_empty()
+                            || elementwise_shapes_match(low_dims, input_dims, subst);
+                        let high_ok = high_dims.is_empty()
+                            || elementwise_shapes_match(high_dims, input_dims, subst);
                         if low_ok && high_ok && low_prec == input_prec && high_prec == input_prec {
                             return input_ty;
                         }
@@ -1414,7 +1413,7 @@ pub(super) fn finish_unified_app(
                             ),
                             None => ConcatListInfo::BindingLen(static_list_len(kids.get(1), env)),
                         };
-                        match tensor_concat_result_type(&lhs_args[0], raw_axis, list_info) {
+                        match tensor_concat_result_type(&lhs_args[0], raw_axis, list_info, subst) {
                             Ok(ty) => return ty,
                             Err(message) => {
                                 return report(
