@@ -743,16 +743,19 @@ still reaches the oracle's own
 erased no row: `--phase a` and `--phase b` keep their names, corpora and
 row-transition checks, and each still has to PASS on its own.
 
-The recorded phase-B corpus has 57 rows and NONE of them is short of exit.
+The recorded phase-B corpus has 66 rows and NONE of them is short of exit.
 `--phase b` reads `RUNTIME EXTENT ORACLE: PASS` rather than `RECEIPTS PASS,
 ROWS SHORT OF EXIT`, and it now does so without `--allow-shortfall`. That
 reading, not a hand count, is what to quote. A hand count of the
-JSON's `phase_b` column reaches 3 instead, because the column holds 54
-`executes_exactly` and three other values, none of which is a shortfall:
-`expand.positional.replacement.non_unit_source_static` and
-`shrink.to_end.nonzero_start` are `rejects_exactly`, an exit state, since those
-programs are SUPPOSED to be rejected and a row that stopped rejecting them would
-be the defect, and `shrink.elementwise_const.build` is a registered
+JSON's `phase_b` column reaches 10 instead, because the column holds 56
+`executes_exactly` and two other values, neither of which is a shortfall.
+Nine rows are `rejects_exactly`, an exit state, since those programs are
+SUPPOSED to be rejected and a row that stopped rejecting them would be the
+defect: `expand.positional.replacement.non_unit_source_static`,
+`shrink.to_end.nonzero_start`, and the seven `route.untied.*` rows, whose
+operand is still unresolved where the shape-computed route runs, so the route
+returns a result nothing ties to the shape it computes and any declared shape
+is admitted. One row, `shrink.elementwise_const.build`, is a registered
 `typed_unsupported(#1482)`, an owned receipt rather than an unexplained gap.
 The op-computed local guards moved seven rows
 (`expand.shape_derived.declared_result_survives.{c,eval}`,

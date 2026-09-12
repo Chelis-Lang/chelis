@@ -112,7 +112,15 @@ fn mentions_error(pattern: &str) -> bool {
 /// the property the census cares about is the same one: the arm does not
 /// publish an unvalidated answer and walk away.
 fn body_gates(body: &str) -> bool {
-    body.contains("record_deferred_") || body.contains("defer_tuple_projection")
+    body.contains("record_deferred_")
+        || body.contains("defer_tuple_projection")
+        // chelis#1836's record-field derivation is the same ledger as tuple
+        // projection, so the recognizer answers for it too. No row's
+        // classification depends on this: `infer_access` already gates through
+        // `record_deferred_opaque_use`. It is here so an arm that gates ONLY
+        // through the field ledger is classified by what it does rather than
+        // by which of two spellings of one mechanism it happens to use.
+        || body.contains("defer_record_field")
 }
 
 fn body_suspends(body: &str) -> bool {
