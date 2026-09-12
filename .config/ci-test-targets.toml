@@ -3,6 +3,18 @@
 version = 1
 
 [[target]]
+package = "chelis-ir"
+name = "issue_1906_concat_admission"
+
+[[target]]
+package = "chelis-compiler-api"
+name = "issue_1906_annotated_softmax"
+
+[[target]]
+package = "chelis-cli"
+name = "issue_1906_annotated_concat_softmax"
+
+[[target]]
 package = "chelis-cli"
 name = "phase3_gate_contract"
 

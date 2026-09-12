@@ -19,6 +19,8 @@
 //! clean check, exact executable eval output, and the current typed C rejection
 //! are all tested. The fixed-stream example runs the ordinary three-lane
 //! driver and also pins its exact values, including the next draw after AD.
+//! The annotated concat/softmax example likewise pins check, all eval values,
+//! and its explicit C rejection; it is not a C parity claim.
 //!
 //! There is deliberately NO tolerant fallback for tensor lines. The old
 //! mismatch path (re-parse both lines as `Vec<f64>`, compare under 1e-6)
@@ -711,6 +713,32 @@ fn parity_wildcard_extents() {
     drive_parity(&examples_root().join("wildcard_extents.ch"), true);
 }
 
+#[test]
+fn parity_annotated_concat_softmax_eval_and_c_rejection() {
+    let path = examples_root().join("annotated_concat_softmax.ch");
+    assert_check_clean(&path);
+    assert_eq!(
+        run_eval(&path),
+        b"output = tensor(shape=[2, 4], data=[0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25])\n",
+    );
+    let directory = tempdir().unwrap();
+    let output = Command::cargo_bin("chelis")
+        .unwrap()
+        .args(["build", path.to_str().unwrap(), "--target", "c", "--output"])
+        .arg(directory.path().join("out"))
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "C host softmax remains unsupported"
+    );
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "error: unsupported: builtin `softmax` on `chelis build` host emission (codegen:c); deliberate [04-TOT-2]: the checked builtin vocabulary and C expression vocabulary disagree; no fallback expression is permitted\n"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Corpus completeness guard
 // -----------------------------------------------------------------------------
@@ -721,6 +749,7 @@ fn parity_wildcard_extents() {
 #[test]
 fn parity_corpus_is_complete() {
     let known: &[&str] = &[
+        "annotated_concat_softmax.ch",
         "source-file-names.ch",
         "checked_reshape.ch",
         "checked_sparse_axes.ch",
