@@ -40,6 +40,55 @@ fn plan_with_inputs(source: &str, inputs: UnordMap<String, TensorType>) -> Evalu
     .unwrap()
 }
 
+fn checked_body_plan(
+    source: &str,
+    inputs: UnordMap<String, TensorType>,
+    context: &RandomExecutionContext,
+) -> EvaluationPlan {
+    let parsed = chelis_surf::parser::parse_str(source).unwrap();
+    let checked =
+        chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(&parsed)).unwrap();
+    // The ordinary host selector cuts at lexical handlers. This test lowers
+    // the checked body itself; it does not claim full host/API transport.
+    fn children(expr: &chelis_deep::Expr) -> &[chelis_deep::Expr] {
+        match expr {
+            chelis_deep::Expr::Node(node, _) => node.children_slice(),
+            chelis_deep::Expr::List(list, _) => &list.elements[2..],
+            _ => panic!("tagged checked expression"),
+        }
+    }
+    let defs: UnordMap<String, chelis_deep::Expr> = checked
+        .exprs()
+        .iter()
+        .filter_map(|expr| {
+            if expr.tag() != Some(chelis_deep::tag::DeepTag::Def) {
+                return None;
+            }
+            let children = children(expr);
+            let chelis_deep::Expr::Atom(chelis_deep::ast::Atom::Name(name), _) = &children[0]
+            else {
+                panic!("def name");
+            };
+            Some((name.clone(), children[1].clone()))
+        })
+        .collect();
+    let sample = defs
+        .to_sorted()
+        .into_iter()
+        .find(|(name, _)| name.as_str() == "sample" || name.ends_with(".sample"))
+        .expect("checked sample definition")
+        .1;
+    assert_eq!(sample.tag(), Some(chelis_deep::tag::DeepTag::Fn));
+    chelis_ir::lower::try_lower_subexpr_evaluation_plan(
+        &children(sample)[1],
+        inputs,
+        UnordMap::new(),
+        defs.clone(),
+        context,
+    )
+    .unwrap()
+}
+
 #[test]
 fn native_empty_and_zero_rate_calls_consume_one_ordinal_before_the_next_draw() {
     // Independent [05-RNG-1] reference: neither the evaluator nor its sampler
@@ -233,48 +282,12 @@ fn native_replay_nested_restore_and_next_uniform_follow_source_steps() {
         let source = format!(
             "def loss(x: tensor[32, f32]) -> tensor[f32] ! {{ Random }} = sum(dropout(x, 0.5f32), 0)\ndef sample(x: tensor[32, f32]) -> tensor[32, f32] = {body}\n"
         );
-        let parsed = chelis_surf::parser::parse_str(&source).unwrap();
-        let checked =
-            chelis_types::check_ir_program(&chelis_surf::desugar::desugar_program(&parsed))
-                .unwrap();
         let mut context = RandomExecutionContext::new(RandomLoweringState {
             seed: Some(7),
             counter: 13,
         });
-        // The ordinary host selector intentionally cuts at lexical handlers.
-        // This backend test lowers the checked body itself; host/API transport
-        // is a separate integration obligation, not silently tested here.
-        fn children(expr: &chelis_deep::Expr) -> &[chelis_deep::Expr] {
-            match expr {
-                chelis_deep::Expr::Node(node, _) => node.children_slice(),
-                chelis_deep::Expr::List(list, _) => &list.elements[2..],
-                _ => panic!("tagged checked expression"),
-            }
-        }
-        let defs: UnordMap<String, chelis_deep::Expr> = checked
-            .exprs()
-            .iter()
-            .filter_map(|expr| {
-                if expr.tag() != Some(chelis_deep::tag::DeepTag::Def) {
-                    return None;
-                }
-                let children = children(expr);
-                let chelis_deep::Expr::Atom(chelis_deep::ast::Atom::Name(name), _) = &children[0]
-                else {
-                    panic!("def name");
-                };
-                Some((name.clone(), children[1].clone()))
-            })
-            .collect();
-        let sample = defs
-            .to_sorted()
-            .into_iter()
-            .find(|(name, _)| name.as_str() == "sample" || name.ends_with(".sample"))
-            .expect("checked sample definition")
-            .1;
-        assert_eq!(sample.tag(), Some(chelis_deep::tag::DeepTag::Fn));
-        let plan = chelis_ir::lower::try_lower_subexpr_evaluation_plan(
-            &children(sample)[1],
+        let plan = checked_body_plan(
+            &source,
             [(
                 "x".into(),
                 TensorType {
@@ -284,11 +297,8 @@ fn native_replay_nested_restore_and_next_uniform_follow_source_steps() {
             )]
             .into_iter()
             .collect(),
-            UnordMap::new(),
-            defs.clone(),
             &context,
-        )
-        .unwrap();
+        );
         assert!(
             plan.dag_for_inspection()
                 .nodes()
@@ -374,6 +384,308 @@ fn assert_native_value_failure(source: &str, driver: &str) {
         message.starts_with("C status"),
         "must fail execution, not compilation: {message}"
     );
+}
+
+struct SpecialWords {
+    prim: Prim,
+    tag: &'static str,
+    ctype: &'static str,
+    input: [u64; 6],
+    doubled: [u64; 6],
+    one: u64,
+}
+
+fn special_words() -> [SpecialWords; 4] {
+    // Independently encoded [-0, -3, +0, +inf, -inf, canonical NaN] and
+    // division by the exact stored denominator 0.5. No evaluator oracle.
+    [
+        SpecialWords {
+            prim: Prim::F16,
+            tag: "CHELIS_DTYPE_F16",
+            ctype: "uint16_t",
+            input: [0x8000, 0xc200, 0, 0x7c00, 0xfc00, 0x7e00],
+            doubled: [0x8000, 0xc600, 0, 0x7c00, 0xfc00, 0x7e00],
+            one: 0x3c00,
+        },
+        SpecialWords {
+            prim: Prim::Bf16,
+            tag: "CHELIS_DTYPE_BF16",
+            ctype: "uint16_t",
+            input: [0x8000, 0xc040, 0, 0x7f80, 0xff80, 0x7fc0],
+            doubled: [0x8000, 0xc0c0, 0, 0x7f80, 0xff80, 0x7fc0],
+            one: 0x3f80,
+        },
+        SpecialWords {
+            prim: Prim::F32,
+            tag: "CHELIS_DTYPE_F32",
+            ctype: "uint32_t",
+            input: [
+                0x80000000, 0xc0400000, 0, 0x7f800000, 0xff800000, 0x7fc00000,
+            ],
+            doubled: [
+                0x80000000, 0xc0c00000, 0, 0x7f800000, 0xff800000, 0x7fc00000,
+            ],
+            one: 0x3f800000,
+        },
+        SpecialWords {
+            prim: Prim::F64,
+            tag: "CHELIS_DTYPE_F64",
+            ctype: "uint64_t",
+            input: [
+                0x8000000000000000,
+                0xc008000000000000,
+                0,
+                0x7ff0000000000000,
+                0xfff0000000000000,
+                0x7ff8000000000000,
+            ],
+            doubled: [
+                0x8000000000000000,
+                0xc018000000000000,
+                0,
+                0x7ff0000000000000,
+                0xfff0000000000000,
+                0x7ff8000000000000,
+            ],
+            one: 0x3ff0000000000000,
+        },
+    ]
+}
+
+fn special_word_driver(words: &SpecialWords, labels: &[String], expected: [[u64; 4]; 6]) -> String {
+    let special = if labels.len() == 1 { "x" } else { "weights" };
+    assert!(labels.iter().all(|name| name == "x" || name == "weights"));
+    let special_slot = labels.iter().position(|name| name == special).unwrap();
+    let encode = |values: &[u64]| {
+        values
+            .iter()
+            .map(|v| format!("UINT64_C(0x{v:x})"))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let expected = expected
+        .iter()
+        .map(|row| format!("{{{}}}", encode(row)))
+        .collect::<Vec<_>>()
+        .join(",\n");
+    format!(
+        r#"
+int main(void) {{
+    int64_t n = 4;
+    const {ctype} classes[] = {{{classes}}};
+    const {ctype} expected[6][4] = {{{expected}}};
+    for (int offset = 0; offset < 6; ++offset) {{
+        chelis_tensor *inputs[{count}];
+        {ctype} original[{count}][4];
+        for (int slot = 0; slot < {count}; ++slot) {{
+            chelis_scalar elements[4];
+            for (int i = 0; i < 4; ++i) {{
+                original[slot][i] = slot == {special_slot} ? classes[(offset+i)%6] : UINT64_C(0x{one:x});
+                elements[i] = chelis_scalar_from_bits({tag}, original[slot][i]);
+            }}
+            inputs[slot] = chelis_alloc(1, &n, {tag});
+            chelis_tensor_write *write = chelis_tensor_begin_write(inputs[slot]);
+            chelis_tensor_write_literal(write, chelis_scalar_from_bits(CHELIS_DTYPE_I64, n), elements);
+            chelis_tensor_end_write(write);
+        }}
+        for (int repeat = 0; repeat < 4; ++repeat) {{
+            chelis_tensor *outputs[1];
+            sample(inputs, {count}, outputs, 1);
+            assert(chelis_tensor_rank(outputs[0]) == 1 && chelis_tensor_shape(outputs[0], 0) == n);
+            chelis_read_view view = chelis_tensor_read_view(outputs[0]);
+            assert(view.dtype == {tag} && view.count == n);
+            assert(memcmp(view.data, expected[offset], sizeof(expected[offset])) == 0);
+            chelis_tensor_release(outputs[0]);
+            for (int slot = 0; slot < {count}; ++slot) {{
+                assert(chelis_tensor_rank(inputs[slot]) == 1 && chelis_tensor_shape(inputs[slot], 0) == n);
+                chelis_read_view original_view = chelis_tensor_read_view(inputs[slot]);
+                assert(original_view.dtype == {tag} && original_view.count == n);
+                assert(memcmp(original_view.data, original[slot], sizeof(original[slot])) == 0);
+            }}
+        }}
+        for (int slot = 0; slot < {count}; ++slot) chelis_tensor_release(inputs[slot]);
+    }}
+    return 0;
+}}
+"#,
+        ctype = words.ctype,
+        classes = encode(&words.input),
+        count = labels.len(),
+        tag = words.tag,
+        one = words.one
+    )
+}
+
+fn corrupt_contiguous_dropout(
+    source: &str,
+    node: chelis_ir::dag::NodeId,
+    corrupt: impl FnOnce(&str) -> String,
+) -> String {
+    let prefix = format!("__out_{}[i] = ", node.0);
+    let lines = source
+        .lines()
+        .filter(|line| {
+            line.trim_start().starts_with(&prefix) && line.contains("chelis_dropout_unit")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1, "actual emitted dropout assignment");
+    let replacement = corrupt(lines[0]);
+    assert_ne!(
+        replacement, lines[0],
+        "mutation must alter the real assignment"
+    );
+    source.replacen(lines[0], &replacement, 1)
+}
+
+#[test]
+fn native_source_ad_replays_signed_and_nonfinite_stored_words() {
+    use chelis_ir::evaluation::RandomSite;
+    for words in special_words() {
+        let dtype = words.prim.name();
+        let source = format!(
+            "def sample(x: tensor[4, {dtype}], weights: tensor[4, {dtype}]) -> tensor[4, {dtype}] = with seed(42i64) {{\n loss = fn (v: tensor[4, {dtype}]) -> tensor_to_scalar(sum(mul(dropout(v, 0.5{dtype}), weights), 0i32))\n grad(loss)(x)\n}}\n"
+        );
+        let inputs = ["x", "weights"]
+            .into_iter()
+            .map(|name| {
+                (
+                    name.into(),
+                    TensorType {
+                        dims: vec![DimInfo::Lit(4)],
+                        precision: words.prim,
+                    },
+                )
+            })
+            .collect();
+        let plan = checked_body_plan(
+            &source,
+            inputs,
+            &RandomExecutionContext::new(RandomLoweringState {
+                seed: Some(7),
+                counter: 13,
+            }),
+        );
+        let replay = plan
+            .clone()
+            .verify_ownership()
+            .unwrap()
+            .with_emission(|owned, execution| {
+                let sites = owned
+                    .emission()
+                    .nodes()
+                    .iter()
+                    .filter_map(|node| execution.site(node.id).map(|site| (node.id, site)))
+                    .collect::<Vec<_>>();
+                match sites.as_slice() {
+                    [
+                        (_, RandomSite::Forward { draw: forward, .. }),
+                        (node, RandomSite::Replay { draw }),
+                    ] if draw == forward => *node,
+                    other => panic!("actual forward/replay pair: {other:?}"),
+                }
+            });
+        let artifact = chelis_backend_c::codegen_evaluation_with_options(
+            plan.verify_ownership().unwrap(),
+            "sample",
+            Default::default(),
+        )
+        .unwrap();
+        let mut labels = artifact.input_labels.clone();
+        labels.sort();
+        assert_eq!(labels, ["weights", "x"]);
+        // Seed42 ordinal0 keeps coordinate1. §2.4 adds +0 before replay and
+        // again at the gradient root, so a -0 source contribution becomes +0.
+        let expected = std::array::from_fn(|offset| {
+            let class = (offset + 1) % 6;
+            [0, if class == 0 { 0 } else { words.doubled[class] }, 0, 0]
+        });
+        let driver = special_word_driver(&words, &artifact.input_labels, expected);
+        ownership_support::balanced(&ownership_support::run(&artifact.c_source, &driver));
+        let value = if matches!(words.prim, Prim::F16 | Prim::Bf16) {
+            "__av".into()
+        } else {
+            format!("__in_a_{}[i]", replay.0)
+        };
+        let abs = if words.prim == Prim::F64 {
+            "fabs"
+        } else {
+            "fabsf"
+        };
+        let mutant = corrupt_contiguous_dropout(&artifact.c_source, replay, |line| {
+            line.replace(&format!("({value}) /"), &format!("{abs}({value}) /"))
+        });
+        assert_native_value_failure(&mutant, &driver);
+    }
+}
+
+#[test]
+fn native_special_words_reject_mask_sign_and_nan_corruption() {
+    // [05-OP-37], [04-NUM-2/8]: the exact primal words include dropped +0,
+    // kept -0, and canonical NaN; class-only comparison is insufficient.
+    for words in special_words() {
+        for rate in ["0.0", "0.5"] {
+            let dtype = words.prim.name();
+            let source = format!(
+                "(handle-effect {{effect: random}} (lit {{type: (t-prim {{}} int64)}} 42) (app {{}} (var {{}} dropout) (var {{}} x) (lit {{type: (t-prim {{}} {dtype})}} {rate})))"
+            );
+            let plan = plan(&source, words.prim, 4);
+            let node = plan.dag_for_inspection().roots()[0];
+            let artifact = chelis_backend_c::codegen_evaluation_with_options(
+                plan.verify_ownership().unwrap(),
+                "sample",
+                Default::default(),
+            )
+            .unwrap();
+            assert_eq!(artifact.input_labels, ["x"]);
+            let expected = std::array::from_fn(|offset| {
+                std::array::from_fn(|i| {
+                    if rate == "0.0" {
+                        words.input[(offset + i) % 6]
+                    } else if i == 1 {
+                        words.doubled[(offset + i) % 6]
+                    } else {
+                        0
+                    }
+                })
+            });
+            let driver = special_word_driver(&words, &artifact.input_labels, expected);
+            ownership_support::balanced(&ownership_support::run(&artifact.c_source, &driver));
+            if rate == "0.5" {
+                let value = if matches!(words.prim, Prim::F16 | Prim::Bf16) {
+                    "__av".into()
+                } else {
+                    format!("__in_a_{}[i]", node.0)
+                };
+                let abs = if words.prim == Prim::F64 {
+                    "fabs"
+                } else {
+                    "fabsf"
+                };
+                // Normalize finite zeros so only dropped nonfinite values
+                // discriminate this multiplication mutant, not the -0 case.
+                let masked = corrupt_contiguous_dropout(&artifact.c_source, node, |line| {
+                    line.replace("? 0 :", &format!("? {abs}(0.0f * ({value})) :"))
+                });
+                assert_native_value_failure(&masked, &driver);
+                let sign = corrupt_contiguous_dropout(&artifact.c_source, node, |line| {
+                    line.replace(
+                        &format!("({value}) /"),
+                        &format!("(({value}) == 0 ? 0 : ({value})) /"),
+                    )
+                });
+                assert_native_value_failure(&sign, &driver);
+                let nan = corrupt_contiguous_dropout(&artifact.c_source, node, |line| {
+                    format!(
+                        "{line}\n{{ {ctype} bits; memcpy(&bits, &__out_{id}[i], sizeof(bits)); if (bits == UINT64_C(0x{canonical:x})) {{ bits ^= 1; memcpy(&__out_{id}[i], &bits, sizeof(bits)); }} }}",
+                        ctype = words.ctype,
+                        id = node.0,
+                        canonical = words.input[5]
+                    )
+                });
+                assert_native_value_failure(&nan, &driver);
+            }
+        }
+    }
 }
 
 #[test]
