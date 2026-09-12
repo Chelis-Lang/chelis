@@ -58,8 +58,56 @@ Sixteen emitted-C corruptions exercise four failure classes at every width:
 absolute-value replay cotangents, multiplicative dropped masking, kept-zero sign
 erasure, and a noncanonical NaN result. Each must compile and then fail an
 executed value assertion. Existing rate-rounding, next-draw and nested-state
-tests remain separate. These cases do not establish arbitrary-rate replay
-rounding or an IEEE derivative theorem.
+tests remain separate. These special-word cases do not establish arbitrary-rate
+replay rounding or an IEEE derivative theorem.
+
+## Native replay rounding and mask thresholds
+
+`fixed_control_c::native_source_ad_replay_finalizes_nonbinary_rate_division`
+checks the actual Surf-generated captured-weight gradient at stored rate 0.1
+for f16/bf16/f32/f64, using the same sealed-body boundary. This is a
+representative non-exact decimal rate, not exhaustive coverage of finite rates.
+Independent exact-rational round-to-nearest-even calculations implement the
+[04-NUM-8] arithmetic/storage stages and [05-OP-37] finalized denominator and
+division. The positive input/result stored-word witnesses are:
+
+| Width | Cotangent → kept replay result |
+| --- | --- |
+| f16 | `3c05 → 3c77`, `3c06 → 3c79` |
+| bf16 | `3f81 → 3f90` |
+| f32 | `3f800005 → 3f8e38e9`, `3f800007 → 3f8e38ec` |
+| f64 | `3ff0000000000005 → 3ff1c71c71c71c77`, `3ff0000000000000 → 3ff1c71c71c71c72` |
+
+Positive and negative witnesses rotate through all four coordinates; seed42,
+ordinal0 keeps coordinates 0–2 and drops coordinate3 at this rate. These finite
+nonzero cotangents are unchanged by the spec/06 §2.4 positive-zero accumulation.
+The plan must contain an actual forward/replay pair sharing the saved draw.
+Executed replay mutations replace division with multiplication by a
+storage-finalized reciprocal, or use a wrong-width/unfinalized denominator.
+The latter skips denominator storage rounding for f16/bf16, evaluates the f32
+denominator/division in f64, or narrows the f64 denominator through f32.
+
+`fixed_control_c::native_mask_threshold_uses_arithmetic_width_and_strict_less_than`
+uses four independently inverse-SplitMix-derived seeds under [05-RNG-1]. At
+ordinal0, coordinate0, their 53-bit units are respectively `0.5 - 2^-53`,
+`0.5`, `0.5 + 2^-53`, and `0.5 - 2^-16`:
+`7396636047707789066`, `4901139120565445618`, `6117835775437243522`,
+`3386422020048024308`. All four output coordinates are pinned independently.
+At rate0.5, the first unit rounds to equality in f32 arithmetic but remains
+below in f64; the last remains below in f32 but would round to equality if
+prematurely narrowed to f16/bf16 storage. Executed mutations distinguish `<`
+from `<=`, pre-f32 comparison from required f32 rounding (and erroneous f32
+rounding for f64), and premature storage rounding for f16/bf16.
+
+Together these two tests execute 20 positive C artifacts, 32 input cases repeated
+four times (128 calls), and 18 emitted-C mutants. Every positive call checks
+complete output/input words, dtype and shape; every positive artifact must
+balance the native ownership ledger. Each mutant must compile and fail a
+runtime assertion, not merely change emitted text. Expectations do not call
+the evaluator. These are IEEE operation conformance checks, not an IEEE
+derivative theorem, full source/API transport, arbitrary runtime-rate C
+support, or completion of E1/E2. HIP/Metal and next-draw/state controls remain
+outside this slice.
 
 The existing PR integration selection includes `fixed_control_c`:
 
