@@ -14187,11 +14187,11 @@ impl<'program> LowerCtx<'program> {
             let resolved = match dim {
                 DimInfo::Lit(required) => {
                     self.preserve_literal_result_axis(id, axis, *required)
-                        || self.preserve_op_computed_result_axis(id, axis, None)
+                        || self.preserve_op_computed_result_axis(id, axis, dim)
                 }
                 DimInfo::Named(binder, _) if !binder.is_empty() && binder != "*" => {
                     self.preserve_named_result_axis(id, axis, binder)
-                        || self.preserve_op_computed_result_axis(id, axis, Some(binder))
+                        || self.preserve_op_computed_result_axis(id, axis, dim)
                 }
                 _ => false,
             };
@@ -14298,29 +14298,64 @@ impl<'program> LowerCtx<'program> {
     ///   A result name declared NOWHERE else needs no such gate: it is the
     ///   checker's fresh-extent representation under section 4.7.2 and is still
     ///   published as `*`, which reaches neither this arm nor a class.
+    ///
+    /// chelis#1798 widened WHICH axis this arm reads. It dispatched on the
+    /// RESULT node's own source, so a body ending in an operation that merely
+    /// FORWARDS an op-computed extent stamped nothing: `add(shrink(x, ..),
+    /// shrink(y, ..))` under a declared `tensor[n, f32]` carries
+    /// `AxisSource::InputAxis` on the `add`, the two witness arms walk those
+    /// hops looking for an `ExtentWitness` an op-computed origin never has,
+    /// and this arm refused the forwarded source outright. Measured at
+    /// `6abca2406`: `shape=[3]` at exit zero on both lanes under `n` = 2.
+    ///
+    /// [`crate::axis_sources::op_computed_axis_origin`] now reports the
+    /// operation that INTRODUCES the extent, crossing pass-through hops and
+    /// stopping at any axis the operation sets, and the claim is stamped on
+    /// that origin's axis as well as on the result. The origin is where
+    /// section 4.7 puts the guard and where `local_dim_guard_sites` keys its
+    /// site; the result's own forwarded axis is refused membership by
+    /// `is_member`, so stamping only the result would leave a claim no site
+    /// checks. Rejected: teaching the derivation to walk pass-through members
+    /// instead, which puts one claim on two nodes and lets two consumers
+    /// disagree, and observing the result AFTER it runs, which section 4.7
+    /// forbids because the origin's own allocation is the allocation the
+    /// guard has to precede.
     fn preserve_op_computed_result_axis(
         &mut self,
         id: NodeId,
         axis: usize,
-        binder: Option<&str>,
+        declared: &DimInfo,
     ) -> bool {
-        use crate::axis_sources::AxisSource;
+        let binder = match declared {
+            DimInfo::Named(binder, _) if !binder.is_empty() && binder != "*" => {
+                Some(binder.as_str())
+            }
+            _ => None,
+        };
         if let Some(binder) = binder
             && (!self.signature_is_authored || self.signature_witness(binder).is_none())
         {
             return false;
         }
-        let Some(AxisSource::OpComputed { axis: computed, .. }) =
-            crate::axis_sources::output_axis_sources(&self.dag, id)
-                .get(axis)
-                .cloned()
+        let Some((origin, computed)) =
+            crate::axis_sources::op_computed_axis_origin(&self.dag, id, axis)
         else {
             return false;
         };
-        let Some(node) = self.dag.get(id) else {
+        let Some(node) = self.dag.get(origin) else {
             return false;
         };
         if crate::axis_sources::op_computed_axis_extent(&node.op, computed).is_none() {
+            return false;
+        }
+        // chelis#1798: the claim belongs to the operation that INTRODUCES the
+        // extent, which is the origin rather than whichever node ends the
+        // body. Section 4.7 puts the guard at "the source position of the
+        // operation that introduces the guarded extent", and the class member
+        // the guard site is keyed on is that origin's axis: the result's own
+        // forwarded axis is excluded from membership by `is_member`, so
+        // stamping only the result leaves a claim with no site to check it.
+        if origin != id && !self.stamp_op_computed_origin(origin, computed, declared) {
             return false;
         }
         // A NAMED claim's canonical value is the declaring parameter's axis, so
@@ -14345,6 +14380,47 @@ impl<'program> LowerCtx<'program> {
                 result.shape_deps.push(witness);
             }
         }
+        true
+    }
+
+    /// Write a declared result dimension onto the op-computed ORIGIN axis a
+    /// pass-through result resolved to, reporting whether the origin can carry
+    /// it.
+    ///
+    /// The origin axis this reaches is the FRESH extent the operation minted,
+    /// which `spec/04-type-system.md` §4.7.2 publishes anonymously, so the
+    /// ordinary case writes a claim where there was none. Two other states
+    /// exist and neither may be relabeled. An axis already carrying exactly
+    /// this claim is already stamped, so the stamp succeeds having written
+    /// nothing. An axis carrying a DIFFERENT name or literal is governed by
+    /// another declaration, and overwriting it would move that declaration's
+    /// guard onto this one's claim: one origin would carry two claims and the
+    /// later lowering order would decide which survived. This declines
+    /// instead, which leaves the second claim exactly as unstamped as it is
+    /// today rather than silently redirecting the first.
+    fn stamp_op_computed_origin(
+        &mut self,
+        origin: NodeId,
+        axis: usize,
+        declared: &DimInfo,
+    ) -> bool {
+        let Some(existing) = self
+            .dag
+            .get(origin)
+            .and_then(|node| node.output_type.dims.get(axis))
+        else {
+            return false;
+        };
+        match existing {
+            DimInfo::Named(name, _) if name.is_empty() || name == "*" => {}
+            existing if existing == declared => return true,
+            _ => return false,
+        }
+        self.dag
+            .node_mut(origin)
+            .expect("op-computed origin")
+            .output_type
+            .dims[axis] = declared.clone();
         true
     }
 

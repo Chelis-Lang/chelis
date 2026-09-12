@@ -6068,3 +6068,215 @@ fn the_spellings_that_never_tripped_the_bystander_guard_stay_green() {
         "{out}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// chelis#1798: a declared result axis that PASSES THROUGH an op-computed
+// extent.
+//
+// `preserve_declared_result` dispatched on the RESULT node's own axis source,
+// so a claim was stamped only when the declared axis WAS the op-computed one.
+// An `add` over two `shrink`s forwards its operand's axis
+// (`AxisSource::InputAxis`), the literal and named witness arms walk those
+// hops looking for an `ExtentWitness` an op-computed origin never has, and the
+// op-computed arm refused the forwarded source outright: the claim was dropped
+// and both lanes returned the extent the operation computed at exit zero.
+//
+// The repair resolves the declared axis to its `ExtentOrigin` with the total
+// resolver `axis_sources::resolve_axis_extent` before dispatching, and runs
+// the op-computed arm against the ORIGIN's node and axis. `spec/04-type-
+// system.md` section 4.7 puts the guard at "the source position of the
+// operation that introduces the guarded extent", which is that origin, so the
+// claim is stamped there as well as on the result and [04-NUM-9]'s `<op>` slot
+// names `shrink`.
+//
+// Both operands of the `add` shrink the SAME extent in every fixture here.
+// Only input 0's origin carries the stamp, and a second operand of a
+// different extent would trap through the `add`'s own elementwise check with
+// a different message, which would measure that check rather than this claim.
+// ---------------------------------------------------------------------------
+
+/// chelis#1798's reproducer, with `declared` naming the result extent and
+/// `w_len` the extent of the parameter that declares `n`.
+///
+/// `x` and `y` both hold four elements and each `shrink` drops the first, so
+/// the body produces 3 on every spelling below; `w_len` is what the claim
+/// says it will be.
+fn pass_through_op_computed_source(w_len: usize, declared: &str) -> String {
+    format!(
+        "def f(w: tensor[n, f32], x: tensor[r, f32], y: tensor[s, f32]) -> \
+         tensor[{declared}, f32] = \
+         add(shrink(x, [[1i64, shape(x, 0i32)]]), shrink(y, [[1i64, shape(y, 0i32)]]))\n\
+         out = f({}, {}, {})\n",
+        vector_literal(w_len),
+        vector_literal(4),
+        vector_literal(4)
+    )
+}
+
+/// claim.named.pass_through.{eval,c}: the NAMED claim over a forwarded
+/// op-computed extent is guarded at the `shrink` that introduces it.
+///
+/// One test for both lanes because the rendering is the same rendering: the
+/// context line and [04-NUM-9]'s trap line are asserted on each lane
+/// separately, and a lane that placed the guard elsewhere or named a
+/// different operation would fail here rather than in a twin nobody compared
+/// against.
+///
+/// EVIDENTIARY STATUS: regression test for the two mismatch blocks. Measured
+/// at `6abca2406`, this exact program printed
+/// `out = tensor(shape=[3], data=[4.0, 6.0, 8.0])` and exited ZERO on eval and
+/// on the linked C binary, under a declared `tensor[n, f32]` with `n` = 2.
+/// Disposition lock for the agreeing block, which exited zero there too and
+/// must keep doing so: it is the non-vacuity control.
+#[test]
+fn a_pass_through_named_claim_is_guarded_at_its_op_computed_origin() {
+    assert!(
+        gcc_available(),
+        "this row compares two executed lanes; neither may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let mismatched = pass_through_op_computed_source(2, "n");
+    let (eval_ok, eval_out) = eval_result(&dir, "pass_through_named.ch", &mismatched);
+    let (c_ok, c_out) = c_run_result(&dir, "pass_through_named_c", &mismatched);
+    let context = "extent `n`: claimed = 2, shrink axis 0 = 3";
+    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(!ok, "{lane}: a claim of 2 over a shrink of 3 traps: {out}");
+        assert!(
+            out.contains(&domain_trap_line("shrink")),
+            "{lane}: [04-NUM-9]'s line names the origin operation: {out}"
+        );
+        assert!(out.contains(context), "{lane}: expected {context}: {out}");
+        assert!(
+            !out.contains("shape=[3]"),
+            "{lane}: and no undeclared extent is produced: {out}"
+        );
+    }
+
+    // The agreeing control: `n` is 3 and the shrinks produce 3.
+    let agreeing = pass_through_op_computed_source(3, "n");
+    let (eval_ok, eval_out) = eval_result(&dir, "pass_through_named_ok.ch", &agreeing);
+    let (c_ok, c_out) = c_run_result(&dir, "pass_through_named_ok_c", &agreeing);
+    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(ok, "{lane}: an agreeing claim executes: {out}");
+        assert!(
+            out.contains("out = tensor(shape=[3], data=[4.0, 6.0, 8.0])"),
+            "{lane}: with the declared extent and the body's values: {out}"
+        );
+    }
+}
+
+/// claim.literal.pass_through.{eval,c}: the LITERAL half of the same class.
+///
+/// The issue reported the named spelling; the literal one is silent through
+/// the same forwarded source for the same reason, and it reaches the guard
+/// through the same origin resolution. Its claim renders as the number rather
+/// than a binder, which is the only difference between the two rows.
+///
+/// EVIDENTIARY STATUS: regression test. Measured at `6abca2406`, this program
+/// printed `out = tensor(shape=[3], data=[4.0, 6.0, 8.0])` and exited ZERO on
+/// both lanes under a declared `tensor[2, f32]`.
+#[test]
+fn a_pass_through_literal_claim_is_guarded_at_its_op_computed_origin() {
+    assert!(
+        gcc_available(),
+        "this row compares two executed lanes; neither may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let mismatched = pass_through_op_computed_source(2, "2");
+    let (eval_ok, eval_out) = eval_result(&dir, "pass_through_lit.ch", &mismatched);
+    let (c_ok, c_out) = c_run_result(&dir, "pass_through_lit_c", &mismatched);
+    let context = "extent `2`: claimed = 2, shrink axis 0 = 3";
+    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(!ok, "{lane}: a literal claim of 2 over 3 traps: {out}");
+        assert!(
+            out.contains(&domain_trap_line("shrink")),
+            "{lane}: [04-NUM-9]'s line names the origin operation: {out}"
+        );
+        assert!(out.contains(context), "{lane}: expected {context}: {out}");
+    }
+
+    // The agreeing literal control, so the row above pins a guard rather than
+    // a lane that stopped executing this shape at all.
+    let agreeing = pass_through_op_computed_source(2, "3");
+    let (eval_ok, eval_out) = eval_result(&dir, "pass_through_lit_ok.ch", &agreeing);
+    let (c_ok, c_out) = c_run_result(&dir, "pass_through_lit_ok_c", &agreeing);
+    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(ok, "{lane}: a literal claim of 3 over 3 executes: {out}");
+        assert!(
+            out.contains("out = tensor(shape=[3], data=[4.0, 6.0, 8.0])"),
+            "{lane}: with the declared extent and the body's values: {out}"
+        );
+    }
+}
+
+/// claim.named.pass_through.inlined_root.{eval,c}: the same forwarded origin
+/// reached through an INLINED root rather than a value binding.
+///
+/// `def main() -> tensor[2, f32] = f(...)` inlines `f`, so the root's own
+/// declared claim is the one that reaches the forwarded axis and the callee's
+/// `n` does not: the const argument that declares `n` mints no signature
+/// witness for the inlined activation, so `f`'s named claim declines and the
+/// root's literal claim lands on the same origin. The claim label is
+/// therefore the number rather than the binder, and the origin, the axis and
+/// the observed extent are the ones the value-binding rows report.
+///
+/// This row exists because the root form is where chelis#1782 and PR #1790
+/// put the inlined claim, and a repair that only reached the exported-kernel
+/// form would leave the root spelling of the same defect silent.
+///
+/// EVIDENTIARY STATUS: regression test. Measured at `6abca2406`, this program
+/// printed `main = tensor(shape=[3], data=[4.0, 6.0, 8.0])` and exited ZERO on
+/// both lanes.
+#[test]
+fn an_inlined_root_pass_through_claim_is_guarded_on_both_lanes() {
+    assert!(
+        gcc_available(),
+        "this row compares two executed lanes; neither may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    // `main` always claims 2, because the callee's own `n` is forced to 2 by
+    // the const argument that declares it and the checker unifies the root's
+    // declared result against that: `-> tensor[3, f32]` is a
+    // `DimensionMismatch` rejection rather than a disagreeing root. The
+    // agreeing control therefore moves the BODY instead, shrinking three
+    // elements to two.
+    let source = |operand_len: usize| {
+        format!(
+            "def f(w: tensor[n, f32], x: tensor[r, f32], y: tensor[s, f32]) -> \
+             tensor[n, f32] = \
+             add(shrink(x, [[1i64, shape(x, 0i32)]]), shrink(y, [[1i64, shape(y, 0i32)]]))\n\
+             def main() -> tensor[2, f32] = f({}, {}, {})\n",
+            vector_literal(2),
+            vector_literal(operand_len),
+            vector_literal(operand_len)
+        )
+    };
+
+    let mismatched = source(4);
+    let (eval_ok, eval_out) = eval_result(&dir, "pass_through_root.ch", &mismatched);
+    let (c_ok, c_out) = c_run_result(&dir, "pass_through_root_c", &mismatched);
+    let context = "extent `2`: claimed = 2, shrink axis 0 = 3";
+    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(!ok, "{lane}: the root's claim of 2 over 3 traps: {out}");
+        assert!(
+            out.contains(&domain_trap_line("shrink")),
+            "{lane}: [04-NUM-9]'s line names the origin operation: {out}"
+        );
+        assert!(out.contains(context), "{lane}: expected {context}: {out}");
+    }
+
+    // The agreeing root, so the row above pins a guard rather than a root
+    // form that stopped producing a value.
+    let agreeing = source(3);
+    let (eval_ok, eval_out) = eval_result(&dir, "pass_through_root_ok.ch", &agreeing);
+    let (c_ok, c_out) = c_run_result(&dir, "pass_through_root_ok_c", &agreeing);
+    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(ok, "{lane}: an agreeing root claim executes: {out}");
+        assert!(
+            out.contains("main = tensor(shape=[2], data=[4.0, 6.0])"),
+            "{lane}: with the declared extent and the body's values: {out}"
+        );
+    }
+}

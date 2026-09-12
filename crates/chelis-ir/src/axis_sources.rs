@@ -2265,6 +2265,62 @@ pub enum ComputedAxisExtent {
     },
 }
 
+/// The op-computed origin a declared result axis reaches through
+/// PASS-THROUGH hops alone, as `(node, axis)`.
+///
+/// This answers "which operation introduces the extent this axis carries",
+/// which is the question `spec/04-type-system.md` section 4.7 asks when it
+/// places a local guard at "the source position of the operation that
+/// introduces the guarded extent". [`resolve_axis_extent`] answers a
+/// different one, "where does this axis's VALUE come from", and the two
+/// diverge on exactly the axes C2.4 separates: a set axis and a forwarded
+/// axis both carry [`AxisSource::InputAxis`], and only the forwarded one
+/// passes an extent through.
+///
+/// Measured, which is why the distinction is drawn here rather than left to
+/// the value resolver. `expand(x, 0i32, shape(small, 0i32))` under a declared
+/// `tensor[3, f32]`, with `small` a runtime `shrink`, has an `InputAxis`
+/// source on the axis the `expand` SETS. The value resolver walks that hop
+/// into the `shrink` and reports an op-computed origin there; a claim stamped
+/// on it moves the guard off the `expand`, whose own axis is the class
+/// witness [`is_member`] admits, and the trap renames itself from `expand` to
+/// `shrink`. `issue_616_runtime_movement_c_parity`'s identity row measures
+/// that rename.
+///
+/// So the walk crosses a hop only where [`is_member`] would refuse the axis
+/// as a pass-through, and stops at the first axis the operation sets, whose
+/// own claim is the one its guard checks. The walk is bounded by the node
+/// count, so a malformed graph cannot spin.
+pub fn op_computed_axis_origin(dag: &Dag, node: NodeId, axis: usize) -> Option<(NodeId, usize)> {
+    op_computed_axis_origin_bounded(dag, node, axis, dag.nodes().len())
+}
+
+fn op_computed_axis_origin_bounded(
+    dag: &Dag,
+    node: NodeId,
+    axis: usize,
+    fuel: usize,
+) -> Option<(NodeId, usize)> {
+    if fuel == 0 {
+        return None;
+    }
+    let owner = dag.get(node)?;
+    match output_axis_sources(dag, node).into_iter().nth(axis)? {
+        AxisSource::OpComputed {
+            op: origin,
+            axis: computed,
+        } => Some((origin, computed)),
+        AxisSource::InputAxis {
+            input,
+            axis: RtAxis::Lit(read),
+        } if !sets_axis(&owner.op, axis) => {
+            let operand = *owner.inputs.get(input)?;
+            op_computed_axis_origin_bounded(dag, operand, usize::try_from(read).ok()?, fuel - 1)
+        }
+        _ => None,
+    }
+}
+
 /// The computed extent of `axis`, when `op` is an admitted op-computed owner.
 ///
 /// ONE admission answer for two callers: [`local_dim_guard_sites`], which

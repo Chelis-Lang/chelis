@@ -1452,3 +1452,107 @@ fn a_named_axis_with_no_source_resolves_to_no_origin_and_is_reported() {
         vec!["_anon_dim_1_0".to_string()],
     );
 }
+
+/// chelis#1798: the origin walk crosses PASS-THROUGH hops and stops at an
+/// axis the operation sets.
+///
+/// `op_computed_axis_origin` answers which operation introduces an axis's
+/// extent, which is where `spec/04-type-system.md` section 4.7 places a local
+/// guard. `resolve_axis_extent` answers where the axis's VALUE comes from and
+/// walks every `InputAxis` hop, including the one on an axis an `expand` sets
+/// from an operand's shape. Both assertions are here because the difference
+/// between them is the whole content of the narrowing: a claim stamped at the
+/// value resolver's answer moves an existing guard off the `expand` whose own
+/// axis is the class witness, which
+/// `issue_616_runtime_movement_c_parity::checked_movement_expansion_guards_preserve_expand_and_insert_identity`
+/// observes as the trap renaming itself from `expand` to `shrink`.
+///
+/// EVIDENTIARY STATUS: regression test for both rows. `op_computed_axis_origin`
+/// did not exist before this change, and the pass-through row is the behaviour
+/// chelis#1798 reports missing; the set-axis row is the measured divergence
+/// from the value resolver, whose answer is asserted beside it so the two
+/// cannot be conflated again.
+#[test]
+fn the_op_computed_origin_walk_crosses_pass_through_and_stops_at_a_set_axis() {
+    use chelis_ir::axis_sources::op_computed_axis_origin;
+
+    // A pass-through hop: `add` forwards its operand's axis, so the origin is
+    // the `shrink` one node upstream.
+    let mut dag = Dag::new();
+    let x = load(&mut dag, "x", vec![named("r")]);
+    let y = load(&mut dag, "y", vec![named("s")]);
+    let shrink_of = |dag: &mut Dag, operand: NodeId| {
+        dag.add_node(
+            RiscOp::Shrink {
+                bounds: vec![(RtDim::Lit(1), RtDim::ToEnd)],
+            },
+            vec![operand],
+            ty(vec![named("*")], Prim::F32),
+            None,
+        )
+    };
+    let left = shrink_of(&mut dag, x);
+    let right = shrink_of(&mut dag, y);
+    let sum = dag.add_node(
+        RiscOp::Add,
+        vec![left, right],
+        ty(vec![named("*")], Prim::F32),
+        None,
+    );
+    assert_eq!(
+        output_axis_sources(&dag, sum),
+        vec![input_axis(0, 0)],
+        "the `add` forwards input 0's axis rather than computing one"
+    );
+    assert_eq!(
+        op_computed_axis_origin(&dag, sum, 0),
+        Some((left, 0)),
+        "so the origin is the `shrink` the extent came from"
+    );
+
+    // Negative parity: an axis the `expand` SETS from an operand's shape is a
+    // witness of its own claim, so the walk stops there and reports nothing,
+    // even though the value resolver reaches the `shrink` behind it.
+    let mut dag = Dag::new();
+    let unit = load(&mut dag, "x", vec![DimInfo::Lit(1)]);
+    let operand = load(&mut dag, "y", vec![named("n")]);
+    let small = shrink_of(&mut dag, operand);
+    let widened = dag.add_node(
+        RiscOp::Expand {
+            axis: 0,
+            size: RtDim::InputAxis {
+                tensor: 1,
+                axis: RtAxis::Lit(0),
+            },
+        },
+        vec![unit, small],
+        ty(vec![named("*")], Prim::F32),
+        None,
+    );
+    assert_eq!(
+        output_axis_sources(&dag, widened),
+        vec![input_axis(1, 0)],
+        "the set axis carries the same `InputAxis` source a forwarded one would"
+    );
+    assert_eq!(
+        op_computed_axis_origin(&dag, widened, 0),
+        None,
+        "but the `expand` introduces the extent, so the walk stops at it"
+    );
+    assert_eq!(
+        resolve_axis_extent(&dag, widened, 0),
+        Some(ExtentOrigin::OpComputed { op: small, axis: 0 }),
+        "the value resolver crosses that hop, which is the divergence"
+    );
+
+    // And an axis whose extent is a literal has no op-computed origin at all.
+    let mut dag = Dag::new();
+    let fixed = load(&mut dag, "x", vec![DimInfo::Lit(4)]);
+    let kept = dag.add_node(
+        RiscOp::Relu,
+        vec![fixed],
+        ty(vec![DimInfo::Lit(4)], Prim::F32),
+        None,
+    );
+    assert_eq!(op_computed_axis_origin(&dag, kept, 0), None);
+}
