@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "freeze_sha256": "d87cef198c2d5b9fca494fd848fcecfe5c70ed28a05735c2ee7e13f810440d30",
+  "freeze_sha256": "ba54e4c3f15a6524039c77aed2663665432dca270ce2ea1529428f3b82269abf",
   "foundation_rows": [
     {
       "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/emit.rs|owner=CEmitter::elem_type",
@@ -1445,6 +1445,14 @@
     {
       "identity": "kind=width-arithmetic|path=crates/chelis-vocab/src/lib.rs|owner=_",
       "deletion_phase": 1
+    },
+    {
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=emit_function",
+      "deletion_phase": 4
+    },
+    {
+      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/random_observer.rs|owner=SUPPORT",
+      "deletion_phase": 4
     }
   ],
   "active_debt": [
@@ -2435,6 +2443,14 @@
     {
       "identity": "kind=width-arithmetic|path=crates/chelis-vocab/src/lib.rs|owner=_",
       "sample": "core :: mem :: size_of :: < RuntimeDType > ()"
+    },
+    {
+      "identity": "kind=backend-element-spelling|path=crates/chelis-backend-c/src/host_emit.rs|owner=emit_function",
+      "sample": "__chelis_random_observer_sink __chelis_sink, void *__chelis_sink_context, uint64_t __chelis_invoc..."
+    },
+    {
+      "identity": "kind=load-store-template|path=crates/chelis-backend-c/src/random_observer.rs|owner=SUPPORT",
+      "sample": "/* CHELIS_NATIVE_RANDOM_OBSERVER_BEGIN */ typedef struct { uint64_t value; } __chelis_random_obse..."
     }
   ],
   "coverage_manifest": {
@@ -2442,7 +2458,7 @@
       "artifact": "the frozen INVENTORY_SOURCES file list",
       "enumerator": "chelis-repr-inventory: syn for Rust; clang's front end under fixed target lanes, a committed stub SDK, and a scrubbed environment for C and Objective-C headers, classified with the capacity census's closed type-word lists",
       "universe": {
-        "registered_sources": 83,
+        "registered_sources": 84,
         "roots": [
           "crates/chelis-runtime/src/**/*.rs",
           "crates/chelis-runtime/include/**/*.h",

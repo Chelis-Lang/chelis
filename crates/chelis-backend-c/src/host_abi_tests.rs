@@ -329,6 +329,13 @@ result = with seed(42i64) {
         1,
         "fixed-control sampler support is emitted once per translation unit"
     );
+    #[cfg(not(feature = "native-random-observer"))]
+    assert!(
+        !c.contains("CHELIS_NATIVE_RANDOM_OBSERVER")
+            && !c.contains("chelis_random_observer")
+            && !c.contains("__chelis_observed"),
+        "the default feature set must emit observer-free artifacts"
+    );
 }
 
 fn emitted_function_body<'a>(source: &'a str, name: &str) -> &'a str {

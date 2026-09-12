@@ -141,6 +141,7 @@ CLIPPY_MATRIX: tuple[ClippyRun, ...] = (
             "--features",
             "chelis-backend-c/sleef,"
             "chelis-compiler-api/compilation-trace,"
+            "chelis-compiler-api/native-random-observer,"
             "chelis-e2e/hip-local-gpu,"
             "chelis-ir/lowering-trace,"
             "chelis-prove/clarabel,"

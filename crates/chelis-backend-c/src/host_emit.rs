@@ -214,6 +214,11 @@ pub(crate) fn emit_host_abi_program(
     body.push(String::new());
     append_uniform_sample_helper(&mut body);
     body.push(String::new());
+    #[cfg(feature = "native-random-observer")]
+    {
+        crate::random_observer::append_support(&mut body);
+        body.push(String::new());
+    }
     append_tensor_math_helpers(&mut body);
     body.push(String::new());
     // Authored functions are published in the generated header with external
@@ -1623,12 +1628,17 @@ fn append_helper(
             verified_identity_helper_input(helper, verified.dag())
     {
         out.push(format!(
-                "static void {}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out, chelis_rng_state *__chelis_rng) {{",
-                helper_name,
-            ));
+            "static void {}({}) {{",
+            helper_name,
+            private_random_params(
+                "chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out"
+            ),
+        ));
         out.push("    (void)n_in;".to_string());
         out.push("    (void)n_out;".to_string());
         out.push("    (void)__chelis_rng;".to_string());
+        #[cfg(feature = "native-random-observer")]
+        out.push("    (void)__chelis_observer;".to_string());
         out.push("    outputs[0] = inputs[0];".to_string());
         out.push("}".to_string());
         out.push(String::new());
@@ -1715,10 +1725,15 @@ fn append_external_helper_declaration(out: &mut Vec<String>, helper_name: &str) 
     // Peer translation units keep their established ABI and baked-seed
     // behavior. The private adapter does not export Random state to a device.
     out.push(format!(
-        "static void {}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out, chelis_rng_state *__chelis_rng) {{",
-        random_helper_name(helper_name)
+        "static void {}({}) {{",
+        random_helper_name(helper_name),
+        private_random_params(
+            "chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out"
+        )
     ));
     out.push("    (void)__chelis_rng;".to_string());
+    #[cfg(feature = "native-random-observer")]
+    out.push("    (void)__chelis_observer;".to_string());
     out.push(format!("    {helper_name}(inputs, n_in, outputs, n_out);"));
     out.push("}".to_string());
     out.push(String::new());
@@ -1728,6 +1743,7 @@ fn random_helper_name(name: &str) -> String {
     format!("{name}__with_rng")
 }
 
+#[cfg(not(feature = "native-random-observer"))]
 fn private_random_params(params: &str) -> String {
     if params.is_empty() {
         "chelis_rng_state *__chelis_rng".to_string()
@@ -1736,9 +1752,31 @@ fn private_random_params(params: &str) -> String {
     }
 }
 
+#[cfg(feature = "native-random-observer")]
+fn private_random_params(params: &str) -> String {
+    if params.is_empty() {
+        crate::random_observer::PRIVATE_PARAM.to_string()
+    } else {
+        format!("{params}, {}", crate::random_observer::PRIVATE_PARAM)
+    }
+}
+
+fn append_private_context_args(args: &mut Vec<String>) {
+    #[cfg(not(feature = "native-random-observer"))]
+    args.push("__chelis_rng".to_string());
+    #[cfg(feature = "native-random-observer")]
+    args.extend(
+        crate::random_observer::PRIVATE_ARGS
+            .iter()
+            .map(|arg| (*arg).to_string()),
+    );
+}
+
 fn append_invocation_random_context(out: &mut Vec<String>) {
     out.push("    chelis_rng_state __chelis_rng_local = {0ULL, 0ULL, 0};".to_string());
     out.push("    chelis_rng_state *__chelis_rng = &__chelis_rng_local;".to_string());
+    #[cfg(feature = "native-random-observer")]
+    crate::random_observer::append_inactive_context(out, "    ");
 }
 
 fn verified_identity_helper_input(
@@ -1962,8 +2000,9 @@ fn emit_function(
         ));
         append_invocation_random_context(out);
         let mut args = Vec::with_capacity(function.params.len());
-        for (index, (param, use_)) in function.params.iter().zip(entry_uses).enumerate() {
-            if use_ == VerifiedOwnershipUse::Move && retain_call(&param.name, &param.ty).is_some() {
+        for (index, (param, use_)) in function.params.iter().zip(&entry_uses).enumerate() {
+            if *use_ == VerifiedOwnershipUse::Move && retain_call(&param.name, &param.ty).is_some()
+            {
                 let owned = format!("__chelis_owned_arg_{index}");
                 out.push(format!(
                     "    {} = {};",
@@ -1979,7 +2018,7 @@ fn emit_function(
                 args.push(c_ident(&param.name).into_owned());
             }
         }
-        args.push("__chelis_rng".to_string());
+        append_private_context_args(&mut args);
         out.push(format!(
             "    {} __result = {}({});",
             c_type(&function.ret_ty)?,
@@ -1988,6 +2027,54 @@ fn emit_function(
         ));
         out.push("    return __result;".to_string());
         out.push("}".to_string());
+
+        #[cfg(feature = "native-random-observer")]
+        {
+            let observed_params = if wrapper_params.is_empty() {
+                "__chelis_random_observer_sink __chelis_sink, void *__chelis_sink_context, uint64_t __chelis_invocation".to_string()
+            } else {
+                format!(
+                    "{wrapper_params}, __chelis_random_observer_sink __chelis_sink, void *__chelis_sink_context, uint64_t __chelis_invocation"
+                )
+            };
+            out.push(format!(
+                "static {} __chelis_observed_{}({observed_params}) {{",
+                c_type(&function.ret_ty)?,
+                emitted_name
+            ));
+            out.push("    chelis_rng_state __chelis_rng_local = {0ULL, 0ULL, 0};".to_string());
+            out.push("    chelis_rng_state *__chelis_rng = &__chelis_rng_local;".to_string());
+            crate::random_observer::append_observed_context(out, "    ");
+            let mut args = Vec::with_capacity(function.params.len() + 2);
+            for (index, (param, use_)) in function.params.iter().zip(&entry_uses).enumerate() {
+                if *use_ == VerifiedOwnershipUse::Move
+                    && retain_call(&param.name, &param.ty).is_some()
+                {
+                    let owned = format!("__chelis_owned_arg_{index}");
+                    out.push(format!(
+                        "    {} = {};",
+                        c_decl(&param.ty, &owned)?,
+                        c_ident(&param.name)
+                    ));
+                    out.push(format!(
+                        "    {}",
+                        retain_call(&owned, &param.ty).expect("heap retain")
+                    ));
+                    args.push(owned);
+                } else {
+                    args.push(c_ident(&param.name).into_owned());
+                }
+            }
+            append_private_context_args(&mut args);
+            out.push(format!(
+                "    {} __result = {}({});",
+                c_type(&function.ret_ty)?,
+                body_name,
+                args.join(", ")
+            ));
+            out.push("    return __result;".to_string());
+            out.push("}".to_string());
+        }
     }
     Ok(())
 }
@@ -3774,6 +3861,14 @@ impl<'a> HostEmitter<'a> {
                     "{}chelis_rng_state {saved_var} = *__chelis_rng;",
                     self.indent
                 ));
+                #[cfg(feature = "native-random-observer")]
+                let observer_frame = self.next_temp("rng_observer_frame");
+                #[cfg(feature = "native-random-observer")]
+                self.lines.extend(crate::random_observer::push_frame(
+                    &self.indent,
+                    &observer_frame,
+                    &saved_var,
+                ));
                 // Install the complete handler frame, just as exit restores
                 // the complete saved frame, before evaluating its body.
                 self.lines.push(format!(
@@ -3782,9 +3877,39 @@ impl<'a> HostEmitter<'a> {
                 ));
                 self.lines
                     .push(format!("{}*__chelis_rng = {seeded_var};", self.indent));
+                #[cfg(feature = "native-random-observer")]
+                self.lines.push(crate::random_observer::record(
+                    &self.indent,
+                    "__CHELIS_RANDOM_OBSERVER_HOST_INSTALL",
+                    "__CHELIS_RANDOM_OBSERVER_HOST_IDENTITY_UNSUPPORTED",
+                    "NULL",
+                    None,
+                    None,
+                    None,
+                    "*__chelis_rng",
+                    None,
+                ));
                 self.assign_expr(target, body, ty)?;
                 self.lines
                     .push(format!("{}*__chelis_rng = {saved_var};", self.indent));
+                #[cfg(feature = "native-random-observer")]
+                {
+                    self.lines.push(crate::random_observer::pop_frame(
+                        &self.indent,
+                        &observer_frame,
+                    ));
+                    self.lines.push(crate::random_observer::record(
+                        &self.indent,
+                        "__CHELIS_RANDOM_OBSERVER_HOST_RESTORE",
+                        "__CHELIS_RANDOM_OBSERVER_HOST_IDENTITY_UNSUPPORTED",
+                        "NULL",
+                        None,
+                        None,
+                        None,
+                        "*__chelis_rng",
+                        None,
+                    ));
+                }
             }
             HostExprKind::TensorCall { helper, args, ty } => {
                 self.assign_tensor_call(target, *helper, args, ty)?;
@@ -5836,14 +5961,18 @@ impl<'a> HostEmitter<'a> {
             "{}chelis_tensor *{}[{}] = {{ NULL }};",
             self.indent, outputs_name, root_count
         ));
+        let mut helper_args = vec![
+            inputs_arg.clone(),
+            tensor_args.len().to_string(),
+            outputs_name.clone(),
+            root_count.to_string(),
+        ];
+        append_private_context_args(&mut helper_args);
         self.lines.push(format!(
-            "{}{}({}, {}, {}, {}, __chelis_rng);",
+            "{}{}({});",
             self.indent,
             helper_name,
-            inputs_arg,
-            tensor_args.len(),
-            outputs_name,
-            root_count
+            helper_args.join(", ")
         ));
         if let HostType::Tuple(parts) = ty
             && root_count > 1
@@ -6413,7 +6542,7 @@ impl<'a> HostEmitter<'a> {
         // Calls to declared functions use private bodies and inherit this
         // invocation. Callback parameters retain their authored C signature.
         if self.emitted_names.contains_key(function) {
-            arg_vars.push("__chelis_rng".to_string());
+            append_private_context_args(&mut arg_vars);
         }
         self.lines.push(format!(
             "{}{target} = {}({});",
@@ -7261,7 +7390,7 @@ impl<'a> HostEmitter<'a> {
             HostCallbackKind::Named { function, .. } => {
                 let mut arg_vars = arg_vars.to_vec();
                 if self.emitted_names.contains_key(function) {
-                    arg_vars.push("__chelis_rng".to_string());
+                    append_private_context_args(&mut arg_vars);
                 }
                 self.lines.push(format!(
                     "{}{target} = {}({});",

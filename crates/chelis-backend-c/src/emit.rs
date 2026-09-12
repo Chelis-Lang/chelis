@@ -7,6 +7,8 @@ use chelis_ir::dag::{
     ReduceWindowKind, RiscOp, RtAxis, RtDim, TensorType,
 };
 use chelis_ir::evaluation::{DrawId, EvaluationEmissionView, RandomSite};
+#[cfg(feature = "native-random-observer")]
+use chelis_ir::execution_spine::SourceKind;
 use chelis_ir::execution_spine::{Control, Step};
 use chelis_ir::ownership::{
     CStorageLane, ReusableOwnedStorage, VerifiedDagAction, VerifiedDagProgram, VerifiedDagView,
@@ -38,6 +40,16 @@ pub(crate) const FIXED_DROPOUT_HELPERS: &[&str] = &[
     "}",
     "/* CHELIS_DROPOUT_HELPERS_END */",
 ];
+
+#[cfg(not(feature = "native-random-observer"))]
+fn private_random_context_param() -> &'static str {
+    ", chelis_rng_state *__chelis_rng"
+}
+
+#[cfg(feature = "native-random-observer")]
+fn private_random_context_param() -> &'static str {
+    ", chelis_rng_state *__chelis_rng, __chelis_random_observer *__chelis_observer"
+}
 
 fn unsupported_verified_dag_action(node: NodeId, detail: &str) -> Unsupported {
     Unsupported::new(
@@ -604,7 +616,7 @@ impl CEmitter {
         // Only host-owned tensor helpers receive the invocation context.
         // Standalone/public kernels keep the four-argument tensor ABI.
         let random_param = if private_random_context {
-            ", chelis_rng_state *__chelis_rng"
+            private_random_context_param()
         } else {
             ""
         };
@@ -615,6 +627,10 @@ impl CEmitter {
 
         if private_random_context && execution.is_none() {
             e.line("(void)__chelis_rng;");
+        }
+        #[cfg(feature = "native-random-observer")]
+        if private_random_context && execution.is_none() {
+            e.line("(void)__chelis_observer;");
         }
 
         let input_labels = Self::input_labels(dag);
@@ -684,6 +700,13 @@ impl CEmitter {
             } else {
                 e.line("uint64_t __chelis_fixed_seed = 0ULL, __chelis_fixed_counter = 0ULL;");
             }
+            #[cfg(feature = "native-random-observer")]
+            if private_random_context {
+                e.line(
+                    "int __chelis_fixed_active = (__chelis_rng != NULL && __chelis_rng->active);",
+                );
+                e.line("if (__chelis_fixed_active) { __chelis_fixed_seed = __chelis_rng->seed; __chelis_fixed_counter = __chelis_rng->counter; }");
+            }
         }
         let ordinary_steps;
         let steps = if let Some(execution) = execution {
@@ -696,25 +719,91 @@ impl CEmitter {
                 .collect::<Vec<_>>();
             &ordinary_steps
         };
+        #[cfg(feature = "native-random-observer")]
+        let (forward_occurrences, draw_scopes) = execution.map_or_else(
+            || (BTreeMap::new(), BTreeMap::new()),
+            |execution| {
+                let mut occurrences = BTreeMap::new();
+                let mut scopes = BTreeMap::new();
+                for source in execution.source() {
+                    if let SourceKind::Forward { node, draw, scope } = source.kind {
+                        occurrences.insert(node.0, source.id.index());
+                        scopes.insert(draw.index(), scope.index());
+                    }
+                }
+                (occurrences, scopes)
+            },
+        );
         for step in steps {
             let node = match *step {
                 Step::Control {
+                    occurrence: _occurrence,
                     control: Control::Enter { scope, seed },
-                    ..
                 } => {
                     let scope = scope.index();
                     e.line(&format!("uint64_t __chelis_saved_seed_{scope} = __chelis_fixed_seed, __chelis_saved_counter_{scope} = __chelis_fixed_counter;"));
+                    #[cfg(feature = "native-random-observer")]
+                    if private_random_context {
+                        e.line(&format!(
+                            "int __chelis_saved_active_{scope} = __chelis_fixed_active;"
+                        ));
+                        for line in crate::random_observer::push_frame(
+                            "",
+                            &format!("__chelis_fixed_observer_frame_{scope}"),
+                            &format!(
+                                "(chelis_rng_state){{__chelis_saved_seed_{scope}, __chelis_saved_counter_{scope}, __chelis_saved_active_{scope}}}"
+                            ),
+                        ) {
+                            e.line(&line);
+                        }
+                    }
                     e.line(&format!(
                         "__chelis_fixed_seed = {seed}ULL; __chelis_fixed_counter = 0ULL;"
                     ));
+                    #[cfg(feature = "native-random-observer")]
+                    if private_random_context {
+                        e.line("__chelis_fixed_active = 1;");
+                        e.line(&crate::random_observer::record(
+                            "",
+                            "__CHELIS_RANDOM_OBSERVER_FIXED_ENTER",
+                            "__CHELIS_RANDOM_OBSERVER_FIXED_IDENTITY",
+                            &format!("\"{func_name_fmt}\""),
+                            Some(_occurrence.index()),
+                            None,
+                            Some(scope),
+                            "(chelis_rng_state){__chelis_fixed_seed, __chelis_fixed_counter, __chelis_fixed_active}",
+                            None,
+                        ));
+                    }
                     continue;
                 }
                 Step::Control {
+                    occurrence: _occurrence,
                     control: Control::Leave { scope },
-                    ..
                 } => {
                     let scope = scope.index();
                     e.line(&format!("__chelis_fixed_seed = __chelis_saved_seed_{scope}; __chelis_fixed_counter = __chelis_saved_counter_{scope};"));
+                    #[cfg(feature = "native-random-observer")]
+                    if private_random_context {
+                        e.line(&format!(
+                            "__chelis_fixed_active = __chelis_saved_active_{scope};"
+                        ));
+                        e.line(&crate::random_observer::pop_frame(
+                            "",
+                            &format!("__chelis_fixed_observer_frame_{scope}"),
+                        ));
+                        e.line(&crate::random_observer::record(
+                            "",
+                            "__CHELIS_RANDOM_OBSERVER_FIXED_LEAVE",
+                            "__CHELIS_RANDOM_OBSERVER_FIXED_IDENTITY",
+                            &format!("\"{func_name_fmt}\""),
+                            Some(_occurrence.index()),
+                            None,
+                            Some(scope),
+                            "(chelis_rng_state){__chelis_fixed_seed, __chelis_fixed_counter, __chelis_fixed_active}",
+                            None,
+                        ));
+                    }
                     continue;
                 }
                 Step::Node(id) => dag
@@ -728,6 +817,44 @@ impl CEmitter {
             {
                 let index = draw.index();
                 e.line(&format!("uint64_t __chelis_draw_seed_{index} = __chelis_fixed_seed, __chelis_draw_ordinal_{index} = __chelis_fixed_counter++;"));
+                #[cfg(feature = "native-random-observer")]
+                if private_random_context {
+                    e.line(&crate::random_observer::record(
+                        "",
+                        "__CHELIS_RANDOM_OBSERVER_FORWARD",
+                        "__CHELIS_RANDOM_OBSERVER_FIXED_IDENTITY",
+                        &format!("\"{func_name_fmt}\""),
+                        forward_occurrences.get(&node.id.0).copied(),
+                        Some(index),
+                        draw_scopes.get(&index).copied(),
+                        "(chelis_rng_state){__chelis_fixed_seed, __chelis_fixed_counter, __chelis_fixed_active}",
+                        Some((
+                            &format!("__chelis_draw_seed_{index}"),
+                            &format!("__chelis_draw_ordinal_{index}"),
+                        )),
+                    ));
+                }
+            }
+            #[cfg(feature = "native-random-observer")]
+            if private_random_context
+                && let Some(RandomSite::Replay { draw }) =
+                    execution.and_then(|view| view.site(node.id))
+            {
+                let index = draw.index();
+                e.line(&crate::random_observer::record(
+                    "",
+                    "__CHELIS_RANDOM_OBSERVER_REPLAY",
+                    "__CHELIS_RANDOM_OBSERVER_FIXED_IDENTITY",
+                    &format!("\"{func_name_fmt}\""),
+                    None,
+                    Some(index),
+                    draw_scopes.get(&index).copied(),
+                    "(chelis_rng_state){__chelis_fixed_seed, __chelis_fixed_counter, __chelis_fixed_active}",
+                    Some((
+                        &format!("__chelis_draw_seed_{index}"),
+                        &format!("__chelis_draw_ordinal_{index}"),
+                    )),
+                ));
             }
             // Skip FusedElem nodes inlined into a trailing reduction.
             if e.reduction_inlined.contains(&node.id.0) {

@@ -215,6 +215,7 @@ class LocalCommandListTests(unittest.TestCase):
                 "cargo clippy --workspace --all-targets --features "
                 "chelis-backend-c/sleef,"
                 "chelis-compiler-api/compilation-trace,"
+                "chelis-compiler-api/native-random-observer,"
                 "chelis-e2e/hip-local-gpu,"
                 "chelis-ir/lowering-trace,"
                 "chelis-prove/clarabel,"
@@ -241,9 +242,9 @@ class LocalCommandListTests(unittest.TestCase):
                 "--phase 2",
                 "cargo nextest run -p chelis-ir --features lowering-trace "
                 "--lib --test lowering_trace --test helper_lowering_trace",
-                "cargo nextest run -p chelis-compiler-api --features compilation-trace "
+                "cargo nextest run -p chelis-compiler-api --features compilation-trace,native-random-observer "
                 "--lib --test emission_observer --test execution_artifact_metadata "
-                "--test compilation_trace",
+                "--test compilation_trace --test native_random_observer --test fixed_control_c",
             ],
         )
 
