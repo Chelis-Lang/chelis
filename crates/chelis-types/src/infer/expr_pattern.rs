@@ -618,8 +618,37 @@ pub(super) fn pattern_bindings(
                 // `pat-record` / `pat-ctor` arms keys off the pattern's
                 // constructor name, not the scrutinee type, so the gate
                 // still fires under a fresh-var element type.
-                let elem_tys: Option<&[Type]> = match &resolved {
-                    Type::Tuple(ts) if ts.len() == kids.len() => Some(ts.as_slice()),
+                // chelis#1836: an UNRESOLVED scrutinee is tied to the
+                // pattern's own shape here. The pattern fixes the arity, so
+                // the scrutinee unifies with a tuple of one fresh element per
+                // sub-pattern and each binding IS the corresponding element.
+                // Handing every child a disconnected `vg.fresh_type()`
+                // instead left `a` in `match q with { | (a, k) => ... }`
+                // descending from `q` by name alone: it never bound when `q`
+                // did, so a shape-computed route over it published a result
+                // the later binding could not contradict, and a false
+                // declared shape checked at score 1.
+                //
+                // A failure to unify is reported rather than dropped: the
+                // scrutinee is a variable here, so the only way this can fail
+                // is an occurs-check violation, which is a real defect in the
+                // program rather than a shape this arm may ignore.
+                let tied: Option<Vec<Type>> = match &resolved {
+                    Type::Var(_) => {
+                        let elems: Vec<Type> = kids.iter().map(|_| vg.fresh_type()).collect();
+                        match unify(&resolved, &Type::Tuple(elems.clone()), subst) {
+                            Ok(()) => Some(elems),
+                            Err(error) => {
+                                errors.push(error.into());
+                                None
+                            }
+                        }
+                    }
+                    _ => None,
+                };
+                let elem_tys: Option<&[Type]> = match (&resolved, &tied) {
+                    (_, Some(elems)) => Some(elems.as_slice()),
+                    (Type::Tuple(ts), None) if ts.len() == kids.len() => Some(ts.as_slice()),
                     _ => None,
                 };
                 for (i, sub_pat) in kids.iter().enumerate() {

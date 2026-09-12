@@ -280,9 +280,21 @@ pub(super) fn finish_unified_app(
             })
             .unwrap_or(result_ty);
     } else if let Some(ref fname) = func_name {
+        // chelis#1836: ANY unresolved outer constructor suspends the route,
+        // not only one an annotation-free lambda parameter owns. The
+        // provenance predicate this replaced recognized a variable descending
+        // from such a parameter and nothing else, so three provenances took
+        // the route's eager `Type::Var` arm instead: a `pat-tuple` element on
+        // an unresolved scrutinee, a field of an unresolved record target, and
+        // a chelis#1577 gate's result. Each published the call's own result
+        // variable, which the declaration was then free to bind to any shape.
+        // This is the readiness predicate every other suspension already uses
+        // (`defer_or_check_shape_route`, the chelis#1577 dtype gates, and the
+        // replay pass itself), so a route now suspends on exactly the
+        // condition it resumes on, and provenance stops deciding anything.
         let owes_shape_replay = arg_tys
             .iter()
-            .any(|ty| product.shape_operand_awaits_lambda_binding(ty, subst));
+            .any(|ty| shape_operand_awaits_binding(ty, subst));
         let mut retained_shape_obligation = false;
         match fname.as_str() {
             "matmul" => {
