@@ -20,6 +20,31 @@ No tensor layout, runtime ABI, RNG, effect, AD, or public shell signature change
 is part of this design. Runtime preservation of a named extent claim is a
 separate obligation; a checker test cannot establish it.
 
+## #1889 bounded lowering progress
+
+The #1889 helper-result repair is deliberately below this proposed checker
+carrier. For an inline plain callable, lowering first preserves the helper's
+authored return claim, including its runtime obligation and source diagnostic.
+When checked and produced ranks agree, it then transports only a distinct,
+non-wildcard *named* checker-annotated call-result axis as a caller-side label.
+That label is not resolved against the callee's signature: the same spelling
+may name an unrelated callee parameter. Label transport creates no equality
+claim and imports neither checker-substituted literals nor optional extents;
+an existing produced extent is retained. Authored two-source guards remain
+on the unchanged preservation path. Parameter-witness construction and rank
+substitution timing are unchanged: checked label transport does not need to
+reclassify names copied through a rank splice as callee-authored binders.
+
+It adds no checker value-root/provenance carrier, global name equivalence,
+extent-based anchor recovery, wire field, cache version, worker protocol, or
+semantic/normative rule. The evaluator/context regression covers direct, alias,
+both elementwise operand orders, caller alpha-renaming, rank-spliced caller
+names, independent same-spelled callee axes and real
+authored mismatches. Native-C attempts stopped before emission at an undeclared
+axis (#1277) or generic unresolved-host diagnostic; those residuals remain
+unclassified and outside this repair. This is a
+lowering-only repair, not approval of the broader origin/template design below.
+
 ## The information-loss witness
 
 These are diagnostic source sketches, not new normative examples:
