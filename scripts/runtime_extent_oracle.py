@@ -913,14 +913,29 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             TERMINAL_CONTROL,
             "cli_slice_b.a_nameless_activation_that_refutes_its_own_claim_is_rejected_on_both_lanes",
         ),
-        # One row, not a pair: this verdict is the checker's and no lane varies
-        # it. A literal parameter extent makes the body's own result type
-        # computable, so the signature is refused before lowering runs at all,
-        # which is why the kernel-entry call sites cannot reach the rejection
-        # above.
+        # One row, not a pair, and no lane suffix: the verdict is the CHECKER's,
+        # no lane varies it, and the program never reaches a lane. That is the
+        # shape chelis#1836's `route.untied` rows use for the same reason.
+        #
+        # Its baseline EQUALS its exit state, which is the one honest reading
+        # here and has six precedents in phase A (`expand.negative.static`,
+        # `reshape.negative.runtime_eval_c`, `wire.legacy_v6.rejected` among
+        # them): this program was already refused, correctly and with the right
+        # diagnostic, on `0820ee28e`. It is C5's "Invalid-program controls
+        # remain `rejects_exactly`" rather than a defect that moved, and
+        # recording a start state it never occupied would claim a transition
+        # that did not happen.
+        #
+        # This row is a CONTROL, not a repair. B2c changed nothing about the
+        # program it names; the row exists because it is the PARTITION's other
+        # half, and it fails only if a later change lets lowering reach a case
+        # the checker owns. A literal parameter extent makes the body's own
+        # result type computable, so the checker refuses the signature before
+        # lowering runs at all, which is why the kernel-entry call sites cannot
+        # reach the rejection above.
         _row(
-            "claim.literal.kernel_entry.checker",
-            "nonconforming_rejection",
+            "claim.literal.kernel_entry",
+            TERMINAL_CONTROL,
             TERMINAL_CONTROL,
             "cli_slice_b.a_literal_parameter_extent_keeps_the_checkers_verdict_on_both_lanes",
         ),

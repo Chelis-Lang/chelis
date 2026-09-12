@@ -820,8 +820,12 @@ B2c's: the two `concat.literal_claim.inlined_root` rows, which B2c moved off
 (`pad.identity_axis.literal_claim.inlined_root`, `claim.literal.identity_root`,
 `pad.literal_claim.inlined_root`, `claim.named.resolved.inlined_root` and
 `claim.literal.nameless_activation`) and the single-row control
-`claim.literal.kernel_entry.checker`, which is one row rather than a pair
-because a checker verdict no lane varies is one row. One row,
+`claim.literal.kernel_entry`, which is one row rather than a pair because a
+checker verdict no lane varies is one row and the program never reaches a
+lane. That control is also the only phase-B row whose baseline EQUALS its exit
+state: it was already refused, correctly, before B2c, so it is this section's
+"Invalid-program controls remain `rejects_exactly`" rather than a defect that
+moved. One row,
 `shrink.elementwise_const.build`, is a registered `typed_unsupported(#1482)`,
 an owned receipt rather than an unexplained gap.
 
