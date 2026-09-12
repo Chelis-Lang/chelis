@@ -1,5 +1,48 @@
 # Bounded typed dropout rates
 
+## Generic evaluator dispatch follow-up (2026-09-12)
+
+The evaluator now routes checked concrete calls to precision-polymorphic,
+fixed-rank tensor helpers through its existing fixed-control execution planner.
+The original `keep[p: Float](x) = dropout(x, cast(0.5, p))` source evaluates
+at f16/bf16/f32/f64. The callee's unresolved generic declaration is not itself
+an executable plan: admission retains the checked call's actual types and
+source control expressions until existing lowering specializes that call.
+
+Isolated call classification attaches missing argument type annotations from
+the evaluator's existing checked frame types. It does not replace argument
+expressions with their evaluated values. Missing or invalid type evidence
+stays absent. Data arguments are evaluated once and staged by the existing
+typed-placeholder route. Admission and scalar-staging trials use the same
+annotated source call, so an effecting scalar data argument is not mistaken
+for a control and executed again. Source-static scalar controls retain their
+original expressions. Runtime-rate variables and computed scalar rates remain excluded,
+as do rank-polymorphic or already excluded control profiles. Local callable
+bindings still shadow top-level helpers. No builtin dispatcher, RNG key cache,
+ambient seed, public ABI, numeric carrier or runtime-rate C support is added.
+
+`dropout_fixed_stream_api` checks the exact original source, all four float
+dtypes, concrete loss wrappers differentiating generic helpers, complete
+forward/gradient/next-draw values, shape/dtype, input preservation and repeated
+prepared evaluation. Mixed f32/f64/f32 calls keep independent precision, and
+effecting tensor and scalar operands consume their draws exactly once. The
+scalar regression compares complete stored words for both bare and copied
+tensor actuals through direct API and repeated prepared evaluation. Paired runtime-rate and
+lexical-shadow controls retain their prior boundaries. `fixed_control_host_c`
+executes generic forward/AD/next-draw source at all four dtypes and balances
+the native ownership ledger. The existing CLI example now includes a generic
+following draw, with unchanged results.
+
+Owning command: `cargo nextest run -p chelis-compiler-api --test
+dropout_fixed_stream_api --test fixed_control_host_c --test fixed_control_c
+--locked --offline --build-jobs 1 --test-threads 1`, after the package's
+`cargo check --tests`. This is bounded evaluator/native parity for the named
+source profile, not exhaustive generic AD, arbitrary-rate native execution,
+E1/E2 completion or a derivative theorem over IEEE arithmetic. In particular,
+applying `grad` directly to an unresolved generic scalar-return loss still
+reaches a separate checker limitation; the tested loss wrappers have concrete
+scalar results. Earlier boundaries below are historical.
+
 ## Concrete call forwarding follow-up (2026-09-12)
 
 The follow-up repairs concrete tensor-returning helper calls whose source-static

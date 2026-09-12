@@ -147,16 +147,20 @@ fn unrelated_scalar_capture_preserves_public_acceptance_and_next_draw() {
 }
 
 #[test]
-fn generic_static_rate_cast_keeps_the_remaining_evaluator_gap_explicit() {
-    // chelis#1764 remains open: compiled C now specializes this rate, but the
-    // evaluator's generic host call still cannot dispatch the Dropout builtin.
-    // Keep the exact residual rejection visible; C success is not eval parity.
-    for dtype in ["f32", "f64"] {
+fn generic_static_rate_cast_reaches_the_evaluator_plan() {
+    // [05-OP-37]/[05-RNG-1], chelis#1764: specialize the source call while
+    // its checked actual dtype and fixed control expression are still paired.
+    for dtype in ["f16", "bf16", "f32", "f64"] {
+        let one = if matches!(dtype, "f32" | "f64") {
+            format!("1.0{dtype}")
+        } else {
+            format!("cast(1.0, {dtype})")
+        };
         let source = format!(
             "def keep[p: Float](x: tensor[4, p]) -> tensor[4, p] = dropout(x, cast(0.5, p))\n\
-             def main() = with seed(42i64) {{ keep(to_tensor([1.0{dtype}, 1.0{dtype}, 1.0{dtype}, 1.0{dtype}])) }}"
+             def main() = with seed(42i64) {{ keep(to_tensor([{one}, {one}, {one}, {one}])) }}"
         );
-        let error = eval_selected(
+        let result = eval_selected(
             EvalRequest {
                 source_kind: SourceKind::Surf,
                 source,
@@ -164,16 +168,203 @@ fn generic_static_rate_cast_keeps_the_remaining_evaluator_gap_explicit() {
             },
             &["main".into()],
         )
-        .unwrap_err();
-        assert_eq!(error.stage, "eval", "{error:?}");
-        assert!(error.transcript.is_empty());
-        assert!(
-            error.errors.iter().any(|diagnostic| diagnostic
-                .message
-                .contains("unknown runtime name `dropout`")),
-            "{error:?}"
+        .unwrap();
+        assert!(result.transcript.is_empty());
+        assert_eq!(tensor(&result, "main"), mask(0)[..4]);
+        assert_tensor_dtype_shape(&result, "main", dtype);
+    }
+}
+
+fn assert_tensor_dtype_shape(result: &EvalResult, name: &str, dtype: &str) {
+    let root = result
+        .roots
+        .iter()
+        .find(|root| root.name.as_deref() == Some(name))
+        .unwrap();
+    let ExecutionValue::Tensor { value } = &root.value else {
+        panic!("{root:?}")
+    };
+    assert_eq!(value.shape, [4]);
+    assert_eq!(value.data.prim().name(), dtype);
+}
+
+#[test]
+fn generic_static_rate_gradient_and_following_draw_share_the_handled_stream() {
+    // [05-OP-37]/[05-RNG-1]: source AD replays ordinal1 without consuming
+    // ordinal2. Expected complete masks come from the independent spec map.
+    for dtype in ["f16", "bf16", "f32", "f64"] {
+        let source = format!(
+            "def keep[p: Float](x: tensor[4, p]) -> tensor[4, p] = dropout(x, cast(0.5, p))\n\
+             def loss(x: tensor[4, {dtype}]) -> {dtype} = tensor_to_scalar(sum(keep(x), 0i32))\n\
+             def main() = with seed(42i64) {{\n\
+               x = to_tensor([cast(1.0, {dtype}), cast(1.0, {dtype}), cast(1.0, {dtype}), cast(1.0, {dtype})])\n\
+               first = keep(copy(x))\n backward = grad(loss)(copy(x))\n next = keep(copy(x))\n\
+               (first, backward, next, x)\n }}"
+        );
+        let prepared = prepare_eval(request(&source)).unwrap();
+        for result in [
+            eval_selected(request(&source), &["main".into()]),
+            prepared.eval_root(BTreeMap::new(), "main"),
+            prepared.eval_root(BTreeMap::new(), "main"),
+        ] {
+            let result = result.unwrap_or_else(|error| panic!("{dtype}: {error:?}"));
+            for (index, ordinal) in [0, 1, 2].into_iter().enumerate() {
+                let name = format!("main.{index}");
+                assert_eq!(tensor(&result, &name), mask(ordinal)[..4]);
+                assert_tensor_dtype_shape(&result, &name, dtype);
+            }
+            assert_eq!(tensor(&result, "main.3"), [1.0; 4]);
+            assert_tensor_dtype_shape(&result, "main.3", dtype);
+            assert!(result.transcript.is_empty());
+        }
+    }
+}
+
+#[test]
+fn generic_static_rate_calls_do_not_reuse_another_calls_precision() {
+    let source = "def keep[p: Float](x: tensor[4, p]) -> tensor[4, p] = dropout(x, cast(0.5, p))\n\
+        def main() = with seed(42i64) {\n\
+          x = to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32])\n\
+          y = to_tensor([1.0f64, 1.0f64, 1.0f64, 1.0f64])\n\
+          a = keep(copy(x))\n b = keep(y)\n c = keep(copy(x))\n\
+          next = dropout(x, 0.5f32)\n\
+          (a, b, c, next)\n }";
+    let result = eval_selected(request(source), &["main".into()]).unwrap();
+    for (index, ordinal, dtype) in [(0, 0, "f32"), (1, 1, "f64"), (2, 2, "f32"), (3, 3, "f32")] {
+        let name = format!("main.{index}");
+        assert_eq!(tensor(&result, &name), mask(ordinal)[..4]);
+        assert_tensor_dtype_shape(&result, &name, dtype);
+    }
+}
+
+#[test]
+fn a_local_callable_still_shadows_the_generic_dropout_definition() {
+    let source = "def keep[p: Float](x: tensor[4, p]) -> tensor[4, p] = dropout(x, cast(0.5, p))\n\
+        def main() = with seed(42i64) {\n\
+          keep = fn (v: tensor[4, f32]) -> v\n\
+          x = to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32])\n\
+          unchanged = keep(copy(x))\n next = dropout(x, 0.5f32)\n\
+          (unchanged, next)\n }";
+    let result = eval_selected(request(source), &["main".into()]).unwrap();
+    assert_eq!(tensor(&result, "main.0"), [1.0; 4]);
+    assert_eq!(tensor(&result, "main.1"), mask(0)[..4]);
+}
+
+#[test]
+fn generic_runtime_rate_is_not_specialized_from_its_evaluated_value() {
+    for dtype in ["f32", "f64"] {
+        for definition in [
+            "def keep[p: Float](x: tensor[4, p]) -> tensor[4, p] = dropout(x, cast(tensor_to_scalar(scalar_to_tensor(0.5f32)), p))".to_string(),
+            format!("def keep[p: Float](x: tensor[4, p], rate: p) -> tensor[4, p] = dropout(x, rate)\ndef run(x: tensor[4, {dtype}]) -> tensor[4, {dtype}] = keep(x, tensor_to_scalar(scalar_to_tensor(0.5{dtype})))"),
+            format!("def keep[p: Float](x: tensor[4, p], rate: p) -> tensor[4, p] = dropout(x, rate)\ndef run(x: tensor[4, {dtype}]) -> tensor[4, {dtype}] = {{ rate = tensor_to_scalar(scalar_to_tensor(0.5{dtype}))\n keep(x, rate) }}"),
+        ] {
+            let callee = if definition.contains("def run") { "run" } else { "keep" };
+            let source = format!("{definition}\ndef main() = with seed(42i64) {{ {callee}(to_tensor([1.0{dtype}, 1.0{dtype}, 1.0{dtype}, 1.0{dtype}])) }}");
+            let error = eval_selected(request(&source), &["main".into()]).unwrap_err();
+            // These sources passed checking and reach the existing excluded
+            // evaluator lane; a parse/type error cannot satisfy the control.
+            assert_eq!(error.stage, "eval", "{error:?}");
+            assert_eq!(error.errors.len(), 1, "{error:?}");
+            assert_eq!(error.errors[0].message, "unknown runtime name `dropout`");
+            assert!(error.transcript.is_empty());
+        }
+    }
+}
+
+#[test]
+fn generic_static_rate_effecting_argument_is_evaluated_once() {
+    for dtype in ["f32", "f64"] {
+        let source = format!(
+            "def keep[p: Float](x: tensor[4, p]) -> tensor[4, p] = dropout(x, cast(0.5, p))\n\
+            def main() = with seed(42i64) {{\n\
+              x = to_tensor([1.0{dtype}, 1.0{dtype}, 1.0{dtype}, 1.0{dtype}])\n\
+              first = keep(dropout(x, 0.0{dtype}))\n next = keep(x)\n\
+              (first, next)\n }}"
+        );
+        let result = eval_selected(request(&source), &["main".into()]).unwrap();
+        assert_eq!(tensor(&result, "main.0"), mask(1)[..4]);
+        assert_eq!(tensor(&result, "main.1"), mask(2)[..4]);
+    }
+}
+
+#[test]
+fn static_rate_example_includes_generic_evaluator_dispatch() {
+    let source = include_str!("../../../examples/dropout_static_rate.ch");
+    let result = eval_selected(request(source), &["result".into()]).unwrap();
+    for ordinal in 0..3 {
+        assert_eq!(
+            tensor(&result, &format!("result.{ordinal}")),
+            mask(ordinal)[..4]
         );
     }
+    assert_eq!(tensor(&result, "result.3"), [1.0; 4]);
+}
+
+fn generic_scalar_data_argument_source(copy_middle: bool) -> String {
+    let middle_input = if copy_middle { "copy(x)" } else { "x" };
+    format!(
+        "def keep[p: Float](x: tensor[4, p], extra: p) -> tensor[4, p] = mul(dropout(x, cast(0.5, p)), insert(scalar_to_tensor(extra), 0i32, 4i64))\n\
+         def main() = with seed(42i64) {{\n\
+           x = to_tensor([1.0f64, 1.0f64, 1.0f64, 1.0f64])\n\
+           y = to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32])\n\
+           first = keep(copy(y), 1.0f32)\n\
+           middle = keep({middle_input}, tensor_to_scalar(dropout(scalar_to_tensor(1.0f64), 0.0f64)))\n\
+           next = keep(y, 1.0f32)\n (first, middle, next)\n }}"
+    )
+}
+
+fn check_generic_scalar_data_argument_stream(copy_middle: bool) {
+    let source = generic_scalar_data_argument_source(copy_middle);
+    let prepared = prepare_eval(request(&source)).unwrap();
+    // Independently encoded [05-RNG-1] seed42 ordinals0/2/3. The rate-zero
+    // scalar actual consumes ordinal1 once, before the middle helper call.
+    // Full stored words make every coordinate, dtype and zero sign observable.
+    let expected = serde_json::json!([
+        {"shape":[4], "data":{"dtype":"f32", "bits":["00000000","40000000","00000000","00000000"]}},
+        {"shape":[4], "data":{"dtype":"f64", "bits":["4000000000000000","4000000000000000","0000000000000000","0000000000000000"]}},
+        {"shape":[4], "data":{"dtype":"f32", "bits":["00000000","40000000","00000000","00000000"]}}
+    ]);
+    // Run all three entry invocations before asserting, so a red regression
+    // records both immediate and reused-preparation behavior.
+    let actual: Vec<_> = [
+        eval_selected(request(&source), &["main".into()]),
+        prepared.eval_root(BTreeMap::new(), "main"),
+        prepared.eval_root(BTreeMap::new(), "main"),
+    ]
+    .into_iter()
+    .map(|result| {
+        let result = result.unwrap();
+        assert!(result.transcript.is_empty());
+        (0..3)
+            .map(|index| {
+                let name = format!("main.{index}");
+                let root = result
+                    .roots
+                    .iter()
+                    .find(|root| root.name.as_deref() == Some(&name))
+                    .unwrap();
+                let ExecutionValue::Tensor { value } = &root.value else {
+                    panic!("{root:?}")
+                };
+                serde_json::json!({"shape":value.shape, "data":value.data})
+            })
+            .collect::<Vec<_>>()
+    })
+    .collect();
+    assert_eq!(
+        serde_json::json!(actual),
+        serde_json::json!([expected, expected, expected])
+    );
+}
+
+#[test]
+fn generic_scalar_data_argument_consumes_its_draw_once() {
+    check_generic_scalar_data_argument_stream(false);
+}
+
+#[test]
+fn generic_scalar_data_argument_copy_control_keeps_the_same_stream() {
+    check_generic_scalar_data_argument_stream(true);
 }
 
 #[test]
