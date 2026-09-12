@@ -49,6 +49,336 @@ pub(super) const INT_SHIFT_OPS: &[&str] = &["shl", "shr"];
 /// Logical `and`/`or`/`not` remain the bool operations.
 pub(super) const BOOL_REJECTED_ARITH_OPS: &[&str] = &["add", "sub", "mul", "neg", "floor_div"];
 
+/// chelis#1805: the dtype family an operation's operand admission is stated
+/// over.
+///
+/// A family policy is one written over [`Prim::is_float`] or
+/// [`Prim::is_integer`]: the operation admits every active dtype of one family
+/// and no dtype outside it. That is exactly the shape a `[p: Float]` or
+/// `[p: Int]` binder bound satisfies, which is why an operand whose precision is
+/// still a variable can be decided by the variable's BOUND alone, with no dtype
+/// in hand. An operation with no such policy has nothing to decide until the
+/// dtype itself arrives, and must keep admitting the variable.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum OperandFamily {
+    /// `f32`, `f64`, `bf16`, `f16`.
+    Float,
+    /// The active signed integer dtypes.
+    Integer,
+}
+
+impl OperandFamily {
+    /// The [04-DTYPE-2] bound that admits this family and nothing wider.
+    pub(super) fn required_bound(self) -> TypeVarRestriction {
+        match self {
+            OperandFamily::Float => TypeVarRestriction::ActiveFloat,
+            OperandFamily::Integer => TypeVarRestriction::ActiveInt,
+        }
+    }
+
+    /// Whether a declared bound admits only dtypes this family admits.
+    ///
+    /// `Numeric` admits integers, so it does NOT satisfy a float-only policy:
+    /// a bound that admits one inadmissible dtype cannot make the operation
+    /// well typed at every instantiation the binder allows.
+    pub(super) fn satisfied_by(self, bound: TypeVarRestriction) -> bool {
+        bound == self.required_bound()
+    }
+
+    /// The binder spelling the repair hint offers.
+    fn binder_spelling(self) -> &'static str {
+        match self {
+            OperandFamily::Float => "`[p: Float]`",
+            OperandFamily::Integer => "`[p: Int]`",
+        }
+    }
+
+    /// What the operand must carry, for the second half of the hint.
+    fn operand_gloss(self) -> &'static str {
+        match self {
+            OperandFamily::Float => "an active float dtype",
+            OperandFamily::Integer => "an active signed integer dtype",
+        }
+    }
+}
+
+/// The family `fname` requires of a tensor operand's precision, or `None` when
+/// its admission is not a family question.
+///
+/// This is the one definition of "family policy" in the checker, and it lists
+/// exactly the callees whose policy lives in [`operand_dtype_rejection`] rather
+/// than in their signature.
+///
+/// Two float-only callees are deliberately absent. `dropout` and
+/// `test_assert_close_tensor` declare a `Float`-bounded precision variable in
+/// their own builtin signatures, so unification propagates that bound onto a
+/// caller's binder and rejects an integer instantiation where the caller
+/// supplies it; they have no policy for this function to enforce a second time.
+/// Bool-rejected arithmetic is absent for a different reason: its policy
+/// excludes a single prim rather than admitting one family, so any numeric bound
+/// repairs it and the hint below would name the wrong one. chelis#1937 owns it.
+pub(super) fn operand_family_policy(fname: &str) -> Option<OperandFamily> {
+    match fname {
+        "mean" | "softmax" | "div" => Some(OperandFamily::Float),
+        "exp" | "log" | "sin" | "tan" | "atan" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu"
+        | "gelu" | "recip" => Some(OperandFamily::Float),
+        "trunc_div" => Some(OperandFamily::Integer),
+        _ => None,
+    }
+}
+
+/// chelis#1805: how a dtype-policy diagnostic names the operand's precision.
+///
+/// One value per diagnostic, so each message below keeps one format string: the
+/// concrete spelling reproduces the bytes the message carried before a precision
+/// variable could reach it, and the bounded spelling names the binder and its
+/// declared family rather than a dtype the source never wrote.
+///
+/// There is no spelling for an UNBOUNDED variable, deliberately. [04-INF-1]
+/// keeps such a binder polymorphic, so its declaration is not rejected and no
+/// diagnostic names it; `validate.rs::check_app_for_poly_op_constraint` rejects
+/// the instantiation instead, naming the dtype the call site supplied.
+/// chelis#1942 records the alternative.
+pub(super) enum PrecisionSubject {
+    /// The dtype the operand carries.
+    Concrete(String),
+    /// A binder whose declared bound admits a dtype this operation does not.
+    Bounded(String, TypeVarRestriction),
+}
+
+impl PrecisionSubject {
+    /// The subject, where a concrete dtype spelling would appear.
+    pub(super) fn render(&self) -> String {
+        match self {
+            PrecisionSubject::Concrete(name) => format!("`{name}`"),
+            PrecisionSubject::Bounded(name, bound) => format!(
+                "`{name}` (a precision variable bounded by dtype family `{}`, {})",
+                bound.family_name(),
+                bound.membership_gloss()
+            ),
+        }
+    }
+
+    /// A dtype-kind qualifier only a concrete subject earns.
+    ///
+    /// A precision variable is inadmissible because of how it was DECLARED, so
+    /// calling it an integer or a float would name a dtype the source never
+    /// wrote. The concrete arms keep the word they always carried.
+    fn qualifier(&self, word: &str) -> String {
+        match self {
+            PrecisionSubject::Concrete(_) => format!("{word} "),
+            _ => String::new(),
+        }
+    }
+
+    /// The [04-DTYPE-2] repair, for a variable subject only. A concrete dtype's
+    /// repair is the operation's own cast hint, which follows this one.
+    pub(super) fn binder_hint(&self, required: OperandFamily) -> Option<String> {
+        match self {
+            PrecisionSubject::Concrete(_) => None,
+            PrecisionSubject::Bounded(_, bound) => Some(format!(
+                "spec/04-type-system.md §5.9 [04-DTYPE-2]: the binder's `{}` bound admits \
+                 dtypes this operation does not. Declare it {}, or give the operand {}.",
+                bound.family_name(),
+                required.binder_spelling(),
+                required.operand_gloss()
+            )),
+        }
+    }
+}
+
+/// chelis#1805: the family-policy rejection for `fname` over `subject`.
+///
+/// ONE implementation, reached from both paths: the concrete arms of
+/// [`operand_dtype_rejection`] hand it the operand's dtype, and the
+/// precision-variable path hands it the binder. A message therefore cannot
+/// drift between the diagnostic a settled `int32` gets and the one its `[p]`
+/// binder gets, which is the property the two paths exist to share.
+///
+/// Every callee [`operand_family_policy`] names has an arm here, and the
+/// declaration boundary in `checked.rs` renders a suspended entry through this
+/// same function, so a boundary diagnostic cannot say something the eager one
+/// does not.
+pub(super) fn family_policy_rejection(
+    fname: &str,
+    subject: &PrecisionSubject,
+    required: OperandFamily,
+) -> (CheckErrorKind, String, Vec<String>) {
+    let rendered = subject.render();
+    let (kind, message, mut hints) = match fname {
+        "mean" => (
+            CheckErrorKind::PrecisionMismatch,
+            format!(
+                "mean on operand precision {rendered} is not admitted per \
+                 the chelis#724 capability decision: mean is float-only \
+                 (f32, f64, bf16, f16). An integer mean has no authored \
+                 rounding, and a fractional result inside an integer tensor \
+                 violates spec/04-type-system.md section 9 [04-NUM-1]"
+            ),
+            vec![
+                "chelis#724: cast to a float precision first, e.g. \
+                 `mean(cast(x, f32), 0)`."
+                    .to_string(),
+            ],
+        ),
+        "softmax" => (
+            CheckErrorKind::PrecisionMismatch,
+            format!(
+                "softmax on operand precision {rendered} is not admitted per \
+                 spec/04-type-system.md §5.4: transcendental operations are \
+                 restricted to f32, f64, bf16, f16 (not integer)"
+            ),
+            vec![
+                "spec/04-type-system.md §5.4: cast to a float precision before \
+                 applying softmax."
+                    .to_string(),
+            ],
+        ),
+        "div" => (
+            CheckErrorKind::PrecisionMismatch,
+            format!(
+                "div on {}operand precision {rendered} is not admitted per \
+                 spec/05-risc-primitives.md §2.1: `div` is float-only (IEEE-754). \
+                 Use `floor_div` (round toward -inf) or `trunc_div` (round toward \
+                 zero) for integers.",
+                subject.qualifier("integer")
+            ),
+            vec![
+                "spec/05-risc-primitives.md §2.1: integer division uses `floor_div` \
+                 or `trunc_div`; `div` requires float operands."
+                    .to_string(),
+            ],
+        ),
+        "trunc_div" => (
+            CheckErrorKind::PrecisionMismatch,
+            format!(
+                "trunc_div on {}operand precision {rendered} is not admitted \
+                 per spec/05-risc-primitives.md §2.1: `trunc_div` is integer-only. \
+                 Use `div` for IEEE-754 float division, or `floor_div` for a floored \
+                 float quotient.",
+                subject.qualifier("float")
+            ),
+            vec![
+                "spec/05-risc-primitives.md §2.1: `trunc_div` requires integer \
+                 operands."
+                    .to_string(),
+            ],
+        ),
+        // The twelve transcendentals share one text, as they always have.
+        _ => (
+            CheckErrorKind::PrecisionMismatch,
+            format!(
+                "{fname} on operand precision {rendered} is not admitted per \
+                 spec/04-type-system.md §5.4: transcendental operations are \
+                 restricted to f32, f64, bf16, f16 (not integer)"
+            ),
+            vec![format!(
+                "spec/04-type-system.md §5.4: cast to a float precision before \
+                 applying `{fname}`."
+            )],
+        ),
+    };
+    if let Some(binder) = subject.binder_hint(required) {
+        hints.insert(0, binder);
+    }
+    (kind, message, hints)
+}
+
+/// chelis#1805: what a family-policy operation does with a tensor operand whose
+/// precision is still a variable.
+pub(super) enum PrecisionVerdict {
+    /// The operation states no family policy, or the variable's declared bound
+    /// admits only dtypes the policy admits.
+    Admit,
+    /// The bound admits a dtype this operation does not. Decided here with no
+    /// ledger entry: [04-DTYPE-2] puts the bound in the binder list, so the
+    /// declaration already carries everything the decision needs and no call
+    /// site can change it.
+    Reject(PrecisionSubject, OperandFamily),
+    /// The variable carries no bound, so nothing is known yet. The call is
+    /// suspended on the variable; the ledger decides it where it binds, and
+    /// rejects it at the declaration boundary when nothing binds it.
+    Suspend,
+}
+
+/// Decide, or suspend, a family policy against a precision variable.
+///
+/// `name` is the subject spelling: the declared binder per [04-FIT-9], or the
+/// inference identity per [04-FIT-10].
+pub(super) fn precision_variable_verdict(
+    fname: &str,
+    var: TypeVar,
+    name: &str,
+    subst: &Subst,
+) -> PrecisionVerdict {
+    let Some(required) = operand_family_policy(fname) else {
+        return PrecisionVerdict::Admit;
+    };
+    match subst.tvar_restriction(var) {
+        Some(bound) if required.satisfied_by(bound) => PrecisionVerdict::Admit,
+        Some(bound) => {
+            PrecisionVerdict::Reject(PrecisionSubject::Bounded(name.to_string(), bound), required)
+        }
+        None => PrecisionVerdict::Suspend,
+    }
+}
+
+/// The [04-FIT-9] spelling of a precision variable, or its [04-FIT-10]
+/// inference identity when the declaration named none.
+///
+/// [04-FIT-10] is the only admissible route to the second spelling: a producer
+/// holding a name and declining to thread it through is not covered by it,
+/// which is why the lookup is on the declaration's own map rather than on a
+/// nearby guess.
+pub(super) fn precision_subject_name(var: TypeVar, env: &Env) -> String {
+    match env.active_declared_type_names().get(&var) {
+        Some(declared) => declared.clone(),
+        None => format!("?{}", var.0),
+    }
+}
+
+/// chelis#1805: decide, reject, or suspend a family policy on a tensor operand
+/// whose precision is a variable.
+///
+/// `Some` means the call was REJECTED, the shape the validators' own `reject!`
+/// produces. All three validators route their precision arm through here, so
+/// one operand shape cannot be handled three ways.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn decide_precision_variable_operand(
+    list: &deep::List,
+    fname: &str,
+    var: TypeVar,
+    env: &Env,
+    arg_tys: &[Type],
+    subst: &Subst,
+    errors: &mut DiagnosticSink<'_>,
+    suspension: Option<&DtypeAdmissibilitySite<'_>>,
+    result_ty: &Type,
+    product: &mut InferenceProduct,
+) -> Option<Type> {
+    let name = precision_subject_name(var, env);
+    match precision_variable_verdict(fname, var, &name, subst) {
+        PrecisionVerdict::Admit => None,
+        PrecisionVerdict::Reject(subject, required) => {
+            let (kind, message, hints) = family_policy_rejection(fname, &subject, required);
+            reject(
+                errors,
+                CheckError::new(
+                    kind,
+                    with_macro_provenance(&deep::Expr::List(list.clone(), zero_span()), message),
+                    hints,
+                ),
+            )
+        }
+        PrecisionVerdict::Suspend => {
+            if let Some(site) = suspension {
+                site.register_awaiting_precision(arg_tys, result_ty, subst, product, var);
+            }
+            None
+        }
+    }
+}
+
 /// The post-desugar operand-dtype policy chokepoint from chelis#860.
 ///
 /// Direct applications, reduction data arguments, and bare pipe stages all
@@ -87,20 +417,12 @@ pub(super) fn operand_dtype_rejection(
             _ => None,
         };
         if let Some(prim_name) = non_float_elem {
-            return Some((
-                CheckErrorKind::PrecisionMismatch,
-                format!(
-                    "mean on operand precision `{prim_name}` is not admitted per \
-                     the chelis#724 capability decision: mean is float-only \
-                     (f32, f64, bf16, f16). An integer mean has no authored \
-                     rounding, and a fractional result inside an integer tensor \
-                     violates spec/04-type-system.md section 9 [04-NUM-1]"
-                ),
-                vec![
-                    "chelis#724: cast to a float precision first, e.g. \
-                     `mean(cast(x, f32), 0)`."
-                        .to_string(),
-                ],
+            // chelis#1805: the concrete path renders through the same function
+            // the precision-variable path does, so the two cannot drift.
+            return Some(family_policy_rejection(
+                fname,
+                &PrecisionSubject::Concrete(prim_name.to_string()),
+                OperandFamily::Float,
             ));
         }
         return None;
@@ -110,19 +432,10 @@ pub(super) fn operand_dtype_rejection(
         if let Type::Tensor(_, TensorPrec::Concrete(prim)) = resolved
             && !prim.is_float()
         {
-            return Some((
-                CheckErrorKind::PrecisionMismatch,
-                format!(
-                    "softmax on operand precision `{}` is not admitted per \
-                     spec/04-type-system.md §5.4: transcendental operations are \
-                     restricted to f32, f64, bf16, f16 (not integer)",
-                    prim.name()
-                ),
-                vec![
-                    "spec/04-type-system.md §5.4: cast to a float precision before \
-                     applying softmax."
-                        .to_string(),
-                ],
+            return Some(family_policy_rejection(
+                fname,
+                &PrecisionSubject::Concrete(prim.name().to_string()),
+                OperandFamily::Float,
             ));
         }
         return None;
@@ -217,52 +530,26 @@ pub(super) fn operand_dtype_rejection(
         && let Type::Tensor(_, TensorPrec::Concrete(prim)) = resolved
         && !prim.is_float()
     {
-        Some((
-            CheckErrorKind::PrecisionMismatch,
-            format!(
-                "{fname} on operand precision `{}` is not admitted per \
-                 spec/04-type-system.md §5.4: transcendental operations are \
-                 restricted to f32, f64, bf16, f16 (not integer)",
-                prim.name()
-            ),
-            vec![format!(
-                "spec/04-type-system.md §5.4: cast to a float precision before \
-                 applying `{fname}`."
-            )],
+        Some(family_policy_rejection(
+            fname,
+            &PrecisionSubject::Concrete(prim.name().to_string()),
+            OperandFamily::Float,
         ))
     } else if fname == "div"
         && let Some(prim_name) = resolved_int_prim
     {
-        Some((
-            CheckErrorKind::PrecisionMismatch,
-            format!(
-                "div on integer operand precision `{prim_name}` is not admitted per \
-                 spec/05-risc-primitives.md §2.1: `div` is float-only (IEEE-754). \
-                 Use `floor_div` (round toward -inf) or `trunc_div` (round toward \
-                 zero) for integers."
-            ),
-            vec![
-                "spec/05-risc-primitives.md §2.1: integer division uses `floor_div` \
-                 or `trunc_div`; `div` requires float operands."
-                    .to_string(),
-            ],
+        Some(family_policy_rejection(
+            fname,
+            &PrecisionSubject::Concrete(prim_name.to_string()),
+            OperandFamily::Float,
         ))
     } else if fname == "trunc_div"
         && let Some(prim_name) = resolved_float_prim
     {
-        Some((
-            CheckErrorKind::PrecisionMismatch,
-            format!(
-                "trunc_div on float operand precision `{prim_name}` is not admitted \
-                 per spec/05-risc-primitives.md §2.1: `trunc_div` is integer-only. \
-                 Use `div` for IEEE-754 float division, or `floor_div` for a floored \
-                 float quotient."
-            ),
-            vec![
-                "spec/05-risc-primitives.md §2.1: `trunc_div` requires integer \
-                 operands."
-                    .to_string(),
-            ],
+        Some(family_policy_rejection(
+            fname,
+            &PrecisionSubject::Concrete(prim_name.to_string()),
+            OperandFamily::Integer,
         ))
     } else {
         Some((
@@ -283,6 +570,7 @@ pub(super) fn validate_numeric_and_reduction_arguments(
     kids: &[deep::Expr],
     func_name: &Option<String>,
     arg_tys: &[Type],
+    env: &Env,
     subst: &Subst,
     errors: &mut DiagnosticSink<'_>,
     route_observed: &mut bool,
@@ -313,6 +601,19 @@ pub(super) fn validate_numeric_and_reduction_arguments(
                 Type::Var(_) => {
                     if let Some(site) = suspension {
                         site.register(arg_tys, result_ty, subst, product);
+                    }
+                }
+                // chelis#1805: a tensor at an unresolved PRECISION. The outer
+                // constructor is known, so the readiness predicate answers
+                // ready and the arm below admits it for good; a family policy
+                // still has a verdict, from the variable's bound or from the
+                // declaration boundary.
+                Type::Tensor(_, TensorPrec::Var(var)) => {
+                    if let Some(rejected) = decide_precision_variable_operand(
+                        list, fname, *var, env, arg_tys, subst, errors, suspension, result_ty,
+                        product,
+                    ) {
+                        return Some(rejected);
                     }
                 }
                 _ => {
@@ -359,6 +660,15 @@ pub(super) fn validate_numeric_and_reduction_arguments(
                 Type::Var(_) => {
                     if let Some(site) = suspension {
                         site.register(arg_tys, result_ty, subst, product);
+                    }
+                }
+                // chelis#1805, as in the loop above.
+                Type::Tensor(_, TensorPrec::Var(var)) => {
+                    if let Some(rejected) = decide_precision_variable_operand(
+                        list, fname, *var, env, arg_tys, subst, errors, suspension, result_ty,
+                        product,
+                    ) {
+                        return Some(rejected);
                     }
                 }
                 Type::Tensor(_, _) | Type::Error(_) => {}

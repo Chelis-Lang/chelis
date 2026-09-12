@@ -1238,58 +1238,323 @@ fn dtype_routes_caught_before_the_validator_keep_their_verdict() {
     }
 }
 
-/// The residual half of this class, tracked as chelis#1805: a tensor operand
-/// whose PRECISION resolves after the route runs.
+/// chelis#1805: a tensor operand whose PRECISION resolves after the route runs.
 ///
-/// The suspension above waits on `shape_operand_awaits_binding`, which answers
-/// true for `Type::Var` and `Type::Ref` alone. A `Type::Tensor` already carries
-/// its outer constructor, so the ledger treats it as ready the moment it is
-/// seen, whatever its precision variable still holds, and this ledger therefore
-/// cannot carry the case. Repairing it needs either a readiness predicate that
-/// also waits on a free `TensorPrec::Var`, which changes when every existing
-/// entry replays, or a second ledger: a design decision rather than an
-/// extension of the arm split, which is why chelis#1805 owns it.
+/// [04-INF-1] keeps a declared precision variable polymorphic, so
+/// `def g[p](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)` is a legitimate
+/// declaration and the defect is an INSTANTIATION at a dtype the family
+/// excludes. `validate.rs::check_app_for_poly_op_constraint` already enforced
+/// that, and already rejected `g(y)` for a `y` the enclosing definition
+/// declares. It gave up whenever the argument's precision was not readable off
+/// an annotation or that parameter scope, which is the hole: the three
+/// spellings below reached the backend and the compiled C lane printed `f = 2`
+/// for a true 2.333.
 ///
-/// chelis#1836 changed WHICH rule rejects the first program, and did not close
-/// chelis#1805. The widened readiness predicate suspends a reduction on every
-/// unresolved outer constructor, and `to_tensor([])` has one: a reduction's
-/// result cannot determine its operand's rank, so nothing binds the literal and
-/// the obligation reaches the declaration boundary. The verdict is therefore a
-/// SHAPE verdict; the dtype policy is still never consulted, so chelis#1805's
-/// hole is untouched and its own receipt needs a fixture whose operand
-/// constructor IS determined.
-///
-/// Evidentiary status, per assertion. The first is a REGRESSION TEST for
-/// chelis#1836's narrowing: measured on `6abca2406` as score 1 with
-/// `errors []` at check and `error: to_tensor requires a resolved checked
-/// element dtype [05-OP-57]` at eval, a check-clean program that does not run.
-/// The second is an ordinary DISPOSITION LOCK, measured rejecting on
-/// `6dbbbf2bc` and here.
+/// REGRESSION TEST, every rejecting row: each was measured ACCEPTED at score 1
+/// on `0820ee28e`, with the `f = 2` C output recorded on that head. DISPOSITION
+/// LOCK for the two accepting rows, measured accepted there and here: they are
+/// what keeps the repair from becoming a declaration-time bound.
 #[test]
-fn a_late_bound_tensor_precision_is_not_validated_yet() {
-    let errors = check("def f() -> tensor[int32] = mean(to_tensor([]), 0i32)\n")
-        .expect_err("an unresolved reduction operand must be rejected");
+fn a_late_bound_tensor_precision_is_rejected_at_the_instantiation() {
+    const HELPER: &str = "def g[p](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n";
+    const INT_TEXT: &str = "mean on operand precision `int32` is not admitted per the \
+                            chelis#724 capability decision";
+
+    for (label, program) in [
+        (
+            "a to_tensor literal argument",
+            format!("{HELPER}f = g(to_tensor([1i32, 2i32, 4i32]))\n"),
+        ),
+        (
+            "a nested call's declared result",
+            format!(
+                "{HELPER}def h() -> tensor[3, int32] = to_tensor([1i32, 2i32, 4i32])\n\
+                 f = g(h())\n"
+            ),
+        ),
+        (
+            "a top-level value binding",
+            format!("{HELPER}t = to_tensor([1i32, 2i32, 4i32])\nf = g(t)\n"),
+        ),
+    ] {
+        let Err(errors) = check(&program) else {
+            panic!("{label}: the int32 instantiation must be rejected");
+        };
+        assert!(
+            errors.iter().any(|e| e.message.contains(INT_TEXT)),
+            "{label}: the rejection must name the instantiated dtype:\n{}",
+            summary(&errors)
+        );
+    }
+
+    // The declaration on its own stays polymorphic, and so does an f32
+    // instantiation. Rejecting either is the over-rejection chelis#1805's
+    // design proposed and this repair declined; `separate_sig_sdpa_checks_clean`
+    // in `issue_773_arg_error_sibling_checking` is the program that settles it.
+    check(HELPER).expect("an unbounded precision binder is a legitimate declaration");
+    check(&format!(
+        "{HELPER}f = g(to_tensor([1.0f32, 2.0f32, 4.0f32]))\n"
+    ))
+    .expect("an f32 instantiation of the same helper is well typed");
+}
+
+/// chelis#1805: the operand's constructor is known, its precision binds one
+/// application later, and the decision is DEFERRED rather than taken at the
+/// `mean` node.
+///
+/// `id_dt` gives `mean` a `tensor[3, ?p]` whose precision the lambda's own
+/// application binds afterwards. Rejecting at the `mean` node would refuse the
+/// float call below, which is legal; admitting for good is chelis#1805. The
+/// ledger entry waits on the precision and the replay decides against the bound
+/// one, which is why the integer call gets the ordinary CONCRETE diagnostic.
+///
+/// This is the half no call-site pass can reach: the lambda has no name for
+/// `check_app_for_poly_op_constraint` to key on.
+///
+/// REGRESSION TEST for the integer half, measured ACCEPTED at score 1 on
+/// `0820ee28e`. DISPOSITION LOCK for the float half, measured accepted there and
+/// here: it is what proves the repair defers instead of rejecting eagerly.
+#[test]
+fn a_precision_that_binds_one_application_later_is_decided_on_binding() {
+    const HELPER: &str = "def id_dt[p](x: tensor[3, p]) -> tensor[3, p] = x\n";
+
+    let errors = check(&format!(
+        "{HELPER}def f() -> tensor[int32] = \
+         (fn (v) -> mean(id_dt(v), 0i32))(to_tensor([1i32, 2i32, 4i32]))\n"
+    ))
+    .expect_err("a precision that binds to int32 one application later must be rejected");
     assert!(
-        errors.iter().any(|e| e
-            .message
-            .starts_with("unresolved `mean` shape obligation at declaration boundary")),
-        "the rejection must be the boundary obligation, not the dtype policy \
-         (chelis#1805 is still open):\n{}",
+        errors.iter().any(|e| e.message.contains(
+            "mean on operand precision `int32` is not admitted per the chelis#724 \
+             capability decision"
+        )),
+        "the discharged rejection names the BOUND dtype, not the binder:\n{}",
         summary(&errors)
     );
 
-    // DISPOSITION LOCK, and the reason the assertion above is a hole rather
-    // than a policy: the same operand with its precision settled first is
-    // rejected. Measured REJECTED on `6dbbbf2bc`.
-    let errors = check("def f(x: tensor[3, int32]) -> tensor[int32] = mean(x, 0i32)\n")
-        .expect_err("a settled integer operand must be rejected");
-    assert!(
-        errors.iter().any(|e| e
-            .message
-            .contains("mean on operand precision `int32` is not admitted")),
-        "the resolved rejection must still name the dtype policy:\n{}",
+    check(&format!(
+        "{HELPER}def f() -> tensor[f32] = \
+         (fn (v) -> mean(id_dt(v), 0i32))(to_tensor([1.0f32, 2.0f32, 4.0f32]))\n"
+    ))
+    .expect("a precision that binds to f32 one application later must be accepted");
+}
+
+/// chelis#1805: a binder that DOES declare a dtype-family bound is decided by
+/// that family where the route runs, with no ledger entry and no call site.
+///
+/// [04-DTYPE-2] puts the bound in the binder list, so the route has everything
+/// it needs at the `mean` node: `Float` admits, and `Int` and `Numeric` each
+/// admit a dtype `mean` does not. The declaration alone is the witness, which is
+/// why this half cannot be left to the instantiation pass.
+///
+/// The last assertion is the DISJOINTNESS property: a bounded binder that is
+/// also badly instantiated is one defect and must be reported once.
+/// `collect_defsig_dtype_bounds` is what makes the two enforcement points
+/// disjoint, by handing every bounded variable to this one.
+///
+/// REGRESSION TEST for the two rejections, both measured ACCEPTED at score 1 on
+/// `0820ee28e` with no call site at all, and for the single-report property,
+/// measured as two diagnostics before `collect_defsig_dtype_bounds` existed.
+/// DISPOSITION LOCK for the `Float` row, measured accepted there and here.
+#[test]
+fn a_bounded_precision_binder_is_decided_by_its_family_at_once() {
+    check("def g[p: Float](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n")
+        .expect("a `Float`-bounded binder is admitted by a float-only route");
+
+    for (bound, gloss) in [
+        ("Int", "the active signed integer dtypes"),
+        ("Numeric", "the active numeric dtypes"),
+    ] {
+        let errors = check(&format!(
+            "def g[p: {bound}](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n"
+        ))
+        .expect_err("a bound admitting an inadmissible dtype must be rejected");
+        assert!(
+            errors.iter().any(|e| e.message.contains(&format!(
+                "mean on operand precision `p` (a precision variable bounded by dtype family \
+                 `{bound}`, {gloss}) is not admitted per the chelis#724 capability decision"
+            ))),
+            "the `{bound}` bound must be named in the rejection:\n{}",
+            summary(&errors)
+        );
+        assert!(
+            errors.iter().any(|e| e
+                .suggestions
+                .iter()
+                .any(|hint| hint
+                    .contains("spec/04-type-system.md \u{a7}5.9 [04-DTYPE-2]: the binder's"))),
+            "the rejection must carry the [04-DTYPE-2] repair hint:\n{}",
+            summary(&errors)
+        );
+    }
+
+    let errors = check(
+        "def g[p: Numeric](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n\
+         f = g(to_tensor([1i32, 2i32, 4i32]))\n",
+    )
+    .expect_err("a bounded binder badly instantiated must still be rejected");
+    assert_eq!(
+        errors
+            .iter()
+            .filter(|e| e.message.contains("mean on operand precision"))
+            .count(),
+        1,
+        "one defect must be reported once, by the in-def decision alone:\n{}",
         summary(&errors)
     );
+}
+
+/// chelis#1805 across the family-policy routes, and the shape it must NOT touch.
+///
+/// A family policy is one stated over `Prim::is_float()` or
+/// `Prim::is_integer()`: exactly the policies a `[p: Float]` or `[p: Int]` bound
+/// satisfies. `add` is not one (it admits every numeric dtype) and must keep
+/// accepting an unbounded binder at any instantiation, or the repair would
+/// reject the dtype-polymorphic helpers the standard library is written from.
+///
+/// The `integer`/`float` qualifier words in the `div` and `trunc_div` rows are
+/// asserted deliberately: the refactor that gave every family text one
+/// implementation had to keep them on a concrete dtype and drop them for a
+/// precision variable, and only a concrete row can prove the first half.
+///
+/// REGRESSION TEST for every rejecting row: each was measured ACCEPTED at score
+/// 1 on `0820ee28e`. DISPOSITION LOCK for the two accepting rows.
+#[test]
+fn every_family_policy_route_rejects_an_inadmissible_instantiation() {
+    for (body, elements, needle) in [
+        (
+            "sqrt(x)",
+            "1i32, 4i32, 9i32",
+            "sqrt on operand precision `int32` is not admitted per \
+             spec/04-type-system.md \u{a7}5.4",
+        ),
+        (
+            "div(x, x)",
+            "1i32, 4i32, 9i32",
+            "div on integer operand precision `int32` is not admitted per \
+             spec/05-risc-primitives.md \u{a7}2.1",
+        ),
+        (
+            "trunc_div(x, x)",
+            "1.0f32, 4.0f32, 9.0f32",
+            "trunc_div on float operand precision `f32` is not admitted \
+             per spec/05-risc-primitives.md \u{a7}2.1",
+        ),
+        (
+            "softmax(x, 0i32)",
+            "1i32, 2i32, 4i32",
+            "softmax on operand precision `int32` is not admitted per \
+             spec/04-type-system.md \u{a7}5.4",
+        ),
+    ] {
+        let program = format!(
+            "def g[p](x: tensor[3, p]) -> tensor[3, p] = {body}\n\
+             f = g(to_tensor([{elements}]))\n"
+        );
+        let Err(errors) = check(&program) else {
+            panic!("`{body}` must reject its inadmissible instantiation");
+        };
+        assert!(
+            errors.iter().any(|e| e.message.contains(needle)),
+            "`{body}` must reject with its own text:\n{}",
+            summary(&errors)
+        );
+    }
+
+    // NOT a family policy: `add` admits every numeric dtype, so an integer
+    // instantiation is well typed and must not be rejected.
+    check(
+        "def g[p](x: tensor[3, p]) -> tensor[3, p] = add(x, x)\n\
+         f = g(to_tensor([1i32, 2i32, 4i32]))\n",
+    )
+    .expect("an operation with no family policy admits an integer instantiation");
+    // A concrete float operand is untouched by all of this.
+    check("def f(x: tensor[3, f32]) -> tensor[f32] = mean(x, 0i32)\n")
+        .expect("a concrete float operand is still accepted");
+}
+
+/// chelis#1805, the arms it measured SAFE rather than repairing: a float-only
+/// callee whose own builtin signature declares a `Float`-bounded precision
+/// variable.
+///
+/// `dropout` and `test_assert_close_tensor` are the two. Unification propagates
+/// the signature's bound onto the caller's own binder, so the call site rejects
+/// every integer instantiation with the [04-DTYPE-2] family diagnostic. That is
+/// why `operand_family_policy` does not list them and why their census rows are
+/// `caught_downstream` rather than `deferred`: this test is the witness those
+/// rows name.
+///
+/// DISPOSITION LOCK, every assertion: all four were measured with these exact
+/// verdicts on `0820ee28e`, before the repair. Removing the downstream catch
+/// turns this test red.
+#[test]
+fn a_signature_bounded_callee_is_caught_at_the_call_site() {
+    const FAMILY: &str = "type variable bounded by dtype family `Float` (the active float dtypes) \
+         cannot be instantiated at `int32`";
+
+    check("def g[p](x: tensor[3, p], r: p) -> tensor[3, p] ! { Random } = dropout(x, r)\n")
+        .expect("the signature's own bound makes the declaration well typed");
+
+    let errors = check(
+        "def g[p](x: tensor[3, p], r: p) -> tensor[3, p] ! { Random } = dropout(x, r)\n\
+         def f() -> tensor[3, int32] ! { Random } = g(to_tensor([1i32, 2i32, 4i32]), 1i32)\n",
+    )
+    .expect_err("the integer instantiation must be rejected");
+    assert!(
+        errors.iter().any(|e| e.message.contains(FAMILY)),
+        "dropout's caller must be caught by the propagated bound:\n{}",
+        summary(&errors)
+    );
+
+    check(
+        "def g[p](a: &tensor[3, p], b: &tensor[3, p], tol: p) -> unit ! { Test } = \
+         test_assert_close_tensor(a, b, tol, \"l\")\n",
+    )
+    .expect("the signature's own bound makes the declaration well typed");
+
+    let errors = check(
+        "def g[p](a: &tensor[3, p], b: &tensor[3, p], tol: p) -> unit ! { Test } = \
+         test_assert_close_tensor(a, b, tol, \"l\")\n\
+         def test_call() -> unit ! { Test } = \
+         g(&to_tensor([1i32, 2i32, 4i32]), &to_tensor([1i32, 2i32, 4i32]), 1i32)\n",
+    )
+    .expect_err("the integer instantiation must be rejected");
+    assert!(
+        errors.iter().any(|e| e.message.contains(FAMILY)),
+        "test_assert_close_tensor's caller must be caught by the propagated bound:\n{}",
+        summary(&errors)
+    );
+}
+
+/// The two spellings chelis#1805's repair does NOT reach, DISPOSITION LOCKS so
+/// the residue is loud in the suite rather than silent.
+///
+/// Both were measured on `0820ee28e` accepting at score 1 and printing `f = 2`
+/// on the compiled C lane for a true 2.333, and both still do. Each needs a
+/// mechanism this pull request does not add, and each has its own issue.
+///
+/// A failure here means that issue was fixed.
+#[test]
+fn two_instantiation_spellings_remain_unreached() {
+    // chelis#1940: the helper reached as a function VALUE. It never appears in
+    // callee position, so the call-site pass has nothing to key on.
+    check(
+        "def g[p](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n\
+         def apply_it(fn_arg: (tensor[3, int32]) -> tensor[int32], y: tensor[3, int32]) \
+         -> tensor[int32] = fn_arg(y)\n\
+         f = apply_it(g, to_tensor([1i32, 2i32, 4i32]))\n",
+    )
+    .expect("chelis#1940: a helper passed as a value is not reached");
+
+    // chelis#1941: two polymorphic defs in a chain. The body walk looks for a
+    // restricted OP and does not follow a call into another def, so the
+    // substitution stops one level up.
+    check(
+        "def g[p](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n\
+         def mid[p](x: tensor[3, p]) -> tensor[p] = g(x)\n\
+         f = mid(to_tensor([1i32, 2i32, 4i32]))\n",
+    )
+    .expect("chelis#1941: a two-def polymorphic chain is not reached");
 }
 
 /// Round 1 P2-1: this pull request NARROWS acceptance on the empty tensor
