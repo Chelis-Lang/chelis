@@ -1557,11 +1557,13 @@ built-ins are:
 Static knowledge improves diagnostics and symbolic dimension propagation; it
 does not define a smaller executable language. A violation proven from
 literals is a type error. Literals that become visible only when a call is
-inlined prove it just the same: the program is rejected before any execution,
-on every lane, and no guard is emitted for it. A constraint that depends on
-runtime values is checked before allocation or element access and traps
-`Domain` or `Overflow` under the owning operation. Every execution mode
-observes the same values and traps.
+inlined prove it just the same when the lowered graph fixes the claimed axis
+to a different extent: the program is rejected before any execution, on every
+lane, and the equality guard §4.7.3 imposes on that axis is decided then rather
+than emitted. An axis the lowered graph does not fix keeps its run-time guard.
+A constraint that depends on runtime values is checked before allocation or
+element access and traps `Domain` or `Overflow` under the owning operation.
+Every execution mode observes the same values and traps.
 
 A runtime extent guard is the check that a declared, named, or otherwise
 claimed extent agrees with the value actually observed, or that a runtime

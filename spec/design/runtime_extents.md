@@ -822,8 +822,8 @@ B2c's: the two `concat.literal_claim.inlined_root` rows, which B2c moved off
 `claim.literal.nameless_activation`) and the single-row control
 `claim.literal.kernel_entry`, which is one row rather than a pair because a
 checker verdict no lane varies is one row and the program never reaches a
-lane. That control is also the only phase-B row whose baseline EQUALS its exit
-state: it was already refused, correctly, before B2c, so it is this section's
+lane. That control is also the only `rejects_exactly` phase-B row whose baseline
+EQUALS its exit state: it was already refused, correctly, before B2c, so it is this section's
 "Invalid-program controls remain `rejects_exactly`" rather than a defect that
 moved. One row,
 `shrink.elementwise_const.build`, is a registered `typed_unsupported(#1482)`,
