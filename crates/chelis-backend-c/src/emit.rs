@@ -294,6 +294,8 @@ impl CEmitter {
             options,
             false,
             execution,
+            #[cfg(feature = "native-random-observer")]
+            None,
         )
     }
 
@@ -322,6 +324,8 @@ impl CEmitter {
             options,
             true,
             None,
+            #[cfg(feature = "native-random-observer")]
+            None,
         )
     }
 
@@ -330,6 +334,7 @@ impl CEmitter {
         execution: EvaluationEmissionView<'_>,
         func_name: &str,
         options: crate::CodegenOptions,
+        #[cfg(feature = "native-random-observer")] source_location: (usize, usize),
     ) -> Result<String, Unsupported> {
         for node in dag.nodes() {
             if matches!(
@@ -361,9 +366,14 @@ impl CEmitter {
             options,
             true,
             Some(execution),
+            #[cfg(feature = "native-random-observer")]
+            Some(source_location),
         )
     }
 
+    // The opt-in eighth argument keeps the sealed helper owner alongside its
+    // execution view without changing ordinary entry signatures or options.
+    #[cfg_attr(feature = "native-random-observer", allow(clippy::too_many_arguments))]
     fn emit_preplanned(
         dag: VerifiedDagView<'_>,
         memory_plan: MemoryPlan,
@@ -372,6 +382,7 @@ impl CEmitter {
         options: crate::CodegenOptions,
         private_random_context: bool,
         execution: Option<EvaluationEmissionView<'_>>,
+        #[cfg(feature = "native-random-observer")] source_location: Option<(usize, usize)>,
     ) -> Result<String, Unsupported> {
         // chelis#1277 C4.1/C4.3: before anything reads a shape, every
         // realized output axis must have one checked extent source. This
@@ -624,6 +635,12 @@ impl CEmitter {
             "{linkage}void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out{random_param}) {{"
         ));
         e.indent = 1;
+
+        #[cfg(feature = "native-random-observer")]
+        if let Some((unit, helper)) = source_location {
+            e.line("int __chelis_helper_saved_admitted = __chelis_observer != NULL ? __chelis_observer->admitted : 0;");
+            e.line(&format!("if (__chelis_observer != NULL) {{ const __chelis_random_call_frame *call = __chelis_observer->calls; __chelis_observer->admitted = __chelis_helper_saved_admitted && call != NULL && call->certified && call->source != NULL && call->source->kind == 3 && call->source->unit.value == {unit}ULL && call->source->target.value == {helper}ULL; }}"));
+        }
 
         if private_random_context && execution.is_none() {
             e.line("(void)__chelis_rng;");
@@ -927,6 +944,10 @@ impl CEmitter {
             e.lines.push(line);
         }
 
+        #[cfg(feature = "native-random-observer")]
+        if source_location.is_some() {
+            e.line("if (__chelis_observer != NULL) __chelis_observer->admitted = __chelis_helper_saved_admitted;");
+        }
         e.indent = 0;
         e.line("}");
         // chelis#665: `declared_dim_names` used to be written and never read.

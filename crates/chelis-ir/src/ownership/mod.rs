@@ -442,6 +442,53 @@ pub struct VerifiedUnitId {
     key: u32,
 }
 
+/// Feature-only view of a source expression at its ownership-verified host
+/// site, before host ABI erasure. This is not a Surf elaboration certificate.
+#[cfg(feature = "lowering-trace")]
+#[derive(Clone, Copy)]
+pub struct VerifiedHostSourceSite<'a> {
+    site: VerifiedHostSiteView<'a>,
+    expression: &'a ConcreteHostExpr,
+    seed_parent: Option<HostSiteId>,
+}
+
+#[cfg(feature = "lowering-trace")]
+impl<'a> VerifiedHostSourceSite<'a> {
+    pub fn site(self) -> VerifiedHostSiteView<'a> {
+        self.site
+    }
+    pub fn expression(self) -> &'a ConcreteHostExpr {
+        self.expression
+    }
+    pub fn seed_parent(self) -> Option<HostSiteId> {
+        self.seed_parent
+    }
+    /// Observation-only words in distinct unit and host-site namespaces.
+    pub fn unit_word(self) -> usize {
+        self.site.record.unit
+    }
+    pub fn site_word(self) -> usize {
+        self.site.id().index()
+    }
+    pub fn seed_parent_word(self) -> Option<usize> {
+        self.seed_parent.map(HostSiteId::index)
+    }
+    pub fn direct_callee_word(self) -> Option<usize> {
+        self.direct_callee().map(|callee| callee.key as usize)
+    }
+    pub fn direct_callee(self) -> Option<VerifiedUnitId> {
+        let mut callees = self.site.actions().filter_map(|action| match action {
+            VerifiedHostAction::Operation(VerifiedHostOperation::Apply {
+                kind: VerifiedApplyKind::DirectCall { callee, .. },
+                ..
+            }) => Some(callee),
+            _ => None,
+        });
+        let callee = callees.next()?;
+        callees.next().is_none().then_some(callee)
+    }
+}
+
 /// Opaque stable identity for one operation within a verified unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VerifiedOperationId {
@@ -992,9 +1039,16 @@ pub struct VerifiedHostTensorHelperView<'a> {
     helper: &'a HostTensorHelper,
     dag: VerifiedDagView<'a>,
     execution: Option<crate::evaluation::EvaluationEmissionView<'a>>,
+    #[cfg(feature = "lowering-trace")]
+    source_location: (usize, usize),
 }
 
 impl<'a> VerifiedHostTensorHelperView<'a> {
+    /// Observation-only owning unit and helper-slot words; not function labels.
+    #[cfg(feature = "lowering-trace")]
+    pub fn source_location(self) -> (usize, usize) {
+        self.source_location
+    }
     pub fn name(self) -> &'a str {
         &self.helper.name
     }
@@ -1141,6 +1195,8 @@ impl<'a> VerifiedHostFunctionView<'a> {
         })?;
         Some(VerifiedHostTensorHelperView {
             helper: raw,
+            #[cfg(feature = "lowering-trace")]
+            source_location: (self.index + 1, helper),
             dag: VerifiedDagView {
                 dag: &raw.dag,
                 plan: &plan.plan,
@@ -1180,6 +1236,10 @@ pub struct VerifiedHostEmission<'a> {
 }
 
 impl<'a> VerifiedHostEmission<'a> {
+    #[cfg(feature = "lowering-trace")]
+    pub fn source_expressions(self) -> Vec<VerifiedHostSourceSite<'a>> {
+        verify::source_expressions(self)
+    }
     fn ownership_program(self) -> &'a ir::OwnershipProgram {
         // The emission cursor is built only from the host proof variant.
         // Its program reference is threaded explicitly below rather than
@@ -1214,6 +1274,8 @@ impl<'a> VerifiedHostEmission<'a> {
             .find(|candidate| candidate.location == NestedDagLocation::Global(helper))?;
         Some(VerifiedHostTensorHelperView {
             helper: raw,
+            #[cfg(feature = "lowering-trace")]
+            source_location: (0, helper),
             dag: VerifiedDagView {
                 dag: &raw.dag,
                 plan: &plan.plan,
