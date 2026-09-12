@@ -384,6 +384,12 @@ build" walkthrough:
 
 ## 10. Cross-references
 
+The [installed artifact callable gate](../../docs/investigations/installed_artifact_canary.md)
+checks staged Linux x86-64/macOS arm64 packages through the actual installer and
+shim before publication. Its bounded ABI observations do not replace compiler,
+numerical or downstream package acceptance. Candidate archive-root conversion is
+explicit and preserves member payloads; published containers remain unchanged.
+
 - [`reef_distribution.md`](reef_distribution.md) — reef package delivery (Items
   6-9 shipped; Item 11 is binary distribution, WS-A).
 - [`chelis_source_crate_sourcing.md`](chelis_source_crate_sourcing.md) — the

@@ -403,10 +403,56 @@ jobs:
             chelisup-darwin-arm64
             chelisup-darwin-arm64.sha256
 
+  installed-artifact-canary:
+    name: Installed C callable (${{ matrix.slug }})
+    needs: [build-linux-x86_64, build-linux-x86_64-glibc231, build-darwin-arm64]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            slug: linux-x86_64
+            installer_artifact: chelis-linux-x86_64-glibc2.31
+          - runner: macos-latest
+            slug: darwin-arm64
+            installer_artifact: chelis-darwin-arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout exact source and canary
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+      - name: Create uv-managed venv
+        run: uv venv --python 3.11
+      - name: Download staged toolchain
+        uses: actions/download-artifact@v7
+        with:
+          name: chelis-${{ matrix.slug }}
+          path: installed-canary-assets/toolchain
+      - name: Download staged installer
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ matrix.installer_artifact }}
+          path: installed-canary-assets/installer
+      - name: Install verified archive and run shipped callable
+        run: .venv/bin/python scripts/installed_artifact_canary.py --artifacts installed-canary-assets/toolchain --installer-assets installed-canary-assets/installer --source-sha "${{ github.sha }}" --evidence installed-canary-evidence
+      - name: Retain installed-artifact evidence, including failures
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: installed-callable-${{ matrix.slug }}
+          path: installed-canary-evidence
+          if-no-files-found: error
+
   publish-release:
     name: Publish GitHub Release
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [build-linux-x86_64, build-linux-x86_64-glibc231, build-darwin-arm64]
+    needs: [build-linux-x86_64, build-linux-x86_64-glibc231, build-darwin-arm64, installed-artifact-canary]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout tagged release notes
@@ -429,6 +475,7 @@ jobs:
       - name: Download staged artifacts
         uses: actions/download-artifact@v7
         with:
+          pattern: chelis-*
           path: release-assets
 
       - name: Publish GitHub Release
