@@ -12,8 +12,8 @@ stdlib and compiled-context payload versions are 15, 19 and 21 respectively.
 Source-free snapshots remain a faithful transport from a trusted checker
 producer; structural decoding does not prove an adversarial summary complete.
 
-Compiled-context named-query checking still enters the lowerer and can fail on
-the pre-existing callee-local axis-name loss tracked by
-[#1889](https://github.com/Chelis-Lang/chelis/issues/1889). This change does not
-claim that compiled-query limitation, all of #1875, or downstream School closure
-is resolved.
+Compiled-context named-query checking also enters the lowerer. Its separate
+bounded helper-result repair is tracked by
+[#1889](https://github.com/Chelis-Lang/chelis/issues/1889); checker snapshot
+transport alone does not establish native-C or worker/disk query compatibility.
+This change does not claim all of #1875 or downstream School closure.
