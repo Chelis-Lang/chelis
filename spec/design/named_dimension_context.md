@@ -61,7 +61,7 @@ This classification is ephemeral: both live and decoded contexts clear
 historical protection before a new check; instantiation copies labels, not
 protection, while active lexical captures retain their canonical binder IDs.
 
-All checker consumers derive an ephemeral `DimObservation` rather than
+The constraint-sensitive consumers described below derive an ephemeral `DimObservation` rather than
 interpreting a carrier `Var` as a language-level category. The interface keeps
 known constraint extents, semantic names, canonical unresolved IDs and current
 protection separate; it has no generic equality or conversion back to `Dim`.
