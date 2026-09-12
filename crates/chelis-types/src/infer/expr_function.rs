@@ -57,6 +57,7 @@ pub(super) fn infer_fn(
         }
     }
 
+    subst.protect_dimensions(declared_dvars.iter().copied());
     let body = if kids.len() > 1 {
         &kids[1]
     } else {
@@ -154,6 +155,9 @@ pub(super) fn infer_def_body_with_sig(
     // `def g[n, m](x: tensor[n, f32], y: tensor[m, f32]) ->
     // tensor[n, f32] = y`, so checking here (pre-sig-unify) would miss
     // it. Running it only at the caller also avoids double-reporting.
+    // Annotated parameters have their own fresh resolution IDs; protecting
+    // only the separate defsig instantiation would be too late for the body.
+    subst.protect_dimensions(param_types.iter().flat_map(crate::env::free_dvars));
     let body_expr = &kids[1];
     let body_ty = infer_expr_with_expected(
         body_expr,
@@ -389,7 +393,7 @@ pub(super) fn infer_let(
                 // The `Sourceless`/`Unknown` arm CLEARS any stale provenance so
                 // a re-bind to a sourceless RHS — `len = shape(x, 0); len = k`
                 // (BLOCKER B) — does not inherit the earlier shape-sourced entry.
-                match classify_expand_size(rhs_expr, &let_env, adt_reg) {
+                match classify_expand_size(rhs_expr, &let_env, adt_reg, subst) {
                     SizeClass::Static => {
                         if let Some(value) =
                             fold_static_int_expr(rhs_expr, |bound| let_env.static_size_value(bound))

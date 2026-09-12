@@ -614,7 +614,7 @@ mod tests {
 
     #[test]
     fn cache_format_version_tracks_canonical_collection_bytes_and_nominal_kinds() {
-        assert_eq!(LIBRARY_CACHE_FORMAT_VERSION, 14);
+        assert_eq!(LIBRARY_CACHE_FORMAT_VERSION, 15);
     }
 
     #[test]

@@ -1068,7 +1068,9 @@ impl InferenceProduct {
                 .owner_types
                 .get_mut(&key)
                 .expect("collected owner key remains present");
-            owner.ty = subst.apply(&owner.ty);
+            // All authored-body/result guards have finished. Annotation is
+            // the semantic name view; the reusable Env/Subst retains IDs.
+            owner.ty = subst.semantic_type(&owner.ty);
         }
     }
 

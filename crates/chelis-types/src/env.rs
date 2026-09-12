@@ -372,6 +372,13 @@ impl Env {
             .any(|(_, scheme)| type_carries_dim_name(&scheme.body, name))
     }
 
+    pub(crate) fn tensor_carries_dim_with_subst(&self, name: &str, subst: &Subst) -> bool {
+        self.bindings
+            .to_sorted()
+            .into_iter()
+            .any(|(_, scheme)| type_carries_dim_name(&subst.semantic_type(&scheme.body), name))
+    }
+
     /// Look up an imported or qualified name by its unique terminal segment.
     pub fn lookup_terminal_unique(&self, name: &str) -> Option<&Scheme> {
         let mut matches = self
@@ -673,6 +680,7 @@ impl Env {
             let fresh_dv = var_gen.fresh_dvar();
             dvar_mapping.push((dv, fresh_dv));
             subst.insert_dim(dv, Dim::Var(fresh_dv));
+            inference_subst.copy_dimension_label(dv, fresh_dv);
         }
         for &rv in &scheme.rvars {
             // Each rank var instantiates to a fresh sole-`Rank` shape so every
@@ -803,7 +811,11 @@ impl Env {
             tvar_restrictions,
             dvars: ty_dvars
                 .into_iter()
-                .filter(|v| subst.level_of_dvar(*v) > level && !pending_d.contains(v))
+                .filter(|v| {
+                    subst.level_of_dvar(*v) > level
+                        && !pending_d.contains(v)
+                        && matches!(subst.constraint_dim(&Dim::Var(*v)), Dim::Var(_))
+                })
                 .collect(),
             rvars: ty_rvars
                 .into_iter()
@@ -856,7 +868,11 @@ impl Env {
             tvar_restrictions,
             dvars: free_dvars(&ty)
                 .into_iter()
-                .filter(|v| !env_dvars.contains(v) && !pending_d.contains(v))
+                .filter(|v| {
+                    !env_dvars.contains(v)
+                        && !pending_d.contains(v)
+                        && matches!(subst.constraint_dim(&Dim::Var(*v)), Dim::Var(_))
+                })
                 .collect(),
             rvars: free_rvars(&ty)
                 .into_iter()

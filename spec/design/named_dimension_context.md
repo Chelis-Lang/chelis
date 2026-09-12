@@ -1,7 +1,9 @@
 # Named-dimension constraint transport
 
-Design under review for [#1875](https://github.com/Chelis-Lang/chelis/issues/1875).
-This document does not change language semantics or declare a compiler repair.
+Design for [#1875](https://github.com/Chelis-Lang/chelis/issues/1875).
+The bounded implementation slice below is selected for the repair experiment;
+the broader origin-aware options remain unselected. This document does not
+change language semantics or claim runtime preservation from checker tests.
 The implementation baseline inspected here is `01e91e766fe48020aff447392d1fb846bdebcdf0`.
 
 ## Objective and non-goals
@@ -20,7 +22,75 @@ No tensor layout, runtime ABI, RNG, effect, AD, or public shell signature change
 is part of this design. Runtime preservation of a named extent claim is a
 separate obligation; a checker test cannot establish it.
 
-## The information-loss witness
+## Selected bounded implementation slice
+
+Retain an authored input dimension's checker identity when it is compatible
+with a concrete axis name. Store the name separately in one mandatory private
+`Subst` table keyed by the existing allocated `DimVar`. Ordinary unprotected
+Var/Name unification remains unchanged. Mul's already-shared tensor type
+retains that identity in either operand order; its ordinary result equality
+can therefore no longer escape an authored-result rigidity check through Name.
+Both the declared signature and separately resolved annotated parameters must
+be protected before body inference. The existing §4.4.1 comparisons remain
+authoritative, not replaced by a new origin policy.
+
+Schemes keep their dimension IDs. Instantiation copies labels onto fresh IDs;
+aliases use the same generalization and instantiation path, while free captures
+keep their IDs. Labelled IDs remain available even after a concrete binding:
+the constraint view resolves that binding, the semantic view answers name
+queries, and neither generalizer quantifies a concretely bound ID. Final
+annotations project names only after authored-result guards. This is not a
+claim that two separately named values have equal extents.
+
+An outer unification journals only changed label entries, including copies
+made through scheme instantiation, and restores them in reverse on failure.
+The journal is checker-local, omitted from serialization, and reset on clone;
+unrelated unifications do not copy the accumulated label table. This preserves
+the narrow label/shared-type-refinement rollback boundary, not atomicity of
+all existing substitution mutations. Context cloning and transactional
+substitution composition remain separate whole-state operations.
+
+For example, `aligned[d](x: tensor[d,f32], gain: tensor[fixed,f32]) ->
+tensor[d,f32] = mul(x,gain)` establishes the output label `fixed`; the same
+signature with body `copy(x)` does not. The private table preserves that
+distinction through whole/live/decoded checks and function aliases, without
+all-value roots, ADT field paths, or a second checker. A caller still cannot
+give the mul result a false literal dimension while promising polymorphic d.
+
+### Serialization and Rust embedding migration
+
+Direct `TypeEnv` serde is now explicitly versioned (format 1), with a mandatory
+dimension-label table. Old raw snapshots must be regenerated; missing tables,
+unallocated label IDs, and structurally invalid labels reject. Dependency,
+stdlib and compiled-context payload versions advance to 15, 19 and 21.
+An embedding that previously serialized `TypeEnv` or its owning wrappers must
+rebuild those snapshots using the matching checker. Public Scheme inspection
+alone does not recreate a reusable binding's private label summary.
+
+The selected source-free boundary is a faithful snapshot from a trusted
+checker producer. Structural admission, hashes, build IDs, and proof IDs do
+not prove that a malicious producer included every required label. Existing
+owner-cache effect/linearity and lowering validation remains necessary.
+No public Dim/Type/Scheme variant, School API, source signature, or runtime
+tensor layout change is selected.
+
+The checker experiment does not repair the existing lowerer's loss of a
+callee-local named axis after call inlining. Both a generic named-gain caller
+and a concrete-only caller can pass name-query checking and then fail to lower
+an outer `sum(..., fixed)` on the inspected baseline. Public
+`check_in_context` enters lowering too, so compiled-context query compatibility
+is blocked by [#1889](https://github.com/Chelis-Lang/chelis/issues/1889);
+successful snapshot decode alone is not an
+end-to-end compatibility result. Keep those reproductions separate rather than
+weakening the checker positives or introducing an IR repair in this slice.
+
+## Unselected broader origin-aware investigation
+
+The following witness and alternatives concern a stronger proposed value-flow
+policy. They are not prerequisites for the bounded existing-spec repair above,
+and their desired shared-versus-independent answer is not normative law.
+
+### The information-loss witness
 
 These are diagnostic source sketches, not new normative examples:
 
@@ -66,7 +136,7 @@ deduction about the proposed model, not execution of an origin-aware checker.
 The intended positive is a source-compatibility discriminator, not settled law
 merely because the current compiler accepts it.
 
-Smallest alternative to design next: give each value parameter a private root
+One unselected alternative: give each value parameter a private root
 and each tensor axis a structural occurrence path. An ADT field projection is
 keyed by (value root, constructor owner, field path, axis), not axis spelling.
 Two `Affine` parameters get distinct roots; repeated projection, destructuring,
@@ -95,7 +165,7 @@ conservative return-only comparison rule with origin inference accidentally.
 Explicit generic `Affine[p]` is the already-demonstrated alternative, but changes
 the source API and requires separate approval. No such migration is made here.
 
-## Proposed representation boundary
+## Unselected broader representation boundary
 
 Prefer one checker-owned constraint representation used by inference and
 publication, not a second source checker or an encoded suffix in name strings.
@@ -103,7 +173,7 @@ Private witnesses may reuse `DimVar` storage only if ordinary quantification,
 semantic name queries, and authored-binder checks cannot confuse their roles.
 Maintain both the semantic axis name and its constraint representative.
 
-Publish a private relation template beside each callable binding: occurrence
+Under that broader option, publish a private relation template beside each callable binding: occurrence
 paths, equivalence classes, retained literal facts, and distinction between
 fresh invocation-local origins and captured origins. Instantiation must carry
 the template through function aliases and returned values, including functions
@@ -190,7 +260,7 @@ be measured before selecting that option. Trusted-snapshot transport instead
 relies on its stated trust boundary; structural checks or a digest must not be
 described as proving semantic completeness of an untrusted snapshot.
 
-## Mergeable implementation sequence
+## Unselected broader implementation sequence
 
 1. Settle the origin policy and carrier/consumer inventory with executable
    discrimination cases. Amend the owning normative text only where a new
@@ -216,7 +286,7 @@ while its operand gate is pending. Extend both algorithms and their parity
 comparison to the new relation product. The current CLI regression target is
 `chelis-cli::issue_1489_deferred_result_generalization`, not a types target.
 
-## Acceptance and falsifiers
+## Broader-option acceptance and falsifiers
 
 The authoritative repair oracle must cover the same source in whole-unit,
 live-context, direct round-trip, and rebuilt checked-context routes, comparing

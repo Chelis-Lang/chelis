@@ -578,7 +578,7 @@ pub(super) fn check_reduction_signature(
             && axis_exprs.iter().any(|axis| {
                 symbolic_dim_ref_name(axis).is_some_and(|axis_name| {
                     dims.iter()
-                        .any(|dim| matches!(dim, Dim::Name(name) if name == axis_name))
+                        .any(|dim| matches!(subst.semantic_dim(dim), Dim::Name(name) if name == axis_name))
                 })
             });
         if selects_concrete_named_axis {
@@ -634,7 +634,7 @@ pub(super) fn check_reduction_signature(
             let hits: Vec<usize> = dims
                 .iter()
                 .enumerate()
-                .filter(|(_, d)| matches!(d, Dim::Name(n) if n == axis_name))
+                .filter(|(_, d)| matches!(subst.semantic_dim(d), Dim::Name(n) if n == axis_name))
                 .map(|(i, _)| i)
                 .collect();
             match hits.as_slice() {
@@ -1108,7 +1108,10 @@ pub(super) fn check_expand_signature(
             // and `let`-bound sizes) defers the output dim slot to
             // the declared return-type / call-context via unification.
             match arg_exprs.get(2).and_then(symbolic_dim_ref_name) {
-                Some(name) if env.lookup(name).is_none() || env.tensor_carries_dim(name) => {
+                Some(name)
+                    if env.lookup(name).is_none()
+                        || env.tensor_carries_dim_with_subst(name, subst) =>
+                {
                     Dim::Name(name.to_string())
                 }
                 _ => Dim::Wildcard,
@@ -1241,7 +1244,7 @@ pub(super) fn check_named_expand_signature(
     // anchor location) ambiguous.
     if input_dims
         .iter()
-        .any(|d| matches!(d, Dim::Name(n) if n == new_name))
+        .any(|d| matches!(subst.semantic_dim(d), Dim::Name(n) if n == new_name))
     {
         return report(
             errors,
@@ -1317,7 +1320,7 @@ pub(super) fn check_named_expand_signature(
             let hits: Vec<usize> = input_dims
                 .iter()
                 .enumerate()
-                .filter(|(_, d)| matches!(d, Dim::Name(n) if n == anchor))
+                .filter(|(_, d)| matches!(subst.semantic_dim(d), Dim::Name(n) if n == anchor))
                 .map(|(i, _)| i)
                 .collect();
             match hits.as_slice() {

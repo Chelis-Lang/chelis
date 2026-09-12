@@ -343,7 +343,7 @@ pub(super) fn finish_unified_app(
                 // rejection (a check-clean program must build).
                 let size_class = kids
                     .get(3)
-                    .map(|arg| classify_expand_size(arg, env, adt_reg))
+                    .map(|arg| classify_expand_size(arg, env, adt_reg, subst))
                     .unwrap_or(SizeClass::Unknown);
                 if owes_shape_replay {
                     product.defer_shape_check(

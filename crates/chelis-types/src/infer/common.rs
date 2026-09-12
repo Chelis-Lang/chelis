@@ -2428,6 +2428,9 @@ pub(super) fn infer_top_level(
         install_exact_op35_dependency_contracts(&name, declared_ty.as_ref(), &mut body_env, vg);
 
         let body_diagnostic_checkpoint = errors.checkpoint();
+        if let Some(Type::Fn(params, _)) = &declared_ty {
+            subst.protect_dimensions(params.iter().flat_map(crate::env::free_dvars));
+        }
         // WS-A7: when the body is a bare-arg `(fn (params) body)` and the
         // declared signature gives concrete param types, seed the body's
         // params with the declared types BEFORE inferring the body. Without
@@ -2732,7 +2735,7 @@ pub(super) fn infer_top_level(
         // sourceless runtime scalar. Classified against the pre-binding scope.
         // The `Sourceless`/`Unknown` arm CLEARS any stale provenance so a
         // re-bind to a sourceless RHS does not inherit an earlier entry.
-        match classify_expand_size(&kids[1], env, adt_reg) {
+        match classify_expand_size(&kids[1], env, adt_reg, subst) {
             SizeClass::Static => {
                 if let Some(value) =
                     fold_static_int_expr(&kids[1], |bound| env.static_size_value(bound))
