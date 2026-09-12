@@ -3813,7 +3813,7 @@ enum DefBodyDecision {
 /// That is the chelis#1835 repair. It replaces a thread-local flag that this
 /// entry point, added by chelis#1531, never armed.
 ///
-/// ```compile_fail,E0308
+/// ```compile_fail
 /// # use chelis_types::CheckedProgram;
 /// fn bypass(program: &CheckedProgram) {
 ///     // No session: `&CheckedProgram` is not `&HostLoweringSession`, and
