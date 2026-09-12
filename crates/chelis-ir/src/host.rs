@@ -2788,9 +2788,28 @@ fn lower_host_program_with_execution(
                 params.iter().all(ty_is_scalar_or_callable_scalar)
                     && ty_is_scalar_or_callable_scalar(&ret)
             });
+        // #1872: a source-fixed tensor entry needs its sealed execution
+        // helper even when no sibling happens to select the host lane.
+        // Classify the original checked body with its declared input scope;
+        // the raw-DAG effect gate remains authoritative for ordinary lowering.
+        // FixedControl can inherit Random. Only an inferred closed body may
+        // introduce this standalone wrapper, whose public ABI has no RNG frame.
+        let has_fixed_execution = collect_execution
+            && is_fn_body
+            && !has_callable_params
+            && cached_def_effect_rows(program)
+                .get(name)
+                .is_some_and(|row| !row.contains(&chelis_types::types::Effect::Random))
+            && named_tensor_entry_lowering_inputs(program, name).is_some_and(
+                |(body, scope, _, _)| {
+                    cached_subexpr_lowering_context(program).c_execution_profile(&body, &scope)
+                        == crate::evaluation::EvaluationProfile::FixedControl
+                },
+            );
         let needs_host_wrapper = is_fn_body
             && (has_non_dag_tensor
                 || scalar_only_callable_signature
+                || has_fixed_execution
                 || (!has_callable_params && (has_any_host_lane_def || lowered_fn_def_count > 1)));
         // Issue #378: a non-`fn` value binding (a `(def name (lit ...))`)
         // that a host-lane function captures must reach `host.globals` so

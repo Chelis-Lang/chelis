@@ -485,13 +485,18 @@ native compiler** — `chelis build` emits source + flags; the user runs `gcc`/`
 | `BlasMatmul` | ✓ | ✓ (rocBLAS; bf16/f16 via GemmEx) | ✓ (tiled MSL) |
 | `ReduceWindow` / `ReduceWindowGrad` | ✓ | ✗ rejected | ✗ rejected |
 | `Pad`, `Shrink` | ✓ | ✗ rejected | ✗ rejected |
-| `dropout` | ✗ (eval-only) | ✗ | ✗ |
+| `dropout` | sealed fixed-control plan only; raw DAG rejects | ✗ | ✗ |
 | `Gather`/`ScatterAdd`/`Scatter` | ✓ (all precisions) | ✓ **f32 payloads only**, int32/int64 indices, indices must come from `load` (not computed) | ✗ deferred |
 | `f64` | ✓ | ✓ | ✗ **hard-rejected** (Apple Silicon lacks FP64 ALUs) |
 
 Rejections are clean `unsupported_feature` diagnostics at compile time, not silent
 fallbacks (`reject_unsupported_hip_ops` / `reject_unsupported_metal_ops`). Reduce-window
 build also rejects runtime-symbolic windowed axes and bf16/f16 (cast to f32 first).
+
+Source-fixed C dropout entries retain their sealed plan in bare and host-containing
+programs, through Surf and Deep. Adding an unrelated scalar definition does not
+change admission. Runtime-rate entries remain unsupported; the raw-DAG rejection
+does not describe the sealed fixed-control C lane (see #1872).
 
 ---
 

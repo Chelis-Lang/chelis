@@ -3,6 +3,14 @@
 version = 1
 
 [[target]]
+package = "chelis-cli"
+name = "phase3_gate_contract"
+
+[[target]]
+package = "chelis-cli"
+name = "issue_687_rejected_cells_corpus"
+
+[[target]]
 package = "chelis-compiler-api"
 name = "invocation_local_random"
 
