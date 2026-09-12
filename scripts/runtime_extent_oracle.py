@@ -1118,6 +1118,26 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             "cli_slice_b.a_result_only_binder_claim_sizes_a_root_on_eval",
         ),
+        # The same root through a THREE-member alias class, which is
+        # chelis#1925's round-2 P1. `apply3` carries two polymorphic function
+        # arguments beside the data one, so where the runtime-extent argument
+        # sits decides which member roots the class when the meeting is
+        # recorded. Every ordering was dropped in silence on `main`; the
+        # receipt asserts the three render IDENTICALLY, because an
+        # order-dependent absorption is the defect section 4.7.3 forbids and
+        # three separate rows could all stay green through it.
+        _row(
+            "root.dim_variable.argument_order.c",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_three_member_alias_class_sizes_a_root_in_every_argument_order_on_c",
+        ),
+        _row(
+            "root.dim_variable.argument_order.eval",
+            "silent_unguarded",
+            EXECUTES,
+            "cli_slice_b.a_three_member_alias_class_sizes_a_root_in_every_argument_order_on_eval",
+        ),
     )
     return tuple(sorted(rows, key=lambda row: row.id))
 

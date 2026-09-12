@@ -616,3 +616,169 @@ fn a_parameter_bound_binder_still_has_no_value_at_a_root() {
         "the unchanged diagnostic: {stderr}"
     );
 }
+
+/// The three-member alias class, chelis#1925's round-2 P1. `apply3` carries
+/// two polymorphic function arguments beside the data one, so all three of its
+/// instantiation's variables land in one class and the runtime-extent
+/// argument's POSITION decides which member roots the class when the meeting
+/// is recorded.
+///
+/// Regression test for the middle ordering, disposition lock for the other
+/// two. On `0820ee28e` the middle ordering read `() -> tensor[d0, f32]` with
+/// empty eval stdout and no `int main(`, while first and last read
+/// `tensor[*, f32]` and executed. The assertion is written as an equality
+/// ACROSS the orderings rather than three separate readings, because the
+/// defect is the disagreement: `spec/04-type-system.md` section 4.7.3 forbids
+/// a verdict that turns on the spelling, and an order-dependent absorption
+/// could otherwise return with every individual row still green. The
+/// executable halves are the `root.dim_variable.argument_order` corpus pair.
+#[test]
+fn a_three_member_alias_class_absorbs_in_every_argument_order() {
+    let orderings = [
+        (
+            "first",
+            "def apply3(v: tensor[p, f32], f: (tensor[p, f32]) -> tensor[p, f32], q: (tensor[p, f32]) -> tensor[p, f32]) -> tensor[p, f32] = q(f(v))\n\
+             def main() = apply3(g(to_tensor([1.0f32, 2.0f32, 3.0f32])), h, h2)\n",
+        ),
+        (
+            "middle",
+            "def apply3(f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32], q: (tensor[p, f32]) -> tensor[p, f32]) -> tensor[p, f32] = q(f(v))\n\
+             def main() = apply3(h, g(to_tensor([1.0f32, 2.0f32, 3.0f32])), h2)\n",
+        ),
+        (
+            "last",
+            "def apply3(f: (tensor[p, f32]) -> tensor[p, f32], q: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = q(f(v))\n\
+             def main() = apply3(h, h2, g(to_tensor([1.0f32, 2.0f32, 3.0f32])))\n",
+        ),
+    ];
+    let mut published = Vec::new();
+    for (name, body) in orderings {
+        let signatures = signatures(&format!("{POLY_HELPERS}{THIRD_HELPER}{body}"));
+        published.push((
+            name,
+            signatures
+                .get("main")
+                .cloned()
+                .unwrap_or_else(|| format!("{signatures:?}")),
+        ));
+    }
+    assert_eq!(published[0].1, "() -> tensor[*, f32]", "first");
+    assert_eq!(
+        published[1].1, published[0].1,
+        "the middle ordering must read exactly as the first: {published:?}"
+    );
+    assert_eq!(
+        published[2].1, published[0].1,
+        "and so must the last: {published:?}"
+    );
+}
+
+/// A second polymorphic helper, so an application can hold two function
+/// arguments and put a third member in one alias class.
+const THIRD_HELPER: &str = "def h2(z: tensor[k, f32]) -> tensor[k, f32] = add(z, z)\n";
+
+/// Negative parity for the row above at the same class size: a binder a
+/// PARAMETER binds still pins a four-member class, so the absorption reaching
+/// further did not reach past the claim.
+///
+/// Disposition lock, measured on `0820ee28e` and here.
+#[test]
+fn a_four_member_binder_class_is_still_not_absorbed() {
+    let signatures = signatures(&format!(
+        "{POLY_HELPERS}{THIRD_HELPER}\
+         def apply3(f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32], q: (tensor[p, f32]) -> tensor[p, f32]) -> tensor[p, f32] = q(f(v))\n\
+         def outer(s: tensor[seq, f32]) -> tensor[seq, f32] = apply3(h, g(s), h2)\n"
+    ));
+    assert_eq!(
+        signatures.get("outer").map(String::as_str),
+        Some("(tensor[seq, f32]) -> tensor[seq, f32]"),
+        "{signatures:?}"
+    );
+}
+
+/// The other half of the same exclusion: a literal another argument of the
+/// same application supplies is a claim on the runtime extent, and it wins
+/// over the absorption even when the class has four members.
+///
+/// Disposition lock, measured on `0820ee28e` and here: `tensor[2, f32]`,
+/// which is the literal's extent and not the runtime one.
+#[test]
+fn a_literal_claim_still_wins_in_a_four_member_class() {
+    let signatures = signatures(&format!(
+        "{POLY_HELPERS}{THIRD_HELPER}\
+         def apply4(f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32], w: tensor[p, f32], q: (tensor[p, f32]) -> tensor[p, f32]) -> tensor[p, f32] = q(f(add(v, w)))\n\
+         def main() = apply4(h, g(to_tensor([1.0f32, 2.0f32, 3.0f32])), to_tensor([1.0f32, 2.0f32]), h2)\n"
+    ));
+    assert_eq!(
+        signatures.get("main").map(String::as_str),
+        Some("() -> tensor[2, f32]"),
+        "{signatures:?}"
+    );
+}
+
+/// The result-only binder at three members, which regressed to its pre-fold
+/// reading when the two-end query missed the middle member.
+///
+/// Regression test against `0820ee28e`, where this read
+/// `outer :: (tensor[3, f32]) -> tensor[seq, f32]` and its root exited 1 on
+/// eval with `missing symbolic dimension binding \`seq\`` while the C lane
+/// emitted an entry point: the same lane divergence the two-member form
+/// repairs, one alias member deeper.
+#[test]
+fn a_three_member_result_only_binder_is_absorbed_on_both_lanes() {
+    let source = format!(
+        "{POLY_HELPERS}{THIRD_HELPER}\
+         def apply3(f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32], q: (tensor[p, f32]) -> tensor[p, f32]) -> tensor[p, f32] = q(f(v))\n\
+         def outer(t: tensor[3, f32]) -> tensor[seq, f32] = apply3(h, g(t), h2)\n\
+         def main() = outer(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n"
+    );
+    let published = signatures(&source);
+    assert_eq!(
+        published.get("outer").map(String::as_str),
+        Some("(tensor[3, f32]) -> tensor[*, f32]"),
+        "{published:?}"
+    );
+
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("three_member_result_only.ch");
+    let report = check(&source, &path);
+    assert_eq!(report["score"].as_f64(), Some(1.0), "{report}");
+
+    let evaluated = eval_file(&path);
+    let stderr = String::from_utf8_lossy(&evaluated.stderr).to_string();
+    assert!(evaluated.status.success(), "{stderr}");
+    assert!(
+        !stderr.contains("missing symbolic dimension binding"),
+        "a binder no parameter binds denotes the extent it met: {stderr}"
+    );
+    let rendering = String::from_utf8_lossy(&evaluated.stdout)
+        .trim_end()
+        .to_string();
+    assert_eq!(rendering, "main = tensor(shape=[2], data=[8.0, 12.0])");
+
+    let out_dir = dir.path().join("three-member-result-only-out");
+    let build = build_c(&path, &out_dir);
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let emitted_path = out_dir.join("three_member_result_only.c");
+    let emitted = fs::read_to_string(&emitted_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", emitted_path.display()));
+    assert!(
+        emitted.contains("int main("),
+        "a realizable root owes a C entry point:\n{emitted}"
+    );
+    let compiled = compile_and_run_c(&out_dir, "three_member_result_only");
+    assert!(
+        compiled.status.success(),
+        "the compiled binary must run: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&compiled.stdout).trim_end(),
+        rendering,
+        "C renders the root exactly as eval does"
+    );
+}

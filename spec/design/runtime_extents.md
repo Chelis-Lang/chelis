@@ -83,7 +83,11 @@ independent declaration, value and failure assertions. Remaining failure boundar
   that no argument of that application binds to a literal or named dimension,
   denote that extent. What denotes the extent is the variable's ALIAS CLASS, so
   a polymorphic def passed as an argument, which mints the variable that
-  becomes the class's root, is covered. A PARAMETER-bound binder keeps its
+  becomes the class's root, is covered, and so is a class of three or more
+  members whose meeting was recorded on a member a later binding re-rooted
+  over: the wildcard meeting and the authored-name pin are properties of the
+  CLASS, maintained on its root and merged at every union, so argument order
+  cannot change the verdict. A PARAMETER-bound binder keeps its
   name. A RESULT-ONLY binder is absorbed to the runtime extent it met, and that
   case was LANE DIVERGENT on `0820ee28e`: `def outer(t: tensor[3, f32]) ->
   tensor[seq, f32] = apply1(h, g(t))` with a root built, linked and printed

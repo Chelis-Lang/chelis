@@ -153,25 +153,46 @@ pub struct Subst {
     dimension_labels: Mutex<UnordMap<DimVar, String>>,
     #[serde(skip)]
     protected_dimensions: UnordSet<DimVar>,
-    /// chelis#1801: every dimension variable that has met a runtime extent
-    /// `*` in some unification, whether or not anything later bound it.
+    /// chelis#1801: the alias CLASSES that have met a runtime extent `*`
+    /// without being bound to it, keyed by the class root.
     ///
     /// `unify_dim`'s wildcard arm deliberately leaves such a variable free
     /// (the #143 invariant documented on that function), so a later concrete
     /// argument in the same signature can still constrain it. That leaves no
     /// record of the meeting at all, and `spec/04-type-system.md` section 3.2
     /// needs one: a variable an application's instantiation minted, that met
-    /// `*` and that no argument bound, denotes that runtime extent. The set
-    /// is the evidence `infer_app` reads to decide which of a call's fresh
-    /// variables to bind to `Dim::Wildcard` once the whole call has unified.
+    /// `*` and that no argument bound, denotes that runtime extent.
     ///
-    /// Membership is monotone and never cleared: dimension variables are
-    /// minted fresh and never reused, so an entry cannot become stale, and
-    /// the absorbing site consults only the variables ONE call's
-    /// instantiation just minted. Not serialized: transient per-pass
-    /// bookkeeping, like the deferred ledgers below.
+    /// Why a property of the CLASS rather than of one variable. Unification
+    /// identifies variables, and which member roots a class changes while the
+    /// call unifies: `unify_dim` resolves both operands through
+    /// `constraint_dim` before it matches, so the meeting is recorded on
+    /// whatever rooted the class at that moment, and a later `bind_dvar` in
+    /// the same call can re-root the class over it. Asking one member, or
+    /// two, then misses a meeting recorded on a third. chelis#1925's rounds 1
+    /// and 2 were both exactly that miss, one alias member apart. The flag
+    /// therefore lives on the root and is OR-merged onto the new root at
+    /// every merge ([`Subst::merge_dvar_class_flags`]), and the absorbing
+    /// site asks the class once.
+    ///
+    /// Monotone within a pass and never cleared: dimension variables are
+    /// minted fresh and never reused, so an entry cannot become stale. Not
+    /// serialized: transient per-pass bookkeeping, like the deferred ledgers
+    /// below.
     #[serde(skip)]
-    wildcard_touched_dvars: UnordSet<DimVar>,
+    wildcard_touched_classes: UnordSet<DimVar>,
+    /// chelis#1801: the alias classes an authored dimension pins, keyed and
+    /// merged exactly like the set above.
+    ///
+    /// This is section 3.2's own exclusion rather than an extra guard: a
+    /// literal or name that an argument of the same application binds to the
+    /// class is a CLAIM on the runtime extent, checked by a section 4.7
+    /// guard, and absorbing the class to `*` would erase the claim. A literal
+    /// binding is visible through `constraint_dim`; an authored name is not
+    /// always, because `bind_dvar` records one as a LABEL and leaves the class
+    /// unbound, so the pin is carried here.
+    #[serde(skip)]
+    name_pinned_classes: UnordSet<DimVar>,
     #[serde(skip)]
     label_unification_depth: usize,
     /// Only labels written by the active outer unification need rollback.
@@ -652,7 +673,8 @@ impl Clone for Subst {
                     .clone(),
             ),
             protected_dimensions: self.protected_dimensions.clone(),
-            wildcard_touched_dvars: self.wildcard_touched_dvars.clone(),
+            wildcard_touched_classes: self.wildcard_touched_classes.clone(),
+            name_pinned_classes: self.name_pinned_classes.clone(),
             label_unification_depth: 0,
             dimension_label_undo: Mutex::new(Vec::new()),
             refined_type_bindings: Vec::new(),
@@ -740,7 +762,8 @@ impl Subst {
         // chelis#1801: per-pass evidence, cleared at the pass boundary for the
         // same reason the protected set is. A resumed check reads it back
         // empty anyway (it is `serde(skip)`); this covers a live reuse.
-        self.wildcard_touched_dvars.clear();
+        self.wildcard_touched_classes.clear();
+        self.name_pinned_classes.clear();
         assert_eq!(
             self.current_level, 0,
             "a persisted type environment cannot resume inside an inference scope"
@@ -1725,32 +1748,91 @@ impl Subst {
         }
     }
 
-    /// chelis#1801: record that `v` met a runtime extent `*` without being
-    /// bound to it. Written only by [`unify_dim`]'s wildcard-against-variable
-    /// arm; read only by the application rule that absorbs the extent.
+    /// The variable that currently roots `v`'s alias class.
+    ///
+    /// A class already bound to a concrete dimension has no variable root and
+    /// answers `v` itself. That case never reaches the class flags: the
+    /// absorbing site skips it on `constraint_dim`'s answer first, because a
+    /// bound class denotes what it is bound to.
+    fn dvar_class_root(&self, v: DimVar) -> DimVar {
+        match self.resolve_dvar(v) {
+            Dim::Var(root) => root,
+            _ => v,
+        }
+    }
+
+    /// chelis#1801: record that `v`'s alias class met a runtime extent `*`
+    /// without being bound to it. Written only by [`unify_dim`]'s
+    /// wildcard-against-variable arm; read only by the application rule that
+    /// absorbs the extent.
     pub(crate) fn note_wildcard_touch(&mut self, v: DimVar) {
-        self.wildcard_touched_dvars.insert(v);
+        let root = self.dvar_class_root(v);
+        self.wildcard_touched_classes.insert(root);
     }
 
-    /// chelis#1801: whether `v` has met a runtime extent `*`.
-    ///
-    /// This answers only "did the meeting happen". Whether `v` still denotes
-    /// that extent is a separate question the caller asks of the
-    /// substitution, because an argument in the same call may have bound `v`
-    /// to a literal or named dimension after the meeting.
-    pub(crate) fn dvar_met_wildcard(&self, v: DimVar) -> bool {
-        self.wildcard_touched_dvars.contains(&v)
+    /// chelis#1801: record that an authored dimension pins `v`'s alias class,
+    /// so no application may absorb it to a runtime extent.
+    pub(crate) fn note_name_pin(&mut self, v: DimVar) {
+        let root = self.dvar_class_root(v);
+        self.name_pinned_classes.insert(root);
     }
 
-    /// chelis#1801: adopt another substitution's wildcard-meeting evidence.
+    /// chelis#1801: whether `v`'s alias class has met a runtime extent `*`.
     ///
-    /// Reached from [`Self::compose`]. A compose that dropped this set would
-    /// silently un-record a meeting, and the application rule would then
-    /// generalize a variable the spec says denotes a runtime extent, which is
-    /// the defect this ledger exists to prevent.
+    /// This answers only "did the meeting happen". Whether the class still
+    /// denotes that extent is a separate question the caller asks of the
+    /// substitution, because an argument in the same call may have bound it
+    /// to a literal after the meeting.
+    pub(crate) fn dvar_class_met_wildcard(&self, v: DimVar) -> bool {
+        self.wildcard_touched_classes
+            .contains(&self.dvar_class_root(v))
+    }
+
+    /// chelis#1801: whether an authored dimension pins `v`'s alias class.
+    ///
+    /// A declared binder of the definition under check reaches the same
+    /// exclusion through the rigidity ledger instead of through a name
+    /// unification, so protection counts here: `def outer(s: tensor[seq,
+    /// f32])` binds the class to the named dimension `seq` whether or not a
+    /// `Dim::Name` ever flowed through `bind_dvar`.
+    pub(crate) fn dvar_class_is_name_pinned(&self, v: DimVar) -> bool {
+        let root = self.dvar_class_root(v);
+        self.name_pinned_classes.contains(&root) || self.protected_dimensions.contains(&root)
+    }
+
+    /// chelis#1801: carry both class flags from `from`'s class onto `into`'s.
+    ///
+    /// Called by [`bind_dvar`] before every merge. A merged class keeps one
+    /// root, so evidence recorded on the other root would otherwise become
+    /// unreachable, which is the defect chelis#1925's rounds 1 and 2 both
+    /// reported.
+    fn merge_dvar_class_flags(&mut self, from: DimVar, into: DimVar) {
+        let source = self.dvar_class_root(from);
+        let target = self.dvar_class_root(into);
+        if source == target {
+            return;
+        }
+        if self.wildcard_touched_classes.contains(&source) {
+            self.wildcard_touched_classes.insert(target);
+        }
+        if self.name_pinned_classes.contains(&source) || self.protected_dimensions.contains(&source)
+        {
+            self.name_pinned_classes.insert(target);
+        }
+    }
+
+    /// chelis#1801: adopt another substitution's class evidence.
+    ///
+    /// Reached from [`Self::compose`]. A compose that dropped these sets
+    /// would silently un-record a meeting or a pin, and the application rule
+    /// would then generalize a class the spec says denotes a runtime extent,
+    /// or absorb one an argument claimed.
     fn absorb_wildcard_touches(&mut self, other: &Subst) {
-        for v in other.wildcard_touched_dvars.to_sorted() {
-            self.wildcard_touched_dvars.insert(*v);
+        for v in other.wildcard_touched_classes.to_sorted() {
+            self.wildcard_touched_classes.insert(*v);
+        }
+        for v in other.name_pinned_classes.to_sorted() {
+            self.name_pinned_classes.insert(*v);
         }
     }
 
@@ -2569,6 +2651,11 @@ fn bind_dvar(v: DimVar, dim: &Dim, subst: &mut Subst) -> Result<(), TypeError> {
         && (subst.protected_dimensions.contains(&v) || subst.dimension_label(v).is_some())
     {
         subst.set_dimension_label(v, name.clone());
+        // chelis#1801: the class is now claimed by an authored name even
+        // though nothing bound it, which is exactly the case
+        // `constraint_dim` cannot report. Section 3.2 excludes such a class
+        // from absorption; section 4.7 guards the claim at run time.
+        subst.note_name_pin(v);
         return Ok(());
     }
     if let Dim::Var(other) = dim
@@ -2595,6 +2682,14 @@ fn bind_dvar(v: DimVar, dim: &Dim, subst: &mut Subst) -> Result<(), TypeError> {
             kind: TypeErrorKind::OccursCheck,
             message: format!("infinite dimension: d{} occurs in {dim:?}", v.0),
         });
+    }
+    // chelis#1801: the merge below leaves the union with one root, so every
+    // class property has to arrive there first. A name the class is bound to
+    // outright pins it for the same reason the label arm above does.
+    match dim {
+        Dim::Var(other) => subst.merge_dvar_class_flags(v, *other),
+        Dim::Name(_) => subst.note_name_pin(v),
+        _ => {}
     }
     let target_level = subst.level_of_dvar(v);
     subst.lower_dim_to(dim, target_level);
@@ -4241,7 +4336,7 @@ mod tests {
         // dim var. chelis#1801 added the explicit
         // `(Wildcard, Var(v)) | (Var(v), Wildcard)` arm ahead of the
         // permissive one; it RECORDS the meeting in
-        // `wildcard_touched_dvars` and still leaves `v` free, which is
+        // `wildcard_touched_classes` and still leaves `v` free, which is
         // what lets the concrete binding below still happen. This test
         // pins the property in case a future refactor reorders the arms
         // or makes either wildcard arm bind.
@@ -4276,7 +4371,7 @@ mod tests {
     }
 
     #[test]
-    fn a_wildcard_meeting_a_dim_var_is_recorded_and_survives_clone_and_compose() {
+    fn a_wildcard_meeting_a_class_is_recorded_and_survives_clone_and_compose() {
         // chelis#1801. `unify_dim`'s wildcard arm leaves the variable free
         // by design, so without this record nothing downstream can tell a
         // variable that met a runtime extent from one that met nothing. The
@@ -4292,34 +4387,34 @@ mod tests {
         let untouched = g.fresh_dvar();
         let mut s = Subst::new();
 
-        assert!(!s.dvar_met_wildcard(touched));
+        assert!(!s.dvar_class_met_wildcard(touched));
         assert!(unify_dim(&Dim::Wildcard, &Dim::Var(touched), &mut s).is_ok());
         assert!(
-            s.dvar_met_wildcard(touched),
+            s.dvar_class_met_wildcard(touched),
             "the Wildcard-then-Var direction records the meeting",
         );
         assert!(
-            !s.dvar_met_wildcard(untouched),
+            !s.dvar_class_met_wildcard(untouched),
             "and records nothing about a variable that met nothing",
         );
 
         // The symmetric direction records too.
         let mut symmetric = Subst::new();
         assert!(unify_dim(&Dim::Var(touched), &Dim::Wildcard, &mut symmetric).is_ok());
-        assert!(symmetric.dvar_met_wildcard(touched));
+        assert!(symmetric.dvar_class_met_wildcard(touched));
 
         // A wildcard against a wildcard names no variable, so it records
         // nothing: the permissive arm is still what handles it.
         let mut both_wild = Subst::new();
         assert!(unify_dim(&Dim::Wildcard, &Dim::Wildcard, &mut both_wild).is_ok());
-        assert!(!both_wild.dvar_met_wildcard(touched));
+        assert!(!both_wild.dvar_class_met_wildcard(touched));
 
         // `Subst::clone` carries the record. A clone that dropped it would
         // silently un-record the meeting for every checking context that
         // clones the substitution into its own state.
         let cloned = s.clone();
-        assert!(cloned.dvar_met_wildcard(touched));
-        assert!(!cloned.dvar_met_wildcard(untouched));
+        assert!(cloned.dvar_class_met_wildcard(touched));
+        assert!(!cloned.dvar_class_met_wildcard(untouched));
 
         // `Subst::compose` carries it in BOTH directions: from the receiver
         // (through the trial clone) and from the argument (through
@@ -4329,7 +4424,7 @@ mod tests {
         let mut receiver = Subst::new();
         receiver.compose(&s).expect("composing a rename is valid");
         assert!(
-            receiver.dvar_met_wildcard(touched),
+            receiver.dvar_class_met_wildcard(touched),
             "compose adopts the argument's wildcard-meeting evidence",
         );
 
@@ -4337,11 +4432,14 @@ mod tests {
         carrier
             .compose(&Subst::new())
             .expect("composing an empty substitution is valid");
-        assert!(carrier.dvar_met_wildcard(touched), "and keeps its own",);
+        assert!(
+            carrier.dvar_class_met_wildcard(touched),
+            "and keeps its own",
+        );
     }
 
     #[test]
-    fn a_recorded_meeting_does_not_by_itself_mean_the_var_is_still_free() {
+    fn a_recorded_meeting_does_not_by_itself_mean_the_class_is_still_free() {
         // chelis#1801 negative parity for the test above, and the reason the
         // absorbing site asks the substitution a second question. The record
         // is monotone: it says the meeting happened, never that the variable
@@ -4367,7 +4465,7 @@ mod tests {
         assert!(unify_dim(&Dim::Var(dv), &Dim::Lit(3), &mut s).is_ok());
 
         assert!(
-            s.dvar_met_wildcard(dv),
+            s.dvar_class_met_wildcard(dv),
             "the meeting is still recorded after the literal binding",
         );
         assert_eq!(
@@ -4379,6 +4477,75 @@ mod tests {
             s.apply_dim(&Dim::Var(dv)),
             Dim::Var(dv),
             "`apply_dim` keeps the label's identity and cannot answer this",
+        );
+    }
+
+    #[test]
+    fn a_class_keeps_its_wildcard_evidence_when_a_later_binding_re_roots_it() {
+        // chelis#1925 round 2, at the unit level. `unify_dim` resolves both
+        // operands through `constraint_dim` before it matches, so the meeting
+        // is recorded on whatever rooted the class at that moment, and a
+        // later `bind_dvar` in the same call re-roots the class over it. Ask
+        // the variable, or two ends of the class, and a meeting recorded on a
+        // third member is invisible; the class that carried it is then
+        // generalized instead of denoting the extent it met.
+        //
+        // Evidentiary status: regression test for the merge this change
+        // introduces. Making `merge_dvar_class_flags` a no-op fails the loop
+        // below, which is how it was checked.
+        let mut g = var_gen();
+        let (first, middle, last) = (g.fresh_dvar(), g.fresh_dvar(), g.fresh_dvar());
+        let mut s = Subst::new();
+
+        // The meeting happens while `middle` still roots its own class.
+        assert!(unify_dim(&Dim::Wildcard, &Dim::Var(middle), &mut s).is_ok());
+        assert!(s.dvar_class_met_wildcard(middle));
+
+        // Two more members join and the class re-roots away from `middle`.
+        assert!(unify_dim(&Dim::Var(middle), &Dim::Var(last), &mut s).is_ok());
+        assert!(unify_dim(&Dim::Var(first), &Dim::Var(middle), &mut s).is_ok());
+
+        for member in [first, middle, last] {
+            assert!(
+                s.dvar_class_met_wildcard(member),
+                "every member answers for the class, whichever member roots it",
+            );
+        }
+    }
+
+    #[test]
+    fn an_authored_binder_pins_its_class_even_after_it_meets_a_runtime_extent() {
+        // Negative parity for the row above, and the exclusion
+        // `spec/04-type-system.md` section 3.2 states: a class an argument
+        // binds to a named dimension is a CLAIM on the runtime extent,
+        // checked by a section 4.7 guard, so absorbing it to `*` would erase
+        // the claim. The meeting is still recorded; the pin is what stops the
+        // absorption, and both answers have to survive the same merge.
+        //
+        // Evidentiary status: disposition lock on the two predicates the
+        // absorbing site asks. The source-level twin is
+        // `an_enclosing_binder_survives_a_wildcard_in_its_own_alias_class`.
+        let mut g = var_gen();
+        let binder = g.fresh_dvar();
+        let minted = g.fresh_dvar();
+        let mut s = Subst::new();
+        s.protect_dimensions([binder]);
+        s.set_dimension_label(binder, "seq".to_string());
+
+        assert!(unify_dim(&Dim::Wildcard, &Dim::Var(minted), &mut s).is_ok());
+        assert!(unify_dim(&Dim::Var(minted), &Dim::Var(binder), &mut s).is_ok());
+
+        assert!(
+            s.dvar_class_met_wildcard(minted),
+            "the class still carries the meeting after the binder joins it",
+        );
+        assert!(
+            s.dvar_class_is_name_pinned(minted),
+            "and the authored binder pins the class against absorption",
+        );
+        assert!(
+            s.dvar_class_is_name_pinned(binder),
+            "asked from either member",
         );
     }
 

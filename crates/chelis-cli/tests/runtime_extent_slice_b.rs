@@ -7671,3 +7671,118 @@ fn a_result_only_binder_claim_sizes_a_root_on_c() {
         "C renders the root exactly as eval does"
     );
 }
+
+/// The same root reached through an alias class with THREE dimension-variable
+/// members, which is chelis#1925's round-2 P1. `apply3` takes two polymorphic
+/// function arguments beside the data one, so all three of its instantiation's
+/// variables land in one class, and where the runtime-extent argument sits
+/// decides which member roots the class when the meeting is recorded.
+///
+/// `unify_dim` resolves through `constraint_dim` before it matches, so the
+/// meeting is recorded on whatever rooted the class at that moment, and a
+/// later `bind_dvar` in the same call re-roots the class over it. Asking two
+/// ends of the class then missed a meeting recorded on the middle member, so
+/// the middle ordering alone stayed dropped while the other two absorbed: an
+/// argument-order disagreement `main` did not have. `spec/04-type-system.md`
+/// section 4.7.3 forbids a verdict that turns on the spelling, so the receipt
+/// asserts the three orderings render IDENTICALLY rather than asserting each
+/// one separately.
+const THREE_MEMBER_HELPERS: &str = "def g(x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
+     def h(y: tensor[k, f32]) -> tensor[k, f32] = add(y, y)\n\
+     def h2(z: tensor[k, f32]) -> tensor[k, f32] = add(z, z)\n";
+
+/// The runtime-extent argument first, in the middle, and last. Every other
+/// token is identical, so the three differ only in argument order.
+fn three_member_orderings() -> [(&'static str, String); 3] {
+    [
+        (
+            "first",
+            format!(
+                "{THREE_MEMBER_HELPERS}\
+                 def apply3(v: tensor[p, f32], f: (tensor[p, f32]) -> tensor[p, f32], q: (tensor[p, f32]) -> tensor[p, f32]) -> tensor[p, f32] = q(f(v))\n\
+                 def main() = apply3(g(to_tensor([1.0f32, 2.0f32, 3.0f32])), h, h2)\n"
+            ),
+        ),
+        (
+            "middle",
+            format!(
+                "{THREE_MEMBER_HELPERS}\
+                 def apply3(f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32], q: (tensor[p, f32]) -> tensor[p, f32]) -> tensor[p, f32] = q(f(v))\n\
+                 def main() = apply3(h, g(to_tensor([1.0f32, 2.0f32, 3.0f32])), h2)\n"
+            ),
+        ),
+        (
+            "last",
+            format!(
+                "{THREE_MEMBER_HELPERS}\
+                 def apply3(f: (tensor[p, f32]) -> tensor[p, f32], q: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = q(f(v))\n\
+                 def main() = apply3(h, h2, g(to_tensor([1.0f32, 2.0f32, 3.0f32])))\n"
+            ),
+        ),
+    ]
+}
+
+/// The rendering all three orderings owe: `g` keeps the last two of three
+/// elements and each of `h` and `h2` doubles them.
+const THREE_MEMBER_RENDERING: &str = "main = tensor(shape=[2], data=[8.0, 12.0])";
+
+/// Receipt for corpus row `root.dim_variable.argument_order.eval`.
+///
+/// Regression test. On `main` all three orderings printed nothing and exited
+/// 0; at `dd0f92fd8` the middle one still did while the other two printed
+/// this line, which is the order dependence this row exists to forbid.
+#[test]
+fn a_three_member_alias_class_sizes_a_root_in_every_argument_order_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut rendered = Vec::new();
+    for (name, source) in three_member_orderings() {
+        let path = fixture(&dir, &format!("three_member_{name}.ch"), &source);
+        let evaluated = eval(&path);
+        let stderr = String::from_utf8_lossy(&evaluated.stderr).to_string();
+        assert!(evaluated.status.success(), "{name}: {stderr}");
+        assert!(
+            !stderr.contains("nothing to evaluate"),
+            "{name}: the root is realizable and must not be dropped: {stderr}"
+        );
+        rendered.push(
+            String::from_utf8_lossy(&evaluated.stdout)
+                .trim_end()
+                .to_string(),
+        );
+    }
+    assert_eq!(rendered[0], THREE_MEMBER_RENDERING, "first");
+    assert_eq!(
+        rendered[1], rendered[0],
+        "the middle ordering must render exactly as the first"
+    );
+    assert_eq!(
+        rendered[2], rendered[0],
+        "and so must the last: argument order may not change the verdict"
+    );
+}
+
+/// Receipt for corpus row `root.dim_variable.argument_order.c`.
+///
+/// Regression test, and the same three orderings on the compiled lane. Each
+/// owes a `int main(` and the rendering eval printed, byte for byte.
+#[test]
+fn a_three_member_alias_class_sizes_a_root_in_every_argument_order_on_c() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut rendered = Vec::new();
+    for (name, source) in three_member_orderings() {
+        let (ok, out, emitted) =
+            c_run_result_with_source(&dir, &format!("three_member_{name}_c"), &source);
+        assert!(
+            emitted.contains("int main("),
+            "{name}: a realizable root owes a C entry point:\n{emitted}"
+        );
+        assert!(ok, "{name}: the sized root must build, link and run: {out}");
+        rendered.push(out.trim_end().to_string());
+    }
+    assert_eq!(rendered[0], THREE_MEMBER_RENDERING, "first");
+    assert_eq!(rendered[1], rendered[0], "middle renders as first on C too");
+    assert_eq!(rendered[2], rendered[0], "and last");
+}

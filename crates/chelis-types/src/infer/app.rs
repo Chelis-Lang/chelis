@@ -660,7 +660,7 @@ fn infer_app_inner(
 
     match unify(&func_ty, &expected_fn, subst) {
         Ok(()) => {
-            absorb_runtime_extents_into_call_variables(&instantiation_dvars, product, subst);
+            absorb_runtime_extents_into_call_variables(&instantiation_dvars, subst);
             // chelis#1512: watch whether the eager pass rejects this call. A
             // route can suspend on one operand and then reject on another in
             // the same pass, and the replay re-enters the whole route, so the
@@ -703,8 +703,8 @@ fn infer_app_inner(
     }
 }
 
-/// Bind every dimension variable this application's instantiation minted that
-/// met a runtime extent `*` and that no argument bound (chelis#1801).
+/// Bind every alias class this application's instantiation minted a member of
+/// that met a runtime extent `*` and that no argument claimed (chelis#1801).
 ///
 /// `spec/04-type-system.md` section 3.2 Application: a dimension variable
 /// minted by an application's instantiation that unifies with a runtime
@@ -714,6 +714,25 @@ fn infer_app_inner(
 /// application binds to it is a claim on the runtime extent, checked by a
 /// section 4.7 guard.
 ///
+/// The three questions below are that sentence and nothing else. Unification
+/// identifies dimension variables, so the subject of every clause is the
+/// ALIAS CLASS rather than the variable this application happens to hold:
+/// "unifies with a runtime extent" is the class's wildcard flag, "binds to a
+/// literal" is `constraint_dim` answering a non-variable, and "or named
+/// dimension" is the class's pin, which covers both an authored name that
+/// `bind_dvar` recorded as a label without binding and a declared binder of
+/// the definition under check. `Subst` maintains both flags ON the class root
+/// and merges them at every union, so one question per class is a complete
+/// answer.
+///
+/// chelis#1925's rounds 1 and 2 both reported the same defect class against
+/// weaker forms of this: asking the variable alone missed a class rooted by a
+/// polymorphic argument's own instantiation, and asking two ends missed a
+/// three-member class carrying the meeting on the middle one. Neither the
+/// two-end query nor the "some instantiation minted this root" membership
+/// index survives, because both approximated a sentence the representation
+/// now states.
+///
 /// Why here, and not in `unify_dim`. Binding the variable where it meets the
 /// wildcard freezes it: `f(x: tensor[d, f32], y: tensor[d, f32])` applied to
 /// a runtime-extent argument and a `tensor[3, f32]` one would read `*` when
@@ -721,7 +740,7 @@ fn infer_app_inner(
 /// depend on argument order. That is the loss the Wildcard-against-Var
 /// invariant on `unify_dim` exists to avoid, and it is why this runs after
 /// the WHOLE call has unified: by then every argument has had its chance to
-/// constrain the variable, and the two orders agree.
+/// constrain the class, and the orders agree.
 ///
 /// Why here, and not at generalization. A declared result reaches the
 /// definition boundary before generalization does, so a signature such as
@@ -733,65 +752,20 @@ fn infer_app_inner(
 /// is the question `constraint_dim` answers: it resolves the variable and
 /// nothing else. `apply_dim` deliberately answers `Var(v)` for a LABELLED
 /// variable that resolved to a concrete dim, to keep the label's identity
-/// available to name-sensitive operations, so it cannot tell a free variable
+/// available to name-sensitive operations, so it cannot tell a free class
 /// from one an argument just bound to a literal.
-///
-/// Swapping the two was measured rather than assumed, and it changed no
-/// reading: the substitution state where they disagree (a labelled variable
-/// bound to a literal AFTER meeting a wildcard) was not reachable from any
-/// source program probed, because `unify_dim` rejects two distinct names
-/// before reaching `bind_dvar` and `bind_dvar`'s Var-to-Var path aliases the
-/// two variables rather than binding one to a literal.
-/// `unify::tests::a_recorded_meeting_does_not_by_itself_mean_the_var_is_still_free`
-/// builds the state directly and locks which predicate answers correctly in
-/// it; the choice here rests on that contract, not on a source witness.
-fn absorb_runtime_extents_into_call_variables(
-    instantiation_dvars: &[DimVar],
-    product: &InferenceProduct,
-    subst: &mut Subst,
-) {
+/// `unify::tests::a_recorded_meeting_does_not_by_itself_mean_the_class_is_still_free`
+/// builds that state directly and locks which predicate answers correctly in
+/// it.
+fn absorb_runtime_extents_into_call_variables(instantiation_dvars: &[DimVar], subst: &mut Subst) {
     for &dv in instantiation_dvars {
-        // What denotes the extent is the ALIAS CLASS, not the one variable
-        // this application minted. Unification may have identified `dv` with
-        // another variable, in which case binding `dv` would leave the class's
-        // root free and the result would still carry a quantified dimension.
-        // chelis#1925's round 1 found that with a polymorphic named def passed
-        // as an argument: the argument's own instantiation mints the variable
-        // that becomes the root, and it is minted after this call's bracket has
-        // already been read back.
         let Dim::Var(root) = subst.constraint_dim(&Dim::Var(dv)) else {
-            // Resolved to a literal, a name or a rank: an argument of this
+            // Bound to a literal, a name or a rank: an argument of this
             // application supplied a claim on the runtime extent, and
             // spec/04-type-system.md section 4.7 guards it at run time.
             continue;
         };
-        // `unify_dim` records the touch on whichever member of the class
-        // `constraint_dim` returned at the time, so which end carries it
-        // depends on whether the wildcard or the alias came first in argument
-        // order. Both orders must reach the same answer, so ask both ends.
-        if !subst.dvar_met_wildcard(dv) && !subst.dvar_met_wildcard(root) {
-            continue;
-        }
-        // Bind only a variable some instantiation minted. A root a PARAMETER
-        // binds is not this application's to decide: `def outer(s: tensor[seq,
-        // f32]) -> tensor[seq, f32] = apply1(h, g(s))` puts a runtime extent
-        // in `seq`'s class, and `seq` stays a named dimension. When
-        // `root == dv` this holds by construction, which is why the simple
-        // case is unchanged.
-        //
-        // This guard says nothing about a RESULT-ONLY binder, and that case
-        // is absorbed rather than kept: a declared result unifies with the
-        // application's type after this runs, and `Dim::Name` unifies
-        // permissively with the `*` already bound here, so `def outer(t:
-        // tensor[3, f32]) -> tensor[seq, f32] = apply1(h, g(t))` publishes
-        // `tensor[*, f32]`. That is what `main` already did for the
-        // one-call-shallower `= g(t)` spelling, and what
-        // `spec/04-type-system.md` section 4.7.3 requires when it says no
-        // function boundary changes acceptance; section 4.4.1 makes a
-        // dimension that occurs only in the declared result output-inferred
-        // from what the body produced. chelis#1925's round-1 verification
-        // measured the lane divergence this repairs.
-        if !product.dvar_was_instantiation_minted(root) {
+        if !subst.dvar_class_met_wildcard(root) || subst.dvar_class_is_name_pinned(root) {
             continue;
         }
         subst.insert_dim(root, Dim::Wildcard);

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "12cd5bb7622ab780799c1e0ece57b906819c8ff630b4fa1f1b1b27c8f624814b",
+  "corpus_sha256": "dd31a50181c95454e34396e4a12aa85217cbfb32808dd5d20f11b37bbb5eeb95",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -529,6 +529,18 @@
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_node_valued_reshape_target_under_a_named_claim_is_guarded_on_eval"
+    },
+    {
+      "id": "root.dim_variable.argument_order.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_three_member_alias_class_sizes_a_root_in_every_argument_order_on_c"
+    },
+    {
+      "id": "root.dim_variable.argument_order.eval",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_three_member_alias_class_sizes_a_root_in_every_argument_order_on_eval"
     },
     {
       "id": "root.dim_variable.nested_helper.c",
