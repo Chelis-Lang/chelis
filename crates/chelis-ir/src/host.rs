@@ -17585,7 +17585,7 @@ mod tests {
                 "def second[s](x: tensor[s, *, f32], y: tensor[s, *, f32]) = concat([y, y], 1i32)\ndef run[s](x: tensor[s, {x_width}, f32], y: tensor[s, {y_width}, f32]) -> tensor[s, *, f32] = softmax(second(y, x), -1)\n"
             );
             let program = surf_check(&source);
-            let defs = cached_program_defs(&program);
+            let defs = cached_program_defs(&HostLoweringSession::new(&program));
             let (_, _, run) = stamped_parts(&defs["run"]).unwrap();
             let (_, _, params) = stamped_parts(&run[0]).unwrap();
             let params: Vec<_> = params
@@ -17596,7 +17596,13 @@ mod tests {
                 })
                 .collect();
             assert_eq!(
-                body_form_the_dag_cannot_carry(&program, &run[1], &params, false).is_some(),
+                body_form_the_dag_cannot_carry(
+                    &HostLoweringSession::new(&program),
+                    &run[1],
+                    &params,
+                    false
+                )
+                .is_some(),
                 host,
                 "{source}"
             );
@@ -17631,7 +17637,7 @@ mod tests {
             "def run(x: tensor[2, f32]) -> tensor[2, f32] = {{\n z = level_{depth}(copy(x))\n _ = rank(x)\n z\n}}\n"
         ));
         let program = surf_check(&source);
-        let defs = cached_program_defs(&program);
+        let defs = cached_program_defs(&HostLoweringSession::new(&program));
         let mut walk = admission_test_walk(&defs);
         assert!(
             walk.def("run", &defs["run"], None)
@@ -17646,7 +17652,7 @@ mod tests {
         let program = surf_check(
             "def second[s](x: tensor[s, *, f32], y: tensor[s, *, f32]) = concat([y, y], 1i32)\n",
         );
-        let defs = cached_program_defs(&program);
+        let defs = cached_program_defs(&HostLoweringSession::new(&program));
         let fixed = ConcatInputFact::Tensor(TensorType {
             dims: vec![DimInfo::Lit(2), DimInfo::Lit(2)],
             precision: Prim::F32,
@@ -17680,7 +17686,7 @@ mod tests {
         let program = surf_check(
             "def global(x: tensor[2, f32]) -> int32 = rank(x)\ndef call(x: tensor[2, f32]) -> int32 = global(x)\n",
         );
-        let defs = cached_program_defs(&program);
+        let defs = cached_program_defs(&HostLoweringSession::new(&program));
         let mut walk = admission_test_walk(&defs);
         // A free callee name resolves against program definitions, not a
         // same-spelled caller alias, including its constructor classification.
