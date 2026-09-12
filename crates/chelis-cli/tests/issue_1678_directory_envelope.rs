@@ -283,8 +283,10 @@ fn a_file_reached_by_several_paths_is_one_entry() {
 }
 
 /// #1827 red-team F4: sixteen links doubling back over eight levels gave
-/// 511 entries for one file. Visiting each directory once bounds the walk by
-/// the tree's real size.
+/// 511 entries for one file. This pins the entry count; that the walk also
+/// stops RE-ENTERING each directory is pinned by
+/// `a_link_out_of_the_target_is_followed_once`, whose expected paths a
+/// directory revisit would lengthen.
 #[test]
 fn doubling_links_do_not_amplify_the_walk() {
     let dir = tempdir().unwrap();
@@ -499,6 +501,27 @@ fn an_unreadable_target_is_an_envelope_with_one_diagnostic() {
         run.stdout
     );
     assert_eq!(run.code, Some(2));
+}
+
+/// [04-FIT-23]: the diagnostics are in walk order too, so a second run over
+/// an unchanged tree emits the same document.
+#[test]
+fn walk_failures_appear_in_walk_order() {
+    let dir = tempdir().unwrap();
+    write(&dir.path().join("m.ch"), CLEAN);
+    // Two entries that cannot be resolved, sorting either side of `m.ch`.
+    symlink("a_loop", dir.path().join("a_loop")).unwrap();
+    symlink("z_loop", dir.path().join("z_loop")).unwrap();
+    let run = check(dir.path());
+    let messages = run.error_messages();
+    assert_eq!(messages.len(), 2, "{}", run.stdout);
+    assert!(messages[0].contains("a_loop"), "{}", run.stdout);
+    assert!(messages[1].contains("z_loop"), "{}", run.stdout);
+    assert_eq!(
+        check(dir.path()).stdout,
+        run.stdout,
+        "the document is stable"
+    );
 }
 
 // ---------------------------------------------------------------------------

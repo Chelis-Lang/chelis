@@ -14,8 +14,9 @@ Chelis ships one CLI with machine-facing and human-facing subcommands.
   symlinks, skipping dot-prefixed entries and `target/` directories) and
   emits one envelope, `{"files": [{"file", "report"}...], "errors": [...]}`.
   `errors` holds the failures that belong to no single file: a directory
-  that cannot be read (`directory_walk_error`) and a directory with nothing
-  to check (`empty_corpus`). It exits 0 only when every error list in the
+  that cannot be read, an entry that cannot be resolved, or a path that
+  cannot be written as UTF-8 (all `directory_walk_error`), and a directory
+  with nothing to check (`empty_corpus`). It exits 0 only when every error list in the
   envelope is empty, and 2 otherwise. `spec/04-type-system.md`
   § Directory mode is the contract.
 - `chelis deep` prints canonical Deep for a Surf program.

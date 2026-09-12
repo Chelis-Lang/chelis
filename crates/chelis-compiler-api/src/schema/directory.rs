@@ -56,20 +56,29 @@ impl CheckDirectoryEntry {
 pub struct EntryPath(String);
 
 impl EntryPath {
+    /// The entry's `file` for `walked`, a path the walk reached below `target`.
+    ///
     /// [04-FIT-21]: the components are joined by `/` on every host, and a path
     /// that is not valid UTF-8 is refused rather than written with replacement
     /// characters. The caller reports a refusal as a walk failure.
-    pub fn new(relative: &Path) -> Result<Self, UnrepresentablePath> {
+    ///
+    /// Taking the walked path rather than an already-relative one keeps the
+    /// stripping beside the validation, so a refusal names the same path every
+    /// other walk failure names.
+    pub fn relative_to(target: &Path, walked: &Path) -> Result<Self, UnrepresentablePath> {
+        let Ok(relative) = walked.strip_prefix(target) else {
+            // The walk only produces paths below its target, so this is a
+            // defect in the caller. It is still reported, not panicked on:
+            // the document must survive it ([04-FIT-12]).
+            return Err(UnrepresentablePath::not_relative(walked));
+        };
         let mut file = String::new();
         for component in relative.components() {
             let Component::Normal(name) = component else {
-                // The walk only produces paths below the target, so this is a
-                // defect in the caller. It is still reported, not panicked on:
-                // the document must survive it ([04-FIT-12]).
-                return Err(UnrepresentablePath::not_relative(relative));
+                return Err(UnrepresentablePath::not_relative(walked));
             };
             let Some(name) = name.to_str() else {
-                return Err(UnrepresentablePath::not_utf8(relative));
+                return Err(UnrepresentablePath::not_utf8(walked));
             };
             if !file.is_empty() {
                 file.push('/');
@@ -77,7 +86,7 @@ impl EntryPath {
             file.push_str(name);
         }
         if file.is_empty() {
-            return Err(UnrepresentablePath::not_relative(relative));
+            return Err(UnrepresentablePath::not_relative(walked));
         }
         Ok(Self(file))
     }
@@ -278,7 +287,8 @@ mod tests {
 
     fn entry(path: &str, errors: Vec<Diagnostic>) -> CheckDirectoryEntry {
         CheckDirectoryEntry::new(
-            EntryPath::new(Path::new(path)).expect("representable"),
+            EntryPath::relative_to(Path::new("/t"), &Path::new("/t").join(path))
+                .expect("representable"),
             report(errors),
         )
     }
@@ -350,18 +360,20 @@ mod tests {
 
     #[test]
     fn a_nested_path_is_joined_with_forward_slashes() {
-        let nested: PathBuf = ["one", "two", "three.ch"].iter().collect();
+        let nested: PathBuf = ["/t", "one", "two", "three.ch"].iter().collect();
         assert_eq!(
-            EntryPath::new(&nested).unwrap().as_str(),
+            EntryPath::relative_to(Path::new("/t"), &nested)
+                .unwrap()
+                .as_str(),
             "one/two/three.ch"
         );
     }
 
     #[test]
     fn a_path_that_is_not_below_the_target_is_refused() {
-        for path in ["", "/abs/a.ch", "../a.ch", "./a.ch"] {
+        for path in ["/t", "/elsewhere/a.ch", "/t/../a.ch"] {
             assert!(
-                EntryPath::new(Path::new(path)).is_err(),
+                EntryPath::relative_to(Path::new("/t"), Path::new(path)).is_err(),
                 "{path:?} must not become an entry"
             );
         }
@@ -383,13 +395,14 @@ mod tests {
     fn a_non_utf8_path_is_refused_not_replaced() {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
-        let path = Path::new(OsStr::from_bytes(b"dir/\xffname.ch"));
-        let error = EntryPath::new(path).unwrap_err();
+        let path = Path::new(OsStr::from_bytes(b"/t/dir/\xffname.ch"));
+        let error = EntryPath::relative_to(Path::new("/t"), path).unwrap_err();
         let message = error.to_string();
         assert!(message.contains("not valid UTF-8"), "{message}");
         // The offending byte survives as `\xff`, and nothing was substituted
         // for it: `Path::display()` would have written U+FFFD here.
-        assert!(message.contains("b\"dir/\\xffname.ch\""), "{message}");
+        // The message names the walked path, as every walk failure does.
+        assert!(message.contains("b\"/t/dir/\\xffname.ch\""), "{message}");
         assert!(!message.contains('\u{fffd}'), "{message}");
     }
 }

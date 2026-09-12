@@ -2397,7 +2397,8 @@ fn check_directory(
 ) -> CheckDirectoryReport {
     let mut entries = Vec::new();
     let mut failures = Vec::new();
-    // Walk order is the envelope's order ([04-FIT-22]), for failures too.
+    // Walk order is the envelope's order: [04-FIT-22] for `files`, and
+    // [04-FIT-23]'s own sentence for the diagnostics.
     for item in walk_sources(target, &CHECK_WALK) {
         let file = match item {
             WalkItem::Source(file) => file,
@@ -2406,12 +2407,7 @@ fn check_directory(
                 continue;
             }
         };
-        // Every walked path is `target` joined with names, so the prefix is
-        // always there. Were it not, the absolute path is refused by
-        // `EntryPath::new` and reported, rather than panicking with no
-        // document ([04-FIT-12]).
-        let relative = file.strip_prefix(target).unwrap_or(&file);
-        match EntryPath::new(relative) {
+        match EntryPath::relative_to(target, &file) {
             Ok(path) => entries.push(CheckDirectoryEntry::new(
                 path,
                 cmd_check_one(&file, show_inferred, allow_style_violations),

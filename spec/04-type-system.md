@@ -639,9 +639,12 @@ inference. `chelis check` stays solver-free: the optional declared
 invariant (RFC D-WF and later workstreams) is never evaluated by the
 checker.
 
-**Gating.** `chelis check` is a scorer-with-exit-code: it always reports a
-fitness score and the full error list, and its exit code mirrors that list
-(`0` iff empty, non-zero otherwise; Issue #207). A declaration error such
+**Gating.** `chelis check` is a scorer-with-exit-code: for a file target it
+always reports a fitness score and the full error list, and its exit code
+mirrors that list (`0` iff empty, non-zero otherwise; Issue #207). A directory
+target reports one score per checked file inside the envelope of §6.4
+§ Directory mode, and [04-FIT-25] states its exit rule in the same terms.
+A declaration error such
 as `OpaqueTypeViolation` is therefore visible on `check` (a non-zero exit
 with the error listed), never a silent score-1 pass. The front-end
 surfaces that consume a program -- `chelis build`, `chelis eval --file`,
@@ -2479,10 +2482,12 @@ Each entry carries:
 > each path [04-FIT-21] cannot represent. The walk continues past every one
 > of them: each checkable file it can still reach is an entry. An unreadable
 > target therefore yields an envelope with no entries and one diagnostic.
-> A path inside one of these messages is rendered as [05-HOST-4] renders one:
-> reversible escaped host bytes. A message that names a path SHALL NOT
-> substitute for bytes it cannot represent, or two paths the walk rejected
-> become one message a reader cannot tell apart. The reports of the readable files are additional
+> `errors` is in the walk order of [04-FIT-22], as `files` is, so a second
+> run over an unchanged tree emits the same document. A path inside one of
+> these messages is rendered as [05-HOST-4] renders one: reversible escaped
+> host bytes. A message that names a path SHALL NOT substitute for bytes it
+> cannot represent, or two paths the walk rejected become one message a
+> reader cannot tell apart. The reports of the readable files are additional
 > information, not a partial success; the envelope still fails under
 > [04-FIT-25].
 
