@@ -232,6 +232,54 @@ fn compiled_dropout_rejection_agrees_across_public_build_paths() {
     }
 }
 
+/// #1872: static rate is not a closed entry; the public ABI supplies no RNG.
+#[test]
+fn bare_inherited_random_c_surf_entry_rejects_across_public_paths() {
+    assert_bare_inherited_random_rejects(SourceKind::Surf);
+}
+
+#[test]
+fn bare_inherited_random_c_deep_entry_rejects_across_public_paths() {
+    assert_bare_inherited_random_rejects(SourceKind::Deep);
+}
+
+fn assert_bare_inherited_random_rejects(kind: SourceKind) {
+    let source = "def sample(x: tensor[4, f32]) -> tensor[4, f32] = dropout(x, 0.5f32)\n";
+    let decls = chelis_surf::parser::parse_str(source).unwrap();
+    let deep =
+        chelis_deep::printer::print_canonical(&chelis_surf::desugar::desugar_program(&decls));
+    let text = match kind {
+        SourceKind::Surf => source,
+        SourceKind::Deep => deep.as_str(),
+    };
+    for execution in [false, true] {
+        let request = CompileRequest {
+            source_kind: kind,
+            source: text.to_string(),
+            target: CompileTarget::C,
+            entry_name: Some("sample".into()),
+        };
+        let errors = if execution {
+            compile_for_execution(request)
+                .expect_err("public entry has no ambient RNG")
+                .errors
+        } else {
+            compile(request)
+                .expect_err("public entry has no ambient RNG")
+                .errors
+        };
+        assert_eq!(errors[0].kind().as_str(), "unsupported_feature");
+        assert!(errors[0].message.contains("inherited Random"), "{errors:?}");
+    }
+    let result = match kind {
+        SourceKind::Surf => build(source, "inherited_surf", "c"),
+        SourceKind::Deep => build_deep(&deep, "inherited_deep", "c"),
+    };
+    result
+        .failure()
+        .stderr(predicates::str::contains("unsupported:"));
+}
+
 /// Entry-scoped compilation admits both the pure and source-fixed C entry;
 /// selecting a runtime-rate entry still rejects it.
 #[test]

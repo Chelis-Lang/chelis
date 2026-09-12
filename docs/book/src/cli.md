@@ -166,6 +166,8 @@ its own or beside other definitions, in both Surf and Deep; see
 `examples/dropout_entry.ch`. Whole-program builds emit its named host wrapper.
 Pure tensor entries and selected compiler-API entries keep their existing ABIs.
 Raw-DAG dropout, runtime-rate entries, HIP and Metal remain unsupported.
+Standalone admission requires the inferred body to handle Random; an extra
+declared `Random` effect does not make a closed seeded body depend on a caller.
 
 When `chelis eval --file` runs from inside a Reef package root, ad hoc
 snippet files can import package modules even if the snippet file

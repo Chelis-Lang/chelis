@@ -8513,6 +8513,8 @@ fn fixed_control_c_entry_is_independent_of_host_siblings() {
         ("bare", "", false, false),
         ("with_host", "def status() -> int64 = 7i64\n", false, false),
         ("deep_entry", "", true, false),
+        ("seeded_helper", "", false, false),
+        ("declared_random", "", false, false),
         ("pure_entry", "", false, true),
     ] {
         let surf = dir.path().join(format!("{stem}.ch"));
@@ -8522,6 +8524,10 @@ fn fixed_control_c_entry_is_independent_of_host_siblings() {
                 "{}{sibling}",
                 if pure {
                     "def sample(x: tensor[4, f32]) -> tensor[4, f32] = add(x, x)\n"
+                } else if stem == "seeded_helper" {
+                    "def keep(x: tensor[4, f32]) -> tensor[4, f32] = dropout(x, 0.5f32)\ndef sample(x: tensor[4, f32]) -> tensor[4, f32] = with seed(42i64) { keep(x) }\n"
+                } else if stem == "declared_random" {
+                    "def sample(x: tensor[4, f32]) -> tensor[4, f32] ! { Random } = with seed(42i64) { dropout(x, 0.5f32) }\n"
                 } else {
                     include_str!("../../../examples/dropout_entry.ch")
                 }

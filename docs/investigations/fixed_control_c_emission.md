@@ -7,7 +7,7 @@ excluded and retain their typed rejection.
 
 ## Whole-program entry selection
 
-A concrete fixed-control tensor function must retain its sealed C execution
+A concrete closed fixed-control tensor function must retain its sealed C execution
 helper whether it is the only declaration or has unrelated scalar/host siblings
 (#1872). Whole-program Surf and Deep CLI builds use the existing authored host
 wrapper for such an entry. The wrapper-selection decision uses the original
@@ -17,10 +17,22 @@ their four-argument tensor ABI, and pure CLI entries keep their ordinary ABI.
 Unbound/runtime controls and HIP/Metal remain unsupported. This repairs entry
 selection, not compiled-in-context plan transport or symbolic-extent emission.
 
+`FixedControl` alone does not establish public-entry closure: the inferred
+effect row must not require ambient `Random` before this rule can introduce a
+standalone wrapper. A bare inherited-Random function still rejects in Surf and
+Deep, as it does through the selected compiler APIs. Existing host programs may
+call inherited helpers under their own seed scopes; this rule does not reject
+those internal calls or change the older host-wrapper export policy.
+In particular, a pre-existing inherited-Random export beside a host sibling
+can still build and abort when invoked directly without the private RNG frame.
+That older export-policy limitation is not repaired by the standalone rule.
+
 The regression is `cli::fixed_control_c_entry_is_independent_of_host_siblings`:
 normal fmt/check/build for bare Surf, sibling Surf and Deep, then actual native
 calls checking all output/input bits and repeated invocation. The
 `phase3_gate_contract` suite locks the corresponding API/target dispositions.
+Its `bare_inherited_random_c_*` tests are the negative closure controls;
+the native entry test includes a seeded helper call.
 Run both with `cargo nextest run -p chelis-cli --test cli --test phase3_gate_contract
 -E 'test(fixed_control_c_entry_) | binary(phase3_gate_contract)' --test-threads 1`
 after `cargo check -p chelis-cli --tests`. All selected tests must pass.
