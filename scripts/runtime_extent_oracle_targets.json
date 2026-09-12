@@ -395,6 +395,8 @@
         "a_repeated_free_result_name_declares_from_its_first_site",
         "a_resolved_named_claim_the_inlined_body_refutes_is_rejected_on_both_lanes",
         "a_result_name_no_parameter_declares_is_not_stamped_as_a_claim",
+        "a_result_only_binder_claim_sizes_a_root_on_c",
+        "a_result_only_binder_claim_sizes_a_root_on_eval",
         "a_runtime_after_bound_and_a_named_pad_claim_reach_the_same_guard",
         "a_runtime_bound_pad_claim_is_guarded_in_every_activation_form",
         "a_runtime_non_unit_source_under_a_same_rank_claim_traps_at_entry_on_eval",

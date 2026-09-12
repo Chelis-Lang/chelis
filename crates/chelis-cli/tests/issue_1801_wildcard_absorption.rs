@@ -7,13 +7,15 @@
 //! file is the checker-visible half: what each signature reads as. The
 //! executable halves are `runtime_extent_slice_a.rs`'s
 //! `a_root_that_keeps_a_dim_variable_is_sized_on_both_lanes` and the
-//! two `root.dim_variable.nested_helper` receipts in
+//! `root.dim_variable.nested_helper`, `root.dim_variable.polymorphic_argument`
+//! and `root.dim_variable.result_only_binder` receipts in
 //! `runtime_extent_slice_b.rs`.
 //!
-//! Every fixture here was measured on the base sha `ae9260727` before the
-//! repair; each test's comment records that reading and says whether the
-//! assertion is a regression test (the reading changed) or a disposition
-//! lock (the reading must not change).
+//! Every fixture here was measured before the repair; each test's comment
+//! records that reading, names the sha it was measured on (`ae9260727` for the
+//! rows this file opened with, `0820ee28e` for the ones added over the rebase),
+//! and says whether the assertion is a regression test (the reading changed)
+//! or a disposition lock (the reading must not change).
 
 use assert_cmd::Command;
 use serde_json::Value;
@@ -530,5 +532,87 @@ fn an_enclosing_binder_survives_a_wildcard_in_its_own_alias_class() {
         signatures.get("outer2").map(String::as_str),
         Some("(tensor[seq, f32]) -> tensor[seq, f32]"),
         "{signatures:?}"
+    );
+}
+
+/// A RESULT-ONLY binder, which chelis#1925's round-1 verification raised.
+/// `outer`, `direct` and `bare` declare the same `-> tensor[seq, f32]` over
+/// the same runtime extent and differ only in how many applications the
+/// extent crosses on its way to the declaration.
+///
+/// Regression test for `direct` and `outer`, disposition lock for `bare`. On
+/// `0820ee28e` `bare` already read `tensor[*, f32]` while `direct` and
+/// `outer` read `tensor[seq, f32]`, so the published extent depended on the
+/// number of intervening calls. `spec/04-type-system.md` section 4.7.3 says
+/// "No syntactic form, binding scope, function boundary, or source-tensor
+/// identity changes acceptance", and section 4.4.1 makes a dimension that
+/// occurs only in the declared result output-inferred from what the body
+/// produced rather than rigid. What the body produced here is a runtime
+/// extent. The executable half of this reading, including the lane divergence
+/// it repairs, is the `root.dim_variable.result_only_binder` pair in
+/// `runtime_extent_slice_b.rs`.
+///
+/// The parameter-bound twin is
+/// `an_enclosing_binder_is_not_absorbed_through_an_aliasing_call` above: a
+/// binder a PARAMETER binds keeps its name, because the parameter type is in
+/// scope while the body is inferred, so the alias class resolves to a name
+/// and the absorption skips it.
+#[test]
+fn a_result_only_binder_is_absorbed_to_the_extent_it_met() {
+    let signatures = signatures(&format!(
+        "{POLY_HELPERS}\
+         def apply1(f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = f(v)\n\
+         def outer(t: tensor[3, f32]) -> tensor[seq, f32] = apply1(h, g(t))\n\
+         def direct(t: tensor[3, f32]) -> tensor[seq, f32] = h(g(t))\n\
+         def bare(t: tensor[3, f32]) -> tensor[seq, f32] = g(t)\n"
+    ));
+    for name in ["outer", "direct", "bare"] {
+        assert_eq!(
+            signatures.get(name).map(String::as_str),
+            Some("(tensor[3, f32]) -> tensor[*, f32]"),
+            "{name}: {signatures:?}"
+        );
+    }
+}
+
+/// Negative parity for the row above: absorbing a result-only binder must not
+/// make every symbolic-dimension program runnable. Here `seq` IS bound by a
+/// parameter, so it stays a named dimension, the root has no value for it, and
+/// eval refuses with the same diagnostic as on the base sha.
+///
+/// Disposition lock on both readings, measured on `0820ee28e` and here: the
+/// signature stays `() -> tensor[seq, f32]` and eval exits non-zero with
+/// `missing symbolic dimension binding \`seq\``. This row is eval-side only
+/// because the program never executes on either lane.
+#[test]
+fn a_parameter_bound_binder_still_has_no_value_at_a_root() {
+    let source = format!(
+        "{POLY_HELPERS}\
+         def apply1(f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = f(v)\n\
+         def outer(s: tensor[seq, f32]) -> tensor[seq, f32] = apply1(h, g(s))\n\
+         def main() = outer(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n"
+    );
+    let published = signatures(&source);
+    assert_eq!(
+        published.get("main").map(String::as_str),
+        Some("() -> tensor[seq, f32]"),
+        "{published:?}"
+    );
+
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("parameter_bound_binder_root.ch");
+    let report = check(&source, &path);
+    assert_eq!(report["score"].as_f64(), Some(1.0), "{report}");
+
+    let evaluated = eval_file(&path);
+    assert!(
+        !evaluated.status.success(),
+        "a parameter-bound binder has no value here: {}",
+        String::from_utf8_lossy(&evaluated.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&evaluated.stderr).to_string();
+    assert!(
+        stderr.contains("missing symbolic dimension binding `seq`"),
+        "the unchanged diagnostic: {stderr}"
     );
 }

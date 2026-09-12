@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "3f1a742371fc4765b55b06dc348802fa8e5792eb1ef32b621d98da1b03137281",
+  "corpus_sha256": "12cd5bb7622ab780799c1e0ece57b906819c8ff630b4fa1f1b1b27c8f624814b",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -553,6 +553,18 @@
       "baseline": "silent_unguarded",
       "phase_b": "executes_exactly",
       "receipt": "cli_slice_b.a_polymorphic_argument_claim_sizes_a_root_on_eval"
+    },
+    {
+      "id": "root.dim_variable.result_only_binder.c",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_result_only_binder_claim_sizes_a_root_on_c"
+    },
+    {
+      "id": "root.dim_variable.result_only_binder.eval",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_result_only_binder_claim_sizes_a_root_on_eval"
     },
     {
       "id": "route.untied.gather.gate",

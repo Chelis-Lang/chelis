@@ -1098,6 +1098,26 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             "cli_slice_b.a_polymorphic_argument_claim_sizes_a_root_on_eval",
         ),
+        # The same root whose extent a RESULT-ONLY binder names, which
+        # chelis#1925's round-1 verification found LANE DIVERGENT on
+        # `0820ee28e`: the C lane emitted an entry point and printed the value
+        # while eval refused the same program with `missing symbolic dimension
+        # binding \`seq\``. Both halves therefore start `lane_divergent` and
+        # both now print the same line. Section 4.7 requires that agreement and
+        # section 4.7.3 forbids a verdict that turns on a function boundary;
+        # `main` already absorbed the one-call-shallower spelling.
+        _row(
+            "root.dim_variable.result_only_binder.c",
+            "lane_divergent",
+            EXECUTES,
+            "cli_slice_b.a_result_only_binder_claim_sizes_a_root_on_c",
+        ),
+        _row(
+            "root.dim_variable.result_only_binder.eval",
+            "lane_divergent",
+            EXECUTES,
+            "cli_slice_b.a_result_only_binder_claim_sizes_a_root_on_eval",
+        ),
     )
     return tuple(sorted(rows, key=lambda row: row.id))
 

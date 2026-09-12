@@ -772,12 +772,25 @@ fn absorb_runtime_extents_into_call_variables(
         if !subst.dvar_met_wildcard(dv) && !subst.dvar_met_wildcard(root) {
             continue;
         }
-        // Bind only a variable some instantiation minted. A root that is an
-        // enclosing definition's own binder is not this application's to
-        // decide: `def outer(s: tensor[seq, f32]) -> tensor[seq, f32] =
-        // apply1(h, g(s))` puts a runtime extent in `seq`'s class, and `seq`
-        // has to stay a named dimension. When `root == dv` this holds by
-        // construction, which is why the simple case is unchanged.
+        // Bind only a variable some instantiation minted. A root a PARAMETER
+        // binds is not this application's to decide: `def outer(s: tensor[seq,
+        // f32]) -> tensor[seq, f32] = apply1(h, g(s))` puts a runtime extent
+        // in `seq`'s class, and `seq` stays a named dimension. When
+        // `root == dv` this holds by construction, which is why the simple
+        // case is unchanged.
+        //
+        // This guard says nothing about a RESULT-ONLY binder, and that case
+        // is absorbed rather than kept: a declared result unifies with the
+        // application's type after this runs, and `Dim::Name` unifies
+        // permissively with the `*` already bound here, so `def outer(t:
+        // tensor[3, f32]) -> tensor[seq, f32] = apply1(h, g(t))` publishes
+        // `tensor[*, f32]`. That is what `main` already did for the
+        // one-call-shallower `= g(t)` spelling, and what
+        // `spec/04-type-system.md` section 4.7.3 requires when it says no
+        // function boundary changes acceptance; section 4.4.1 makes a
+        // dimension that occurs only in the declared result output-inferred
+        // from what the body produced. chelis#1925's round-1 verification
+        // measured the lane divergence this repairs.
         if !product.dvar_was_instantiation_minted(root) {
             continue;
         }

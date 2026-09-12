@@ -7597,3 +7597,77 @@ fn a_polymorphic_argument_claim_sizes_a_root_on_c() {
         "C renders the root exactly as eval does"
     );
 }
+
+/// The same root whose extent a RESULT-ONLY binder names: `outer` declares
+/// `-> tensor[seq, f32]` and no parameter binds `seq`, so nothing supplies a
+/// value for that name. chelis#1925's round-1 verification found the LANE
+/// DIVERGENCE this left on `main` `0820ee28e`: the C lane emitted an entry
+/// point and printed the correct line, while eval refused the same program
+/// with `error: missing symbolic dimension binding \`seq\``. The absorption
+/// binds the alias class before the declared result unifies with it, and
+/// `Dim::Name` unifies permissively with the `*` already there, so the
+/// published signature reads `tensor[*, f32]` and both lanes agree.
+///
+/// `spec/04-type-system.md` section 4.7 requires that agreement ("Every
+/// execution mode observes the same values and traps"), section 4.7.4 repeats
+/// it for the lanes by name, and section 4.7.3 forbids a verdict that turns on
+/// a function boundary. `main` itself already absorbed the one-call-shallower
+/// `def bare(t: tensor[3, f32]) -> tensor[seq, f32] = g(t)` to
+/// `tensor[*, f32]` on both lanes, so retaining the name here would make the
+/// answer depend on how many calls the extent crossed.
+const RESULT_ONLY_BINDER_ROOT: &str = "def g(x: tensor[n, f32]) -> tensor[k, f32] = shrink(x, [[1i64, shape(x, 0i32)]])\n\
+     def h(y: tensor[k, f32]) -> tensor[k, f32] = add(y, y)\n\
+     def apply1(f: (tensor[p, f32]) -> tensor[p, f32], v: tensor[p, f32]) -> tensor[p, f32] = f(v)\n\
+     def outer(t: tensor[3, f32]) -> tensor[seq, f32] = apply1(h, g(t))\n\
+     def main() = outer(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n";
+
+/// Receipt for corpus row `root.dim_variable.result_only_binder.eval`.
+///
+/// Regression test. On `0820ee28e` this printed nothing on stdout and
+/// `error: missing symbolic dimension binding \`seq\`` on stderr at exit 1,
+/// while the C half below already printed the value: the divergence is the
+/// defect this row records.
+#[test]
+fn a_result_only_binder_claim_sizes_a_root_on_eval() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = fixture(&dir, "result_only_binder_root.ch", RESULT_ONLY_BINDER_ROOT);
+
+    let evaluated = eval(&path);
+    let stderr = String::from_utf8_lossy(&evaluated.stderr).to_string();
+    assert!(evaluated.status.success(), "{stderr}");
+    assert!(
+        !stderr.contains("missing symbolic dimension binding"),
+        "a binder no parameter binds denotes the extent it met: {stderr}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&evaluated.stdout).trim_end(),
+        NESTED_HELPER_ROOT_RENDERING,
+        "eval renders the root exactly as the C half does"
+    );
+}
+
+/// Receipt for corpus row `root.dim_variable.result_only_binder.c`.
+///
+/// Disposition lock, unlike its eval twin: this half already built, linked and
+/// printed this line on `0820ee28e`, and the repair must keep it. The two
+/// assertions together are what makes the row a lane-agreement receipt rather
+/// than a one-lane improvement.
+#[test]
+fn a_result_only_binder_claim_sizes_a_root_on_c() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (ok, out, emitted) =
+        c_run_result_with_source(&dir, "result_only_binder_root_c", RESULT_ONLY_BINDER_ROOT);
+    assert!(
+        emitted.contains("int main("),
+        "a realizable root owes a C entry point:\n{emitted}"
+    );
+    assert!(ok, "the sized root must build, link and run: {out}");
+    assert_eq!(
+        out.trim_end(),
+        NESTED_HELPER_ROOT_RENDERING,
+        "C renders the root exactly as eval does"
+    );
+}

@@ -84,9 +84,16 @@ independent declaration, value and failure assertions. Remaining failure boundar
   denote that extent. What denotes the extent is the variable's ALIAS CLASS, so
   a polymorphic def passed as an argument, which mints the variable that
   becomes the class's root, is covered. A PARAMETER-bound binder keeps its
-  name; a RESULT-ONLY binder is absorbed to the runtime extent it met, which is
-  what §4.7.3 already required of a signature that names a computed extent and
-  what the one-call-shallower spelling already did on `main`. The manifest's
+  name. A RESULT-ONLY binder is absorbed to the runtime extent it met, and that
+  case was LANE DIVERGENT on `0820ee28e`: `def outer(t: tensor[3, f32]) ->
+  tensor[seq, f32] = apply1(h, g(t))` with a root built, linked and printed
+  correctly on C while eval refused it for a missing `seq` binding, and the
+  one-call-shallower `= g(t)` spelling already published `tensor[*, f32]` on
+  both lanes. §4.7 requires every execution mode to observe the same values,
+  §4.7.3 forbids a verdict that turns on a function boundary, and §4.4.1 makes
+  a dimension that occurs only in the declared result output-inferred from what
+  the body produced; the `root.dim_variable.result_only_binder` corpus pair is
+  the receipt. The manifest's
   `DeepTag::DVar` refusal is unchanged: an uninstantiated variable still has no
   ABI.
   #1378's public vmap witness is no longer masked and executes with its exact
