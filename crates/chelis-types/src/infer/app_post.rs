@@ -851,35 +851,26 @@ pub(super) fn finish_unified_app(
                 if arg_tys.len() != 3 {
                     return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
                 }
-                let tensor_ty = type_for_readonly_check(&arg_tys[0], subst);
-                let indices_ty = type_for_readonly_check(&arg_tys[1], subst);
-                let axis = match resolve_builtin_axis(
-                    "gather",
-                    kids.get(3),
-                    &subst.apply(&arg_tys[2]),
-                    &tensor_ty,
-                    list,
-                    errors,
-                ) {
-                    Ok(axis) => axis,
-                    Err(err) => return err,
-                };
-                match infer_gather_result_type("gather", &tensor_ty, &indices_ty, axis) {
-                    Ok(ty) => return ty,
-                    Err(message) => {
-                        return report(
-                            errors,
-                            CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    message,
-                                ),
-                                vec![],
-                            ),
-                        );
-                    }
+                if let Err(err) =
+                    reject_non_int32_axis("gather", &subst.apply(&arg_tys[2]), list, errors)
+                {
+                    return err;
                 }
+                let route = ShapeRoute::Gather {
+                    op: "gather".to_string(),
+                    indices: Box::new(type_for_readonly_check(&arg_tys[1], subst)),
+                    raw_axis: kids.get(3).and_then(extract_int_for_dim),
+                    updates: None,
+                    mode: None,
+                };
+                return decide_shape_route(
+                    route,
+                    &type_for_readonly_check(&arg_tys[0], subst),
+                    list,
+                    vg,
+                    subst,
+                    errors,
+                );
             }
             "where" => {
                 if arg_tys.len() != 3 {
@@ -1053,47 +1044,25 @@ pub(super) fn finish_unified_app(
                 if arg_tys.len() != 3 {
                     return report_builtin_arity(errors, list, fname, 3, arg_tys.len());
                 }
-                let trace_operand = type_for_readonly_check(&arg_tys[0], subst);
-                let axis1 = match resolve_axis_pair_member(
-                    "trace",
-                    kids.get(2),
-                    &subst.apply(&arg_tys[1]),
-                    &trace_operand,
-                    0,
-                    list,
-                    errors,
-                ) {
-                    Ok(axis) => axis,
-                    Err(err) => return err,
-                };
-                let axis2 = match resolve_axis_pair_member(
-                    "trace",
-                    kids.get(3),
-                    &subst.apply(&arg_tys[2]),
-                    &trace_operand,
-                    1,
-                    list,
-                    errors,
-                ) {
-                    Ok(axis) => axis,
-                    Err(err) => return err,
-                };
-                match infer_trace_result_type(&trace_operand, axis1, axis2) {
-                    Ok(ty) => return ty,
-                    Err(message) => {
-                        return report(
-                            errors,
-                            CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    message,
-                                ),
-                                vec![],
-                            ),
-                        );
+                for idx in [1usize, 2] {
+                    if let Err(err) =
+                        reject_non_int32_axis("trace", &subst.apply(&arg_tys[idx]), list, errors)
+                    {
+                        return err;
                     }
                 }
+                let route = ShapeRoute::Trace {
+                    raw_axis1: kids.get(2).and_then(extract_int_for_dim),
+                    raw_axis2: kids.get(3).and_then(extract_int_for_dim),
+                };
+                return decide_shape_route(
+                    route,
+                    &type_for_readonly_check(&arg_tys[0], subst),
+                    list,
+                    vg,
+                    subst,
+                    errors,
+                );
             }
             "clamp" => {
                 if arg_tys.len() != 3 {
@@ -1199,103 +1168,58 @@ pub(super) fn finish_unified_app(
                 if arg_tys.len() != 5 {
                     return report_builtin_arity(errors, list, fname, 5, arg_tys.len());
                 }
-                let base_ty = subst.apply(&arg_tys[0]);
-                let indices_ty = subst.apply(&arg_tys[1]);
-                let updates_ty = subst.apply(&arg_tys[2]);
-                let axis = match resolve_builtin_axis(
-                    "scatter",
-                    kids.get(4),
-                    &subst.apply(&arg_tys[3]),
-                    &base_ty,
-                    list,
-                    errors,
-                ) {
-                    Ok(axis) => axis,
-                    Err(err) => return err,
+                if let Err(err) =
+                    reject_non_int32_axis("scatter", &subst.apply(&arg_tys[3]), list, errors)
+                {
+                    return err;
+                }
+                let route = ShapeRoute::Gather {
+                    op: "scatter".to_string(),
+                    indices: Box::new(subst.apply(&arg_tys[1])),
+                    raw_axis: kids.get(4).and_then(extract_int_for_dim),
+                    updates: Some(Box::new(subst.apply(&arg_tys[2]))),
+                    mode: Some(
+                        kids.get(5)
+                            .and_then(extract_string_literal)
+                            .unwrap_or_default(),
+                    ),
                 };
-                let mode = kids.get(5).and_then(extract_string_literal);
-                match mode.as_deref() {
-                    Some("replace") | Some("add") => {}
-                    _ => {
-                        return report(
-                            errors,
-                            CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    "scatter mode must be \"replace\" or \"add\"".to_string(),
-                                ),
-                                vec![],
-                            ),
-                        );
-                    }
-                }
-                match infer_gather_result_type("scatter", &base_ty, &indices_ty, axis) {
-                    Ok(expected_updates) => {
-                        if let Err(te) = unify(&expected_updates, &updates_ty, subst) {
-                            return report(errors, te.into());
-                        }
-                        return base_ty;
-                    }
-                    Err(message) => {
-                        return report(
-                            errors,
-                            CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    message,
-                                ),
-                                vec![],
-                            ),
-                        );
-                    }
-                }
+                return decide_shape_route(
+                    route,
+                    &subst.apply(&arg_tys[0]),
+                    list,
+                    vg,
+                    subst,
+                    errors,
+                );
             }
             "scatter_replace" => {
-                // Tensor-lane replace-scatter (last-write-wins) — lowers
-                // to RiscOp::Scatter. Distinct from the host-lane
-                // `scatter(..., mode)` pentaop. AD policy: no_grad
-                // (rejected via AdError::NotSupported); see
-                // spec/05-risc-primitives.md §3.5.
                 if arg_tys.len() != 4 {
                     return report_builtin_arity(errors, list, fname, 4, arg_tys.len());
                 }
-                let base_ty = subst.apply(&arg_tys[0]);
-                let indices_ty = subst.apply(&arg_tys[1]);
-                let updates_ty = subst.apply(&arg_tys[2]);
-                let axis = match resolve_builtin_axis(
+                if let Err(err) = reject_non_int32_axis(
                     "scatter_replace",
-                    kids.get(4),
                     &subst.apply(&arg_tys[3]),
-                    &base_ty,
                     list,
                     errors,
                 ) {
-                    Ok(axis) => axis,
-                    Err(err) => return err,
-                };
-                match infer_gather_result_type("scatter_replace", &base_ty, &indices_ty, axis) {
-                    Ok(expected_updates) => {
-                        if let Err(te) = unify(&expected_updates, &updates_ty, subst) {
-                            return report(errors, te.into());
-                        }
-                        return base_ty;
-                    }
-                    Err(message) => {
-                        return report(
-                            errors,
-                            CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    message,
-                                ),
-                                vec![],
-                            ),
-                        );
-                    }
+                    return err;
                 }
+                let route = ShapeRoute::Gather {
+                    op: "scatter_replace".to_string(),
+                    indices: Box::new(subst.apply(&arg_tys[1])),
+                    raw_axis: kids.get(4).and_then(extract_int_for_dim),
+                    updates: Some(Box::new(subst.apply(&arg_tys[2]))),
+                    mode: None,
+                };
+                return decide_shape_route(
+                    route,
+                    &subst.apply(&arg_tys[0]),
+                    list,
+                    vg,
+                    subst,
+                    errors,
+                );
             }
             "scatter_elements" => {
                 return check_scatter_elements(list, kids, &arg_tys, result_ty, subst, errors);

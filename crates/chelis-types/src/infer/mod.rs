@@ -108,6 +108,7 @@ use app_tensor::*;
 use binder_literal::*;
 use checked::*;
 use common::*;
+pub(crate) use common::{decide_shape_route, shape_route_result};
 use declarations::*;
 use deferred_operands::*;
 use expr::*;

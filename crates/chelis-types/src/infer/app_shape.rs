@@ -2026,7 +2026,8 @@ pub(super) fn app_children_of(expr: &deep::Expr) -> Option<&[deep::Expr]> {
 ///
 /// | Domain               | Site (approx)                        | User-reachable cast? | Validation                | Host-runtime defense |
 /// |----------------------|--------------------------------------|----------------------|---------------------------|----------------------|
-/// | trace/diagonal axis  | `resolve_axis_pair_member` (~4110)   | yes                  | rank bounds + diagnostic  | yes (eval)           |
+/// | diagonal axis        | `resolve_axis_pair_member` (~4110)   | yes                  | rank bounds + diagnostic  | yes (eval)           |
+/// | trace axis           | `settled_axis` (`shape_route_result`) | yes                 | rank bounds + diagnostic  | yes (eval)           |
 /// | builtin axis         | `resolve_builtin_axis` (~4154)       | yes                  | rank bounds + diagnostic  | yes (eval)           |
 /// | conv output type   | `derive_conv_output_type` (~5720)  | yes (`stride=cast`)  | positivity + spatial dim  | yes (validator arm)  |
 /// | conv output type   | `derive_conv_output_type` (~5721)  | yes (`padding=cast`) | non-neg + spatial dim     | yes (validator arm)  |

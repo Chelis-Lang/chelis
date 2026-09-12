@@ -577,6 +577,154 @@ pub(super) fn param_bound_dims(decl_ty: &Type) -> Vec<Dim> {
     out
 }
 
+/// Decide a shape-computing call now, or suspend it if the operand is not
+/// resolved yet (chelis#1489).
+///
+/// The ONE entry point every shape-route arm uses, so "decide now" and "decide
+/// later" cannot drift apart: both end in [`shape_route_result`], and the only
+/// difference is when.
+///
+/// Suspending returns a FRESH result variable rather than the operand's,
+/// exactly as the `copy`/`cast` gates do, so the expression's type cannot
+/// depend on when the operand resolved.
+pub(crate) fn decide_shape_route(
+    route: crate::unify::ShapeRoute,
+    operand: &Type,
+    list: &deep::List,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    errors: &mut DiagnosticSink<'_>,
+) -> Type {
+    if let Type::Var(tv) = operand {
+        let result = vg.fresh_type();
+        subst.record_deferred_tensor_operand(
+            *tv,
+            crate::unify::DeferredOperandGate::ShapeRoute {
+                route,
+                result: Box::new(result.clone()),
+            },
+        );
+        return result;
+    }
+    match shape_route_result(&route, operand) {
+        Ok((result, updates)) => {
+            if let Some(expected_updates) = updates
+                && let crate::unify::ShapeRoute::Gather {
+                    updates: Some(actual),
+                    ..
+                } = &route
+                && let Err(te) = unify(&expected_updates, actual.as_ref(), subst)
+            {
+                return report(errors, te.into());
+            }
+            result
+        }
+        Err(message) => report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(&deep::Expr::List(list.clone(), zero_span()), message),
+                vec![],
+            ),
+        ),
+    }
+}
+
+/// Decide a shape-computing call (chelis#1489).
+///
+/// THE decision function for `gather`, `scatter`, `scatter_replace` and
+/// `trace`. The eager arm calls it with the operand it just resolved; a
+/// suspended [`crate::unify::DeferredOperandGate::ShapeRoute`] calls it with
+/// the operand the binding just settled. One implementation, so the two cannot
+/// disagree -- an earlier revision hand-copied the arm's tail here instead and
+/// silently lost `scatter`'s mode check and the borrow normalization.
+///
+/// Everything the call decides happens HERE, not in the arm: the operand is
+/// normalized through one borrow where the route's arm does so, the axis is
+/// normalized against the operand's own rank, and the mode string is
+/// validated. The arm's remaining job is to report the `Err`, and to unify the
+/// updates obligation this returns.
+///
+/// These routes only COPY the operand's dims into their result, so a dim that
+/// is still a variable when this runs passes through and resolves later.
+/// `concat` and `diagonal` compute a new extent from those dims and are NOT
+/// decided here: see the deferred-operand ledger's doc in `unify.rs`.
+///
+/// Returns `(result type, updates obligation)`. The updates unification is the
+/// caller's because discharge runs inside unification while the eager arm has
+/// a `&mut Subst`; the DECISION of what updates must equal is here.
+pub(crate) fn shape_route_result(
+    route: &crate::unify::ShapeRoute,
+    operand: &Type,
+) -> Result<(Type, Option<Type>), String> {
+    use crate::unify::ShapeRoute;
+    // Strip one borrow only for the routes whose arms do, so a deferred
+    // `gather(&t, ..)` accepts what the eager one accepts WITHOUT widening
+    // `scatter`/`scatter_replace`, which reject a borrowed operand.
+    let operand = match operand {
+        Type::Ref(inner) if route.normalizes_borrow() => inner.as_ref(),
+        other => other,
+    };
+    match route {
+        ShapeRoute::Gather {
+            op,
+            indices,
+            raw_axis,
+            updates,
+            mode,
+        } => {
+            // Axis bounds first, then the mode string: the order the eager arm
+            // had, so a call that is wrong in both ways reports the same one.
+            let axis = settled_axis(op, operand, *raw_axis, 0)?;
+            if let Some(mode) = mode
+                && !matches!(mode.as_str(), "replace" | "add")
+            {
+                return Err(format!("{op} mode must be \"replace\" or \"add\""));
+            }
+            let result = infer_gather_result_type(op, operand, indices.as_ref(), axis)?;
+            match updates {
+                // `scatter` returns the BASE tensor; the gathered shape is what
+                // its updates operand must equal.
+                Some(_) => Ok((operand.clone(), Some(result))),
+                None => Ok((result, None)),
+            }
+        }
+        ShapeRoute::Trace {
+            raw_axis1,
+            raw_axis2,
+        } => {
+            let axis1 = settled_axis("trace", operand, *raw_axis1, 0)?;
+            let axis2 = settled_axis("trace", operand, *raw_axis2, 1)?;
+            Ok((infer_trace_result_type(operand, axis1, axis2)?, None))
+        }
+    }
+}
+
+/// Normalize a raw axis against the operand's rank (chelis#1489).
+///
+/// The eager resolvers, with the same message text. `default` is the axis the
+/// call uses when none was written, matching their fallback.
+///
+/// A non-tensor operand yields `default` rather than an error, exactly as the
+/// eager resolvers do: the route's own helper rejects it, and it does so AFTER
+/// `scatter`'s mode check. Rejecting here instead made a call that is wrong in
+/// both ways report the operand error where it had reported the mode error.
+fn settled_axis(
+    op: &str,
+    operand: &Type,
+    raw: Option<i64>,
+    default: usize,
+) -> Result<usize, String> {
+    let Type::Tensor(dims, _) = operand else {
+        return Ok(default);
+    };
+    match raw {
+        Some(raw) => normalize_static_axis(dims.len(), raw)
+            .ok_or_else(|| format!("{op} axis {raw} out of bounds for rank {}", dims.len())),
+        None => Ok(default),
+    }
+}
+
 pub(super) fn infer_gather_result_type(
     op: &str,
     tensor_ty: &Type,
