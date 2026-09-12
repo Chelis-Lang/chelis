@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "426ba0bcaf11c1077ba2e0bbf4c24b7b1b5c74196bd056802f6e825f979d1f09",
+  "corpus_sha256": "bd66d50389a3d3ccde6a7c28182a30efebfdeaadcd017787eccc3f3d51f9c6be",
   "rows": [
     {
       "id": "claim.literal.nested_and_unused.eval_c",
@@ -217,6 +217,30 @@
       "baseline": "lane_divergent",
       "phase_b": "executes_exactly",
       "receipt": "literal_claim.literal_result_claim_contract"
+    },
+    {
+      "id": "expand.named_bystander.axis_zero.c",
+      "baseline": "ice",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_named_bystander_axis_keeps_its_size_extent_on_axis_zero_too"
+    },
+    {
+      "id": "expand.named_bystander.consumer.c",
+      "baseline": "ice",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_named_bystander_axis_keeps_its_size_extent_on_c"
+    },
+    {
+      "id": "expand.named_bystander.no_consumer.c",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_named_bystander_expand_with_no_consumer_agrees_across_lanes"
+    },
+    {
+      "id": "expand.named_bystander.no_consumer.eval",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_named_bystander_expand_with_no_consumer_agrees_across_lanes"
     },
     {
       "id": "expand.named_claim.cross_tensor_read.c",
