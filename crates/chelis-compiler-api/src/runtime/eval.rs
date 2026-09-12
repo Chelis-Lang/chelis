@@ -313,6 +313,23 @@ fn render_shape(shape: &[usize]) -> String {
     format!("[{dimensions}]")
 }
 
+/// Isolated source-call classification must retain the checked frame types
+/// of bare arguments. Attach only missing type evidence: scalar expressions
+/// remain source expressions, never their already-evaluated runtime values.
+fn source_call_with_checked_argument_types(list: &List, types: &[Option<Expr>]) -> Expr {
+    let mut call = list.clone();
+    for (argument, ty) in call.elements[3..].iter_mut().zip(types) {
+        if let (Expr::List(argument, _), Some(ty)) = (argument, ty)
+            && let Some(Expr::Map(metadata, _)) = argument.elements.get_mut(1)
+            && metadata.ty().is_none()
+            && let Ok(ty) = chelis_deep::annotations::TypeSyntax::try_new(ty.clone())
+        {
+            metadata.replace(chelis_deep::annotations::MetadataValue::Type(ty));
+        }
+    }
+    Expr::List(call, Span::new(0, 0))
+}
+
 impl<'a> EvalContext<'a> {
     pub(super) fn execution_profile(
         &self,
@@ -1273,10 +1290,10 @@ impl<'a> EvalContext<'a> {
             .map(|arg| self.eval_expr(arg))
             .collect::<Result<Vec<_>, _>>()?;
 
-        // #1764: a concrete tensor call may bind a dropout rate that its
-        // standalone declaration cannot. Route the source call before the
-        // callee frame forgets those static actuals. Generic host dispatch
-        // and excluded control profiles keep their existing boundary.
+        // #1764: a checked tensor call may specialize a dropout rate that
+        // its standalone declaration cannot, including a generic cast.
+        // Route before the callee frame forgets those source actuals; the
+        // existing planner resolves precision from checked argument types.
         if self.execution_exclusion.is_none()
             && let Some(callee) = var_name(func)
             && let Some((resolved, def_expr)) = self.lookup_top_level_def(callee)
@@ -1289,13 +1306,12 @@ impl<'a> EvalContext<'a> {
                 RuntimeValue::Closure { def_name: Some(name), .. } if name == &resolved)
             })
             && let Some(signature) = self.type_env.get(&resolved)
-            && !chelis_ir::lower::type_expr_has_precision_var(signature)
             && !chelis_ir::lower::type_expr_has_rank_var(signature)
             && result_type_expr.as_ref().is_some_and(|ty| {
                 tagged_expr_children(ty).is_some_and(|(tag, _)| tag == DeepTag::TTensor)
             })
             && chelis_ir::lower::evaluation_profile(
-                &Expr::List(list.clone(), Span::new(0, 0)),
+                &source_call_with_checked_argument_types(list, &arg_type_exprs),
                 &self.top_level_defs,
             ) == chelis_ir::evaluation::EvaluationProfile::FixedControl
             && let Some(value) =
