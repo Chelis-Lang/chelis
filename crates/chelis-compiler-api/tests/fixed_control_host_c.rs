@@ -6,6 +6,51 @@ use chelis_compiler_api::compiler::compile_for_execution;
 use chelis_compiler_api::schema::{CompileRequest, CompileTarget, SourceKind};
 
 #[test]
+fn signed_int64_host_boundaries_compile_without_literal_overflow() {
+    // [04-NUM-11], [05-RNG-1], chelis#1859. Expected masks are fixed
+    // ordinal-zero words from the specified seed-bit map, not emitted C.
+    for (seed, literal, expected) in [
+        (i64::MIN, "INT64_MIN", "-6.0f,-2.0f,0.0f,6.0f"),
+        (i64::MIN + 1, "(INT64_MIN + 1)", "0.0f,-2.0f,0.0f,6.0f"),
+        (-1, "-1", "-6.0f,-2.0f,2.0f,0.0f"),
+        (0, "0", "0.0f,0.0f,2.0f,0.0f"),
+        (i64::MAX, "INT64_MAX", "0.0f,-2.0f,0.0f,0.0f"),
+    ] {
+        let source = format!(
+            "def boundary() -> int64 = {seed}i64\n\
+             def sample(x: tensor[4,f32]) -> tensor[4,f32] = with seed({seed}i64) {{ dropout(x,0.5f32) }}"
+        );
+        let generated = ownership_support::emit(&source, "signed-host-boundary");
+        // Make the actual bad decimal token fail compilation on both native
+        // compiler families, without suppressing diagnostics elsewhere.
+        let strict = format!(
+            "#if defined(__clang__)\n#pragma clang diagnostic error \"-Wimplicitly-unsigned-literal\"\n\
+             #elif defined(__GNUC__)\n#pragma GCC diagnostic error \"-Woverflow\"\n#endif\n\
+             #define main unused_generated_main\n{generated}\n#undef main\n"
+        );
+        let driver = format!(
+            r#"
+int main(void) {{
+    assert(boundary() == {literal});
+    chelis_tensor *x = input(4);
+    const float expected[] = {{{expected}}};
+    for (int repeat = 0; repeat < 3; ++repeat) {{
+        chelis_tensor *result = sample(x);
+        chelis_read_view view = chelis_tensor_read_view(result);
+        assert(view.dtype == CHELIS_DTYPE_F32 && view.count == 4);
+        assert(memcmp(view.data, expected, sizeof(expected)) == 0);
+        chelis_tensor_release(result);
+    }}
+    chelis_tensor_release(x);
+    return 0;
+}}
+"#
+        );
+        ownership_support::balanced(&ownership_support::run(&strict, &driver));
+    }
+}
+
+#[test]
 fn generic_static_rate_reaches_native_host_helper() {
     for dtype in ["f16", "bf16", "f32", "f64"] {
         let source = format!(
