@@ -44,13 +44,18 @@ fn checked_surf(source: &str) -> CheckedProgram {
     chelis_types::check_ir_program(&exprs).expect("ir check")
 }
 
-/// chelis#1829: the interpreter entry arms the host-lowering memo, so the
-/// kernel-decision probes behind `def_kernel` are bounded by the number of
-/// definitions rather than expanding the call graph as a tree.
+/// chelis#1829: the interpreter entry derives each definition's kernel
+/// decision once, so the summary probes behind `def_kernel` are bounded by the
+/// number of definitions rather than expanding the call graph as a tree.
+///
+/// Two rows, and each stops the other going vacuous. The tensor row measures
+/// the BOUND, because it still reaches the probe. The scalar row is the
+/// REGRESSION CLASS, because #1829's own provoking definitions are non-tensor,
+/// and after chelis#1835's predicate reorder its count is exactly zero.
 ///
 /// Evidentiary status: REGRESSION TEST for the entry point. On the base this
-/// function armed nothing, so the same fixture builds hundreds of thousands of
-/// summaries (measured: 398,574 at depth 12) and takes minutes.
+/// function armed nothing, so the scalar fixture builds hundreds of thousands
+/// of summaries (measured: 398,574 at depth 12) and takes minutes.
 ///
 /// The fixture uses one program rather than a composed library plus caller,
 /// because `CheckedProgram::compose` requires a `library_proof_id` that only
@@ -60,40 +65,21 @@ fn checked_surf(source: &str) -> CheckedProgram {
 /// CLI rows. What this pins is the part those rows cannot: an exact probe count
 /// at the entry that arms the scope.
 ///
-/// The negative twin is the mutation run recorded in the pull request: with the
-/// scope neutered this assertion reads five orders of magnitude higher.
-#[test]
-fn issue_1829_interpreter_entry_bounds_kernel_decision_probes() {
-    const DEPTH: usize = 12;
-    // The chain is TENSOR-returning, and that is what keeps the `probes > 0`
-    // guard below meaningful. chelis#1835 made the callee summary probe the
-    // last host-lane predicate asked, after the declared result type has had
-    // its chance, so a SCALAR-returning chain now reaches no probe at all and
-    // this fixture would assert a bound on zero work. A tensor result is the
-    // shape that still asks the question the receipt is counting.
-    //
-    // A large stack so that an unmemoized run reports the probe COUNT rather
-    // than overflowing: the probe recurses once per call-graph level per call
-    // site, and the default test stack aborts the whole process at depth 12.
+/// The negative twin is on the base rather than a mutation: the scalar row's
+/// 398,574 against its 0 here, and the tensor row's own `probes > 0` guard,
+/// which fired on CI when chelis#1835's reorder first made the scalar fixture
+/// stop reaching the probe.
+/// One evaluation of `source`, returning its `result` rendering and the number
+/// of kernel-decision summary probes the interpreter ran.
+///
+/// A large stack so that an unmemoized run reports the probe COUNT rather than
+/// overflowing: the probe recurses once per call-graph level per call site, and
+/// the default test stack aborts the whole process at depth 12.
+fn issue_1829_entry_probe_count(label: &'static str, source: String) -> (String, u64) {
     std::thread::Builder::new()
-        .name("issue-1829-entry".to_string())
+        .name(format!("issue-1829-entry-{label}"))
         .stack_size(256 * 1024 * 1024)
-        .spawn(|| {
-            let mut source = String::new();
-            for level in 0..DEPTH {
-                source.push_str(&format!(
-                    "def f{level}(x: tensor[4, f32]) -> tensor[4, f32] = \
-                     add(f{next}(x), f{next}(x))\n",
-                    next = level + 1
-                ));
-            }
-            source.push_str(&format!(
-                "def f{DEPTH}(x: tensor[4, f32]) -> tensor[4, f32] = mul(x, x)\n"
-            ));
-            source
-                .push_str("seed = reshape(insert(to_tensor([cast(1.0, f32)]), 0, 4i64), [4i64])\n");
-            source.push_str("result = f0(seed)\n");
-
+        .spawn(move || {
             let checked = checked_surf(&source);
             let empty_tensors: UnordMap<String, RuntimeTensorValue> = UnordMap::new();
             let inputs = HostEvaluationInputs {
@@ -106,32 +92,97 @@ fn issue_1829_interpreter_entry_bounds_kernel_decision_probes() {
             )
             .expect("#1829 fanout fixture evaluates");
             let probes = chelis_ir::host::host_summary_probe_builds();
-            let definitions = u64::try_from(DEPTH + 1).expect("definition count fits");
-
             let result = outcome
                 .host_bindings
                 .get("result")
                 .map(render_value)
                 .expect("#1829 fixture binds `result`");
-            eprintln!("#1829 entry depth={DEPTH} definitions={definitions} probes={probes}");
-            assert_eq!(
-                result, "tensor(shape=[4], data=[4096.0, 4096.0, 4096.0, 4096.0])",
-                "#1829 fixture must still compute the right answer"
-            );
-            assert!(
-                probes > 0,
-                "#1829: the fixture must actually reach the kernel-decision probe, or this \
-                 receipt would pass without measuring anything"
-            );
-            assert!(
-                probes <= definitions,
-                "#1829: the interpreter entry must build at most one summary per definition; \
-                 {definitions} definitions produced {probes} builds"
-            );
+            (result, probes)
         })
         .expect("#1829 entry probe thread starts")
         .join()
-        .expect("#1829 entry probe thread completes");
+        .expect("#1829 entry probe thread completes")
+}
+
+/// A fan-out chain of `depth` definitions, each calling the next from two
+/// argument positions, returning tensors or scalars.
+fn issue_1829_entry_source(depth: usize, tensor_result: bool) -> String {
+    let mut source = String::new();
+    if tensor_result {
+        for level in 0..depth {
+            source.push_str(&format!(
+                "def f{level}(x: tensor[4, f32]) -> tensor[4, f32] = \
+                 add(f{next}(x), f{next}(x))\n",
+                next = level + 1
+            ));
+        }
+        source.push_str(&format!(
+            "def f{depth}(x: tensor[4, f32]) -> tensor[4, f32] = mul(x, x)\n"
+        ));
+        source.push_str("seed = reshape(insert(to_tensor([cast(1.0, f32)]), 0, 4i64), [4i64])\n");
+    } else {
+        for level in 0..depth {
+            source.push_str(&format!(
+                "def f{level}(x: int64) -> int64 = add(f{next}(x), f{next}(x))\n",
+                next = level + 1
+            ));
+        }
+        source.push_str(&format!("def f{depth}(x: int64) -> int64 = x\n"));
+        source.push_str("seed = cast(1, int64)\n");
+    }
+    source.push_str("result = f0(seed)\n");
+    source
+}
+
+#[test]
+fn issue_1829_interpreter_entry_bounds_kernel_decision_probes() {
+    const DEPTH: usize = 12;
+    let definitions = u64::try_from(DEPTH + 1).expect("definition count fits");
+
+    // Row 1, the BOUND. A tensor-returning chain reaches the probe, so the
+    // bound is measured rather than asserted over nothing. This row exists in
+    // this shape because chelis#1835's predicate reorder made the probe the
+    // last host-lane predicate asked: the scalar chain below no longer reaches
+    // it, and a receipt whose only fixture stopped reaching it would pass
+    // while measuring zero work. Its own `probes > 0` guard caught exactly
+    // that, on CI.
+    let (tensor_result, tensor_probes) =
+        issue_1829_entry_probe_count("tensor", issue_1829_entry_source(DEPTH, true));
+    eprintln!("#1829 entry tensor definitions={definitions} probes={tensor_probes}");
+    assert_eq!(
+        tensor_result, "tensor(shape=[4], data=[4096.0, 4096.0, 4096.0, 4096.0])",
+        "#1829 tensor fixture must still compute the right answer"
+    );
+    assert!(
+        tensor_probes > 0,
+        "#1829: the fixture must actually reach the kernel-decision probe, or this receipt \
+         would pass without measuring anything"
+    );
+    assert!(
+        tensor_probes <= definitions,
+        "#1829: the interpreter entry must build at most one summary per definition; \
+         {definitions} definitions produced {tensor_probes} builds"
+    );
+
+    // Row 2, the REGRESSION CLASS. #1829's own class is the scalar chain,
+    // because the definitions that provoked it are non-tensor (`Std.Io.Json`).
+    // Keeping it is what stops row 1's retyping from quietly dropping the
+    // class this receipt was written for. Its count is now exactly zero, and
+    // that is the public-entry receipt for the reorder: a definition whose
+    // declared result cannot be a kernel pays no probe at all. On the base it
+    // was 398,574.
+    let (scalar_result, scalar_probes) =
+        issue_1829_entry_probe_count("scalar", issue_1829_entry_source(DEPTH, false));
+    eprintln!("#1829 entry scalar definitions={definitions} probes={scalar_probes}");
+    assert_eq!(
+        scalar_result, "4096",
+        "#1829 scalar fixture must still compute the right answer"
+    );
+    assert_eq!(
+        scalar_probes, 0,
+        "#1829/#1835: a non-tensor definition must pay no kernel-decision probe; the reorder \
+         asks the probe after the declared result type, so this chain reaches none"
+    );
 }
 
 #[test]
