@@ -146,29 +146,45 @@ const RUNTIME_DTYPE_CONSUMERS: &[Consumer] = &[
     // emitter's three other copies were not, so `cmplt` and `cast` went on
     // dispatching four-byte kernels over a one-byte allocation.
     //
-    // The header no longer decides anything per dtype - it calls
-    // `chelis_dtype_size`, whose Rust side is `tensor_elem_size`, required by
-    // the `chelis-runtime` row above and implemented as `dtype.byte_width()`.
-    // That is an exhaustive match on `Repr`, so a new dtype breaks the build
-    // there rather than merely missing a string here. Per this file's own
-    // header, rustc exhaustiveness is the authority and the inventory exists
-    // to keep untyped string consumers from sitting outside it; delegating
-    // removes this file from that category instead of keeping it compliant.
-    //
-    // The row therefore inverts: require the delegation, forbid the
-    // restatement.
+    // chelis#1867: the separate device owner now obtains allocation bytes from
+    // the checked Rust metadata plan. Keep the header's anti-restatement
+    // checks, and follow the delegation through its current owners rather
+    // than requiring the removed header-local size helper. Exhaustiveness in
+    // RuntimeDType remains the authority; these are supporting source guards.
     Consumer {
         source: ConsumerSource::File("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
-        role: "HIP allocation byte width",
+        role: "HIP header delegates device ownership",
         required: &[
             "#include \"chelis_runtime_dtype.h\"",
-            "return (size_t)chelis_dtype_size((chelis_dtype)dtype);",
+            "#include \"chelis_device_owner.h\"",
         ],
         forbidden: &[
             "return sizeof(float);",
             "case CHELIS_DTYPE_F64:",
             "case CHELIS_DTYPE_BOOL:",
         ],
+    },
+    Consumer {
+        source: ConsumerSource::File("crates/chelis-backend-hip/runtime/chelis_device_owner.cpp"),
+        role: "HIP allocation consumes checked metadata bytes",
+        required: &[
+            "auto bytes = chelis_metadata_plan_byte_count(plan.get());",
+            "hipMalloc(&data, static_cast<size_t>(bytes))",
+        ],
+        forbidden: &[
+            "return sizeof(float);",
+            "case CHELIS_DTYPE_F64:",
+            "case CHELIS_DTYPE_BOOL:",
+        ],
+    },
+    Consumer {
+        source: ConsumerSource::File("crates/chelis-abi/src/metadata.rs"),
+        role: "checked metadata derives bytes from RuntimeDType",
+        required: &[
+            "pub fn bytes(self, dtype: RuntimeDType)",
+            "self.layout_bytes(dtype.contract().repr().byte_width())",
+        ],
+        forbidden: &[],
     },
     Consumer {
         source: ConsumerSource::File("crates/chelis-backend-metal/src/dtype.rs"),

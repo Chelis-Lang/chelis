@@ -33,6 +33,16 @@ const ALLOWED: &[(&str, usize, &str)] = &[
         "a runtime unit-axis broadcast multiplies a computed reshape without raising rank",
     ),
     (
+        "examples/record_input_broadcast.ch",
+        1,
+        "record-projected bias tensor[1, 4, f32] broadcasts axis 0 to the feature batch extent, retaining rank 2",
+    ),
+    (
+        "crates/chelis-compiler-api/tests/dropout_fixed_stream_api.rs",
+        1,
+        "the seeded forward/gradient fixture broadcasts its rank-1 unit operand to 32 before dropout; the runtime unit-extent claim remains required",
+    ),
+    (
         "crates/chelis-compiler-api/tests/disk_cache.rs",
         1,
         "current and restored library caches retain the same-rank unit broadcast precondition",
@@ -164,8 +174,8 @@ const ALLOWED: &[(&str, usize, &str)] = &[
     // axis, or is the negative row that refuses a non-unit one.
     (
         "crates/chelis-cli/tests/runtime_extent_slice_b.rs",
-        11,
-        "the same-rank broadcast fixture, the zero-extent fixture, the static and runtime non-unit refusals, the unit-extent control, the two locally placed claims over a runtime `shrink` extent, and the two-`expand`-over-one-operand pair with its refuted twin",
+        27,
+        "same-rank unit-axis broadcasts and their static/runtime non-unit refusals; includes record/nested-record projections, helper and lambda results, aliased/cast shape carriers, and axis/declared-result mismatch controls",
     ),
     (
         "crates/chelis-cli/tests/runtime_extent_claim_preparation.rs",
