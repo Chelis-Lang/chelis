@@ -1411,8 +1411,7 @@ fn signature_mismatch(params: &str, body_result: &str, declared_result: &str) ->
 }
 
 fn expect_exact_error(program: &str, expected: &str) {
-    let errors = check(program)
-        .expect_err(&format!("this program must be rejected:\n{program}"));
+    let errors = check(program).expect_err(&format!("this program must be rejected:\n{program}"));
     assert!(
         errors.iter().any(|e| e.message == expected),
         "the rejection must be the direct spelling's own text.\nexpected: {expected}\ngot:\n{}",
@@ -1450,12 +1449,8 @@ fn a_match_destructured_sum_operand_is_tied_to_the_bound_scrutinee() {
 
     // NEGATIVE TWIN: the shape the route actually produces still checks, so
     // the repair rejects a wrong claim rather than the destructuring form.
-    check(&program("tensor[3, f32]")).unwrap_or_else(|e| {
-        panic!(
-            "the true result shape must still check:\n{}",
-            summary(&e)
-        )
-    });
+    check(&program("tensor[3, f32]"))
+        .unwrap_or_else(|e| panic!("the true result shape must still check:\n{}", summary(&e)));
 
     // The operand that NEVER binds is the acceptance boundary, not a pass:
     // the lambda is never applied, so no application supplies `q`'s
@@ -1499,7 +1494,10 @@ fn a_match_destructured_matmul_operand_is_tied_to_the_bound_scrutinee() {
 
     // NEGATIVE TWIN.
     check(&program("tensor[4, 5, f32]")).unwrap_or_else(|e| {
-        panic!("matmul's true result shape must still check:\n{}", summary(&e))
+        panic!(
+            "matmul's true result shape must still check:\n{}",
+            summary(&e)
+        )
     });
 }
 
@@ -1595,4 +1593,81 @@ fn a_gated_copy_result_ties_its_sum_consumer_to_the_bound_operand() {
         "the consumer's own obligation must also be reported:\n{}",
         summary(&errors)
     );
+}
+
+/// NEGATIVE PARITY for chelis#1836's two ties: an ill-typed destructuring or
+/// field read on a late-bound operand is now REPORTED, where it used to be
+/// invisible.
+///
+/// Tying an unresolved scrutinee to the pattern's shape, and a projected field
+/// to the field the target carries, makes four disagreements checkable that the
+/// disconnected fresh variable absorbed. That is the tie working rather than a
+/// side effect: a pattern or a field read that cannot agree with the value the
+/// application supplies is a defect in the program, and nothing else in the
+/// checker was positioned to notice.
+///
+/// Each program also reports the route's declaration-boundary obligation,
+/// because the tie that failed is the one that would have settled the operand.
+/// The assertions below name the PRIMARY diagnostic, and the last cell is the
+/// control that nothing became noisy: a tie that succeeds still checks.
+///
+/// REGRESSION TEST, every rejecting assertion. All four were measured on
+/// `6abca2406` at score 1 with `errors []`.
+#[test]
+fn an_ill_typed_destructure_or_field_read_on_a_late_bound_operand_is_now_reported() {
+    for (case, program, kind, diagnostic) in [
+        (
+            "pattern arity disagrees with the scrutinee",
+            "def apply_p[b](f: ((tensor[4, 3, f32], int32)) -> b, r: (tensor[4, 3, f32], int32)) -> b = f(r)\n\
+             def probe(t: tensor[4, 3, f32]) -> tensor[3, f32] = apply_p(fn (q) -> match q with { | (a, k, z) => sum(a, 0) }, (t, 1i32))\n",
+            "ArityMismatch",
+            "tuple length mismatch: 2 vs 3",
+        ),
+        (
+            "tuple pattern on a scrutinee that binds to a tensor",
+            "def apply_t[b](f: (tensor[4, 3, f32]) -> b, x: tensor[4, 3, f32]) -> b = f(x)\n\
+             def probe(t: tensor[4, 3, f32]) -> tensor[3, f32] = apply_t(fn (q) -> match q with { | (a, k) => sum(a, 0) }, t)\n",
+            "TypeMismatch",
+            "type mismatch: tensor[4, 3, f32] vs (",
+        ),
+        (
+            "field read on a target that binds to a tensor",
+            "def apply_t[b](f: (tensor[4, 3, f32]) -> b, x: tensor[4, 3, f32]) -> b = f(x)\n\
+             def probe(t: tensor[4, 3, f32]) -> tensor[3, f32] = apply_t(fn (q) -> sum(q.x, 0), t)\n",
+            "TypeMismatch",
+            "field access `.x` expects a record value, got a value of type `tensor[4, 3, f32]` (chelis#755)",
+        ),
+        (
+            "unknown field on a target that binds to a record",
+            "type Box =\n  | Box { x: tensor[4, 3, f32] }\n\
+             def apply_b[b](f: (Box) -> b, r: Box) -> b = f(r)\n\
+             def probe(t: tensor[4, 3, f32]) -> tensor[3, f32] = apply_b(fn (q) -> sum(q.zzz, 0), Box { x: t })\n",
+            "TypeMismatch",
+            "unknown record field 'zzz' on Box",
+        ),
+    ] {
+        let errors = check(program).expect_err(&format!("{case}: this program must be rejected"));
+        assert!(
+            errors
+                .iter()
+                .any(|e| format!("{:?}", e.kind) == kind && e.message.contains(diagnostic)),
+            "{case}: the primary diagnostic must be [{kind}] {diagnostic:?}, got:\n{}",
+            summary(&errors)
+        );
+    }
+
+    // CONTROL. Two field reads on one unresolved target both resolve, so the
+    // ties report nothing when they agree. DISPOSITION LOCK: accepted on
+    // `6abca2406` and here.
+    check(
+        "type Box =\n  | Box { x: tensor[4, 3, f32], y: tensor[4, 3, f32] }\n\
+         def apply_b[b](f: (Box) -> b, r: Box) -> b = f(r)\n\
+         def probe(t: tensor[4, 3, f32]) -> tensor[4, 3, f32] = apply_b(fn (q) -> add(q.x, q.y), Box { x: t, y: t })\n",
+    )
+    .unwrap_or_else(|e| {
+        panic!(
+            "two field reads on one late-bound target must still check:\n{}",
+            summary(&e)
+        )
+    });
 }

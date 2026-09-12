@@ -562,9 +562,7 @@ impl InferenceProduct {
                             // The arm pattern admits these two only.
                             _ => unreachable!("arm matches Adt and KindedAdt only"),
                         };
-                        let Some(variant) =
-                            single_record_variant(adt_reg, &adt_name)
-                        else {
+                        let Some(variant) = single_record_variant(adt_reg, &adt_name) else {
                             errors.push(CheckError::new(
                                 CheckErrorKind::TypeMismatch,
                                 format!(

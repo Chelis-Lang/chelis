@@ -665,11 +665,7 @@ pub(super) fn infer_access(
             // projection by ADT field lookup at the same point tuple
             // projection is resolved.
             let projected = vg.fresh_type();
-            product.defer_record_field(
-                resolved.clone(),
-                field_name.to_string(),
-                projected.clone(),
-            );
+            product.defer_record_field(resolved.clone(), field_name.to_string(), projected.clone());
             projected
         }
         // chelis#755 (discovered-hole conversion, chelis#731 Phase 2): field

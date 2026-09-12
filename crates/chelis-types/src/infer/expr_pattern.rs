@@ -635,8 +635,7 @@ pub(super) fn pattern_bindings(
                 // program rather than a shape this arm may ignore.
                 let tied: Option<Vec<Type>> = match &resolved {
                     Type::Var(_) => {
-                        let elems: Vec<Type> =
-                            kids.iter().map(|_| vg.fresh_type()).collect();
+                        let elems: Vec<Type> = kids.iter().map(|_| vg.fresh_type()).collect();
                         match unify(&resolved, &Type::Tuple(elems.clone()), subst) {
                             Ok(()) => Some(elems),
                             Err(error) => {
