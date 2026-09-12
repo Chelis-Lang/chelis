@@ -199,12 +199,16 @@ draws use the same ownership-verified plan as direct source compilation. Entry
 selection still names only new-code tensor roots; runtime-rate and rootless
 entries retain their existing rejection.
 
-The separate qualified-private-library checker gap remains tracked by chelis#1878.
-Its ignored negative is a manual regression, expected to fail until that issue is
-repaired: `cargo nextest run -p chelis-compiler-api --test fixed_control_host_c -E
-'test(diagnostic_private_export_is_already_accepted_by_context_checker)'
---run-ignored only`. Ordinary context transport tests do not claim export-checker
-completeness.
+Reef imports respect each module's export list even within the same package
+(chelis#1878). Local private helpers remain available in their declaring module;
+public types still export their constructors. The active
+`context_imports_enforce_module_exports_before_checking_or_emission` regression
+checks qualified, selective and wildcard imports through live and decoded contexts,
+before both checking and C emission. A same-package import of a previously hidden
+helper must now name an explicitly exported binding; this is an acceptance tightening,
+not a new module grammar or a complete export-checker proof. `Std.Tokenizer` explicitly
+exports its existing `Tokenizer` type (and thus `BpeTokenizer`) used by its package
+tests. Consumers need a reviewed migration before adopting the compiler release.
 
 ### 1.7 Sparse tensor-lane nodes — `spec/05` §3.5
 
