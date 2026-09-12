@@ -1556,3 +1556,132 @@ fn the_op_computed_origin_walk_crosses_pass_through_and_stops_at_a_set_axis() {
     );
     assert_eq!(op_computed_axis_origin(&dag, kept, 0), None);
 }
+
+/// chelis#1837: which op-computed extents are compile-time constants, and
+/// which the section 4.7.2 guard is for.
+///
+/// `static_op_computed_axis_extent` decides whether a declaration over an
+/// op-computed axis is runtime-checkable at all. A constant extent makes a
+/// disagreeing claim statically refuted, which `verify`'s per-owner size check
+/// refuses the graph for, so lowering leaves it unstamped; a runtime extent is
+/// the case the guard exists for.
+///
+/// EVIDENTIARY STATUS: regression test. The function did not exist before this
+/// change, and each row is one of the two dispositions the stamp depends on:
+/// without the `pad` row, `concat`'s lowered cascade stamps a claim the C lane
+/// then refuses to build.
+#[test]
+fn a_static_op_computed_extent_is_told_apart_from_a_runtime_one() {
+    use chelis_ir::axis_sources::static_op_computed_axis_extent;
+
+    // Literal padding over a literal operand: `concat`'s lowered cascade,
+    // whose extent the verifier also computes.
+    let mut dag = Dag::new();
+    let fixed = load(&mut dag, "x", vec![DimInfo::Lit(4)]);
+    let padded = dag.add_node(
+        RiscOp::zero_pad(Prim::F32, vec![(RtDim::Lit(0), RtDim::Lit(4))]),
+        vec![fixed],
+        ty(vec![DimInfo::Lit(8)], Prim::F32),
+        None,
+    );
+    assert_eq!(static_op_computed_axis_extent(&dag, padded, 0), Some(8));
+
+    // The same padding over a SYMBOLIC operand: a runtime extent, which is
+    // the case the guard is for.
+    let mut dag = Dag::new();
+    let symbolic = load(&mut dag, "x", vec![named("rows")]);
+    let padded = dag.add_node(
+        RiscOp::zero_pad(Prim::F32, vec![(RtDim::Lit(1), RtDim::Lit(1))]),
+        vec![symbolic],
+        ty(vec![named("*")], Prim::F32),
+        None,
+    );
+    assert_eq!(static_op_computed_axis_extent(&dag, padded, 0), None);
+
+    // A `shrink` whose end is a folded shape read is a runtime extent even
+    // over a concrete operand, which is why an inlined root still reaches the
+    // guard: chelis#1798's root row depends on this row's answer.
+    let mut dag = Dag::new();
+    let concrete = load(&mut dag, "x", vec![DimInfo::Lit(4)]);
+    let shrunk = dag.add_node(
+        RiscOp::Shrink {
+            bounds: vec![(
+                RtDim::Lit(1),
+                RtDim::InputAxis {
+                    tensor: 0,
+                    axis: RtAxis::Lit(0),
+                },
+            )],
+        },
+        vec![concrete],
+        ty(vec![named("*")], Prim::F32),
+        None,
+    );
+    assert_eq!(static_op_computed_axis_extent(&dag, shrunk, 0), None);
+
+    // And a literal span over a concrete operand IS constant, so the same
+    // owner answers both ways depending only on its carriers.
+    let mut dag = Dag::new();
+    let concrete = load(&mut dag, "x", vec![DimInfo::Lit(4)]);
+    let shrunk = dag.add_node(
+        RiscOp::Shrink {
+            bounds: vec![(RtDim::Lit(1), RtDim::Lit(3))],
+        },
+        vec![concrete],
+        ty(vec![DimInfo::Lit(2)], Prim::F32),
+        None,
+    );
+    assert_eq!(static_op_computed_axis_extent(&dag, shrunk, 0), Some(2));
+
+    // Negative parity: an unadmitted owner has no computed extent to report,
+    // constant carriers or not.
+    let mut dag = Dag::new();
+    let concrete = load(&mut dag, "x", vec![DimInfo::Lit(6)]);
+    let strided = dag.add_node(
+        RiscOp::Stride {
+            strides: vec![RtDim::Lit(2)],
+        },
+        vec![concrete],
+        ty(vec![DimInfo::Lit(3)], Prim::F32),
+        None,
+    );
+    assert_eq!(static_op_computed_axis_extent(&dag, strided, 0), None);
+}
+
+/// Which dimension names lowering may overwrite with a declaration's claim.
+///
+/// A synthesized name is the compiler's placeholder for an extent nothing has
+/// claimed; a user-spelled one is another signature's claim, with its own
+/// declaring witness and its own guard. The stamp in
+/// `preserve_op_computed_result_axis` declines the second so one origin cannot
+/// carry two claims with lowering order deciding which survives.
+///
+/// EVIDENTIARY STATUS: regression test for the predicate, which did not exist
+/// before this change. The `d0` row records a deliberate collision rather than
+/// an oversight: it is the checker's own display spelling for an unresolved
+/// dimension variable, and nothing at this layer tells it from a signature
+/// that happens to spell a binder that way.
+#[test]
+fn synthesized_dim_names_are_told_apart_from_user_spelled_ones() {
+    use chelis_ir::axis_sources::is_synthesized_dim_name;
+
+    for name in [
+        "",
+        "*",
+        "_rt_shrink_dim_7_0",
+        "_rt_dim_3_1",
+        "_anon_dim_2_1",
+        "d0",
+        "d17",
+    ] {
+        assert!(is_synthesized_dim_name(name), "{name} is compiler-minted");
+    }
+    for name in [
+        "n", "rows", "batch", "seq", "d", "dim", "d1x", "_rt", "x_rt_",
+    ] {
+        assert!(
+            !is_synthesized_dim_name(name),
+            "{name} is a name a signature can declare"
+        );
+    }
+}

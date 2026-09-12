@@ -3730,35 +3730,92 @@ fn a_result_name_no_parameter_declares_is_not_stamped_as_a_claim() {
     );
 }
 
-/// The unadmitted op-computed owners, stated as a lock rather than left to be
-/// discovered. `spec/04-type-system.md` section 4.7 makes a non-unit `stride`
-/// step and non-zero `pad` mint fresh extents exactly as `shrink` does, and
-/// this change admits only `shrink`: those two remain unguarded, unchanged
-/// rather than newly silent.
+/// The still-unadmitted op-computed owner, stated as a lock rather than left
+/// to be discovered. `spec/04-type-system.md` section 4.7 makes a non-unit
+/// `stride` step mint a fresh extent exactly as `shrink` does, and it remains
+/// unguarded: unchanged rather than newly silent. chelis#1379 owns the
+/// arithmetic-sized forms.
+///
+/// This row was `pad_and_stride_op_computed_extents_remain_unadmitted` until
+/// chelis#1837 admitted `pad`. Its pad half moved to
+/// `a_non_zero_pad_extent_is_guarded_on_both_lanes` below, as a receipt rather
+/// than a lock; the two must not share one test, because a lock and a receipt
+/// make opposite claims about whether the behaviour may change.
 ///
 /// EVIDENTIARY STATUS: disposition lock, not a regression test. The behaviour
 /// asserted here is the base behaviour and this change does not alter it; the
-/// row exists so that admitting either owner has to update this test.
+/// row exists so that admitting `stride` has to update this test.
 #[test]
-fn pad_and_stride_op_computed_extents_remain_unadmitted() {
+fn a_non_unit_stride_op_computed_extent_remains_unadmitted() {
     let dir = tempfile::tempdir().expect("tempdir");
-    for (name, source) in [
-        (
-            "stride_unadmitted.ch",
-            "def f(x: tensor[rows, f32]) -> tensor[2, f32] = stride(x, 2i64)\n\
-             out = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]))\n",
-        ),
-        (
-            "pad_unadmitted.ch",
-            "def f(x: tensor[rows, f32]) -> tensor[2, f32] = pad(x, [[1i64, 1i64]], 0.0f32)\n\
-             out = f(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n",
-        ),
-    ] {
-        let (ok, out) = eval_result(&dir, name, source);
+    let source = "def f(x: tensor[rows, f32]) -> tensor[2, f32] = stride(x, 2i64)\n\
+                  out = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32]))\n";
+    let (ok, out) = eval_result(&dir, "stride_unadmitted.ch", source);
+    assert!(
+        ok,
+        "an unadmitted op-computed owner is unchanged by this change, not \
+         newly trapping: {out}"
+    );
+}
+
+/// A declared literal over a non-zero `pad` is guarded at the `pad`, on both
+/// lanes and with the same rendering.
+///
+/// This is the direct spelling of the extent chelis#1837 reaches through
+/// `concat`'s lowered cascade, and it is here because admitting `pad` has to
+/// be visible in the owner's own spelling rather than only through a composed
+/// operation. It also closes a lane divergence the old lock did not measure,
+/// because the lock ran eval only.
+///
+/// EVIDENTIARY STATUS: regression test on BOTH lanes, for different base
+/// behaviour on each. Measured at `1fb6ced38`: eval printed
+/// `out = tensor(shape=[5], data=[0.0, 1.0, 2.0, 3.0, 0.0])` and exited ZERO
+/// under a declared `tensor[2, f32]`, while the C binary exited 1 reporting
+/// the generic `Domain: movement target shape mismatch` before
+/// `numeric trap: domain in pad at int64` - a trap, but one naming the
+/// allocation rather than the claim, and arriving at the movement plan's
+/// target check rather than at the claim's guard.
+#[test]
+fn a_non_zero_pad_extent_is_guarded_on_both_lanes() {
+    assert!(
+        gcc_available(),
+        "this row compares two executed lanes; neither may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = |claim: u32| {
+        format!(
+            "def f(x: tensor[rows, f32]) -> tensor[{claim}, f32] = \
+             pad(x, [[1i64, 1i64]], 0.0f32)\n\
+             out = f(to_tensor([1.0f32, 2.0f32, 3.0f32]))\n"
+        )
+    };
+
+    let mismatched = source(2);
+    let (eval_ok, eval_out) = eval_result(&dir, "pad_admitted.ch", &mismatched);
+    let (c_ok, c_out) = c_run_result(&dir, "pad_admitted_c", &mismatched);
+    let context = "extent `2`: claimed = 2, pad axis 0 = 5";
+    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(!ok, "{lane}: a claim of 2 over a pad to 5 traps: {out}");
         assert!(
-            ok,
-            "{name}: an unadmitted op-computed owner is unchanged by this \
-             change, not newly trapping: {out}"
+            out.contains(&domain_trap_line("pad")),
+            "{lane}: [04-NUM-9]'s line names the `pad`: {out}"
+        );
+        assert!(out.contains(context), "{lane}: expected {context}: {out}");
+        assert!(
+            !out.contains("Domain: movement target shape mismatch"),
+            "{lane}: and the claim's guard precedes the plan's target check: {out}"
+        );
+    }
+
+    // The agreeing control: three elements padded by one on each side is five.
+    let agreeing = source(5);
+    let (eval_ok, eval_out) = eval_result(&dir, "pad_admitted_ok.ch", &agreeing);
+    let (c_ok, c_out) = c_run_result(&dir, "pad_admitted_ok_c", &agreeing);
+    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(ok, "{lane}: an agreeing pad claim executes: {out}");
+        assert!(
+            out.contains("out = tensor(shape=[5], data=[0.0, 1.0, 2.0, 3.0, 0.0])"),
+            "{lane}: with the padded extent and the fill: {out}"
         );
     }
 }
@@ -6278,5 +6335,195 @@ fn an_inlined_root_pass_through_claim_is_guarded_on_both_lanes() {
             out.contains("main = tensor(shape=[2], data=[4.0, 6.0])"),
             "{lane}: with the declared extent and the body's values: {out}"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// chelis#1837: a declared `concat`-axis extent over a symbolic operand.
+//
+// `tensor_concat_result_type` encodes a concat-axis extent it cannot compute
+// as `Dim::Wildcard`, which `spec/04-type-system.md` §4.5.4 rule 3 makes the
+// correct TYPE, and a surrounding declaration then narrows that wildcard to
+// whatever it claims. §4.7.6 supplies the missing half - "A surrounding
+// literal or named-dimension claim adds the runtime equality guard" - and
+// [05-OP-62] states the rule the silence broke: "A joined unknown extent
+// never licenses retaining the first element's extent without a guard". So
+// the wildcard stays and the guard ends the admission; no spec amendment is
+// owed.
+//
+// `concat` has no `RiscOp`. `tensor_concat_from_nodes` lowers a Pad+Add
+// cascade, and [04-NUM-9] fixes which name the trap carries: "When a composed
+// source operation lowers to that primitive, the trap SHALL retain the lowered
+// primitive name; it SHALL NOT be renamed to the composed operation." The DAG
+// path therefore names `pad`, the first Pad of the cascade being the add's
+// axis-0 origin, and the host path names `concat`, which is the guard the
+// return boundary already places. Each lane pair agrees per activation form,
+// which is what the two rows below assert separately.
+// ---------------------------------------------------------------------------
+
+/// chelis#1837's reproducer in the inlined-root form, with `claim` naming the
+/// declared concat-axis extent. Four rows joined to themselves produce eight.
+fn concat_symbolic_root_source(claim: &str) -> String {
+    let row = "[1.0f32, 2.0f32, 3.0f32]";
+    let rows = [row; 4].join(", ");
+    format!(
+        "def probe(v: tensor[n, 3, f32]) -> tensor[{claim}, 3, f32] = concat([v, v], 0i32)\n\
+         def main() -> tensor[{claim}, 3, f32] = probe(to_tensor([{rows}]))\n"
+    )
+}
+
+/// concat.literal_claim.inlined_root.{eval,c}: the DAG path's declared
+/// concat-axis extent is NOT reached by a runtime extent guard, and why.
+///
+/// `concat` has no `RiscOp`. `tensor_concat_from_nodes` lowers a Pad+Add
+/// cascade, and it lowers one only when it can compute the joined extent from
+/// concrete element extents: it writes `Lit(total)` on each `Pad`, so on this
+/// path the cascade's padding bounds are always literal and the joined extent
+/// is always a compile-time constant. An inlined root supplies concrete
+/// arguments by construction, so this is the only shape the DAG path has.
+///
+/// A compile-time constant is exactly what `spec/04-type-system.md` §4.7.2's
+/// guard does NOT cover: it conditions the check on a claim "that is not
+/// statically proven equal to `size`". A statically REFUTED claim is a
+/// §4.4/§4.5 dimension mismatch instead, which
+/// `the_checker_refuses_a_static_pad_extent_a_declaration_refutes` below
+/// shows the checker already reporting wherever it can see the extent.
+///
+/// Measured rather than argued. Stamping the claim onto the origin anyway
+/// produced, on the C lane,
+/// `pad at node 1: output axis 0 has size 100, expected 8` and
+/// `binary op at node 3 has mismatched dimension at axis 0: Lit(100) vs
+/// Lit(8)`, refusing the build, while the DAG evaluator, which does not run
+/// the verifier, trapped at run time. `verify`'s per-owner static size check
+/// computes the same arithmetic the claim contradicts, so the graph cannot
+/// state a refuted claim at all, and a lane divergence whose C side does not
+/// compile is not a repair.
+///
+/// What `concat` needs is therefore the static verdict, which the checker
+/// cannot reach today because `tensor_concat_result_type` publishes the
+/// uncomputable extent as `Dim::Wildcard` (the correct TYPE under §4.5.4 rule
+/// 3) and the declaration narrows it. Refuting it needs `n + n` at the type
+/// level, which is chelis#526, or a re-derivation of the body at a call site
+/// where `n` is known. The host path is unaffected and already traps: that is
+/// the row below.
+///
+/// EVIDENTIARY STATUS: disposition lock on both lanes, not a regression test.
+/// Measured at `1fb6ced38`, this program printed
+/// `main = tensor(shape=[8, 3], ...)` and exited ZERO on eval and on the
+/// linked C binary under a declared `tensor[100, 3, f32]`; this change leaves
+/// that unchanged. Tracked by chelis#1837, which must update this row when the
+/// static verdict lands.
+#[test]
+fn a_declared_concat_axis_extent_on_the_dag_path_is_not_guarded_by_this_slice() {
+    assert!(
+        gcc_available(),
+        "this row compares two executed lanes; neither may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let claimed = concat_symbolic_root_source("100");
+    let (eval_ok, eval_out) = eval_result(&dir, "concat_root.ch", &claimed);
+    let (c_ok, c_out) = c_run_result(&dir, "concat_root_c", &claimed);
+    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(
+            ok,
+            "{lane}: the DAG path's claim is unenforced (chelis#1837): {out}"
+        );
+        assert!(
+            out.contains("shape=[8, 3]"),
+            "{lane}: and the joined extent is returned instead: {out}"
+        );
+        assert!(
+            !out.contains("extent `100`"),
+            "{lane}: no guard claims to have checked it: {out}"
+        );
+    }
+
+    // The agreeing control: the true joined extent executes exactly, so the
+    // block above pins an unguarded claim rather than a broken lowering.
+    let agreeing = concat_symbolic_root_source("8");
+    let (eval_ok, eval_out) = eval_result(&dir, "concat_root_ok.ch", &agreeing);
+    let (c_ok, c_out) = c_run_result(&dir, "concat_root_ok_c", &agreeing);
+    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(ok, "{lane}: the true joined extent executes: {out}");
+        assert!(
+            out.contains("shape=[8, 3]"),
+            "{lane}: producing the joined shape: {out}"
+        );
+    }
+}
+
+/// The tier boundary the row above turns on: a STATIC extent a declaration
+/// refutes is a check-time dimension mismatch, not a runtime guard.
+///
+/// This is the same `pad` owner and the same disagreement as
+/// `a_non_zero_pad_extent_is_guarded_on_both_lanes`, with the operand's extent
+/// declared literally instead of symbolically. `spec/04-type-system.md`
+/// §4.7.2 conditions its guard on a claim "that is not statically proven equal
+/// to `size`", and this one is statically refuted, so the verdict belongs to
+/// the tier that can report one. Without this row the concat lock reads as an
+/// unexplained gap rather than as a wildcard hiding an extent the checker
+/// would otherwise refuse.
+///
+/// EVIDENTIARY STATUS: disposition lock. This is existing checker behaviour
+/// that this change neither introduces nor alters; the row exists so that the
+/// static and runtime halves of §4.7.2 stay visibly separate.
+#[test]
+fn the_checker_refuses_a_static_pad_extent_a_declaration_refutes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = "def f(x: tensor[4, f32]) -> tensor[2, f32] = pad(x, [[1i64, 1i64]], 0.0f32)\n\
+                  out = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]))\n";
+    let (ok, out) = eval_result(&dir, "pad_static_refuted.ch", source);
+    assert!(!ok, "a statically refuted claim does not execute: {out}");
+    assert!(
+        out.contains("DimensionMismatch")
+            && out.contains("body has type `(tensor[4, f32]) -> tensor[6, f32]`")
+            && out.contains("declared type is `(tensor[4, f32]) -> tensor[2, f32]`"),
+        "and the checker, not a runtime guard, reports it: {out}"
+    );
+    assert!(
+        !out.contains(&domain_trap_line("pad")),
+        "so no [04-NUM-9] trap is rendered for it: {out}"
+    );
+}
+
+/// concat.literal_claim.host.{eval,c}: the host path keeps naming `concat`.
+///
+/// [04-NUM-9]'s composed-source rule is about the operation the TRAP names,
+/// and the two activation forms reach two different guards: the value binding
+/// applies the exported kernel, whose chelis#1739 return guard compares the
+/// declared literal at the boundary and names the composed operation the user
+/// wrote. This row pins that rendering so the row above cannot be read as
+/// having renamed every `concat` trap to `pad`.
+///
+/// EVIDENTIARY STATUS: disposition lock on both lanes. Measured at
+/// `1fb6ced38`, this program already printed
+/// ``extent `100`: claimed = 100, concat axis 0 = 8`` and
+/// `numeric trap: domain in concat at int64`, exiting 1 on eval and 134 on the
+/// linked binary. This change neither introduces nor alters it.
+#[test]
+fn the_host_path_concat_claim_still_names_concat_on_both_lanes() {
+    assert!(
+        gcc_available(),
+        "this row compares two executed lanes; neither may skip"
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let row = "[1.0f32, 2.0f32, 3.0f32]";
+    let rows = [row; 4].join(", ");
+    let source = format!(
+        "def probe(v: tensor[n, 3, f32]) -> tensor[100, 3, f32] = concat([v, v], 0i32)\n\
+         m = to_tensor([{rows}])\n\
+         out = probe(m)\n"
+    );
+    let (eval_ok, eval_out) = eval_result(&dir, "concat_host.ch", &source);
+    let (c_ok, c_out) = c_run_result(&dir, "concat_host_c", &source);
+    let context = "extent `100`: claimed = 100, concat axis 0 = 8";
+    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(!ok, "{lane}: the host path traps: {out}");
+        assert!(
+            out.contains(&domain_trap_line("concat")),
+            "{lane}: naming the composed operation the user wrote: {out}"
+        );
+        assert!(out.contains(context), "{lane}: expected {context}: {out}");
     }
 }

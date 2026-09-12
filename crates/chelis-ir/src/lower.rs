@@ -14387,17 +14387,33 @@ impl<'program> LowerCtx<'program> {
     /// pass-through result resolved to, reporting whether the origin can carry
     /// it.
     ///
-    /// The origin axis this reaches is the FRESH extent the operation minted,
-    /// which `spec/04-type-system.md` §4.7.2 publishes anonymously, so the
-    /// ordinary case writes a claim where there was none. Two other states
-    /// exist and neither may be relabeled. An axis already carrying exactly
-    /// this claim is already stamped, so the stamp succeeds having written
-    /// nothing. An axis carrying a DIFFERENT name or literal is governed by
-    /// another declaration, and overwriting it would move that declaration's
-    /// guard onto this one's claim: one origin would carry two claims and the
-    /// later lowering order would decide which survived. This declines
-    /// instead, which leaves the second claim exactly as unstamped as it is
-    /// today rather than silently redirecting the first.
+    /// What the origin axis already states is the extent the OPERATION
+    /// computes, in whichever of three spellings the lowerer had for it: an
+    /// anonymous or synthesized name (`spec/04-type-system.md` §4.7.2's fresh
+    /// extent, the ordinary case), or the literal the lowerer recorded when it
+    /// could compute the value. `tensor_concat_from_nodes` is the literal
+    /// case, and it is the one chelis#1837 needs: over concrete element
+    /// extents the cascade writes `Lit(total)` on each `Pad`, so the pad that
+    /// origins a declared `tensor[100, 3, f32]` states `Lit(8)`. A declaration
+    /// replaces that record, because §4.7.2 makes the declared dimension the
+    /// claim and the guard the comparison; the record is what the guard then
+    /// compares against, read from the operation's own carriers rather than
+    /// from this dim.
+    ///
+    /// The one state it must NOT replace is a USER-SPELLED name, which is
+    /// another signature's claim with its own declaring witness. Overwriting
+    /// that would move the first declaration's guard onto the second's claim:
+    /// one origin would carry two claims and lowering order would decide which
+    /// survived. This declines instead, leaving the second claim exactly as
+    /// unstamped as it is today rather than silently redirecting the first.
+    /// An axis already carrying exactly this claim is already stamped and the
+    /// stamp succeeds having written nothing.
+    ///
+    /// Two declarations claiming different LITERALS over one shared origin are
+    /// not told apart from the operation's own record, so the later one wins.
+    /// That is the residual the design records: no maintainer writes it, and
+    /// the repair for it is a per-declaration claim carrier rather than a
+    /// tighter test here.
     fn stamp_op_computed_origin(
         &mut self,
         origin: NodeId,
@@ -14411,10 +14427,21 @@ impl<'program> LowerCtx<'program> {
         else {
             return false;
         };
+        if existing == declared {
+            return true;
+        }
         match existing {
-            DimInfo::Named(name, _) if name.is_empty() || name == "*" => {}
-            existing if existing == declared => return true,
-            _ => return false,
+            DimInfo::Lit(_) => {}
+            DimInfo::Named(name, _) if crate::axis_sources::is_synthesized_dim_name(name) => {}
+            DimInfo::Named(_, _) => return false,
+        }
+        // A claim the operation's own rule statically refutes is not
+        // runtime-checkable, and the graph cannot state it: `verify`'s
+        // per-owner size check compares the same arithmetic and refuses the
+        // build. Leave it unstamped rather than trade a silent claim for a
+        // lane divergence whose C side does not compile.
+        if crate::axis_sources::static_op_computed_axis_extent(&self.dag, origin, axis).is_some() {
+            return false;
         }
         self.dag
             .node_mut(origin)
