@@ -1816,9 +1816,21 @@ pub(crate) struct SubexprLoweringContext {
     program_types: Arc<BTreeMap<String, TensorType>>,
     program_defs: Arc<BTreeMap<String, Expr>>,
     program_signatures: Arc<BTreeMap<String, Expr>>,
+    lexical_callables: UnordMap<String, Arc<ResolvedFunction>>,
+    callable_parameters: UnordSet<String>,
 }
 
 impl SubexprLoweringContext {
+    pub(crate) fn with_lexical_callables(
+        mut self,
+        callables: UnordMap<String, Arc<ResolvedFunction>>,
+        parameters: UnordSet<String>,
+    ) -> Self {
+        self.lexical_callables = callables;
+        self.callable_parameters = parameters;
+        self
+    }
+
     pub(crate) fn evaluation_profile(
         &self,
         expr: &Expr,
@@ -1852,10 +1864,19 @@ impl SubexprLoweringContext {
         let defs = self
             .program_defs
             .iter()
-            .filter(|(name, _)| !bound.iter().any(|(bound, _)| bound == *name))
+            .filter(|(name, _)| {
+                !self.lexical_callables.is_empty() || !bound.iter().any(|(bound, _)| bound == *name)
+            })
             .map(|(name, body)| (name.clone(), body.clone()))
             .collect();
-        static_controls::profile(expr, &defs, bound, resource_policy)
+        static_controls::profile_with_callables(
+            expr,
+            &defs,
+            bound,
+            resource_policy,
+            &self.lexical_callables,
+            &self.callable_parameters,
+        )
     }
 }
 
@@ -1874,6 +1895,8 @@ pub(crate) fn prepare_subexpr_lowering_context(
         program_types: Arc::new(program_types),
         program_defs,
         program_signatures,
+        lexical_callables: UnordMap::new(),
+        callable_parameters: UnordSet::new(),
     }
 }
 
@@ -2169,6 +2192,15 @@ fn lower_subexpr_program_inner_impl(
         context.program_signatures.clone(),
         LinearityInfo::default(),
     );
+    ctx.local_callables.extend(
+        context
+            .lexical_callables
+            .to_sorted()
+            .into_iter()
+            .map(|(name, function)| (name.clone(), CallableExpr::Plain(function.as_ref().clone()))),
+    );
+    ctx.fn_typed_params
+        .extend(context.callable_parameters.to_sorted().into_iter().cloned());
     #[cfg(feature = "lowering-trace")]
     {
         ctx.trace = trace.clone();
@@ -5677,11 +5709,14 @@ fn compute_reduce_window_out_dims(
 }
 
 #[derive(Clone)]
-struct ResolvedFunction {
-    expression: Expr,
+pub(crate) struct ResolvedFunction {
+    pub(crate) expression: Expr,
     /// Travels with the resolved callable through lexical aliases and AD.
     /// It is a claim, never evidence of the body's actual result extent.
-    signature: Option<Expr>,
+    pub(crate) signature: Option<Expr>,
+    /// Named definitions resolve helper references in the program's callable
+    /// environment; anonymous functions retain the existing lexical route.
+    pub(crate) canonical_definition: Option<String>,
 }
 
 impl std::ops::Deref for ResolvedFunction {
@@ -8303,7 +8338,7 @@ impl<'program> LowerCtx<'program> {
                 ty,
                 checked_result_precision,
                 app_span,
-                inlining_name,
+                fn_expr.canonical_definition.clone().or(inlining_name),
             )),
             CallableExpr::Vmap { fn_expr, axis } => {
                 Some(self.lower_vmap_callable_app(&fn_expr, axis, args, ty, app_span))
@@ -8387,6 +8422,7 @@ impl<'program> LowerCtx<'program> {
             DeepTag::Fn => Some(CallableExpr::Plain(ResolvedFunction {
                 expression: expr.clone(),
                 signature: None,
+                canonical_definition: None,
             })),
             DeepTag::Var => {
                 let name = kids.first().and_then(|expr| match expr {
@@ -8420,17 +8456,18 @@ impl<'program> LowerCtx<'program> {
                 if let Some(callable) = self.local_callables.get(&name) {
                     return Some(callable.clone());
                 }
-                if let Some(body) = self.program_defs.get(&name) {
-                    let mut callable = self.resolve_callable_expr_inner(body, visited)?;
-                    if let CallableExpr::Plain(function) = &mut callable
-                        && let Some(signature) = self.program_signatures.get(&name)
-                    {
-                        function.signature = Some(signature.clone());
-                    }
-                    return Some(callable);
-                }
                 if self.fn_typed_params.contains(&name) {
                     return Some(CallableExpr::Parameter { name });
+                }
+                if let Some(body) = self.program_defs.get(&name) {
+                    let mut callable = self.resolve_callable_expr_inner(body, visited)?;
+                    if let CallableExpr::Plain(function) = &mut callable {
+                        function.canonical_definition.get_or_insert(name.clone());
+                        if let Some(signature) = self.program_signatures.get(&name) {
+                            function.signature = Some(signature.clone());
+                        }
+                    }
+                    return Some(callable);
                 }
                 None
             }
@@ -9417,6 +9454,26 @@ impl<'program> LowerCtx<'program> {
                 }
                 self.bindings.insert(name.clone(), arg_id);
             }
+        }
+        if fn_expr.canonical_definition.is_some() {
+            // A captured named definition closes over the program. Its
+            // actual arguments were resolved above in the caller, but its
+            // body must not inherit the caller's lexical callable overlay.
+            // Leave existing tensor/value and witness transport unchanged.
+            self.local_callables = self
+                .local_callables
+                .to_sorted()
+                .into_iter()
+                .filter(|(name, _)| param_names.contains(name))
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect();
+            self.fn_typed_params = self
+                .fn_typed_params
+                .to_sorted()
+                .into_iter()
+                .filter(|name| param_names.contains(name))
+                .cloned()
+                .collect();
         }
         self.dim_substitutions
             .merge(tensor_dim_substitutions(&formal_types, &actual_types));
@@ -19657,6 +19714,52 @@ mod tests {
             outcome.is_ok(),
             "non-negative seed control must lower: {outcome:?}"
         );
+    }
+
+    #[test]
+    fn issue_1889_dynamic_parameter_blocks_same_named_definition_and_cycles_terminate() {
+        let parse = |source: &str| {
+            chelis_deep::parser::parse_str(source)
+                .unwrap()
+                .pop()
+                .unwrap()
+        };
+        let reference = parse("(var {} f)");
+        let mut ctx = LowerCtx::new(
+            BTreeMap::new(),
+            BTreeMap::from([
+                ("f".into(), parse("(fn {} (params {} x) (var {} x))")),
+                ("a".into(), parse("(var {} b)")),
+                ("b".into(), parse("(var {} a)")),
+            ]),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        );
+        let known = ctx
+            .resolve_callable_expr(&reference)
+            .expect("global definition");
+        assert!(matches!(&known, CallableExpr::Plain(function)
+            if function.canonical_definition.as_deref() == Some("f")));
+        ctx.fn_typed_params.insert("f".into());
+        assert!(
+            matches!(ctx.resolve_callable_expr(&reference), Some(CallableExpr::Parameter { name }) if name == "f")
+        );
+        ctx.local_callables.insert("f".into(), known);
+        assert!(matches!(
+            ctx.resolve_callable_expr(&reference),
+            Some(CallableExpr::Plain(_))
+        ));
+        ctx.local_callables.remove("f");
+        assert!(matches!(
+            ctx.resolve_callable_expr(&reference),
+            Some(CallableExpr::Parameter { .. })
+        ));
+        ctx.fn_typed_params.remove("f");
+        assert!(matches!(
+            ctx.resolve_callable_expr(&reference),
+            Some(CallableExpr::Plain(_))
+        ));
+        assert!(ctx.resolve_callable_expr(&parse("(var {} a)")).is_none());
     }
 
     #[test]

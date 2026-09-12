@@ -137,6 +137,27 @@ axis (#1277) or generic unresolved-host diagnostic; those residuals remain
 unclassified and outside this repair. This is a
 lowering-only repair, not approval of the broader origin/template design below.
 
+### Statically known local callable aliases
+
+The next bounded native-C slice retains a local `f = named_helper` binding's
+resolved definition identity and authored signature at binding time. Alias
+chains reuse that immutable capture. Ordinary value/parameter bindings shadow
+both the type and callable entries; leaving an inner scope restores both.
+The existing host helper profiler and tensor lowerer consume the same lexical
+overlay. A captured top-level helper's body sees its program definitions, not
+same-spelled helper aliases in its caller. No surface-name rewriting, runtime
+callable value, or separate abstract/provenance evaluator is introduced.
+
+`chelis-cli::issue_1889_named_callable_alias` is the bounded oracle: check,
+interpreter shape/dtype/value bits, and compiled native C values for direct and
+aliased named/positional queries, raw tensor results, independent instantiations,
+capture and shadowing. It also compares an authored result-extent mismatch with
+its agreeing control, and rejects noncallable shadows and unresolved cycles.
+`examples/named_callable_alias.ch` is an executed alias-chain example. These
+native cases supersede the corresponding alias-before-emission residual above;
+they do not certify every parameterized helper, dynamic/effectful callable,
+worker/context route, School program, or broader #1889/#1875 obligation.
+
 ## Unselected broader origin-aware investigation
 
 The following witness and alternatives concern a stronger proposed value-flow

@@ -409,6 +409,24 @@ pub(super) fn profile(
     inputs: &[(String, TensorType)],
     resource_policy: crate::evaluation::ResourcePolicy,
 ) -> crate::evaluation::EvaluationProfile {
+    profile_with_callables(
+        expr,
+        defs,
+        inputs,
+        resource_policy,
+        &UnordMap::new(),
+        &UnordSet::new(),
+    )
+}
+
+pub(super) fn profile_with_callables(
+    expr: &Expr,
+    defs: &BTreeMap<String, Expr>,
+    inputs: &[(String, TensorType)],
+    resource_policy: crate::evaluation::ResourcePolicy,
+    callables: &UnordMap<String, std::sync::Arc<super::ResolvedFunction>>,
+    parameters: &UnordSet<String>,
+) -> crate::evaluation::EvaluationProfile {
     use crate::evaluation::{EvaluationProfile, LegacyEvaluationReason};
     let mut profile = Profile {
         defs,
@@ -423,6 +441,24 @@ pub(super) fn profile(
     };
     for (name, ty) in inputs {
         env.bind(name, None, Some(ty.precision));
+    }
+    for name in parameters.to_sorted() {
+        env.bind(name, None, None);
+    }
+    for (name, callable) in callables.to_sorted() {
+        env.callables.insert(
+            name.clone(),
+            Closure {
+                function: callable.expression.clone(),
+                // Named definitions are closed over the program, never this
+                // extraction's caller-local aliases or scalar values.
+                environment: Rc::new(Environment {
+                    shadowed_neg: defs.contains_key("neg"),
+                    ..Environment::default()
+                }),
+                name: callable.canonical_definition.clone(),
+            },
+        );
     }
     profile.visit(expr, 0, &env);
     if let Some(reason) = profile.reason {
