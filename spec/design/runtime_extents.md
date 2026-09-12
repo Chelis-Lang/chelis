@@ -688,16 +688,26 @@ helper takes that local as its own tensor input. That IS materializing the
 field's tensor as the actual shape input, and it is the prologue-local rewrite
 #1266 reports downstream applying by hand.
 
-One decision, asked once. The shared decision is derived once per program per
-host-lowering session, and the "once" is a property of the representation
-rather than of a caller's discipline: the per-program facts behind the
-decision, the program's definitions and call graph among them, are fields of
-a `HostLoweringSession` that borrows the program they describe, so every
-caller establishes one and none can read a fact derived from a different
-program. The earlier arrangement keyed those facts on the program's address
-and gated them on a thread-local flag, which three entry points grew into and
-the third never armed (#1829); a flag can be forgotten at the next entry
-point, and a type cannot. What follows from that, and is worth stating because
+One decision, asked once per session. The per-program facts behind the shared
+decision, the program's definitions and call graph among them, are fields of a
+`HostLoweringSession` that borrows the program they describe, so every caller
+establishes one and none can read a fact derived from a different program. The
+earlier arrangement keyed those facts on the program's address and gated them
+on a thread-local flag, which three entry points grew into and the third never
+armed (#1829); a flag can be forgotten at the next entry point, and a type
+cannot.
+
+What the type enforces and what it does not, stated at the granularity it
+earns. It enforces that a session EXISTS wherever the memo is read: forgetting
+one is a compile error, which is what the flag could never give. It does not
+enforce that a caller HOLDS one for a program's lifetime, because that is a
+statement about the extent of a value rather than about its type, and no Rust
+visibility construct bounds it: the interpreter is a separate crate and
+legitimately constructs a session, so the constructor cannot be narrowed.
+Each session's extent is therefore its owner's, and the interpreter's is its
+program's lifetime by construction of `EvalContext`. A future entry point that
+built a session per ask would re-derive everything, and that cost is visible at
+its call site but is not a compile error (#1835). What follows from that, and is worth stating because
 it is the reason a cheaper second predicate was rejected: nothing may answer
 "is this def a kernel" except this decision. A syntactic surrogate for the
 callee summary probe would be a second definition of one question, and the two

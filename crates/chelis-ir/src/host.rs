@@ -3841,6 +3841,31 @@ pub fn host_def_kernel(
         .map(|product| product.map(|product| product.kernel))
 }
 
+/// The evaluator's counterpart to [`host_def_kernel`], carrying the execution
+/// plan beside the kernel. It requires a session for the same reason and with
+/// the same force: a caller holding only a checked program cannot reach it.
+///
+/// ```compile_fail
+/// # use chelis_ir::evaluation::RandomExecutionContext;
+/// # use chelis_ir::host::RandomLoweringState;
+/// # use chelis_types::CheckedProgram;
+/// fn bypass(program: &CheckedProgram) {
+///     let context = RandomExecutionContext::new(RandomLoweringState { seed: None, counter: 0 });
+///     let _ = chelis_ir::host::host_def_evaluation_plan(program, "f", &context);
+/// }
+/// ```
+///
+/// ```no_run
+/// # use chelis_ir::evaluation::RandomExecutionContext;
+/// # use chelis_ir::host::RandomLoweringState;
+/// # use chelis_ir::host::HostLoweringSession;
+/// # use chelis_types::CheckedProgram;
+/// fn plan(program: &CheckedProgram) {
+///     let session = HostLoweringSession::new(program);
+///     let context = RandomExecutionContext::new(RandomLoweringState { seed: None, counter: 0 });
+///     let _ = chelis_ir::host::host_def_evaluation_plan(&session, "f", &context);
+/// }
+/// ```
 pub fn host_def_evaluation_plan(
     program: &HostLoweringSession<'_>,
     name: &str,
@@ -18424,6 +18449,49 @@ def main(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(0i64) {
                 .join()
                 .expect("#1835 fanout thread completes");
         }
+
+        // Both chains above answer uniformly, all-kernel or all-host, so their
+        // cross-lane comparison cannot fail for a PER-DEFINITION disagreement:
+        // two constant vectors of the same constant are equal whatever the
+        // decision did. This program's answers are non-uniform by
+        // construction, one definition per documented class, so the
+        // comparison has something to disagree about.
+        let mixed = surf_check(
+            "module Demo.MixedLanes\n\n             def k(x: tensor[4, f32]) -> tensor[4, f32] = mul(x, x)\n             def loud(x: tensor[4, f32]) -> tensor[4, f32] ! {IO} = {\n               _ = print(x)\n  x\n}\n             def s(x: int64) -> int64 = add(x, x)\n             def k2(x: tensor[4, f32]) -> tensor[4, f32] = add(k(x), k(x))\n",
+        );
+        let mixed = chelis_types::check_linearity(
+            &chelis_effects::check_program(&mixed).expect("mixed effect check"),
+        )
+        .expect("mixed linearity check");
+        let mixed_names = ["k", "loud", "s", "k2"].map(String::from).to_vec();
+        let mixed_session = HostLoweringSession::new(&mixed);
+        let mixed_answers = mixed_names
+            .iter()
+            .map(|name| {
+                host_def_kernel(&mixed_session, name, None)
+                    .expect("#1835 mixed fixture reaches a kernel decision")
+                    .is_some()
+            })
+            .collect::<Vec<_>>();
+        eprintln!("#1835 mixed answers={mixed_answers:?}");
+        assert!(
+            mixed_answers.iter().any(|kernel| *kernel)
+                && mixed_answers.iter().any(|kernel| !*kernel),
+            "#1835: the mixed fixture must answer non-uniformly, or the cross-lane \
+             comparison below is two constant vectors again; got {mixed_answers:?}"
+        );
+        assert_eq!(
+            mixed_answers,
+            vec![true, false, false, true],
+            "#1835: a pure tensor body is a kernel, an IO effect row and a non-tensor \
+             result are host code (chelis#1277 B2h's documented classes)"
+        );
+        assert_eq!(
+            mixed_answers,
+            issue_1835_c_lane_kernel_defs(&mixed, &mixed_names),
+            "#1835: the shared decision must answer what the C lane compiles, per \
+             definition and not merely in aggregate (chelis#1277 B2h)"
+        );
     }
 
     fn issue_1205_source(operations: usize, flat: bool) -> String {
