@@ -104,8 +104,9 @@ const ALLOWED: &[(&str, usize, usize, &str)] = &[
     (
         "crates/chelis-compiler-api/src/runtime/tests.rs",
         0,
-        10,
-        "these host-runtime tests exercise `insert` programs only",
+        11,
+        "these host-runtime tests exercise `insert` programs only; the eleventh builds the \
+         seed tensor for chelis#1829's tensor-returning probe chain (chelis#1835)",
     ),
     (
         "crates/chelis-compiler-api/src/runtime/transforms.rs",
