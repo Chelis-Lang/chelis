@@ -8228,6 +8228,118 @@ int main(void) {
     );
 }
 
+/// NEGATIVE CONTROL for the per-scope rename's freshness rule, chelis#1788.
+///
+/// `<name>__s<k>` is a legal Chelis dimension name, so a graph can already
+/// carry the spelling the rename would mint. Renaming onto it would recreate
+/// the very collision the pass exists to remove, one name meaning two extents
+/// in one emitted function, and it would do so silently.
+///
+/// Three roots: `seq` is declared by two of them, and a third independently
+/// declares `seq__s1`. The second `seq` scope must therefore take `seq__s2`,
+/// and all three extents must stay independent at run time. Without the
+/// freshness check this test emits two declarations of `seq__s1` and the third
+/// root reads the second root's extent.
+///
+/// EVIDENTIARY STATUS: regression test for the freshness rule specifically. The
+/// sibling row above covers the rename itself.
+#[test]
+fn issue_1788_a_scope_rename_does_not_collide_with_a_name_the_graph_declares() {
+    use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+    let ty = |dims: Vec<DimInfo>| TensorType {
+        dims,
+        precision: Prim::F32,
+    };
+    let named = |name: &str| DimInfo::Named(name.into(), None);
+
+    let mut dag = Dag::new();
+    let x = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        ty(vec![named("seq")]),
+        None,
+    );
+    let y = dag.add_node(
+        RiscOp::Load { name: "y".into() },
+        vec![],
+        ty(vec![named("batch"), named("seq")]),
+        None,
+    );
+    // The occupant. A third, independent signature that already spells the
+    // identity the rename would otherwise mint for `y`'s scope.
+    let w = dag.add_node(
+        RiscOp::Load { name: "w".into() },
+        vec![],
+        ty(vec![named("seq__s1")]),
+        None,
+    );
+    let from_x = dag.add_node(RiscOp::Neg, vec![x], ty(vec![named("seq")]), None);
+    let from_y = dag.add_node(
+        RiscOp::Neg,
+        vec![y],
+        ty(vec![named("batch"), named("seq")]),
+        None,
+    );
+    let from_w = dag.add_node(RiscOp::Neg, vec![w], ty(vec![named("seq__s1")]), None);
+    dag.add_root(from_x);
+    dag.add_root(from_y);
+    dag.add_root(from_w);
+
+    let result = codegen_with_options(
+        &dag,
+        "three_scopes",
+        CodegenOptions {
+            use_blas: false,
+            math_lib_override: Some(MathLib::None),
+            static_entry: false,
+        },
+    )
+    .expect("a merged three-scope kernel still emits");
+    let emitted = &result.c_source;
+    for declaration in ["int64_t seq = ", "int64_t seq__s1 = ", "int64_t seq__s2 = "] {
+        assert_eq!(
+            emitted.matches(declaration).count(),
+            1,
+            "exactly one `{declaration}` declaration, so no identity means two extents: {emitted}"
+        );
+    }
+
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+static chelis_tensor *make_view_2d_b(float* data, int64_t rows, int64_t cols) {{
+    int64_t shape[2] = {{rows, cols}};
+    return chelis_tensor_entry_borrow(
+        2, shape, CHELIS_DTYPE_F32, data,
+        rows * cols * chelis_dtype_size(CHELIS_DTYPE_F32)
+    );
+}}
+
+extern void three_scopes(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    float xd[3] = {{1.0f, 2.0f, 3.0f}};
+    float yd[4] = {{1.0f, 2.0f, 3.0f, 4.0f}};
+    float wd[4] = {{5.0f, 6.0f, 7.0f, 8.0f}};
+    chelis_tensor* inputs[3] = {{make_view_1d(xd, 3), make_view_2d_b(yd, 2, 2), make_view_1d(wd, 4)}};
+    chelis_tensor* outputs[3] = {{NULL, NULL, NULL}};
+    three_scopes(inputs, 3, outputs, 3);
+    printf("RAN %lld %lld %lld\n",
+           (long long)chelis_tensor_numel(outputs[0]),
+           (long long)chelis_tensor_numel(outputs[1]),
+           (long long)chelis_tensor_numel(outputs[2]));
+    return 0;
+}}
+"#
+    );
+
+    let (ok, out) = compile_and_run_kernel_capturing("three_scopes", emitted, &harness);
+    assert!(ok, "three independent scopes run: {out}");
+    assert!(
+        out.contains("RAN 3 4 4"),
+        "and each root keeps its own extent, 3, 2x2 and 4: {out}"
+    );
+}
+
 /// chelis#1788: two scopes of one binder, lowered into ONE emitted function,
 /// each get their own declaration and their own input.
 ///

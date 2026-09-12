@@ -1130,6 +1130,16 @@ impl CEmitter {
             }
         }
         // `(scope, old, new)` for every scope after a name's first.
+        //
+        // The new identity must be FRESH. `<name>__s<k>` is a legal Chelis
+        // dimension name, so a graph can already carry it, and renaming onto a
+        // name another scope declares would recreate the collision this pass
+        // exists to remove. `dimension_identity_names` is the enumerator that
+        // answers which identities a DAG already carries, output axes and
+        // op-internal payloads alike, so the suffix is bumped until it answers
+        // no. Names minted here are reserved as they are chosen, because two
+        // scopes of two different binders can otherwise pick the same one.
+        let mut taken = chelis_ir::dag::dimension_identity_names(&dag);
         let mut renames: Vec<(usize, String, String)> = Vec::new();
         for (name, mut list) in declared {
             if list.len() < 2 {
@@ -1137,7 +1147,14 @@ impl CEmitter {
             }
             list.sort_unstable();
             for (index, scope) in list.into_iter().enumerate().skip(1) {
-                renames.push((scope, name.clone(), format!("{name}__s{index}")));
+                let mut suffix = index;
+                let mut fresh = format!("{name}__s{suffix}");
+                while taken.contains(&fresh) {
+                    suffix += 1;
+                    fresh = format!("{name}__s{suffix}");
+                }
+                taken.insert(fresh.clone());
+                renames.push((scope, name.clone(), fresh));
             }
         }
         if renames.is_empty() {
@@ -9310,6 +9327,134 @@ mod tests {
         assert!(
             (val - 2.0_f32).abs() < 1e-4,
             "abs(-2.0) should be 2.0, got {val}"
+        );
+    }
+
+    /// chelis#1788. The per-scope rename's two naming rules, checked on the
+    /// rewritten graph rather than on emitted text, so a change to the emitter
+    /// cannot make this pass for the wrong reason.
+    ///
+    /// Three roots. `seq` is declared by two of them, so the later scope must
+    /// be renamed; a third root independently declares `seq__s1`, so the name
+    /// the rename would mint is already taken and it must step past it. The
+    /// occupant keeps its own spelling, and the untouched binder `batch` and
+    /// the first scope's `seq` are unchanged.
+    #[test]
+    fn scope_rename_mints_a_fresh_identity_past_one_the_graph_declares() {
+        use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+        let ty = |dims: Vec<DimInfo>| TensorType {
+            dims,
+            precision: chelis_types::types::Prim::F32,
+        };
+        let named = |name: &str| DimInfo::Named(name.into(), None);
+
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty(vec![named("seq")]),
+            None,
+        );
+        let y = dag.add_node(
+            RiscOp::Load { name: "y".into() },
+            vec![],
+            ty(vec![named("batch"), named("seq")]),
+            None,
+        );
+        let w = dag.add_node(
+            RiscOp::Load { name: "w".into() },
+            vec![],
+            ty(vec![named("seq__s1")]),
+            None,
+        );
+        let from_x = dag.add_node(RiscOp::Neg, vec![x], ty(vec![named("seq")]), None);
+        let from_y = dag.add_node(
+            RiscOp::Neg,
+            vec![y],
+            ty(vec![named("batch"), named("seq")]),
+            None,
+        );
+        let from_w = dag.add_node(RiscOp::Neg, vec![w], ty(vec![named("seq__s1")]), None);
+        dag.add_root(from_x);
+        dag.add_root(from_y);
+        dag.add_root(from_w);
+
+        let renamed = CEmitter::rename_scoped_dims(dag);
+        let dims = |id: NodeId| {
+            renamed
+                .get(id)
+                .expect("node survives the rename")
+                .output_type
+                .dims
+                .clone()
+        };
+        assert_eq!(
+            dims(x),
+            vec![named("seq")],
+            "the first scope keeps the name"
+        );
+        assert_eq!(
+            dims(y),
+            vec![named("batch"), named("seq__s2")],
+            "the later scope steps past the taken `seq__s1`"
+        );
+        assert_eq!(
+            dims(w),
+            vec![named("seq__s1")],
+            "and the occupant is untouched, since it declares the name only once"
+        );
+        assert_eq!(dims(from_y), vec![named("batch"), named("seq__s2")]);
+    }
+
+    /// The negative twin. A binder each of whose declarations sits in ONE scope
+    /// is renamed by nothing, so a single-root graph and an unshared name come
+    /// out byte-identical. Without this, a pass that renamed everything would
+    /// satisfy the row above.
+    #[test]
+    fn scope_rename_leaves_a_binder_no_second_scope_declares_alone() {
+        use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
+        let ty = |dims: Vec<DimInfo>| TensorType {
+            dims,
+            precision: chelis_types::types::Prim::F32,
+        };
+        let named = |name: &str| DimInfo::Named(name.into(), None);
+
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty(vec![named("seq")]),
+            None,
+        );
+        let y = dag.add_node(
+            RiscOp::Load { name: "y".into() },
+            vec![],
+            ty(vec![named("batch")]),
+            None,
+        );
+        let from_x = dag.add_node(RiscOp::Neg, vec![x], ty(vec![named("seq")]), None);
+        let from_y = dag.add_node(RiscOp::Neg, vec![y], ty(vec![named("batch")]), None);
+        dag.add_root(from_x);
+        dag.add_root(from_y);
+
+        let renamed = CEmitter::rename_scoped_dims(dag);
+        assert_eq!(
+            renamed
+                .get(x)
+                .expect("node survives")
+                .output_type
+                .dims
+                .clone(),
+            vec![named("seq")]
+        );
+        assert_eq!(
+            renamed
+                .get(y)
+                .expect("node survives")
+                .output_type
+                .dims
+                .clone(),
+            vec![named("batch")]
         );
     }
 }

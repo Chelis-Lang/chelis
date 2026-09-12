@@ -2028,7 +2028,7 @@ pub fn op_references_symbol(op: &RiscOp, name: &str) -> bool {
 /// exactly whatever [`op_internal_symbolic_dims`] recognizes, so an op that
 /// spells a dimension symbol only inside its own payload still participates
 /// even when no node output repeats that name.
-pub(crate) fn dimension_identity_names(dag: &Dag) -> UnordSet<String> {
+pub fn dimension_identity_names(dag: &Dag) -> UnordSet<String> {
     let mut names = UnordSet::new();
     for node in dag.nodes() {
         names.extend(node.output_type.dims.iter().filter_map(|dim| match dim {

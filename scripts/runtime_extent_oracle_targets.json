@@ -494,6 +494,7 @@
         "an_all_interface_class_runs_when_its_witnesses_agree",
         "an_all_interface_class_traps_at_entry_when_its_witnesses_disagree",
         "entry_guards_run_in_assigned_slot_order_not_claim_name_order",
+        "issue_1788_a_scope_rename_does_not_collide_with_a_name_the_graph_declares",
         "issue_1788_two_scopes_in_one_function_share_one_declaration",
         "local_reshape_guards_follow_declaration_order",
         "numeric_local_extent_claims_execute_exactly",
