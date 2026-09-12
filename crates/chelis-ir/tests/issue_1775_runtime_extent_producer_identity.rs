@@ -6,8 +6,8 @@
 //! `Copy` and named the resulting axis after that wrapper. Two reshapes sized
 //! from one runtime scalar therefore ended up with two different names for one
 //! extent. `concat` requires every non-concat axis to agree across its
-//! elements; the disagreement sent it to its host-runtime fallback, which
-//! emits a rank-0 `Load { name: "concat" }` placeholder, and `grad` over that
+//! elements; the disagreement historically sent it to a fallback that
+//! emitted a rank-0 `Load { name: "concat" }` placeholder, and `grad` over that
 //! placeholder built a backward DAG that failed verification with a rank-zero
 //! collapse and `0 extent source(s) for 1 output axis(es)`.
 //!
@@ -147,31 +147,32 @@ fn shared_producer_concat_lowers_to_pad_add_not_the_host_placeholder() {
     );
 }
 
-/// NEGATIVE TWIN, DISPOSITION LOCK (this is the conservative behaviour on
-/// BOTH sides of the repair, not a regression receipt).
+/// NEGATIVE TWIN: distinct producer identities must not be fused.
 ///
 /// Two rows sized from two DISTINCT scalar producers do NOT collapse onto one
 /// extent, even though the two `shape(x, 0)` reads agree at run time. Keying
 /// the name by the producer is what keeps them apart; lowering declines to
-/// fuse extents it cannot prove equal and stays on its host lane. The bailed
-/// `Reshape` nodes are pruned as orphans, so the disposition, not the names,
-/// is what this fixture can observe.
+/// fuse extents it cannot prove equal. #1906 replaces the historical fake
+/// scalar Load disposition with a structured forced-DAG rejection. Neither
+/// disposition is evidence of actual Host execution.
 #[test]
-fn two_reshapes_from_distinct_producers_stay_on_the_host_lane() {
-    let dag = lower_over_symbolic_x(&concat_of_two_rows("(var {} m)", "(var {} k)"));
-
-    assert!(
-        has_host_concat_placeholder(&dag),
-        "an unprovable extent agreement keeps concat on its host lane: {dag:?}"
-    );
+fn two_reshapes_from_distinct_producers_reject_forced_dag() {
+    let error = chelis_ir::lower::try_lower_subexpr_program(
+        &concat_of_two_rows("(var {} m)", "(var {} k)"),
+        UnordMap::from([(
+            "x".to_string(),
+            TensorType {
+                dims: vec![DimInfo::Named("n".into(), None)],
+                precision: Prim::F32,
+            },
+        )]),
+        UnordMap::new(),
+        UnordMap::new(),
+    )
+    .expect_err("distinct producers cannot prove the non-concat axes equal");
     assert_eq!(
-        pad_count(&dag),
-        0,
-        "no Pad cascade on the host lane: {dag:?}"
-    );
-    assert!(
-        reshape_axis_dims(&dag).is_empty(),
-        "the bailed rows are pruned rather than fused: {dag:?}"
+        error.message,
+        "tensor concat cannot be represented by the static tensor DAG; use its host execution path (chelis#1906)"
     );
 }
 
