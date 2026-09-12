@@ -186,35 +186,41 @@ fn hip_narrow_blas_matmul_stays_admitted_across_build_paths() {
     }
 }
 
-/// The seeded evaluator implementation does not imply compiled support.
-/// Every public compiled entry must consume the same typed effect policy,
-/// carrying the closed kind and a real implementation owner.
+/// Sealed fixed-control C support and the unsupported device lanes are each
+/// independent of the public entry path (#1872, [05-OP-37]).
 #[test]
 fn compiled_dropout_rejection_agrees_across_public_build_paths() {
     let source = "def noisy(x: tensor[4, f32]) -> tensor[4, f32] = \
                   with seed(42i64) { dropout(x, 0.5) }\n";
 
-    for target in [CompileTarget::C, CompileTarget::Hip] {
-        let error = compile(CompileRequest {
-            source_kind: SourceKind::Surf,
-            source: source.to_string(),
-            target,
-            entry_name: Some("noisy".to_string()),
-        })
-        .expect_err("compiled dropout must be rejected by the shared effect gate");
-        let diagnostic = &error.errors[0];
-        assert_eq!(diagnostic.kind().as_str(), "unsupported_feature");
-        assert!(diagnostic.message.contains("early capability gate"));
-        assert!(diagnostic.message.contains("unimplemented chelis#1192"));
-        assert!(
-            diagnostic
-                .message
-                .contains("run this program with `chelis eval`")
-        );
-        assert!(!diagnostic.message.contains("with seed(...)` instead"));
-    }
+    compile(CompileRequest {
+        source_kind: SourceKind::Surf,
+        source: source.to_string(),
+        target: CompileTarget::C,
+        entry_name: Some("noisy".to_string()),
+    })
+    .expect("fixed-control C source entry must retain its sealed plan");
+    build(source, "dropout_c", "c").success();
 
-    for target in ["c", "hip", "metal"] {
+    let error = compile(CompileRequest {
+        source_kind: SourceKind::Surf,
+        source: source.to_string(),
+        target: CompileTarget::Hip,
+        entry_name: Some("noisy".to_string()),
+    })
+    .expect_err("compiled dropout must be rejected by the shared effect gate");
+    let diagnostic = &error.errors[0];
+    assert_eq!(diagnostic.kind().as_str(), "unsupported_feature");
+    assert!(diagnostic.message.contains("early capability gate"));
+    assert!(diagnostic.message.contains("unimplemented chelis#1192"));
+    assert!(
+        diagnostic
+            .message
+            .contains("run this program with `chelis eval`")
+    );
+    assert!(!diagnostic.message.contains("with seed(...)` instead"));
+
+    for target in ["hip", "metal"] {
         build(source, &format!("dropout_{target}"), target)
             .failure()
             .stderr(predicates::str::contains("unsupported:"))
@@ -226,9 +232,56 @@ fn compiled_dropout_rejection_agrees_across_public_build_paths() {
     }
 }
 
-/// Entry-scoped compilation emits only the selected DAG. An unsupported
-/// effect in an un-emitted sibling must not block the clean entry, while
-/// selecting that sibling still reaches the same typed rejection.
+/// #1872: static rate is not a closed entry; the public ABI supplies no RNG.
+#[test]
+fn bare_inherited_random_c_surf_entry_rejects_across_public_paths() {
+    assert_bare_inherited_random_rejects(SourceKind::Surf);
+}
+
+#[test]
+fn bare_inherited_random_c_deep_entry_rejects_across_public_paths() {
+    assert_bare_inherited_random_rejects(SourceKind::Deep);
+}
+
+fn assert_bare_inherited_random_rejects(kind: SourceKind) {
+    let source = "def sample(x: tensor[4, f32]) -> tensor[4, f32] = dropout(x, 0.5f32)\n";
+    let decls = chelis_surf::parser::parse_str(source).unwrap();
+    let deep =
+        chelis_deep::printer::print_canonical(&chelis_surf::desugar::desugar_program(&decls));
+    let text = match kind {
+        SourceKind::Surf => source,
+        SourceKind::Deep => deep.as_str(),
+    };
+    for execution in [false, true] {
+        let request = CompileRequest {
+            source_kind: kind,
+            source: text.to_string(),
+            target: CompileTarget::C,
+            entry_name: Some("sample".into()),
+        };
+        let errors = if execution {
+            compile_for_execution(request)
+                .expect_err("public entry has no ambient RNG")
+                .errors
+        } else {
+            compile(request)
+                .expect_err("public entry has no ambient RNG")
+                .errors
+        };
+        assert_eq!(errors[0].kind().as_str(), "unsupported_feature");
+        assert!(errors[0].message.contains("inherited Random"), "{errors:?}");
+    }
+    let result = match kind {
+        SourceKind::Surf => build(source, "inherited_surf", "c"),
+        SourceKind::Deep => build_deep(&deep, "inherited_deep", "c"),
+    };
+    result
+        .failure()
+        .stderr(predicates::str::contains("unsupported:"));
+}
+
+/// Entry-scoped compilation admits both the pure and source-fixed C entry;
+/// selecting a runtime-rate entry still rejects it.
 #[test]
 fn compiled_dropout_gate_follows_the_emitted_entry_scope() {
     let source = "def clean(x: tensor[4, f32]) -> tensor[4, f32] = add(x, x)\n\
@@ -243,17 +296,28 @@ fn compiled_dropout_gate_follows_the_emitted_entry_scope() {
     })
     .expect("an un-emitted dropout sibling must not block the selected clean entry");
 
-    let error = compile_for_execution(CompileRequest {
+    compile_for_execution(CompileRequest {
         source_kind: SourceKind::Surf,
         source: source.to_string(),
         target: CompileTarget::C,
         entry_name: Some("noisy".to_string()),
     })
-    .expect_err("selecting the dropout entry must retain the typed rejection");
+    .expect("selecting the source-fixed C dropout entry must retain its sealed plan");
+
+    let runtime = source.replace("dropout(x, 0.5)", "dropout(x, tensor_to_scalar(sum(x, 0)))");
+    let error = compile_for_execution(CompileRequest {
+        source_kind: SourceKind::Surf,
+        source: runtime,
+        target: CompileTarget::C,
+        entry_name: Some("noisy".to_string()),
+    })
+    .expect_err("selected runtime-rate dropout must remain unsupported");
     assert!(
-        error.errors[0]
-            .message
-            .contains("unimplemented chelis#1192")
+        error.errors[0].message.contains("RuntimeRate")
+            || error.errors[0]
+                .message
+                .contains("statically-resolvable rate"),
+        "{error:?}"
     );
 }
 
@@ -330,7 +394,8 @@ fn scalar_activation_entry_respects_parameter_shadowing() {
 #[test]
 fn deep_dropout_uses_the_shared_typed_effect_gate() {
     let source = include_str!("fixtures/phase3_seeded_dropout.dp");
-    for target in ["c", "hip", "metal"] {
+    build_deep(source, "deep_dropout_c", "c").success();
+    for target in ["hip", "metal"] {
         build_deep(source, &format!("deep_dropout_{target}"), target)
             .failure()
             .stderr(predicates::str::contains("unsupported:"))
@@ -348,9 +413,12 @@ fn host_tensor_helper_dropout_uses_the_shared_typed_effect_gate() {
                   def noisy(x: tensor[4, f32]) -> tensor[4, f32] = \
                   with seed(42i64) { dropout(x, 0.5) }\n";
 
-    build(source, "host_helper_dropout", "c")
-        .failure()
-        .stderr(predicates::str::contains("unsupported:"))
-        .stderr(predicates::str::contains("early capability gate"))
-        .stderr(predicates::str::contains("unimplemented chelis#1192"));
+    build(source, "host_helper_dropout", "c").success();
+    for target in ["hip", "metal"] {
+        build(source, &format!("host_helper_dropout_{target}"), target)
+            .failure()
+            .stderr(predicates::str::contains("unsupported:"))
+            .stderr(predicates::str::contains("early capability gate"))
+            .stderr(predicates::str::contains("unimplemented chelis#1192"));
+    }
 }

@@ -148,7 +148,7 @@ fn executable_example_survives_format_check_and_exact_eval() {
 }
 
 #[test]
-fn invalid_empty_rate_is_a_real_cli_error_and_c_build_stays_unsupported() {
+fn invalid_empty_rate_is_a_real_cli_error_and_runtime_rate_c_build_stays_unsupported() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("dropout.ch");
     std::fs::write(&file, "def empty() -> tensor[0, f32] = to_tensor([])\ndef invalid(x: tensor[0, f32]) -> tensor[0, f32] = dropout(x, 1.0f32)\ndef main() = with seed(42i64) { invalid(empty()) }\n").unwrap();
@@ -165,7 +165,7 @@ fn invalid_empty_rate_is_a_real_cli_error_and_c_build_stays_unsupported() {
         text.contains("numeric trap: domain in dropout at f32"),
         "{text}"
     );
-    std::fs::write(&file, "def sample(x: tensor[4, f32]) -> tensor[4, f32] = with seed(42i64) { dropout(x, 0.5f32) }\n").unwrap();
+    std::fs::write(&file, "def sample(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = with seed(42i64) { dropout(x, rate) }\n").unwrap();
     assert!(cli(&["fmt", "--inplace", path]).status.success());
     let output = cli(&[
         "build",
@@ -182,7 +182,7 @@ fn invalid_empty_rate_is_a_real_cli_error_and_c_build_stays_unsupported() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        text.contains("dropout") || text.contains("Dropout"),
+        text.contains("statically-resolvable rate") || text.contains("RuntimeRate"),
         "{text}"
     );
 }

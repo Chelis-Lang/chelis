@@ -442,6 +442,11 @@ fn parity_dict_foundation() {
 }
 
 #[test]
+fn parity_dropout_entry_library_only() {
+    drive_parity(&examples_root().join("dropout_entry.ch"), false);
+}
+
+#[test]
 fn parity_dropout_fixed_stream() {
     let path = examples_root().join("dropout_fixed_stream.ch");
     assert_eq!(
@@ -719,6 +724,7 @@ fn parity_corpus_is_complete() {
         "count_bool_axes.ch",
         "count_bool_device_entry.ch",
         "dict_foundation.ch",
+        "dropout_entry.ch",
         "dropout_fixed_stream.ch",
         "dropout_staged_claim.ch",
         "dropout_static_rate.ch",

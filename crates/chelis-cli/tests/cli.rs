@@ -8504,6 +8504,127 @@ forty_two = with seed(42i64) { sample(copy(template)) }
     );
 }
 
+/// #1872, [05-OP-37]/[05-RNG-1]: a source-fixed entry retains its sealed
+/// execution plan independently of unrelated declarations or source spelling.
+#[test]
+fn fixed_control_c_entry_is_independent_of_host_siblings() {
+    let dir = tempdir().unwrap();
+    for (stem, sibling, deep, pure) in [
+        ("bare", "", false, false),
+        ("with_host", "def status() -> int64 = 7i64\n", false, false),
+        ("deep_entry", "", true, false),
+        ("seeded_helper", "", false, false),
+        ("declared_random", "", false, false),
+        ("pure_entry", "", false, true),
+    ] {
+        let surf = dir.path().join(format!("{stem}.ch"));
+        write_file(
+            &surf,
+            &format!(
+                "{}{sibling}",
+                if pure {
+                    "def sample(x: tensor[4, f32]) -> tensor[4, f32] = add(x, x)\n"
+                } else if stem == "seeded_helper" {
+                    "def keep(x: tensor[4, f32]) -> tensor[4, f32] = dropout(x, 0.5f32)\ndef sample(x: tensor[4, f32]) -> tensor[4, f32] = with seed(42i64) { keep(x) }\n"
+                } else if stem == "declared_random" {
+                    "def sample(x: tensor[4, f32]) -> tensor[4, f32] ! { Random } = with seed(42i64) { dropout(x, 0.5f32) }\n"
+                } else {
+                    include_str!("../../../examples/dropout_entry.ch")
+                }
+            ),
+        );
+        for args in [
+            vec!["fmt", "--inplace"],
+            vec!["lint", "--check"],
+            vec!["check"],
+        ] {
+            Command::cargo_bin("chelis")
+                .unwrap()
+                .args(args)
+                .arg(&surf)
+                .assert()
+                .success();
+        }
+        let source = if deep {
+            let output = Command::cargo_bin("chelis")
+                .unwrap()
+                .arg("deep")
+                .arg(&surf)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let path = dir.path().join(format!("{stem}.dp"));
+            fs::write(&path, output.stdout).unwrap();
+            Command::cargo_bin("chelis")
+                .unwrap()
+                .arg("check")
+                .arg(&path)
+                .assert()
+                .success();
+            path
+        } else {
+            surf
+        };
+        let out = dir.path().join(stem);
+        Command::cargo_bin("chelis")
+            .unwrap()
+            .env("CHELIS_RUNTIME_DIR", runtime_library_dir())
+            .arg("build")
+            .arg(&source)
+            .args(["--target", "c", "--output"])
+            .arg(&out)
+            .assert()
+            .success();
+        let invocation = if pure {
+            "chelis_tensor *outputs[1]; pure_entry(&x, 1, outputs, 1); chelis_tensor *y = outputs[0];"
+        } else {
+            "chelis_tensor *y = sample(x);"
+        };
+        let expected = if pure {
+            "0x40000000u, 0x40800000u, 0x40c00000u, 0x41000000u"
+        } else {
+            "0u, 0x40800000u, 0u, 0u"
+        };
+        let driver = format!(
+            r#"
+#define main generated_main
+#include "{stem}.c"
+#undef main
+#include <assert.h>
+#include <string.h>
+int main(void) {{
+    int64_t n = 4;
+    chelis_tensor *x = chelis_alloc(1, &n, CHELIS_DTYPE_F32);
+    const uint32_t original[] = {{0x3f800000u, 0x40000000u, 0x40400000u, 0x40800000u}};
+    chelis_tensor_write *guard = chelis_tensor_begin_write(x);
+    memcpy(chelis_tensor_write_view(guard).data, original, sizeof(original));
+    chelis_tensor_end_write(guard);
+    const uint32_t expected[] = {{{expected}}};
+    for (int repeat = 0; repeat < 3; ++repeat) {{
+        {invocation}
+        assert(chelis_tensor_rank(y) == 1 && chelis_tensor_shape(y, 0) == n);
+        chelis_read_view view = chelis_tensor_read_view(y);
+        assert(view.dtype == CHELIS_DTYPE_F32 && view.count == n);
+        assert(memcmp(view.data, expected, sizeof(expected)) == 0);
+        assert(memcmp(chelis_tensor_read_view(x).data, original, sizeof(original)) == 0);
+        chelis_tensor_release(y);
+    }}
+    chelis_tensor_release(x);
+    return 0;
+}}
+"#
+        );
+        write_file(&out.join("driver.c"), &driver);
+        assert!(gcc_link_generated(&out, "driver.c", "driver").success());
+        assert!(
+            StdCommand::new(out.join("driver"))
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+}
+
 #[test]
 fn concrete_static_rate_local_helper_executes_eval_and_native_c() {
     let dir = tempdir().unwrap();
