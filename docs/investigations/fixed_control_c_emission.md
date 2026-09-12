@@ -5,6 +5,28 @@ also carried through ordinary C source/API/CLI admission, including concrete
 specializations of generic host helpers such as #1764. HIP/Metal remain
 excluded and retain their typed rejection.
 
+## Whole-program entry selection
+
+A concrete fixed-control tensor function must retain its sealed C execution
+helper whether it is the only declaration or has unrelated scalar/host siblings
+(#1872). Whole-program Surf and Deep CLI builds use the existing authored host
+wrapper for such an entry. The wrapper-selection decision uses the original
+checked body, declared input scope and shared `c_execution_profile`; a raw DAG
+is not evidence for fixed-control admission. Selected compiler-API entries keep
+their four-argument tensor ABI, and pure CLI entries keep their ordinary ABI.
+Unbound/runtime controls and HIP/Metal remain unsupported. This repairs entry
+selection, not compiled-in-context plan transport or symbolic-extent emission.
+
+The regression is `cli::fixed_control_c_entry_is_independent_of_host_siblings`:
+normal fmt/check/build for bare Surf, sibling Surf and Deep, then actual native
+calls checking all output/input bits and repeated invocation. The
+`phase3_gate_contract` suite locks the corresponding API/target dispositions.
+Run both with `cargo nextest run -p chelis-cli --test cli --test phase3_gate_contract
+-E 'test(fixed_control_c_entry_) | binary(phase3_gate_contract)' --test-threads 1`
+after `cargo check -p chelis-cli --tests`. All selected tests must pass.
+
+## Sealed emission
+
 `EvaluationPlan::verify_ownership` consumes the lowering-owned graph and source
 execution metadata. It validates the plan, requires the actual node schedule to
 equal the graph order used by ownership lowering, and checks logical ownership.

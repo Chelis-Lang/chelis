@@ -184,12 +184,14 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
          ALUs; use `--target c` or `--target hip` for f64 workloads\n",
     ),
     (
-        "c_seeded_dropout",
+        // #1872: C's sealed entry is now an executed positive in cli.rs.
+        // The unimplemented device lane still owns this rejection record.
+        "hip_seeded_dropout",
         "def noisy(x: tensor[4, f32]) -> tensor[4, f32] = \
          with seed(42i64) { dropout(x, 0.5) }\n",
-        "c",
-        "error: unsupported: compiled `dropout` op at lowered node 1 on `chelis build --target c` \
-         early capability gate (codegen:c); unimplemented chelis#1192: compiled `dropout` \
+        "hip",
+        "error: unsupported: compiled `dropout` op at lowered node 1 on `chelis build --target hip` \
+         early capability gate (codegen:hip); unimplemented chelis#1192: compiled `dropout` \
          kernels are not implemented; run this program with `chelis eval`\n",
     ),
     // -- chelis#730 Phase 1 rows: the converted census sites, each pinned
@@ -244,7 +246,7 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
          reduce_window_max(x, [w], [s])\n\
          out = f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0]), 2i64, 1i64)\n",
         "c",
-        "error: Lowering error: unsupported: a non-literal window list for `reduce_window_max` \
+        "error: unsupported: a non-literal window list for `reduce_window_max` \
          on the compiled-backend lowering of `reduce_window_*` (lowering); unimplemented \
          chelis#1058: window and stride lists must be integer literals for the compiled lane \
          today; a runtime-parameterized window previously lowered to a silent no-op; \
