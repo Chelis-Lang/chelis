@@ -1,5 +1,45 @@
 # Bounded typed dropout rates
 
+## Concrete call forwarding follow-up (2026-09-12)
+
+The follow-up repairs concrete tensor-returning helper calls whose source-static
+rate was lost when the evaluator entered the helper frame. Unbound declarations
+remain checked library templates; actual calls reuse the existing typed scalar
+grammar and execution planner. Scalar data operands are staged once, while only
+the source expressions required to prove fixed controls survive staging. A local
+binding cannot be mistaken for a same-named top-level template. Legacy helper
+summary probes no longer eagerly lower an unresolved-rate template, and ordinary
+dropout lowering shares the typed rate recognizer. No new random interpreter or
+rate cotangent is introduced.
+
+The executable `examples/dropout_static_rate.ch` exercises a local helper,
+gradient replay, input preservation, and the following draw through actual CLI
+eval and native C. API coverage adds distinct literal callsites and repeated
+prepared evaluation through encoded/decoded Reef contexts. Runtime-computed
+rates, dynamic control, unsupported generic evaluator calls, and lexical capture
+exclusions remain outside this repair.
+
+Export policy matters: without an explicit export list, every top-level def is
+public (spec/02-surf-syntax.md). A whole-program build containing an unbound
+public `keep(x, rate)` still rejects its standalone C entry; it must not silently
+discard that entry to make a literal wrapper compile. A Reef library context
+retains an exported helper as source for consumer specialization, not as a
+standalone runtime-rate C ABI. In-context compilation selects new consumer roots,
+not library functions (the `compile_for_execution_in_context` API contract).
+
+Compiled-in-context C remains a separate known gap: its resolved-entry branch
+attaches `None` instead of the monolithic selected-source execution plan. Thus a
+consumer `main(x) = with seed(42i64) { keep(x, 0.5f32) }` still reaches the old
+compiled-dropout rejection. This intended-success case is not a permanent
+negative contract. The repair should reuse existing selected-plan construction
+and transport in `compiler.rs`, with owning API/native tests; it must not add a
+second C random implementation. Symbolic rank-four extent emission yielding
+bare `*` is likewise separate. Neither issue is fixed or certified here.
+
+The remainder records the earlier IR-only slice and its historical boundaries.
+
+## Original IR specialization slice
+
 Part of #1764. This slice specializes statically known dropout rates before
 fixed-control admission and lowering. The source grammar is literals, checked
 or truncating casts, negation, and lexical aliases/first-order helper parameters.

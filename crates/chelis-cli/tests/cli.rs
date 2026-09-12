@@ -8504,6 +8504,76 @@ forty_two = with seed(42i64) { sample(copy(template)) }
     );
 }
 
+#[test]
+fn concrete_static_rate_local_helper_executes_eval_and_native_c() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("static_rate.ch");
+    write_file(
+        &source,
+        include_str!("../../../examples/dropout_static_rate.ch"),
+    );
+    for args in [
+        vec!["fmt", "--inplace"],
+        vec!["lint", "--check"],
+        vec!["check"],
+    ] {
+        Command::cargo_bin("chelis")
+            .unwrap()
+            .args(args)
+            .arg(&source)
+            .assert()
+            .success();
+    }
+    let expected = "result.0 = tensor(shape=[4], data=[0.0, 2.0, 0.0, 0.0])\nresult.1 = tensor(shape=[4], data=[2.0, 0.0, 0.0, 0.0])\nresult.2 = tensor(shape=[4], data=[2.0, 2.0, 0.0, 0.0])\nresult.3 = tensor(shape=[4], data=[1.0, 1.0, 1.0, 1.0])\n";
+    Command::cargo_bin("chelis")
+        .unwrap()
+        .args(["eval", "--file"])
+        .arg(&source)
+        .assert()
+        .success()
+        .stdout(expected);
+    let out = dir.path().join("out");
+    Command::cargo_bin("chelis")
+        .unwrap()
+        .env("CHELIS_RUNTIME_DIR", runtime_library_dir())
+        .arg("build")
+        .arg(&source)
+        .arg("--output")
+        .arg(&out)
+        .assert()
+        .success();
+    assert!(gcc_link_generated(&out, "static_rate.c", "static_rate").success());
+    let result = StdCommand::new(out.join("static_rate")).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8(result.stdout).unwrap(), expected);
+
+    // The public unresolved-rate entry is still a compile rejection. This
+    // program has no export list, so every top-level def is public (§2 Surf).
+    write_file(
+        &source,
+        "def keep(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = dropout(x, rate)\n",
+    );
+    Command::cargo_bin("chelis")
+        .unwrap()
+        .args(["fmt", "--inplace"])
+        .arg(&source)
+        .assert()
+        .success();
+    Command::cargo_bin("chelis")
+        .unwrap()
+        .arg("build")
+        .arg(&source)
+        .arg("--output")
+        .arg(dir.path().join("unresolved"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("statically-resolvable rate"));
+}
+
 /// [05-OP-37]/[05-RNG-1]: a concrete call of a dtype-generic static-rate
 /// helper retains its source draw identity through the CLI host build.
 #[test]

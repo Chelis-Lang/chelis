@@ -1273,6 +1273,37 @@ impl<'a> EvalContext<'a> {
             .map(|arg| self.eval_expr(arg))
             .collect::<Result<Vec<_>, _>>()?;
 
+        // #1764: a concrete tensor call may bind a dropout rate that its
+        // standalone declaration cannot. Route the source call before the
+        // callee frame forgets those static actuals. Generic host dispatch
+        // and excluded control profiles keep their existing boundary.
+        if self.execution_exclusion.is_none()
+            && let Some(callee) = var_name(func)
+            && let Some((resolved, def_expr)) = self.lookup_top_level_def(callee)
+            && chelis_ir::lower::evaluation_profile(&def_expr, &self.top_level_defs)
+                == chelis_ir::evaluation::EvaluationProfile::Legacy(
+                    chelis_ir::evaluation::LegacyEvaluationReason::RuntimeRate,
+                )
+            && self.bindings.get(callee).is_none_or(|value| {
+                matches!(value,
+                RuntimeValue::Closure { def_name: Some(name), .. } if name == &resolved)
+            })
+            && let Some(signature) = self.type_env.get(&resolved)
+            && !chelis_ir::lower::type_expr_has_precision_var(signature)
+            && !chelis_ir::lower::type_expr_has_rank_var(signature)
+            && result_type_expr.as_ref().is_some_and(|ty| {
+                tagged_expr_children(ty).is_some_and(|(tag, _)| tag == DeepTag::TTensor)
+            })
+            && chelis_ir::lower::evaluation_profile(
+                &Expr::List(list.clone(), Span::new(0, 0)),
+                &self.top_level_defs,
+            ) == chelis_ir::evaluation::EvaluationProfile::FixedControl
+            && let Some(value) =
+                self.try_named_axis_def_call(&resolved, &def_expr, kids, &args, true)?
+        {
+            return Ok(value);
+        }
+
         // Std.Io.Json's private serializer intrinsic. Keep generic
         // `dict_entries` insertion-ordered for CSV/tokenizer callers; only
         // the owning JSON boundary canonicalizes string keys. Rust `str` Ord
@@ -1347,7 +1378,7 @@ impl<'a> EvalContext<'a> {
             // kernel at application; site B keeps only the defs C also
             // handles per call (rank- and precision-polymorphic ones).
             && self.def_kernel(&resolved)?.is_none()
-            && let Some(routed) = self.try_named_axis_def_call(&resolved, &def_expr, kids, &args)?
+            && let Some(routed) = self.try_named_axis_def_call(&resolved, &def_expr, kids, &args, false)?
         {
             return Ok(routed);
         }

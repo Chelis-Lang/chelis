@@ -452,6 +452,16 @@ fn parity_dropout_fixed_stream() {
 }
 
 #[test]
+fn parity_dropout_static_rate() {
+    let path = examples_root().join("dropout_static_rate.ch");
+    assert_eq!(
+        run_eval(&path),
+        b"result.0 = tensor(shape=[4], data=[0.0, 2.0, 0.0, 0.0])\nresult.1 = tensor(shape=[4], data=[2.0, 0.0, 0.0, 0.0])\nresult.2 = tensor(shape=[4], data=[2.0, 2.0, 0.0, 0.0])\nresult.3 = tensor(shape=[4], data=[1.0, 1.0, 1.0, 1.0])\n",
+    );
+    drive_parity(&path, true);
+}
+
+#[test]
 fn parity_dropout_staged_claim_eval_and_c_rejection() {
     check_dropout_eval_and_c_rejection(
         "dropout_staged_claim.ch",
@@ -711,6 +721,7 @@ fn parity_corpus_is_complete() {
         "dict_foundation.ch",
         "dropout_fixed_stream.ch",
         "dropout_staged_claim.ch",
+        "dropout_static_rate.ch",
         "explicit_normalization.ch",
         "generic_explicit_shape.ch",
         "generic_value_roots.ch",
