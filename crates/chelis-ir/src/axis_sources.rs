@@ -1736,8 +1736,34 @@ pub fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass> {
         // with. A `Literal` class needs one, because C2.4 makes the literal
         // the canonical VALUE rather than a first member, so a single
         // runtime-sourced axis claiming a literal already owes a guard.
+        //
+        // One `Name` class needs only one, and for the same reason the
+        // `Literal` rule gives: a RESOLVED claim is its own canonical value.
+        // A single member whose source is `OpComputed` and whose dim carries
+        // `Named(_, Some(v))` has both a number to compare against and an
+        // extent the operation computes to compare, so it is a complete guard
+        // with nothing missing. chelis#1800 is the case: `f(w: tensor[n, f32],
+        // x) -> tensor[n, f32]` called with a graph-fixed `w` puts `Lit(v)` on
+        // the declaring axis, which belongs to the `Literal(v)` class rather
+        // than to `n`'s, leaving `n` with the op-computed member alone;
+        // lowering resolves that member's claim so the number travels with it.
+        //
+        // The rule is deliberately this narrow. An unresolved single member
+        // still forms no class, because nothing supplies its canonical value,
+        // and a resolved member with any OTHER source is not admitted: an
+        // entry class resolved this way would mint a guard for every
+        // literal-shaped input, which is the mint `is_member`'s `ExternalAxis`
+        // rule exists to prevent.
         let needed = match claim {
-            DimClaim::Name(_) => 2,
+            DimClaim::Name(_) => {
+                let resolved_op_computed = members.len() == 1
+                    && matches!(members[0].member.source, AxisSource::OpComputed { .. })
+                    && dag
+                        .get(members[0].member.node)
+                        .and_then(|node| node.output_type.dims.get(members[0].member.axis))
+                        .is_some_and(|dim| matches!(dim, DimInfo::Named(_, Some(_))));
+                if resolved_op_computed { 1 } else { 2 }
+            }
             DimClaim::Literal(_) => 1,
         };
         if members.len() < needed {

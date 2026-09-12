@@ -3532,56 +3532,75 @@ fn nested_named_result_source(len: usize, declared: &str) -> String {
     )
 }
 
-/// The boundary of this slice's declaration half, stated rather than implied.
+/// claim.named.nested_fresh_result.{eval,c}: a NAMED result claim is enforced
+/// when the declaring def is called from inside another def's body.
 ///
-/// A NAMED result claim is enforced at the outermost activation: an exported
-/// def, a top-level value binding, an inlined root. It is NOT enforced when the
-/// declaring def is called from inside another def's body, because the
-/// enclosing signature's own result name is written over the axis the inner
-/// activation stamped, so the class keyed by the inner binder has one member
-/// and C2.4 does not make that a class. Read off the emitted C: `f`'s own
-/// kernel carries `int64_t n = chelis_tensor_shape(inputs[0], 0)` and the
-/// comparison, while `g`'s kernel, with `f` inlined, carries
+/// Two sites lost it, and the repair needed both. `host::remap_tensor_helper_
+/// dim_symbols` pairs the root's output type with the enclosing declared
+/// result as an extra formal, and the graph-wide substitution that pairing
+/// produced renamed the inner activation's `n` to `g`'s fresh `k`, orphaning
+/// the class. Even unrenamed, the class keyed by `n` had ONE member: the
+/// declaring axis is the const `to_tensor([1.0f32, 2.0f32])`, which carries
+/// `Lit(2)` and so belongs to the `Literal(2)` class instead, and C2.4 did not
+/// make a one-member `Name` class a class. So the pairing now substitutes only
+/// compiler-minted names, and lowering stamps the inner claim RESOLVED, as
+/// `Named("n", Some(2))`, which `derive_runtime_dim_classes` admits as a
+/// complete single-member class.
+///
+/// Read off the emitted C before the repair: `f`'s own kernel carried
+/// `int64_t n = chelis_tensor_shape(inputs[0], 0)` and the comparison, while
+/// `g`'s kernel, with `f` inlined, carried
 /// `int64_t k = chelis_movement_extent(...)` and none.
 ///
-/// The LITERAL half survives the same nesting, which is why this row asserts
-/// both: the two halves of the declared-result contract diverge exactly here,
-/// and a lock that pinned only the unguarded side would not show that.
+/// The LITERAL half survives the same nesting and did so before this change,
+/// which is why this row still asserts both: the two halves of the
+/// declared-result contract diverged exactly here, and a receipt that dropped
+/// the literal side would stop showing that they now agree.
 ///
-/// EVIDENTIARY STATUS: disposition lock on both lanes for the named half, not
-/// a regression test: the same program exits zero on `8ae55787f` and this
-/// slice neither introduces nor worsens it. Regression test for the literal
-/// half, which this slice does deliver through the same nesting. Tracked by
-/// chelis#1800, which must update this row when it closes.
+/// This row was `a_nested_named_result_claim_is_not_enforced_by_this_slice`, a
+/// disposition lock, until chelis#1800 closed it.
+///
+/// EVIDENTIARY STATUS: regression test for the named block. Measured at
+/// `5cf3dbb63`, which already carries chelis#1798's origin resolution and
+/// chelis#1837's pad admission, this program printed
+/// `out = tensor(shape=[3], data=[2.0, 3.0, 4.0])` and exited ZERO on eval and
+/// on the linked C binary under a declared `tensor[n, f32]` with `n` = 2.
+/// Regression test for the literal block too, which this slice delivered
+/// through the same nesting earlier. Disposition lock for the agreeing
+/// control, the non-vacuity check.
 #[test]
-fn a_nested_named_result_claim_is_not_enforced_by_this_slice() {
+fn a_nested_named_result_claim_is_enforced_through_its_resolved_binder() {
     assert!(
         gcc_available(),
         "this row compares two executed lanes; neither may skip"
     );
     let dir = tempfile::tempdir().expect("tempdir");
 
-    // The named half: unguarded, and the outer result takes the extent the
-    // operation computed rather than the one `n` declares.
+    // The named half: guarded, reporting the inner binder and the number the
+    // graph-fixed declaring argument resolved it to.
     let named = nested_named_result_source(4, "n");
     let (eval_ok, eval_out) = eval_result(&dir, "nested_named.ch", &named);
     let (c_ok, c_out) = c_run_result(&dir, "nested_named_c", &named);
+    let context = "extent `n`: claimed = 2, shrink axis 0 = 3";
     for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(!ok, "{lane}: the nested named claim traps: {out}");
         assert!(
-            ok,
-            "{lane}: the nested named claim is unenforced (chelis#1800): {out}"
+            out.contains(&domain_trap_line("shrink")),
+            "{lane}: [04-NUM-9]'s line: {out}"
+        );
+        assert!(out.contains(context), "{lane}: expected {context}: {out}");
+        assert!(
+            !out.contains("shape=[3]"),
+            "{lane}: and the extent the shrink computed is not returned: {out}"
         );
         assert!(
-            out.contains("shape=[3]") && out.contains("data=[2.0, 3.0, 4.0]"),
-            "{lane}: and the extent the shrink computed is returned: {out}"
-        );
-        assert!(
-            !out.contains("extent `n`"),
-            "{lane}: no guard claims to have checked it: {out}"
+            !out.contains("extent `k`"),
+            "{lane}: the enclosing fresh result name does not replace the \
+             inner binder: {out}"
         );
     }
 
-    // The literal half through the SAME nesting: guarded.
+    // The literal half through the SAME nesting: guarded, as before.
     let literal = nested_named_result_source(4, "2");
     let (eval_ok, eval_out) = eval_result(&dir, "nested_lit.ch", &literal);
     let (c_ok, c_out) = c_run_result(&dir, "nested_lit_c", &literal);
@@ -3596,14 +3615,99 @@ fn a_nested_named_result_claim_is_not_enforced_by_this_slice() {
         assert!(out.contains(context), "{lane}: expected {context}: {out}");
     }
 
-    // And the named half's agreeing control still executes exactly, so the
-    // first block above is pinning an unguarded claim and not a broken lane.
+    // And the named half's agreeing control still executes exactly, on both
+    // lanes, so the first block is pinning a guard and not a broken lane.
     let agreeing = nested_named_result_source(3, "n");
     let (eval_ok, eval_out) = eval_result(&dir, "nested_named_ok.ch", &agreeing);
-    assert!(eval_ok, "an agreeing nested claim executes: {eval_out}");
+    let (c_ok, c_out) = c_run_result(&dir, "nested_named_ok_c", &agreeing);
+    for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
+        assert!(ok, "{lane}: an agreeing nested claim executes: {out}");
+        assert!(
+            out.contains("shape=[2]") && out.contains("data=[2.0, 3.0]"),
+            "{lane}: with the declared extent: {out}"
+        );
+    }
+}
+
+/// claim.named.nested_runtime_declarer: a nested named claim whose declaring
+/// argument carries a RUNTIME extent is a checker rejection, which is why the
+/// resolved stamp alone closes chelis#1800.
+///
+/// The stamp resolves a claim only when its declaring witness observes a
+/// graph-fixed extent. An UNRESOLVED inner claim would still be renamed by the
+/// root pairing in `host::remap_tensor_helper_dim_symbols`, because
+/// `tensor_dim_substitutions` keys on `DimInfo::Named(name, None)` and a
+/// resolved `Named(name, Some(v))` is not a key at all. So the question is
+/// whether an unresolved nested claim is reachable, and it is not: passing
+/// `g`'s own parameter as the argument that declares `n` unifies two rigid
+/// dim parameters, which §4.4.1 refuses.
+///
+/// Without this row the repair looks incomplete, and a reader would reach for
+/// the pairing change the design proposed. That change is measurably wrong:
+/// masking user-spelled names out of the pairing removed the guard from seven
+/// existing receipts in this file, among them
+/// `a_literal_claim_over_a_runtime_read_traps_at_entry_on_eval`, where a
+/// declared `tensor[4, f32]` over a read of 5 executed and printed
+/// `widened = tensor(shape=[5], ...)`. The pairing carries legitimate
+/// user-spelled declarations as well as synthesized ones.
+///
+/// EVIDENTIARY STATUS: disposition lock. Existing checker behaviour that this
+/// change neither introduces nor alters; the row exists so the resolved
+/// stamp's sufficiency is recorded rather than assumed.
+#[test]
+fn a_nested_claim_whose_declarer_is_a_runtime_extent_is_refused_by_the_checker() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = "def f(w: tensor[n, f32], x: tensor[r, f32]) -> tensor[n, f32] = \
+                  shrink(x, [[1i64, shape(x, 0i32)]])\n\
+                  def g(y: tensor[s, f32], z: tensor[t, f32]) -> tensor[k, f32] = f(z, y)\n\
+                  out = g(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]), \
+                  to_tensor([1.0f32, 2.0f32]))\n";
+    let (ok, out) = eval_result(&dir, "nested_runtime_declarer.ch", source);
+    assert!(!ok, "two rigid dim parameters do not unify: {out}");
     assert!(
-        eval_out.contains("shape=[2]") && eval_out.contains("data=[2.0, 3.0]"),
-        "with the declared extent: {eval_out}"
+        out.contains("declared dim parameters are rigid and must remain distinct"),
+        "and §4.4.1 is what refuses it: {out}"
+    );
+    assert!(
+        !out.contains(&domain_trap_line("shrink")),
+        "so no [04-NUM-9] runtime trap is rendered for it: {out}"
+    );
+}
+
+/// claim.named.nested_param_result.{eval,c}: the spelling that binds the
+/// enclosing result to the enclosing PARAMETER is a checker rejection, not a
+/// guard.
+///
+/// chelis#1800's issue text gestures at `-> tensor[m]` beside the fresh `k`
+/// above, and the two are not the same case. A dim parameter the signature
+/// declares must stay polymorphic under `spec/04-type-system.md` §4.4.1, and
+/// this body pins it: `f`'s declared `n` comes from a const argument, so `m`
+/// is forced to 2. The checker refuses that before any lane runs, which is why
+/// the row above uses a FRESH enclosing name; a fresh name is the only
+/// spelling where the residual existed.
+///
+/// EVIDENTIARY STATUS: disposition lock, and a correction to the design that
+/// preceded this change, which recorded this spelling as already trapping
+/// ``extent `m` `` at run time. Measured at `5cf3dbb63`, it is a
+/// `DimensionMismatch` from the checker, with or without the repair: this
+/// change touches `crates/chelis-ir` only, so it cannot reach the verdict.
+#[test]
+fn a_nested_param_bound_result_claim_is_refused_by_the_checker() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = "def f(w: tensor[n, f32], x: tensor[r, f32]) -> tensor[n, f32] = \
+                  shrink(x, [[1i64, shape(x, 0i32)]])\n\
+                  def g(y: tensor[m, f32]) -> tensor[m, f32] = \
+                  f(to_tensor([1.0f32, 2.0f32]), y)\n\
+                  out = g(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]))\n";
+    let (ok, out) = eval_result(&dir, "nested_param_result.ch", source);
+    assert!(!ok, "a pinned dim parameter does not execute: {out}");
+    assert!(
+        out.contains("polymorphic dim parameter `m` forced to concrete Lit(2)"),
+        "and §4.4.1's rigid-parameter rule is what refuses it: {out}"
+    );
+    assert!(
+        !out.contains(&domain_trap_line("shrink")),
+        "so no [04-NUM-9] runtime trap is rendered for it: {out}"
     );
 }
 
@@ -6271,13 +6375,20 @@ fn a_pass_through_literal_claim_is_guarded_at_its_op_computed_origin() {
 /// claim.named.pass_through.inlined_root.{eval,c}: the same forwarded origin
 /// reached through an INLINED root rather than a value binding.
 ///
-/// `def main() -> tensor[2, f32] = f(...)` inlines `f`, so the root's own
-/// declared claim is the one that reaches the forwarded axis and the callee's
-/// `n` does not: the const argument that declares `n` mints no signature
-/// witness for the inlined activation, so `f`'s named claim declines and the
-/// root's literal claim lands on the same origin. The claim label is
-/// therefore the number rather than the binder, and the origin, the axis and
+/// `def main() -> tensor[2, f32] = f(...)` inlines `f`, so two claims reach
+/// one origin: the callee's `n`, and the root's own literal 2. The claim
+/// label is the BINDER, because chelis#1800's resolved stamp gives the inner
+/// activation's `n` a number from the const argument that declares it, and
+/// chelis#1782's rule then makes the root's restated literal entailed by that
+/// named claim and records no second requirement. The origin, the axis and
 /// the observed extent are the ones the value-binding rows report.
+///
+/// This row asserted ``extent `2` `` when the origin resolution landed on its
+/// own, which is what the head produced before the resolved stamp: the const
+/// argument minted no usable signature witness for the inlined activation, so
+/// `f`'s named claim declined and the root's literal was the only one left.
+/// The rendering moved with the stamp, in the same pull request, and the
+/// measured value is what it asserts.
 ///
 /// This row exists because the root form is where chelis#1782 and PR #1790
 /// put the inlined claim, and a repair that only reached the exported-kernel
@@ -6314,7 +6425,7 @@ fn an_inlined_root_pass_through_claim_is_guarded_on_both_lanes() {
     let mismatched = source(4);
     let (eval_ok, eval_out) = eval_result(&dir, "pass_through_root.ch", &mismatched);
     let (c_ok, c_out) = c_run_result(&dir, "pass_through_root_c", &mismatched);
-    let context = "extent `2`: claimed = 2, shrink axis 0 = 3";
+    let context = "extent `n`: claimed = 2, shrink axis 0 = 3";
     for (lane, ok, out) in [("eval", eval_ok, &eval_out), ("c", c_ok, &c_out)] {
         assert!(!ok, "{lane}: the root's claim of 2 over 3 traps: {out}");
         assert!(
@@ -6322,6 +6433,11 @@ fn an_inlined_root_pass_through_claim_is_guarded_on_both_lanes() {
             "{lane}: [04-NUM-9]'s line names the origin operation: {out}"
         );
         assert!(out.contains(context), "{lane}: expected {context}: {out}");
+        assert!(
+            !out.contains("extent `2`"),
+            "{lane}: and the root's restated literal records no second \
+             requirement (chelis#1782): {out}"
+        );
     }
 
     // The agreeing root, so the row above pins a guard rather than a root
