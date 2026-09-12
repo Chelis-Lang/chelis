@@ -22,7 +22,7 @@ What makes it structural: no key, so nothing is stale; the borrow checker binds 
 
 `issue_1205_host_lowering_work_is_linear` (16716) is the shape. Its sibling `issue_1835_kernel_decision_work_is_linear` lives in the same `#[cfg(test)]` module because `HostWorkProfile` is crate-private, which is also why it runs: `gate.py ci-fast` runs `cargo nextest run --workspace --lib --bins` in the per-PR `Fast Tests (Linux)` job (`ci.yml:556-598`, `ci_test_targets.py:69`). An integration file needs a `ci-test-targets.toml` row or runs only nightly in `full-workspace`, cancelled at 60 minutes (#1819); a feature-gated accessor like `lowering-trace` is nightly-only (`gate.py:529`).
 
-Fixture: `f_i(x: tensor[4, f32]) -> tensor[4, f32] = add(f_{i+1}(x), f_{i+1}(x))`, depth 12, leaf `mul(x, x)`, built as `issue_1205_host_profile` does. Drive `host_def_kernel` per def, root first, then a second full pass. Assert counts: `helper_summary_builds <= 12` after pass one, unchanged after pass two; `program_def_collections == 1`; each def's decision equals the C lane's from `try_lower_compiled_program` (the B2h agreement). A depth-6 row shows +6 builds, against the re-expanding tree's own depth-6 count. Today it reads **398,574**, measured by the #1829 implementer on that head, not the about-2^12 I estimated here: each probe's own lowering re-probes its callees, so the expansion is not one tree of depth 12 but a tree whose every node re-expands. An implementer who computes 4,096 and measures 398,574 will suspect the fixture; the measured figure is the one to assert against. It stays red after #1829, which arms the guard in `runtime/mod.rs`, not `host_def_kernel`; the receipt separates the issues. Record the red count in the PR before the fix.
+Fixture: `f_i(x: tensor[4, f32]) -> tensor[4, f32] = add(f_{i+1}(x), f_{i+1}(x))`, depth 12, leaf `mul(x, x)`, built as `issue_1205_host_profile` does. Drive `host_def_kernel` per def, root first, then a second full pass. Assert counts: `helper_summary_builds <= 12` after pass one, unchanged after pass two; `program_def_collections == 1`; each def's decision equals the C lane's from `try_lower_compiled_program` (the B2h agreement). A depth-6 row shows +6 builds, against the re-expanding tree's own depth-6 count. **Correction, 2026-09-12 (the fixture figure).** This paragraph originally read "Today it reads **398,574**", a number measured by the chelis#1829 implementer on a *scalar* chain, which I folded in here as a correction to my own about-2^12 estimate without checking that the two fixtures were the same shape. They are not. On the base, chelis#1835's implementer measures the **tensor** fixture above at **78** and the **scalar** chain at **398,574**. Both shapes exhibit the defect; they differ by orders of magnitude because the scalar chain's re-expansion is not bounded by tensor-helper structure. The receipt in PR #1910 carries both, each figure attributed to its own chain, which is the right shape for it. The mechanism the original sentence described is unchanged and correct: each probe's own lowering re-probes its callees, so the expansion is not one tree of depth 12 but a tree whose every node re-expands. Only the number's subject was wrong. A receipt should name which chain it measures. It stays red after #1829, which arms the guard in `runtime/mod.rs`, not `host_def_kernel`; the receipt separates the issues. Record the red count in the PR before the fix.
 
 ## 4. Question 4: numbered spec
 
@@ -43,18 +43,38 @@ Land #1829 first; it closes the user-visible regression, and its `runtime/mod.rs
 The chelis#893 runtime-representation **Phase 0 inventory** flags new arithmetic in
 `crates/chelis-ir/src/host.rs` under the kind `normalized-key-arithmetic`. On #1843's
 head it flagged two rows: the **refcount decrement in `HostLoweringCacheGuard::drop`**
-and a **counter increment in `top_level_fn_helper_summary_rejects`**. An unclassified row
+and a **counter increment in `top_level_fn_helper_summary_rejects`**. *(That sentence is
+refuted; neither owner has an inventory row. The correction is below, under
+**Correction, 2026-09-12 (the flagged-row claim)**.)* An unclassified row
 is `UNCLASSIFIED_FAILURE` from `scripts/runtime_representation_oracle.py`, not a warning,
 so each needs a sanctioned classification in the baseline or a restructuring that removes
 it. The oracle runs in `heavy-e2e.yml`, never per pull request, so this surfaces after
 merge unless it is dispatched deliberately.
 
-**This cuts both ways for §2's proposal, and the favourable direction is the larger one.**
-The session type deletes `HostLoweringCacheGuard`, its `Drop`, and #1829's refcount
-outright, so the first flagged row **stops existing** rather than needing a
-classification. That is a second, independent argument for the structural repair over
-arming the flag at one more entry point: the flag's own bookkeeping is inventory debt,
-and the borrow checker's is not.
+**Correction, 2026-09-12 (the flagged-row claim).** This section originally asserted:
+
+> the first flagged row **stops existing** rather than needing a classification
+
+and the paragraph making that argument is deleted. The claim it rested on is the one
+still standing earlier in this section, now marked there: that
+`HostLoweringCacheGuard::drop`'s refcount decrement and
+`top_level_fn_helper_summary_rejects`'s counter were flagged Phase 0 rows, so deleting the
+guard would remove one. Measured against
+`spec/design/runtime_representation_phase0_inventory.json` on `main`: **neither owner
+appears anywhere in the inventory** (`HostLoweringCacheGuard` 0 occurrences,
+`top_level_fn_helper_summary_rejects` 0). The refcount was hand-spelled in a way the
+method-name rule does not match, so no row ever existed for it.
+
+`crates/chelis-ir/src/host.rs` **does** carry three `normalized-key-arithmetic` owners -
+`infer_app_expr_host_type`, `mono_specialization_symbol`, and
+`try_lower_general_list_grad_app`, each present in both `foundation_rows` and
+`active_debt` - so "host.rs has no rows" would be equally wrong. The three that exist are
+simply not the two I named.
+
+So the honest claim for an implementation is **"adds no flagged row"**, not "removes one",
+and an implementer adding arithmetic here should check whether it lands under one of those
+three existing owners or creates a fourth. The rest of §2's argument for the structural
+repair stands on its own terms and never depended on this.
 
 **But §3's counted receipt meets the same guard.** `HostWorkProfile.helper_summary_builds`
 is a counter increment in this exact file, and `issue_1835_kernel_decision_work_is_linear`
