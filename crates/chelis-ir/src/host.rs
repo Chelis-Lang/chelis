@@ -4789,8 +4789,6 @@ fn def_body_decision_impl(
         .params
         .iter()
         .any(|param| matches!(param.ty, HostTypeTerm::Fn(_, _)));
-    let calls_summary_rejecting_function =
-        expr_calls_summary_rejecting_top_level_fn(body_expr, program)?;
     let HostTypeTerm::Tensor(expected) = signature.ret_ty.clone() else {
         return Ok(DefBodyDecision::Host);
     };
@@ -4813,11 +4811,19 @@ fn def_body_decision_impl(
     {
         return Ok(DefBodyDecision::Host);
     }
+    // The callee summary probe is asked LAST of the host-lane predicates, and
+    // only after the declared result type, the effect row and the body form
+    // have each had their chance to answer. It is the only one that lowers a
+    // callee, so every cheaper predicate that answers first is a probe not
+    // run. Asking it eagerly made a non-tensor definition pay for a result
+    // the very next line discarded, which is what every definition in
+    // `Std.Io.Json` was doing; `||` short-circuits, so the order IS the
+    // saving. The predicates are independent, so the decision is unchanged.
     if any_callable_param
         || expr_needs_host_lane_tensor_lowering(body_expr, program)
         || expr_calls_top_level_fn_with_callable_param(body_expr, program)
-        || calls_summary_rejecting_function
         || should_keep_tensor_expr_in_host_lane(body_expr)
+        || expr_calls_summary_rejecting_top_level_fn(body_expr, program)?
     {
         return Ok(DefBodyDecision::Host);
     }
