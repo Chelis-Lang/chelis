@@ -1769,6 +1769,11 @@ impl<'a> EvalContext<'a> {
                             let DimInfo::Named(name, Some(size)) = dim else {
                                 continue;
                             };
+                            // §4.5: `*` describes an unknown extent, not a
+                            // binder shared by independent axes/arguments.
+                            if name == "*" {
+                                continue;
+                            }
                             match dimension_bindings.insert(name.clone(), size) {
                                 Some(previous) if previous != size => {
                                     return Err(format!(

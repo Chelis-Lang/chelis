@@ -706,6 +706,11 @@ fn parity_resource_target_cpu_library_only() {
     drive_parity(&examples_root().join("resource_target_cpu.ch"), false);
 }
 
+#[test]
+fn parity_wildcard_extents() {
+    drive_parity(&examples_root().join("wildcard_extents.ch"), true);
+}
+
 // -----------------------------------------------------------------------------
 // Corpus completeness guard
 // -----------------------------------------------------------------------------
@@ -755,6 +760,7 @@ fn parity_corpus_is_complete() {
         "tensor_structural_ops.ch",
         "transformer_block.ch",
         "vmap_relu.ch",
+        "wildcard_extents.ch",
     ];
     let actual: Vec<String> = discover_executable_examples()
         .iter()
