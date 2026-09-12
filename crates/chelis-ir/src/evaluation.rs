@@ -1546,8 +1546,9 @@ mod tests {
                 &declarations,
             ))
             .unwrap();
+            let session = crate::host::HostLoweringSession::new(&checked);
             let plan = |name| {
-                crate::host::host_def_evaluation_plan(&checked, name, &context())
+                crate::host::host_def_evaluation_plan(&session, name, &context())
                     .unwrap()
                     .unwrap()
                     .plan()
