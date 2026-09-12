@@ -5,6 +5,37 @@
 
 use super::*;
 
+/// The §4.5.2 join categories are semantic, not `Dim` representation tags.
+/// A private labelled Var can represent a concrete name with an optional
+/// known extent; only an active authored binder must retain rigid evidence.
+enum ListAxis {
+    Variable,
+    Wildcard,
+    Concrete {
+        extent: Option<i64>,
+        label: Option<String>,
+    },
+}
+
+impl ListAxis {
+    fn classify(dim: &Dim, subst: &Subst) -> Self {
+        let observation = subst.observe_dim(dim);
+        if observation.rank().is_some()
+            || (observation.variable().is_some()
+                && (observation.name().is_none() || observation.is_protected()))
+        {
+            Self::Variable
+        } else if observation.is_wildcard() {
+            Self::Wildcard
+        } else {
+            Self::Concrete {
+                extent: observation.known_extent(),
+                label: observation.name().map(str::to_owned),
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_app(
     list: &deep::List,
@@ -519,20 +550,31 @@ fn infer_app_inner(
             for (h, t) in head_dims.iter().zip(tail_dims.iter()) {
                 let hr = subst.apply_dim(h);
                 let tr = subst.apply_dim(t);
-                let joined = match (&hr, &tr) {
-                    (Dim::Lit(a), Dim::Lit(b)) if a == b => Dim::Lit(*a),
-                    (Dim::Name(n1), Dim::Name(n2)) if n1 == n2 => Dim::Name(n1.clone()),
-                    // Mismatched concrete dims (literal/literal or
-                    // name/name): the deliberate #218 ragged-axis
-                    // widening. Neither side is a dim variable, so there
-                    // is no rigid-dim promise to preserve here.
-                    (Dim::Lit(_), Dim::Lit(_))
-                    | (Dim::Name(_), Dim::Name(_))
-                    | (Dim::Lit(_), Dim::Name(_))
-                    | (Dim::Name(_), Dim::Lit(_)) => Dim::Wildcard,
-                    // At least one side is a dim variable (or a
-                    // wildcard). Unify so rigid dim parameters keep their
-                    // identity and `check_declared_dvars_rigid` can fire.
+                let joined = match (
+                    ListAxis::classify(&hr, subst),
+                    ListAxis::classify(&tr, subst),
+                ) {
+                    (
+                        ListAxis::Concrete {
+                            extent: a,
+                            label: an,
+                        },
+                        ListAxis::Concrete {
+                            extent: b,
+                            label: bn,
+                        },
+                    ) => {
+                        // Names and literal extents are separate observations.
+                        // Name/Lit and distinct names widen even at equal sizes;
+                        // equal names cannot conceal a known extent conflict.
+                        if an == bn && !matches!((a, b), (Some(a), Some(b)) if a != b) {
+                            hr.clone()
+                        } else {
+                            Dim::Wildcard
+                        }
+                    }
+                    // Keep genuine variable constraints for the body-rigidity
+                    // guards, and preserve the specified wildcard head bias.
                     _ => {
                         if let Err(te) = unify_dim(&hr, &tr, subst) {
                             return report(errors, te.into());

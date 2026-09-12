@@ -78,6 +78,57 @@ pub enum TypeErrorKind {
     NotAFunction,
 }
 
+/// A derived observation, never a replacement dimension for propagation.
+/// Labels, known constraints, and current authored rigidity are independent.
+/// Deliberately has no equality or conversion to `Dim`: each operation chooses
+/// its own proof/admission policy, and keeps the original ID in surviving axes.
+pub(crate) struct DimObservation {
+    constraint: Dim,
+    name: Option<String>,
+    protected: bool,
+}
+
+impl DimObservation {
+    pub(crate) fn known_extent(&self) -> Option<i64> {
+        match self.constraint {
+            Dim::Lit(n) => Some(n),
+            _ => None,
+        }
+    }
+
+    /// The literal category of policies that admit named runtime claims
+    /// (expand/reshape/concat), not every internally known constraint.
+    pub(crate) fn literal_extent(&self) -> Option<i64> {
+        if self.name.is_none() {
+            self.known_extent()
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+    pub(crate) fn variable(&self) -> Option<DimVar> {
+        match self.constraint {
+            Dim::Var(v) => Some(v),
+            _ => None,
+        }
+    }
+    pub(crate) fn rank(&self) -> Option<RankVar> {
+        match self.constraint {
+            Dim::Rank(v) => Some(v),
+            _ => None,
+        }
+    }
+    pub(crate) fn is_wildcard(&self) -> bool {
+        matches!(self.constraint, Dim::Wildcard)
+    }
+    pub(crate) fn is_protected(&self) -> bool {
+        self.protected
+    }
+}
+
 /// Substitution: maps type variables to types and dim variables to dims.
 ///
 /// The maps are wrapped in `Mutex` so [`Subst::apply`] and
@@ -96,6 +147,20 @@ pub struct Subst {
     #[serde(default)]
     tvar_restrictions: Mutex<UnordMap<TypeVar, TypeVarRestriction>>,
     dims: Mutex<UnordMap<DimVar, Dim>>,
+    /// Named-axis view of a checker dimension identity. Schemes retain these
+    /// IDs and instantiation copies their labels to fresh IDs. This mandatory
+    /// snapshot field is not evidence that arbitrary equal names have equal sizes.
+    dimension_labels: Mutex<UnordMap<DimVar, String>>,
+    #[serde(skip)]
+    protected_dimensions: UnordSet<DimVar>,
+    #[serde(skip)]
+    label_unification_depth: usize,
+    /// Only labels written by the active outer unification need rollback.
+    /// Interior mutability also covers scheme instantiation through `&Subst`.
+    #[serde(skip)]
+    dimension_label_undo: Mutex<Vec<(DimVar, Option<String>)>>,
+    #[serde(skip)]
+    refined_type_bindings: Vec<(TypeVar, Type)>,
     /// Rank-variable bindings: a `RankVar` binds to the *entire* shape vector
     /// it stands for (Tier-2 rank polymorphism). A binding to `[Dim::Rank(r2)]`
     /// is a rank-to-rank alias resolved transitively by `resolve_rvar`.
@@ -561,6 +626,16 @@ impl Clone for Subst {
                     .clone(),
             ),
             dims: Mutex::new(self.dims.lock().expect("subst.dims poisoned").clone()),
+            dimension_labels: Mutex::new(
+                self.dimension_labels
+                    .lock()
+                    .expect("dimension labels poisoned")
+                    .clone(),
+            ),
+            protected_dimensions: self.protected_dimensions.clone(),
+            label_unification_depth: 0,
+            dimension_label_undo: Mutex::new(Vec::new()),
+            refined_type_bindings: Vec::new(),
             ranks: Mutex::new(self.ranks.lock().expect("subst.ranks poisoned").clone()),
             deferred_borrow_vars: Mutex::new(
                 self.deferred_borrow_vars
@@ -641,6 +716,7 @@ impl Subst {
     /// Existing IDs become level-zero imports; only work performed after this
     /// point contributes level metadata to the serialized context.
     pub(crate) fn resume_for_new_check(&mut self, var_gen: &VarGen) {
+        self.protected_dimensions.clear();
         assert_eq!(
             self.current_level, 0,
             "a persisted type environment cannot resume inside an inference scope"
@@ -891,9 +967,7 @@ impl Subst {
 
     pub(crate) fn static_dim_product(&self, dims: &[Dim]) -> Option<i128> {
         dims.iter().try_fold(1_i128, |product, dim| {
-            let Dim::Lit(value) = self.apply_dim(dim) else {
-                return None;
-            };
+            let value = self.observe_dim(dim).literal_extent()?;
             product.checked_mul(i128::from(value))
         })
     }
@@ -904,10 +978,7 @@ impl Subst {
     pub(crate) fn static_dim_products_match(&self, lhs: &[Dim], rhs: &[Dim]) -> Option<bool> {
         fn values(subst: &Subst, dims: &[Dim]) -> Option<Vec<i64>> {
             dims.iter()
-                .map(|dim| match subst.apply_dim(dim) {
-                    Dim::Lit(value) => Some(value),
-                    _ => None,
-                })
+                .map(|dim| subst.observe_dim(dim).literal_extent())
                 .collect()
         }
 
@@ -1178,11 +1249,13 @@ impl Subst {
                 }
             }
         };
-        // Phase 2: compress — point every link in the chain directly at
-        // the terminal value.
+        // Keep the terminal binding's owner: a shared tensor type may later
+        // acquire a protected dimension identity while retaining its name.
         if chain.len() > 1 {
             for v in chain {
-                map.insert(v, terminal.clone());
+                if v != current {
+                    map.insert(v, Type::Var(current));
+                }
             }
         }
         terminal
@@ -1486,9 +1559,188 @@ impl Subst {
     /// Apply this substitution to a dimension. Path-compresses chains.
     pub fn apply_dim(&self, dim: &Dim) -> Dim {
         match dim {
+            Dim::Var(v) => {
+                let resolved = self.resolve_dvar(*v);
+                if self.dimension_label(*v).is_some() && !matches!(resolved, Dim::Var(_)) {
+                    // Keep the label's identity available to aliases and
+                    // name-sensitive operations, even after a concrete call.
+                    Dim::Var(*v)
+                } else {
+                    resolved
+                }
+            }
+            _ => dim.clone(),
+        }
+    }
+
+    pub(crate) fn constraint_dim(&self, dim: &Dim) -> Dim {
+        match dim {
             Dim::Var(v) => self.resolve_dvar(*v),
             _ => dim.clone(),
         }
+    }
+
+    pub(crate) fn observe_dim(&self, dim: &Dim) -> DimObservation {
+        let constraint = self.constraint_dim(dim);
+        let name = match dim {
+            Dim::Var(v) => self.dimension_label(*v),
+            Dim::Name(name) => Some(name.clone()),
+            _ => None,
+        }
+        .or_else(|| match &constraint {
+            Dim::Name(name) => Some(name.clone()),
+            _ => None,
+        });
+        let protected = matches!(&constraint, Dim::Var(v) if self.is_protected_dimension(*v));
+        DimObservation {
+            constraint,
+            name,
+            protected,
+        }
+    }
+
+    pub(crate) fn dimension_label(&self, v: DimVar) -> Option<String> {
+        let root = self.resolve_dvar(v);
+        let labels = self
+            .dimension_labels
+            .lock()
+            .expect("dimension labels poisoned");
+        labels
+            .get(&v)
+            .or_else(|| match root {
+                Dim::Var(root) => labels.get(&root),
+                _ => None,
+            })
+            .cloned()
+    }
+
+    pub(crate) fn copy_dimension_label(&self, old: DimVar, fresh: DimVar) {
+        if let Some(label) = self.dimension_label(old) {
+            self.set_dimension_label(fresh, label);
+        }
+    }
+
+    fn set_dimension_label(&self, var: DimVar, label: String) {
+        // The only nested lock order is labels -> undo. Rollback has exclusive
+        // access to Subst and uses get_mut, so it never acquires the reverse.
+        let mut labels = self
+            .dimension_labels
+            .lock()
+            .expect("dimension labels poisoned");
+        if labels.get(&var) == Some(&label) {
+            return;
+        }
+        let previous = labels.insert(var, label);
+        if self.label_unification_depth != 0 {
+            self.dimension_label_undo
+                .lock()
+                .expect("dimension label undo poisoned")
+                .push((var, previous));
+        }
+    }
+
+    fn finish_dimension_label_writes(&mut self, rollback: bool) {
+        let undo = self
+            .dimension_label_undo
+            .get_mut()
+            .expect("dimension label undo poisoned");
+        if rollback && !undo.is_empty() {
+            let labels = self
+                .dimension_labels
+                .get_mut()
+                .expect("dimension labels poisoned");
+            for (var, previous) in undo.drain(..).rev() {
+                if let Some(label) = previous {
+                    labels.insert(var, label);
+                } else {
+                    labels.remove(&var);
+                }
+            }
+        } else {
+            undo.clear();
+        }
+    }
+
+    pub(crate) fn semantic_dim(&self, dim: &Dim) -> Dim {
+        if let Dim::Var(v) = dim
+            && let Some(label) = self.dimension_label(*v)
+        {
+            return Dim::Name(label);
+        }
+        self.constraint_dim(dim)
+    }
+
+    /// Semantic annotation/name-query view. Never use this before the authored
+    /// result guards: projecting a labelled identity to Name erases rigidity.
+    pub(crate) fn semantic_type(&self, ty: &Type) -> Type {
+        match self.apply(ty) {
+            Type::Tensor(dims, prec) => {
+                Type::Tensor(dims.iter().map(|d| self.semantic_dim(d)).collect(), prec)
+            }
+            Type::Fn(args, ret) => Type::Fn(
+                args.iter().map(|a| self.semantic_type(a)).collect(),
+                Box::new(self.semantic_type(&ret)),
+            ),
+            Type::Ref(inner) => Type::Ref(Box::new(self.semantic_type(&inner))),
+            Type::Tuple(items) => {
+                Type::Tuple(items.iter().map(|t| self.semantic_type(t)).collect())
+            }
+            Type::Adt(name, args) => {
+                Type::Adt(name, args.iter().map(|t| self.semantic_type(t)).collect())
+            }
+            Type::KindedAdt(name, args) => Type::KindedAdt(
+                name,
+                args.iter()
+                    .map(|a| match a {
+                        NominalArg::Type(t) => NominalArg::Type(self.semantic_type(t)),
+                        NominalArg::Dimension(d) => NominalArg::Dimension(self.semantic_dim(d)),
+                    })
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
+
+    pub(crate) fn protect_dimensions(&mut self, vars: impl IntoIterator<Item = DimVar>) {
+        for v in vars {
+            self.protected_dimensions.insert(v);
+        }
+    }
+
+    /// Current-check authored rigidity, never historical snapshot metadata.
+    /// Instantiation freshens quantified IDs without copying protection;
+    /// lexical captures keep their canonical ID. Both live and decoded imports
+    /// clear historical protection in `resume_for_new_check` before inference.
+    pub(crate) fn is_protected_dimension(&self, var: DimVar) -> bool {
+        matches!(self.resolve_dvar(var), Dim::Var(root) if self.protected_dimensions.contains(&root))
+    }
+
+    pub(crate) fn validate_dimension_labels(&self, var_gen: &VarGen) -> Result<(), &'static str> {
+        for (var, label) in self
+            .dimension_labels
+            .lock()
+            .expect("dimension labels poisoned")
+            .to_sorted()
+        {
+            if var.0 >= var_gen.watermarks().next_dvar {
+                return Err("dimension label refers to an unallocated checker identity");
+            }
+            if label.is_empty() || label == "_" || label.chars().any(char::is_whitespace) {
+                return Err("invalid dimension label in checker snapshot");
+            }
+        }
+        Ok(())
+    }
+
+    fn type_binding_owner(&self, mut v: TypeVar) -> TypeVar {
+        let map = self.types.lock().expect("subst.types poisoned");
+        while let Some(Type::Var(next)) = map.get(&v) {
+            if *next == v {
+                break;
+            }
+            v = *next;
+        }
+        v
     }
 
     /// Apply this substitution to a tensor precision slot.
@@ -1525,6 +1777,45 @@ impl Subst {
     pub fn compose(&mut self, other: &Subst) -> Result<(), TypeError> {
         let mut trial = self.clone();
         trial.compose_bindings(other);
+        // Re-canonicalize BOTH operands' labels through the composed alias
+        // graph; merely copying incoming entries misses a newly joined class.
+        let mut incoming = Vec::new();
+        for source in [&*self, other] {
+            incoming.extend(
+                source
+                    .dimension_labels
+                    .lock()
+                    .expect("dimension labels poisoned")
+                    .to_sorted()
+                    .into_iter()
+                    .map(|(v, label)| (*v, label.clone())),
+            );
+        }
+        trial
+            .dimension_labels
+            .lock()
+            .expect("dimension labels poisoned")
+            .clear();
+        for (v, label) in incoming {
+            let target = trial.constraint_dim(&Dim::Var(v));
+            let mut labels = trial
+                .dimension_labels
+                .lock()
+                .expect("dimension labels poisoned");
+            let root = if let Dim::Var(root) = target { root } else { v };
+            if matches!(&target, Dim::Name(name) if name != &label)
+                || [v, root]
+                    .iter()
+                    .any(|id| labels.get(id).is_some_and(|old| old != &label))
+            {
+                return Err(TypeError {
+                    kind: TypeErrorKind::DimensionMismatch,
+                    message: format!("conflicting dimension labels while composing {v:?}"),
+                });
+            }
+            labels.insert(v, label.clone());
+            labels.insert(root, label);
+        }
 
         let mut restrictions = self.tvar_restrictions_snapshot();
         for (var, incoming) in other.tvar_restrictions_snapshot().into_sorted() {
@@ -1677,7 +1968,7 @@ impl Subst {
                 let val = self_dims
                     .get_mut(&var)
                     .expect("collected dimension variable remains present");
-                *val = other.apply_dim(val);
+                *val = other.constraint_dim(val);
             }
         }
         {
@@ -1747,9 +2038,82 @@ fn merge_tvar_restrictions(
 }
 /// Unify two types, producing a substitution or a type error.
 pub fn unify(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeError> {
-    let t1 = subst.apply(t1);
-    let t2 = subst.apply(t2);
+    let outer = subst.label_unification_depth == 0;
+    subst.label_unification_depth += 1;
+    let result = unify_preserving_owners(t1, t2, subst);
+    subst.label_unification_depth -= 1;
+    if outer {
+        subst.finish_dimension_label_writes(result.is_err());
+        if result.is_err() {
+            let mut types = subst.types.lock().expect("subst.types poisoned");
+            for (v, old) in subst.refined_type_bindings.drain(..).rev() {
+                types.insert(v, old);
+            }
+        } else {
+            subst.refined_type_bindings.clear();
+        }
+    }
+    result
+}
 
+fn unify_preserving_owners(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeError> {
+    let owner1 = if let Type::Var(v) = t1 {
+        Some(subst.type_binding_owner(*v))
+    } else {
+        None
+    };
+    let owner2 = if let Type::Var(v) = t2 {
+        Some(subst.type_binding_owner(*v))
+    } else {
+        None
+    };
+    // Resolve only the outer variable. Recursion must still see a shared T
+    // under Ref/Fn rather than an eagerly copied tensor payload.
+    let t1 = if matches!(t1, Type::Var(_)) {
+        subst.apply(t1)
+    } else {
+        t1.clone()
+    };
+    let t2 = if matches!(t2, Type::Var(_)) {
+        subst.apply(t2)
+    } else {
+        t2.clone()
+    };
+    let result = unify_resolved(&t1, &t2, subst);
+    if result.is_ok() {
+        for (owner, old, other) in [(owner1, &t1, &t2), (owner2, &t2, &t1)] {
+            if let (Some(owner), Type::Tensor(dims, prec), Type::Tensor(other_dims, _)) =
+                (owner, old, other)
+                && dims.len() == other_dims.len()
+            {
+                let refined: Vec<_> = dims
+                    .iter()
+                    .zip(other_dims)
+                    .map(|(d, other)| {
+                        if matches!(d, Dim::Name(_))
+                            && matches!(other, Dim::Var(v) if subst.dimension_label(*v).is_some())
+                        {
+                            subst.apply_dim(other)
+                        } else {
+                            d.clone()
+                        }
+                    })
+                    .collect();
+                if &refined != dims {
+                    subst.refined_type_bindings.push((owner, old.clone()));
+                    subst
+                        .types
+                        .lock()
+                        .expect("subst.types poisoned")
+                        .insert(owner, Type::Tensor(refined, prec.clone()));
+                }
+            }
+        }
+    }
+    result
+}
+
+fn unify_resolved(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeError> {
     match (&t1, &t2) {
         // Same type — trivially unified
         (Type::Prim(p1), Type::Prim(p2)) if p1 == p2 => Ok(()),
@@ -1767,8 +2131,8 @@ pub fn unify(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeError> {
         (Type::Ref(inner1), Type::Ref(inner2)) => unify(inner1, inner2, subst),
 
         // Type variable binding
-        (Type::Var(v), _) => bind_tvar(*v, &t2, subst),
-        (_, Type::Var(v)) => bind_tvar(*v, &t1, subst),
+        (Type::Var(v), _) => bind_tvar(*v, t2, subst),
+        (_, Type::Var(v)) => bind_tvar(*v, t1, subst),
 
         // Function types
         (Type::Fn(args1, ret1), Type::Fn(args2, ret2)) => {
@@ -1989,8 +2353,18 @@ pub fn unify_tensor_prec(
 /// distinct `Lit <-> Lit` continue to be rejected, and the
 /// `Var <-> Lit` cross-position contract is unaffected.
 pub fn unify_dim(d1: &Dim, d2: &Dim, subst: &mut Subst) -> Result<(), TypeError> {
-    let d1 = subst.apply_dim(d1);
-    let d2 = subst.apply_dim(d2);
+    let name1 = subst.semantic_dim(d1);
+    let name2 = subst.semantic_dim(d2);
+    if let (Dim::Name(a), Dim::Name(b)) = (&name1, &name2)
+        && a != b
+    {
+        return Err(TypeError {
+            kind: TypeErrorKind::DimensionMismatch,
+            message: format!("dimension mismatch: {name1:?} vs {name2:?}"),
+        });
+    }
+    let d1 = subst.constraint_dim(d1);
+    let d2 = subst.constraint_dim(d2);
 
     match (&d1, &d2) {
         (Dim::Name(n1), Dim::Name(n2)) if n1 == n2 => Ok(()),
@@ -2123,6 +2497,26 @@ fn ensure_tvar_restriction(restriction: TypeVarRestriction, ty: &Type) -> Result
 }
 
 fn bind_dvar(v: DimVar, dim: &Dim, subst: &mut Subst) -> Result<(), TypeError> {
+    if let Dim::Name(name) = dim
+        && (subst.protected_dimensions.contains(&v) || subst.dimension_label(v).is_some())
+    {
+        subst.set_dimension_label(v, name.clone());
+        return Ok(());
+    }
+    if let Dim::Var(other) = dim
+        && *other != v
+    {
+        if subst.protected_dimensions.contains(&v) && !subst.protected_dimensions.contains(other) {
+            return bind_dvar(*other, &Dim::Var(v), subst);
+        }
+        if let Some(label) = subst
+            .dimension_label(v)
+            .or_else(|| subst.dimension_label(*other))
+        {
+            subst.set_dimension_label(v, label.clone());
+            subst.set_dimension_label(*other, label);
+        }
+    }
     if let Dim::Var(v2) = dim
         && *v2 == v
     {
@@ -2218,7 +2612,7 @@ fn check_introduced_name_rank_collision(
     }
     for rv in ret_rvars {
         for bound in resolve_shape(&[Dim::Rank(rv)], subst) {
-            if let Dim::Name(n) = &bound
+            if let Dim::Name(n) = &subst.semantic_dim(&bound)
                 && introduced.contains(&n)
             {
                 return Err(TypeError {
@@ -2275,7 +2669,8 @@ fn unify_row_against_ground(
                     // The spread is immediately followed by a named anchor:
                     // locate that name in the remaining ground to fix the split.
                     Some(0) => {
-                        let name = match &rest[0] {
+                        let semantic_anchor = subst.semantic_dim(&rest[0]);
+                        let name = match &semantic_anchor {
                             Dim::Name(s) => s,
                             other => {
                                 return Err(TypeError {
@@ -2288,7 +2683,7 @@ fn unify_row_against_ground(
                             }
                         };
                         let hits: Vec<usize> = (gi..n)
-                            .filter(|&j| matches!(&ground[j], Dim::Name(g) if g == name))
+                            .filter(|&j| matches!(subst.semantic_dim(&ground[j]), Dim::Name(g) if &g == name))
                             .collect();
                         match hits.as_slice() {
                             [split] => {
@@ -2462,6 +2857,331 @@ fn occurs_in_dim(v: DimVar, dim: &Dim, subst: &Subst) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protected_label_aliases_keep_identity_after_compression_and_literal_binding() {
+        let mut subst = Subst::new();
+        let root = DimVar(0);
+        subst.protect_dimensions([root]);
+        unify_dim(&Dim::Var(root), &Dim::Name("fixed".into()), &mut subst).unwrap();
+        for i in 1..5 {
+            unify_dim(&Dim::Var(DimVar(i)), &Dim::Var(DimVar(i - 1)), &mut subst).unwrap();
+        }
+        assert_eq!(subst.apply_dim(&Dim::Var(DimVar(4))), Dim::Var(root));
+        unify_dim(&Dim::Var(root), &Dim::Lit(2), &mut subst).unwrap();
+        assert_eq!(subst.constraint_dim(&Dim::Var(DimVar(4))), Dim::Lit(2));
+        assert_eq!(
+            subst.semantic_dim(&Dim::Var(DimVar(4))),
+            Dim::Name("fixed".into())
+        );
+        assert!(matches!(subst.apply_dim(&Dim::Var(DimVar(4))), Dim::Var(_)));
+        assert!(unify_dim(&Dim::Var(DimVar(4)), &Dim::Lit(3), &mut subst).is_err());
+    }
+
+    #[test]
+    fn protected_labels_do_not_leak_from_a_failed_type_unification() {
+        let mut subst = Subst::new();
+        subst.protect_dimensions([DimVar(0)]);
+        let tensor = |dim| Type::Tensor(vec![dim], TensorPrec::Concrete(Prim::F32));
+        let left = Type::Tuple(vec![tensor(Dim::Var(DimVar(0))), Type::Unit]);
+        let right = Type::Tuple(vec![tensor(Dim::Name("fixed".into())), tensor(Dim::Lit(1))]);
+        assert!(unify(&left, &right, &mut subst).is_err());
+        assert_eq!(subst.dimension_label(DimVar(0)), None);
+        unify_dim(&Dim::Var(DimVar(0)), &Dim::Name("other".into()), &mut subst).unwrap();
+    }
+
+    #[test]
+    fn dimension_label_undo_replays_repeated_copy_writes_and_skips_noops() {
+        let mut subst = Subst::new();
+        subst.set_dimension_label(DimVar(0), "fixed".into());
+        subst.set_dimension_label(DimVar(1), "other".into());
+        subst.set_dimension_label(DimVar(2), "before".into());
+        subst.label_unification_depth = 1;
+        // Exercise the &Subst writer used by scheme instantiation, including
+        // repeated writes to both a pre-existing entry and a fresh entry.
+        for target in [DimVar(2), DimVar(3)] {
+            subst.copy_dimension_label(DimVar(0), target);
+            subst.copy_dimension_label(DimVar(0), target);
+            subst.copy_dimension_label(DimVar(1), target);
+        }
+        assert_eq!(subst.dimension_label_undo.lock().unwrap().len(), 4);
+        subst.label_unification_depth = 0;
+        subst.finish_dimension_label_writes(true);
+        assert_eq!(subst.dimension_label(DimVar(2)).as_deref(), Some("before"));
+        assert_eq!(subst.dimension_label(DimVar(3)), None);
+        assert!(subst.dimension_label_undo.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn protected_label_nested_alias_failure_preserves_prior_success() {
+        let mut subst = Subst::new();
+        subst.protect_dimensions([DimVar(0), DimVar(1)]);
+        let tensor = |d| Type::Tensor(vec![d], TensorPrec::Concrete(Prim::F32));
+        unify(
+            &tensor(Dim::Var(DimVar(0))),
+            &tensor(Dim::Name("fixed".into())),
+            &mut subst,
+        )
+        .unwrap();
+        assert!(subst.dimension_label_undo.lock().unwrap().is_empty());
+        let lhs = Type::Tuple(vec![
+            Type::Tuple(vec![
+                tensor(Dim::Var(DimVar(1))),
+                tensor(Dim::Var(DimVar(2))),
+            ]),
+            Type::Unit,
+        ]);
+        let rhs = Type::Tuple(vec![
+            Type::Tuple(vec![
+                tensor(Dim::Name("other".into())),
+                tensor(Dim::Var(DimVar(1))),
+            ]),
+            tensor(Dim::Lit(1)),
+        ]);
+        assert!(unify(&lhs, &rhs, &mut subst).is_err());
+        assert_eq!(subst.dimension_label(DimVar(0)).as_deref(), Some("fixed"));
+        assert_eq!(subst.dimension_label(DimVar(1)), None);
+        assert_eq!(subst.dimension_label(DimVar(2)), None);
+        assert_eq!(subst.label_unification_depth, 0);
+        assert!(subst.dimension_label_undo.lock().unwrap().is_empty());
+        // Existing dim aliases are outside this narrow label rollback; retry
+        // must nevertheless be free to install a different semantic label.
+        unify(
+            &tensor(Dim::Var(DimVar(1))),
+            &tensor(Dim::Name("retry".into())),
+            &mut subst,
+        )
+        .unwrap();
+        assert_eq!(subst.dimension_label(DimVar(2)).as_deref(), Some("retry"));
+        assert!(subst.dimension_label_undo.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn dimension_label_journal_is_absent_from_clones_and_wire() {
+        let mut subst = Subst::new();
+        subst.label_unification_depth = 1;
+        subst.set_dimension_label(DimVar(0), "fixed".into());
+        assert_eq!(subst.dimension_label_undo.lock().unwrap().len(), 1);
+        let cloned = subst.clone();
+        assert_eq!(cloned.label_unification_depth, 0);
+        assert!(cloned.dimension_label_undo.lock().unwrap().is_empty());
+        let bytes = bincode::serialize(&subst).unwrap();
+        assert_eq!(bytes, bincode::serialize(&cloned).unwrap());
+        let decoded: Subst = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(decoded.label_unification_depth, 0);
+        assert!(decoded.dimension_label_undo.lock().unwrap().is_empty());
+        subst.label_unification_depth = 0;
+        subst.finish_dimension_label_writes(true);
+        assert_eq!(subst.dimension_label(DimVar(0)), None);
+        for independent in [&cloned, &decoded] {
+            assert_eq!(
+                independent.dimension_label(DimVar(0)).as_deref(),
+                Some("fixed")
+            );
+        }
+    }
+
+    #[test]
+    fn protected_labels_are_freshened_but_captured_ids_are_not() {
+        let mut vg = VarGen::default();
+        let quantified = vg.fresh_dvar();
+        let capture = vg.fresh_dvar();
+        let alias = vg.fresh_dvar();
+        let alias_chain = vg.fresh_dvar();
+        let mut subst = Subst::new();
+        subst.protect_dimensions([quantified, capture]);
+        for v in [quantified, capture] {
+            unify_dim(&Dim::Var(v), &Dim::Name("fixed".into()), &mut subst).unwrap();
+        }
+        // Exercise both alias operand orders; binding prefers the protected
+        // representative, including after path compression.
+        unify_dim(&Dim::Var(capture), &Dim::Var(alias), &mut subst).unwrap();
+        unify_dim(&Dim::Var(alias_chain), &Dim::Var(alias), &mut subst).unwrap();
+        assert!(subst.is_protected_dimension(alias_chain));
+        assert_eq!(
+            subst.constraint_dim(&Dim::Var(alias_chain)),
+            Dim::Var(capture)
+        );
+        let scheme = Scheme {
+            tvars: vec![],
+            tvar_restrictions: vec![],
+            dvars: vec![quantified],
+            rvars: vec![],
+            body: Type::Tensor(
+                vec![Dim::Var(quantified), Dim::Var(alias_chain)],
+                TensorPrec::Concrete(Prim::F32),
+            ),
+        };
+        let mut env = crate::env::Env::new();
+        env.bind("f".into(), scheme);
+        let a = env.instantiate(env.lookup("f").unwrap(), &mut vg, &subst);
+        let b = env.instantiate(env.lookup("f").unwrap(), &mut vg, &subst);
+        let (Type::Tensor(a, _), Type::Tensor(b, _)) = (a, b) else {
+            panic!("tensor")
+        };
+        assert_ne!(a[0], b[0]);
+        for dims in [&a, &b] {
+            let Dim::Var(fresh) = dims[0] else {
+                panic!("fresh dimension")
+            };
+            assert!(!subst.is_protected_dimension(fresh));
+            let Dim::Var(captured) = dims[1] else {
+                panic!("captured dimension")
+            };
+            assert!(subst.is_protected_dimension(captured));
+            assert_eq!(subst.constraint_dim(&dims[1]), Dim::Var(capture));
+        }
+        unify_dim(&a[0], &Dim::Lit(2), &mut subst).unwrap();
+        unify_dim(&b[0], &Dim::Lit(3), &mut subst).unwrap();
+        assert_eq!(subst.semantic_dim(&a[0]), Dim::Name("fixed".into()));
+        assert_eq!(subst.semantic_dim(&b[0]), Dim::Name("fixed".into()));
+    }
+
+    #[test]
+    fn protected_dimension_queries_agree_after_live_and_decoded_resume() {
+        let mut vg = VarGen::default();
+        let historical = vg.fresh_dvar();
+        let alias = vg.fresh_dvar();
+        let mut published = Subst::new();
+        published.protect_dimensions([historical]);
+        unify_dim(
+            &Dim::Var(historical),
+            &Dim::Name("fixed".into()),
+            &mut published,
+        )
+        .unwrap();
+        unify_dim(&Dim::Var(alias), &Dim::Var(historical), &mut published).unwrap();
+        let mut live = published.clone();
+        let mut decoded: Subst =
+            bincode::deserialize(&bincode::serialize(&published).unwrap()).unwrap();
+        // Raw mid-check serialization intentionally omits active protection.
+        // The public context entry point resumes BOTH paths before inference.
+        assert!(live.is_protected_dimension(alias));
+        assert!(!decoded.is_protected_dimension(alias));
+        for subst in [&mut live, &mut decoded] {
+            subst.resume_for_new_check(&vg);
+            assert!(!subst.is_protected_dimension(alias));
+            assert_eq!(
+                subst.semantic_dim(&Dim::Var(alias)),
+                Dim::Name("fixed".into())
+            );
+        }
+        let current = vg.fresh_dvar();
+        let current_alias = vg.fresh_dvar();
+        for subst in [&mut live, &mut decoded] {
+            subst.protect_dimensions([current]);
+            unify_dim(&Dim::Var(current), &Dim::Name("fixed".into()), subst).unwrap();
+            unify_dim(&Dim::Var(current), &Dim::Var(current_alias), subst).unwrap();
+            assert!(subst.is_protected_dimension(current_alias));
+            assert!(!subst.is_protected_dimension(alias));
+        }
+        assert_eq!(
+            bincode::serialize(&live).unwrap(),
+            bincode::serialize(&decoded).unwrap()
+        );
+    }
+
+    #[test]
+    fn protected_label_pending_result_stays_monomorphic_in_both_generalizers() {
+        let mut vg = VarGen::default();
+        let mut subst = Subst::new();
+        let level = subst.enter_level(&vg);
+        let operand = vg.fresh_tvar();
+        let dim = vg.fresh_dvar();
+        let rank = vg.fresh_rvar();
+        let precision = vg.fresh_tvar();
+        subst.protect_dimensions([dim]);
+        unify_dim(&Dim::Var(dim), &Dim::Name("fixed".into()), &mut subst).unwrap();
+        let result = Type::Tensor(
+            vec![Dim::Var(dim), Dim::Rank(rank)],
+            TensorPrec::Var(precision),
+        );
+        subst.record_deferred_tensor_operand(
+            operand,
+            DeferredOperandGate::Copy {
+                result: Box::new(result.clone()),
+            },
+        );
+        subst.leave_level(level, &vg);
+        // generalize-sweep-oracle executes and compares the reference algorithm.
+        let scheme = crate::env::Env::new().generalize(&result, &subst);
+        assert!(scheme.dvars.is_empty());
+        assert!(scheme.rvars.is_empty());
+        assert!(scheme.tvars.is_empty());
+    }
+
+    #[test]
+    fn protected_label_shared_type_refinement_rolls_back_with_failed_retry() {
+        let mut subst = Subst::new();
+        let tv = TypeVar(0);
+        let dv = DimVar(0);
+        subst.protect_dimensions([dv]);
+        let tensor = |d| Type::Tensor(vec![d], TensorPrec::Concrete(Prim::F32));
+        unify(
+            &Type::Var(tv),
+            &tensor(Dim::Name("fixed".into())),
+            &mut subst,
+        )
+        .unwrap();
+        let lhs = Type::Tuple(vec![Type::Var(tv), Type::Unit]);
+        let rhs = Type::Tuple(vec![tensor(Dim::Var(dv)), tensor(Dim::Lit(1))]);
+        assert!(unify(&lhs, &rhs, &mut subst).is_err());
+        assert_eq!(
+            subst.apply(&Type::Var(tv)),
+            tensor(Dim::Name("fixed".into()))
+        );
+        assert_eq!(subst.dimension_label(dv), None);
+        unify_dim(&Dim::Var(dv), &Dim::Name("other".into()), &mut subst).unwrap();
+    }
+
+    #[test]
+    fn protected_label_is_a_rank_anchor_without_erasing_its_identity() {
+        let mut subst = Subst::new();
+        let dv = DimVar(0);
+        subst.protect_dimensions([dv]);
+        unify_dim(&Dim::Var(dv), &Dim::Name("fixed".into()), &mut subst).unwrap();
+        let row = [Dim::Rank(RankVar(0)), Dim::Name("fixed".into())];
+        let ground = [Dim::Name("batch".into()), Dim::Var(dv)];
+        unify_row_against_ground(&row, &ground, &mut subst).unwrap();
+        assert_eq!(subst.constraint_dim(&Dim::Var(dv)), Dim::Var(dv));
+        assert_eq!(
+            subst.resolve_rvar(RankVar(0)),
+            vec![Dim::Name("batch".into())]
+        );
+    }
+
+    #[test]
+    fn protected_label_in_rank_spread_cannot_collide_with_inserted_name() {
+        let mut subst = Subst::new();
+        let dv = DimVar(0);
+        subst.protect_dimensions([dv]);
+        unify_dim(&Dim::Var(dv), &Dim::Name("fixed".into()), &mut subst).unwrap();
+        subst.insert_rank(RankVar(0), vec![Dim::Var(dv)]);
+        let tensor = |dims| Type::Tensor(dims, TensorPrec::Concrete(Prim::F32));
+        let args = [tensor(vec![Dim::Rank(RankVar(0))])];
+        let ret = tensor(vec![Dim::Rank(RankVar(0)), Dim::Name("fixed".into())]);
+        assert!(check_introduced_name_rank_collision(&args, &ret, &subst).is_err());
+    }
+
+    #[test]
+    fn protected_label_compose_rejects_conflicting_alias_classes_transactionally() {
+        let mut left = Subst::new();
+        let mut right = Subst::new();
+        left.protect_dimensions([DimVar(0)]);
+        right.protect_dimensions([DimVar(1)]);
+        unify_dim(&Dim::Var(DimVar(0)), &Dim::Name("fixed".into()), &mut left).unwrap();
+        unify_dim(&Dim::Var(DimVar(1)), &Dim::Name("other".into()), &mut right).unwrap();
+        right.insert_dim(DimVar(0), Dim::Var(DimVar(1)));
+        assert!(left.compose(&right).is_err());
+        assert_eq!(
+            left.constraint_dim(&Dim::Var(DimVar(0))),
+            Dim::Var(DimVar(0))
+        );
+        assert_eq!(
+            left.semantic_dim(&Dim::Var(DimVar(0))),
+            Dim::Name("fixed".into())
+        );
+    }
 
     fn var_gen() -> VarGen {
         VarGen::default()

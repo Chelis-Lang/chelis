@@ -9512,6 +9512,11 @@ impl<'program> LowerCtx<'program> {
                 ),
             );
         }
+        // The authored result carries the runtime obligation and its source
+        // diagnostic. Keep it distinct from the checker-substituted result of
+        // this particular application: the latter may refine a named axis for
+        // a following query, but must not replace an authored named claim with
+        // a literal (chelis#1782/#1889).
         let declared_result = fn_expr
             .result_type()
             .map(|expr| {
@@ -9547,6 +9552,23 @@ impl<'program> LowerCtx<'program> {
             self.repair_output_type_if_default(&result, expected_return_ty);
         }
         self.preserve_declared_result(&result, &declared_result);
+        // A checker result may expose a caller-side name for a result axis
+        // after the authored result has installed its own obligations. This
+        // is label transport, not a callee-authored equality: in particular,
+        // do not resolve the caller spelling through this activation's
+        // signature witnesses or import its checked optional extent.
+        if expected_return_ty != &Self::default_type()
+            && let Some(id) = result.as_single_node()
+            && expected_return_ty.dims.len()
+                == self.dag.get(id).expect("result").output_type.dims.len()
+        {
+            for (axis, checked_dim) in expected_return_ty.dims.iter().enumerate() {
+                if Self::is_distinct_checked_named_result_axis(&declared_result, axis, checked_dim)
+                {
+                    self.refine_checked_result_axis_name(id, axis, checked_dim);
+                }
+            }
+        }
         let result = self.retain_invocation_witnesses(result, witness_start);
         self.binding_witnesses = saved_witnesses;
         self.local_unit_refinements = saved_unit_refinements;
@@ -14177,6 +14199,52 @@ impl<'program> LowerCtx<'program> {
                 self.dag.node_mut(id).expect("result").output_type.dims[axis] = dim.clone();
             }
         }
+    }
+
+    /// A checked call type refines an authored result only when this exact
+    /// axis gained a concrete, non-wildcard name. A known extent attached to
+    /// the same name is not a new name. Literals stay solely in the authored
+    /// result path, where their runtime obligations originate.
+    fn is_distinct_checked_named_result_axis(
+        declared: &TensorType,
+        axis: usize,
+        checked: &DimInfo,
+    ) -> bool {
+        let DimInfo::Named(checked_binder, _) = checked else {
+            return false;
+        };
+        !checked_binder.is_empty()
+            && checked_binder != "*"
+            && !matches!(
+                declared.dims.get(axis),
+                Some(DimInfo::Named(authored_binder, _)) if authored_binder == checked_binder
+            )
+    }
+
+    /// Transport only a checker-established caller-side axis name onto an
+    /// already-lowered result. The authored result's claim has already run;
+    /// this must not create a second named equality or borrow a known extent
+    /// from the checked annotation. A concrete extent already present on the
+    /// produced axis remains useful information and is retained under the new
+    /// spelling.
+    fn refine_checked_result_axis_name(&mut self, id: NodeId, axis: usize, checked: &DimInfo) {
+        let DimInfo::Named(name, _) = checked else {
+            return;
+        };
+        let Some(existing) = self
+            .dag
+            .get(id)
+            .and_then(|node| node.output_type.dims.get(axis))
+            .cloned()
+        else {
+            return;
+        };
+        let known_extent = match existing {
+            DimInfo::Named(_, extent) => extent,
+            DimInfo::Lit(extent) => Some(extent),
+        };
+        self.dag.node_mut(id).expect("result").output_type.dims[axis] =
+            DimInfo::Named(name.clone(), known_extent);
     }
 
     /// chelis#1397's declaration half: keep a declared result dimension over an
@@ -19979,6 +20047,92 @@ mod tests {
             recover_anchor_axis(&dims, 0, dims.len(), "absent", &positions),
             AnchorRecovery::Unrecorded
         ));
+    }
+
+    #[test]
+    fn checked_result_refines_only_distinct_named_axes() {
+        let authored = TensorType {
+            dims: vec![
+                DimInfo::Named("d".into(), None),
+                DimInfo::Named("rows".into(), None),
+            ],
+            precision: Prim::F32,
+        };
+        let checked = TensorType {
+            dims: vec![DimInfo::Named("fixed".into(), Some(2)), DimInfo::Lit(3)],
+            precision: Prim::F32,
+        };
+
+        // The first axis is the #1889 caller-established name. The checker
+        // also knows a literal on the second axis, but it is not a new claim.
+        assert!(LowerCtx::is_distinct_checked_named_result_axis(
+            &authored,
+            0,
+            &checked.dims[0]
+        ));
+        assert!(!LowerCtx::is_distinct_checked_named_result_axis(
+            &authored,
+            1,
+            &checked.dims[1]
+        ));
+
+        // An already-authored name and wildcard/empty names never become a
+        // checked-result refinement.
+        assert!(!LowerCtx::is_distinct_checked_named_result_axis(
+            &authored,
+            0,
+            &DimInfo::Named("d".into(), None)
+        ));
+        assert!(!LowerCtx::is_distinct_checked_named_result_axis(
+            &authored,
+            0,
+            &DimInfo::Named("d".into(), Some(2))
+        ));
+        assert!(!LowerCtx::is_distinct_checked_named_result_axis(
+            &authored,
+            0,
+            &DimInfo::Named("*".into(), None)
+        ));
+        assert!(!LowerCtx::is_distinct_checked_named_result_axis(
+            &authored,
+            0,
+            &DimInfo::Named(String::new(), None)
+        ));
+    }
+
+    #[test]
+    fn checked_result_name_transport_preserves_produced_extent_not_checked_extent() {
+        let mut ctx = LowerCtx::new(
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            LinearityInfo::default(),
+        );
+        let id = ctx.dag.add_node(
+            RiscOp::Load {
+                name: "produced".into(),
+            },
+            vec![],
+            TensorType {
+                dims: vec![DimInfo::Named("raw".into(), Some(7))],
+                precision: Prim::F32,
+            },
+            None,
+        );
+        ctx.refine_checked_result_axis_name(id, 0, &DimInfo::Named("fixed".into(), Some(2)));
+        assert_eq!(
+            ctx.dag.get(id).expect("result").output_type.dims,
+            vec![DimInfo::Named("fixed".into(), Some(7))],
+            "checked optional size is not an imported claim"
+        );
+
+        ctx.dag.node_mut(id).expect("result").output_type.dims = vec![DimInfo::Lit(3)];
+        ctx.refine_checked_result_axis_name(id, 0, &DimInfo::Named("fixed".into(), Some(2)));
+        assert_eq!(
+            ctx.dag.get(id).expect("result").output_type.dims,
+            vec![DimInfo::Named("fixed".into(), Some(3))],
+            "a produced concrete extent survives the caller-side label"
+        );
     }
 
     /// Tier-3: a `(d-rank {} pre) (d-name {} seq) (d-rank {} post)` formal splits

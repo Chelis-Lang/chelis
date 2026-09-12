@@ -1458,7 +1458,39 @@ fn pad(
     ))
 }
 
-fn shrink(input: &TensorValue, bounds: &[(usize, usize)]) -> TensorValue {
+/// The out-of-domain `shrink` bound rejection, in the compiled lane's exact
+/// words.
+///
+/// `spec/05-risc-primitives.md` section 2.4.1 makes "a shrink range overshoot"
+/// one of the runtime-bound errors that "are validated in every execution mode
+/// with matching language errors", so this lane does not get to invent its own
+/// text for it. The compiled lane reaches the same rejection through
+/// `chelis_tensor_affine_plan`: `ShapeMetadata::shrunk`
+/// (`crates/chelis-abi/src/metadata.rs`) answers a negative start, an inverted
+/// pair, or an end past the operand extent with ONE `Domain` message, and
+/// `affine_result` (`crates/chelis-runtime/src/lib.rs`) prints that message and
+/// then [04-NUM-9]'s trap line before exiting. These are those two lines,
+/// verbatim and in that order.
+///
+/// The three conditions share one message because the compiled lane gives them
+/// one message. Splitting them here to name the axis would read better in
+/// isolation and would be a lane divergence in exactly the sentence section
+/// 2.4.1 writes, so the compiled lane's wording wins.
+///
+/// The eval lane's reporter prefixes `error: ` to the first line of every
+/// diagnostic it raises, as it does to the extent guard's [04-NUM-9] line; the
+/// message body below is what the two lanes hold in common. Where this lane
+/// raises the diagnostic DIRECTLY that prefix is the whole of the difference.
+/// A host transform adds its own wrapper above it: `grad` renders
+/// ``host runtime `grad` evaluation failed: `` before this text
+/// (`chelis-compiler-api/src/runtime/transforms.rs`). That wrapper is
+/// pre-existing and uniform over every error it carries, so chelis#1797
+/// neither introduces nor closes it; the text is merely newly reachable there,
+/// because the same program used to panic. The exit status agrees either way.
+const SHRINK_DOMAIN_TRAP: &str = "Domain: shrink bounds outside input extent\n\
+                                  numeric trap: domain in shrink at int64";
+
+fn shrink(input: &TensorValue, bounds: &[(usize, usize)]) -> Result<TensorValue, String> {
     assert_eq!(bounds.len(), input.shape.len());
     // chelis#368: defensive backstop for the `SHRINK_TO_END` full-axis
     // sentinel (the Pad adjoint of the differentiable `concat` over an
@@ -1469,38 +1501,30 @@ fn shrink(input: &TensorValue, bounds: &[(usize, usize)]) -> TensorValue {
     // resolve it here to the axis's runtime extent — `SHRINK_TO_END` means
     // "to the end of this axis", which is exactly `input.shape[axis]` — rather
     // than letting `end - start = usize::MAX` overflow `numel`.
-    // chelis#523: loud bounds clamp. `verify`'s C10 shrink check runs BEFORE
-    // `bind_symbolic_dims` and skips symbolic axes, so a shrink whose `end`
-    // exceeds the (now concrete) input extent, or whose `start > end`, could
-    // reach here and either underflow `end - start` (usize) or read
-    // out-of-bounds in the copy loop below (a silent wrong gradient on higher
-    // rank, where the flat index can alias a valid slot). This is not an active
-    // wrong-result today (a type-checker symbol-identity invariant keeps it
-    // unreachable), but a future pass that rewrites a Stride/Shrink's input vs
-    // output symbols independently would break that invariant. Fail loud here
-    // rather than silently corrupt — do NOT clamp to a valid range (that would
-    // hide the producing-pass bug).
-    let out_shape: Vec<usize> = input
-        .shape
-        .iter()
-        .zip(bounds.iter())
-        .enumerate()
-        .map(|(axis, (extent, (start, end)))| {
-            let end = if *end == SHRINK_TO_END { *extent } else { *end };
-            assert!(
-                *start <= end,
-                "eval::shrink: axis {axis} bound start {start} exceeds end {end} \
-                 (input extent {extent}); the producing IR pass emitted an inverted \
-                 shrink (chelis#523)"
-            );
-            assert!(
-                end <= *extent,
-                "eval::shrink: axis {axis} bound end {end} exceeds input extent {extent}; \
-                 out-of-bounds shrink (chelis#523)"
-            );
-            end - start
-        })
-        .collect();
+    // chelis#523: out-of-domain bounds. `verify`'s C10 shrink check runs BEFORE
+    // `bind_symbolic_dims` and skips symbolic axes, and
+    // `verify_bound_movement_node` can only check a compile-time `(Lit, Lit)`
+    // pair, so a shrink whose `end` exceeds the (now concrete) input extent, or
+    // whose `start > end`, reaches here and would either underflow
+    // `end - start` (usize) or read out-of-bounds in the copy loop below (a
+    // silent wrong gradient on higher rank, where the flat index can alias a
+    // valid slot). Do NOT clamp to a valid range: that would hide the producing
+    // pass's bug.
+    //
+    // chelis#1797: this rejection is a typed `Err`, not an `assert!`. A runtime
+    // (`RtDim::Node`) end is a perfectly ordinary user-reachable value - the
+    // issue's reproducer computes `shape(x, 0) + 3` - so the answer to it is
+    // the language error section 2.4.1 names, which the lane boundary renders
+    // as a diagnostic. A panic was neither that error nor any other, and it
+    // exited 101 where the compiled lane exits 1.
+    let mut out_shape: Vec<usize> = Vec::with_capacity(input.shape.len());
+    for (extent, (start, end)) in input.shape.iter().zip(bounds.iter()) {
+        let end = if *end == SHRINK_TO_END { *extent } else { *end };
+        if *start > end || end > *extent {
+            return Err(SHRINK_DOMAIN_TRAP.to_string());
+        }
+        out_shape.push(end - start);
+    }
     let out_len = numel(&out_shape);
     let mut picks = Vec::with_capacity(out_len);
     for flat_idx in 0..out_len {
@@ -1513,7 +1537,10 @@ fn shrink(input: &TensorValue, bounds: &[(usize, usize)]) -> TensorValue {
         picks.push(index_to_linear(&in_index, &input.shape));
     }
     // reuse_* contract: shrink is element-preserving (section C3).
-    TensorValue::from_storage(out_shape, input.storage().reuse_gather(&picks))
+    Ok(TensorValue::from_storage(
+        out_shape,
+        input.storage().reuse_gather(&picks),
+    ))
 }
 
 fn stride(input: &TensorValue, strides: &[usize]) -> TensorValue {
@@ -1640,6 +1667,15 @@ fn verify_bound_movement_node(dag: &Dag, node: &DagNode) -> Result<(), String> {
                 // is validated by the evaluator (it needs the input values).
                 // Only compile-time `(Lit, Lit)` bounds are statically
                 // checkable here.
+                //
+                // chelis#1797: "validated by the evaluator" now means what it
+                // says. The runtime case is checked in `shrink` itself, where
+                // the resolved bounds and the operand's realized shape both
+                // exist, and it returns `SHRINK_DOMAIN_TRAP` - section 2.4.1's
+                // overshoot error in the compiled lane's words - rather than
+                // asserting. The gap this comment used to describe was that
+                // the sentence was true of the check's LOCATION and false of
+                // its outcome.
                 let (Some(start), Some(end)) = (start.as_lit(), end.as_lit()) else {
                     continue;
                 };
@@ -2338,17 +2374,31 @@ where
                     crate::axis_sources::LocalGuardObservation::ComputedExtent(computed) => {
                         match computed_axis_extent_value(computed, node, &values)? {
                             Some(extent) => extent,
-                            // A span that selects nothing computes no extent
-                            // to compare, so the guard yields rather than
+                            // A span that selects nothing, or that runs past
+                            // the operand's own extent, computes no extent to
+                            // compare, so the guard yields rather than
                             // comparing a fabricated number.
                             //
+                            // chelis#1797 added the second of those. An
+                            // overshooting span has an arithmetic width, and
+                            // comparing a claim against it reported a claim
+                            // mismatch for a program whose claim was not the
+                            // defect: `-> tensor[6, f32]` over a span of 6 that
+                            // reads past the end AGREED with the claim and the
+                            // guard passed. `shrink` now returns section
+                            // 2.4.1's overshoot error instead, in the compiled
+                            // lane's words, so declining here is what lets the
+                            // operation report it.
+                            //
                             // An earlier version of this comment justified the
-                            // decline by saying the C runtime's movement plan
-                            // rejects such a span before the site is reached.
-                            // That was checkable and false:
-                            // `ShapeMetadata::shrunk` rejects only
-                            // `end < start`, so `start == end` builds a plan of
-                            // extent 0 and C's guard runs and reports the claim.
+                            // decline for the EMPTY case by saying the C
+                            // runtime's movement plan rejects such a span
+                            // before the site is reached. That was checkable
+                            // and false: `ShapeMetadata::shrunk` does not
+                            // reject `start == end` (it rejects a negative
+                            // start, `end < start`, and an overshoot), so an
+                            // empty span builds a plan of extent 0 and C's
+                            // guard runs and reports the claim.
                             //
                             // C is the conforming lane there.
                             // `spec/05-risc-primitives.md` section 2.4.1's
@@ -2849,7 +2899,7 @@ where
                         ));
                     }
                 }
-                shrink(input, &resolved)
+                shrink(input, &resolved)?
             }
             RiscOp::Stride { strides } => {
                 let input = &values[&node.inputs[0]];
@@ -3210,15 +3260,21 @@ where
 /// That divergence is chelis#1795's, not this function's; the inline comment
 /// at the call site carries the full argument.
 ///
-/// A span whose END exceeds the operand's extent is NOT declined, and that is
-/// a deliberate limit rather than an oversight. It is out of domain too, and
-/// section 2.4.1 makes "a shrink range overshoot" an error every execution
-/// mode reports with matching language. But this lane answers such a span with
-/// the `assert!` in `shrink`, which PANICS rather than returning a typed
-/// error, so declining here would trade a guard reporting the wrong reason for
-/// a panic. The claim this slice makes is therefore bounded to IN-DOMAIN
-/// spans, the two out-of-domain dispositions are pinned by receipts, and
-/// closing the divergence belongs to chelis#1797.
+/// A span whose END exceeds the operand's extent is declined for the same
+/// reason, and chelis#1797 is why it now can be. Such a span is out of domain,
+/// and section 2.4.1 makes "a shrink range overshoot" an error every execution
+/// mode reports with matching language, so the guard must not compare a claim
+/// against the span's arithmetic width and report a claim mismatch: the claim
+/// is not what is wrong. Declining hands the report to the operation, and
+/// `shrink` now answers an out-of-domain bound with `SHRINK_DOMAIN_TRAP`,
+/// which is the compiled lane's own two lines. Before that repair the
+/// operation's answer was an `assert!`, so declining would have traded a guard
+/// naming the wrong reason for a panic, and this slice bounded its cross-lane
+/// claim to IN-DOMAIN spans instead.
+///
+/// This is also the order the compiled lane takes, rather than a choice made
+/// twice: C builds the movement plan before the guard site runs, so
+/// `ShapeMetadata::shrunk` rejects the bounds and the guard never executes.
 fn computed_axis_extent_value(
     computed: &crate::axis_sources::ComputedAxisExtent,
     node: &DagNode,
@@ -3250,6 +3306,9 @@ fn computed_axis_extent_value(
             };
             let start = resolve_eval_bound(start, node, values, extent)?;
             let end = resolve_eval_bound(end, node, values, extent)?;
+            if end > extent {
+                return Ok(None);
+            }
             Ok(end.checked_sub(start).filter(|span| *span > 0))
         }
     }
@@ -3565,29 +3624,60 @@ mod tests {
         // 2x3 input [[1,2,3],[4,5,6]]; axis 0 sliced [1,2] (concrete row 1),
         // axis 1 a full-axis identity via the sentinel.
         let input = TensorValue::from_vec(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        let out = shrink(&input, &[(1, 2), (0, SHRINK_TO_END)]);
+        let out = shrink(&input, &[(1, 2), (0, SHRINK_TO_END)]).expect("an in-domain slice");
         assert_eq!(out.shape, vec![1, 3]);
         assert_eq!(out.to_f64_lossy_vec(), vec![4.0, 5.0, 6.0]);
     }
 
-    /// chelis#523: `eval::shrink` loud-clamp — a genuine (non-sentinel) `end`
-    /// beyond the input extent must fail loud, not read out of bounds / return
-    /// a silently wrong slice. Do NOT clamp to a valid range (that hides the
-    /// producing-pass bug).
+    /// chelis#1797: a genuine (non-sentinel) `end` beyond the input extent is
+    /// answered with `spec/05-risc-primitives.md` section 2.4.1's overshoot
+    /// error, in the compiled lane's words, rather than read out of bounds or
+    /// returned as a silently wrong slice. Do NOT clamp to a valid range (that
+    /// hides the producing pass's bug), and do not panic (that is neither this
+    /// error nor any other).
+    ///
+    /// EVIDENTIARY STATUS: regression test. On `6abca2406` this input panicked
+    /// with `eval::shrink: axis 0 bound end 5 exceeds input extent 3`, which is
+    /// what `#[should_panic(expected = "end 5 exceeds input extent 3")]` pinned.
     #[test]
-    #[should_panic(expected = "end 5 exceeds input extent 3")]
-    fn shrink_asserts_on_end_beyond_extent() {
+    fn shrink_rejects_an_end_beyond_extent_as_a_domain_trap() {
         let input = TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]);
-        let _ = shrink(&input, &[(0, 5)]);
+        let err = shrink(&input, &[(0, 5)]).expect_err("an overshoot produces no value");
+        assert_eq!(err, SHRINK_DOMAIN_TRAP);
     }
 
-    /// chelis#523: `eval::shrink` loud-clamp — an inverted bound (`start > end`)
-    /// must fail loud rather than underflow `end - start` (usize).
+    /// chelis#1797: an inverted bound (`start > end`) takes the same typed
+    /// rejection rather than underflowing `end - start` (usize), because
+    /// `ShapeMetadata::shrunk` gives it the same `Domain` message on the
+    /// compiled lane.
+    ///
+    /// This kernel branch is a backstop from the DAG evaluator's side: the
+    /// `RiscOp::Shrink` arm rejects `start >= end` first, with chelis#616's
+    /// admission-rule wording, so a program cannot reach this branch through
+    /// that path. That earlier rejection is a separate lane divergence tracked
+    /// by chelis#1795 and is NOT repaired here.
+    ///
+    /// EVIDENTIARY STATUS: regression test. On `6abca2406` this input panicked
+    /// with `eval::shrink: axis 0 bound start 3 exceeds end 1`.
     #[test]
-    #[should_panic(expected = "start 3 exceeds end 1")]
-    fn shrink_asserts_on_inverted_bounds() {
+    fn shrink_rejects_inverted_bounds_as_a_domain_trap() {
         let input = TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]);
-        let _ = shrink(&input, &[(3, 1)]);
+        let err = shrink(&input, &[(3, 1)]).expect_err("an inverted bound produces no value");
+        assert_eq!(err, SHRINK_DOMAIN_TRAP);
+    }
+
+    /// Negative parity for both rows above: an in-domain slice of the same
+    /// operand still produces its elements, so the rejection is keyed on the
+    /// bounds and not on the operation.
+    ///
+    /// EVIDENTIARY STATUS: regression test for the `Result` return, disposition
+    /// lock for the slice itself, which `6abca2406` already produced.
+    #[test]
+    fn shrink_still_slices_an_in_domain_range() {
+        let input = TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]);
+        let out = shrink(&input, &[(1, 3)]).expect("an in-domain slice");
+        assert_eq!(out.shape, vec![2]);
+        assert_eq!(out.to_f64_lossy_vec(), vec![2.0, 3.0]);
     }
 
     /// chelis#523: the post-bind re-verify. `verify` runs BEFORE

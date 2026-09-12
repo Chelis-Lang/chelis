@@ -717,6 +717,23 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             "rejects_exactly",
             "ir_sources.to_end_shrink_end_requires_a_literal_zero_start",
         ),
+        # Chelis#1797. The compiled lane already reported section 2.4.1's
+        # overshoot; the eval lane answered it with a PANIC under a free or an
+        # agreeing result claim, and with a claim mismatch under a disagreeing
+        # one. The row therefore starts `lane_divergent`, and both halves now
+        # print the same two lines for all three claim spellings.
+        _row(
+            "shrink.runtime_bound.overshoot.eval",
+            "lane_divergent",
+            EXECUTES,
+            "cli_slice_b.an_overshooting_shrink_span_reports_the_domain_error_on_eval",
+        ),
+        _row(
+            "shrink.runtime_bound.overshoot.c",
+            "lane_divergent",
+            EXECUTES,
+            "cli_slice_b.an_overshooting_shrink_span_reports_the_domain_error_on_c",
+        ),
     )
     return tuple(sorted(rows, key=lambda row: row.id))
 

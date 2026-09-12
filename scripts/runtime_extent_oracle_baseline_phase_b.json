@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "b21aeac04dcf6796288f388beb79ef6d0d48f24ae45ee42711e4b83245527152",
+  "corpus_sha256": "8b9b7fa8b82b7594fa375bc61c849745d91410dff7319556255415c738b5d71d",
   "rows": [
     {
       "id": "claim.literal.nested_and_unused.eval_c",
@@ -337,6 +337,18 @@
       "baseline": "ice",
       "phase_b": "typed_unsupported(#1482)",
       "receipt": "cli_slice_b.runtime_bound_shrink_consumed_elementwise_reports_a_typed_receipt"
+    },
+    {
+      "id": "shrink.runtime_bound.overshoot.c",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.an_overshooting_shrink_span_reports_the_domain_error_on_c"
+    },
+    {
+      "id": "shrink.runtime_bound.overshoot.eval",
+      "baseline": "lane_divergent",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.an_overshooting_shrink_span_reports_the_domain_error_on_eval"
     },
     {
       "id": "shrink.to_end.nonzero_start",

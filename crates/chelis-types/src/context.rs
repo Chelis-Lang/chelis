@@ -107,11 +107,59 @@ impl LibraryProofId {
 /// Cheap to clone — internally `Arc`-shared. Build from a library decl
 /// list with [`crate::build_type_env_from_library`], or create an
 /// empty one with [`TypeEnv::empty`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TypeEnv {
     inner: Arc<TypeEnvInner>,
-    #[serde(default)]
     library_proof_id: Option<LibraryProofId>,
+}
+
+// Source-free snapshots are faithful transports from a trusted checker
+// producer, not independently re-proved programs. Structural validation does
+// not establish completeness of a maliciously edited label summary.
+const TYPE_ENV_FORMAT_VERSION: u32 = 1;
+
+#[derive(Serialize)]
+struct TypeEnvWireRef<'a> {
+    format_version: u32,
+    inner: &'a Arc<TypeEnvInner>,
+    library_proof_id: Option<LibraryProofId>,
+}
+
+#[derive(Deserialize)]
+struct TypeEnvWire {
+    format_version: u32,
+    inner: Arc<TypeEnvInner>,
+    library_proof_id: Option<LibraryProofId>,
+}
+
+impl Serialize for TypeEnv {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        TypeEnvWireRef {
+            format_version: TYPE_ENV_FORMAT_VERSION,
+            inner: &self.inner,
+            library_proof_id: self.library_proof_id,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for TypeEnv {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = TypeEnvWire::deserialize(deserializer)?;
+        if wire.format_version != TYPE_ENV_FORMAT_VERSION {
+            return Err(serde::de::Error::custom(
+                "obsolete TypeEnv format; regenerate the checker snapshot",
+            ));
+        }
+        wire.inner
+            .subst
+            .validate_dimension_labels(&wire.inner.var_gen)
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            inner: wire.inner,
+            library_proof_id: wire.library_proof_id,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,6 +285,43 @@ mod tests {
     use super::*;
     use crate::types::{Dim, Prim, Scheme, TensorPrec, Type, TypeVarRestriction};
     use crate::unify::unify;
+
+    #[test]
+    fn dimension_snapshot_rejects_obsolete_direct_encoding_and_missing_summary() {
+        let context = TypeEnv::empty();
+        // Previous source-free wire had no leading format version.
+        let old = bincode::serialize(&(&context.inner, context.library_proof_id)).unwrap();
+        assert!(bincode::deserialize::<TypeEnv>(&old).is_err());
+        let mut json = serde_json::to_value(&context).unwrap();
+        json["format_version"] = serde_json::json!(0);
+        assert!(serde_json::from_value::<TypeEnv>(json).is_err());
+        let mut json = serde_json::to_value(&context).unwrap();
+        json["inner"]["subst"]
+            .as_object_mut()
+            .unwrap()
+            .remove("dimension_labels");
+        assert!(serde_json::from_value::<TypeEnv>(json).is_err());
+    }
+
+    #[test]
+    fn dimension_snapshot_rejects_unallocated_and_invalid_labels() {
+        for label in ["fixed", "_", "", "two words"] {
+            let mut inner = TypeEnv::empty().inner().clone();
+            let v = if label == "fixed" {
+                crate::types::DimVar(u32::MAX)
+            } else {
+                inner.var_gen.fresh_dvar()
+            };
+            inner.subst.protect_dimensions([v]);
+            crate::unify::unify_dim(&Dim::Var(v), &Dim::Name(label.into()), &mut inner.subst)
+                .unwrap();
+            let encoded = bincode::serialize(&TypeEnv::from_inner(inner)).unwrap();
+            assert!(
+                bincode::deserialize::<TypeEnv>(&encoded).is_err(),
+                "{label:?}"
+            );
+        }
+    }
 
     #[test]
     fn serialized_level_state_resumes_old_ids_at_zero_and_compacts_history() {

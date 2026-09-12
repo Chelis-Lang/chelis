@@ -93,6 +93,11 @@ const ALLOWED: &[(&str, usize, &str)] = &[
         2,
         "negative controls reject the obsolete shape-taking expand recipe and an invalid broadcast extent",
     ),
+    (
+        "crates/chelis-types/tests/issue_1875_callable_labels.rs",
+        3,
+        "same-rank unit broadcast, bare non-unit static rejection, and named non-unit runtime claim admission through callable-label contexts",
+    ),
     // Genuine same-rank broadcasts: the declared result has the operand's rank.
     // These are what `expand` means after the split, so they are not renamed.
     (
