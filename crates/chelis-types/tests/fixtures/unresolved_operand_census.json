@@ -147,13 +147,27 @@
       "file": "app_numeric.rs",
       "function": "validate_numeric_and_reduction_arguments",
       "ordinal": 2,
-      "pattern": "Type::Var(_)",
+      "pattern": "Type::Tensor(_ , TensorPrec::Var(var))",
       "disposition": "deferred"
     },
     {
       "file": "app_numeric.rs",
       "function": "validate_numeric_and_reduction_arguments",
       "ordinal": 3,
+      "pattern": "Type::Var(_)",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_numeric.rs",
+      "function": "validate_numeric_and_reduction_arguments",
+      "ordinal": 4,
+      "pattern": "Type::Tensor(_ , TensorPrec::Var(var))",
+      "disposition": "deferred"
+    },
+    {
+      "file": "app_numeric.rs",
+      "function": "validate_numeric_and_reduction_arguments",
+      "ordinal": 5,
       "pattern": "Type::Var(_)",
       "disposition": "deferred"
     },
@@ -182,6 +196,14 @@
       "file": "app_operand_dtype.rs",
       "function": "reject_inadmissible_operand_dtypes",
       "ordinal": 4,
+      "pattern": "Type::Tensor(_ , TensorPrec::Var(_)) | Type::Error(_)",
+      "disposition": "caught_downstream",
+      "witness": "a_signature_bounded_callee_is_caught_at_the_call_site"
+    },
+    {
+      "file": "app_operand_dtype.rs",
+      "function": "reject_inadmissible_operand_dtypes",
+      "ordinal": 5,
       "pattern": "Type::Var(_)",
       "disposition": "deferred"
     },
@@ -196,6 +218,14 @@
       "file": "app_operand_dtype.rs",
       "function": "reject_test_assert_close_tensor_operand_dtypes",
       "ordinal": 2,
+      "pattern": "Some(Type::Tensor(_ , TensorPrec::Var(_))) | Some(Type::Error(_)) | None",
+      "disposition": "caught_downstream",
+      "witness": "a_signature_bounded_callee_is_caught_at_the_call_site"
+    },
+    {
+      "file": "app_operand_dtype.rs",
+      "function": "reject_test_assert_close_tensor_operand_dtypes",
+      "ordinal": 3,
       "pattern": "Type::Var(_)",
       "disposition": "deferred"
     },

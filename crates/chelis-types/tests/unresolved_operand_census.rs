@@ -11,8 +11,8 @@
 //! WHAT IT ENUMERATES, exactly: a `match` arm, or an `if matches!(...)`
 //! guard, under `crates/chelis-types/src/infer/**`, whose pattern names
 //! `Type::Var` beside `Type::Error` (the merged spelling the issue itself
-//! identified), plus every arm whose body suspends the call on the deferred
-//! shape ledger. That is a code-shape key, not a semantic one: an early
+//! identified), or, since chelis#1805, names a tensor operand at an
+//! unresolved PRECISION. That is a code-shape key, not a semantic one: an early
 //! return written in some third spelling is outside what this file can see,
 //! and the behavioural cells in `unresolved_operand_matrix.rs` are what prove
 //! the routes actually validate. The two artifacts are complements.
@@ -96,8 +96,25 @@ fn normalize(tokens: String) -> String {
     collapsed.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Does this pattern name an unresolved operand?
+///
+/// Two spellings, and the second was added by chelis#1805. `Type::Var` is an
+/// operand whose whole TYPE is unknown. `Type::Tensor(_, TensorPrec::Var(_))`
+/// is an operand whose outer constructor is known and whose PRECISION is not,
+/// and it is a route's early return for exactly the same reason: the arm
+/// publishes a result the route never derived from a dtype and skips the check
+/// the concrete arm performs. The recognizer was blind to it, so the arms that
+/// admitted a precision variable were not enumerated at all and no reviewer was
+/// ever asked to disposition them.
+///
+/// The conjunction is deliberate rather than a bare `TensorPrec::Var` test. A
+/// pattern naming a precision variable OUTSIDE a tensor operand position is a
+/// structural walk over `TensorPrec` (`infer_cast`, `type_to_deep_expr_with`,
+/// `check_pad_signature`), which decides nothing about an operand and whose
+/// enumeration would add rows no disposition vocabulary fits.
 fn mentions_var(pattern: &str) -> bool {
     pattern.contains("Type::Var")
+        || (pattern.contains("Type::Tensor") && pattern.contains("TensorPrec::Var"))
 }
 
 fn mentions_error(pattern: &str) -> bool {
@@ -128,6 +145,16 @@ fn body_suspends(body: &str) -> bool {
         || body.contains("site . register")
         || body.contains("defer_shape_check")
         || body.contains("defer_or_check_shape_route")
+        // chelis#1805: the precision arm hands its whole decision to one
+        // function, which either rejects a bounded variable or suspends an
+        // unbounded one on the ledger. Recognizing it by name is as safe as
+        // recognizing `site.register` for the same reason round 1's P3-2 note
+        // gives: `decide_precision_variable_operand` is the only caller of
+        // `DtypeAdmissibilitySite::register_awaiting_precision`, and that
+        // method is the only route to the precision wait, so an arm that calls
+        // this one cannot be recorded `deferred` while its validation goes
+        // unreplayed.
+        || body.contains("decide_precision_variable_operand")
 }
 
 impl Census {
@@ -584,6 +611,98 @@ fn a_route_with_a_separate_non_suspending_var_arm_is_enumerated() {
             "`{disposition}` must not be assertable for a planted early return, got no problems"
         );
     }
+}
+
+/// MUTATION CONTROL for chelis#1805, the spelling this pull request taught the
+/// recognizer to see. A route arm that admits a tensor at an unresolved
+/// PRECISION is the same defect as one that admits a bare `Type::Var`, and the
+/// earlier recognizer left every such arm invisible: `reject_inadmissible_operand_dtypes`
+/// and `reject_test_assert_close_tensor_operand_dtypes` each carried one, and
+/// neither had a census row.
+#[test]
+fn a_route_admitting_an_unresolved_precision_is_enumerated() {
+    let planted = r#"
+        fn probe_precision_route(
+            operand: Type,
+            result_ty: Type,
+            errors: &mut DiagnosticSink<'_>,
+        ) -> Type {
+            match operand {
+                Type::Tensor(dims, TensorPrec::Concrete(prim)) => Type::Tensor(dims, prim),
+                Type::Tensor(_, TensorPrec::Var(_)) | Type::Error(_) => result_ty,
+                other => report(errors, other),
+            }
+        }
+    "#;
+    let parsed = syn::parse_file(planted).expect("planted source parses");
+    let mut census = Census {
+        file: "planted.rs".to_string(),
+        ..Census::default()
+    };
+    census.visit_file(&parsed);
+    assert_eq!(
+        census.sites.len(),
+        1,
+        "the precision arm must be enumerated, got {:?}",
+        census.sites
+    );
+    let site = &census.sites[0];
+    assert!(
+        site.pattern.contains("TensorPrec::Var"),
+        "the recorded pattern must be the precision arm, got `{}`",
+        site.pattern
+    );
+    assert!(
+        site.is_route,
+        "the planted function publishes a type and can report"
+    );
+    assert!(
+        !site.suspends && !site.gates,
+        "it neither suspends nor gates: it returns early"
+    );
+    for disposition in ["not_a_route", "deferred", "gated_on_binding"] {
+        let problems = problems_for(
+            site,
+            &synthetic_row(
+                disposition,
+                serde_json::json!({ "pattern": site.pattern.clone() }),
+            ),
+            "",
+            "",
+        );
+        assert!(
+            !problems.is_empty(),
+            "`{disposition}` must not be assertable for a planted precision arm"
+        );
+    }
+}
+
+/// The NEGATIVE half of the control above: widening the recognizer must not
+/// enumerate a structural walk over `TensorPrec` that decides nothing about an
+/// operand. Those name a precision variable outside a tensor pattern, and
+/// `infer_cast`, `type_to_deep_expr_with` and `check_pad_signature` each have
+/// one; recording them would add rows the disposition vocabulary does not fit.
+#[test]
+fn a_bare_precision_walk_is_not_enumerated() {
+    let planted = r#"
+        fn probe_precision_walk(prec: TensorPrec, errors: &mut DiagnosticSink<'_>) -> Type {
+            match prec {
+                TensorPrec::Concrete(prim) => Type::Prim(prim),
+                TensorPrec::Var(v) => Type::Var(v),
+            }
+        }
+    "#;
+    let parsed = syn::parse_file(planted).expect("planted source parses");
+    let mut census = Census {
+        file: "planted.rs".to_string(),
+        ..Census::default()
+    };
+    census.visit_file(&parsed);
+    assert!(
+        census.sites.is_empty(),
+        "a bare `TensorPrec` walk must not be enumerated, got {:?}",
+        census.sites
+    );
 }
 
 /// Print the enumerated sites as the fixture the first test wants. Run with
