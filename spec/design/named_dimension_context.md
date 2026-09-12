@@ -61,8 +61,9 @@ This classification is ephemeral: both live and decoded contexts clear
 historical protection before a new check; instantiation copies labels, not
 protection, while active lexical captures retain their canonical binder IDs.
 
-The constraint-sensitive consumers described below derive an ephemeral `DimObservation` rather than
-interpreting a carrier `Var` as a language-level category. The interface keeps
+The constraint-sensitive consumers described below derive an ephemeral
+`DimObservation` rather than interpreting a carrier `Var` as a language-level
+category. The interface keeps
 known constraint extents, semantic names, canonical unresolved IDs and current
 protection separate; it has no generic equality or conversion back to `Dim`.
 Each operation owns its policy. Scatter-elements containment checks known
@@ -108,15 +109,33 @@ owner-cache effect/linearity and lowering validation remains necessary.
 No public Dim/Type/Scheme variant, School API, source signature, or runtime
 tensor layout change is selected.
 
-The checker experiment does not repair the existing lowerer's loss of a
-callee-local named axis after call inlining. Both a generic named-gain caller
-and a concrete-only caller can pass name-query checking and then fail to lower
-an outer `sum(..., fixed)` on the inspected baseline. Public
-`check_in_context` enters lowering too, so compiled-context query compatibility
-is blocked by [#1889](https://github.com/Chelis-Lang/chelis/issues/1889);
-successful snapshot decode alone is not an
-end-to-end compatibility result. Keep those reproductions separate rather than
-weakening the checker positives or introducing an IR repair in this slice.
+## #1889 bounded lowering progress
+
+Public `check_in_context` enters lowering too: successful checker snapshot
+decode alone is not an end-to-end compatibility result. The separate
+[#1889](https://github.com/Chelis-Lang/chelis/issues/1889) helper-result repair
+addresses the bounded lowering cases below without changing this checker carrier.
+For an inline plain callable, lowering first preserves the helper's
+authored return claim, including its runtime obligation and source diagnostic.
+When checked and produced ranks agree, it then transports only a distinct,
+non-wildcard *named* checker-annotated call-result axis as a caller-side label.
+That label is not resolved against the callee's signature: the same spelling
+may name an unrelated callee parameter. Label transport creates no equality
+claim and imports neither checker-substituted literals nor optional extents;
+an existing produced extent is retained. Authored two-source guards remain
+on the unchanged preservation path. Parameter-witness construction and rank
+substitution timing are unchanged: checked label transport does not need to
+reclassify names copied through a rank splice as callee-authored binders.
+
+It adds no checker value-root/provenance carrier, global name equivalence,
+extent-based anchor recovery, wire field, cache version, worker protocol, or
+semantic/normative rule. The evaluator/context regression covers direct, alias,
+both elementwise operand orders, caller alpha-renaming, rank-spliced caller
+names, independent same-spelled callee axes and real
+authored mismatches. Native-C attempts stopped before emission at an undeclared
+axis (#1277) or generic unresolved-host diagnostic; those residuals remain
+unclassified and outside this repair. This is a
+lowering-only repair, not approval of the broader origin/template design below.
 
 ## Unselected broader origin-aware investigation
 

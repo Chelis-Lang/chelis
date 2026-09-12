@@ -235,6 +235,151 @@ fn eval_in_context_uses_context_lowering_map_for_host_library_calls() {
     );
 }
 
+/// chelis#1889: a checked call result may carry a caller-established named
+/// axis that differs from the generic helper's raw return binder. Lowering
+/// must retain that checked result annotation through direct calls, aliases,
+/// and either elementwise operand order; otherwise the following named
+/// reduction reaches `resolve_reduce_axis` after monomorphization with no
+/// `fixed` anchor.
+#[test]
+fn helper_result_checked_named_axis_survives_decoded_context_paths() {
+    // `format_library_plus_snippet` intentionally contains linker-emitted
+    // names, just like the production monolithic baseline.
+    let _linked = chelis_compiler_api::install_linked_program_guard();
+    let dir = TempDir::new().expect("tempdir");
+    let root = dir.path().join("myapp");
+    fs::create_dir_all(root.join("src")).expect("mkdir src");
+    fs::create_dir_all(root.join("mylib/src")).expect("mkdir mylib/src");
+    fs::write(root.join("reef.toml"), app_reef_toml()).expect("write app reef.toml");
+    fs::write(
+        root.join("src/main.ch"),
+        "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n",
+    )
+    .expect("write main.ch");
+    fs::write(root.join("mylib/reef.toml"), mylib_reef_toml()).expect("write mylib reef.toml");
+    fs::write(
+        root.join("mylib/src/axes.ch"),
+        "module Mylib.Axes\nexport (aligned_left, aligned_right, aligned_matrix, scale, keep, keep_rank)\n\n\
+         def aligned_left[d](x: tensor[d, f32], gain: tensor[fixed, f32]) -> tensor[d, f32] = mul(x, gain)\n\
+         def aligned_right[d](x: tensor[d, f32], gain: tensor[fixed, f32]) -> tensor[d, f32] = mul(gain, x)\n\
+         def aligned_matrix[d, rows](x: tensor[d, rows, f32], gain: tensor[fixed, rows, f32]) -> tensor[d, rows, f32] = mul(x, gain)\n\
+         def scale[d](x: tensor[d, f32], gain: tensor[fixed, f32]) -> tensor[d, f32] = mul(x, insert(sum(gain, fixed), 0i32, shape(x, 0i32)))\n\
+         def keep[d](x: tensor[d, f32], gain: tensor[fixed, f32]) -> tensor[d, f32] = copy(x)\n\
+         def keep_rank(x: tensor[..rest, f32], gain: tensor[fixed, f32]) -> tensor[..rest, f32] = copy(x)\n",
+    )
+    .expect("write axes.ch");
+    fs::write(root.join("reef.lock"), app_reef_lock()).expect("write reef.lock");
+
+    let snippet = "module App.Eval\nimport Mylib.Axes (aligned_left, aligned_right, aligned_matrix, scale, keep, keep_rank)\n\n\
+                   def direct() = sum(aligned_left(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32])), fixed)\n\
+                   def alias() = {\n  f = aligned_left\n  sum(f(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32])), fixed)\n}\n\
+                   def reversed() = sum(aligned_right(to_tensor([1.0f32, 2.0f32]), to_tensor([1.0f32, 2.0f32])), fixed)\n\
+                   def mixed_axes() = sum(sum(aligned_matrix(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]), to_tensor([[1.0f32, 1.0f32], [1.0f32, 1.0f32]])), fixed), 0i32)\n\
+                   def scale_bridge(x: tensor[fixed, f32]) -> tensor[fixed, f32] = scale(x, to_tensor([1.0f32, 2.0f32, 3.0f32]))\n\
+                   def keep_bridge(x: tensor[fixed, f32]) -> tensor[fixed, f32] = keep(x, to_tensor([1.0f32, 2.0f32, 3.0f32]))\n\
+                   def scale_outer(x: tensor[outer, f32]) -> tensor[outer, f32] = scale(x, to_tensor([1.0f32, 2.0f32, 3.0f32]))\n\
+                   def rank_bridge(x: tensor[fixed, f32]) -> tensor[fixed, f32] = keep_rank(x, to_tensor([1.0f32, 2.0f32, 3.0f32]))\n\
+                   def rank_outer(x: tensor[outer, f32]) -> tensor[outer, f32] = keep_rank(x, to_tensor([1.0f32, 2.0f32, 3.0f32]))\n\
+                   rank_kept = rank_bridge(to_tensor([4.0f32, 5.0f32]))\n\
+                   rank_outer_kept = rank_outer(to_tensor([4.0f32, 5.0f32]))\n\
+                   scaled = scale_bridge(to_tensor([4.0f32, 5.0f32]))\n\
+                   kept = keep_bridge(to_tensor([4.0f32, 5.0f32]))\n\
+                   outer_scaled = scale_outer(to_tensor([4.0f32, 5.0f32]))\n";
+    let names = [
+        "direct",
+        "alias",
+        "reversed",
+        "mixed_axes",
+        "scaled",
+        "kept",
+        "outer_scaled",
+        "rank_kept",
+        "rank_outer_kept",
+    ];
+
+    let formatted = format_library_plus_snippet(&root, snippet);
+    let raw = eval(EvalRequest {
+        source_kind: SourceKind::Surf,
+        source: formatted,
+        bindings: BTreeMap::new(),
+    })
+    .expect("raw monolithic helper-result query");
+    let raw_results = collect_named_roots_json(&raw.roots, &names);
+    assert_eq!(raw_results.len(), names.len(), "raw roots: {raw_results:?}");
+    let expected =
+        r#"{"type":"tensor","value":{"shape":[],"data":{"dtype":"f32","bits":["40a00000"]}}}"#;
+    for name in ["direct", "alias", "reversed"] {
+        assert_eq!(raw_results[name], expected, "{name}");
+    }
+    assert_eq!(
+        raw_results["mixed_axes"],
+        r#"{"type":"tensor","value":{"shape":[],"data":{"dtype":"f32","bits":["41200000"]}}}"#,
+        "the mixed named/literal helper result retains its complete expected value"
+    );
+    assert_eq!(
+        raw_results["scaled"],
+        r#"{"type":"tensor","value":{"shape":[2],"data":{"dtype":"f32","bits":["41c00000","41f00000"]}}}"#,
+        "the caller-side `fixed` result label must not capture scale's gain binder"
+    );
+    for name in ["kept", "rank_kept", "rank_outer_kept", "outer_scaled"] {
+        assert_eq!(
+            raw_results[name],
+            if name != "outer_scaled" {
+                r#"{"type":"tensor","value":{"shape":[2],"data":{"dtype":"f32","bits":["40800000","40a00000"]}}}"#
+            } else {
+                r#"{"type":"tensor","value":{"shape":[2],"data":{"dtype":"f32","bits":["41c00000","41f00000"]}}}"#
+            },
+            "{name}: alpha-renaming the caller must not affect checked result-label transport"
+        );
+    }
+
+    let context = compile_reef_context(Path::new("/tmp/x"), &root).expect("context");
+    check_in_context(&context, snippet).expect("live checked/lowered context query");
+    let live = eval_in_context(&context, snippet).expect("live context eval");
+    assert_eq!(collect_named_roots_json(&live.roots, &names), raw_results);
+
+    // This is an in-process codec round-trip. It verifies that the serialized
+    // context retains the same checked result annotation after decode; it does
+    // not claim a separate worker or disk-cache execution.
+    let restored = CompiledContext::decode(&context.encode().expect("encode context"))
+        .expect("decode context");
+    check_in_context(&restored, snippet).expect("decoded checked/lowered context query");
+    let decoded = eval_in_context(&restored, snippet).expect("decoded context eval");
+    assert_eq!(
+        collect_named_roots_json(&decoded.roots, &names),
+        raw_results
+    );
+}
+
+/// A caller-side checked result label must not erase the independent authored
+/// named-result obligation: `out` is produced from `y`, while `fixed` belongs
+/// to `x`, so the mismatch still traps rather than being relabeled away.
+#[test]
+fn checked_result_name_transport_keeps_authored_named_mismatch_rejection() {
+    let error = eval(EvalRequest {
+        source_kind: SourceKind::Surf,
+        source: "def mismatch(x: tensor[fixed, f32], y: tensor[3, f32]) -> tensor[fixed, f32] = copy(y)\n\
+                 out = mismatch(to_tensor([4.0f32, 5.0f32]), to_tensor([1.0f32, 2.0f32, 3.0f32]))\n"
+            .to_string(),
+        bindings: BTreeMap::new(),
+    })
+    .expect_err("the authored fixed result must still compare y with x");
+    let messages = error
+        .errors
+        .iter()
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        messages.contains("extent `fixed`: x axis 0 = 2, y axis 0 = 3"),
+        "authored named diagnostic remains informative: {messages}"
+    );
+    assert!(
+        messages.ends_with("numeric trap: domain in load at int64"),
+        "the real named mismatch must still trap: {messages}"
+    );
+}
+
 #[test]
 fn compile_context_accepts_symbolic_matmul_aliases_from_library_helpers() {
     let dir = TempDir::new().expect("tempdir");

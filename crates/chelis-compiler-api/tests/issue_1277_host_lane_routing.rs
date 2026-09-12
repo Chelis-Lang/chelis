@@ -151,3 +151,90 @@ fn host_applied_mismatch_names_the_disagreeing_sources() {
         "{messages}"
     );
 }
+
+// #1897 / §4.5: anonymous unknown extents are not shared runtime binders.
+#[allow(deprecated)] // Exercise repeated calls through the compatibility API too.
+fn assert_host_values(source: &str, expected: &[serde_json::Value]) {
+    let request = || EvalRequest {
+        source_kind: SourceKind::Surf,
+        source: source.to_owned(),
+        bindings: BTreeMap::new(),
+    };
+    let prepared = chelis_compiler_api::compiler::prepare_eval(request()).unwrap();
+    let results = [
+        eval_selected(request(), &["output".to_owned()]),
+        prepared.eval_root(BTreeMap::new(), "output"),
+        prepared.eval_root(BTreeMap::new(), "output"),
+    ];
+    for result in results {
+        let result = result.unwrap_or_else(|error| panic!("{source}\n{error:?}"));
+        assert!(result.transcript.is_empty(), "{result:?}");
+        let values = result
+            .roots
+            .iter()
+            .map(|root| {
+                assert_eq!(lane_of(&result, root.name.as_deref().unwrap()), Lane::Host);
+                serde_json::to_value(&root.value).unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(values, expected, "{source}");
+    }
+}
+
+fn int64_values(values: &[i64]) -> Vec<serde_json::Value> {
+    values
+        .iter()
+        .map(|value| serde_json::json!({"type":"scalar", "value":{"dtype":"int64", "value":value}}))
+        .collect()
+}
+
+#[test]
+fn wildcard_axes_remain_independent_in_direct_and_prepared_host_calls() {
+    assert_host_values(
+        include_str!("../../../examples/wildcard_extents.ch"),
+        &int64_values(&[2, 3]),
+    );
+    for (input, dims) in [
+        ("to_tensor([[1.0f32], [2.0f32], [3.0f32]])", [3, 1]),
+        ("reshape(to_tensor(empty), [0i64, 3i64])", [0, 3]),
+        ("reshape(to_tensor(empty), [4i64, 0i64])", [4, 0]),
+    ] {
+        let source = format!(
+            "def widths(x: tensor[*, *, f32]) = (shape(&x, 0i32), shape(x, 1i32))\nempty: List[f32] = []\noutput = widths({input})\n"
+        );
+        assert_host_values(&source, &int64_values(&dims));
+    }
+}
+
+#[test]
+fn wildcard_arguments_do_not_hide_real_shared_host_binders() {
+    let source = "def widths(x: tensor[extent, *, f32], y: tensor[extent, *, f32]) = (shape(&x, 0i32), shape(x, 1i32), shape(&y, 0i32), shape(y, 1i32))\noutput = widths(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]), to_tensor([[5.0f32], [6.0f32]]))\n";
+    assert_host_values(source, &int64_values(&[2, 2, 2, 1]));
+    let mismatch = source.replace("[[5.0f32], [6.0f32]]", "[[5.0f32]]");
+    let error = eval_selected(
+        EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: mismatch,
+            bindings: BTreeMap::new(),
+        },
+        &["output".to_owned()],
+    )
+    .expect_err("the real extent binder must still agree");
+    assert_eq!(error.stage, "eval");
+    assert_eq!(error.errors.len(), 1);
+    assert_eq!(
+        error.errors[0].message,
+        "dimension binder `extent` has inconsistent runtime witnesses: 2 and 1"
+    );
+}
+
+#[test]
+fn wildcard_column_concat_preserves_all_values_through_host_helpers() {
+    let source = "def join_columns[s](x: tensor[s, *, f32], y: tensor[s, *, f32]) = concat([x, y], 1i32)\ndef columns[s](x: tensor[s, s, f32], y: tensor[s, 1, f32]) = join_columns(x, y)\noutput = columns(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]), to_tensor([[5.0f32], [6.0f32]]))\n";
+    assert_host_values(
+        source,
+        &[serde_json::json!({"type":"tensor", "value": {
+            "shape":[2,3], "data":{"dtype":"f32", "bits":["3f800000", "40000000", "40a00000", "40400000", "40800000", "40c00000"]}
+        }})],
+    );
+}
