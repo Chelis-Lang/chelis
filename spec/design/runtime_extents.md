@@ -707,7 +707,10 @@ legitimately constructs a session, so the constructor cannot be narrowed.
 Each session's extent is therefore its owner's, and the interpreter's is its
 program's lifetime by construction of `EvalContext`. A future entry point that
 built a session per ask would re-derive everything, and that cost is visible at
-its call site but is not a compile error (#1835). What follows from that, and is worth stating because
+its call site but is not a compile error; #1921 tracks that residual. What the
+representation changed is therefore precise: the session makes forgetting
+impossible and makes misuse visible at the call site, where the thread-local
+flag made both invisible (#1835). What follows from that, and is worth stating because
 it is the reason a cheaper second predicate was rejected: nothing may answer
 "is this def a kernel" except this decision. A syntactic surrogate for the
 callee summary probe would be a second definition of one question, and the two
