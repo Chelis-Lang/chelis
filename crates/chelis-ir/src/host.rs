@@ -12422,12 +12422,19 @@ fn top_level_fn_helper_summary_rejects(
     // it must leave no trace on specialization state
     // (harden-bounded-monomorphization D1).
     let probe_guard = MonoProbeGuard::begin();
-    let lowered = lower_host_function(name, body, None, program, false, false);
+    let lowered = crate::lower::catch_lowering_external(|| {
+        lower_host_function(name, body, None, program, false, false)
+    });
     drop(probe_guard);
     if pushed {
         pop_inlining(name);
     }
-    // A probe failure is not a build failure
+    // A fatal tensor-helper rejection can unwind from lower_host_function
+    // (#1922). Return that diagnostic only after restoring the probe state
+    // and inlining marker, and never cache it as "no summary rejection".
+    let lowered = lowered?;
+    // An already-returned probe error is not a build failure, including an
+    // error returned by a nested summary probe. Preserve that deferral
     // (harden-bounded-monomorphization D1): this lowering was speculative,
     // and a genuine defect in the callee resurfaces — with call-free
     // attribution — when the callee is lowered for real. A failed probe
@@ -18032,6 +18039,82 @@ def bad[b](box: Box[b]) -> bool =
              unhandled Deep form cannot lower to a substitute host value"
         );
         MONO_SPECIALIZATIONS.with(|state| *state.borrow_mut() = MonoSpecializationState::default());
+    }
+
+    /// A nested probe's already-returned error retains the existing deferral.
+    /// The public source still rejects in real lowering (API/CLI regression).
+    #[test]
+    fn issue_1922_nested_returned_probe_error_retains_deferral_and_cleanup() {
+        assert_issue_1922_summary_probe("sink_output", false);
+    }
+
+    /// A fatal unwind raised directly in this probe returns the original
+    /// diagnostic only after cleanup, and never installs a false cache row.
+    #[test]
+    fn issue_1922_direct_fatal_summary_probe_restores_state_before_returning_error() {
+        assert_issue_1922_summary_probe("causal_sdpa_with_sink", true);
+    }
+
+    fn assert_issue_1922_summary_probe(name: &str, raises_here: bool) {
+        let checked = surf_check(include_str!(
+            "../../../tests/support/helper_summary_fatal.ch"
+        ));
+        let session = HostLoweringSession::new(&checked);
+        let _restore = MonoProbeGuard::begin();
+        MONO_SPECIALIZATIONS.with(|state| {
+            state
+                .borrow_mut()
+                .memo
+                .insert("seed-key".into(), "seed-symbol".into());
+        });
+        let seeded = MONO_SPECIALIZATIONS.with(|state| state.borrow().clone());
+        for _ in 0..2 {
+            let caught =
+                std::panic::catch_unwind(|| top_level_fn_helper_summary_rejects(&session, name));
+            if let Err(payload) = &caught {
+                eprintln!(
+                    "escaped diagnostic: {:?}",
+                    payload.downcast_ref::<crate::lower::LowerDiagnostic>()
+                );
+            }
+            let result = caught.expect("summary probe must not unwind");
+            if raises_here {
+                let error = result.expect_err("direct fatal diagnostic must not be deferred");
+                assert!(error.fatal, "{error:?}");
+                assert_eq!(
+                    error.message,
+                    "`insert` size resolves to `seq`, but no in-scope tensor axis supplies that extent. Use an int64 literal or a shape(tensor, int32-axis) read. Tracked by Chelis-Lang/chelis#469"
+                );
+                assert_eq!(error.span_id.as_deref(), Some("surf:467..507"));
+            } else {
+                assert_eq!(
+                    result,
+                    Ok(false),
+                    "preserve already-returned error deferral"
+                );
+            }
+            assert!(!is_inlining("sink_output"));
+            assert!(!is_inlining("causal_sdpa_with_sink"));
+            assert_eq!(
+                session
+                    .facts
+                    .helper_summary_rejects
+                    .borrow()
+                    .get(name)
+                    .copied(),
+                if raises_here { None } else { Some(false) }
+            );
+            MONO_SPECIALIZATIONS.with(|state| {
+                let restored = state.borrow();
+                assert_eq!(restored.memo, seeded.memo);
+                assert_eq!(restored.symbol_keys, seeded.symbol_keys);
+                assert_eq!(
+                    format!("{:#?}", restored.functions),
+                    format!("{:#?}", seeded.functions)
+                );
+                assert_eq!(restored.in_progress.len(), seeded.in_progress.len());
+            });
+        }
     }
 
     #[test]

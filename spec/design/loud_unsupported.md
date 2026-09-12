@@ -983,8 +983,17 @@ authored or monomorphized provenance through C-ABI projection. The published
 header and tensor-entry selectors use that provenance, not symbol text.
 Specializations use translation-unit-local C linkage in binary and object mode.
 Speculative summary probes use state snapshot and restore plus sorted order.
-Thus, repeated builds emit byte-identical C and a probe failure cannot fail the
-build. Specializations intern by exact package definition identity under a
+Thus, repeated builds emit byte-identical C and an ordinary returned probe
+error is deferred until real lowering, including an error already returned by a
+nested summary probe. A fatal tensor-helper rejection raised directly during a
+summary probe is different: the existing lowering catcher returns its diagnostic
+after specialization-state and inlining-marker cleanup, without caching a false
+summary at that boundary (#1922). This preserves the existing returned-error
+deferral; it does not admit the rejected operation or fall back to a value.
+`issue_1922_helper_summary_diagnostic_api` and
+`issue_1922_helper_summary_diagnostic_cli` lock the public error transport;
+the private host unit locks same-name retry and probe-state restoration.
+Specializations intern by exact package definition identity under a
 canonical signature key. Exact identity lookup precedes unique terminal-name
 fallback. A hash collision between distinct signatures produces a loud internal
 error. A specialization's parameter types are the call site's checked types.
