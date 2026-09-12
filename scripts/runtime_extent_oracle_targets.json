@@ -508,7 +508,7 @@
         "a_scatter_replace_gate_result_ties_its_sum_consumer_to_the_bound_operand",
         "a_trace_gate_result_ties_its_sum_consumer_to_the_bound_operand"
       ],
-      "note": "chelis#1836. The first phase-b target in `chelis-types`: the four cells are CHECKER verdicts, so their receipts are unit-level and no lane splits them. Named with `--exact` rather than running the whole file for the reason `exec_c` gives: the receipt check requires the observed test set to EQUAL the expected one, and `unresolved_operand_matrix.rs` holds thirty-odd chelis#1512 cells this phase does not own."
+      "note": "chelis#1836. The first phase-b target in `chelis-types`: all seven cells are CHECKER verdicts, so their receipts are unit-level and no lane splits them. Four cover the provenances the issue names (the two `match` destructurings, the record field and chelis#1577's `copy` gate) and three cover chelis#1690's `gather`, `trace` and `scatter_replace` gates; `scatter`, its fourth gated route, was not probed and is not registered. Named with `--exact` rather than running the whole file for the reason `exec_c` gives: the receipt check requires the observed test set to EQUAL the expected one, and `unresolved_operand_matrix.rs` holds thirty-odd chelis#1512 cells this phase does not own."
     }
   ]
 }
