@@ -4607,7 +4607,11 @@ fn def_body_decision(
     program: &CheckedProgram,
     signature: &HostDefSignature,
 ) -> Result<DefBodyDecision, crate::lower::LowerDiagnostic> {
-    def_body_decision_impl(program, signature, false)
+    let fixed_dropout = cached_subexpr_lowering_context(program).c_execution_profile(
+        &signature.body_expr,
+        &kernel_scope_types(&signature.scope, Some(&signature.params)),
+    ) == crate::evaluation::EvaluationProfile::FixedControl;
+    def_body_decision_impl(program, signature, fixed_dropout)
 }
 
 fn def_body_decision_impl(
@@ -12190,6 +12194,16 @@ fn top_level_fn_helper_summary_rejects(
     let Some(body) = find_top_level_def_expr(program.exprs(), name) else {
         return Ok(false);
     };
+    // Like a type-polymorphic declaration, an unresolved source-rate
+    // template has no standalone helper summary. Its actual call is
+    // classified and lowered with the caller's static controls (#1764).
+    if cached_subexpr_lowering_context(program).evaluation_profile(body, &[])
+        == crate::evaluation::EvaluationProfile::Legacy(
+            crate::evaluation::LegacyEvaluationReason::RuntimeRate,
+        )
+    {
+        return Ok(false);
+    }
     if !matches!(body, Expr::List(list, _) if tag(list) == Some(DeepTag::Fn)) {
         return Ok(false);
     }

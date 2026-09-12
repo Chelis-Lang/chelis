@@ -203,6 +203,7 @@ impl<'a> EvalContext<'a> {
         def_expr: &Expr,
         kids: &[Expr],
         args: &[RuntimeValue],
+        retain_source_controls: bool,
     ) -> Result<Option<RuntimeValue>, String> {
         let span = Span::new(0, 0);
         let mut scoped: UnordMap<String, TensorType> = UnordMap::new();
@@ -248,7 +249,30 @@ impl<'a> EvalContext<'a> {
                 }
                 _ => return Ok(None),
             };
-            app_elements.push(make_var_with_type(&placeholder, &tensor_ty, span));
+            // A fixed source call proves its control expressions before any
+            // arguments are evaluated. Keep only scalar expressions needed
+            // for that proof; data operands still cross this boundary once.
+            let argument = make_var_with_type(&placeholder, &tensor_ty, span);
+            let argument = if retain_source_controls && matches!(value, RuntimeValue::Scalar(_)) {
+                let mut trial = kids.to_vec();
+                trial[index + 1] = argument.clone();
+                let mut elements = vec![
+                    Expr::Atom(Atom::Tag(DeepTag::App), span),
+                    Expr::Map(Metadata::default(), span),
+                ];
+                elements.extend(trial);
+                let trial = Expr::List(List { elements }, span);
+                if chelis_ir::lower::evaluation_profile(&trial, &self.top_level_defs)
+                    == chelis_ir::evaluation::EvaluationProfile::FixedControl
+                {
+                    argument
+                } else {
+                    kids[index + 1].clone()
+                }
+            } else {
+                argument
+            };
+            app_elements.push(argument);
             scoped.insert(placeholder.clone(), tensor_ty);
             staged.insert(placeholder, tensor_value);
         }

@@ -4105,7 +4105,22 @@ fn def_is_lowered(
         // DAG-lowerable). Top-level non-fn value bindings keep the
         // strict classification so emit-main still materializes
         // their runtime literals.
-        !def_body_requires_host_runtime(body)
+        // A source declaration with an unbound dropout rate is a template
+        // for checked calls, not a standalone DAG. Keep its checked body in
+        // the library so a caller can supply a source-static actual (#1764).
+        !(lookup_declared_type_expr(types.signatures, type_env, name).is_some_and(|ty| {
+            stamped_parts(ty).is_some_and(|(tag, _, kids)| {
+                tag == DeepTag::TFn
+                    && kids
+                        .last()
+                        .is_some_and(|result| result.tag() == Some(DeepTag::TTensor))
+            })
+        }) && matches!(
+            evaluation_profile_from_defs(body, top_level_defs),
+            crate::evaluation::EvaluationProfile::Legacy(
+                crate::evaluation::LegacyEvaluationReason::RuntimeRate
+            )
+        )) && !def_body_requires_host_runtime(body)
             && !expr_depends_on_nonlowerable_name(
                 body,
                 top_level_defs,
@@ -4180,11 +4195,16 @@ fn expr_depends_on_nonlowerable_name(
             && !bound_names.contains(&name)
             && let Some(body) = top_level_defs.get(&name)
             && body.tag() == Some(DeepTag::Fn)
-            && lookup_declared_type_expr(types.signatures, type_env, &name).is_some_and(|ty| {
+            && (lookup_declared_type_expr(types.signatures, type_env, &name).is_some_and(|ty| {
                 type_expr_has_precision_var(ty)
                     || type_expr_has_rank_var(ty)
                     || fn_type_has_bounded_scalar_var(ty, types.dtype_bound_names.get(&name))
-            })
+            }) || (evaluation_profile_from_defs(body, top_level_defs)
+                == crate::evaluation::EvaluationProfile::Legacy(
+                    crate::evaluation::LegacyEvaluationReason::RuntimeRate,
+                )
+                && evaluation_profile_from_defs(expr, top_level_defs)
+                    == crate::evaluation::EvaluationProfile::FixedControl))
         {
             if def_body_requires_host_runtime(body) || !visiting.insert(name.clone()) {
                 return true;
@@ -14841,7 +14861,16 @@ impl<'program> LowerCtx<'program> {
     /// own evaluator and does not require this DAG lowering to succeed, so a
     /// runtime bound that fails the build still evaluates to the right range.
     fn resolve_static_f64_arg(&self, expr: &Expr, builtin: &str, arg_desc: &str) -> f64 {
-        Self::extract_f64_value(expr, &self.prec_substitutions).unwrap_or_else(|| {
+        let value = if builtin == "dropout" {
+            self.static_rate(expr).map(|value| match value {
+                StagedScalar::Typed(value) => value.as_f64_lossy(),
+                StagedScalar::Raw(chelis_types::RawScalar::Float(value)) => value,
+                StagedScalar::Raw(chelis_types::RawScalar::Int(value)) => value as f64,
+            })
+        } else {
+            Self::extract_f64_value(expr, &self.prec_substitutions)
+        };
+        value.unwrap_or_else(|| {
             let found = match expr {
                 Expr::List(list, _) => get_tag(list).map(DeepTag::as_str).unwrap_or("expression"),
                 _ => "expression",
@@ -14864,7 +14893,6 @@ impl<'program> LowerCtx<'program> {
     /// Unlike the legacy f64 extractor, an integer leaf remains exact through
     /// int64 and a typed leaf retains its source dtype until the checked cast.
     fn static_rate(&self, expr: &Expr) -> Option<StagedScalar> {
-        self.execution.as_ref()?;
         static_controls::scalar(
             expr,
             &self.static_rate_bindings,
