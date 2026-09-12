@@ -1740,11 +1740,11 @@ pub fn compile_for_execution_in_context(
 }
 
 /// Resolve and scope the entry for the in-context compiled path (#816).
-/// (The monolithic path uses [`entry_lane_decision`] instead, which re-lowers
-/// the named def from `compiled.checked` — that works only because the
-/// monolithic `compiled.checked` holds the whole program. In-context it holds
-/// new code only, so re-lowering a def that calls a library function would
-/// fail — the reviewer-flagged Step-1 trap.)
+/// The monolithic path uses [`entry_lane_decision`] instead. In-context,
+/// `compiled.checked` holds new code only, so source execution planning after
+/// selection must compose it with its proof-matched checked library. The
+/// composed library supplies helper definitions, never additional selectable
+/// entries.
 ///
 /// In-context, a clean tensor entry lowers straight into `compiled.dag` as a
 /// DAG root (its library calls already inlined by `compile_new_source_in_context`),
@@ -2043,7 +2043,7 @@ fn execution_artifact_from_compiled_observed(
             // tensor program the scoped DAG equals the whole-program DAG, so
             // this is a no-op there.
             let mut entry_lane_decline = None;
-            let scoped_entry = if compiled.library_runtime.is_some() {
+            let scoped_entry = if let Some(library) = compiled.library_runtime.as_ref() {
                 // In-context (#816): a clean tensor entry lowers straight into
                 // `compiled.dag` as a DAG root — it is NOT a host-program
                 // function, so `entry_lane_decision` (which reads the host
@@ -2087,7 +2087,31 @@ fn execution_artifact_from_compiled_observed(
                             GeneralKind::CompileError,
                         ));
                     }
-                    resolved => resolved.map(|(entry, dag)| (entry, dag, None)),
+                    Some((entry, ordinary)) => {
+                        let checked = CheckedProgram::compose(&library.checked, compiled.checked())
+                            .ok_or_else(|| {
+                                stage_error(
+                                    "compile",
+                                    "in-context execution program lost its checked library proof",
+                                    GeneralKind::CompileError,
+                                )
+                            })?;
+                        // Plan from checked source even when DCE removed a
+                        // draw's value. Only NoDropout keeps the ordinary DAG;
+                        // unsupported source execution is a fatal diagnostic.
+                        let execution = lower_selected_execution_plan(
+                            &checked,
+                            entry,
+                            #[cfg(feature = "compilation-trace")]
+                            collect_trace.then_some(&mut entry_trace),
+                        )?;
+                        let dag = execution
+                            .as_ref()
+                            .map(|plan| plan.dag_for_inspection().clone())
+                            .unwrap_or(ordinary);
+                        Some((entry, dag, execution))
+                    }
+                    None => None,
                 }
             } else if let Some(host_program) = host_program {
                 match entry_lane_decision(

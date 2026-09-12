@@ -60,6 +60,31 @@ fn concrete_static_rate_exported_library_call_survives_context_decode() {
 }
 
 #[test]
+fn compiled_static_rate_exported_library_call_survives_context_decode() {
+    use chelis_compiler_api::compiler::compile_for_execution_in_context;
+    use chelis_compiler_api::schema::CompileTarget;
+    use chelis_compiler_api::{COMPILER_VERSION, compile_reef_context};
+
+    // [05-OP-37]/[05-RNG-1]: library source must retain the selected entry's
+    // fixed-control execution authority across the serialized context boundary.
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::create_dir(directory.path().join("src")).unwrap();
+    std::fs::write(directory.path().join("reef.toml"), format!("[package]\nname = \"static_rate\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Probe\"\n")).unwrap();
+    std::fs::write(directory.path().join("src/draw.ch"), "module Probe.Draw\nexport (keep)\ndef keep(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = dropout(x, rate)\n").unwrap();
+    let context = compile_reef_context(directory.path(), directory.path()).unwrap();
+    let decoded =
+        chelis_compiler_api::context::CompiledContext::decode(&context.encode().unwrap()).unwrap();
+    let source = "module Probe.Client\nimport Probe.Draw (keep)\ndef main(x: tensor[4, f32]) -> tensor[4, f32] = with seed(42i64) { keep(x, 0.5f32) }\n";
+    for context in [&decoded, &context] {
+        let artifact =
+            compile_for_execution_in_context(context, source, CompileTarget::C, Some("main"))
+                .expect("fixed-control library entry must compile through the context API");
+        assert_eq!(artifact.inputs.len(), 1);
+        assert_eq!(artifact.outputs.len(), 1);
+    }
+}
+
+#[test]
 fn concrete_runtime_rate_actual_is_not_frozen_from_its_evaluated_value() {
     let source = "def keep(x: tensor[4, f32], rate: f32) -> tensor[4, f32] = dropout(x, rate)\ndef main() = with seed(42i64) { keep(to_tensor([1.0f32, 1.0f32, 1.0f32, 1.0f32]), tensor_to_scalar(scalar_to_tensor(0.5f32))) }\n";
     let error = eval_selected(request(source), &["main".into()]).unwrap_err();
