@@ -18,6 +18,27 @@ from scripts import changelog as m
 
 
 HISTORY = "# Changelog\n\nProject notes.\n\n## [0.1.0] - 2026-01-01\n\n### Fixed\n\n- Old fix.\n"
+LEGACY_UNRELEASED = """# Changelog
+
+Project notes.
+
+## [Unreleased]
+
+### Changed
+
+- **First change.**
+  Its continuation is retained.
+
+- **BREAKING (checker/CLI): Second change.**
+  ```text
+  example
+  ```
+
+### Fixed
+
+- **A fix.**
+
+"""
 
 
 class ChangelogTests(unittest.TestCase):
@@ -387,6 +408,172 @@ class ChangelogTests(unittest.TestCase):
         result = self.policy("--event-file", str(event), success=False)
         self.assertIn("direct CHANGELOG.md edit", result.stdout)
         self.assertIn("move [Unreleased] notes", result.stdout)
+
+    def test_migrate_unreleased_preview_and_write_are_lossless(self):
+        self.write("CHANGELOG.md", LEGACY_UNRELEASED + HISTORY[HISTORY.index("## [0.1.0]"):])
+        before = self.snapshot()
+        result = self.cli("migrate-unreleased")
+        self.assertIn("changelog.d/legacy-unreleased-001.changed.md", result.stdout)
+        self.assertEqual(before, self.snapshot())
+        self.cli("migrate-unreleased", "--write")
+        self.assertEqual((self.root / "CHANGELOG.md").read_bytes(), HISTORY.encode())
+        self.assertEqual((self.root / "changelog.d/legacy-unreleased-001.changed.md").read_text(),
+                         "**First change.**\nIts continuation is retained.\n")
+        self.assertEqual((self.root / "changelog.d/legacy-unreleased-002.changed.breaking.md").read_text(),
+                         "**checker/CLI: Second change.**\n```text\nexample\n```\n")
+        self.assertEqual((self.root / "changelog.d/legacy-unreleased-003.fixed.md").read_text(),
+                         "**A fix.**\n")
+        self.cli("check")
+
+    def test_migration_pr_admission_requires_exact_conservation(self):
+        self.write("CHANGELOG.md", LEGACY_UNRELEASED + HISTORY[HISTORY.index("## [0.1.0]"):])
+        self.base = self.commit()
+        self.cli("migrate-unreleased", "--write")
+        self.commit()
+        self.policy()
+        self.write("changelog.d/legacy-unreleased-001.changed.md", "**Rewritten.**\n")
+        self.commit()
+        self.assertIn("direct CHANGELOG.md edit", self.policy(success=False).stdout)
+
+    def test_migration_pr_rejects_omitted_or_reclassified_legacy_note(self):
+        for action in ("omit", "reclassify"):
+            with self.subTest(action=action):
+                self.write("CHANGELOG.md", LEGACY_UNRELEASED + HISTORY[HISTORY.index("## [0.1.0]"):])
+                self.base = self.commit()
+                self.cli("migrate-unreleased", "--write")
+                if action == "omit":
+                    (self.root / "changelog.d/legacy-unreleased-001.changed.md").unlink()
+                else:
+                    path = self.root / "changelog.d/legacy-unreleased-001.changed.md"
+                    path.rename(path.with_name("legacy-unreleased-001.fixed.md"))
+                self.commit()
+                self.assertIn("direct CHANGELOG.md edit", self.policy(success=False).stdout)
+
+    def test_migration_pr_allows_docs_and_an_additional_new_fragment(self):
+        self.write("CHANGELOG.md", LEGACY_UNRELEASED + HISTORY[HISTORY.index("## [0.1.0]"):])
+        self.base = self.commit()
+        self.cli("migrate-unreleased", "--write")
+        self.write("changelog.d/follow-up.fixed.md", "A separate pending note.\n")
+        self.write("changelog.d/README.md", "# Updated fragment instructions\n")
+        self.commit()
+        self.policy()
+
+    def test_migration_pr_rejects_lost_pending_fragment(self):
+        self.write("CHANGELOG.md", LEGACY_UNRELEASED + HISTORY[HISTORY.index("## [0.1.0]"):])
+        self.write("changelog.d/pending.fixed.md", "Pending note.\n")
+        self.base = self.commit()
+        self.cli("migrate-unreleased", "--write")
+        (self.root / "changelog.d/pending.fixed.md").unlink()
+        self.commit()
+        self.assertIn("direct CHANGELOG.md edit", self.policy(success=False).stdout)
+
+    def test_migration_pr_rejects_version_bump(self):
+        self.write("CHANGELOG.md", LEGACY_UNRELEASED + HISTORY[HISTORY.index("## [0.1.0]"):])
+        self.base = self.commit()
+        self.cli("migrate-unreleased", "--write")
+        self.write("Cargo.toml", '[workspace.package]\nversion = "0.3.0"\n')
+        self.commit()
+        self.assertIn("direct CHANGELOG.md edit", self.policy(success=False).stdout)
+
+    def test_migration_pr_rejects_preamble_or_history_rewrite(self):
+        for target, replacement in (("preamble", "Rewritten notes."),
+                                    ("history", "Historical rewrite.")):
+            with self.subTest(target=target):
+                self.write("CHANGELOG.md", LEGACY_UNRELEASED + HISTORY[HISTORY.index("## [0.1.0]"):])
+                self.base = self.commit()
+                self.cli("migrate-unreleased", "--write")
+                path = self.root / "CHANGELOG.md"
+                old = "Project notes." if target == "preamble" else "Old fix."
+                path.write_text(path.read_text().replace(old, replacement), encoding="utf-8")
+                self.commit()
+                self.assertIn("direct CHANGELOG.md edit", self.policy(success=False).stdout)
+
+    def test_migration_rejects_malformed_legacy_markdown_and_collisions(self):
+        cases = (
+            "Free prose.\n\n### Changed\n\n- **Entry.**\n\n",
+            "### Added\n\n- **Entry.**\n continuation\n\n",
+            "### Security\n\n- **Entry.**\n\n",
+            "### Changed\n\n- **Entry.**\n  ```text\n  unclosed\n",
+        )
+        for body in cases:
+            with self.subTest(body=body):
+                self.write("CHANGELOG.md", "# Changelog\n\n## [Unreleased]\n\n" + body + HISTORY[HISTORY.index("## [0.1.0]"):])
+                before = self.snapshot()
+                self.cli("migrate-unreleased", "--write", success=False)
+                self.assertEqual(before, self.snapshot())
+        self.write("CHANGELOG.md", LEGACY_UNRELEASED + HISTORY[HISTORY.index("## [0.1.0]"):])
+        collision = self.write("changelog.d/legacy-unreleased-001.changed.md", "Foreign note.\n")
+        self.cli("migrate-unreleased", success=False)
+        self.cli("migrate-unreleased", "--write", success=False)
+        collision.unlink()
+        collision.symlink_to("README.md")
+        self.cli("migrate-unreleased", success=False)
+        self.cli("migrate-unreleased", "--write", success=False)
+
+    def test_migration_requires_history_and_recognizes_only_canonical_breaking(self):
+        cases = (
+            "# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- **Entry.**\n",
+            "# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- **BREAKING:** Entry.\n\n"
+            + HISTORY[HISTORY.index("## [0.1.0]"):],
+        )
+        for text in cases:
+            with self.subTest(text=text):
+                self.write("CHANGELOG.md", text)
+                before = self.snapshot()
+                self.cli("migrate-unreleased", "--write", success=False)
+                self.assertEqual(before, self.snapshot())
+
+    def test_migration_precreated_fragment_must_have_exact_bytes_and_mode(self):
+        self.write("CHANGELOG.md", LEGACY_UNRELEASED + HISTORY[HISTORY.index("## [0.1.0]"):])
+        plan = m.migration(m.disk_tree(self.root))
+        path = self.root / "changelog.d/legacy-unreleased-001.changed.md"
+        path.write_bytes(plan.fragments["changelog.d/legacy-unreleased-001.changed.md"])
+        path.chmod(0o644)
+        self.cli("migrate-unreleased")
+        path.chmod(0o755)
+        self.cli("migrate-unreleased", success=False)
+
+    def test_migration_rejects_non_top_or_multiple_unreleased_sections(self):
+        cases = (
+            HISTORY + "\n## [Unreleased]\n\n### Fixed\n\n- **Too late.**\n",
+            "# Changelog\n\n## [Unreleased] - 2026-09-12\n\n### Fixed\n\n- **Dated.**\n\n"
+            + HISTORY[HISTORY.index("## [0.1.0]"):],
+            "# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- **One.**\n\n"
+            "## [Unreleased]\n\n### Fixed\n\n- **Two.**\n\n" + HISTORY[HISTORY.index("## [0.1.0]"):],
+        )
+        for text in cases:
+            with self.subTest(text=text):
+                self.write("CHANGELOG.md", text)
+                before = self.snapshot()
+                self.cli("migrate-unreleased", "--write", success=False)
+                self.assertEqual(before, self.snapshot())
+
+    def test_fenced_fake_unreleased_heading_does_not_enable_migration(self):
+        self.write("CHANGELOG.md", HISTORY + "\n```text\n## [Unreleased]\n```\n")
+        before = self.snapshot()
+        self.cli("migrate-unreleased", "--write", success=False)
+        self.assertEqual(before, self.snapshot())
+
+    def test_migration_partial_fragment_write_is_recoverable(self):
+        self.write("CHANGELOG.md", LEGACY_UNRELEASED + HISTORY[HISTORY.index("## [0.1.0]"):])
+        original = m.write_new_file
+        calls = 0
+
+        def fail_second(path, data):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("fragment write refused")
+            original(path, data)
+
+        with mock.patch.object(m, "write_new_file", side_effect=fail_second):
+            code, _, errors = self.invoke_main(["migrate-unreleased", "--write"])
+        self.assertEqual(code, 2)
+        self.assertIn("fragment write refused", errors)
+        self.assertIn("[Unreleased]", (self.root / "CHANGELOG.md").read_text())
+        self.assertTrue((self.root / "changelog.d/legacy-unreleased-001.changed.md").exists())
+        self.cli("migrate-unreleased", "--write")
+        self.assertNotIn("[Unreleased]", (self.root / "CHANGELOG.md").read_text())
 
     def test_advisory_escape_is_not_supported(self):
         self.write("crates/compiler/src/lib.rs", "Changed")

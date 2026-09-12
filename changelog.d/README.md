@@ -57,6 +57,25 @@ Commit the version bump, assembled changelog, and fragment deletions together
 in the release PR. Direct historical edits are outside the assembly convention
 and fail the PR check even with `no-changelog`.
 
+### Migrate a legacy Unreleased section
+
+`[Unreleased]` is not part of the fragment workflow and ordinary checks reject it.
+For the one supported legacy layout, migrate it before beginning a version bump:
+
+```sh
+.venv/bin/python scripts/changelog.py migrate-unreleased
+.venv/bin/python scripts/changelog.py migrate-unreleased --write
+```
+
+Preview is read-only and lists deterministic fragment paths. Writing accepts only a
+top-level legacy section containing `Added`, `Changed`, or `Fixed` categories and
+outer entries with two-space-indented continuations; malformed or ambiguous Markdown
+fails rather than being rewritten. It removes only that section, preserves the
+preamble and release history byte-for-byte, and creates numbered
+`legacy-unreleased-*.{category}[.breaking].md` fragments. Existing pending fragments
+are retained. A partial fragment write is recoverable: retry succeeds only when any
+already-created migration fragment has the exact expected bytes and regular-file mode.
+
 The tag-publishing workflow extracts the committed version section into its
 GitHub Release body. It refuses missing, duplicate, or empty notes, a workspace
 version mismatch, `[Unreleased]`, and unconsumed fragments. Local extraction:
