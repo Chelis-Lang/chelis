@@ -181,18 +181,22 @@ pub struct Subst {
     /// below.
     #[serde(skip)]
     wildcard_touched_classes: UnordSet<DimVar>,
-    /// chelis#1801: the alias classes an authored dimension pins, keyed and
-    /// merged exactly like the set above.
+    /// chelis#1801: the alias classes a DECLARED dimension of the definition
+    /// under check pins, keyed and merged exactly like the set above.
     ///
-    /// This is section 3.2's own exclusion rather than an extra guard: a
-    /// literal or name that an argument of the same application binds to the
-    /// class is a CLAIM on the runtime extent, checked by a section 4.7
-    /// guard, and absorbing the class to `*` would erase the claim. A literal
-    /// binding is visible through `constraint_dim`; an authored name is not
-    /// always, because `bind_dvar` records one as a LABEL and leaves the class
-    /// unbound, so the pin is carried here.
+    /// This is half of section 3.2's own exclusion rather than an extra
+    /// guard: a literal or name that an argument of the same application
+    /// binds to the class is a CLAIM on the runtime extent, checked by a
+    /// section 4.7 guard, and absorbing the class to `*` would erase the
+    /// claim. The other half needs no ledger. A name or literal the class is
+    /// BOUND to is reported by `constraint_dim`, which the absorbing site
+    /// asks first; what `constraint_dim` cannot report is a declared binder,
+    /// because `bind_dvar`'s name arm records it as a label and leaves the
+    /// class unbound. `protected_dimensions` holds those binders, and this
+    /// set is what keeps that answer stable when a merge or a compose demotes
+    /// the protected member out of the root position.
     #[serde(skip)]
-    name_pinned_classes: UnordSet<DimVar>,
+    binder_pinned_classes: UnordSet<DimVar>,
     #[serde(skip)]
     label_unification_depth: usize,
     /// Only labels written by the active outer unification need rollback.
@@ -674,7 +678,7 @@ impl Clone for Subst {
             ),
             protected_dimensions: self.protected_dimensions.clone(),
             wildcard_touched_classes: self.wildcard_touched_classes.clone(),
-            name_pinned_classes: self.name_pinned_classes.clone(),
+            binder_pinned_classes: self.binder_pinned_classes.clone(),
             label_unification_depth: 0,
             dimension_label_undo: Mutex::new(Vec::new()),
             refined_type_bindings: Vec::new(),
@@ -763,7 +767,7 @@ impl Subst {
         // same reason the protected set is. A resumed check reads it back
         // empty anyway (it is `serde(skip)`); this covers a live reuse.
         self.wildcard_touched_classes.clear();
-        self.name_pinned_classes.clear();
+        self.binder_pinned_classes.clear();
         assert_eq!(
             self.current_level, 0,
             "a persisted type environment cannot resume inside an inference scope"
@@ -1770,13 +1774,6 @@ impl Subst {
         self.wildcard_touched_classes.insert(root);
     }
 
-    /// chelis#1801: record that an authored dimension pins `v`'s alias class,
-    /// so no application may absorb it to a runtime extent.
-    pub(crate) fn note_name_pin(&mut self, v: DimVar) {
-        let root = self.dvar_class_root(v);
-        self.name_pinned_classes.insert(root);
-    }
-
     /// chelis#1801: whether `v`'s alias class has met a runtime extent `*`.
     ///
     /// This answers only "did the meeting happen". Whether the class still
@@ -1788,16 +1785,17 @@ impl Subst {
             .contains(&self.dvar_class_root(v))
     }
 
-    /// chelis#1801: whether an authored dimension pins `v`'s alias class.
+    /// chelis#1801: whether a declared dimension pins `v`'s alias class.
     ///
-    /// A declared binder of the definition under check reaches the same
-    /// exclusion through the rigidity ledger instead of through a name
-    /// unification, so protection counts here: `def outer(s: tensor[seq,
-    /// f32])` binds the class to the named dimension `seq` whether or not a
-    /// `Dim::Name` ever flowed through `bind_dvar`.
-    pub(crate) fn dvar_class_is_name_pinned(&self, v: DimVar) -> bool {
+    /// `def outer(s: tensor[seq, f32])` binds the class to the named
+    /// dimension `seq`, which is section 3.2's exclusion, and it reaches that
+    /// exclusion through the rigidity ledger rather than through a `Dim::Name`
+    /// unification: the name arm in `bind_dvar` records the name as a label
+    /// and binds nothing. The set carries the same answer for a class whose
+    /// protected member a merge or a compose demoted out of the root.
+    pub(crate) fn dvar_class_is_binder_pinned(&self, v: DimVar) -> bool {
         let root = self.dvar_class_root(v);
-        self.name_pinned_classes.contains(&root) || self.protected_dimensions.contains(&root)
+        self.binder_pinned_classes.contains(&root) || self.protected_dimensions.contains(&root)
     }
 
     /// chelis#1801: carry both class flags from `from`'s class onto `into`'s.
@@ -1815,9 +1813,10 @@ impl Subst {
         if self.wildcard_touched_classes.contains(&source) {
             self.wildcard_touched_classes.insert(target);
         }
-        if self.name_pinned_classes.contains(&source) || self.protected_dimensions.contains(&source)
+        if self.binder_pinned_classes.contains(&source)
+            || self.protected_dimensions.contains(&source)
         {
-            self.name_pinned_classes.insert(target);
+            self.binder_pinned_classes.insert(target);
         }
     }
 
@@ -1845,18 +1844,18 @@ impl Subst {
         let mut pinned: Vec<DimVar> = Vec::new();
         for source in [left, right] {
             touched.extend(source.wildcard_touched_classes.to_sorted().iter().copied());
-            pinned.extend(source.name_pinned_classes.to_sorted().iter().copied());
+            pinned.extend(source.binder_pinned_classes.to_sorted().iter().copied());
             pinned.extend(source.protected_dimensions.to_sorted().iter().copied());
         }
         self.wildcard_touched_classes.clear();
-        self.name_pinned_classes.clear();
+        self.binder_pinned_classes.clear();
         for v in touched {
             let root = self.dvar_class_root(v);
             self.wildcard_touched_classes.insert(root);
         }
         for v in pinned {
             let root = self.dvar_class_root(v);
-            self.name_pinned_classes.insert(root);
+            self.binder_pinned_classes.insert(root);
         }
     }
 
@@ -2675,11 +2674,16 @@ fn bind_dvar(v: DimVar, dim: &Dim, subst: &mut Subst) -> Result<(), TypeError> {
         && (subst.protected_dimensions.contains(&v) || subst.dimension_label(v).is_some())
     {
         subst.set_dimension_label(v, name.clone());
-        // chelis#1801: the class is now claimed by an authored name even
-        // though nothing bound it, which is exactly the case
-        // `constraint_dim` cannot report. Section 3.2 excludes such a class
-        // from absorption; section 4.7 guards the claim at run time.
-        subst.note_name_pin(v);
+        // chelis#1801 note: this arm records an authored name as a LABEL and
+        // binds nothing, so it is the one place a name reaches a class
+        // without `constraint_dim` being able to report it. It needs no pin
+        // of its own. The arm fires only when `v` is protected or already
+        // labelled, a `Dim::Name` operand arises only from the definition
+        // under check, and that definition's binders are protected, so the
+        // rigidity ledger below already pins every class this arm can reach.
+        // `a_name_arm_class_is_pinned_by_protection_not_by_a_second_ledger`
+        // locks the remaining state and says what to add if a
+        // labelled-but-unprotected variable ever meets a name.
         return Ok(());
     }
     if let Dim::Var(other) = dim
@@ -2707,13 +2711,13 @@ fn bind_dvar(v: DimVar, dim: &Dim, subst: &mut Subst) -> Result<(), TypeError> {
             message: format!("infinite dimension: d{} occurs in {dim:?}", v.0),
         });
     }
-    // chelis#1801: the merge below leaves the union with one root, so every
-    // class property has to arrive there first. A name the class is bound to
-    // outright pins it for the same reason the label arm above does.
-    match dim {
-        Dim::Var(other) => subst.merge_dvar_class_flags(v, *other),
-        Dim::Name(_) => subst.note_name_pin(v),
-        _ => {}
+    // chelis#1801: the merge below leaves the union with one root, so the
+    // class properties have to arrive there first. A name or literal the
+    // class is BOUND to needs no flag: `constraint_dim` reports the binding,
+    // and the absorbing site skips on that answer before it asks anything
+    // else.
+    if let Dim::Var(other) = dim {
+        subst.merge_dvar_class_flags(v, *other);
     }
     let target_level = subst.level_of_dvar(v);
     subst.lower_dim_to(dim, target_level);
@@ -4564,45 +4568,72 @@ mod tests {
             "the class still carries the meeting after the binder joins it",
         );
         assert!(
-            s.dvar_class_is_name_pinned(minted),
+            s.dvar_class_is_binder_pinned(minted),
             "and the authored binder pins the class against absorption",
         );
         assert!(
-            s.dvar_class_is_name_pinned(binder),
+            s.dvar_class_is_binder_pinned(binder),
             "asked from either member",
         );
     }
 
     #[test]
-    fn a_name_meeting_a_labelled_variable_pins_its_class_without_binding_it() {
+    fn a_name_arm_class_is_pinned_by_protection_not_by_a_second_ledger() {
         // chelis#1925 round 2, the first of the paths that pin or union
-        // WITHOUT a plain `insert_dim`. `bind_dvar`'s first arm sets the
-        // label and returns, so an authored name claiming this class leaves
-        // nothing for `constraint_dim` to report and no union for the merge
-        // to hook. The pin is the only carrier, and without it the absorbing
-        // site would take a class section 3.2 excludes.
+        // WITHOUT a plain `insert_dim`. `bind_dvar`'s name arm records the
+        // name as a LABEL and returns, so `constraint_dim` still answers the
+        // variable and the absorbing site has no binding to skip on.
         //
-        // Evidentiary status: disposition lock on that arm. Deleting its
-        // `note_name_pin` call fails the last assertion.
+        // The arm needs no ledger of its own. It fires only when the variable
+        // is protected or already labelled, and a `Dim::Name` operand arises
+        // only from the definition under check, whose binders are protected.
+        // The protected half is therefore the whole reachable half, and it
+        // pins through the rigidity ledger.
+        //
+        // Evidentiary status, per assertion. The protected rows are a
+        // disposition lock on the pin the absorbing site relies on. The last
+        // row records a state no source program reaches, measured rather than
+        // assumed: `def named(w: tensor[batch, f32])` passed as a polymorphic
+        // argument reads `() -> tensor[batch, f32]` and executes identically
+        // with and without a pin on this arm, because the reachable spelling
+        // BINDS the name rather than labelling it, and `constraint_dim`
+        // reports that. If a change ever makes the labelled-but-unprotected
+        // state reachable, this row is where the missing pin goes.
         let mut g = var_gen();
-        let minted = g.fresh_dvar();
+        let protected = g.fresh_dvar();
         let mut s = Subst::new();
-        // Labelled but NOT protected: the arm fires on either condition, and
-        // this is the half that protection does not already cover.
-        s.set_dimension_label(minted, "seq".to_string());
+        s.protect_dimensions([protected]);
 
-        assert!(unify_dim(&Dim::Wildcard, &Dim::Var(minted), &mut s).is_ok());
-        assert!(unify_dim(&Dim::Var(minted), &Dim::Name("seq".to_string()), &mut s).is_ok());
+        assert!(unify_dim(&Dim::Wildcard, &Dim::Var(protected), &mut s).is_ok());
+        assert!(unify_dim(&Dim::Var(protected), &Dim::Name("seq".to_string()), &mut s).is_ok());
 
         assert_eq!(
-            s.constraint_dim(&Dim::Var(minted)),
-            Dim::Var(minted),
+            s.constraint_dim(&Dim::Var(protected)),
+            Dim::Var(protected),
             "the name arm binds nothing, so the class still reads as unbound",
         );
-        assert!(s.dvar_class_met_wildcard(minted));
+        assert!(s.dvar_class_met_wildcard(protected));
         assert!(
-            s.dvar_class_is_name_pinned(minted),
-            "and the authored name pins it against absorption",
+            s.dvar_class_is_binder_pinned(protected),
+            "and the declared binder pins it against absorption",
+        );
+
+        let labelled = g.fresh_dvar();
+        let mut unreached = Subst::new();
+        unreached.set_dimension_label(labelled, "seq".to_string());
+        assert!(unify_dim(&Dim::Wildcard, &Dim::Var(labelled), &mut unreached).is_ok());
+        assert!(
+            unify_dim(
+                &Dim::Var(labelled),
+                &Dim::Name("seq".to_string()),
+                &mut unreached
+            )
+            .is_ok()
+        );
+        assert!(
+            !unreached.dvar_class_is_binder_pinned(labelled),
+            "a labelled but UNPROTECTED variable is not pinned by this arm, and no \
+             source program reaches that state today",
         );
     }
 
@@ -4633,7 +4664,7 @@ mod tests {
         );
         assert!(s.dvar_class_met_wildcard(minted), "and from the other one");
         assert!(
-            s.dvar_class_is_name_pinned(minted),
+            s.dvar_class_is_binder_pinned(minted),
             "and the protected member pins the class it was merged into",
         );
     }
@@ -4646,7 +4677,7 @@ mod tests {
         // by the time that arm matches, `constraint_dim` has already resolved
         // both operands to non-variables, so no class is left for an
         // application to absorb, and the class the name came from was pinned
-        // when the name reached it.
+        // when the declared binder reached it.
         //
         // Evidentiary status: a reachability receipt for that claim rather
         // than a lock on a repair. It is the row to re-run if the arm ever
@@ -4655,19 +4686,20 @@ mod tests {
         let named = g.fresh_dvar();
         let bystander = g.fresh_dvar();
         let mut s = Subst::new();
+        s.protect_dimensions([named]);
         s.set_dimension_label(named, "batch".to_string());
 
         assert!(unify_dim(&Dim::Wildcard, &Dim::Var(named), &mut s).is_ok());
         assert!(unify_dim(&Dim::Var(named), &Dim::Name("batch".to_string()), &mut s).is_ok());
         assert!(
-            s.dvar_class_is_name_pinned(named),
-            "the name pinned the class before any literal arrived",
+            s.dvar_class_is_binder_pinned(named),
+            "the declared binder pinned the class before any literal arrived",
         );
 
         // The literal claim now meets the NAME, not the variable.
         assert!(unify_dim(&Dim::Name("batch".to_string()), &Dim::Lit(3), &mut s).is_ok());
         assert!(
-            s.dvar_class_is_name_pinned(named),
+            s.dvar_class_is_binder_pinned(named),
             "and the literal arm leaves the pin where it was",
         );
         assert!(
@@ -4718,6 +4750,55 @@ mod tests {
         assert!(
             left.dvar_class_met_wildcard(met),
             "and from the member it was recorded on",
+        );
+    }
+
+    #[test]
+    fn compose_keeps_the_binder_pin_when_it_demotes_the_protected_member() {
+        // The pin's half of the path above, and the reason
+        // `binder_pinned_classes` exists at all rather than the query reading
+        // the rigidity ledger alone.
+        //
+        // `bind_dvar` never demotes a protected member: when the protected
+        // side would bind to an unprotected one it recurses with the operands
+        // swapped, so protection stays at the root and the merge needs no
+        // help. `compose_bindings` has no such rule, so a compose CAN put an
+        // unprotected variable at the root of a class a declared binder pins,
+        // and the set is what keeps that answer reachable.
+        //
+        // Evidentiary status: regression test for the protection fold in
+        // `recanonicalize_class_flags`. Removing that fold fails the last
+        // assertion, which is how it was checked. Removing the same fold from
+        // `merge_dvar_class_flags` fails nothing today, for the swap reason
+        // above; it is kept because a class this compose pinned can still be
+        // merged afterwards, and the set is then the only carrier.
+        let mut g = var_gen();
+        let binder = g.fresh_dvar();
+        let joiner = g.fresh_dvar();
+
+        let mut left = Subst::new();
+        left.protect_dimensions([binder]);
+        assert!(unify_dim(&Dim::Wildcard, &Dim::Var(binder), &mut left).is_ok());
+        assert!(
+            left.dvar_class_is_binder_pinned(binder),
+            "the declared binder pins its own class before the compose",
+        );
+
+        // The other operand re-roots that class onto an unprotected variable,
+        // which is the demotion `bind_dvar` would have refused.
+        let mut right = Subst::new();
+        assert!(unify_dim(&Dim::Var(binder), &Dim::Var(joiner), &mut right).is_ok());
+
+        left.compose(&right).expect("composing an alias is valid");
+
+        assert_eq!(
+            left.constraint_dim(&Dim::Var(binder)),
+            Dim::Var(joiner),
+            "the compose demoted the protected member out of the root",
+        );
+        assert!(
+            left.dvar_class_is_binder_pinned(joiner),
+            "and the pin has to survive it, or the absorption would erase the claim",
         );
     }
 

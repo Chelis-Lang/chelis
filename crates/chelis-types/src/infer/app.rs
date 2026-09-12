@@ -765,7 +765,7 @@ fn absorb_runtime_extents_into_call_variables(instantiation_dvars: &[DimVar], su
             // spec/04-type-system.md section 4.7 guards it at run time.
             continue;
         };
-        if !subst.dvar_class_met_wildcard(root) || subst.dvar_class_is_name_pinned(root) {
+        if !subst.dvar_class_met_wildcard(root) || subst.dvar_class_is_binder_pinned(root) {
             continue;
         }
         subst.insert_dim(root, Dim::Wildcard);
