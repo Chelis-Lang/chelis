@@ -282,7 +282,16 @@ impl<'a> EvalContext<'a> {
             },
             span,
         );
-        match self.route_named_axis_expr(&app_expr, scoped, staged, resolved_name) {
+        // Source actuals and their checked types were prepared in the caller
+        // above. Free loads in the named body belong to declaration scope.
+        let saved = std::mem::take(&mut self.bindings);
+        let saved_types = std::mem::take(&mut self.binding_types);
+        let saved_precisions = std::mem::take(&mut self.precision_bindings);
+        let routed = self.route_named_axis_expr(&app_expr, scoped, staged, resolved_name);
+        self.bindings = saved;
+        self.binding_types = saved_types;
+        self.precision_bindings = saved_precisions;
+        match routed {
             Ok(value) => Ok(Some(
                 self.unwrap_declared_scalar_return(resolved_name, value)?,
             )),
@@ -484,10 +493,16 @@ impl<'a> EvalContext<'a> {
         if let Some(RuntimeValue::Tensor(value)) = self.bindings.get(name) {
             return Ok(Some(value.value.clone()));
         }
+        let declaration = self.lookup_top_level_def(name);
+        if let Some((resolved, _)) = &declaration
+            && let Some(RuntimeValue::Tensor(value)) = self.declaration_values.get(resolved)
+        {
+            return Ok(Some(value.value.clone()));
+        }
         if demand == TensorInputDemand::AvailableShape {
             return Ok(None);
         }
-        let Some((resolved, body)) = self.lookup_top_level_def(name) else {
+        let Some((resolved, body)) = declaration else {
             return Ok(None);
         };
         if self

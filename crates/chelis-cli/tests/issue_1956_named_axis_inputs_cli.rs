@@ -131,7 +131,7 @@ fn selected_capture_preserves_values_and_initializer_events() {
         false,
         "(sum(x, seq), sum(weights, 0i32))",
         "41000000",
-        &["entry", "initialize", "entry", "initialize"],
+        &["entry", "initialize", "entry"],
     );
 }
 

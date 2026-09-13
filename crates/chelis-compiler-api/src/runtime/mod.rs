@@ -538,10 +538,10 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         /* register_runtime_order = */ false,
     );
     // Register new-code defs. New-code is the only source of eager
-    // module-init bindings in `top_level_order` — library was already
-    // checked + lowered at context-build time and any side effects
-    // would have happened then; re-running them on every per-test
-    // worker is exactly the regression we're fixing.
+    // module-init bindings in `top_level_order`. Building a library context
+    // checks and lowers declarations; it does not execute their effects.
+    // Library values initialize on demand in each evaluation context, and
+    // successful values are reused only within that context.
     register_top_level_defs(
         program.exprs(),
         &lowered_names,
@@ -568,6 +568,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         bindings: UnordMap::new(),
         binding_types: UnordMap::new(),
         precision_bindings: UnordMap::new(),
+        declaration_values: UnordMap::new(),
         named_axis_route_cache: UnordMap::new(),
         named_axis_route_visiting: UnordSet::new(),
         top_level_defs,
@@ -676,14 +677,11 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         // call without their bindings. Unit therefore supplies arity without
         // inventing a numeric value; an incorrect reachability decision still
         // fails loudly when the body tries to use it. If another root already
-        // resolved this declaration, `ctx.bindings[name]` is the callable
+        // resolved this declaration, its cached value is the callable
         // closure, not its result. Reuse that closure but still apply it: an
         // owed [05-OBS-7] root can never be represented by `<closure>`, and
         // the effect-row guard above proves the automatic application pure.
-        let callable = ctx.bindings.get(name).cloned().map(Ok).unwrap_or_else(|| {
-            ctx.eval_expr(body)
-                .map(|value| stamp_def_closure(value, name, body))
-        });
+        let callable = ctx.resolve_top_level(name);
         let applied = callable.and_then(|closure| {
             // Admission and required-input filtering already selected this
             // call. Deliver its supplied tensor actuals independently of the
@@ -721,7 +719,9 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
     }
 
     Ok(RuntimeOutcome {
-        host_bindings: ctx.bindings,
+        // Lexical frames are not output roots. Project successful declaration
+        // values separately from applied callable-root observations above.
+        host_bindings: ctx.declaration_values,
         host_root_values,
         host_root_errors,
         transcript: ctx.transcript,
@@ -970,6 +970,7 @@ fn descend_manifest_path(value: RuntimeValue, step: RootPathStep) -> Option<Runt
 }
 
 struct EvalContext<'a> {
+    /// Only lexical values; successful declarations never enter this map.
     bindings: UnordMap<String, RuntimeValue>,
     /// Declared/static Deep type expression for names in `bindings`,
     /// maintained in lockstep with `bindings` (saved/swapped/restored at
@@ -983,6 +984,11 @@ struct EvalContext<'a> {
     /// casts. Values come only from checker-owned call-site argument/result
     /// types matched against the callee's declared signature.
     precision_bindings: UnordMap<String, Prim>,
+    /// Successful initializations keyed by canonical declaration identity.
+    /// Lives for this context (one ordinary request, or one invariant
+    /// predicate), independently of lexical frame restoration. Never stores
+    /// failed initializations or the results of applying cached callables.
+    declaration_values: UnordMap<String, RuntimeValue>,
     /// Memoized per-def result of [`Self::def_requires_named_axis_routing`].
     named_axis_route_cache: UnordMap<String, bool>,
     /// Cycle guard for the recursive routing detection walk.
