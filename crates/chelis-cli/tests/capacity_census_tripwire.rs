@@ -2758,11 +2758,19 @@ fn coverage_manifest() -> CoverageManifest {
             },
             CoveredLeg {
                 leg: "backend-runtime-headers".to_string(),
-                artifact: "complete chelis_hip_runtime.h and chelis_metal_runtime.h published closures with committed SDK fixtures".to_string(),
-                enumerator: "backend_headers::scan -> shared attributed preprocess_root -> header_rows".to_string(),
+                artifact: "complete chelis_hip_runtime.h published closure under the committed \
+                           Phase 0 SDK stubs; recursively discovered published Metal `.h` \
+                           zero-ABI enrollment set"
+                .to_string(),
+                enumerator: "backend_headers::scan -> closed attributed preprocess_root -> \
+                             header_rows; published_headers_on_disk(Metal runtime) -> sorted raw \
+                             header rows -> enrollment assertion"
+                    .to_string(),
                 command: "cargo nextest run -p chelis-cli --test capacity_census_tripwire -E 'test(backend_headers::)'".to_string(),
                 expected_success: "backend_runtime_headers_match_the_reviewed_final_authority passes".to_string(),
                 mutations: vec![
+                    "a_metal_abi_declaration_requires_backend_census_enrollment".to_string(),
+                    "backend_include_resolving_outside_declared_universe_fails_closed".to_string(),
                     "backend_roots_cannot_omit_an_unreached_generated_header".to_string(),
                     "backend_environments_cannot_change_a_public_numeric_signature".to_string(),
                     "generated_device_descriptor_requires_exact_tagged_transport_authority".to_string(),
