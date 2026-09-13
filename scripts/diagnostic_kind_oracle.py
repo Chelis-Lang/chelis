@@ -110,6 +110,7 @@ fn diagnostic_kind_oracle_literal() -> crate::schema::Diagnostic {
         span: None,
         deep_path: None,
         span_id: None,
+        unsupported: None,
     }
 }
 """
@@ -172,6 +173,7 @@ impl From<WireDiagnostic> for Diagnostic {
             span: wire.span,
             deep_path: wire.deep_path,
             span_id: wire.span_id,
+            unsupported: None,
         }
     }
 }

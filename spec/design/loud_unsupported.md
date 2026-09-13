@@ -226,27 +226,30 @@ not satisfy the normative surface contract.
 pub struct Unsupported {
     /// What was encountered: an op, builtin name, dtype, tag, effect
     /// kind, or construct. Closed enum + payload, not a bare string.
-    pub what: UnsupportedKind,
+    pub what: Box<UnsupportedKind>,
     /// The context of the encounter (the op family, target lane, or
     /// call position) - the `on <context>` clause of the rendering.
     /// (Added at Phase 1 ratification: the branded message format always
     /// carried a context clause; the struct now carries it explicitly.)
-    pub context: String,
+    pub context: Box<str>,
     /// Which stage refused (checker | lowering | codegen(target) | runtime).
     pub stage: Stage,
     /// Source span when one exists (lowering/codegen must thread it;
     /// `raise_lowering_error` already takes span + span_id).
-    pub span: Option<SpanRef>,
-    /// Opaque typed authority plus the supported alternative. Construction
-    /// distinguishes a numbered-spec decision from tracked implementation
-    /// work and rejects empty or unregistered citations.
+    pub span: Option<Box<SpanRef>>,
+    /// Opaque typed authority. Construction distinguishes a numbered-spec
+    /// decision from tracked implementation work and rejects empty or
+    /// unregistered citations.
     pub authority: RejectionAuthority,
+    /// A supported route the caller can select, when one exists.
+    pub supported_alternative: Option<Box<str>>,
 }
 ```
 
-Implemented as `chelis_types::unsupported::Unsupported`. The span field is
-boxed so the `Err` variant stays small on Result-typed emission paths; this is
-a representation detail, not a contract change.
+Implemented as `chelis_types::unsupported::Unsupported`. The subject, context,
+span, and supported-alternative storage shown above are boxed so the `Err`
+variant stays small on Result-typed emission paths; these are representation
+details, not changes to their projected values.
 
 **Message format:**
 `unsupported: <what> on <context> (<stage>); <authority-kind> <citation>: <hint>` - branded with the
@@ -274,22 +277,40 @@ gains a rejected-cells section asserting these strings byte-for-byte per
 lane (a rejection emitted differently per lane is lane skew, [#712]'s
 shape).
 
-**STATUS (updated 2026-08-01): the structured `chelis check` surface above is
-still the TARGET, not current behavior.** The `Unsupported` object now carries
-the §C2.1 opaque typed authority, but no stage constructs `Stage::Checker`
+**STATUS (updated 2026-09-13): the complete structured `chelis check` and wire
+surface above is still the TARGET, not current behavior.** The `Unsupported`
+object now carries the §C2.1 opaque typed authority, but no stage constructs `Stage::Checker`
 (`chelis check` never reaches lowering or codegen, so no `Unsupported` can
-arrive there), no type on the `Unsupported` path derives `Serialize`, and
-the build surface renders the branded string into a flat
-`kind: "unsupported_feature"` envelope
-(`crates/chelis-compiler-api/src/compiler.rs`, `unsupported_stage_error`).
-Consumers - including this plan's own rejected-cells corpus - match prose
-today. Three prerequisites, in order: [#729] Phase 4C populates capability
-Table A; Phase 4D derives `check` reporting from its target-independent
-rejections (`capability_table.md` §Derivations); then the structured payload
-must be plumbed onto `schema::Diagnostic`. Until both land, the
-`unsupported:` brand is the machine surface and tests may match it. The
-byte-for-byte per-lane corpus assertions likewise arrive with [#732]
-Phase 3; today's corpus is deliberately substring-level and says so.
+arrive there), and no type on the `Unsupported` path derives `Serialize`.
+Chelis#1870 adds a bounded in-process trial: `schema::Diagnostic` retains the
+actual typed value off-wire, `LowerDiagnostic` retains it for selected
+lowering producers, and `unsupported_identity()` projects the exact
+`unsupported:` brand/prefix, diagnostic
+kind, subject, context, stage, span association, disposition, atom or tracking
+issue, and supported alternative without parsing prose. The
+three compiler-API adapters that flatten `LowerDiagnostic` retain their prior
+public stage, diagnostic kind, and rendered message while attaching that
+off-wire sidecar. The
+`c_nonliteral_window` witness proves identical production stderr through the
+C, HIP, and Metal CLI build entry paths; it is lowering and host-process
+evidence, not device execution.
+
+That trial is not replacement coverage yet. In particular, the current
+unimplemented authority stores an issue number but has no exact capability
+Table A/B key; the issue remains nonsemantic tracking metadata. The existing
+exact rejected-cell pins, mutations, and Phase 3 definition digests therefore
+remain blocking. The two chelis#1918 softmax consumers read one generated
+reviewed snapshot from a canonical reviewed row, owned by
+`scripts/regen_all.py --tier 0`, while their structured identity is checked
+separately. This tier-0 snapshot is not production-derived: tier 0 cannot
+execute the Rust renderer, and parsing or re-rendering Rust source would create
+a second prose implementation. A production-derived snapshot therefore waits
+for a built-tier Rust generator or a production-owned declarative source that
+does not duplicate rendering. Remaining prerequisites are [#729] Phase 4C's
+capability tables, Phase 4D's target-independent checker derivation, and a
+complete serialized diagnostic payload. Until they land, branded prose remains
+a sanctioned compatibility surface beside, not instead of, the structured
+trial.
 
 **This is a normative relaxation, recorded as a decision.** Naming it
 rather than leaving a later reader to discover it: the surfacing bullet

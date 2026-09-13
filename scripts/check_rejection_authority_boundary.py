@@ -46,6 +46,8 @@ EXPECTED_PUBLIC_FUNCTIONS = Counter(
         "new": 1,
         "compiled_host_only_builtin": 1,
         "with_span": 1,
+        "with_supported_alternative": 1,
+        "identity": 1,
     }
 )
 DIRECT_BUILDER = re.compile(

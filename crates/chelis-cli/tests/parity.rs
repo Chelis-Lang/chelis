@@ -66,6 +66,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use tempfile::tempdir;
 
+#[path = "common/unsupported_wording.rs"]
+mod unsupported_wording;
+
 // -----------------------------------------------------------------------------
 // Corpus discovery
 // -----------------------------------------------------------------------------
@@ -741,7 +744,7 @@ fn parity_annotated_concat_softmax_eval_and_c_rejection() {
     assert!(output.stdout.is_empty());
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
-        "error: unsupported: builtin `softmax` on `chelis build` host emission (codegen:c); deliberate [04-TOT-2]: the checked builtin vocabulary and C expression vocabulary disagree; no fallback expression is permitted\n"
+        unsupported_wording::stderr("annotated_concat_softmax_c")
     );
 }
 

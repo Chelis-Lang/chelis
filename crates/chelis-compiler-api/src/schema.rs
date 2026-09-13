@@ -15,7 +15,7 @@ use numbers::{NonnegativeCount, NonnegativeExtent, SourceFloat, SourceInteger, U
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use chelis_types::unsupported::Unsupported;
+use chelis_types::unsupported::{Unsupported, UnsupportedIdentity};
 use chelis_types::{
     ScalarValue,
     types::{Lane, Prim, Target},
@@ -219,12 +219,40 @@ pub struct Diagnostic {
     /// unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub span_id: Option<String>,
+    /// In-process producer identity. Kept off the wire until unimplemented
+    /// rows can carry their exact capability-table key.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub(crate) unsupported: Option<Box<Unsupported>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsupportedDiagnosticIdentity {
+    pub brand: &'static str,
+    pub kind: DiagnosticKind,
+    pub payload: UnsupportedIdentity,
 }
 
 impl Diagnostic {
     pub fn kind(&self) -> DiagnosticKind {
         DiagnosticKind::decode(&self.kind)
             .expect("producer diagnostics are constructed from DiagnosticKind")
+    }
+
+    /// Wording-independent identity for a production unsupported diagnostic.
+    pub fn unsupported_identity(&self) -> Option<UnsupportedDiagnosticIdentity> {
+        self.unsupported.as_ref().map(|unsupported| {
+            let payload = unsupported.identity();
+            UnsupportedDiagnosticIdentity {
+                brand: payload.brand,
+                kind: self.kind(),
+                payload,
+            }
+        })
+    }
+
+    pub(crate) fn retain_unsupported(&mut self, unsupported: Unsupported) {
+        self.unsupported = Some(Box::new(unsupported));
     }
 
     pub(crate) fn general(
@@ -238,11 +266,26 @@ impl Diagnostic {
     }
 
     fn unsupported(error: Unsupported) -> Self {
-        Self::new(
+        let mut diagnostic = Self::new(
             DiagnosticKind::UnsupportedFeature,
             error.to_string(),
             UnitInterval::new(1.0).expect("constant severity"),
-        )
+        );
+        if let Some(span) = error.span.as_deref() {
+            diagnostic.span = match (span.offset, span.len) {
+                (Some(offset), Some(len)) => Some(DiagnosticSpan::Range {
+                    offset: host_index(offset),
+                    len: host_index(len),
+                }),
+                (Some(offset), None) => Some(DiagnosticSpan::Point {
+                    offset: host_index(offset),
+                }),
+                (None, _) => None,
+            };
+            diagnostic.span_id = span.span_id.clone();
+        }
+        diagnostic.unsupported = Some(Box::new(error));
+        diagnostic
     }
 
     fn new(kind: DiagnosticKind, message: impl Into<String>, severity: UnitInterval) -> Self {
@@ -256,6 +299,7 @@ impl Diagnostic {
             span: None,
             deep_path: None,
             span_id: None,
+            unsupported: None,
         }
     }
 }
@@ -289,6 +333,7 @@ impl Diagnostic {
             span: check_error_span(error),
             deep_path: None,
             span_id: error.span_id.clone(),
+            unsupported: None,
         })
     }
 
@@ -313,6 +358,7 @@ impl Diagnostic {
             span: None,
             deep_path: None,
             span_id: None,
+            unsupported: None,
         }
     }
 }
@@ -3098,6 +3144,25 @@ fn default_true() -> bool {
 mod tests {
     use super::*;
     use chelis_types::types::Prim;
+
+    #[test]
+    fn unsupported_sidecar_storage_is_pointer_sized() {
+        let diagnostic = Diagnostic::unsupported(Unsupported::new(
+            chelis_types::unsupported::UnsupportedKind::Builtin("softmax".into()),
+            "`chelis build` host emission",
+            chelis_types::unsupported::Stage::Codegen("c"),
+            chelis_types::deliberate_rejection!(
+                "[04-TOT-2]",
+                "the checked builtin vocabulary and C expression vocabulary disagree"
+            ),
+        ));
+        assert_eq!(
+            std::mem::size_of_val(&diagnostic.unsupported),
+            std::mem::size_of::<usize>(),
+            "the off-wire typed sidecar must not inline Unsupported into every Diagnostic"
+        );
+    }
+
     /// The kinds a general producer has no standing to spell.
     ///
     /// `UnsupportedFeature` is the original member. chelis#886 adds the
