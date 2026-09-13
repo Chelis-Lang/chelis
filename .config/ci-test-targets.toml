@@ -1,269 +1,270 @@
-# Reviewed PR integration targets. All default-feature lib/bin units are automatic.
-# New integration targets run in the unfiltered nightly unless added here.
-version = 1
+# Versioned pull-request integration ownership. All default-feature lib/bin units are automatic.
+# standing_target preserves the reviewed ci-fast set; exclusions and shared-path rules
+# are consumed by scripts/ci_change_owned.py and fail closed when stale.
+version = 2
 
 # chelis#1956: checked lazy-library named-axis inputs and default-style CLI effects.
-[[target]]
+[[standing_target]]
 package = "chelis-compiler-api"
 name = "issue_1956_named_axis_inputs"
 
-[[target]]
+[[standing_target]]
 package = "chelis-cli"
 name = "issue_1956_named_axis_inputs_cli"
 
 # chelis#1975: fused zero slots, forward checks, and exact eval/native values.
-[[target]]
+[[standing_target]]
 package = "chelis-compiler-api"
 name = "issue_1975_fused_zero_cotangents"
 
-[[target]]
+[[standing_target]]
 package = "chelis-cli"
 name = "issue_1975_fused_zero_cotangents_cli"
 
 # chelis#1915: caller/formal scope, exact eval/native values and rejection control.
-[[target]]
+[[standing_target]]
 package = "chelis-cli"
 name = "issue_1915_caller_actual_scope"
 
-[[target]]
+[[standing_target]]
 package = "chelis-ir"
 name = "issue_1753_grad_result_order_ir"
 
-[[target]]
+[[standing_target]]
 package = "chelis-compiler-api"
 name = "issue_1753_grad_result_order"
 
-[[target]]
+[[standing_target]]
 package = "chelis-cli"
 name = "issue_1753_grad_result_order_cli"
 
 # chelis#1922: fatal helper-summary error transport and same-process recovery.
 # Host evaluation only; no C build or package provisioning.
-[[target]]
+[[standing_target]]
 package = "chelis-compiler-api"
 name = "issue_1922_helper_summary_diagnostic_api"
 
-[[target]]
+[[standing_target]]
 package = "chelis-cli"
 name = "issue_1922_helper_summary_diagnostic_cli"
 
-[[target]]
+[[standing_target]]
 package = "chelis-ir"
 name = "issue_1906_concat_admission"
 
-[[target]]
+[[standing_target]]
 package = "chelis-compiler-api"
 name = "issue_1906_annotated_softmax"
 
-[[target]]
+[[standing_target]]
 package = "chelis-cli"
 name = "issue_1906_annotated_concat_softmax"
 
-[[target]]
+[[standing_target]]
 package = "chelis-types"
 name = "issue_1875_protected_dimension_identity"
 
-[[target]]
+[[standing_target]]
 package = "chelis-types"
 name = "issue_1875_callable_labels"
 
-[[target]]
+[[standing_target]]
 package = "chelis-compiler-api"
 name = "issue_1875_callable_label_caches"
 
-[[target]]
+[[standing_target]]
 package = "chelis-cli"
 name = "phase3_gate_contract"
 
-[[target]]
+[[standing_target]]
 package = "chelis-cli"
 name = "issue_687_rejected_cells_corpus"
 
-[[target]]
+[[standing_target]]
 package = "chelis-compiler-api"
 name = "invocation_local_random"
 
-[[target]]
+[[standing_target]]
 package = "chelis-compiler-api"
 name = "fixed_control_c"
 
-[[target]]
+[[standing_target]]
 package = "chelis-compiler-api"
 name = "fixed_control_host_c"
 
-[[target]]
+[[standing_target]]
 package = "chelis-cli"
 name = "issue_771_seed_width_parity"
 
-[[target]]
+[[standing_target]]
 package = "chelis-compiler-api"
 name = "resource_target_admission"
 
-[[target]]
+[[standing_target]]
 package = "chelis-compiler-api"
 name = "issue_1738_transcript_capture"
 
-[[target]]
+[[standing_target]]
 package = "chelis-compiler-api"
 name = "issue_1741_scalar_gradient_api"
 
-[[target]]
+[[standing_target]]
 package = "chelis-cli"
 name = "issue_1741_scalar_gradient_cli"
 
-[[target]]
+[[standing_target]]
 package = "chelis-compiler-api"
 name = "issue_1650_empty_tensor_api"
 
-[[target]]
+[[standing_target]]
 package = "chelis-cli"
 name = "issue_1650_empty_tensor_cli"
 
-[[target]]
+[[standing_target]]
 package = "chelis-deep"
 name = "roundtrip"
 
-[[target]]
+[[standing_target]]
 package = "chelis-surf"
 name = "issue_486_parser_diagnostics"
 
-[[target]]
+[[standing_target]]
 package = "chelis-types"
 name = "infer_module_parity"
 
-[[target]]
+[[standing_target]]
 package = "chelis-types"
 name = "issue_1107_stamped_node_ingress_parity"
 
-[[target]]
+[[standing_target]]
 package = "chelis-types"
 name = "unresolved_operand_census"
 
-[[target]]
+[[standing_target]]
 package = "chelis-types"
 name = "unresolved_operand_matrix"
 
 # chelis#1801's checker-visible rows. The two executable halves run through
 # `runtime_extent_slice_b` (registered below) and the phase-A oracle target;
 # this file is the signature matrix and the cross-lane refuted-claim control.
-[[target]]
+[[standing_target]]
 package = "chelis-cli"
 name = "issue_1801_wildcard_absorption"
 
 # chelis#2003: scalar Shape identity, batching, and malformed-read refusal.
-[[target]]
+[[standing_target]]
 package = "chelis-ir"
 name = "vmap"
 
-[[target]]
+[[standing_target]]
 package = "chelis-compiler-api"
 name = "pipeline_contract"
 
-[[target]]
+[[standing_target]]
 package = "chelis-compiler-api"
 name = "diagnostic_kind_pipeline"
 
-[[target]]
+[[standing_target]]
 package = "chelis-compiler-api"
 name = "fragment_parity"
 
-[[target]]
+[[standing_target]]
 package = "chelis-ir"
 name = "dropout_fixed_stream_ir"
 
-[[target]]
+[[standing_target]]
 package = "chelis-compiler-api"
 name = "dropout_fixed_stream_api"
 
-[[target]]
+[[standing_target]]
 package = "chelis-cli"
 name = "dropout_fixed_stream_cli"
 
-[[target]]
+[[standing_target]]
 package = "chelis-cli"
 name = "dp_check_ingest"
 
-[[target]]
+[[standing_target]]
 package = "chelis-cli"
 name = "check_exits_zero_with_errors_contract"
 
-[[target]]
+[[standing_target]]
 package = "chelis-cli"
 name = "issue_207_check_exit_code_invariant"
 
-[[target]]
+[[standing_target]]
 package = "chelis-cli"
 name = "issue_394_f64_literal_eval_roundtrip"
 
-[[target]]
+[[standing_target]]
 package = "chelis-cli"
 name = "issue_1732_integer_host_literals"
 
-[[target]]
+[[standing_target]]
 package = "chelis-cli"
 name = "test_command_smoke"
 
-[[target]]
+[[standing_target]]
 package = "chelis-cli"
 name = "parity"
 
-[[target]]
+[[standing_target]]
 package = "chelis-e2e"
 name = "pipeline"
 
-[[target]]
+[[standing_target]]
 package = "chelis-e2e"
 name = "eval_agreement"
 
-[[target]]
+[[standing_target]]
 package = "chelis-reef"
 name = "pipeline_parity"
 
-[[target]]
+[[standing_target]]
 package = "chelis-conformance"
 name = "audit_negative_parity"
 
-[[target]]
+[[standing_target]]
 package = "chelis-cli"
 name = "issue_1710_c_source_names"
 
-[[target]]
+[[standing_target]]
 package = "chelis-cli"
 name = "issue_1418_recursive_cast_targets"
 
-[[target]]
+[[standing_target]]
 package = "chelis-cli"
 name = "issue_1640_value_root_actualization"
 
-[[target]]
+[[standing_target]]
 package = "chelis-backend-hip"
 name = "hip_count_codegen"
 
-[[target]]
+[[standing_target]]
 package = "chelis-backend-metal"
 name = "metal_count_codegen"
 
-[[target]]
+[[standing_target]]
 package = "chelis-compiler-api"
 name = "issue_1291_count_device_helpers_api"
 
-[[target]]
+[[standing_target]]
 package = "chelis-cli"
 name = "issue_1291_count_device_helpers_cli"
 
-[[target]]
+[[standing_target]]
 package = "chelis-cli"
 name = "issue_1291_count_device_entry"
 
-[[target]]
+[[standing_target]]
 package = "chelis-cli"
 name = "issue_368_grad_concat_windows"
 
-[[target]]
+[[standing_target]]
 package = "chelis-ir"
 name = "issue_1775_runtime_extent_producer_identity"
 
-[[target]]
+[[standing_target]]
 # chelis#1374/#1376: this change's two regression receipts. Both are
 # milliseconds, and without a row here they would run only in the unfiltered
 # nightly, which is not where a regression this pull request introduced should
@@ -271,7 +272,7 @@ name = "issue_1775_runtime_extent_producer_identity"
 package = "chelis-compiler-api"
 name = "runtime_extent_authored_claims"
 
-[[target]]
+[[standing_target]]
 package = "chelis-compiler-api"
 name = "hip_entry_obligation_witness"
 
@@ -289,7 +290,7 @@ name = "hip_entry_obligation_witness"
 # nightly `runtime-extent-oracle` job runs `--phase b`, which reads that leg, so
 # the matrix stays covered; it is the per-pull-request budget it does not fit,
 # not the coverage that is missing.
-[[target]]
+[[standing_target]]
 package = "chelis-cli"
 name = "runtime_extent_slice_b"
 
@@ -298,7 +299,7 @@ name = "runtime_extent_slice_b"
 # `main` with no per-pull-request job to catch it. That happened once already,
 # on a hand-written example count this change retires. 16 tests, 2.9 s measured
 # warm, of which the census is 2.6 s.
-[[target]]
+[[standing_target]]
 package = "chelis-cli"
 name = "issue_1739_diagonal_runtime_bound"
 
@@ -329,7 +330,7 @@ name = "issue_1739_diagonal_runtime_bound"
 # than tripping over it.
 
 # 18 tests, 1.595 s measured warm. Host-runtime evaluation only.
-[[target]]
+[[standing_target]]
 package = "chelis-compiler-api"
 name = "issue_257_tensor_scan_host_runtime"
 
@@ -343,12 +344,12 @@ name = "issue_257_tensor_scan_host_runtime"
 # Same PROVISIONAL status as the row above, pending chelis#1824.
 
 # 16 tests, 3.385 s measured warm.
-[[target]]
+[[standing_target]]
 package = "chelis-cli"
 name = "issue_1489_deferred_tensor_operand_gates"
 
 # 8 tests, 2.884 s measured warm.
-[[target]]
+[[standing_target]]
 package = "chelis-cli"
 name = "issue_1489_deferred_result_generalization"
 
@@ -356,11 +357,11 @@ name = "issue_1489_deferred_result_generalization"
 # fold returns a new tree and that every public checker entry calls it, so a
 # tenth entry added later cannot quietly skip it; the second says which printed
 # surfaces move and which do not. Six tests, well under a second warm.
-[[target]]
+[[standing_target]]
 package = "chelis-types"
 name = "issue_1923_pipe_fold_placement"
 
-[[target]]
+[[standing_target]]
 package = "chelis-cli"
 name = "issue_1923_pipe_fold_surface"
 
@@ -369,6 +370,282 @@ name = "issue_1923_pipe_fold_surface"
 # ahead of the decision that reads the runtime-shaped `to_tensor` marker, and
 # nothing per pull request caught it: bisection in chelis#1776 found it. One
 # test, under a second warm.
-[[target]]
+[[standing_target]]
 package = "chelis-cli"
 name = "reshape_symbolic_dim_vmap_column"
+
+# chelis#1824 / Jeff's incoming-main audit: the retired spelling inventories
+# stay retired, while their small AST-position and behavioral replacements
+# receive ordinary pull-request ownership.
+[[standing_target]]
+package = "chelis-types"
+name = "expand_insert_dispatch_family"
+
+[[standing_target]]
+package = "chelis-types"
+name = "issue_1294_standard_lowerings"
+
+# The default nextest profile excludes these complete targets. The current
+# unfiltered four-shard Linux workspace job is their exact alternative owner.
+[[target_exclusion]]
+package = "chelis-cli"
+name = "stdlib_typecheck_cache_oracle"
+workflow = "heavy-e2e.yml"
+job = "full-workspace"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "cold/warm and monolithic/layered cache acceptance rebuilds the chelis-std graph"
+tracking_issue = "chelis#1824"
+
+[[target_exclusion]]
+package = "chelis-cli"
+name = "stdlib_typecheck_cache_concurrency"
+workflow = "heavy-e2e.yml"
+job = "full-workspace"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "parallel cold-cache stress is contention-sensitive and belongs to the unfiltered nightly"
+tracking_issue = "chelis#1824"
+
+[[target_exclusion]]
+package = "chelis-cli"
+name = "monomorphization_build"
+workflow = "heavy-e2e.yml"
+job = "full-workspace"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "real chelis build plus generated-C compilation rebuilds the chelis-std graph"
+tracking_issue = "chelis#1824"
+
+# These individual heavy rows remain in otherwise selectable targets. Each
+# exact test is removed from package expansion and retains the same unfiltered
+# Linux nightly owner.
+[[test_exclusion]]
+package = "chelis-cli"
+target = "cli"
+name = "phase3a_reef_std_acceptance_oracle"
+workflow = "heavy-e2e.yml"
+job = "full-workspace"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "named reef-std acceptance oracle publishes and builds a dependent package"
+tracking_issue = "chelis#1824"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "cli"
+name = "reef_check_accepts_sig_only_shell_imports"
+workflow = "heavy-e2e.yml"
+job = "full-workspace"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "real reef check traverses the packaged chelis-std dependency graph"
+tracking_issue = "chelis#1824"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "cli"
+name = "reef_build_emits_shell_and_archive"
+workflow = "heavy-e2e.yml"
+job = "full-workspace"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "real reef build emits the packaged shell and archive"
+tracking_issue = "chelis#1824"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "bundled_chelis_std_loader"
+name = "phaseA_bundled_chelis_std_loader_property_oracle"
+workflow = "heavy-e2e.yml"
+job = "full-workspace"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "named bundled-stdlib property oracle performs a real reef build"
+tracking_issue = "chelis#1824"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "reef_install_from_monorepo"
+name = "reef_install_from_monorepo_populates_registry_and_unblocks_check"
+workflow = "heavy-e2e.yml"
+job = "full-workspace"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "real monorepo reef install populates a registry before checking a dependent package"
+tracking_issue = "chelis#1824"
+
+[[test_exclusion]]
+package = "chelis-cli"
+target = "issue_1293_redteam_round4"
+name = "recursive_list_tuple_and_adt_cotangents_match_in_eval_and_c"
+workflow = "heavy-e2e.yml"
+job = "full-workspace"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "recursive composite cotangent parity compiles and executes generated C"
+tracking_issue = "chelis#1293"
+
+# Cargo metadata classifies paths under workspace package roots directly.
+# Shared roots remain fail-closed unless this file records a current,
+# evidence-backed disposition. Directory prefixes end in `/`; other rules are
+# exact files. Overlap is forbidden by the parser.
+
+[[path_rule]]
+prefix = ".cargo/"
+disposition = "packages"
+packages = [
+  "chelis-abi", "chelis-backend-c", "chelis-backend-hip",
+  "chelis-backend-metal", "chelis-cli", "chelis-compiler-api",
+  "chelis-conformance", "chelis-cove", "chelis-deep", "chelis-e2e",
+  "chelis-effects", "chelis-image-id", "chelis-ir", "chelis-lint",
+  "chelis-lsp", "chelis-macros", "chelis-pipeline-core", "chelis-pred",
+  "chelis-prove", "chelis-python", "chelis-reef", "chelis-repr-inventory",
+  "chelis-runtime", "chelis-shell", "chelis-std-bundle", "chelis-surf",
+  "chelis-tide", "chelis-types", "chelis-unord", "chelis-validate",
+  "chelis-version", "chelis-vocab", "chelisup", "tree-sitter-chelis",
+]
+
+[[path_rule]]
+prefix = "packages/chelis-std/"
+disposition = "packages"
+packages = ["chelis-cli", "chelis-compiler-api", "chelis-reef", "chelis-std-bundle"]
+
+# Exact implementation paths for the initial chelis#1824 mechanism. These
+# avoid granting authority to unrelated future files under scripts/, .github/
+# or .config/.
+[[path_rule]]
+prefix = ".config/ci-test-targets.toml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the strict v2 ownership manifest is parsed and mutation-tested by script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = ".github/workflows/ci.yml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the change-owned workflow graph and command spellings are locked by script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/ci_change_owned.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the planner executor and report implementation is directly covered by script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_ci_change_owned.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the planner executor and report mutation suite runs in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_change_owned_workflow.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the required and informational workflow topology is locked by script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/ci_test_targets.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the standing ci-fast manifest consumer is directly covered by script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_ci_test_targets.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "the standing ci-fast selection contract runs in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_ci_cadence.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "CI cadence and stable dependency assertions run in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_gate.py"
+disposition = "owner"
+workflow = "ci.yml"
+job = "script-unit"
+cadence = "pull_request and push"
+reason = "gate-owned workflow and cache invariants run in script-unit"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "scripts/test_nextest_profile_partition.py"
+disposition = "owner"
+workflow = "heavy-e2e.yml"
+job = "full-workspace"
+cadence = "daily 03:17 UTC and workflow_dispatch"
+reason = "workspace shard 1 runs the real standing-selection versus unfiltered-nightly listing comparison"
+tracking_issue = "chelis#1824"
+
+# Stable root controls with direct standing owners.
+[[path_rule]]
+prefix = "Cargo.lock"
+disposition = "packages"
+packages = [
+  "chelis-abi", "chelis-backend-c", "chelis-backend-hip",
+  "chelis-backend-metal", "chelis-cli", "chelis-compiler-api",
+  "chelis-conformance", "chelis-cove", "chelis-deep", "chelis-e2e",
+  "chelis-effects", "chelis-image-id", "chelis-ir", "chelis-lint",
+  "chelis-lsp", "chelis-macros", "chelis-pipeline-core", "chelis-pred",
+  "chelis-prove", "chelis-python", "chelis-reef", "chelis-repr-inventory",
+  "chelis-runtime", "chelis-shell", "chelis-std-bundle", "chelis-surf",
+  "chelis-tide", "chelis-types", "chelis-unord", "chelis-validate",
+  "chelis-version", "chelis-vocab", "chelisup", "tree-sitter-chelis",
+]
+
+[[path_rule]]
+prefix = "Cargo.toml"
+disposition = "packages"
+packages = [
+  "chelis-abi", "chelis-backend-c", "chelis-backend-hip",
+  "chelis-backend-metal", "chelis-cli", "chelis-compiler-api",
+  "chelis-conformance", "chelis-cove", "chelis-deep", "chelis-e2e",
+  "chelis-effects", "chelis-image-id", "chelis-ir", "chelis-lint",
+  "chelis-lsp", "chelis-macros", "chelis-pipeline-core", "chelis-pred",
+  "chelis-prove", "chelis-python", "chelis-reef", "chelis-repr-inventory",
+  "chelis-runtime", "chelis-shell", "chelis-std-bundle", "chelis-surf",
+  "chelis-tide", "chelis-types", "chelis-unord", "chelis-validate",
+  "chelis-version", "chelis-vocab", "chelisup", "tree-sitter-chelis",
+]
+
+[[path_rule]]
+prefix = "clippy.toml"
+disposition = "owner"
+workflow = "ci.yml"
+job = "lint-rust"
+cadence = "pull_request and push"
+reason = "Clippy policy is executed directly by the standing Rust policy job"
+tracking_issue = "chelis#1824"
+
+[[path_rule]]
+prefix = "rust-toolchain.toml"
+disposition = "packages"
+packages = [
+  "chelis-abi", "chelis-backend-c", "chelis-backend-hip",
+  "chelis-backend-metal", "chelis-cli", "chelis-compiler-api",
+  "chelis-conformance", "chelis-cove", "chelis-deep", "chelis-e2e",
+  "chelis-effects", "chelis-image-id", "chelis-ir", "chelis-lint",
+  "chelis-lsp", "chelis-macros", "chelis-pipeline-core", "chelis-pred",
+  "chelis-prove", "chelis-python", "chelis-reef", "chelis-repr-inventory",
+  "chelis-runtime", "chelis-shell", "chelis-std-bundle", "chelis-surf",
+  "chelis-tide", "chelis-types", "chelis-unord", "chelis-validate",
+  "chelis-version", "chelis-vocab", "chelisup", "tree-sitter-chelis",
+]
