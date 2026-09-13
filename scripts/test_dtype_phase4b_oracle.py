@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
+import os
 import re
 import shutil
 import subprocess
@@ -4252,8 +4254,13 @@ class RunnerTests(unittest.TestCase):
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    # These tiny repositories are deleted as soon as the command returns.
+    # Automatic maintenance can detach and write .git/objects after that
+    # boundary (chelis#1970). It has no role in the fixture's merge oracle.
+    # Keep the setting invocation-local; never change developer Git config
+    # or hide a real TemporaryDirectory cleanup failure.
     return subprocess.run(
-        ("git", "-C", str(root), *args),
+        ("git", "-c", "maintenance.auto=false", "-C", str(root), *args),
         capture_output=True,
         text=True,
         check=False,
@@ -4286,6 +4293,56 @@ def _commit_all(root: Path, message: str) -> str:
         message,
     )
     return _git_ok(root, "rev-parse", "HEAD").strip()
+
+
+class GitFixtureLifetimeTests(unittest.TestCase):
+    """A disposable fixture must not leave optional Git writers behind it."""
+
+    def test_fixture_commits_do_not_launch_automatic_maintenance(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name) / "repo"
+            root.mkdir()
+            _git_ok(root, "init", "-q", "-b", "main")
+            # Override any machine defaults and keep the raw control's
+            # maintenance synchronous so the test itself owns every process.
+            for key, value in (
+                ("maintenance.auto", "true"),
+                ("maintenance.autoDetach", "false"),
+                ("gc.autoDetach", "false"),
+                ("user.name", "Fixture Lifetime Test"),
+                ("user.email", "test@example.invalid"),
+                ("commit.gpgsign", "false"),
+            ):
+                _git_ok(root, "config", key, value)
+            (root / "file").write_text("fixture\n", encoding="utf-8")
+
+            def maintenance_children(trace: Path) -> list[dict]:
+                events = [
+                    json.loads(line)
+                    for line in trace.read_text(encoding="utf-8").splitlines()
+                ]
+                self.assertTrue(any(event["event"] == "start" for event in events))
+                return [
+                    event for event in events
+                    if event["event"] == "child_start"
+                    and "maintenance" in event.get("argv", [])
+                ]
+
+            fixture_trace = Path(name) / "fixture.jsonl"
+            with mock.patch.dict(os.environ, {"GIT_TRACE2_EVENT": str(fixture_trace)}):
+                _commit_all(root, "fixture commit")
+
+            # Negative control: the same real repository and enabled config
+            # must expose maintenance if the fixture helper is bypassed.
+            control_trace = Path(name) / "control.jsonl"
+            with mock.patch.dict(os.environ, {"GIT_TRACE2_EVENT": str(control_trace)}):
+                subprocess.run(
+                    ("git", "-C", str(root), "commit", "--no-verify", "-q",
+                     "--allow-empty", "-m", "unguarded control"),
+                    check=True, capture_output=True, text=True,
+                )
+            self.assertTrue(maintenance_children(control_trace))
+            self.assertEqual(maintenance_children(fixture_trace), [])
 
 
 class AcknowledgementGrammarTests(unittest.TestCase):
