@@ -48,7 +48,7 @@ through chelis#2008 and re-measured the current PR integration surface.
 | Capacity census baselines and registries | Agent contract, census implementation, representative review history | Rows carry authority a machine cannot invent | Keep; improve executable reach and hermetic closure. |
 | Backend header lanes | Phase 0 closure precedent and device-lane preprocessing probes | Host SDK leakage and zero-row Metal lane | Complete attributed discovery and SDK fixtures implemented by chelis#1963. |
 | Runtime-extent target manifest | Manifest code, tripwire, post-review changes | Five synchronized feature changes, no repair-only drift | Keep. |
-| `.config/ci-test-targets.toml` | chelis#1824 and current history | 53 to 68 growth; 768 default-eligible integration targets and 36 duplicate names across packages | Keep the 68 rows as a standing layer; require every added/directly-modified target to execute and trial broader package-qualified expansion rather than growing the list by default. |
+| `.config/ci-test-targets.toml` | chelis#1824 and current history | 53 to 68 growth; 770 default-eligible integration targets and 36 duplicate names across packages | Keep the 68 rows as a standing layer; require every added/directly-modified target to execute and trial broader package-qualified expansion rather than growing the list by default. |
 | Rejected-cells corpus | File contract, unsupported structure, collect-all and mutation probe | Byte drift versus stable identity, cross-lane skew | Structured identity blocking; wording snapshot reviewed. |
 | Dropout gate rows | Gate implementation and entry-path findings | Real behavior changes and policy-fork detection | Keep, with per-target and per-entry claims. |
 | Rejection-authority liveness | Design §C2.1/§C7.5, workflow, validator | Useful audits, bystander failures, scheduled-owner sequencing | Source-derived membership landed in chelis#1961 and the standing scheduled check in chelis#1971; changed-row PR narrowing remains. |
@@ -185,7 +185,7 @@ The additions are legitimate, but each came from the pull request currently
 needing the test. No rule derives omissions or states which future test target
 must be selected.
 
-Current Cargo metadata contains 768 default-eligible integration targets in a
+Current Cargo metadata contains 770 default-eligible integration targets in a
 34-package workspace; 24 packages currently own at least one. Thirty-six
 target names, covering 78 identities, occur in more than one package. The
 standing file covers 68 exact package/target identities in 11 packages. Those

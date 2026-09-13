@@ -61,7 +61,7 @@ standing lane.
 | Developer `gate.py --fast` | Unchanged: tier-0 regeneration, formatting, lint, changed-crate Clippy, and 13 fixed integration tripwire identities. It remains the pre-push gate and does not become a broad integration run. |
 | Hosted `gate.py ci-fast` | Preserve the standing baseline of every default-feature library/binary unit target plus the reviewed integration manifest under its existing 20-minute job limit. The manifest is currently 68 package/target identities; the first implementation adds `chelis-types::expand_insert_dispatch_family` and `chelis-types::issue_1294_standard_lowerings`, bringing the planned standing set to 70. |
 | New hosted change-owned lane | On every non-doc pull request and main push, run every default-enabled integration target added or directly modified by the change. An exclusion is valid only when it names an exact alternative owner and reason. |
-| New hosted package expansion | Informationally run every other default-enabled integration target in each directly changed package or package selected by a reviewed shared-path rule, except exact reviewed target/test exclusions. |
+| New hosted package expansion | In separate non-required workers, informationally run every other default-enabled integration target in each directly changed package or package selected by a reviewed shared-path rule, except exact reviewed target/test exclusions. |
 | Linux nightly | Unchanged full backstop: all non-ignored default-feature workspace tests across four shards, with the two capacity censuses still deduplicated into their dtype owner and the existing explicitly invoked ignored/manual suites retained. |
 | macOS and feature/nightly owners | Unchanged. The new Linux lanes make no cross-platform, non-default-feature, hardware, ignored-test, or phase-acceptance claim. |
 
@@ -137,7 +137,7 @@ package expansion or an explicit shared-path disposition.
 
 A target whose `required-features` are all enabled by that package's
 default-feature closure is eligible; a target requiring a non-default feature
-is not. Package qualification is mandatory: current `main` has 768
+is not. Package qualification is mandatory: current `main` has 770
 default-eligible integration targets in a 34-package workspace; 24 packages
 currently own at least one. Thirty-six target names, covering 78 identities,
 are shared by more than one package, so the present global target-name
@@ -147,39 +147,53 @@ uniqueness check cannot be reused.
 
 The planner writes one machine-readable plan containing the candidate and base
 SHAs, raw changed-path records, path dispositions, selected packages, eligible
-targets, the exact change-owned subset, the package-expansion subset,
-target/test exclusions, exclusion owners, and a plan digest. Exact
-`package::target` identities are assigned to four deterministic shards by
+targets, the exact change-owned subset, the disjoint package-expansion subset,
+target/test exclusions, exclusion owners, and a plan digest. Planning is
+required: malformed or incomplete classification blocks both execution
+surfaces.
+
+Required change-owned execution and informational package expansion must not
+share worker budgets or aggregate status. Exact `package::target` identities in
+each subset are independently assigned to four deterministic shards by
 `sha256(package + "::" + target) mod 4`. Runners execute package-scoped Cargo
 selectors so equal target names in different packages cannot create a cross
 product or ambiguity.
 
-Each shard has a 20-minute hard timeout. A 15-minute soft budget is telemetry,
-not a test failure. Every shard uploads its command, selected and executed test
-lists, timings, JUnit, and plan digest. The report job fails on a missing shard,
-digest mismatch, duplicate execution, uncovered selected target, executed
-exclusion, or non-success result. The stable `Integration Tests (Linux)`
-context eventually depends on both the standing `ci-fast` worker and this
-change-owned/package-expansion report. The report distinguishes failure of the
-precise change-owned contract from failure or budget overflow in the
-informational package expansion.
+Each required change-owned shard has a 20-minute hard timeout and uploads its
+command, selected and executed test lists, timings, JUnit, and plan digest. Its
+required report fails on a missing shard, digest mismatch, duplicate execution,
+uncovered selected target, executed exclusion, or non-success result. The
+stable `Integration Tests (Linux)` context eventually depends on the standing
+`ci-fast` worker and this change-owned report only.
+
+Package expansion runs in a separate four-shard worker pool with its own
+20-minute hard timeout and 15-minute soft telemetry budget. Its summary records
+missing shards, timeouts, test failures, exclusions, timings, and receipts but
+does not fail a required context. A package-expansion timeout or failure cannot
+cancel, starve, or change the verdict of required change-owned execution. Step
+4 may make that summary required only after exact-head receipts justify the
+promotion.
 
 ### Delivery sequence
 
 1. Land this design amendment.
 2. Add the planner, versioned configuration, structural/mutation tests,
-   four-shard workflow, aggregate report, and telemetry. Add the two exact
-   replacement-expand standing rows named above. Enforce plan correctness and
-   execution of the exact change-owned subset; keep broader package expansion
-   informational. Do not alter local `--fast`, any other standing-target
-   ownership, or nightly ownership in that slice.
+   separate four-shard change-owned and package-expansion workers, required
+   change-owned report, non-blocking expansion summary, and telemetry. Add the
+   two exact replacement-expand standing rows named above. Enforce plan
+   correctness and execution of the exact change-owned subset; keep broader
+   package expansion informational and isolated from the required worker
+   budget. Do not alter local `--fast`, any other standing-target ownership, or
+   nightly ownership in that slice.
 3. Collect exact-head receipts from representative small, multi-package,
    shared-path, new-target, duplicate-name, and heavy-exclusion pull requests.
-4. Make package expansion required only after those receipts show that the
-   four shards finish within budget and that every changed path receives one
-   reviewable disposition. If the package-wide heuristic does not fit, retain
-   the required change-owned guarantee and narrow or repartition the heuristic
-   rather than weakening that guarantee.
+4. Make package expansion required only after those receipts show that its four
+   independent shards finish within budget and that every changed path receives
+   one reviewable disposition. Promotion changes the required dependency;
+   before promotion, an expansion failure remains telemetry. If the
+   package-wide heuristic does not fit, retain the required change-owned
+   guarantee and narrow or repartition the heuristic rather than weakening that
+   guarantee.
 5. Remove `PROVISIONAL pending chelis#1824` comments and close the issue only
    after required hosted execution proves the selected contract on merged
    `main`.
