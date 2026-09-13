@@ -14,6 +14,7 @@
 - [ ] 3.1 Transfer `spec/11-ffi.md` to the `ffi` capability: review the capability against the chapter, record divergence, mark the chapter superseded.
 - [ ] 3.2 Transfer `spec/10-serialization.md` to the `serialization` capability the same way.
 - [ ] 3.3 Both are the smallest captured chapters (4 requirements each) and are deliberately the pilot. Do not transfer a further chapter until both have landed and the process has been reviewed.
+- [ ] 3.4 Before transferring `spec/04-type-system.md`, reconcile the stale rank-raising `expand(b, 0, shape(...))` scenario in both `openspec/specs/type-system/spec.md` and its originating `openspec/changes/capture-type-system/specs/type-system/spec.md`. The numbered chapter assigns rank-raising to `insert`; these two reference captures are recorded divergence, not executable evidence for `expand`.
 
 ## 4. Validation
 
