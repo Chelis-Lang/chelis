@@ -1,10 +1,10 @@
 use chelis_deep::DeepTag;
-use chelis_unord::{UnordMap, UnordSet};
+use chelis_unord::UnordMap;
 
 use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, Metadata};
 use chelis_ir::dag::{Dag, DimInfo, NodeId, TensorType};
-use chelis_ir::eval::TensorValue as IrTensorValue;
+use chelis_ir::eval::{TensorInputDemand, TensorValue as IrTensorValue};
 use chelis_ir::lower::{try_lower_subexpr_program, type_expr_has_rank_var};
 use chelis_types::types::Prim;
 
@@ -307,8 +307,6 @@ impl<'a> EvalContext<'a> {
         staged_inputs: UnordMap<String, IrTensorValue>,
         context_label: &str,
     ) -> Result<RuntimeValue, NamedAxisRouteError> {
-        self.pre_resolve_top_level_value_refs(routed_expr)
-            .map_err(NamedAxisRouteError::Fatal)?;
         let program_defs = self.top_level_defs.clone();
         if let Some(name) = find_reachable_host_only_builtin_call(routed_expr, &program_defs) {
             return Err(NamedAxisRouteError::NotLowerable(format!(
@@ -363,19 +361,39 @@ impl<'a> EvalContext<'a> {
                 "host runtime: named-axis `{context_label}` lowering produced no roots"
             )));
         }
-        let tensor_bindings = self.tensor_bindings;
-        let host_bindings = &self.bindings;
-        let load = |name: &str| {
-            staged_inputs
-                .get(name)
-                .cloned()
-                .or_else(|| tensor_bindings.get(name).map(|t| t.value.clone()))
-                .or_else(|| match host_bindings.get(name) {
-                    Some(RuntimeValue::Tensor(t)) => Some(t.value.clone()),
-                    _ => None,
-                })
+        let preparation_context = chelis_ir::evaluation::RandomExecutionContext::new(
+            chelis_ir::host::RandomLoweringState {
+                seed: self.random_seed,
+                counter: self.random_counter,
+            },
+        );
+        let mut provider_failed = false;
+        let prepare = |name: &str, demand| {
+            self.prepare_named_axis_input(name, demand, &staged_inputs)
+                .inspect_err(|_| provider_failed = true)
         };
+        let prepared = if let Some(plan) = &execution_plan {
+            chelis_ir::eval::prepare_tensor_plan_inputs_with_demand(
+                plan,
+                &preparation_context,
+                prepare,
+            )
+        } else {
+            chelis_ir::eval::prepare_tensor_roots_inputs_with_demand(&dag, &roots, prepare)
+        }
+        .map_err(|err| {
+            if provider_failed || execution_plan.is_some() {
+                NamedAxisRouteError::Fatal(err)
+            } else {
+                NamedAxisRouteError::Fatal(format!(
+                    "host runtime named-axis `{context_label}` evaluation failed: {err}"
+                ))
+            }
+        })?;
+        let load = |name: &str| prepared.get(name).cloned();
         let result = if let Some(plan) = &execution_plan {
+            // Preparation may enter a fallible initializer. Execute the original
+            // plan using the resulting host state, not its pre-preparation copy.
             let mut context = chelis_ir::evaluation::RandomExecutionContext::new(
                 chelis_ir::host::RandomLoweringState {
                     seed: self.random_seed,
@@ -449,37 +467,44 @@ impl<'a> EvalContext<'a> {
         Ok(RuntimeValue::from_scalar_value(value))
     }
 
-    /// Force any top-level *value* bindings referenced (transitively
-    /// through def bodies) by a routed expression to be evaluated
-    /// before DAG evaluation, so the strict load callback can serve
-    /// them from `bindings` (the lowerer emits `Load(name)` for such
-    /// free names).
-    fn pre_resolve_top_level_value_refs(&mut self, root: &Expr) -> Result<(), String> {
-        let mut visited: UnordSet<String> = UnordSet::new();
-        let mut vars: Vec<String> = Vec::new();
-        collect_var_names(root, &mut vars);
-        while let Some(name) = vars.pop() {
-            if !visited.insert(name.clone()) {
-                continue;
-            }
-            let Some((resolved, body)) = self.lookup_top_level_def(&name) else {
-                continue;
-            };
-            if !visited.insert(resolved.clone()) && resolved != name {
-                continue;
-            }
-            if matches!(&body, Expr::List(body_list, _) if tag(body_list) == Some(DeepTag::Fn)) {
-                collect_var_names(&body, &mut vars);
-            } else if !self.resolving_top_levels.iter().any(|n| n == &resolved) {
-                // Skip a binding currently being resolved (this walk is
-                // syntactic and may reach the in-flight root through a
-                // dead branch); forcing it would raise a spurious
-                // "cyclic top-level" error. If the lowered DAG genuinely
-                // needs the value, the strict load callback reports it.
-                let _ = self.resolve_top_level(&resolved)?;
-            }
+    /// Serve available tensors first. A surplus shape witness is a query, not
+    /// permission to enter a declaration initializer or observe a callable.
+    pub(super) fn prepare_named_axis_input(
+        &mut self,
+        name: &str,
+        demand: TensorInputDemand,
+        staged_inputs: &UnordMap<String, IrTensorValue>,
+    ) -> Result<Option<IrTensorValue>, String> {
+        if let Some(value) = staged_inputs.get(name) {
+            return Ok(Some(value.clone()));
         }
-        Ok(())
+        if let Some(value) = self.tensor_bindings.get(name) {
+            return Ok(Some(value.value.clone()));
+        }
+        if let Some(RuntimeValue::Tensor(value)) = self.bindings.get(name) {
+            return Ok(Some(value.value.clone()));
+        }
+        if demand == TensorInputDemand::AvailableShape {
+            return Ok(None);
+        }
+        let Some((resolved, body)) = self.lookup_top_level_def(name) else {
+            return Ok(None);
+        };
+        if self
+            .type_env
+            .get(&resolved)
+            .is_some_and(|ty| ty.tag() == Some(DeepTag::TFn))
+            || matches!(&body, Expr::List(body_list, _) if tag(body_list) == Some(DeepTag::Fn))
+            || self.resolving_top_levels.iter().any(|n| n == &resolved)
+        {
+            // Retain the strict missing-input boundary for an in-flight root;
+            // input preparation does not add callable observation or recursion.
+            return Ok(None);
+        }
+        match self.resolve_top_level(&resolved)? {
+            RuntimeValue::Tensor(value) => Ok(Some(value.value)),
+            _ => Ok(None),
+        }
     }
 }
 
@@ -626,24 +651,6 @@ fn scan_expr_for_named_axis_reduction(expr: &Expr, hit: &mut bool, vars: &mut Ve
             }
             for child in &list.elements {
                 scan_expr_for_named_axis_reduction(child, hit, vars);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Collect every `(var name)` reference in a Deep expr (no early exit).
-fn collect_var_names(expr: &Expr, vars: &mut Vec<String>) {
-    match expr {
-        Expr::MetaExpr(meta, _) => collect_var_names(&meta.expr, vars),
-        Expr::List(list, _) => {
-            if tag(list) == Some(DeepTag::Var)
-                && let Some(name) = children(list).first().and_then(symbol_name)
-            {
-                vars.push(name.to_string());
-            }
-            for child in &list.elements {
-                collect_var_names(child, vars);
             }
         }
         _ => {}

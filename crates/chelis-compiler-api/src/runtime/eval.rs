@@ -4259,6 +4259,127 @@ mod legacy_capture_order_tests {
     }
 
     #[test]
+    fn named_axis_available_shape_never_enters_failing_initializer() {
+        use chelis_ir::eval::TensorInputDemand::{AvailableShape, RequiredShape, Selected};
+        let initializer =
+            format!("_ = {DRAW}\n to_tensor([cast(floor_div(1i32, 0i32), f32), 0.0f32])");
+        let library = library(&initializer, "x: tensor[2, f32]", LIVE);
+        let tensors = UnordMap::new();
+        let staged = UnordMap::new();
+        for required in [RequiredShape, Selected] {
+            let mut ctx = context(&library, &tensors);
+            assert!(
+                ctx.prepare_named_axis_input("weights", AvailableShape, &staged)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(ctx.transcript.is_empty());
+            assert!(!ctx.bindings.contains_key("weights"));
+            assert_eq!((ctx.random_seed, ctx.random_counter), (Some(42), 5));
+            assert_eq!(
+                ctx.prepare_named_axis_input("weights", required, &staged)
+                    .unwrap_err(),
+                "numeric trap: division by zero in floor_div at int32"
+            );
+            assert_eq!(ctx.transcript, ["initialize"]);
+            assert!(!ctx.bindings.contains_key("weights"));
+            assert_eq!((ctx.random_seed, ctx.random_counter), (Some(42), 5));
+            assert!(
+                ctx.prepare_named_axis_input("weights", AvailableShape, &staged)
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                bits(&admitted_call(&mut ctx, "next_draw").unwrap()),
+                bits(&expected_draw(42, 5))
+            );
+            assert_eq!(ctx.random_counter, 6);
+            assert_eq!(ctx.transcript, ["initialize"]);
+        }
+    }
+
+    #[test]
+    fn named_axis_input_roles_preserve_available_tensor_precedence() {
+        use chelis_ir::eval::TensorInputDemand::{AvailableShape, RequiredShape, Selected};
+        let library = library(DRAW, "x: tensor[2, f32]", LIVE);
+        let tensor = |ordinal| {
+            let RuntimeValue::Tensor(value) = expected_draw(42, ordinal) else {
+                panic!("draw is a tensor")
+            };
+            value
+        };
+        for role in [AvailableShape, RequiredShape, Selected] {
+            for level in 0..3 {
+                let mut tensors = UnordMap::new();
+                let mut staged = UnordMap::new();
+                if level >= 1 {
+                    tensors.insert("weights".to_owned(), tensor(1));
+                }
+                if level == 2 {
+                    staged.insert("weights".to_owned(), tensor(2).value);
+                }
+                let mut ctx = context(&library, &tensors);
+                ctx.bindings
+                    .insert("weights".to_owned(), RuntimeValue::Tensor(tensor(0)));
+                let actual = ctx
+                    .prepare_named_axis_input("weights", role, &staged)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    bits(&RuntimeValue::Tensor(RuntimeTensorValue::new(actual))),
+                    bits(&expected_draw(42, level))
+                );
+                assert_eq!((ctx.random_seed, ctx.random_counter), (Some(42), 5));
+                assert!(ctx.transcript.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn named_axis_input_roles_do_not_observe_callables_or_unknown_names() {
+        use chelis_ir::eval::TensorInputDemand::{AvailableShape, RequiredShape, Selected};
+        let library = checked_library(&format!(
+            "def sample() -> tensor[2, f32] = with seed(17i64) {{ _ = print(\"observe\")\n {DRAW} }}\nalias = sample\n"
+        ));
+        let tensors = UnordMap::new();
+        let staged = UnordMap::new();
+        let mut ctx = context(&library, &tensors);
+        for role in [AvailableShape, RequiredShape, Selected] {
+            for name in ["sample", "alias", "unknown"] {
+                assert!(
+                    ctx.prepare_named_axis_input(name, role, &staged)
+                        .unwrap()
+                        .is_none()
+                );
+                assert!(!ctx.bindings.contains_key(name));
+            }
+        }
+        assert_eq!((ctx.random_seed, ctx.random_counter), (Some(42), 5));
+        assert!(ctx.transcript.is_empty());
+    }
+
+    #[test]
+    fn named_axis_required_shape_initializes_once_then_available_can_serve() {
+        use chelis_ir::eval::TensorInputDemand::{AvailableShape, RequiredShape};
+        let library = library(DRAW, "x: tensor[2, f32]", LIVE);
+        let tensors = UnordMap::new();
+        let staged = UnordMap::new();
+        let mut ctx = context(&library, &tensors);
+        for role in [RequiredShape, AvailableShape] {
+            let actual = ctx
+                .prepare_named_axis_input("weights", role, &staged)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                bits(&RuntimeValue::Tensor(RuntimeTensorValue::new(actual))),
+                bits(&expected_draw(17, 0))
+            );
+            assert_eq!((ctx.random_seed, ctx.random_counter), (Some(42), 5));
+            assert_eq!(ctx.transcript, ["initialize"]);
+        }
+    }
+
+    #[test]
     fn legacy_capture_order_valid_lazy_handler_does_not_advance_parent() {
         let library = library(DRAW, "x: tensor[2, f32]", LIVE);
         let tensors = UnordMap::new();

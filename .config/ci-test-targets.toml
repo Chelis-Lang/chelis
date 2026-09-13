@@ -2,6 +2,15 @@
 # New integration targets run in the unfiltered nightly unless added here.
 version = 1
 
+# chelis#1956: checked lazy-library named-axis inputs and default-style CLI effects.
+[[target]]
+package = "chelis-compiler-api"
+name = "issue_1956_named_axis_inputs"
+
+[[target]]
+package = "chelis-cli"
+name = "issue_1956_named_axis_inputs_cli"
+
 # chelis#1975: fused zero slots, forward checks, and exact eval/native values.
 [[target]]
 package = "chelis-compiler-api"
