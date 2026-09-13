@@ -616,7 +616,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/dtype_semantics.md",
         "## Phase 4 - the capability table becomes the permanent guard",
         "## I1. Interlock with loud unsupported ([#730])",
-        "ec2eac5ae6f31c8fb4b60f5ae835908b1afa7f866a357be6c7eaf04130ab2103",
+        "f2cbc2ff47b83fe887c740f437798e38c03e6027e73275a42e9bbdcb31dfd862",
     ),
     "compiled stdlib consumer": (
         "spec/design/loud_unsupported.md",
@@ -634,7 +634,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/remediation_roadmap.md",
         "| **v0.19.0 - grounded dtype storage break",
         "| **v0.20.0 - behavior-preserving permanent guards**",
-        "ec37b8cab3f013cdc17f9c792291922b0bfbdebf5b2fa48a44bb8ba2aad2f516",
+        "b59c7db4c9a53e26798ca258d39b90c9937c0940b9c5e51d38b0e1a619e6de6e",
     ),
     "status dtype row": (
         "docs/investigations/remediation_status_2026_08_04.md",

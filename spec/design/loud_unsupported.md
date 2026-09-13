@@ -361,28 +361,83 @@ REGISTRIES of what actually exists:
   byte-agreement test (the §C4.3 generated-header pattern), so the
   registry cannot drift from `spec/` silently. Citing an atom that no
   numbered spec declares is a construction error.
-- `IssueRef` wraps `NonZeroU32` AND validates membership in a
-  checked-in issue manifest recording, per number: it is an ISSUE
-  (not a PR), and it is OPEN. **A checked-in manifest is
-  self-authorizing unless its edits are gated** - the same PR that
-  cites a bogus number can add the manifest row that blesses it (the
-  2026-07-30 addendum's countermodel: after a same-PR edit, a closed
-  issue, a PR number, and a 404 all "validate"). So manifest
-  ADDITIONS receive blocking LIVE validation: every construction,
-  registry, validator, imported liveness-helper, detector, and workflow input
-  is in the `Rejection Authority Liveness` change set, and that job verifies
-  every added or modified row against the live tracker (exists, is an
-  issue, is open) before the PR can merge. Phase 4's §C7.5 scheduled job
-  will re-verify the STANDING manifest for drift, so a cited issue closing
-  later makes the stale citation red - the shell contract's "probe flips
-  green, remove the citation" rule, pointed inward. Until that Phase 4 job
-  lands, standing-state drift remains a named pending control rather than an
-  implied continuous guarantee. Membership answers the compile-time question;
-  the change-gated job answers the truth question when authority inputs change.
+- `IssueRef` wraps `NonZeroU32` AND validates membership in a checked-in,
+  source-derived issue manifest recording, per number: it is an ISSUE (not a
+  PR), and it is OPEN. `scripts/generate_rejection_registries.py` discovers
+  one Cargo-owned production workspace: every repository-local workspace
+  member, regardless of directory, contributes its non-test library and
+  binary-like target roots and its exact package identity. The existing
+  `chelis-repr-inventory` `syn` parser follows those roots through inline,
+  ordinary external, and literal `#[path]` module edges. Before validating
+  `include!`, macro, or module wiring, it forms one `test=false` source view by
+  excluding test-only items, statements, expressions, arms, fields, arguments,
+  and generic parameters. Thus `src/tests.rs`, inline `#[cfg(test)]`, and
+  test-only expression citations are not authority, while a production
+  `#[path]` source outside its target directory is. Ambiguous ordinary module
+  paths, conditional or malformed path wiring, production `include!`, and
+  production macro definitions that directly emit module wiring fail closed.
+  The defining
+  `crates/chelis-types/src/unsupported.rs` remains the sole citation
+  exclusion. The direct-construction boundary checker consumes this exact
+  source view rather than owning a second filesystem glob. The generator also
+  runs Cargo's non-test production targets and reuses
+  `check_configuration_closure.py`'s rustc dep-info parser; dep-info selection
+  uses the same Cargo package identity set while remaining an independent
+  compiler-read closure observation. Every compiler-read repository source
+  must appear in the structural graph. Thus the parser does not self-certify
+  module closure.
+  Every resulting production `unimplemented_rejection!` invocation is parsed.
+  The first argument accepts Rust's full unsuffixed decimal token grammar
+  (leading zeroes and arbitrary/trailing underscores), then must decode to a
+  positive `u32`; dynamic expressions, alternate delimiters, suffixes, zero,
+  overflow, and malformed invocations are errors.
+  The macro name is likewise exact: production imports and reexports may not
+  rename `unimplemented_rejection`, because an aliased invocation would evade
+  source derivation. Rust strings, raw strings, ordinary character literals,
+  byte character literals, comments, and lifetimes are lexed distinctly so
+  none can hide or fabricate a citation.
+  Repeated production sites for one issue collapse to one sorted row. The
+  generator writes both `spec/design/loud_unsupported_issue_manifest.json`
+  and the Rust membership artifact, while `--check` rejects a cited issue
+  missing from the manifest, an uncited stale row, or byte drift in either
+  generated artifact. Tests freeze Cargo target-kind and repository-local
+  package selection (including members outside `crates/`), dep-info package
+  selection, the structural module and test-exclusion contract, the shared
+  boundary source owner, the sole citation exclusion, exact parsing, both drift
+  directions, duplicate handling, and Rust byte agreement.
+- **A source-derived manifest is still self-authorizing with respect to live
+  tracker state** - the same PR can cite a closed issue, a PR number, or a
+  nonexistent number and regenerate a structurally valid row. Every
+  construction, registry, validator, imported liveness-helper, detector, and
+  workflow input therefore remains in the `Rejection Authority Liveness`
+  change set. Every `.rs` path and every file named `Cargo.toml` anywhere in
+  the repository conservatively triggers that job, including a newly added
+  workspace member or a production `#[path]` target outside its target
+  directory; the job reruns structural source and generated-byte agreement
+  before tracker validation. As of 2026-09-13,
+  it preserves the existing conservative liveness behavior: whenever
+  triggered it verifies EVERY standing manifest row against the live tracker
+  (exists, is an issue, is open), not only rows changed by the PR. The
+  proposed changed-row PR narrowing and §C7.5 scheduled
+  standing-manifest canary remain later #1870 slices; this source-derivation
+  prerequisite implements neither. Until the canary lands, standing-state
+  drift remains a named pending control rather than an implied daily
+  guarantee. Membership answers the compile-time question; the change-gated
+  job answers the truth question on each run.
 - Hints are validated non-empty; direct struct-literal construction and the
   former scalar constructor composition from outside the owning module are
   privacy errors, locked by `compile_fail` doctests. The required CI job also
   runs the boundary checker before the network-backed manifest validation.
+  That dedicated liveness job owns fresh production-graph and rustc dep-info
+  execution. Cargo metadata supplies each production target's package, name,
+  kind, root, and required features. The compiler closure enables the union of
+  those package-qualified features and requires matching non-test dep-info for
+  every exact target identity; a newly feature-gated target cannot be silently
+  skipped. Ordinary Python unit discovery tests the parsers, mutations, and
+  orchestration with supplied source evidence; it does not rerun the full
+  Cargo inventory or compiler closure. This keeps the source and tracker
+  checks fresh and fail-closed without executing the same expensive derivation
+  several times in one CI run.
 - **These registries are the named pre-table authority source.**
   Phase 3 does not wait for [#729]'s capability table. Phase 4C populates
   Table A's typed `Rejected { op_atom, diagnostic_kind }` cells and Table B's
@@ -393,9 +448,9 @@ REGISTRIES of what actually exists:
 
 **Calibrated claim:** construction proves only citation IDENTITY and
 last-verified tracker STATE - an existing atom, or a manifest member
-that was live-verified as an open ISSUE when its row was added and at
-the last scheduled re-verification since. Between schedules the issue
-manifest means "open at last verification", never "open this instant".
+that was live-verified as an open ISSUE by the last successful liveness
+execution. Without the pending scheduled canary, the issue manifest means
+"open at last verification", never "open this instant".
 Neither registry proves RELEVANCE: whether an atom semantically
 decides this rejection, or an issue actually tracks implementing this
 rejected site/capability, remains an explicit review obligation.
@@ -1858,8 +1913,9 @@ root-realizability integration.
    `reduce_window` hints cite [#729] and [#600], not [#959]) -
    plus the two validation registries the constructors consume: the
    derived atom registry (generated from the numbered specs,
-   byte-agreement-tested) and the checked-in issue manifest (whose
-   liveness re-verification is §C7.5 scheduled-job work).
+   byte-agreement-tested) and the checked-in issue manifest (generated from
+   exact production `unimplemented_rejection!` citations, then live-validated;
+   scheduled standing-state re-verification remains §C7.5 work).
 5. Deletion of gates that now only duplicate emitter rejections, with the
    cross-lane rejected-cells corpus proving the diagnostic surface
    unchanged or improved (earlier stage, same `unsupported:` content).
