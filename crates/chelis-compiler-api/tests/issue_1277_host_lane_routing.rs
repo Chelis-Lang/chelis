@@ -17,9 +17,9 @@ mod wire_values;
 
 use std::collections::BTreeMap;
 
-use chelis_compiler_api::compiler::{eval, eval_selected};
+use chelis_compiler_api::compiler::{check, eval, eval_selected};
 use chelis_compiler_api::schema::{
-    EvalRequest, EvalResult, ExecutionValue, SourceKind, TensorValue,
+    CheckRequest, EvalRequest, EvalResult, ExecutionValue, SourceKind, TensorValue,
 };
 use chelis_types::types::Lane;
 
@@ -66,12 +66,43 @@ fn lane_of(result: &EvalResult, name: &str) -> Lane {
         .lane
 }
 
-/// Selecting a parameterized shape-reading entry still cannot supply these
-/// bindings through the Host root (#1397). Preserve the actual host-call
-/// argument error rather than replacing it with an unavailable-root wrapper.
-/// This is a diagnostic disposition lock, not an execution receipt.
+/// #2013: a missing named DAG root selects Host, not missing actual arguments.
 #[test]
-fn bound_parameterized_entry_preserves_its_host_call_error() {
+fn bound_parameterized_entry_uses_supplied_host_inputs() {
+    let checked = check(CheckRequest {
+        source_kind: SourceKind::Surf,
+        source: CALLEE_1376.into(),
+    })
+    .unwrap();
+    assert_eq!(checked.score.get(), 1.0);
+    assert!(checked.errors.is_empty(), "{checked:?}");
+    assert!(checked.unresolved_names.is_empty(), "{checked:?}");
+    let result = eval_selected(
+        EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: CALLEE_1376.into(),
+            bindings: BTreeMap::from([
+                ("x".into(), f32_tensor(&[2], &[1.0, 2.0])),
+                ("y".into(), f32_tensor(&[2], &[3.0, 4.0])),
+            ]),
+        },
+        &["f".into()],
+    )
+    .unwrap();
+    assert_eq!(lane_of(&result, "f"), Lane::Host);
+    assert_eq!(result.roots.len(), 1);
+    assert_eq!(
+        serde_json::to_value(&result.roots[0].value).unwrap(),
+        serde_json::json!({"type":"tensor","value":{"shape":[2,2],"data":{
+            "dtype":"f32","bits":["3f800000","3f800000","40000000","40000000"]
+        }}})
+    );
+    assert!(result.transcript.is_empty(), "{result:?}");
+}
+
+/// Supplying live actuals must reach the real named-extent guard (§4.7.2).
+#[test]
+fn bound_parameterized_mismatch_names_the_disagreeing_sources() {
     let mut bindings = BTreeMap::new();
     bindings.insert("x".to_string(), f32_tensor(&[2], &[1.0, 2.0]));
     bindings.insert("y".to_string(), f32_tensor(&[3], &[3.0, 4.0, 5.0]));
@@ -83,16 +114,22 @@ fn bound_parameterized_entry_preserves_its_host_call_error() {
         },
         &["f".to_string()],
     )
-    .expect_err("a shape-reading def has no named root, so its selected call is a Host root");
+    .expect_err("a claimed 3 cannot silently return an actual axis of 2");
     let messages = err
         .errors
         .iter()
         .map(|diagnostic| diagnostic.message.clone())
         .collect::<Vec<_>>()
         .join("\n");
-    assert_eq!(
-        messages,
-        "kernel `f` parameter `x` expects a tensor or scalar argument, got ()"
+    assert_eq!(err.stage, "eval");
+    assert!(err.transcript.is_empty(), "{err:?}");
+    assert!(
+        messages.contains("extent `m`: y axis 0 = 3, x axis 0 = 2"),
+        "{messages}"
+    );
+    assert!(
+        messages.ends_with("numeric trap: domain in load at int64"),
+        "{messages}"
     );
 }
 
