@@ -1,9 +1,10 @@
 """Unit contracts for the chelis#893 Phase 0 acceptance oracle.
 
 These cover the parts of the oracle that are not proved by running it: that the
-frozen source list still equals its roots, that the freeze digest actually binds
-what it claims to, that every classifier has a controlled mutation, and that a
-mutation cannot be weakened without moving the freeze.
+frozen source list still equals its roots, that the freeze digest binds only the
+finished foundation, that the runtime manifest exactly describes the
+configuration the oracle executes, and that every classifier has a controlled
+mutation.
 
 The seam classification rules themselves are proved in the scanner's own suite
 (`cargo nextest run -p chelis-repr-inventory --test inventory`), which is where
@@ -131,11 +132,60 @@ class BaselineTests(unittest.TestCase):
         with self.assertRaisesRegex(oracle.OracleFailure, "freeze digest"):
             oracle.validate_baseline(mutated, self.rows)
 
-    def test_freeze_digest_rejects_an_edited_coverage_manifest(self) -> None:
+    def test_baseline_contains_only_the_frozen_foundation_and_shrink_only_debt(
+        self,
+    ) -> None:
+        self.assertEqual(
+            set(self.baseline),
+            {"schema_version", "freeze_sha256", "foundation_rows", "active_debt"},
+        )
+        self.assertNotIn("coverage_manifest", self.baseline)
+
+    def test_foundation_digest_has_no_coverage_manifest_input(self) -> None:
+        digest = oracle._freeze_digest(self.baseline["foundation_rows"])
+        manifest = oracle.coverage_manifest()
+        manifest["acceptance"] = "ALWAYS PASS"
+        self.assertEqual(digest, oracle._freeze_digest(self.baseline["foundation_rows"]))
+
+    def test_schema_rejects_a_reintroduced_persisted_coverage_manifest(self) -> None:
         mutated = json.loads(json.dumps(self.baseline))
-        mutated["coverage_manifest"]["acceptance"] = "ALWAYS PASS"
-        with self.assertRaises(oracle.OracleFailure):
+        mutated["coverage_manifest"] = oracle.coverage_manifest()
+        with self.assertRaisesRegex(oracle.OracleFailure, "top-level fields"):
             oracle.validate_baseline(mutated, self.rows)
+
+    def test_regeneration_preserves_retired_foundation_rows(self) -> None:
+        foundation = self.baseline["foundation_rows"]
+        active_rows = self.rows[:1]
+        regenerated = oracle.build_foundation_baseline(
+            active_rows,
+            foundation_rows=foundation,
+            active_debt_rows=self.baseline["active_debt"],
+        )
+        self.assertEqual(regenerated["foundation_rows"], foundation)
+        self.assertEqual(
+            regenerated["active_debt"],
+            [row.to_active_dict() for row in active_rows],
+        )
+
+    def test_regeneration_adds_a_new_row_to_the_reviewed_foundation(self) -> None:
+        foundation = self.baseline["foundation_rows"]
+        added = oracle.InventoryRow(
+            kind="direct-data-access",
+            path="crates/chelis-runtime/src/invented.rs",
+            owner="new_owner",
+            deletion_phase=3,
+            sample="invented",
+        )
+        regenerated = oracle.build_foundation_baseline(
+            (*self.rows, added),
+            foundation_rows=foundation,
+            active_debt_rows=self.baseline["active_debt"],
+        )
+        self.assertIn(added.to_baseline_dict(), regenerated["foundation_rows"])
+        self.assertNotEqual(
+            regenerated["freeze_sha256"],
+            oracle._freeze_digest(foundation),
+        )
 
     def test_active_debt_cannot_add_an_identity(self) -> None:
         mutated = json.loads(json.dumps(self.baseline))
@@ -342,9 +392,10 @@ class MutationContractTests(unittest.TestCase):
             self.assertEqual(entry["command"], oracle.PHASE0_COMMAND)
             self.assertRegex(str(entry["implementation_sha256"]), r"^[0-9a-f]{64}$")
 
-    def test_mutation_body_change_moves_the_freeze_digest(self) -> None:
+    def test_mutation_body_change_moves_the_runtime_manifest_not_the_freeze(self) -> None:
         probes = oracle.phase0_mutation_probes()
         before = oracle.coverage_manifest(probes)
+        frozen = oracle._freeze_digest(oracle.load_baseline()["foundation_rows"])
 
         def weakened(source: str) -> str:
             return source
@@ -360,6 +411,10 @@ class MutationContractTests(unittest.TestCase):
             *probes[1:],
         )
         self.assertNotEqual(before, oracle.coverage_manifest(replaced))
+        self.assertEqual(
+            frozen,
+            oracle._freeze_digest(oracle.load_baseline()["foundation_rows"]),
+        )
 
     def test_implementation_digest_is_independent_of_import_name(self) -> None:
         digest = oracle._mutation_implementation_sha256(oracle.mutate_direct_data_access)
@@ -574,6 +629,38 @@ class ManifestTests(unittest.TestCase):
             with self.assertRaisesRegex(oracle.OracleFailure, "failed with exit 1"):
                 oracle.run_phase0(run_mutations=False)
         self.assertEqual(run.call_count, 1)
+
+    def test_runner_rejects_a_manifest_that_does_not_match_its_configuration(
+        self,
+    ) -> None:
+        drifted = oracle.coverage_manifest()
+        drifted["release_reproducers"] = drifted["release_reproducers"][:-1]
+        with (
+            mock.patch.object(oracle, "validate_phase0_inventory"),
+            mock.patch.object(oracle, "coverage_manifest", return_value=drifted),
+            mock.patch.object(oracle, "_run_leg") as run_leg,
+        ):
+            with self.assertRaisesRegex(oracle.OracleFailure, "coverage manifest drifted"):
+                oracle.run_phase0(run_mutations=False)
+        run_leg.assert_not_called()
+
+    def test_runner_executes_every_manifested_mutation_and_reproducer(self) -> None:
+        probes = oracle.phase0_mutation_probes()
+        legs = oracle.phase0_legs()
+        with (
+            mock.patch.object(oracle, "validate_phase0_inventory"),
+            mock.patch.object(oracle, "_expect_mutation_rejected") as reject,
+            mock.patch.object(oracle, "_run_leg") as run_leg,
+        ):
+            oracle.run_phase0()
+        self.assertEqual(
+            [call.args[0] for call in reject.call_args_list],
+            list(probes),
+        )
+        self.assertEqual(
+            [call.args[0] for call in run_leg.call_args_list],
+            list(legs),
+        )
 
 
 if __name__ == "__main__":
