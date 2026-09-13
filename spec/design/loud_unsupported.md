@@ -429,11 +429,15 @@ REGISTRIES of what actually exists:
   privacy errors, locked by `compile_fail` doctests. The required CI job also
   runs the boundary checker before the network-backed manifest validation.
   That dedicated liveness job owns fresh production-graph and rustc dep-info
-  execution. Ordinary Python unit discovery tests the parsers, mutations, and
+  execution. Cargo metadata supplies each production target's package, name,
+  kind, root, and required features. The compiler closure enables the union of
+  those package-qualified features and requires matching non-test dep-info for
+  every exact target identity; a newly feature-gated target cannot be silently
+  skipped. Ordinary Python unit discovery tests the parsers, mutations, and
   orchestration with supplied source evidence; it does not rerun the full
-  Cargo inventory or compiler closure. This keeps the source and tracker checks
-  fresh and fail-closed without executing the same expensive derivation several
-  times in one CI run.
+  Cargo inventory or compiler closure. This keeps the source and tracker
+  checks fresh and fail-closed without executing the same expensive derivation
+  several times in one CI run.
 - **These registries are the named pre-table authority source.**
   Phase 3 does not wait for [#729]'s capability table. Phase 4C populates
   Table A's typed `Rejected { op_atom, diagnostic_kind }` cells and Table B's

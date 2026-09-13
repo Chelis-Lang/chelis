@@ -12,6 +12,7 @@ from generate_rejection_registries import (
     MANIFEST_REL,
     OUTPUT_REL,
     ProductionSource,
+    ProductionTarget,
     ProductionWorkspace,
     RegistryError,
     compiler_source_closure_problems,
@@ -22,6 +23,7 @@ from generate_rejection_registries import (
     manifest_derivation_problems,
     parse_issue_citations,
     parse_production_issue_citations,
+    production_check_command,
     production_dep_info_files,
     production_target_roots_from_metadata,
     production_workspace_from_metadata,
@@ -56,6 +58,96 @@ class DiscoverAtoms(unittest.TestCase):
 
 
 class ProductionSources(unittest.TestCase):
+    def test_compiler_inventory_enables_every_required_target_feature(self) -> None:
+        workspace = ProductionWorkspace(
+            targets=(
+                ProductionTarget(
+                    package_id="example 0.1.0",
+                    package_name="example",
+                    name="example",
+                    kinds=("lib",),
+                    root="crates/example/src/lib.rs",
+                    required_features=(),
+                ),
+                ProductionTarget(
+                    package_id="example 0.1.0",
+                    package_name="example",
+                    name="future_certifier",
+                    kinds=("bin",),
+                    root="crates/example/src/bin/future_certifier.rs",
+                    required_features=("future-arb", "proofs"),
+                ),
+                ProductionTarget(
+                    package_id="other 0.1.0",
+                    package_name="other",
+                    name="other_tool",
+                    kinds=("bin",),
+                    root="tools/other/src/bin/other_tool.rs",
+                    required_features=("proofs",),
+                ),
+            )
+        )
+        self.assertEqual(
+            production_check_command(workspace),
+            (
+                "cargo",
+                "check",
+                "--workspace",
+                "--lib",
+                "--bins",
+                "--features",
+                "example/future-arb,example/proofs,other/proofs",
+                "--message-format=json",
+            ),
+        )
+
+    def test_dep_info_rejects_any_silently_skipped_production_target(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            library_artifact = root / "target/debug/libexample.rlib"
+            (root / "target/debug/example.d").parent.mkdir(parents=True)
+            (root / "target/debug/example.d").write_text(
+                "target: crates/example/src/lib.rs\n"
+            )
+            workspace = ProductionWorkspace(
+                targets=(
+                    ProductionTarget(
+                        package_id="example 0.1.0",
+                        package_name="example",
+                        name="example",
+                        kinds=("lib",),
+                        root="crates/example/src/lib.rs",
+                        required_features=(),
+                    ),
+                    ProductionTarget(
+                        package_id="example 0.1.0",
+                        package_name="example",
+                        name="future_certifier",
+                        kinds=("bin",),
+                        root="crates/example/src/bin/future_certifier.rs",
+                        required_features=("future-arb",),
+                    ),
+                )
+            )
+            messages = [
+                {
+                    "reason": "compiler-artifact",
+                    "package_id": "example 0.1.0",
+                    "profile": {"test": False},
+                    "target": {
+                        "name": "example",
+                        "kind": ["lib"],
+                        "src_path": str(root / "crates/example/src/lib.rs"),
+                    },
+                    "filenames": [str(library_artifact)],
+                }
+            ]
+            with self.assertRaisesRegex(
+                RegistryError,
+                "future_certifier.*required features: future-arb",
+            ):
+                production_dep_info_files(root, messages, workspace)
+
     def test_cargo_workspace_includes_repository_members_outside_crates_and_excludes_nonproduction_targets(
         self,
     ) -> None:
@@ -65,40 +157,50 @@ class ProductionSources(unittest.TestCase):
             "packages": [
                 {
                     "id": "example 0.1.0",
+                    "name": "example",
                     "manifest_path": "/repo/crates/example/Cargo.toml",
                     "targets": [
                         {
                             "kind": ["lib"],
+                            "name": "example",
                             "src_path": "/repo/crates/example/src/lib.rs",
                         },
                         {
                             "kind": ["bin"],
+                            "name": "example-bin",
                             "src_path": "/repo/crates/example/src/main.rs",
+                            "required-features": ["arb"],
                         },
                         {
                             "kind": ["test"],
+                            "name": "integration",
                             "src_path": "/repo/crates/example/tests/integration.rs",
                         },
                         {
                             "kind": ["example"],
+                            "name": "demo",
                             "src_path": "/repo/crates/example/examples/demo.rs",
                         },
                         {
                             "kind": ["bench"],
+                            "name": "bench",
                             "src_path": "/repo/crates/example/benches/bench.rs",
                         },
                         {
                             "kind": ["custom-build"],
+                            "name": "build-script-build",
                             "src_path": "/repo/crates/example/build.rs",
                         },
                     ],
                 },
                 {
                     "id": "tree-sitter-chelis 0.1.0",
+                    "name": "tree-sitter-chelis",
                     "manifest_path": "/repo/tree-sitter-chelis/Cargo.toml",
                     "targets": [
                         {
                             "kind": ["lib"],
+                            "name": "tree-sitter-chelis",
                             "src_path": "/repo/tree-sitter-chelis/src/lib.rs",
                         }
                     ],
@@ -109,13 +211,31 @@ class ProductionSources(unittest.TestCase):
         self.assertEqual(
             workspace,
             ProductionWorkspace(
-                package_ids=frozenset(
-                    {"example 0.1.0", "tree-sitter-chelis 0.1.0"}
-                ),
-                target_roots=(
-                    "crates/example/src/lib.rs",
-                    "crates/example/src/main.rs",
-                    "tree-sitter-chelis/src/lib.rs",
+                targets=(
+                    ProductionTarget(
+                        package_id="example 0.1.0",
+                        package_name="example",
+                        name="example",
+                        kinds=("lib",),
+                        root="crates/example/src/lib.rs",
+                        required_features=(),
+                    ),
+                    ProductionTarget(
+                        package_id="example 0.1.0",
+                        package_name="example",
+                        name="example-bin",
+                        kinds=("bin",),
+                        root="crates/example/src/main.rs",
+                        required_features=("arb",),
+                    ),
+                    ProductionTarget(
+                        package_id="tree-sitter-chelis 0.1.0",
+                        package_name="tree-sitter-chelis",
+                        name="tree-sitter-chelis",
+                        kinds=("lib",),
+                        root="tree-sitter-chelis/src/lib.rs",
+                        required_features=(),
+                    ),
                 ),
             ),
         )
@@ -137,20 +257,59 @@ class ProductionSources(unittest.TestCase):
             selected_dep_info = root / "target/debug/tree_sitter_chelis.d"
             selected_dep_info.parent.mkdir(parents=True)
             selected_dep_info.write_text("target: tree-sitter-chelis/src/lib.rs\n")
+            gated_artifact = root / "target/debug/future_tool"
+            gated_dep_info = root / "target/debug/future_tool.d"
+            gated_dep_info.write_text(
+                "target: tree-sitter-chelis/src/bin/future_tool.rs\n"
+            )
             ignored_artifact = root / "target/debug/libexternal.rlib"
             ignored_dep_info = root / "target/debug/external.d"
             ignored_dep_info.write_text("target: external/src/lib.rs\n")
             workspace = ProductionWorkspace(
-                package_ids=frozenset({"tree-sitter-chelis 0.1.0"}),
-                target_roots=("tree-sitter-chelis/src/lib.rs",),
+                targets=(
+                    ProductionTarget(
+                        package_id="tree-sitter-chelis 0.1.0",
+                        package_name="tree-sitter-chelis",
+                        name="tree-sitter-chelis",
+                        kinds=("lib",),
+                        root="tree-sitter-chelis/src/lib.rs",
+                        required_features=(),
+                    ),
+                    ProductionTarget(
+                        package_id="tree-sitter-chelis 0.1.0",
+                        package_name="tree-sitter-chelis",
+                        name="future_tool",
+                        kinds=("bin",),
+                        root="tree-sitter-chelis/src/bin/future_tool.rs",
+                        required_features=("future-feature",),
+                    ),
+                ),
             )
             messages = [
                 {
                     "reason": "compiler-artifact",
                     "package_id": "tree-sitter-chelis 0.1.0",
                     "profile": {"test": False},
-                    "target": {"name": "tree-sitter-chelis", "kind": ["lib"]},
+                    "target": {
+                        "name": "tree-sitter-chelis",
+                        "kind": ["lib"],
+                        "src_path": str(root / "tree-sitter-chelis/src/lib.rs"),
+                    },
                     "filenames": [str(selected_artifact)],
+                },
+                {
+                    "reason": "compiler-artifact",
+                    "package_id": "tree-sitter-chelis 0.1.0",
+                    "profile": {"test": False},
+                    "target": {
+                        "name": "future_tool",
+                        "kind": ["bin"],
+                        "src_path": str(
+                            root
+                            / "tree-sitter-chelis/src/bin/future_tool.rs"
+                        ),
+                    },
+                    "filenames": [str(gated_artifact)],
                 },
                 {
                     "reason": "compiler-artifact",
@@ -161,8 +320,8 @@ class ProductionSources(unittest.TestCase):
                 },
             ]
             self.assertEqual(
-                production_dep_info_files(messages, workspace),
-                {selected_dep_info},
+                production_dep_info_files(root, messages, workspace),
+                {gated_dep_info, selected_dep_info},
             )
 
     def test_real_workspace_includes_tree_sitter_outside_crates(

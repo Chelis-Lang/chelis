@@ -427,9 +427,12 @@ production module graph, including literal `#[path]` sources outside the
 target directory. One `test=false` source view excludes test-only items,
 statements, expressions, arms, fields, arguments, and generic parameters
 before include, macro, or module-wiring validation. The direct-construction
-boundary consumes that same view. Rustc dep-info selects the same Cargo package
-identities and is then independently reconciled against the graph through the
-repository's existing configuration-closure parser.
+boundary consumes that same view. The shared Cargo representation retains each
+production target's package identity, name, kind, root, and required features.
+Rustc runs with the union of those package-qualified required features and must
+emit non-test dep-info for every exact target identity before its source closure
+is independently reconciled against the graph through the repository's
+existing configuration-closure parser.
 Its current set is **#600, #689, #729, #759, #829, #879, #912,
 #951, #1058, #1059, #1138, #1192, #1277, #1298, #1306, #1364, #1383, #1482,
 and #1844**. Repeated citation sites collapse to one row; a missing cited row,
@@ -452,7 +455,8 @@ The dedicated liveness job is the hosted owner of fresh production-graph,
 compiler-closure, boundary, and tracker execution. Script-unit tests consume
 fixtures or injected source evidence for those paths, avoiding four redundant
 Cargo inventory/closure runs while preserving the dedicated job's fail-closed
-checks.
+checks. Its target-coverage assertion prevents Cargo's ordinary
+required-feature skip behavior from reducing the compiler-backed universe.
 
 ### Where the graph puts things
 

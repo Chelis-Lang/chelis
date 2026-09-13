@@ -58,11 +58,47 @@ class ProductionSource:
 
 
 @dataclass(frozen=True)
-class ProductionWorkspace:
-    """Cargo-owned package and target identities for production scanning."""
+class ProductionTarget:
+    """One exact Cargo-owned production target and its admission features."""
 
-    package_ids: frozenset[str]
-    target_roots: tuple[str, ...]
+    package_id: str
+    package_name: str
+    name: str
+    kinds: tuple[str, ...]
+    root: str
+    required_features: tuple[str, ...]
+
+    @property
+    def compiler_identity(self) -> tuple[str, str, tuple[str, ...], str]:
+        """Fields Cargo repeats on compiler-artifact messages."""
+        return (self.package_id, self.name, self.kinds, self.root)
+
+    def describe(self) -> str:
+        kinds = ",".join(self.kinds)
+        features = (
+            ",".join(self.required_features)
+            if self.required_features
+            else "none"
+        )
+        return (
+            f"{self.package_name}:{kinds}:{self.name} "
+            f"({self.root}; required features: {features})"
+        )
+
+
+@dataclass(frozen=True)
+class ProductionWorkspace:
+    """Exact Cargo-owned production target identities for source scanning."""
+
+    targets: tuple[ProductionTarget, ...]
+
+    @property
+    def package_ids(self) -> frozenset[str]:
+        return frozenset(target.package_id for target in self.targets)
+
+    @property
+    def target_roots(self) -> tuple[str, ...]:
+        return tuple(sorted({target.root for target in self.targets}))
 
 
 def discover_atoms(spec_dir: Path) -> list[str]:
@@ -93,8 +129,7 @@ def production_workspace_from_metadata(
     if not isinstance(packages, list) or not isinstance(members, list):
         raise RegistryError("cargo metadata lacks packages or workspace_members")
     member_ids = set(members)
-    package_ids: set[str] = set()
-    roots: set[str] = set()
+    targets: list[ProductionTarget] = []
     canonical_root = root.resolve()
     for package in packages:
         if not isinstance(package, dict):
@@ -103,27 +138,43 @@ def production_workspace_from_metadata(
         if package_id not in member_ids:
             continue
         manifest = package.get("manifest_path")
-        if not isinstance(package_id, str) or not isinstance(manifest, str):
-            raise RegistryError("workspace package has invalid id or manifest_path")
+        package_name = package.get("name")
+        if (
+            not isinstance(package_id, str)
+            or not isinstance(package_name, str)
+            or not isinstance(manifest, str)
+        ):
+            raise RegistryError(
+                "workspace package has invalid id, name, or manifest_path"
+            )
         try:
             Path(manifest).resolve().relative_to(canonical_root)
         except ValueError:
             continue
-        package_ids.add(package_id)
-        targets = package.get("targets")
-        if not isinstance(targets, list):
+        package_targets = package.get("targets")
+        if not isinstance(package_targets, list):
             raise RegistryError("workspace package has invalid targets")
-        for target in targets:
+        for target in package_targets:
             if not isinstance(target, dict):
                 raise RegistryError("workspace package has an invalid target")
             kinds = target.get("kind")
+            name = target.get("name")
             source = target.get("src_path")
+            required_features = target.get("required-features", [])
             if (
                 not isinstance(kinds, list)
                 or not all(isinstance(kind, str) for kind in kinds)
+                or not isinstance(name, str)
                 or not isinstance(source, str)
+                or not isinstance(required_features, list)
+                or not all(
+                    isinstance(feature, str) for feature in required_features
+                )
             ):
-                raise RegistryError("workspace target has invalid kind or src_path")
+                raise RegistryError(
+                    "workspace target has invalid kind, name, src_path, "
+                    "or required-features"
+                )
             if not PRODUCTION_TARGET_KINDS.intersection(kinds):
                 continue
             path = Path(source).resolve()
@@ -133,15 +184,33 @@ def production_workspace_from_metadata(
                 raise RegistryError(
                     f"production target root resolves outside repository: {source}"
                 ) from error
-            roots.add(relative.as_posix())
-    if not package_ids:
-        raise RegistryError("cargo metadata names no repository-local workspace packages")
-    if not roots:
-        raise RegistryError("cargo metadata names no production workspace target roots")
-    return ProductionWorkspace(
-        package_ids=frozenset(package_ids),
-        target_roots=tuple(sorted(roots)),
+            targets.append(
+                ProductionTarget(
+                    package_id=package_id,
+                    package_name=package_name,
+                    name=name,
+                    kinds=tuple(sorted(kinds)),
+                    root=relative.as_posix(),
+                    required_features=tuple(sorted(required_features)),
+                )
+            )
+    if not targets:
+        raise RegistryError(
+            "cargo metadata names no repository-local production targets"
+        )
+    targets.sort(
+        key=lambda target: (
+            target.package_id,
+            target.name,
+            target.kinds,
+            target.root,
+            target.required_features,
+        )
     )
+    identities = [target.compiler_identity for target in targets]
+    if len(identities) != len(set(identities)):
+        raise RegistryError("cargo metadata repeats a production target identity")
+    return ProductionWorkspace(targets=tuple(targets))
 
 
 def production_target_roots_from_metadata(
@@ -185,11 +254,38 @@ def compiler_source_closure_problems(
     return sorted(compiler_sources - parser_sources - excluded)
 
 
+def production_check_command(workspace: ProductionWorkspace) -> tuple[str, ...]:
+    """Compile every selected target under all of its required features."""
+    feature_specs = sorted(
+        {
+            f"{target.package_name}/{feature}"
+            for target in workspace.targets
+            for feature in target.required_features
+        }
+    )
+    command = [
+        "cargo",
+        "check",
+        "--workspace",
+        "--lib",
+        "--bins",
+    ]
+    if feature_specs:
+        command.extend(("--features", ",".join(feature_specs)))
+    command.append("--message-format=json")
+    return tuple(command)
+
+
 def production_dep_info_files(
-    messages: list[object], workspace: ProductionWorkspace
+    root: Path, messages: list[object], workspace: ProductionWorkspace
 ) -> set[Path]:
-    """Select dep-info for non-test artifacts in the shared Cargo package set."""
+    """Require dep-info for every exact Cargo-owned production target."""
+    expected = {
+        target.compiler_identity: target for target in workspace.targets
+    }
+    observed: set[tuple[str, str, tuple[str, ...], str]] = set()
     dep_info_files: set[Path] = set()
+    canonical_root = root.resolve()
     for message in messages:
         if (
             not isinstance(message, dict)
@@ -204,11 +300,41 @@ def production_dep_info_files(
             not isinstance(profile, dict)
             or profile.get("test") is not False
             or not isinstance(target, dict)
-            or not isinstance(target.get("kind"), list)
-            or not PRODUCTION_TARGET_KINDS.intersection(target["kind"])
             or not isinstance(filenames, list)
         ):
             continue
+        kinds = target.get("kind")
+        if (
+            not isinstance(kinds, list)
+            or not all(isinstance(kind, str) for kind in kinds)
+            or not PRODUCTION_TARGET_KINDS.intersection(kinds)
+        ):
+            continue
+        name = target.get("name")
+        source = target.get("src_path")
+        if not isinstance(name, str) or not isinstance(source, str):
+            raise RegistryError(
+                "cargo production artifact has invalid name or src_path"
+            )
+        try:
+            relative = Path(source).resolve().relative_to(canonical_root)
+        except ValueError as error:
+            raise RegistryError(
+                f"cargo production artifact resolves outside repository: {source}"
+            ) from error
+        identity = (
+            message["package_id"],
+            name,
+            tuple(sorted(kinds)),
+            relative.as_posix(),
+        )
+        selected = expected.get(identity)
+        if selected is None:
+            raise RegistryError(
+                "cargo reported an unexpected production target: "
+                f"{message['package_id']}:{','.join(sorted(kinds))}:{name} "
+                f"({relative.as_posix()})"
+            )
         candidates: set[Path] = set()
         for filename in filenames:
             if not isinstance(filename, str):
@@ -220,21 +346,32 @@ def production_dep_info_files(
                 candidates.add(candidate)
         if not candidates:
             raise RegistryError(
-                f"cargo artifact `{target.get('name', '?')}` has no readable dep-info"
+                f"cargo artifact `{selected.describe()}` has no readable dep-info"
             )
+        observed.add(identity)
         dep_info_files.update(candidates)
+    missing = [
+        target.describe()
+        for identity, target in expected.items()
+        if identity not in observed
+    ]
+    if missing:
+        raise RegistryError(
+            f"cargo reported no dep-info for production targets: {sorted(missing)}"
+        )
     return dep_info_files
 
 
 def discover_compiler_production_sources(
     root: Path, workspace: ProductionWorkspace | None = None
 ) -> set[str]:
-    """Ask rustc dep-info which files default production targets read.
+    """Ask rustc dep-info which files every production target reads.
 
     This is the exact mechanism owned by ``check_configuration_closure.py``.
     Cargo JSON selects only non-test artifacts for the same repository-local
-    package identity set that owns the structural target roots; their matching
-    dep-info files independently supply the compiler-read source closure.
+    target identity set that owns the structural roots. Required target
+    features are derived from that representation, and every target must emit
+    matching dep-info before its compiler-read source closure is accepted.
     """
     workspace = workspace or discover_production_workspace(root)
     canonical_root = root.resolve()
@@ -242,14 +379,7 @@ def discover_compiler_production_sources(
     environment = dict(os.environ)
     environment["PYO3_PYTHON"] = sys.executable
     completed = subprocess.run(
-        (
-            "cargo",
-            "check",
-            "--workspace",
-            "--lib",
-            "--bins",
-            "--message-format=json",
-        ),
+        production_check_command(workspace),
         cwd=root,
         env=environment,
         check=False,
@@ -268,7 +398,7 @@ def discover_compiler_production_sources(
             messages.append(json.loads(line))
         except json.JSONDecodeError:
             continue
-    dep_info_files = production_dep_info_files(messages, workspace)
+    dep_info_files = production_dep_info_files(root, messages, workspace)
     if not dep_info_files:
         raise RegistryError("cargo reported no production workspace dep-info")
 
