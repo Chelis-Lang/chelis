@@ -1318,11 +1318,15 @@ execution tests prove its sanctioned replacements work.
   so a witness cannot be weakened while its manifest entry still claims the old
   semantics.
 - Phase 1 freezes `DTypeContract`, sealed element markers, exact capacity keys,
-  and checked finite-count types. Later phases consume them without parallel
-  tables.
-- Phase 2 freezes the generated host/device schema and public-layout parity.
-  Later field changes amend [05-OP-31] or [05-OP-44] first when public,
-  regenerate every consumer, and move the freeze in one change.
+  checked finite-count types, and a required test-identity floor. Later phases
+  consume the contracts without parallel tables. Tests newly selected by an
+  existing command execute and appear as additions without weakening or moving
+  that floor.
+- Phase 2 freezes the generated host/device schema, public-layout parity, and a
+  required test-identity floor. Later field changes amend [05-OP-31] or
+  [05-OP-44] first when public, regenerate every consumer, and move the
+  architectural freeze in one change. Newly selected tests execute and are
+  reported without requiring a floor amendment.
 - Phase 3 freezes typed runtime ingress and the private data field. Reopening a
   raw accessor is a design change, not a local optimization.
 - Phase 4 freezes the typed lane renderer and all-lanes representation probes.
@@ -1330,9 +1334,11 @@ execution tests prove its sanctioned replacements work.
 - Phase 5 freezes the composite oracle and closure receipts. No individual
   child test substitutes for it.
 
-Moving a freeze requires changing this document, the owning numbered spec when
-semantics move, the oracle's integrity digest, and a mutation that would have
-accepted the forbidden behavior.
+Moving an architectural freeze or removing, renaming, or intentionally replacing
+a required test identity requires changing this document, the owning numbered
+spec when semantics move, the oracle's integrity digest, and a mutation that
+would have accepted the forbidden behavior. Adding a test already selected by a
+frozen command does not move the required floor.
 
 The chelis#1286 private ownership-IR boundary extends the Phase 0 source
 universe by eight `chelis-ir/src/ownership/` files without adding or
@@ -1523,9 +1529,12 @@ Final line: `RUNTIME REPRESENTATION PHASE 1: PASS`.
 
 The Phase 1 implementation is `scripts/runtime_representation_phase1.py`, invoked
 through the command above. `runtime_representation_phase1_tests.json` freezes
-exact test identities and commands; its reviewed digest is in the implementation.
-A changed test cohort requires a reviewed manifest amendment. Neither a previous
-receipt nor a regenerated selection is an acceptance input.
+required test-identity floors and commands; its reviewed digest is in the
+implementation. Removing, renaming, or intentionally replacing a required
+identity requires a reviewed manifest amendment. A test newly selected by an
+existing command is an addition: it executes and is reported without changing
+the required floor. Neither a previous receipt nor a regenerated selection is an
+acceptance input.
 
 The host/C consumer audit follows the representation owners and submissions:
 
@@ -1552,12 +1561,17 @@ and generated descriptor/Python/DLPack adoption remains Phase 2.
 The oracle first checks clean committed source bytes/modes, executes its Python
 framework controls, validates the Phase 0 inventory and rejects all its live
 production seam mutations. Each Rust leg then builds and lists current tests,
-requires the frozen nonempty selection, hashes the listed executables, removes
-any earlier JUnit output, and executes with a dedicated nextest profile and zero
-retries. Missing, duplicate, ignored, skipped, failing or unselected results
-cannot satisfy the selection; changed executables fail. The isolated JUnit path
-prevents nested CLI tests from replacing the parent receipt. Current test results
-are written alongside their command, source identity and executable digests.
+requires every nonempty frozen identity while accepting current additions,
+hashes every listed executable, removes any earlier JUnit output, and executes
+the complete current selection with a dedicated nextest profile and zero
+retries. Missing, renamed, duplicate, ignored, skipped, failing or unexecuted
+required identities block. Added identities also block if ignored, skipped,
+failing or unexecuted. Native failure controls and production mutation probes
+retain exact one-for-one selection rather than the cohort-floor rule. The
+isolated JUnit path prevents nested CLI tests from replacing the parent receipt.
+Receipt schema 2 records `required`, current `selected`, exact `additions`, and
+one passing `executed` row per current identity alongside the command, source
+identity and executable digests.
 
 Native execution uses a separately pinned archive from the current
 `cargo build --locked -p chelis-runtime --lib --features ownership-ledger
@@ -1639,13 +1653,18 @@ uv run --managed-python --python 3.11 --no-project python \
 Final line: `RUNTIME REPRESENTATION PHASE 2: PASS`.
 
 The implementation is `scripts/runtime_representation_phase2.py`.
-`runtime_representation_phase2_tests.json` freezes six Python contract cases
-and 237 current Rust selections: 33 shared-ABI tests, six metadata-plan C API
-tests, 79 HIP descriptor/owner tests, 109 platform-invariant Python binding
-tests, and ten backend-header census tests. The Python leg names its integration
-binaries and relevant internal ownership tests explicitly rather than freezing
-platform-only package tests. The command first obtains a complete fresh Phase 1
-receipt, then lists and executes each Phase 2 cohort with zero retries and
+`runtime_representation_phase2_tests.json` stores seven required Python contract
+identities and 237 explicit required Rust identities: 33 shared-ABI tests, six
+metadata-plan C API tests, 79 HIP descriptor/owner tests, 109 platform-invariant
+Python binding tests, and ten backend-header census tests. Counts and digests are
+derived summaries, not membership authority. The Python leg names its
+integration binaries and relevant internal ownership tests explicitly rather
+than freezing platform-only package tests. The command first obtains a complete
+fresh Phase 1 receipt, then lists and executes each complete current Phase 2
+cohort with zero retries. Every required identity must remain selected,
+nonignored, executed and passing; additions are executed and reported, while a
+removal or rename blocks. Receipt schema 2 distinguishes `required`, current
+`selected`, exact `additions`, and passing `executed` identities, and the runner
 verifies unchanged test artifacts and source identity. The only recorded
 non-execution is the exact HIP hardware command above; CPU SDK-fixture execution
 does not relabel it as hardware evidence. Hosted CI advances the stable

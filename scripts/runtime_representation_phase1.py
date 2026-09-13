@@ -27,7 +27,7 @@ ROOT = phase0.REPO_ROOT
 OracleFailure = phase0.OracleFailure
 PROFILE = 'runtime-representation'
 MANIFEST = ROOT / 'spec/design/runtime_representation_phase1_tests.json'
-MANIFEST_SHA256 = 'e09106ce7c4898af225e487202ee3363a63cd9602af1a1e94a71e7c252618fe1'
+MANIFEST_SHA256 = '3981994c888a44300648ef1c81bb13578a71c5ab7d729d041a5804880aa55c76'
 MANUAL_TEST = 'an_allocation_above_int32_elements_reports_its_true_extent'
 
 
@@ -66,13 +66,40 @@ class PythonReceipts(unittest.TextTestResult):
         self.executed.append(test.id())
 
 
-def python_execution(suite, expected):
+def python_selection(suite):
+    selected = []
+
+    def visit(test):
+        if isinstance(test, unittest.TestSuite):
+            for child in test:
+                visit(child)
+        else:
+            selected.append(test.id())
+
+    visit(suite)
+    selected.sort()
+    _require_identity_list(selected, 'current Python test selection')
+    return selected
+
+
+def python_execution(suite, required):
+    selected = python_selection(suite)
+    additions = require_frozen_selection(selected, required)
+    if additions:
+        print(f'+ Python controls: execute {len(additions)} added tests', flush=True)
+        for identity in additions:
+            print(f'  + {identity}', flush=True)
     result = unittest.TextTestRunner(verbosity=1, resultclass=PythonReceipts).run(suite)
-    if (not result.wasSuccessful() or not expected or len(set(expected)) != len(expected)
+    if (not result.wasSuccessful()
             or len(result.executed) != len(set(result.executed))
-            or sorted(result.executed) != sorted(expected)):
-        raise OracleFailure('Python selection lacks exact successful framework execution')
-    return sorted(result.executed)
+            or sorted(result.executed) != selected):
+        raise OracleFailure('Python selection lacks complete successful framework execution')
+    return {
+        'required': required,
+        'selected': selected,
+        'additions': additions,
+        'executed': sorted(result.executed),
+    }
 
 
 def python_suite():
@@ -92,6 +119,37 @@ def artifact_hashes(paths):
 def verify_artifacts(expected):
     if artifact_hashes(expected) != expected:
         raise OracleFailure('test artifact changed between selection and execution')
+
+
+def _require_identity_list(identities, label):
+    if (
+        not isinstance(identities, list)
+        or not identities
+        or not all(isinstance(identity, str) and identity for identity in identities)
+        or len(set(identities)) != len(identities)
+        or identities != sorted(identities)
+    ):
+        raise OracleFailure(f'{label} is empty, duplicate, unordered, or malformed')
+
+
+def require_exact_selection(selected, expected):
+    _require_identity_list(selected, 'current exact test selection')
+    _require_identity_list(expected, 'reviewed exact test selection')
+    if selected != expected:
+        raise OracleFailure('exact test selection drifted')
+
+
+def require_frozen_selection(selected, required):
+    _require_identity_list(selected, 'current test selection')
+    _require_identity_list(required, 'reviewed required test selection')
+    selected_set = set(selected)
+    missing = [identity for identity in required if identity not in selected_set]
+    if missing:
+        raise OracleFailure(
+            'frozen test selection lost identities: ' + ', '.join(missing)
+        )
+    required_set = set(required)
+    return [identity for identity in selected if identity not in required_set]
 
 
 def runtime_artifact(output):
@@ -174,12 +232,10 @@ def selection(packet, root: Path, expected=None):
     except (KeyError, TypeError, ValueError) as error:
         raise OracleFailure(f'malformed nextest selection: {error}') from error
     selected.sort()
-    if (
-        not selected
-        or len(set(selected)) != len(selected)
-        or (expected is not None and selected != expected)
-    ):
-        raise OracleFailure('empty, duplicate, or drifted frozen test selection')
+    if not selected or len(set(selected)) != len(selected):
+        raise OracleFailure('empty or duplicate current test selection')
+    if expected is not None:
+        require_exact_selection(selected, expected)
     return selected, artifact_hashes(binaries)
 
 
@@ -346,10 +402,15 @@ def junit_path(root: Path | None = None):
     return (ROOT if root is None else root) / 'target' / 'nextest' / PROFILE / 'junit.xml'
 
 
-def execute_leg(name, args, expected, directory):
-    print(f'+ {name}: list and execute {len(expected)} frozen tests', flush=True)
+def execute_leg(name, args, required, directory):
+    print(f'+ {name}: list and execute {len(required)} required tests', flush=True)
     listed = command([*nextest_command('list', args), '--message-format', 'json'], ROOT, directory, 'list')
-    selected, artifacts = selection(load_json(listed), ROOT, expected)
+    selected, artifacts = selection(load_json(listed), ROOT)
+    additions = require_frozen_selection(selected, required)
+    if additions:
+        print(f'+ {name}: execute {len(additions)} added tests', flush=True)
+        for identity in additions:
+            print(f'  + {identity}', flush=True)
     junit = junit_path()
     junit.unlink(missing_ok=True)
     command([*nextest_command('run', args), '--no-fail-fast', '--retries', '0'], ROOT, directory, 'run')
@@ -359,7 +420,14 @@ def execute_leg(name, args, expected, directory):
     (directory / 'execution.xml').write_text(xml)
     executed = execution(xml, selected)
     verify_artifacts(artifacts)
-    return {'name': name, 'selected': selected, 'executed': [{'id': name, 'outcome': 'passed'} for name in executed], 'artifacts': artifacts}
+    return {
+        'name': name,
+        'required': required,
+        'selected': selected,
+        'additions': additions,
+        'executed': [{'id': identity, 'outcome': 'passed'} for identity in executed],
+        'artifacts': artifacts,
+    }
 
 
 def native_controls():
@@ -381,7 +449,7 @@ def native_controls():
     for package, binary, test in consumers:
         args = ['-p', package, *(['--test', binary] if binary else ['--lib']), '-E', f'test(={test})']
         identity = f'{package}::{binary}::{test}' if binary else f'{package}::{test}'
-        controls.append({'kind': 'empty-runtime-archive', 'args': args, 'selected': [identity]})
+        controls.append({'kind': 'empty-runtime-archive', 'args': args, 'required': [identity]})
     for binary, test in [(None, 'tests::generated_code_compiles_with_platform_parallelism'),
                          (None, 'tests::canonical_matmul_numerics_ignore_blas_hint'),
                          ('dtype_matrix_bf16_f16', 'bf16_matmul_agrees_with_evaluator'),
@@ -389,7 +457,7 @@ def native_controls():
                          ('fused_compile', 'c_fused_reduce_compiles')]:
         controls.append({'kind': 'missing-c-compiler',
                          'args': ['-p', 'chelis-backend-c', *(['--test', binary] if binary else ['--lib']), '-E', f'test(={test})'],
-                         'selected': [f'chelis-backend-c::{binary}::{test}' if binary else f'chelis-backend-c::{test}']})
+                         'required': [f'chelis-backend-c::{binary}::{test}' if binary else f'chelis-backend-c::{test}']})
     return controls
 
 
@@ -402,7 +470,7 @@ def execute_native_controls(directory):
         evidence = directory / str(index)
         args = control['args']
         listed = command([*nextest_command('list', args), '--message-format', 'json'], ROOT, evidence, 'list')
-        selected, artifacts = selection(load_json(listed), ROOT, control['selected'])
+        selected, artifacts = selection(load_json(listed), ROOT, control['required'])
         variable = 'CHELIS_RUNTIME_DIR' if control['kind'] == 'empty-runtime-archive' else 'CHELIS_TEST_CC'
         previous = os.environ.get(variable)
         os.environ[variable] = str(bad if variable == 'CHELIS_RUNTIME_DIR' else directory / 'missing-compiler')
@@ -466,41 +534,54 @@ def execute_planner_mutations(directory):
     return receipts
 
 
-def run() -> Path:
-    check_options(sys.argv[1:])
-    identity = source_identity(ROOT)
-    packet = frozen_manifest(MANIFEST.read_bytes(), MANIFEST_SHA256)
+def validate_manifest(packet):
     expected_mutations = [{'id': n, 'before': a, 'after': z, 'test': t} for n, a, z, t in planner_mutations()]
     if packet.get('planner_mutations') != expected_mutations:
         raise OracleFailure('Phase 1 production mutation manifest drifted')
     if packet.get('native_controls') != native_controls():
         raise OracleFailure('Phase 1 native control manifest drifted')
     legs = phase1_legs()
-    if packet.get('schema') != 1 or [row.get('name') for row in packet.get('legs', [])] != [name for name, _ in legs]:
+    if packet.get('schema') != 2 or [row.get('name') for row in packet.get('legs', [])] != [name for name, _ in legs]:
         raise OracleFailure('Phase 1 leg inventory drifted')
     for row, (_, args) in zip(packet['legs'], legs, strict=True):
         if row.get('args') != list(args):
             raise OracleFailure('Phase 1 frozen command drifted')
+        _require_identity_list(row.get('required'), 'Phase 1 required test selection')
+    _require_identity_list(packet.get('python_required'), 'Phase 1 required Python selection')
+    return legs
+
+
+def run() -> Path:
+    check_options(sys.argv[1:])
+    identity = source_identity(ROOT)
+    packet = frozen_manifest(MANIFEST.read_bytes(), MANIFEST_SHA256)
+    legs = validate_manifest(packet)
     run_id = str(uuid.uuid4())
     directory = ROOT / 'target/runtime-representation-phase1' / run_id
     directory.mkdir(parents=True, exist_ok=False)
-    python_cases = python_execution(python_suite(), packet['python_selected'])
+    python_receipt = python_execution(python_suite(), packet['python_required'])
     phase0.validate_phase0_inventory()
     phase0.run_phase0_mutations()
     with runtime_pin(directory / 'runtime-build') as runtime_receipt:
         native_receipts = execute_native_controls(directory / 'native-controls')
         executions = []
         for index, (row, (name, args)) in enumerate(zip(packet['legs'], legs, strict=True)):
-            executions.append(execute_leg(name, args, row['selected'], directory / str(index)))
+            executions.append(execute_leg(name, args, row['required'], directory / str(index)))
         planner_receipts = execute_planner_mutations(directory / 'planner-mutations')
         for leg in phase0.phase0_legs():
             if '--doc' in leg.argv:
                 command(list(leg.argv), ROOT, directory / 'supporting-doc-privacy', 'run')
     if source_identity(ROOT) != identity:
         raise OracleFailure('source changed during execution')
-    receipt = {'schema': 1, 'head': identity[0], 'source_digest': identity[1], 'run_id': run_id,
+    receipt = {'schema': 2, 'head': identity[0], 'source_digest': identity[1], 'run_id': run_id,
                'manifest_sha256': hashlib.sha256(MANIFEST.read_bytes()).hexdigest(),
-               'python_executed': [{'id': name, 'outcome': 'passed'} for name in python_cases],
+               'python': {
+                   **{key: value for key, value in python_receipt.items() if key != 'executed'},
+                   'executed': [
+                       {'id': name, 'outcome': 'passed'}
+                       for name in python_receipt['executed']
+                   ],
+               },
                'mutation_probes': [{'id': probe.witness_id, 'outcome': 'rejected',
                                     'expected_class': probe.expected_kind}
                                    for probe in phase0.phase0_mutation_probes()],
