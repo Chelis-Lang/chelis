@@ -391,42 +391,189 @@ fn is_cxx_raw_literal(spelling: &str) -> bool {
         .any(|prefix| spelling.starts_with(prefix))
 }
 
-fn splice_c_line_continuations(source: &str) -> String {
-    let chars: Vec<char> = source.chars().collect();
-    let mut spliced = String::with_capacity(source.len());
-    let mut index = 0;
+fn c_line_splice_end(chars: &[char], index: usize) -> Option<usize> {
+    if chars.get(index) != Some(&'\\') {
+        return None;
+    }
+    if chars.get(index + 1) == Some(&'\n') {
+        Some(index + 2)
+    } else if chars.get(index + 1) == Some(&'\r') && chars.get(index + 2) == Some(&'\n') {
+        Some(index + 3)
+    } else {
+        None
+    }
+}
 
-    while index < chars.len() {
-        if let Some(Ok(raw_end)) = c_lexical::cxx_raw_string_end(&chars, index) {
-            spliced.extend(chars[index..raw_end].iter());
-            index = raw_end;
+fn next_c_logical_char(chars: &[char], mut index: usize) -> Option<(char, usize)> {
+    while let Some(splice_end) = c_line_splice_end(chars, index) {
+        index = splice_end;
+    }
+    chars
+        .get(index)
+        .copied()
+        .map(|character| (character, index + 1))
+}
+
+fn cxx_raw_literal_end(chars: &[char], start: usize) -> Option<usize> {
+    const PREFIXES: &[&[char]] = &[
+        &['R'],
+        &['u', '8', 'R'],
+        &['u', 'R'],
+        &['U', 'R'],
+        &['L', 'R'],
+        &['@', 'R'],
+    ];
+
+    for prefix in PREFIXES {
+        let mut cursor = start;
+        let mut matches_prefix = true;
+        for expected in *prefix {
+            let Some((actual, next)) = next_c_logical_char(chars, cursor) else {
+                matches_prefix = false;
+                break;
+            };
+            if actual != *expected {
+                matches_prefix = false;
+                break;
+            }
+            cursor = next;
+        }
+        if !matches_prefix {
             continue;
         }
 
-        let splice_end = if chars[index] == '\\' && chars.get(index + 1) == Some(&'\n') {
-            Some(index + 2)
-        } else if chars[index] == '\\'
-            && chars.get(index + 1) == Some(&'\r')
-            && chars.get(index + 2) == Some(&'\n')
-        {
-            Some(index + 3)
-        } else {
-            None
+        let Some(('"', next)) = next_c_logical_char(chars, cursor) else {
+            continue;
         };
+        cursor = next;
 
-        if let Some(splice_end) = splice_end {
-            index = splice_end;
-        } else {
-            spliced.push(chars[index]);
-            index += 1;
+        let mut delimiter = Vec::new();
+        loop {
+            let (character, next) = next_c_logical_char(chars, cursor)?;
+            if character == '(' {
+                cursor = next;
+                break;
+            }
+            if delimiter.len() == 16 || character.is_whitespace() || matches!(character, ')' | '\\')
+            {
+                return None;
+            }
+            delimiter.push(character);
+            cursor = next;
+        }
+
+        while cursor < chars.len() {
+            if chars[cursor] == ')'
+                && chars.get(cursor + 1..cursor + 1 + delimiter.len()) == Some(&delimiter)
+                && chars.get(cursor + 1 + delimiter.len()) == Some(&'"')
+            {
+                return Some(cursor + delimiter.len() + 2);
+            }
+            cursor += 1;
+        }
+        return None;
+    }
+    None
+}
+
+#[derive(Clone, Copy)]
+enum CProjectionContext {
+    Normal,
+    LineComment,
+    BlockComment,
+    Quoted { delimiter: char, escaped: bool },
+}
+
+fn project_c_translation_phases(source: &str) -> String {
+    let chars: Vec<char> = source.chars().collect();
+    let mut projected = String::with_capacity(source.len());
+    let mut context = CProjectionContext::Normal;
+    let mut index = 0;
+
+    while let Some((character, next)) = next_c_logical_char(&chars, index) {
+        match context {
+            CProjectionContext::Normal => {
+                let physical_start = next - 1;
+                if let Some(raw_end) = cxx_raw_literal_end(&chars, physical_start) {
+                    projected.push_str("R\"()\"");
+                    index = raw_end;
+                    continue;
+                }
+
+                if character == '/'
+                    && let Some((next_character, after_next)) = next_c_logical_char(&chars, next)
+                    && matches!(next_character, '/' | '*')
+                {
+                    projected.push(character);
+                    projected.push(next_character);
+                    index = after_next;
+                    context = if next_character == '/' {
+                        CProjectionContext::LineComment
+                    } else {
+                        CProjectionContext::BlockComment
+                    };
+                    continue;
+                }
+
+                projected.push(character);
+                index = next;
+                if matches!(character, '"' | '\'') {
+                    context = CProjectionContext::Quoted {
+                        delimiter: character,
+                        escaped: false,
+                    };
+                }
+            }
+            CProjectionContext::LineComment => {
+                projected.push(character);
+                index = next;
+                if character == '\n' {
+                    context = CProjectionContext::Normal;
+                }
+            }
+            CProjectionContext::BlockComment => {
+                if character == '*'
+                    && let Some(('/', after_slash)) = next_c_logical_char(&chars, next)
+                {
+                    projected.push('*');
+                    projected.push('/');
+                    index = after_slash;
+                    context = CProjectionContext::Normal;
+                } else {
+                    projected.push(character);
+                    index = next;
+                }
+            }
+            CProjectionContext::Quoted { delimiter, escaped } => {
+                projected.push(character);
+                index = next;
+                context = if escaped {
+                    CProjectionContext::Quoted {
+                        delimiter,
+                        escaped: false,
+                    }
+                } else if character == '\\' {
+                    CProjectionContext::Quoted {
+                        delimiter,
+                        escaped: true,
+                    }
+                } else if character == delimiter {
+                    CProjectionContext::Normal
+                } else {
+                    CProjectionContext::Quoted {
+                        delimiter,
+                        escaped: false,
+                    }
+                };
+            }
         }
     }
-    spliced
+    projected
 }
 
 fn lex_c_family_tokens(source: &str) -> Vec<SourceToken> {
-    let spliced = splice_c_line_continuations(source);
-    c_lexical::lex_c_tokens(&spliced)
+    let projected = project_c_translation_phases(source);
+    c_lexical::lex_c_tokens(&projected)
         .into_iter()
         .map(|spelling| {
             if is_cxx_raw_literal(&spelling) {
@@ -1117,6 +1264,60 @@ fn c_family_line_splicing_precedes_line_comment_projection() {
             forbidden.len(),
             1,
             "without a splice, the next {label} physical line remains active: {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn c_family_raw_looking_text_in_continued_line_comments_is_not_a_raw_literal() {
+    for (label, newline) in [("lf", "\n"), ("crlf", "\r\n")] {
+        let source = ScannedSource::new(
+            PathBuf::from(format!(
+                "crates/example/include/raw-looking-line-comment-{label}.cpp"
+            )),
+            &format!("// R\"x(note \\{newline}return sizeof(float);)x\"{newline}"),
+        );
+        let forbidden =
+            forbidden_occurrences("RuntimeDType", &["return sizeof(float);"], &[source]);
+        assert!(
+            forbidden.is_empty(),
+            "{label} raw-looking comment payload must not receive raw-literal splice reversion: \
+             {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn c_family_block_comments_own_raw_looking_payload() {
+    for (label, newline) in [("lf", "\n"), ("crlf", "\r\n")] {
+        let inert = ScannedSource::new(
+            PathBuf::from(format!(
+                "crates/example/include/raw-looking-block-comment-{label}.cpp"
+            )),
+            &format!("/* R\"x(note \\{newline}return sizeof(float);)x\" */{newline}"),
+        );
+        let forbidden = forbidden_occurrences("RuntimeDType", &["return sizeof(float);"], &[inert]);
+        assert!(
+            forbidden.is_empty(),
+            "{label} raw-looking block-comment payload remains comment text: {forbidden:?}"
+        );
+
+        let closes_first = ScannedSource::new(
+            PathBuf::from(format!(
+                "crates/example/include/raw-looking-block-close-{label}.cpp"
+            )),
+            &format!(
+                "/* R\"x(note */ size_t width(void) {{ return sizeof(float); }} \
+                 /* )x\" */{newline}"
+            ),
+        );
+        let forbidden =
+            forbidden_occurrences("RuntimeDType", &["return sizeof(float);"], &[closes_first]);
+        assert_eq!(
+            forbidden.len(),
+            1,
+            "{label} a block-comment terminator inside raw-looking text remains authoritative: \
+             {forbidden:?}"
         );
     }
 }
