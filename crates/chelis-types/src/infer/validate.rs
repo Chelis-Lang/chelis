@@ -843,7 +843,7 @@ pub(super) fn walk_for_poly_op_constraint_violations(
     let body = stamped_parts(expr)
         .filter(|(tag, _, _)| *tag == DeepTag::Def)
         .and_then(|(_, _, kids)| kids.get(1))
-        .and_then(|body| extract_fn_params_and_body(body))
+        .and_then(extract_fn_params_and_body)
         .map(|(_, body)| body);
     walk_for_poly_op_constraint_violations_in(
         body.as_ref().unwrap_or(expr),
@@ -883,7 +883,7 @@ fn walk_for_poly_op_constraint_violations_in(
     if let Some((DeepTag::Let, _, kids)) = stamped_parts(expr) {
         let mut extended = locals.clone();
         if let Some((DeepTag::Bind, _, bind_kids)) = kids.first().and_then(stamped_parts) {
-            for pair in bind_kids.chunks_exact(2) {
+            for pair in bind_kids.as_chunks::<2>().0 {
                 let value = &pair[1];
                 walk_for_poly_op_constraint_violations_in(
                     value,
@@ -1266,23 +1266,6 @@ pub(super) fn precision_prim_name_in_type_expr(expr: &deep::Expr) -> Option<Stri
         return None;
     }
     prec_kids.first().and_then(symbol_name).map(String::from)
-}
-
-/// Look up the type of `(var name)` in the enclosing-def `scope` map
-/// (built from the def's sig + inline param annotations). Returns
-/// `None` when the expression is not a var or the name is not in
-/// scope.
-pub(super) fn resolve_var_type_in_scope(
-    expr: &deep::Expr,
-    scope: &BTreeMap<String, deep::Expr>,
-) -> Option<deep::Expr> {
-    // chelis#1107: carrier-preserving read.
-    let (tag, _, kids) = stamped_parts(expr)?;
-    if tag != DeepTag::Var {
-        return None;
-    }
-    let name = kids.first().and_then(symbol_name)?;
-    scope.get(name).cloned()
 }
 
 /// chelis#1805: the concrete precision an ARGUMENT expression carries, when the
