@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "e6a75f5bacbe99cc713d8eedd18840f003e65ddf9796393782d7ad5a123c9bb7",
+  "corpus_sha256": "e7060183d920b6027feef5dcabefe45053160cebf9ccb7b28d0f22c07e7dc4d6",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -211,6 +211,12 @@
       "baseline": "silent_unguarded",
       "phase_b": "rejects_exactly",
       "receipt": "types_unresolved_operand.a_late_bound_tensor_precision_is_rejected_at_the_instantiation"
+    },
+    {
+      "id": "entry.merged_scopes.declaration.c",
+      "baseline": "silent_unguarded",
+      "phase_b": "executes_exactly",
+      "receipt": "exec_c.issue_1788_two_scopes_in_one_function_share_one_declaration"
     },
     {
       "id": "expand.arith_size.named_claim.c",

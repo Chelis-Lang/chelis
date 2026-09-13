@@ -2007,6 +2007,19 @@ pub(crate) fn op_internal_symbolic_dims(op: &RiscOp) -> Vec<String> {
     out
 }
 
+/// Whether an op's internal payload still references `name` as a symbolic
+/// dimension, as [`op_internal_symbolic_dims`] recognizes payloads.
+///
+/// A consumer that RENAMES a dimension identity calls this after rewriting an
+/// op, so that an op payload the enumerator learns about later, and the rename
+/// does not, fails the rename closed instead of producing a graph that declares
+/// one symbol and reads another.
+pub fn op_references_symbol(op: &RiscOp, name: &str) -> bool {
+    op_internal_symbolic_dims(op)
+        .iter()
+        .any(|carried| carried == name)
+}
+
 /// Every symbolic dimension identity already carried by a DAG.
 ///
 /// Keep output-axis and op-internal carriers behind one enumerator so a
@@ -2015,7 +2028,7 @@ pub(crate) fn op_internal_symbolic_dims(op: &RiscOp) -> Vec<String> {
 /// exactly whatever [`op_internal_symbolic_dims`] recognizes, so an op that
 /// spells a dimension symbol only inside its own payload still participates
 /// even when no node output repeats that name.
-pub(crate) fn dimension_identity_names(dag: &Dag) -> UnordSet<String> {
+pub fn dimension_identity_names(dag: &Dag) -> UnordSet<String> {
     let mut names = UnordSet::new();
     for node in dag.nodes() {
         names.extend(node.output_type.dims.iter().filter_map(|dim| match dim {

@@ -1497,6 +1497,66 @@ fn root_reach(dag: &Dag) -> Vec<u128> {
     reach
 }
 
+/// Every node's SCOPE index, where two nodes share a scope when one root
+/// reaches both of them, transitively through any node a chain of roots shares.
+/// `None` marks a node no root reaches.
+///
+/// This is the node-level form of C2.4's scoping, over the same `root_reach`
+/// masks [`split_by_scope`] buckets a claim's members with. It is deliberately
+/// COARSER than that bucketing wherever two roots share a node, and it has to
+/// be: a node two roots reach cannot carry a different dimension name per root,
+/// so a consumer that RENAMES per scope may only split scopes that share
+/// nothing. Scopes are numbered by their lowest node id, so the numbering is a
+/// property of the graph rather than of iteration order.
+pub fn node_scopes(dag: &Dag) -> Vec<Option<usize>> {
+    let reach = root_reach(dag);
+    let mut masks: Vec<u128> = Vec::new();
+    for &mask in &reach {
+        if mask == 0 {
+            continue;
+        }
+        let mut merged = mask;
+        let mut kept: Vec<u128> = Vec::new();
+        for existing in masks.drain(..) {
+            if existing & merged != 0 {
+                merged |= existing;
+            } else {
+                kept.push(existing);
+            }
+        }
+        kept.push(merged);
+        masks = kept;
+    }
+    let mut ranked: Vec<(usize, usize)> = masks
+        .iter()
+        .enumerate()
+        .map(|(index, mask)| {
+            let first = reach
+                .iter()
+                .position(|node| *node != 0 && node & mask != 0)
+                .unwrap_or(usize::MAX);
+            (first, index)
+        })
+        .collect();
+    ranked.sort_unstable();
+    let mut rank = vec![0usize; masks.len()];
+    for (position, (_, index)) in ranked.into_iter().enumerate() {
+        rank[index] = position;
+    }
+    reach
+        .iter()
+        .map(|&mask| {
+            if mask == 0 {
+                return None;
+            }
+            masks
+                .iter()
+                .position(|scope| scope & mask != 0)
+                .map(|index| rank[index])
+        })
+        .collect()
+}
+
 /// Split each claim's members by SCOPE, so a name spelled by two signatures
 /// becomes two claims rather than one class.
 ///
