@@ -471,6 +471,51 @@ fn checked_result_axis_view_keeps_invalid_named_insert_rejection() {
     }
 }
 
+/// A monomorphized caller still needs its authored axis name for the next
+/// consumer. Keeping that name must not suppress the helper's extent claim.
+#[test]
+fn checked_result_axis_view_keeps_monomorphized_caller_anchor() {
+    for divisor in [1, 2] {
+        let result = eval(EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: format!(
+                "def g(x: tensor[n, f32]) -> tensor[n, {divisor}, f32] = reshape(x, [floor_div(shape(x, 0i32), {divisor}i64), {divisor}i64])\n\
+                 def f(a: tensor[left, f32]) -> tensor[one, left, {divisor}, f32] = insert(g(a), one, 1i64, left)\n\
+                 def main() = f(to_tensor([1.0f32, 2.0f32, 3.0f32, 4.0f32]))\n"
+            ),
+            bindings: BTreeMap::new(),
+        });
+        if divisor == 1 {
+            let roots = collect_named_roots_json(
+                &result
+                    .expect("the caller's left anchor survives actualization")
+                    .roots,
+                &["main"],
+            );
+            assert_eq!(
+                roots["main"],
+                r#"{"type":"tensor","value":{"shape":[1,4,1],"data":{"dtype":"f32","bits":["3f800000","40000000","40400000","40800000"]}}}"#
+            );
+        } else {
+            let error = result.expect_err("the false authored n extent must still trap");
+            let messages = error
+                .errors
+                .iter()
+                .map(|diagnostic| diagnostic.message.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                messages.contains("claimed = 4, reshape axis 0 = 2"),
+                "{messages}"
+            );
+            assert!(
+                messages.ends_with("numeric trap: domain in reshape at int64"),
+                "{messages}"
+            );
+        }
+    }
+}
+
 #[test]
 fn compile_context_accepts_symbolic_matmul_aliases_from_library_helpers() {
     let dir = TempDir::new().expect("tempdir");

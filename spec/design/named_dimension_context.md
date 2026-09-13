@@ -119,9 +119,10 @@ For an inline plain callable, lowering first preserves the helper's
 authored return claim, including its runtime obligation and source diagnostic.
 When checked and produced ranks agree, it then transports only a distinct,
 non-wildcard *named* checker-annotated call-result axis as a caller-side label.
-Resolve that axis in the saved caller substitutions before transporting a
-remaining name. A caller binder already actualized to a literal must not
-reappear as an unbound runtime symbol at an inlined root (#1917).
+Keep the checked caller name even when its binder actualizes to a literal:
+subsequent named consumers still refer to that label. Its runtime declaration
+must come from the returned value, not from treating the name as an extent
+binding in either the caller or callee namespace (#1917).
 Transport labels on a fresh rank-preserving `Reshape` value whose target
 extents are exact `Shape` reads of the produced value. Do not rewrite the
 producer's output type: an elementwise node must retain shape agreement with

@@ -9567,14 +9567,6 @@ impl<'program> LowerCtx<'program> {
             let produced_ty = self.dag.get(id).expect("result").output_type.clone();
             let mut labelled_ty = produced_ty.clone();
             for (axis, checked_dim) in expected_return_ty.dims.iter().enumerate() {
-                // Resolve a monomorphized caller binder in its own saved
-                // namespace, before considering a new result-axis label.
-                let checked_dim = match checked_dim {
-                    DimInfo::Named(name, None) => {
-                        saved_dim_substitutions.get(name).unwrap_or(checked_dim)
-                    }
-                    _ => checked_dim,
-                };
                 if Self::is_distinct_checked_named_result_axis(&declared_result, axis, checked_dim)
                 {
                     Self::refine_checked_result_axis_name(&mut labelled_ty, axis, checked_dim);
