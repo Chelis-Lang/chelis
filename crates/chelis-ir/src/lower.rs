@@ -5655,7 +5655,7 @@ struct ResolvedFunction {
     expression: std::sync::Arc<Expr>,
     /// Travels with the resolved callable through lexical aliases and AD.
     /// It is a claim, never evidence of the body's actual result extent.
-    signature: Option<Expr>,
+    signature: Option<std::sync::Arc<Expr>>,
 }
 
 impl std::ops::Deref for ResolvedFunction {
@@ -5668,7 +5668,7 @@ impl std::ops::Deref for ResolvedFunction {
 impl ResolvedFunction {
     fn result_type(&self) -> Option<&Expr> {
         self.signature
-            .as_ref()
+            .as_deref()
             .and_then(stamped_parts)
             .and_then(|(tag, _, kids)| (tag == DeepTag::TFn).then(|| kids.last()).flatten())
             .or_else(|| extract_fn_return_type(&self.expression))
@@ -7788,7 +7788,7 @@ impl<'program> LowerCtx<'program> {
                 if let CallableExpr::Plain(function) = &mut callable
                     && let Some(signature) = self.program_signatures.get(&name)
                 {
-                    function.signature = Some(signature.clone());
+                    function.signature = Some(std::sync::Arc::new(signature.clone()));
                 }
                 self.local_callables.insert(
                     match &elems[2] {
@@ -8399,7 +8399,7 @@ impl<'program> LowerCtx<'program> {
                     if let CallableExpr::Plain(function) = &mut callable
                         && let Some(signature) = self.program_signatures.get(&name)
                     {
-                        function.signature = Some(signature.clone());
+                        function.signature = Some(std::sync::Arc::new(signature.clone()));
                     }
                     return Some(callable);
                 }

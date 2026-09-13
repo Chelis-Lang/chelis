@@ -27,18 +27,23 @@ fn lowering_scalar_helpers_keeps_scope_snapshot_allocations_bounded() {
         .stack_size(128 * 1024 * 1024)
         .spawn(|| {
             let mut source = String::new();
+            let parameters = (0..32)
+                .map(|i| format!("x{i}: tensor[f64]"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let arguments = vec!["x"; 32].join(", ");
             for function in 0..16 {
                 writeln!(
                     source,
-                    "def helper{function}(x: tensor[f64]) -> tensor[f64] = {{"
+                    "def helper{function}({parameters}) -> tensor[f64] = {{"
                 )
                 .unwrap();
                 for index in 0..128 {
-                    writeln!(source, "v{index} = x + scalar_to_tensor({index}.0f64)").unwrap();
+                    writeln!(source, "v{index} = x0 + scalar_to_tensor({index}.0f64)").unwrap();
                 }
                 source.push_str("v127\n}\n");
             }
-            source.push_str("x = (x : tensor[f64])\nout = helper15(x)\n");
+            writeln!(source, "x = (x : tensor[f64])\nout = helper15({arguments})").unwrap();
             let decls = chelis_surf::parser::parse_str(&source).unwrap();
             let deep = chelis_surf::desugar::desugar_program(&decls);
             let expanded = chelis_macros::expand_program(
