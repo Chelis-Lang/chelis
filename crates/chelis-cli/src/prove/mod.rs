@@ -3236,7 +3236,7 @@ fn resolve_package_root(input: &Path, explicit: Option<&Path>) -> Option<PathBuf
     chelis_reef::find_package_root_for_dir(start).ok().flatten()
 }
 
-/// Whether the prove dispatch path can actually ROUTE a goal to Beacon (#673).
+/// Whether the legacy BoxRange registry route reaches Beacon (#673).
 ///
 /// Probes the production registry with Beacon's native goal shape (`BoxRange`)
 /// and asks which engine would be selected. This is the dispatchability claim
@@ -3303,10 +3303,8 @@ pub fn prove_capabilities() -> serde_json::Value {
     if beacon_contract_prover_available {
         engine_registry.push("beacon_contract_prover");
     }
-    // Schema version 2: adds beacon_contract_prover_available, reachable_bs_tier,
-    // certified_envelope tier, beacon_contract_prover engine. Consumers that only
-    // check for fields they know handle this additively (new fields are ignored).
-    // The version bump signals that the contract prover capability exists.
+    // Schema version 3 adds the explicit scalar Beacon route and its budgets.
+    // Contract-upgrade availability remains a separate capability.
     json!({
         "schema_version": 3,
         "prove_json_schema_version": 1,

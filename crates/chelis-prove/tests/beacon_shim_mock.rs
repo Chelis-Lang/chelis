@@ -760,8 +760,18 @@ fn large_tree_response_does_not_fill_the_child_stdout_pipe() {
     let _g = with_scenario("large_report");
     let shim = BeaconShim::new(MOCK_BIN, large_populated_store());
     let discharge = shim.discharge(&large_box_goal(), FAST_TIMEOUT_MS);
-    assert_eq!(*discharge.result(), TierBResult::Proved, "large report was lost: {discharge:?}");
-    assert_eq!(discharge.evidence()["beacon_evidence"]["tree_payload"].as_str().unwrap().len(), 256 * 1024);
+    assert_eq!(
+        *discharge.result(),
+        TierBResult::Proved,
+        "large report was lost: {discharge:?}"
+    );
+    assert_eq!(
+        discharge.evidence()["beacon_evidence"]["tree_payload"]
+            .as_str()
+            .unwrap()
+            .len(),
+        256 * 1024
+    );
 }
 
 /// NEGATIVE/positive twin of the deadlock fix: a SMALL stdin request still uses

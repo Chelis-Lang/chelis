@@ -34,8 +34,8 @@ use smt_lower::{
     ContractAbstraction, DeepInlineCtx, InlineCtx, deep_expr_to_smt, surf_arith, surf_expr_to_smt,
 };
 
-mod injection;
 mod beacon;
+mod injection;
 use crate::beacon_contract_prover::BeaconContractProver;
 use crate::composition::{
     AssumptionDischarge, AssumptionRecord, CompositeVerdict, DischargeMethod, FUZZ_TOLERANCE,
@@ -259,7 +259,9 @@ impl PropertyOutcome {
             return None;
         }
         match self.proof_tier {
-            PropertyTier::Smt | PropertyTier::Induction | PropertyTier::Beacon => self.base_discharge.clone(),
+            PropertyTier::Smt | PropertyTier::Induction | PropertyTier::Beacon => {
+                self.base_discharge.clone()
+            }
             PropertyTier::Fuzz if self.samples > 0 => Some((
                 crate::discharge::Soundness::Empirical,
                 QualifierSet::from_iter_kinds([crate::discharge::Qualifier::FuzzBase]),
@@ -322,8 +324,10 @@ impl PropertyOutcome {
             return false;
         }
         self.status == PropertyStatus::Passed
-            && (matches!(self.proof_tier, PropertyTier::Smt | PropertyTier::Induction | PropertyTier::Beacon)
-                || self.samples > 0)
+            && (matches!(
+                self.proof_tier,
+                PropertyTier::Smt | PropertyTier::Induction | PropertyTier::Beacon
+            ) || self.samples > 0)
     }
 
     /// The display status label, bucketed through [`is_pass`] so a
@@ -389,12 +393,14 @@ fn base_verdict(
             // Beacon interval discharge reads `sound_approximate`. A green base
             // MUST carry its discharge; a missing one is a covered-or-rejected
             // `Unsupported`, never a silent proof.
-            PropertyTier::Smt | PropertyTier::Induction | PropertyTier::Beacon => match base_discharge {
-                Some((soundness, qualifiers)) => {
-                    base_verdict_from_discharge(*soundness, qualifiers)
+            PropertyTier::Smt | PropertyTier::Induction | PropertyTier::Beacon => {
+                match base_discharge {
+                    Some((soundness, qualifiers)) => {
+                        base_verdict_from_discharge(*soundness, qualifiers)
+                    }
+                    None => CompositeVerdict::Unsupported,
                 }
-                None => CompositeVerdict::Unsupported,
-            },
+            }
             // A fuzz-tier base pass is empirically validated, NOT proven: seed
             // `FuzzBase` so it renders `fuzz_validated` and can never read
             // `proven_*` (chelis#422).

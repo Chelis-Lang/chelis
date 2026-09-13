@@ -1050,7 +1050,8 @@ fn main() {
                 tier: &_tier,
                 smt_timeout_ms: _smt_timeout,
                 beacon_budget: std::time::Duration::from_millis(beacon_budget),
-                beacon_deadline: beacon_wall_budget.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms)),
+                beacon_deadline: beacon_wall_budget
+                    .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms)),
                 invariant_min_rate,
                 package: package.as_deref(),
             }) {

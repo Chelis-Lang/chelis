@@ -52,7 +52,6 @@ use crate::discharge::{
 };
 use crate::tier_b::TierBResult;
 
-#[path = "beacon_relaxation.rs"]
 mod relaxation;
 
 /// The schema version of the request the shim emits. Beacon pins against this.
@@ -292,7 +291,11 @@ impl BeaconShim {
     fn run_beacon(&self, request_bytes: &[u8], timeout_ms: u64) -> SubprocessOutcome {
         // The temp file (if any) must outlive the child, so it is bound here.
         let mut command = Command::new(&self.binary);
-        command.arg(if self.oracle_mode == BeaconOracleMode::ReluLinear { "relax" } else { "dispatch" });
+        command.arg(if self.oracle_mode == BeaconOracleMode::ReluLinear {
+            "relax"
+        } else {
+            "dispatch"
+        });
 
         // Auto-fall-back to the temp-file transport for a request too large to
         // write to a stdin pipe without risking a full-buffer deadlock (the
@@ -343,10 +346,12 @@ impl BeaconShim {
         })();
         let (stdout_capture, stderr_capture) = match captures {
             Ok(files) => files,
-            Err(err) => return SubprocessOutcome::Failed {
-                reason: format!("could not create beacon output captures: {err}"),
-                stderr: String::new(),
-            },
+            Err(err) => {
+                return SubprocessOutcome::Failed {
+                    reason: format!("could not create beacon output captures: {err}"),
+                    stderr: String::new(),
+                };
+            }
         };
 
         let mut child = match command.spawn() {
@@ -439,7 +444,11 @@ enum SubprocessOutcome {
     /// JSON) and stderr.
     Exited { stdout: String, stderr: String },
     /// Structured stdout is retained on a nonzero exit, without trusting a proof.
-    Rejected { reason: String, stdout: String, stderr: String },
+    Rejected {
+        reason: String,
+        stdout: String,
+        stderr: String,
+    },
     /// The binary was hard-killed at the timeout. Fail-closed.
     TimedOut,
     /// Spawn failure, nonzero exit, or an IO error. Fail-closed; carries a
@@ -493,7 +502,9 @@ impl DischargeEngine for BeaconShim {
         // Beacon's native form is the box/range goal; the shim claims exactly
         // that shape and nothing else.
         match self.oracle_mode {
-            BeaconOracleMode::ReluLinear => matches!(goal.shape, GoalShape::ScalarUpperBound { .. }),
+            BeaconOracleMode::ReluLinear => {
+                matches!(goal.shape, GoalShape::ScalarUpperBound { .. })
+            }
             _ => matches!(goal.shape, GoalShape::BoxRange { .. }),
         }
     }
@@ -562,8 +573,14 @@ impl DischargeEngine for BeaconShim {
 
         match self.run_beacon(&request_bytes, timeout_ms) {
             SubprocessOutcome::Exited { stdout, stderr } => map_report(&stdout, &stderr),
-            SubprocessOutcome::Rejected { reason, stdout, stderr } => untrusted_error(&reason,
-                serde_json::json!({"engine":"beacon","error":reason,"stdout":stdout,"stderr":stderr})),
+            SubprocessOutcome::Rejected {
+                reason,
+                stdout,
+                stderr,
+            } => untrusted_error(
+                &reason,
+                serde_json::json!({"engine":"beacon","error":reason,"stdout":stdout,"stderr":stderr}),
+            ),
             SubprocessOutcome::TimedOut => untrusted_error(
                 "beacon timeout",
                 serde_json::json!({ "engine": "beacon", "error": "timeout" }),

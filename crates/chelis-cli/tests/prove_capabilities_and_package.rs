@@ -63,9 +63,18 @@ fn prove_capabilities_distinguishes_scalar_route_from_contract_upgrade() {
     assert!(output.status.success(), "exit 0");
     let caps: Value = serde_json::from_slice(&output.stdout).expect("valid JSON");
 
-    assert_eq!(caps["beacon_available"], Value::Bool(cfg!(feature = "chelis-prove")));
-    assert_eq!(caps["beacon_scalar_available"], Value::Bool(cfg!(feature = "chelis-prove")));
-    assert_eq!(caps["beacon_wired"], Value::Bool(cfg!(feature = "chelis-prove")));
+    assert_eq!(
+        caps["beacon_available"],
+        Value::Bool(cfg!(feature = "chelis-prove"))
+    );
+    assert_eq!(
+        caps["beacon_scalar_available"],
+        Value::Bool(cfg!(feature = "chelis-prove"))
+    );
+    assert_eq!(
+        caps["beacon_wired"],
+        Value::Bool(cfg!(feature = "chelis-prove"))
+    );
     assert_eq!(caps["beacon_contract_prover_available"], Value::Bool(false));
     let registry = caps["engine_registry"].as_array().unwrap();
     assert!(

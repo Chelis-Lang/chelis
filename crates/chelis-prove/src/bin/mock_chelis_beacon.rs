@@ -73,8 +73,11 @@ fn main() {
             print!(r#"{{"verdict":"proved","oracle_verified":true}}"#);
         }
         "large_report" => {
-            println!("{}", serde_json::json!({"verdict":"proved","oracle_verified":true,
-                "evidence":{"tree_payload":"x".repeat(256 * 1024)}}));
+            println!(
+                "{}",
+                serde_json::json!({"verdict":"proved","oracle_verified":true,
+                "evidence":{"tree_payload":"x".repeat(256 * 1024)}})
+            );
         }
         "proved_oracle_unverified" => {
             print!(r#"{{"verdict":"proved_oracle_unverified"}}"#);

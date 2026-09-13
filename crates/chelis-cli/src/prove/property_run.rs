@@ -287,8 +287,11 @@ fn emit(
             "passed" => {
                 let suffix = if outcome.injected { " (injected)" } else { "" };
                 if outcome.proof_tier == PropertyTier::Beacon {
-                    println!("property: {} -- {} (real arithmetic on stored weights; floating execution not covered)",
-                        outcome.name,outcome.composite_verdict.as_str());
+                    println!(
+                        "property: {} -- {} (real arithmetic on stored weights; floating execution not covered)",
+                        outcome.name,
+                        outcome.composite_verdict.as_str()
+                    );
                 } else if outcome.proof_tier == PropertyTier::Induction {
                     println!(
                         "property: {} -- proved (induction: base + step){suffix}",
@@ -328,7 +331,10 @@ fn build_failure_summary_json(
 ) -> serde_json::Value {
     let requested_tier = options.tier;
     let actual_tier = outcome.proof_tier.as_str();
-    let degradation = if requested_tier != actual_tier && !(requested_tier == "beacon-only" && actual_tier == "beacon") && actual_tier != "none" {
+    let degradation = if requested_tier != actual_tier
+        && !(requested_tier == "beacon-only" && actual_tier == "beacon")
+        && actual_tier != "none"
+    {
         Some(json!({
             "degraded": true,
             "reason": format!("requested tier '{}' fell back to '{}'", requested_tier, actual_tier),
@@ -355,6 +361,8 @@ fn build_failure_summary_json(
     summary["samples"] = json!(outcome.samples);
     summary["timeout_ms"] = if outcome.proof_tier == PropertyTier::Beacon {
         json!(options.beacon_budget.as_millis())
-    } else { json!(options.smt_timeout_ms) };
+    } else {
+        json!(options.smt_timeout_ms)
+    };
     summary
 }

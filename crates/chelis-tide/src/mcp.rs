@@ -355,11 +355,17 @@ fn handle_prove_tool(args: &Value) -> Value {
             "errors": [{"kind": "invalid_arguments", "message": format!("invalid tier `{tier}`"), "severity": 1.0, "suggestions": []}]
         });
     }
-    if args.get("beacon_budget").is_some_and(|value| value.as_u64().is_none()) {
+    if args
+        .get("beacon_budget")
+        .is_some_and(|value| value.as_u64().is_none())
+    {
         return json!({"ok":false,"stage":"mcp","errors":[{"kind":"invalid_arguments",
             "message":"beacon_budget must be an unsigned integer in milliseconds","severity":1.0,"suggestions":[]}]});
     }
-    if args.get("beacon_wall_budget").is_some_and(|value| !value.as_u64().is_some_and(|ms| ms <= 86_400_000)) {
+    if args
+        .get("beacon_wall_budget")
+        .is_some_and(|value| !value.as_u64().is_some_and(|ms| ms <= 86_400_000))
+    {
         return json!({"ok":false,"stage":"mcp","errors":[{"kind":"invalid_arguments",
             "message":"beacon_wall_budget must be an integer from 0 to 86400000 milliseconds","severity":1.0,"suggestions":[]}]});
     }
@@ -401,8 +407,15 @@ fn handle_prove_tool(args: &Value) -> Value {
         seed,
         samples,
         smt_timeout_ms: smt_timeout,
-        beacon_budget: std::time::Duration::from_millis(args.get("beacon_budget").and_then(Value::as_u64).unwrap_or(60000)),
-        beacon_deadline: args.get("beacon_wall_budget").and_then(Value::as_u64).map(|ms| started + std::time::Duration::from_millis(ms)),
+        beacon_budget: std::time::Duration::from_millis(
+            args.get("beacon_budget")
+                .and_then(Value::as_u64)
+                .unwrap_or(60000),
+        ),
+        beacon_deadline: args
+            .get("beacon_wall_budget")
+            .and_then(Value::as_u64)
+            .map(|ms| started + std::time::Duration::from_millis(ms)),
         tier: tier.to_string(),
         only: None,
         invariant_min_rate,

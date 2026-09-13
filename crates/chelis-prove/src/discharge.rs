@@ -175,14 +175,26 @@ impl Goal {
     ) -> Result<Self, GoalError> {
         let mut names = std::collections::BTreeSet::new();
         for (name, lo, hi) in &inputs.dims {
-            if name.is_empty() || !names.insert(name) || !lo.is_finite() || !hi.is_finite() || lo > hi {
-                return Err(GoalError::IllFormed(format!("invalid or duplicate scalar input `{name}`")));
+            if name.is_empty()
+                || !names.insert(name)
+                || !lo.is_finite()
+                || !hi.is_finite()
+                || lo > hi
+            {
+                return Err(GoalError::IllFormed(format!(
+                    "invalid or duplicate scalar input `{name}`"
+                )));
             }
         }
         if upper.prim() != chelis_types::types::Prim::F64 || !upper.as_f64_lossy().is_finite() {
-            return Err(GoalError::IllFormed("scalar upper bound must be a finite tagged f64".into()));
+            return Err(GoalError::IllFormed(
+                "scalar upper bound must be a finite tagged f64".into(),
+            ));
         }
-        Ok(Self { shape: GoalShape::ScalarUpperBound { inputs, upper }, ir: IrHandle::unpopulated() })
+        Ok(Self {
+            shape: GoalShape::ScalarUpperBound { inputs, upper },
+            ir: IrHandle::unpopulated(),
+        })
     }
     /// Build a structured-SMT goal from an existing [`SmtProperty`]. The IR
     /// handle is left unpopulated (the Phase 1 cvc5 path).
@@ -924,15 +936,27 @@ mod tests {
         // Read the actual enum, so adding a kind cannot silently leave this
         // supposedly exhaustive table incomplete (the NN landing found two).
         let file = syn::parse_file(include_str!("discharge.rs")).unwrap();
-        let vocabulary = file.items.iter().find_map(|item| match item {
-            syn::Item::Enum(item) if item.ident == "Qualifier" => Some(item),
-            _ => None,
-        }).unwrap();
-        let defined: std::collections::BTreeSet<_> = vocabulary.variants.iter()
-            .map(|variant| variant.ident.to_string()).collect();
-        let covered: std::collections::BTreeSet<_> = table.iter()
-            .map(|(qualifier, _)| format!("{qualifier:?}")).collect();
-        assert_eq!(covered, defined, "minimum-soundness oracle must cover the actual enum");
+        let vocabulary = file
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Enum(item) if item.ident == "Qualifier" => Some(item),
+                _ => None,
+            })
+            .unwrap();
+        let defined: std::collections::BTreeSet<_> = vocabulary
+            .variants
+            .iter()
+            .map(|variant| variant.ident.to_string())
+            .collect();
+        let covered: std::collections::BTreeSet<_> = table
+            .iter()
+            .map(|(qualifier, _)| format!("{qualifier:?}"))
+            .collect();
+        assert_eq!(
+            covered, defined,
+            "minimum-soundness oracle must cover the actual enum"
+        );
 
         // Guard: the table must cover every qualifier kind exactly once, so a
         // newly added qualifier cannot slip past this oracle uncovered.
