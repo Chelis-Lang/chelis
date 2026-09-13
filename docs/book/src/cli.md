@@ -207,6 +207,18 @@ The [declaration regression tests](../../../crates/chelis-compiler-api/tests/iss
 exercise named versus anonymous scope, initialization reuse and fresh requests;
 the example above demonstrates caller-argument scope only.
 
+The host `grad` path also uses declaration scope for free tensor values when
+its original operand directly names a checked function declaration and that
+target name is absent from the gradient's captured lexical environment.
+Actual arguments still run once in caller order, before a selected gradient
+demands an uninitialized capture. The written `wrt` order determines result
+grouping, not argument evaluation.
+Anonymous gradients retain creation-time captures. This narrow rule does not
+extend target resolution to aliases or captured target bindings; those paths
+retain their existing admission and behavior.
+The [direct-gradient regression tests](../../../crates/chelis-compiler-api/tests/issue_1956_grad_declaration_captures.rs)
+exercise this scope boundary, frozen gradients, initialization reuse and errors.
+
 ### Targeted evaluation and root manifests
 
 Function aliases remain callable entries, without display roots of their own.
