@@ -3,6 +3,21 @@ use chelis_unord::{UnordMap, UnordSet};
 use crate::dag::{Dag, DimInfo, NodeId, RiscOp, RtAxis, RtDim, TensorType};
 
 pub fn vectorize_axis0(dag: &Dag, batch_dim: DimInfo) -> Result<Dag, String> {
+    vectorize_axis0_with_node_map(dag, batch_dim).map(|(batched, _)| batched)
+}
+
+/// [`vectorize_axis0`] plus the batched id of every input node, indexed by the
+/// input `NodeId`.
+///
+/// The rebuild is not id-preserving in general: a shared extent scalar gains a
+/// batch-expansion node, which shifts every later id. A caller that has to name
+/// one specific input node inside the batched DAG therefore needs this map
+/// rather than the id it started with (chelis#1821 names the forward activation
+/// under `vmap(grad(...))` so it survives dead-code elimination).
+pub fn vectorize_axis0_with_node_map(
+    dag: &Dag,
+    batch_dim: DimInfo,
+) -> Result<(Dag, Vec<NodeId>), String> {
     let mut out = Dag::new();
     let concrete_batch = match &batch_dim {
         DimInfo::Lit(size) => Some(*size),
@@ -179,8 +194,13 @@ pub fn vectorize_axis0(dag: &Dag, batch_dim: DimInfo) -> Result<Dag, String> {
             if !node.merged_spans.is_empty() {
                 new_node.merged_spans = node.merged_spans.clone();
             }
-            // chelis#384/#397: vmap is a 1:1 id-preserving clone, so an
-            // `expand` shape dependency maps to the same id verbatim.
+            // chelis#384/#397: an `expand` shape dependency is remapped
+            // through `mapped_ids`, not copied verbatim. This rebuild is NOT
+            // an id-preserving clone in general: a shared extent scalar with
+            // an ordinary consumer gains a batch expansion that shifts every
+            // later id, which is exactly why `vectorize_axis0_with_node_map`
+            // returns the mapping. The remap below is therefore the
+            // correctness step, not a no-op that happens to look like one.
             new_node.shape_deps = node
                 .shape_deps
                 .iter()
@@ -236,7 +256,7 @@ pub fn vectorize_axis0(dag: &Dag, batch_dim: DimInfo) -> Result<Dag, String> {
         out.add_root(expanded);
     }
 
-    Ok(out)
+    Ok((out, mapped_ids))
 }
 
 fn shift_input_axis(dim: &RtDim) -> RtDim {

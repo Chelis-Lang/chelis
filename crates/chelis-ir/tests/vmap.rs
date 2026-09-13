@@ -387,3 +387,168 @@ fn issue524_explicit_nonzero_constant_vmap_axis_via_surf_lowers() {
     let dag = lower_surf_program(src).expect("an explicit constant vmap axis must lower");
     assert!(!dag.nodes().is_empty(), "lowered DAG must be non-empty");
 }
+
+/// chelis#1821: `vectorize_axis0_with_node_map` names the batched id of every
+/// input node.
+///
+/// The lowering of `vmap(grad(...))` has to record the batched forward
+/// activation as a shape dependency of each batched cotangent, and the only id
+/// it holds is the one the unbatched gradient DAG used. The rebuild is not
+/// id-preserving: a shared extent scalar consumed as an ordinary value gains a
+/// batch-expansion node, which shifts every id after it. The fixture below is
+/// exactly that shape, and its `sqrt` node's batched id is one higher than its
+/// own, so a caller reusing its input id would name the expansion instead.
+///
+/// The contract is one entry per input node, in input-node order, each naming a
+/// node that exists in the batched DAG and carries the same operator family.
+///
+/// EVIDENTIARY STATUS: disposition lock on a new API. There is no prior
+/// behaviour to regress; the row exists so a future rebuild that inserts nodes
+/// cannot silently return a map that has drifted from its own DAG.
+#[test]
+fn the_vmap_node_map_names_every_input_nodes_batched_id() {
+    use chelis_ir::dag::{NodeId, RtDim};
+    use chelis_ir::vmap::vectorize_axis0_with_node_map;
+
+    let int64_scalar = TensorType {
+        dims: vec![],
+        precision: Prim::Int64,
+    };
+    let f32_scalar = TensorType {
+        dims: vec![],
+        precision: Prim::F32,
+    };
+
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
+    // One shape read serving a movement bound, which is what marks it shared.
+    let extent = dag.add_node(RiscOp::Shape { axis: 0 }, vec![x], int64_scalar, None);
+    let shrunk = dag.add_node(
+        RiscOp::Shrink {
+            bounds: vec![(RtDim::Lit(0), RtDim::Node(1))],
+        },
+        vec![x, extent],
+        vec_f32(3),
+        None,
+    );
+    // `cast` is a shared scalar operation, so the shared chain reaches here...
+    let as_f32 = dag.add_node(
+        RiscOp::Cast {
+            new_precision: Prim::F32,
+        },
+        vec![extent],
+        f32_scalar.clone(),
+        None,
+    );
+    // ... and stops: `sqrt` is not one, so it is batched and its shared operand
+    // is expanded to the batch, inserting a node ahead of it.
+    let root = dag.add_node(RiscOp::Sqrt, vec![as_f32], f32_scalar, None);
+    dag.add_root(shrunk);
+    dag.add_root(root);
+
+    let (batched, map) = vectorize_axis0_with_node_map(&dag, DimInfo::Lit(2))
+        .expect("a shared extent scalar with an ordinary consumer vectorizes");
+
+    assert_eq!(
+        map.len(),
+        dag.len(),
+        "one entry per input node, in input-node order"
+    );
+    for node in dag.nodes() {
+        let mapped = map[node.id.0];
+        let batched_node = batched.get(mapped).unwrap_or_else(|| {
+            panic!(
+                "{:?} maps to {mapped:?}, which the batched DAG lacks",
+                node.id
+            )
+        });
+        assert_eq!(
+            std::mem::discriminant(&batched_node.op),
+            std::mem::discriminant(&node.op),
+            "{:?} must map to a node of its own operator family, not to whichever \
+             node happens to sit at that index after an insertion",
+            node.id
+        );
+    }
+
+    // The insertion is what makes the map necessary rather than decorative.
+    assert_eq!(
+        batched.len(),
+        dag.len() + 1,
+        "the ordinary use of the shared extent inserts one batch expansion"
+    );
+    assert_eq!(
+        map[root.0],
+        NodeId(root.0 + 1),
+        "so the node after the insertion does not keep its own id"
+    );
+}
+
+/// chelis#1821 on the mapped path: the batched cotangent carries a shape
+/// dependency on the batched forward activation.
+///
+/// The lowering records that edge after `vmap(grad(...))`'s splice, for the
+/// same reason the unmapped path does: only the cotangents are rooted in the
+/// parent DAG, so the entry-point dead-code elimination would otherwise remove
+/// the forward activation and the carrier holding its extent obligations.
+///
+/// This row exists because round 1 of this pull request deleted that block and
+/// every other test still passed. It asserts the EDGE rather than a program's
+/// output, because a `vmap(grad(...))` program whose callee carries an entry
+/// witness does not lower at all on this head (it fails with "`vmap(...)`
+/// lowering produced no roots", a separate defect), so no end-to-end receipt
+/// can reach the mechanism.
+///
+/// The program has two roots: the exported `h` kernel's own unbatched
+/// reduction, and the mapped cotangent. Only the second carries a shape
+/// dependency, and it names the BATCHED reduction, the one whose reduced axis
+/// vmap shifted past the batch axis. Asserting that signature rather than a
+/// root index is what makes the row independent of root order.
+///
+/// EVIDENTIARY STATUS: regression test for the block's PRESENCE, proven by
+/// deleting the dependency block from the `vmap(grad(...))` lowering and
+/// rerunning, which leaves no root with any shape dependency. It does not
+/// discriminate the map: round 2 measured that it still passes when the block
+/// is rewritten to the unmapped id, because every `vmap(grad(...))` program
+/// that lowers today has an identity map. The map's own contract is proven
+/// separately, and on a fixture where it is NOT the identity, by
+/// `the_vmap_node_map_names_every_input_nodes_batched_id` above.
+#[test]
+fn vmap_grad_records_the_batched_forward_activation_as_a_shape_dep() {
+    let source = "def h(x: tensor[2, f32]) -> tensor[f32] = sum(mul(x, x), 0i32)\n\
+                  def main() = vmap(grad(h))(to_tensor([[1.0f32, 2.0f32], [3.0f32, 4.0f32]]))\n";
+    let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
+    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let checked = check_ir_program(&exprs).expect("check");
+    let checked = chelis_effects::check_program(&checked).expect("effects");
+    let checked = chelis_types::check_linearity(&checked).expect("linearity");
+    let dag = chelis_ir::lower::try_lower_program(&checked).expect("lower vmap(grad(h))");
+
+    let carrying: Vec<_> = dag
+        .roots()
+        .iter()
+        .copied()
+        .filter(|root| !dag.get(*root).expect("root node").shape_deps.is_empty())
+        .collect();
+    assert_eq!(
+        carrying.len(),
+        1,
+        "exactly one root, the mapped cotangent, depends on the batched forward \
+         activation; found {carrying:?} among roots {:?}",
+        dag.roots()
+    );
+    let cotangent = dag.get(carrying[0]).expect("cotangent node");
+    for dep in &cotangent.shape_deps {
+        assert!(
+            !cotangent.inputs.contains(dep),
+            "a dependency the cotangent already reads as a value input would prove \
+             nothing about retention; {dep:?} is such an input"
+        );
+        let node = dag.get(*dep).expect("shape dependency survives lowering");
+        assert!(
+            matches!(node.op, RiscOp::Sum { axis: 1, .. }),
+            "the dependency names the batched forward reduction, got {:?}",
+            node.op
+        );
+    }
+}

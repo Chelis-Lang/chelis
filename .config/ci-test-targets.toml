@@ -45,6 +45,13 @@ name = "issue_1906_annotated_concat_softmax"
 package = "chelis-types"
 name = "issue_1875_protected_dimension_identity"
 
+# chelis#1912: this guard was red on `main` for two days because #1914 added
+# two `expand` program sites and no PR job ran the inventory. The file name is
+# unique in the workspace, so the resolver cannot call it ambiguous.
+[[target]]
+package = "chelis-types"
+name = "expand_call_site_inventory"
+
 [[target]]
 package = "chelis-types"
 name = "issue_1875_callable_labels"

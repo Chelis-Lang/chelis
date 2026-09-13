@@ -9088,13 +9088,19 @@ impl<'program> LowerCtx<'program> {
         let mut grad_iter = grad_per_wrt.iter().copied();
         let mut wrt_actual_iter = wrt_actuals.iter().copied();
         let mut packed: Vec<LoweredValue> = Vec::with_capacity(result_plans.len());
+        // chelis#1821: every packed cotangent node, so the forward
+        // activation can be recorded as their shared shape dependency below.
+        let mut cotangents: Vec<NodeId> = Vec::new();
         for plan in &result_plans {
             match plan {
                 GradResultPlan::Tensor => {
                     let grad_node = grad_iter.next().flatten();
                     let actual = wrt_actual_iter.next();
                     match grad_node {
-                        Some(node) => packed.push(LoweredValue::Node(node)),
+                        Some(node) => {
+                            cotangents.push(node);
+                            packed.push(LoweredValue::Node(node));
+                        }
                         // The known output dataflow does not depend on this
                         // argument, so its gradient is exactly zero.
                         // Materialize it for single- and multi-target results;
@@ -9106,6 +9112,7 @@ impl<'program> LowerCtx<'program> {
                                 .map(|id| node_type(self, id))
                                 .unwrap_or_else(Self::default_type);
                             let zero = self.zero_tensor_node(&field_ty, actual);
+                            cotangents.push(zero);
                             packed.push(LoweredValue::Node(zero));
                         }
                     }
@@ -9125,6 +9132,7 @@ impl<'program> LowerCtx<'program> {
                                     .unwrap_or_else(Self::default_type);
                                 self.zero_tensor_node(&element_ty, actual)
                             });
+                            cotangents.push(node);
                             leaves.push(LoweredValue::Node(node));
                         } else {
                             // Discrete cotangent leaves are unit; they do not
@@ -9146,6 +9154,25 @@ impl<'program> LowerCtx<'program> {
                 .iter()
                 .filter_map(|index| groups.get(index).cloned())
                 .collect();
+        }
+        // chelis#1821: differentiation is an execution mode of the same
+        // activation, and spec/04 §4.7 requires every execution mode to
+        // observe the same values and traps. Only the per-wrt cotangents are
+        // rooted in the parent DAG after the splice, so the entry-point DCE
+        // otherwise deletes the spliced forward output together with the
+        // `retain_invocation_witnesses` carrier whose `shape_deps` hold the
+        // activation's witness claims, and with every forward node carrying a
+        // local guard site that the backward never reads. Record the forward
+        // output as a shape dependency of each cotangent: DCE and grad pruning
+        // both keep a shape-dep source live, the forward nodes precede the
+        // backward nodes in id order so their traps fire first, and no value
+        // the derivative returns changes.
+        if let Some(forward_output) = remap.get(&grad_result.output_node).copied() {
+            // A cotangent that IS the forward output needs no edge to itself,
+            // the same exclusion `record_runtime_dim_shape_deps` applies.
+            for cotangent in cotangents.iter().filter(|id| **id != forward_output) {
+                self.dag.add_shape_dep(*cotangent, forward_output);
+            }
         }
         let result = match packed.as_slice() {
             [LoweredValue::Node(single)] => {
@@ -10074,14 +10101,15 @@ impl<'program> LowerCtx<'program> {
                 body.span_id().map(ToOwned::to_owned),
             )
         });
-        let vmapped = match vmap::vectorize_axis0(&grad_result.dag, batch_dim.clone()) {
-            Ok(dag) => dag,
-            Err(message) => raise_lowering_error(
-                format!("`vmap(grad(...))` lowering failed: {message}"),
-                Some(body.span()),
-                body.span_id().map(ToOwned::to_owned),
-            ),
-        };
+        let (vmapped, batched_ids) =
+            match vmap::vectorize_axis0_with_node_map(&grad_result.dag, batch_dim.clone()) {
+                Ok(batched) => batched,
+                Err(message) => raise_lowering_error(
+                    format!("`vmap(grad(...))` lowering failed: {message}"),
+                    Some(body.span()),
+                    body.span_id().map(ToOwned::to_owned),
+                ),
+            };
 
         let batch_source = param_types
             .iter()
@@ -10116,6 +10144,18 @@ impl<'program> LowerCtx<'program> {
             .zip(wrt_param_indices)
             .filter_map(|(node, index)| grad_result.grad_nodes.contains_key(node).then_some(index))
             .collect();
+        // chelis#1821, the same obligation on the mapped path: only the
+        // cotangents are rooted here too, so the batched forward activation
+        // and its extent obligations need the same shape dependency.
+        if let Some(forward_output) = batched_ids
+            .get(grad_result.output_node.0)
+            .and_then(|batched| remap.get(batched))
+            .copied()
+        {
+            for cotangent in flattened.iter().filter(|id| **id != forward_output) {
+                self.dag.add_shape_dep(*cotangent, forward_output);
+            }
+        }
         let reusable_inputs = param_types
             .iter()
             .enumerate()
