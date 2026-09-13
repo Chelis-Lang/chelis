@@ -65,7 +65,7 @@ BASELINE_PATH = REPO_ROOT / "spec/design/runtime_representation_phase0_inventory
 # design amendment when the finished foundation or a mutation binding changes.
 # Release reproducers, hardware probes, counts, and ordinary configuration are
 # deliberately outside this digest.
-FREEZE_SHA256 = "905e0c46e65d95d9111dec2d66c40e703dbd3c8c6323ee0e92fa49f853ddaddc"
+FREEZE_SHA256 = "854c5457c5d819373e8494c918ca1c8607f43a1ff8e735b660349d92af514f92"
 PHASE0_COMMAND = (
     "uv run --managed-python --python 3.11 --no-project python "
     "scripts/runtime_representation_oracle.py --phase 0"
@@ -650,20 +650,9 @@ def mutation_manifest(probes: Sequence[MutationProbe]) -> list[dict[str, object]
 def frozen_mutation_rows(
     probes: Sequence[MutationProbe],
 ) -> list[dict[str, object]]:
-    """Project the review-bearing part of each Phase 0 mutation contract."""
+    """Freeze the complete mutation contract, including rejection obligations."""
 
-    return [
-        {
-            "witness_id": probe.witness_id,
-            "implementation_sha256": _mutation_implementation_sha256(probe.mutate),
-            "expected_failure": {
-                "code": probe.expected_failure.code,
-                "reason_prefix": probe.expected_failure.reason_prefix,
-            },
-            "command": PHASE0_COMMAND,
-        }
-        for probe in probes
-    ]
+    return mutation_manifest(probes)
 
 
 def _validate_frozen_mutation_contract(
@@ -844,7 +833,7 @@ def build_foundation_baseline(
             active_ids.add(row.identity)
 
     return {
-        "schema_version": 6,
+        "schema_version": 7,
         "freeze_sha256": _freeze_digest(foundation, source_inventory),
         "source_inventory": json.loads(json.dumps(source_inventory)),
         "foundation_rows": foundation,
@@ -919,8 +908,8 @@ def _validate_baseline_schema(baseline: object) -> None:
         )
 
     schema_version = baseline["schema_version"]
-    if type(schema_version) is not int or schema_version != 6:
-        raise OracleFailure("schema_version must be the integer 6")
+    if type(schema_version) is not int or schema_version != 7:
+        raise OracleFailure("schema_version must be the integer 7")
     freeze_sha256 = baseline["freeze_sha256"]
     if (
         not isinstance(freeze_sha256, str)
@@ -968,6 +957,9 @@ def _validate_baseline_schema(baseline: object) -> None:
             untyped_row,
             expected={
                 "witness_id",
+                "path",
+                "expected_kind",
+                "expected_owners",
                 "implementation_sha256",
                 "expected_failure",
                 "command",
@@ -984,6 +976,16 @@ def _validate_baseline_schema(baseline: object) -> None:
         command = row["command"]
         if not isinstance(witness_id, str) or not witness_id:
             raise OracleFailure(f"{location}.witness_id must be a nonempty string")
+        for field in ("path", "expected_kind"):
+            if not isinstance(row[field], str) or not row[field]:
+                raise OracleFailure(f"{location}.{field} must be a nonempty string")
+        owners = row["expected_owners"]
+        if not isinstance(owners, list) or any(
+            not isinstance(owner, str) or not owner for owner in owners
+        ):
+            raise OracleFailure(
+                f"{location}.expected_owners must be a list of nonempty strings"
+            )
         if (
             not isinstance(implementation_sha256, str)
             or len(implementation_sha256) != 64
