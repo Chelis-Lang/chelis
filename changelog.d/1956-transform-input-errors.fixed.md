@@ -1,1 +1,0 @@
-Preserve lazy captured-initializer errors when evaluating host `grad` and `vmap` transforms. Prepare inputs using the existing execution selection before running the same lowered graph or plan; retain capture precedence and the existing vmap capture-rank refusal. This does not change declaration memoization or resolve all global-capture issues in #1956.

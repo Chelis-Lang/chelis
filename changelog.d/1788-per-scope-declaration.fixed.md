@@ -1,1 +1,0 @@
-Two roots merged into one emitted C function no longer share one declaration of a dimension binder each of their signatures spells. Every scope after the first declares its own identity from its own input, so the second root sizes its work from the tensor it was given rather than from the first root's extent (chelis#1788).
