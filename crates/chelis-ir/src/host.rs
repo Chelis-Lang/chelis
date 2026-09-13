@@ -3980,7 +3980,7 @@ fn host_def_kernel_product(
             random,
         )?
     };
-    if let Some(builtin) = kernel_dag_loads_builtin(&dag) {
+    if let Some(builtin) = kernel_dag_loads_builtin(&dag, &signature.scope) {
         return Err(crate::lower::LowerDiagnostic::new(
             format!(
                 "the kernel body of `{name}` reaches the host-only builtin `{builtin}`, which has \
@@ -5056,7 +5056,7 @@ fn lower_def_body_kernel(
             return Ok(None);
         }
     };
-    if kernel_dag_loads_builtin(&dag).is_some() {
+    if kernel_dag_loads_builtin(&dag, &signature.scope).is_some() {
         record_host_work(|profile| {
             profile.tensor_helper_fallbacks += 1;
             profile.tensor_helper_builtin_load_rejections += 1;
@@ -5078,9 +5078,18 @@ fn lower_def_body_kernel(
 /// A `Load` named after a builtin means the lowerer treated a host-lane
 /// builtin as a free variable; emitting that DAG would reference a symbol
 /// that does not exist.
-fn kernel_dag_loads_builtin(dag: &crate::Dag) -> Option<String> {
+fn kernel_dag_loads_builtin(
+    dag: &crate::Dag,
+    scope: &UnordMap<String, HostTypeTerm>,
+) -> Option<String> {
     dag.nodes().iter().find_map(|node| match &node.op {
-        crate::dag::RiscOp::Load { name } if BUILTIN_NAMES.contains(&name.as_str()) => {
+        crate::dag::RiscOp::Load { name }
+            if BUILTIN_NAMES.contains(&name.as_str())
+                && scope
+                    .get(name.as_str())
+                    .and_then(tensor_type_from_host_input)
+                    .is_none() =>
+        {
             Some(name.as_str().to_string())
         }
         _ => None,
@@ -5415,12 +5424,14 @@ fn try_lower_tensor_helper_call(
         record_host_work(|profile| profile.tensor_helper_fallbacks += 1);
         return None;
     };
-    // Reject DAGs whose inputs reference known builtin names: a `Load("fold")`
+    // Reject unresolved builtin inputs. A typed lexical input named `fold`
+    // still denotes that input (spec/04 section 8.6, chelis#2023). Otherwise
+    // a `Load("fold")`
     // (or `einsum`, `map`, etc.) means the lowerer fell back to treating a
     // host-lane builtin as a free variable. Emitting this DAG would generate
     // C with a `__tensor_scalar0_0 = fold;` line — `fold` is not a C symbol.
     // Fall back to `lower_host_expr` which handles HOFs directly.
-    if kernel_dag_loads_builtin(&product.dag).is_some() {
+    if kernel_dag_loads_builtin(&product.dag, scope).is_some() {
         record_host_work(|profile| {
             profile.tensor_helper_fallbacks += 1;
             profile.tensor_helper_builtin_load_rejections += 1;
@@ -17398,6 +17409,36 @@ mod tests {
     use super::*;
     use crate::{DimInfo, RiscOp};
     use chelis_types::types::Prim;
+
+    #[test]
+    fn kernel_builtin_load_rejection_requires_a_typed_lexical_input() {
+        for name in ["mean", "fold", "map"] {
+            let mut dag = crate::Dag::new();
+            dag.add_node(
+                RiscOp::Load { name: name.into() },
+                vec![],
+                TensorType {
+                    dims: vec![],
+                    precision: Prim::F32,
+                },
+                None,
+            );
+            let mut scope = UnordMap::new();
+            assert_eq!(kernel_dag_loads_builtin(&dag, &scope), Some(name.into()));
+            scope.insert(
+                "unrelated".into(),
+                HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::F32)),
+            );
+            assert_eq!(kernel_dag_loads_builtin(&dag, &scope), Some(name.into()));
+            scope.insert(name.into(), HostTypeTerm::String);
+            assert_eq!(kernel_dag_loads_builtin(&dag, &scope), Some(name.into()));
+            scope.insert(
+                name.into(),
+                HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::F32)),
+            );
+            assert_eq!(kernel_dag_loads_builtin(&dag, &scope), None);
+        }
+    }
 
     fn parse_one_expr(source: &str) -> Expr {
         deep_expr(source)
