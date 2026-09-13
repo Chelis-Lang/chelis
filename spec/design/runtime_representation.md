@@ -1333,15 +1333,18 @@ execution tests prove its sanctioned replacements work.
   hits but may not add an exception or weaken a witness without a reviewed
   freeze move. The separately stored active-debt list sits outside the digest
   so it can shrink, while regeneration preserves retired foundation identities
-  and the reviewed mutation rows. `coverage_manifest()` remains code-derived
-  configuration rather than a persisted baseline field: it adds source paths,
-  seam kinds, expected owners, release reproducers, hardware probes, counts,
-  and ordinary execution configuration. At runtime the oracle verifies that
-  live probes match the frozen mutation rows, verifies that the richer manifest
-  is the exact projection of the current configuration, and executes every
-  non-hardware mutation and reproducer. Changes only to live-derived
-  reproducers, hardware probes, counts, or ordinary configuration do not move
-  the freeze.
+  and the reviewed mutation rows. An identity in the frozen foundation but
+  absent from the prior active-debt list is retired; regeneration rejects its
+  reappearance rather than silently restoring it. A genuinely new identity
+  outside the prior foundation may still be emitted with a changed digest for
+  review. `coverage_manifest()` remains code-derived configuration rather than
+  a persisted baseline field: it adds source paths, seam kinds, expected
+  owners, release reproducers, hardware probes, counts, and ordinary execution
+  configuration. At runtime the oracle verifies that live probes match the
+  frozen mutation rows, verifies that the richer manifest is the exact
+  projection of the current configuration, and executes every non-hardware
+  mutation and reproducer. Changes only to live-derived reproducers, hardware
+  probes, counts, or ordinary configuration do not move the freeze.
 - Phase 1 freezes `DTypeContract`, sealed element markers, exact capacity keys,
   checked finite-count types, and a required test-identity floor. Later phases
   consume the contracts without parallel tables. Tests newly selected by an

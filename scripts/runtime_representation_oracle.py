@@ -798,6 +798,25 @@ def build_foundation_baseline(
     foundation = [
         dict(row) for row in (() if foundation_rows is None else foundation_rows)
     ]
+    stored_active = [
+        dict(row) for row in (() if active_debt_rows is None else active_debt_rows)
+    ]
+    preexisting_foundation_ids = {
+        str(row["identity"]) for row in foundation
+    }
+    preexisting_active_ids = {
+        str(row["identity"]) for row in stored_active
+    }
+    observed_ids = {row.identity for row in rows}
+    reactivated = sorted(
+        observed_ids & (preexisting_foundation_ids - preexisting_active_ids)
+    )
+    if reactivated:
+        raise OracleFailure(
+            "retired Phase 0 identity reappeared and cannot be restored by regeneration: "
+            + ", ".join(reactivated[:5])
+        )
+
     foundation_index = {
         str(row["identity"]): index for index, row in enumerate(foundation)
     }
@@ -813,7 +832,7 @@ def build_foundation_baseline(
     current_by_id = {row.identity: row for row in rows}
     active: list[dict[str, object]] = []
     active_ids: set[str] = set()
-    for stored in (() if active_debt_rows is None else active_debt_rows):
+    for stored in stored_active:
         identity = str(stored["identity"])
         current = current_by_id.get(identity)
         if current is not None:

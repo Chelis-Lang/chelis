@@ -454,6 +454,60 @@ class BaselineTests(unittest.TestCase):
             oracle._freeze_digest(foundation, self.baseline["source_inventory"]),
         )
 
+    def test_regeneration_rejects_a_retired_identity_before_writing(self) -> None:
+        foundation = self.baseline["foundation_rows"]
+        active_ids = {
+            str(row["identity"]) for row in self.baseline["active_debt"]
+        }
+        retired = next(
+            row for row in foundation if str(row["identity"]) not in active_ids
+        )
+        identity = {
+            part.split("=", 1)[0]: part.split("=", 1)[1]
+            for part in str(retired["identity"]).split("|")
+        }
+        reactivated = oracle.InventoryRow(
+            kind=identity["kind"],
+            path=identity["path"],
+            owner=identity["owner"],
+            deletion_phase=int(retired["deletion_phase"]),
+            sample="reviewer reactivation reproduction",
+        )
+        observed = (*self.rows, reactivated)
+
+        with self.assertRaisesRegex(
+            oracle.OracleFailure,
+            "retired Phase 0 identity reappeared",
+        ):
+            oracle.build_foundation_baseline(
+                observed,
+                foundation_rows=foundation,
+                source_inventory=self.baseline["source_inventory"],
+                active_debt_rows=self.baseline["active_debt"],
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "baseline.json"
+            with (
+                mock.patch.object(oracle, "BASELINE_PATH", output),
+                mock.patch.object(
+                    oracle,
+                    "load_baseline",
+                    return_value=self.baseline,
+                ),
+                mock.patch.object(
+                    oracle,
+                    "inventory_rows",
+                    return_value=observed,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    oracle.OracleFailure,
+                    "retired Phase 0 identity reappeared",
+                ):
+                    oracle.regenerate()
+            self.assertFalse(output.exists())
+
     def test_regeneration_rejects_current_mutation_drift_without_rewriting(
         self,
     ) -> None:
