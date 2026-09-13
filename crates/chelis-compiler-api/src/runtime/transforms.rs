@@ -4,7 +4,7 @@ use chelis_unord::{UnordMap, UnordSet};
 use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, Metadata};
 use chelis_ir::dag::{DimInfo, TensorType};
-use chelis_ir::eval::TensorValue as IrTensorValue;
+use chelis_ir::eval::{TensorInputDemand, TensorValue as IrTensorValue};
 use chelis_ir::evaluation::{EvaluationProfile, RandomExecutionContext};
 use chelis_ir::host::RandomLoweringState;
 use chelis_ir::lower::try_lower_subexpr_program_with_random_state_progress;
@@ -161,6 +161,20 @@ impl<'a> EvalContext<'a> {
             Expr::List(list, _) => children(list).first(),
             _ => None,
         };
+        // #1956: only the already-resolved direct declaration owns free
+        // values here. The fresh lowerer has no local callable for this
+        // operand; its exact program_defs entry is the original Fn, and
+        // captured-closure injection below cannot replace that entry.
+        // A present snapshot binding, alias or inline Fn stays on the old
+        // lexical path. Do not use current caller bindings or the formals
+        // helper to infer identity, and do not rewrite the target.
+        let declaration_captures = matches!(kind, TransformKind::Grad)
+            && fn_expr.and_then(var_name).is_some_and(|name| {
+                !captured_env.contains_key(name)
+                    && self.top_level_defs.get(name).is_some_and(|body| {
+                        tagged_expr_children(body).is_some_and(|(tag, _)| tag == DeepTag::Fn)
+                    })
+            });
         let grad_formals = match kind {
             TransformKind::Grad => {
                 resolve_transform_fn_for_formals(transform_expr, &self.top_level_defs)
@@ -489,14 +503,21 @@ impl<'a> EvalContext<'a> {
         // parity gap pinned by `issue_352_grad_over_capturing_def_eval_gap`.
         // Only `Tensor` captures are served; non-tensor captures (closures,
         // scalars routed elsewhere) are not load inputs here.
-        let mut captured_tensors: UnordMap<String, IrTensorValue> = captured_env
-            .to_sorted()
-            .into_iter()
-            .filter_map(|(name, value)| match value {
-                RuntimeValue::Tensor(tensor) => Some((name.clone(), tensor.value.clone())),
-                _ => None,
-            })
-            .collect();
+        // A direct declaration's served captures come from the canonical
+        // provider below, never the caller's same-spelled lexical tensors.
+        // Keep the served values in this map for the existing rank guard.
+        let mut captured_tensors: UnordMap<String, IrTensorValue> = if declaration_captures {
+            UnordMap::new()
+        } else {
+            captured_env
+                .to_sorted()
+                .into_iter()
+                .filter_map(|(name, value)| match value {
+                    RuntimeValue::Tensor(tensor) => Some((name.clone(), tensor.value.clone())),
+                    _ => None,
+                })
+                .collect()
+        };
 
         // chelis#377 (vmap-inside-a-def): when the transform is applied
         // inside another def's body (`def fv(xs) = xs |> vmap(dot_w)`), the
@@ -511,7 +532,10 @@ impl<'a> EvalContext<'a> {
             counter: self.random_counter,
         });
         let mut provider_failed = false;
-        let prepare_input = |name: &str| {
+        let prepare_input = |name: &str, demand: TensorInputDemand| {
+            // eval_compiled supplies manifested Tensor-lane root values in
+            // tensor_bindings, not raw caller parameters. Actual arguments
+            // were evaluated separately and own the placeholders first.
             if let Some(value) = placeholder_tensors
                 .get(name)
                 .cloned()
@@ -523,7 +547,15 @@ impl<'a> EvalContext<'a> {
             // Unknown or ambiguous names may be optional shape declarers.
             // Do not confuse this absence with an error *inside* a known
             // initializer, even if that error also names an unknown binding.
-            if self.lookup_top_level_def(name).is_none() {
+            let Some((resolved, _)) = self.lookup_top_level_def(name) else {
+                return Ok(None);
+            };
+            if declaration_captures
+                && demand == TensorInputDemand::AvailableShape
+                && !self.declaration_values.contains_key(&resolved)
+            {
+                // Optional shape queries may reuse an initialized canonical
+                // value, but cannot enter a previously caller-masked initializer.
                 return Ok(None);
             }
             match self.resolve_top_level(name) {
@@ -539,9 +571,13 @@ impl<'a> EvalContext<'a> {
             }
         };
         let prepared_inputs = if let Some(plan) = &execution_plan {
-            chelis_ir::eval::prepare_tensor_plan_inputs(plan, &preparation_context, prepare_input)
+            chelis_ir::eval::prepare_tensor_plan_inputs_with_demand(
+                plan,
+                &preparation_context,
+                prepare_input,
+            )
         } else {
-            chelis_ir::eval::prepare_tensor_roots_inputs(&dag, &roots, prepare_input)
+            chelis_ir::eval::prepare_tensor_roots_inputs_with_demand(&dag, &roots, prepare_input)
         }
         .map_err(|error| {
             if provider_failed || execution_plan.is_some() {
