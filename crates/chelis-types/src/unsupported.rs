@@ -21,16 +21,15 @@
 //! the structured kind and payload, and agents match those, never regex
 //! over prose.
 //!
-//! **Status: that structured surface is the TARGET, not what ships today.**
-//! Nothing on this path derives `Serialize`, and the compiler-api flattens
-//! an [`Unsupported`] into a flat `kind: "unsupported_feature"` envelope
-//! plus the rendered message (`unsupported_stage_error`). So today the
-//! branded prefix IS the machine surface, and matching it is legitimate.
-//! Prerequisites, in order: chelis#729 Phase 4's capability Table A (without
-//! it `chelis check` has no target-independent rejections to report, which
-//! is why nothing constructs [`Stage::Checker`]), then a structured payload
-//! slot on `schema::Diagnostic`. Tracked by the section C2 status note in
-//! `spec/design/loud_unsupported.md`.
+//! **Status: the complete serialized surface is still the target.**
+//! Nothing on this path derives `Serialize`, and nothing constructs
+//! [`Stage::Checker`]. Chelis#1870 adds an in-process identity projection and
+//! retains the original [`Unsupported`] in compiler-api and selected lowering
+//! diagnostics, while serialized clients still receive
+//! `kind: "unsupported_feature"` plus the rendering. Unimplemented rows also
+//! still lack the future exact capability-table key: their issue is tracking
+//! metadata, not semantic authority. Existing exact pins therefore remain.
+//! Tracked by the section C2 status note in `spec/design/loud_unsupported.md`.
 //!
 //! **Executable form of that status (chelis#871).** A permission scoped
 //! "until the prerequisites land" needs something that fires when they do,
@@ -77,6 +76,9 @@ use std::fmt;
 use std::num::NonZeroU32;
 
 use crate::rejection_registry_generated::{REGISTERED_OPEN_ISSUES, REGISTERED_SPEC_ATOMS};
+
+/// Stable rendered prefix carried by every structured unsupported identity.
+pub const UNSUPPORTED_BRAND: &str = "unsupported:";
 
 /// A registered numbered-spec atom.
 ///
@@ -507,17 +509,39 @@ pub struct SpanRef {
     pub span_id: Option<String>,
 }
 
+/// Wording-independent identity available from a production [`Unsupported`].
+///
+/// The free-form authority hint is deliberately absent. Unimplemented rows
+/// retain their typed disposition and tracking issue, but the future exact
+/// capability-table key is not available yet, so existing exact pins remain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsupportedIdentity {
+    pub brand: &'static str,
+    pub what: UnsupportedKind,
+    pub context: String,
+    pub stage: Stage,
+    pub span: Option<Box<SpanRef>>,
+    pub disposition: RejectionAuthorityKind,
+    pub atom: Option<SpecAtomRef>,
+    pub tracking_issue: Option<IssueRef>,
+    pub supported_alternative: Option<String>,
+}
+
 /// The section C2 unsupported diagnostic. Construct with
 /// [`Unsupported::new`] and render with `to_string()`; the rendering exposes
 /// the validated authority kind and citation after the frozen brand/context
 /// clauses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unsupported {
-    /// What was encountered.
-    pub what: UnsupportedKind,
+    /// What was encountered. The closed typed subject is boxed so dynamic
+    /// payload growth cannot push this common Result error over Clippy's
+    /// `result_large_err` threshold.
+    pub what: Box<UnsupportedKind>,
     /// The context the encounter happened in (an op family, a target
     /// lane, a call position). Rendered as the `on <context>` clause.
-    pub context: String,
+    /// Boxed string storage keeps this Result error below Clippy's
+    /// `result_large_err` threshold without changing its value semantics.
+    pub context: Box<str>,
     /// Which stage refused.
     pub stage: Stage,
     /// Source span when one exists (lowering/codegen thread it). Boxed
@@ -525,23 +549,26 @@ pub struct Unsupported {
     /// paths (clippy::result_large_err); the section C2 shape is
     /// unchanged - the box is a representation detail.
     pub span: Option<Box<SpanRef>>,
-    /// Typed atom-or-issue authority plus the supported alternative.
+    /// Typed atom-or-issue authority.
     pub authority: RejectionAuthority,
+    /// A supported route the caller can select, when one exists.
+    pub supported_alternative: Option<Box<str>>,
 }
 
 impl Unsupported {
     pub fn new(
-        what: UnsupportedKind,
-        context: impl Into<String>,
+        what: impl Into<Box<UnsupportedKind>>,
+        context: impl Into<Box<str>>,
         stage: Stage,
         authority: RejectionAuthority,
     ) -> Self {
         Self {
-            what,
+            what: what.into(),
             context: context.into(),
             stage,
             span: None,
             authority,
+            supported_alternative: None,
         }
     }
 
@@ -567,6 +594,28 @@ impl Unsupported {
     pub fn with_span(mut self, span: SpanRef) -> Self {
         self.span = Some(Box::new(span));
         self
+    }
+
+    /// Attach the supported route for structured consumers.
+    #[must_use]
+    pub fn with_supported_alternative(mut self, alternative: impl Into<Box<str>>) -> Self {
+        self.supported_alternative = Some(alternative.into());
+        self
+    }
+
+    /// Project blocking fields without depending on rendered hint wording.
+    pub fn identity(&self) -> UnsupportedIdentity {
+        UnsupportedIdentity {
+            brand: UNSUPPORTED_BRAND,
+            what: (*self.what).clone(),
+            context: self.context.to_string(),
+            stage: self.stage,
+            span: self.span.clone(),
+            disposition: self.authority.kind(),
+            atom: self.authority.atom(),
+            tracking_issue: self.authority.issue(),
+            supported_alternative: self.supported_alternative.as_deref().map(str::to_owned),
+        }
     }
 }
 

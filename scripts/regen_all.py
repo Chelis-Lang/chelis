@@ -16,8 +16,10 @@ Tiers, in dependency order
     registry (`generate_rejection_registries.py --write`) compile and run only
     the existing `syn` inventory helper to derive the production module graph;
     the embedded conformance skill assets
-    (`regenerate_conformance_assets.py`), and the
-    opaque-invariants corpus (`tests/corpus/opaque_invariants/generate_corpus.py`).
+    (`regenerate_conformance_assets.py`), the centralized reviewed
+    unsupported-wording expectation
+    (`generate_reviewed_unsupported_wording_snapshot.py`), and the opaque-
+    invariants corpus (`tests/corpus/opaque_invariants/generate_corpus.py`).
     The corpus generator has no `--check`; this script regenerates into a
     temporary directory and byte-compares, the same three comparisons
     `crates/chelis-cli/tests/opaque_corpus_gate.rs` makes.
@@ -192,6 +194,24 @@ def regen_legs(python: str) -> tuple[RegenLeg, ...]:
             write_argv=(python, "scripts/regenerate_conformance_assets.py"),
             check_argv=(python, "scripts/regenerate_conformance_assets.py", "--check"),
             writes=("crates/chelis-conformance/assets/skills/",),
+            needs="python",
+        ),
+        RegenLeg(
+            name="reviewed-unsupported-wording",
+            tier=0,
+            write_argv=(
+                python,
+                "scripts/generate_reviewed_unsupported_wording_snapshot.py",
+            ),
+            check_argv=(
+                python,
+                "scripts/generate_reviewed_unsupported_wording_snapshot.py",
+                "--check",
+            ),
+            writes=(
+                "crates/chelis-cli/tests/snapshots/"
+                "issue_1870__reviewed__unsupported_wording.snap",
+            ),
             needs="python",
         ),
         RegenLeg(

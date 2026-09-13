@@ -1,0 +1,3 @@
+{
+  "annotated_concat_softmax_c": "error: unsupported: builtin `softmax` on `chelis build` host emission (codegen:c); deliberate [04-TOT-2]: the checked builtin vocabulary and C expression vocabulary disagree; no fallback expression is permitted\n"
+}

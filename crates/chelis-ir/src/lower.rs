@@ -65,20 +65,44 @@ pub struct LowerDiagnostic {
     pub span: Option<Span>,
     pub span_id: Option<String>,
     pub fatal: bool,
+    unsupported: Option<Box<Unsupported>>,
 }
 
 impl LowerDiagnostic {
-    pub(crate) fn new(
-        message: impl Into<String>,
-        span: Option<Span>,
-        span_id: Option<String>,
-    ) -> Self {
+    pub fn new(message: impl Into<String>, span: Option<Span>, span_id: Option<String>) -> Self {
         Self {
             message: message.into(),
             span,
             span_id,
             fatal: false,
+            unsupported: None,
         }
+    }
+
+    pub(crate) fn from_unsupported(
+        mut unsupported: Unsupported,
+        span: Option<Span>,
+        span_id: Option<String>,
+    ) -> Self {
+        if unsupported.span.is_none() && (span.is_some() || span_id.is_some()) {
+            unsupported = unsupported.with_span(chelis_types::unsupported::SpanRef {
+                offset: span.map(|value| value.offset),
+                len: span.map(|value| value.len),
+                span_id: span_id.clone(),
+            });
+        }
+        Self {
+            message: unsupported.to_string(),
+            span,
+            span_id,
+            fatal: false,
+            unsupported: Some(Box::new(unsupported)),
+        }
+    }
+
+    /// The typed unsupported value when this diagnostic came from that path.
+    pub fn unsupported(&self) -> Option<&Unsupported> {
+        self.unsupported.as_deref()
     }
 
     /// Mark a diagnostic as fatal — it must reach the user instead of
@@ -86,7 +110,7 @@ impl LowerDiagnostic {
     /// for deliberate rejections (e.g. AD on non-differentiable ops)
     /// where falling back to the host path would silently emit an
     /// undefined-symbol reference.
-    pub(crate) fn fatal(mut self) -> Self {
+    pub fn fatal(mut self) -> Self {
         self.fatal = true;
         self
     }
@@ -374,6 +398,14 @@ fn raise_fatal_lowering_error(
     span_id: Option<String>,
 ) -> ! {
     raise_lowering_diagnostic(LowerDiagnostic::new(message, span, span_id).fatal())
+}
+
+fn raise_fatal_unsupported(
+    unsupported: Unsupported,
+    span: Option<Span>,
+    span_id: Option<String>,
+) -> ! {
+    raise_lowering_diagnostic(LowerDiagnostic::from_unsupported(unsupported, span, span_id).fatal())
 }
 
 /// chelis#730 Phase 1, section C1.4 raise-or-prove: a malformed or
@@ -11245,8 +11277,10 @@ impl<'program> LowerCtx<'program> {
                                      previously lowered to a silent no-op; chelis#1058 owns compiled runtime-list support"
                                 ),
                             );
-                            raise_fatal_lowering_error(
-                                unsupported.to_string(),
+                            raise_fatal_unsupported(
+                                unsupported.with_supported_alternative(
+                                    "use integer literal window and stride lists",
+                                ),
                                 Some(list_arg.span()),
                                 list_arg.span_id().map(ToOwned::to_owned),
                             )
@@ -16884,6 +16918,15 @@ impl<'program> LowerCtx<'program> {
 mod tests {
     use super::*;
     use crate::verify;
+
+    #[test]
+    fn lower_diagnostic_stays_within_the_result_error_size_limit() {
+        assert!(
+            std::mem::size_of::<LowerDiagnostic>() < 128,
+            "LowerDiagnostic is {} bytes and will trigger clippy::result_large_err",
+            std::mem::size_of::<LowerDiagnostic>()
+        );
+    }
 
     #[test]
     fn evaluation_normalization_drops_only_inert_scope_witnesses() {

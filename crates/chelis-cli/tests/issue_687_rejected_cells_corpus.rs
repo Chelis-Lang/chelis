@@ -272,6 +272,57 @@ fn rejected_cells_fail_the_build_with_their_pinned_diagnostics() {
     }
 }
 
+fn compare_cross_lane_rejection(
+    expected_lane: &str,
+    expected: &str,
+    actual_lane: &str,
+    actual: &str,
+) -> Result<(), String> {
+    compare_exact_observations(
+        &format!("{expected_lane} production rejection versus {actual_lane}"),
+        expected,
+        actual,
+    )
+    .map(|_| ())
+    .map_err(|error| error.to_string())
+}
+
+#[test]
+fn cross_lane_rejection_comparison_rejects_a_lane_specific_wrapper() {
+    let c = "error: unsupported: same typed lowering rejection\n";
+    let hip = "error: Lowering error: unsupported: same typed lowering rejection\n";
+    assert!(
+        compare_cross_lane_rejection("c", c, "hip", hip).is_err(),
+        "a HIP-only wrapper must fail the C-output-derived comparison"
+    );
+}
+
+/// Actual CLI build entry paths converge on the lowering-stage rejection
+/// before target-specific code generation. This covers production stderr for
+/// C, HIP, and Metal; it does not claim device execution.
+#[test]
+fn nonliteral_window_rejection_is_equal_across_build_lanes() {
+    let (name, program, _, _) = BUILD_REJECTION_ROWS
+        .iter()
+        .find(|(name, _, _, _)| *name == "c_nonliteral_window")
+        .expect("nonliteral-window corpus row");
+
+    let (c_ok, c_stderr, c_emitted) = build_target(program, &format!("{name}_c"), "c");
+    assert!(!c_ok, "c: lowering must reject before code generation");
+    assert!(c_emitted.is_empty(), "c: rejection emitted an artifact");
+
+    for target in ["hip", "metal"] {
+        let (ok, stderr, emitted) = build_target(program, &format!("{name}_{target}"), target);
+        assert!(!ok, "{target}: lowering must reject before code generation");
+        assert!(
+            emitted.is_empty(),
+            "{target}: rejection emitted an artifact"
+        );
+        compare_cross_lane_rejection("c", &c_stderr, target, &stderr)
+            .unwrap_or_else(|error| panic!("{target}: {error}"));
+    }
+}
+
 /// The Metal rank-2 gap is a typed build rejection. No aborting artifact may
 /// be presented as a successful build.
 #[test]

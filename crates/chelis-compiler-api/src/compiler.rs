@@ -3494,12 +3494,18 @@ pub(crate) fn pipeline_rejection_to_compiler_error(
         PipelineRejection::Linearity { errors } => {
             crate::compiler::check_errors_to_compiler_error("linearity", &errors)
         }
-        PipelineRejection::Lower(diagnostic) => stage_error_with_span(
-            "lower",
-            diagnostic.to_string(),
-            GeneralKind::LowerError,
-            deep_span_to_diagnostic(diagnostic.span),
-        ),
+        PipelineRejection::Lower(diagnostic) => {
+            if let Some(unsupported) = diagnostic.unsupported().cloned() {
+                unsupported_stage_error(unsupported)
+            } else {
+                stage_error_with_span(
+                    "lower",
+                    diagnostic.to_string(),
+                    GeneralKind::LowerError,
+                    deep_span_to_diagnostic(diagnostic.span),
+                )
+            }
+        }
         PipelineRejection::RootCount {
             context,
             expected,

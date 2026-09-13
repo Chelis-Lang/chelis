@@ -43,8 +43,8 @@ fn vec_i64(n: usize) -> TensorType {
 
 fn assert_hip_dtype_rejection(error: Unsupported, dtype: &str, issue: u32) {
     assert_eq!(
-        error.what,
-        UnsupportedKind::Dtype(dtype.to_string()),
+        error.what.as_ref(),
+        &UnsupportedKind::Dtype(dtype.to_string()),
         "the rejection must carry the exact typed dtype"
     );
     assert_eq!(

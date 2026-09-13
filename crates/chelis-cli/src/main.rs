@@ -1610,8 +1610,7 @@ fn lower_build_program_for_cli(
         Ok((lowered.into_dag(), ordinary_host, plan))
     } else {
         let mut compiled =
-            chelis_ir::host::try_lower_compiled_program_with_manifest(checked.program(), manifest)
-                .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?;
+            chelis_ir::host::try_lower_compiled_program_with_manifest(checked.program(), manifest)?;
         emit_summary_rejections(compiled.host.as_ref());
         let dag = lower_checked_for_cli(checked.clone(), compiled.host.as_ref())?;
         if let Some(host) = compiled.host.as_mut() {
