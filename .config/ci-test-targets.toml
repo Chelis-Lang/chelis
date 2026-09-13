@@ -330,6 +330,11 @@ name = "issue_1923_pipe_fold_placement"
 package = "chelis-cli"
 name = "issue_1923_pipe_fold_surface"
 
+# chelis#1779: one nine-line `chelis build --target c` of the Shoals column
+# reshape. It went red on `main` when chelis#1693 put the staged partition
+# ahead of the decision that reads the runtime-shaped `to_tensor` marker, and
+# nothing per pull request caught it: bisection in chelis#1776 found it. One
+# test, under a second warm.
 [[target]]
 package = "chelis-cli"
 name = "reshape_symbolic_dim_vmap_column"

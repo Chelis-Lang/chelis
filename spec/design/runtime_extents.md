@@ -970,6 +970,15 @@ writes it). `chelis_deep::pipe::fold_pipes` states the sentence once, over
 every checker entry's input, and each of those passes lost its own pipe arm
 rather than gaining a rule.
 
+The two `staged.dynamic_to_tensor.vmap_column` rows are chelis#1779 and are
+adjacent rather than the same defect. A runtime-shaped `to_tensor` lowers to a
+deliberate rank-0 placeholder whose documented contract is to be refused so
+the definition routes to the host lane; chelis#1693's staged host-source
+partition runs ahead of the decision that reads that signal and cannot carry
+the marker, so both lanes refused a program that checks at 1.0. The repair
+reads the same fact the tensor-helper extractor reads. The partition's
+exactly-one check is unchanged: it is what caught this.
+
 What a passing `--phase final` claims is exactly this: every row of the two
 recorded corpora is at an exit state, every named receipt executed and passed
 at one clean exact head, and both baselines match their generated corpora. It
