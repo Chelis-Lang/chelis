@@ -437,6 +437,16 @@ fn parity_grad_wrt_order() {
 }
 
 #[test]
+fn parity_vmap_shape_value() {
+    let path = examples_root().join("vmap_shape_value.ch");
+    drive_parity(&path, true);
+    assert_eq!(
+        run_eval(&path),
+        b"out = tensor(shape=[2], data=[3.0, 3.0])\n"
+    );
+}
+
+#[test]
 fn parity_source_file_names() {
     drive_parity(&examples_root().join("source-file-names.ch"), true);
 }
@@ -805,6 +815,7 @@ fn parity_corpus_is_complete() {
         "tensor_structural_ops.ch",
         "transformer_block.ch",
         "vmap_relu.ch",
+        "vmap_shape_value.ch",
         "wildcard_extents.ch",
     ];
     let actual: Vec<String> = discover_executable_examples()

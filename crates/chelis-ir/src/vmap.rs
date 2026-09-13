@@ -306,7 +306,14 @@ fn shared_bound_nodes(dag: &Dag) -> Result<UnordSet<NodeId>, String> {
         if matches!(owner.op, RiscOp::ExtentWitness { .. }) {
             shared.insert(owner.id);
         }
-        if matches!(owner.op, RiscOp::CheckedReshapeExtent { .. }) {
+        // A shape read stays rank zero even when used only as ordinary data
+        // or retained forward work. Its operand is still batched; the read's
+        // axis shifts above, and existing consumer/root expansion broadcasts
+        // its scalar result (spec/05 §2.5.1, spec/06 §3.7; chelis#2003).
+        if matches!(
+            owner.op,
+            RiscOp::CheckedReshapeExtent { .. } | RiscOp::Shape { .. }
+        ) {
             mark_shared_bound(dag, owner.id, &mut shared)?;
         }
         // Operand-slot order is the IR's canonical order for this dependency walk.
