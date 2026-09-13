@@ -1175,6 +1175,23 @@ def generated_phase_b_corpus() -> tuple[CorpusRow, ...]:
             EXECUTES,
             "cli_slice_b.a_three_member_alias_class_sizes_a_root_in_every_argument_order_on_eval",
         ),
+        # chelis#1779: a runtime-shaped `to_tensor` lowers to a deliberate
+        # rank-0 placeholder whose contract is to be refused so the definition
+        # routes to the host lane. chelis#1693's staged host-source partition
+        # runs ahead of the decision that reads that signal and cannot carry
+        # the marker, so both lanes rejected a program that checks at 1.0.
+        _row(
+            "staged.dynamic_to_tensor.vmap_column.eval",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_slice_b.a_runtime_shaped_to_tensor_column_routes_to_the_host_lane_on_both_lanes",
+        ),
+        _row(
+            "staged.dynamic_to_tensor.vmap_column.c",
+            "nonconforming_rejection",
+            EXECUTES,
+            "cli_slice_b.a_runtime_shaped_to_tensor_column_routes_to_the_host_lane_on_both_lanes",
+        ),
     )
     return tuple(sorted(rows, key=lambda row: row.id))
 

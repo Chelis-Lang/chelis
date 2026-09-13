@@ -821,12 +821,12 @@ still reaches the oracle's own
 erased no row: `--phase a` and `--phase b` keep their names, corpora and
 row-transition checks, and each still has to PASS on its own.
 
-The recorded phase-B corpus has 111 rows and none of them is an unexplained
+The recorded phase-B corpus has 113 rows and none of them is an unexplained
 shortfall. `--phase b` reads `RUNTIME EXTENT ORACLE: PASS` rather than
 `RECEIPTS PASS, ROWS SHORT OF EXIT`, and it does so without
 `--allow-shortfall`. That reading, not a hand count, is what to quote. A hand
 count of the JSON's `phase_b` column reaches 27 non-`executes_exactly` values
-against 84 `executes_exactly`, and every one of the twenty-seven is accounted
+against 86 `executes_exactly`, and every one of the twenty-seven is accounted
 for. Twenty-six rows are `rejects_exactly`, an exit state, since those programs
 are SUPPOSED to be rejected and a row that stopped rejecting them would be the
 defect. Nine of the twenty-six predate B2c:
@@ -889,6 +889,15 @@ The op-computed local guards moved seven rows
 `class.splice_f_of_n_n.{c,eval}`) and the six `shrink.*` preparation cells, and
 #1379's acceptance moved `expand.arith_size.named_claim.{c,eval}`, which were
 the last two.
+
+The two `staged.dynamic_to_tensor.vmap_column` rows are chelis#1779 and are
+adjacent rather than the same defect. A runtime-shaped `to_tensor` lowers to a
+deliberate rank-0 placeholder whose documented contract is to be refused so
+the definition routes to the host lane; chelis#1693's staged host-source
+partition runs ahead of the decision that reads that signal and cannot carry
+the marker, so both lanes refused a program that checks at 1.0. The repair
+reads the same fact the tensor-helper extractor reads. The partition's
+exactly-one check is unchanged: it is what caught this.
 
 What a passing `--phase final` claims is exactly this: every row of the two
 recorded corpora is at an exit state, every named receipt executed and passed

@@ -7786,3 +7786,73 @@ fn a_three_member_alias_class_sizes_a_root_in_every_argument_order_on_c() {
     assert_eq!(rendered[1], rendered[0], "middle renders as first on C too");
     assert_eq!(rendered[2], rendered[0], "and last");
 }
+
+
+// ---------------------------------------------------------------------------
+// chelis#1779: a runtime-shaped `to_tensor` routes to the host lane under
+// staging.
+//
+// A `to_tensor` whose operand is not a literal cons chain lowers to a
+// deliberate rank-0 `Load { name: "to_tensor" }` placeholder whose documented
+// contract is to be refused so the definition routes to the host lane. The
+// staged host-source partition added by chelis#1693 runs ahead of the
+// decision that reads that signal and cannot carry the marker, so it rejected
+// the whole definition after a clean check.
+// ---------------------------------------------------------------------------
+
+/// The Shoals pricer's `const_col` column, reduced. `const_col` is the staged
+/// candidate: it names `reshape` and reaches host-only builtins.
+const STAGED_RUNTIME_SHAPED_COLUMN: &str = "module Repro.StagedColumn\n\
+def const_col[n](spots: tensor[n, f32], v: f64) -> tensor[n, 1, f64] = {\n  \
+nn = cast(shape(copy(spots), cast(0, int32)), int64)\n  \
+reshape(to_tensor(map(fn (i: int64) -> v, range(cast(0, int64), nn))), [nn, cast(1, int64)])\n\
+}\n\
+def prices[n](spots: tensor[n, f32], k: f32) -> tensor[n, f32] = {\n  \
+kc = const_col(spots, cast(k, f64))\n  \
+p64 = vmap(fn (ka: tensor[1, f64]) -> tensor_to_scalar(sum(ka, 0)))(kc)\n  \
+cast(p64, f32)\n\
+}\n\
+out = prices(to_tensor([1.0f32, 2.0f32, 3.0f32]), 5.0f32)\n";
+
+/// staged.dynamic_to_tensor.vmap_column.{eval,c}
+///
+/// EVIDENTIARY STATUS: regression test on both lanes. On `08e46ebe6`
+/// `chelis check` scored this 1.0 with an empty error list and BOTH lanes
+/// then exited 1 with "every staged graph input needs exactly one declared or
+/// host producer". On chelis#1693's parent `062c29c19` both lanes printed the
+/// line below, through the host lane, and the emitted C carried the same 18
+/// `const_col__tensor_` helper spellings it carries here.
+#[test]
+fn a_runtime_shaped_to_tensor_column_routes_to_the_host_lane_on_both_lanes() {
+    if !gcc_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let expected = "out = tensor(shape=[3], data=[5.0, 5.0, 5.0])";
+    let (ok, out) = c_run_result(&dir, "staged_column_c", STAGED_RUNTIME_SHAPED_COLUMN);
+    assert!(ok, "the C lane must build and run the column: {out}");
+    assert!(out.contains(expected), "{out}");
+    let (eval_ok, eval_out) =
+        eval_result(&dir, "staged_column_eval.ch", STAGED_RUNTIME_SHAPED_COLUMN);
+    assert!(eval_ok, "{eval_out}");
+    assert!(
+        eval_out.contains(expected),
+        "and the lanes agree byte for byte: {eval_out}"
+    );
+
+    // Declining staging must retain the host path's reshape-size check.
+    let invalid = STAGED_RUNTIME_SHAPED_COLUMN
+        .replace("tensor[n, 1, f64]", "tensor[n, 2, f64]")
+        .replace("[nn, cast(1, int64)]", "[nn, cast(2, int64)]")
+        .replace("tensor[1, f64]", "tensor[2, f64]");
+    let (eval_ok, eval_error) = eval_result(&dir, "invalid_column.ch", &invalid);
+    assert!(
+        !eval_ok && eval_error.contains("reshape expects 6 elements but tensor has 3"),
+        "{eval_error}"
+    );
+    let (c_ok, c_error) = c_run_result(&dir, "invalid_column_c", &invalid);
+    assert!(
+        !c_ok && c_error.contains("Domain: chelis_tensor_check_reshape reshape numel mismatch: target 6 but tensor has 3 elements"),
+        "{c_error}"
+    );
+}

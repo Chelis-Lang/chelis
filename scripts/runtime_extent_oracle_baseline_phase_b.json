@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "corpus_sha256": "7548b5e3bccb7d9ac38c02999d1770e699a5314341ca21fdd01af9c52c940df4",
+  "corpus_sha256": "e6a75f5bacbe99cc713d8eedd18840f003e65ddf9796393782d7ad5a123c9bb7",
   "rows": [
     {
       "id": "claim.literal.identity_root.c",
@@ -667,6 +667,18 @@
       "baseline": "silent_unguarded",
       "phase_b": "rejects_exactly",
       "receipt": "ir_sources.to_end_shrink_end_requires_a_literal_zero_start"
+    },
+    {
+      "id": "staged.dynamic_to_tensor.vmap_column.c",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_runtime_shaped_to_tensor_column_routes_to_the_host_lane_on_both_lanes"
+    },
+    {
+      "id": "staged.dynamic_to_tensor.vmap_column.eval",
+      "baseline": "nonconforming_rejection",
+      "phase_b": "executes_exactly",
+      "receipt": "cli_slice_b.a_runtime_shaped_to_tensor_column_routes_to_the_host_lane_on_both_lanes"
     }
   ]
 }
