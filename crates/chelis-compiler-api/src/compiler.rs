@@ -2622,6 +2622,15 @@ pub fn eval_for_target(request: EvalRequest, target: Target) -> Result<EvalResul
     eval_compiled(&compiled, request.bindings, None)
 }
 
+/// Evaluate the selected roots using only their required tensor bindings.
+/// A selected parameterized declaration becomes owed when those inputs are
+/// present; bindings do not supply live scalar or container parameters.
+/// Admitted selected Host calls receive tensor actuals in authored parameter
+/// order. An available lowered Host kernel also contributes its shape-witness
+/// parameters to input demand; this does not broaden entry/profile admission.
+/// Missing required inputs leave the declaration unentered. Invalid required
+/// wire tensors fail before entry; genuinely dead and unrelated bindings are
+/// not decoded. Host execution still owns lowering errors and executed effects.
 pub fn eval_selected(request: EvalRequest, selected_root_names: &[String]) -> Result<EvalResult> {
     eval_selected_for_target(request, selected_root_names, Target::Eval)
 }
@@ -2691,6 +2700,7 @@ pub struct PreparedEval {
 impl PreparedEval {
     /// Evaluate exactly one selected root. Other top-level non-fn bindings
     /// stay registered for lazy reference but are not eagerly evaluated.
+    /// Tensor bindings follow [`eval_selected`], freshly for each call.
     pub fn eval_root(
         &self,
         bindings: BTreeMap<String, crate::schema::TensorValue>,
@@ -2895,7 +2905,9 @@ pub fn eval_in_context_for_target(
 /// into the evaluator instead of an empty map. This is the reef-aware
 /// analogue of [`eval`] with bindings: it lets the Python `eval(...,
 /// project_root=...)` path resolve library imports (issue #816) while still
-/// binding the new source's free `Load`s to the caller's inputs.
+/// binding the new source's free `Load`s and the selected `main`'s required
+/// tensor parameters to the caller's inputs. The binding and non-observation
+/// rules are the same as [`eval_selected`].
 pub fn eval_in_context_with_bindings(
     context: &crate::context::CompiledContext,
     new_source: &str,
@@ -2984,6 +2996,9 @@ pub struct PreparedEvalInContext {
 
 impl PreparedEvalInContext {
     /// Evaluate exactly one selected root against the prepared compile.
+    /// Tensor bindings follow [`eval_selected`], freshly for each call.
+    /// Selected Host demand may inspect a new lowering product, including the
+    /// checked library proof; execution does not reuse that speculative plan.
     pub fn eval_root(
         &self,
         bindings: BTreeMap<String, crate::schema::TensorValue>,
@@ -3577,7 +3592,7 @@ fn manifest_result(program: &ManifestedProgram) -> RootManifestResult {
 }
 
 /// Specialize callable tensor entries selected for evaluation into owed
-/// roots once all authored parameters have bindings. The checked manifest
+/// roots once all required runtime inputs have bindings. The checked manifest
 /// intentionally excludes parameterized declarations in the abstract; this
 /// produces a new `ManifestedProgram` for the concrete evaluation request
 /// rather than reaching around the manifest to the legacy named-root map.
