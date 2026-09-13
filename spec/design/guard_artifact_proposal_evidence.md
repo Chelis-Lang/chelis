@@ -241,7 +241,7 @@ census entrypoints and their slow full checks actually ran.
 ### Newly failing rows relative to the preceding scheduled head
 
 Scheduled run `34670561943` on `6abca2406` passed each of the following tests.
-The current run failed ten distinct rows:
+The current run failed eleven distinct rows. Ten had no exact open owner:
 
 | Failure class | Distinct rows | Current observation |
 |---|---:|---|
@@ -249,6 +249,10 @@ The current run failed ten distinct rows:
 | chelis#345 gradient | 1 | Evaluation rejects construction of the backward DAG at same-shape/same-dtype `relu` verification. |
 | Module-export fixture precedence | 3 | One proof fixture and two opaque-type fixtures encounter an unexported import before the result their assertions expect. |
 | `annotated_concat_softmax.ch` corpus validity | 2 | Strict Deep validation and `--desugar` reject the executable example added by chelis#1918. |
+
+The eleventh row,
+`chelis-cli::runtime_extent_claim_preparation::omitted_extent_claim_contract`,
+is already tracked by chelis#1917.
 
 Exact open-issue searches on 2026-09-13 found no matching owner for these ten
 rows. That absence is recorded as an assessment limit: the evidence proves the

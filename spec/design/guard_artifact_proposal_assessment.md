@@ -243,15 +243,26 @@ longer hand-maintained list.
 For `unsupported` diagnostics, the blocking contract is structured identity:
 
 - the `unsupported:` brand;
-- compiler stage;
-- deliberate or unimplemented kind;
-- validated authority citation; and
-- the named operation, dtype, or capability.
+- the named subject and its context;
+- the earliest competent compiler stage;
+- `DiagnosticKind::UnsupportedFeature`, rendered as the machine-facing
+  `unsupported_feature` kind;
+- the span's presence and association where one exists;
+- the correct supported alternative where one exists;
+- the typed disposition category and its deciding numbered atom or exact
+  capability cell; and
+- explicit human review that any associated issue is relevant, not merely
+  structurally valid and open.
 
-Hint prose, wrapper prefixes, node identifiers, and source offsets are
-rendering. Expose the `Unsupported` value through a structured channel or keep
-the existing substring identity locks until that channel exists. Do not ship a
-second hand-written parser for the rendered sentence.
+Project issue metadata may schedule work around a capability cell, but it is
+not semantic authority. Hint wording, wrapper prefixes, node identifiers, and
+the exact textual rendering of offsets are snapshot evidence; they do not
+replace the blocking span and authority fields.
+
+Expose the complete `Unsupported` value through a structured channel or keep
+the existing substring and exact-text identity locks and their mutations until
+that channel covers every obligation above. Do not ship a second hand-written
+parser for the rendered sentence.
 
 This is not a rule against every exact diagnostic assertion. Post-review
 changes chelis#1873, chelis#1926, and chelis#1943 deliberately lock exact public
@@ -387,8 +398,8 @@ successfully prompted a filename audit; it did not prove the example's broader
 executable obligations. The replacement report must therefore join changed
 names to their owning executable checks, not reproduce only the name review.
 
-Compared with scheduled run `34670561943` on `6abca2406`, ten distinct tests
-that previously passed are now failing:
+Compared with scheduled run `34670561943` on `6abca2406`, eleven distinct
+tests that previously passed are now failing. Ten had no exact open owner:
 
 - four chained-expand evaluation or C-agreement rows fail on a conflicting
   synthetic dimension;
@@ -396,6 +407,10 @@ that previously passed are now failing:
 - three proof or opaque-type fixtures now encounter module-export rejection
   before their expected contract; and
 - the two `annotated_concat_softmax.ch` corpus checks fail.
+
+The eleventh,
+`runtime_extent_claim_preparation::omitted_extent_claim_contract`, is already
+tracked by chelis#1917.
 
 No exact open issue match was found for those ten rows as of 2026-09-13. This
 document records them as current-main residual findings rather than assigning
