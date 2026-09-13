@@ -195,10 +195,8 @@ impl PrecisionSubject {
 /// drift between the diagnostic a settled `int32` gets and the one its `[p]`
 /// binder gets, which is the property the two paths exist to share.
 ///
-/// Every callee [`operand_family_policy`] names has an arm here, and the
-/// declaration boundary in `checked.rs` renders a suspended entry through this
-/// same function, so a boundary diagnostic cannot say something the eager one
-/// does not.
+/// Every callee [`operand_family_policy`] names has an arm here. A deferred
+/// entry that becomes concrete uses the same rejection when replayed.
 pub(super) fn family_policy_rejection(
     fname: &str,
     subject: &PrecisionSubject,
@@ -296,8 +294,8 @@ pub(super) enum PrecisionVerdict {
     /// site can change it.
     Reject(PrecisionSubject, OperandFamily),
     /// The variable carries no bound, so nothing is known yet. The call is
-    /// suspended on the variable; the ledger decides it where it binds, and
-    /// rejects it at the declaration boundary when nothing binds it.
+    /// suspended on the variable; the ledger decides it where it binds. An
+    /// entry still unresolved at the declaration boundary discharges silently.
     Suspend,
 }
 

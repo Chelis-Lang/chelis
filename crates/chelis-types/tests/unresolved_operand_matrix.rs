@@ -1276,6 +1276,13 @@ fn a_late_bound_tensor_precision_is_rejected_at_the_instantiation() {
             "a top-level value binding",
             format!("{HELPER}t = to_tensor([1i32, 2i32, 4i32])\nf = g(t)\n"),
         ),
+        (
+            "a tuple element of a declared parameter",
+            format!(
+                "{HELPER}def pick(pair: (tensor[3, int32], int32)) -> tensor[int32] = g(pair.0)\n\
+                 f = pick((to_tensor([1i32, 2i32, 4i32]), 7i32))\n"
+            ),
+        ),
     ] {
         let Err(errors) = check(&program) else {
             panic!("{label}: the int32 instantiation must be rejected");
@@ -1296,6 +1303,11 @@ fn a_late_bound_tensor_precision_is_rejected_at_the_instantiation() {
         "{HELPER}f = g(to_tensor([1.0f32, 2.0f32, 4.0f32]))\n"
     ))
     .expect("an f32 instantiation of the same helper is well typed");
+    check(&format!(
+        "{HELPER}def pick(pair: (tensor[3, f32], int32)) -> tensor[f32] = g(pair.0)\n\
+         f = pick((to_tensor([1.0f32, 2.0f32, 4.0f32]), 7i32))\n"
+    ))
+    .expect("the same tuple projection at f32 is admitted");
 }
 
 /// chelis#1805: the operand's constructor is known, its precision binds one
@@ -1526,35 +1538,181 @@ fn a_signature_bounded_callee_is_caught_at_the_call_site() {
     );
 }
 
-/// The two spellings chelis#1805's repair does NOT reach, DISPOSITION LOCKS so
-/// the residue is loud in the suite rather than silent.
+/// chelis#1805: a local binding SHADOWING a top-level one is read from the
+/// local binding, in both directions.
 ///
-/// Both were measured on `0820ee28e` accepting at score 1 and printing `f = 2`
-/// on the compiled C lane for a true 2.333, and both still do. Each needs a
-/// mechanism this pull request does not add, and each has its own issue.
+/// The argument reader resolves a `(var name)` through the binding chain in
+/// scope order. Reading the outer binding instead is wrong both ways round: it
+/// rejects a legal program by naming a dtype no operand at that call carries,
+/// and it accepts an illegal one because the shadowed binding happens to be
+/// admissible.
 ///
-/// A failure here means that issue was fixed.
+/// REGRESSION TEST, both assertions, from round 1's P1-1 probes. On
+/// `a36c7c581` the first was REJECTED naming `int32`, a dtype the call's
+/// operand does not carry, and the second was ACCEPTED at score 1 with the
+/// compiled C lane printing `f = 2` for a true 2.3333333.
 #[test]
-fn two_instantiation_spellings_remain_unreached() {
+fn a_local_binding_shadowing_a_top_level_one_is_read_from_the_local() {
+    const HELPER: &str = "def g[p](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n";
+
+    check(&format!(
+        "{HELPER}t = to_tensor([1i32, 2i32, 4i32])\n\
+         def pick() -> tensor[f32] = {{\n  \
+         t = to_tensor([1.0f32, 2.0f32, 4.0f32])\n  g(t)\n}}\n\
+         f = pick()\n"
+    ))
+    .expect("the local f32 binding is what `g` receives, so the program is well typed");
+
+    let errors = check(&format!(
+        "{HELPER}t = to_tensor([1.0f32, 2.0f32, 4.0f32])\n\
+         def pick() -> tensor[int32] = {{\n  \
+         t = to_tensor([1i32, 2i32, 4i32])\n  g(t)\n}}\n\
+         f = pick()\n"
+    ))
+    .expect_err("the local int32 binding is what `g` receives, so the program is rejected");
+    assert!(
+        errors.iter().any(|e| e.message.contains(
+            "mean on operand precision `int32` is not admitted per the chelis#724 \
+             capability decision"
+        )),
+        "the rejection must name the LOCAL binding's dtype:\n{}",
+        summary(&errors)
+    );
+}
+
+/// Binding references retain the scope in which their value was defined.
+/// The two dtype orders catch false acceptance as well as false rejection.
+#[test]
+fn argument_precision_respects_sequential_and_top_level_binding_scopes() {
+    const HELPER: &str = "def g[p](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n";
+    for (first, second, rejects) in [
+        ("[1.0f32, 2.0f32, 4.0f32]", "[1i32, 2i32, 4i32]", false),
+        ("[1i32, 2i32, 4i32]", "[1.0f32, 2.0f32, 4.0f32]", true),
+    ] {
+        for program in [
+            format!(
+                "{HELPER}t = to_tensor({first})\n\
+                 def pick() = {{\n u = t\n t = to_tensor({second})\n g(u)\n }}\nf = pick()\n"
+            ),
+            format!(
+                "{HELPER}t = to_tensor({first})\nu = t\n\
+                 def pick() = {{\n t = to_tensor({second})\n g(u)\n }}\nf = pick()\n"
+            ),
+        ] {
+            let result = check(&program);
+            if rejects {
+                let errors = result.expect_err("the referenced binding carries int32");
+                assert!(
+                    errors.iter().any(|error| error
+                        .message
+                        .contains("mean on operand precision `int32` is not admitted")),
+                    "{}",
+                    summary(&errors)
+                );
+            } else {
+                result.expect("the referenced binding carries f32");
+            }
+        }
+    }
+}
+
+/// chelis#1805: bool arithmetic reached through an unbounded precision binder.
+///
+/// `BOOL_REJECTED_ARITH_OPS` is not a family policy, so nothing in this repair
+/// decides it, but the argument reader feeds the pre-existing restricted-op
+/// walk, which already covers those five operations. The narrowing is therefore
+/// real and had no assertion, which is how it could regress silently while
+/// chelis#1937 stayed open against a repaired witness.
+///
+/// REGRESSION TEST, every row: all five were measured ACCEPTED at score 1 on
+/// `0820ee28e`, and the first is chelis#1937's verbatim witness.
+#[test]
+fn bool_arithmetic_through_an_unbounded_binder_is_rejected_at_the_instantiation() {
+    for (op, body) in [
+        ("add", "add(x, x)"),
+        ("sub", "sub(x, x)"),
+        ("mul", "mul(x, x)"),
+        ("neg", "neg(x)"),
+        ("floor_div", "floor_div(x, x)"),
+    ] {
+        let program = format!(
+            "def g[p](x: tensor[3, p]) -> tensor[3, p] = {body}\n\
+             def f() -> tensor[3, bool] = g(to_tensor([true, false, true]))\n"
+        );
+        let Err(errors) = check(&program) else {
+            panic!("`{op}` on a bool instantiation must be rejected");
+        };
+        assert!(
+            errors.iter().any(|e| e.message.contains(&format!(
+                "{op} on bool operands is not admitted per the chelis#726 capability decision"
+            ))),
+            "`{op}` must reject with the chelis#726 text:\n{}",
+            summary(&errors)
+        );
+        check(&format!(
+            "def g[p](x: tensor[3, p]) -> tensor[3, p] = {body}\n\
+             def f() -> tensor[3, int32] = g(to_tensor([1i32, 2i32, 4i32]))\n"
+        ))
+        .expect("the same arithmetic at int32 is admitted");
+    }
+}
+
+/// The argument spellings chelis#1805's reader does NOT resolve, DISPOSITION
+/// LOCKS so the residue is loud in the suite rather than silent.
+///
+/// The covered set is stated by construction: an argument whose precision the
+/// reader resolves, reaching a restricted operation in the callee's own body
+/// EXPRESSION. Each row below falls outside one half of that and needs a
+/// mechanism this pull request does not add. All five were measured on
+/// `0820ee28e` accepting at score 1 and printing `f = 2` on the compiled C lane
+/// for a true 2.3333333, and all five still do.
+///
+/// A failure here means the owning issue was fixed.
+#[test]
+fn the_spellings_the_argument_reader_does_not_resolve_remain_unreached() {
+    const HELPER: &str = "def g[p](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n";
+
     // chelis#1940: the helper reached as a function VALUE. It never appears in
     // callee position, so the call-site pass has nothing to key on.
-    check(
-        "def g[p](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n\
-         def apply_it(fn_arg: (tensor[3, int32]) -> tensor[int32], y: tensor[3, int32]) \
+    check(&format!(
+        "{HELPER}def apply_it(fn_arg: (tensor[3, int32]) -> tensor[int32], y: tensor[3, int32]) \
          -> tensor[int32] = fn_arg(y)\n\
-         f = apply_it(g, to_tensor([1i32, 2i32, 4i32]))\n",
-    )
+         f = apply_it(g, to_tensor([1i32, 2i32, 4i32]))\n"
+    ))
     .expect("chelis#1940: a helper passed as a value is not reached");
 
-    // chelis#1941: two polymorphic defs in a chain. The body walk looks for a
-    // restricted OP and does not follow a call into another def, so the
-    // substitution stops one level up.
-    check(
-        "def g[p](x: tensor[3, p]) -> tensor[p] = mean(x, 0i32)\n\
-         def mid[p](x: tensor[3, p]) -> tensor[p] = g(x)\n\
-         f = mid(to_tensor([1i32, 2i32, 4i32]))\n",
-    )
+    // chelis#1941: the substitution does not cross a second polymorphic def,
+    // whether the second one wraps the call or supplies the argument.
+    check(&format!(
+        "{HELPER}def mid[p](x: tensor[3, p]) -> tensor[p] = g(x)\n\
+         f = mid(to_tensor([1i32, 2i32, 4i32]))\n"
+    ))
     .expect("chelis#1941: a two-def polymorphic chain is not reached");
+    check(&format!(
+        "{HELPER}def id2[q](y: tensor[3, q]) -> tensor[3, q] = y\n\
+         f = g(id2(to_tensor([1i32, 2i32, 4i32])))\n"
+    ))
+    .expect("chelis#1941: a callee whose declared result is a bare binder is not reached");
+
+    // chelis#1805: the restricted operation sits in a local lambda, so the
+    // callee's parameter never reaches it by name and the body walk's
+    // parameter-to-precision map does not apply.
+    check(
+        "def g[p](x: tensor[3, p]) -> tensor[p] = {\n  \
+         h = fn (t) -> mean(t, 0i32)\n  h(x)\n}\n\
+         f = g(to_tensor([1i32, 2i32, 4i32]))\n",
+    )
+    .expect("chelis#1805: a restricted op inside a local lambda is not reached");
+
+    // chelis#1805: an ADT field argument. The reader can see the target's
+    // declared type is an ADT by name, and the field's own type lives in a
+    // declaration registry this pass does not hold.
+    check(&format!(
+        "type Box =\n  | Box {{ t: tensor[3, int32] }}\n\n\
+         {HELPER}def pick(b: Box) -> tensor[int32] = g(b.t)\n\
+         f = pick(Box {{ t: to_tensor([1i32, 2i32, 4i32]) }})\n"
+    ))
+    .expect("chelis#1805: an ADT field argument is not reached");
 }
 
 /// Round 1 P2-1: this pull request NARROWS acceptance on the empty tensor
