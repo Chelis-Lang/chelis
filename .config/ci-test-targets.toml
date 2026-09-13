@@ -8,6 +8,11 @@ version = 2
 package = "chelis-compiler-api"
 name = "recursive_profile_allocations"
 
+# chelis#2023: builtin-spelled lexical inputs agree in eval and native C.
+[[standing_target]]
+package = "chelis-compiler-api"
+name = "builtin_named_kernel_inputs"
+
 # chelis#1956: checked lazy-library named-axis inputs and default-style CLI effects.
 [[standing_target]]
 package = "chelis-compiler-api"
